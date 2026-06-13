@@ -36,7 +36,7 @@
 结果都必须扣除手续费、点差、延迟、市场冲击、止损滑点和可能发生的
 资金费率。
 
-建议把这项研究放到新的 `crypto-short-momentum` 项目，而不是继续加入
+建议把这项研究放到新的 `crypto-momentum-lab` 项目，而不是继续加入
 当前 `momentum_alpha`。新策略需要逐笔原始数据留存、15 秒聚合、分钟级
 信号确认、事件复盘和独立的研究数据集。它不以 100 毫秒或 1 秒预测为
 目标，也不与高频系统竞争。
@@ -639,12 +639,12 @@ replay engines, models, paper-trading services, and future live execution.
 
 Suggested project name:
 
-`crypto-short-momentum`
+`crypto-momentum-lab`
 
 ## 10. Suggested New Project Structure
 
 ```text
-crypto-short-momentum/
+crypto-momentum-lab/
   README.md
   pyproject.toml
   configs/
@@ -652,7 +652,7 @@ crypto-short-momentum/
     research/
     strategy-specs/
     experiment-log/
-  src/crypto_short_momentum/
+  src/crypto_momentum_lab/
     capture/
     normalization/
     orderbook/
