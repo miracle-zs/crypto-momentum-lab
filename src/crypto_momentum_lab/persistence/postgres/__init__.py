@@ -9,3 +9,8 @@ __all__ = [
     "create_async_database_engine",
     "create_sync_engine",
 ]
+from crypto_momentum_lab.persistence.postgres.repository import (
+    PostgresUniverseRepository,
+)
+
+__all__ = ["PostgresUniverseRepository"]
