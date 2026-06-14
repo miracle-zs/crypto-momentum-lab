@@ -5,6 +5,7 @@ from typing import Protocol
 from crypto_momentum_lab.domain.universe.models import (
     ContractMetadata,
     DailyOpen,
+    PricePoint,
     TrackedMembership,
     UniverseSnapshot,
 )
@@ -41,3 +42,26 @@ class UniverseRepository(Protocol):
         self,
         observed_at: datetime,
     ) -> UniverseSnapshot | None: ...
+
+
+class UniverseMarketData(Protocol):
+    async def fetch_active_usdt_perpetuals(
+        self,
+    ) -> tuple[ContractMetadata, ...]: ...
+
+    async def fetch_latest_prices(self) -> dict[str, PricePoint]: ...
+
+    async def fetch_daily_opens(
+        self,
+        symbols: frozenset[str],
+        utc_day: date,
+    ) -> tuple[DailyOpen, ...]: ...
+
+
+class MonitoringObligationProvider(Protocol):
+    async def forced_symbols(self) -> frozenset[str]: ...
+
+
+class NoMonitoringObligations:
+    async def forced_symbols(self) -> frozenset[str]:
+        return frozenset()
