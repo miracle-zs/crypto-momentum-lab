@@ -15,5 +15,26 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
+  migrate:
+    build: .
+    entrypoint: ["alembic"]
+    command: ["upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      CML_DATABASE_URL: postgresql+asyncpg://cml:cml@postgres:5432/cml
+
+  market-data:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      CML_DATABASE_URL: postgresql+asyncpg://cml:cml@postgres:5432/cml
+      CML_ENVIRONMENT_CONFIG: configs/environments/research.yaml
+    command: ["run-universe-scheduler"]
+    restart: unless-stopped
+
 volumes:
   postgres-data:

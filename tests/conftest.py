@@ -1,7 +1,11 @@
+import os
+from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.domain.universe.models import (
     ContractMetadata,
@@ -9,6 +13,19 @@ from crypto_momentum_lab.domain.universe.models import (
     PricePoint,
     TrackedMembership,
     UniverseSnapshot,
+)
+from crypto_momentum_lab.persistence.postgres.models import (
+    ContractMetadataRow,
+    DailyOpenRow,
+    MonitoringMembershipRow,
+    UniverseEntryRow,
+    UniverseSnapshotRow,
+)
+from crypto_momentum_lab.persistence.postgres.repository import (
+    PostgresUniverseRepository,
+)
+from crypto_momentum_lab.persistence.postgres.session import (
+    create_async_database_engine,
 )
 
 
@@ -122,6 +139,34 @@ class FakeUniverseRepository:
         ):
             return self.saved_snapshot
         return None
+
+
+@pytest.fixture(scope="session")
+def async_database_url() -> str:
+    return os.environ.get(
+        "CML_TEST_ASYNC_DATABASE_URL",
+        "postgresql+asyncpg://cml:cml@localhost:54329/cml",
+    )
+
+
+@pytest.fixture
+async def repository(
+    async_database_url: str,
+) -> AsyncIterator[PostgresUniverseRepository]:
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        async with session.begin():
+            for model in (
+                MonitoringMembershipRow,
+                UniverseEntryRow,
+                UniverseSnapshotRow,
+                DailyOpenRow,
+                ContractMetadataRow,
+            ):
+                await session.execute(delete(model))
+    yield PostgresUniverseRepository(factory)
+    await engine.dispose()
 
 
 @pytest.fixture
