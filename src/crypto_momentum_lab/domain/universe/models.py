@@ -36,6 +36,13 @@ class DailyOpen:
 
 
 @dataclass(frozen=True, slots=True)
+class PricePoint:
+    symbol: str
+    price: Decimal
+    observed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class MarketCandidate:
     symbol: str
     open_price: Decimal | None
