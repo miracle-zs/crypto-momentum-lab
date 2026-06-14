@@ -1,3 +1,6 @@
+from crypto_momentum_lab.domain.universe.membership import (
+    build_monitoring_memberships,
+)
 from crypto_momentum_lab.domain.universe.models import (
     ContractMetadata,
     DailyOpen,
@@ -21,5 +24,6 @@ __all__ = [
     "RankingSide",
     "TrackedMembership",
     "UniverseSnapshot",
+    "build_monitoring_memberships",
     "rank_utc_day_returns",
 ]
