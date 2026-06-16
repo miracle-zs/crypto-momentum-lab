@@ -18,6 +18,8 @@ dependencies = [
   "sqlalchemy[asyncio]>=2.0,<3",
   "structlog>=25.1,<26",
   "typer>=0.16,<1",
+  "websockets>=16,<17",
+  "zstandard>=0.25,<1",
 ]
 
 [project.optional-dependencies]
