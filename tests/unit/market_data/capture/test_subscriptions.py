@@ -1,0 +1,60 @@
+from crypto_momentum_lab.domain.market.models import (
+    CaptureRoute,
+    CaptureStream,
+)
+from crypto_momentum_lab.market_data.capture.subscriptions import (
+    Subscription,
+    build_subscription_groups,
+    plan_subscription_change,
+)
+
+
+def test_stream_routes_and_names_follow_binance_contract() -> None:
+    agg = Subscription.for_symbol(CaptureStream.AGG_TRADE, "BTCUSDT")
+    book = Subscription.for_symbol(CaptureStream.BOOK_TICKER, "BTCUSDT")
+
+    assert agg.route is CaptureRoute.MARKET
+    assert agg.binance_name == "btcusdt@aggTrade"
+    assert book.route is CaptureRoute.PUBLIC
+    assert book.binance_name == "btcusdt@bookTicker"
+
+
+def test_groups_are_stable_and_capped() -> None:
+    subscriptions = frozenset(
+        Subscription.for_symbol(CaptureStream.AGG_TRADE, f"S{i:03d}USDT")
+        for i in range(205)
+    )
+
+    groups = build_subscription_groups(
+        subscriptions,
+        max_per_connection=100,
+    )
+
+    assert [len(group.subscriptions) for group in groups] == [100, 100, 5]
+    assert groups == tuple(sorted(groups, key=lambda item: item.group_id))
+
+
+def test_change_plan_adds_before_removing() -> None:
+    old = frozenset(
+        {
+            Subscription.for_symbol(
+                CaptureStream.AGG_TRADE,
+                "BTCUSDT",
+            ),
+        }
+    )
+    new = frozenset(
+        {
+            Subscription.for_symbol(
+                CaptureStream.AGG_TRADE,
+                "ETHUSDT",
+            ),
+        }
+    )
+
+    plan = plan_subscription_change(old, new, generation=2)
+
+    assert [step.method for step in plan.steps] == [
+        "SUBSCRIBE",
+        "UNSUBSCRIBE",
+    ]
