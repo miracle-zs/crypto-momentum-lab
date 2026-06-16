@@ -2,11 +2,17 @@ import os
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from uuid import UUID
 
 import pytest
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from crypto_momentum_lab.domain.market.models import (
+    CaptureRoute,
+    CaptureStream,
+    RawEnvelope,
+)
 from crypto_momentum_lab.domain.universe.models import (
     ContractMetadata,
     DailyOpen,
@@ -177,3 +183,23 @@ def fake_market_data() -> FakeUniverseMarketData:
 @pytest.fixture
 def fake_repository() -> FakeUniverseRepository:
     return FakeUniverseRepository()
+
+
+@pytest.fixture
+def raw_envelope() -> RawEnvelope:
+    return RawEnvelope(
+        schema_version=1,
+        exchange="binance-usdm",
+        environment="research",
+        route=CaptureRoute.MARKET,
+        stream=CaptureStream.AGG_TRADE,
+        symbol="BTCUSDT",
+        exchange_event_at=datetime(2026, 6, 15, 2, 0, tzinfo=UTC),
+        received_at=datetime(2026, 6, 15, 2, 0, 1, tzinfo=UTC),
+        received_monotonic_ns=1,
+        connection_session_id=UUID(int=1),
+        local_sequence=1,
+        exchange_sequence="42",
+        subscription_generation=1,
+        raw_payload={"e": "aggTrade", "s": "BTCUSDT"},
+    )

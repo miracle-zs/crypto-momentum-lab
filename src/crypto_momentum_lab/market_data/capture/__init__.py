@@ -1,3 +1,7 @@
+from crypto_momentum_lab.market_data.capture.queue import (
+    BoundedEnvelopeQueue,
+    CaptureQueueFull,
+)
 from crypto_momentum_lab.market_data.capture.subscriptions import (
     Subscription,
     SubscriptionChangePlan,
@@ -8,6 +12,8 @@ from crypto_momentum_lab.market_data.capture.subscriptions import (
 )
 
 __all__ = [
+    "BoundedEnvelopeQueue",
+    "CaptureQueueFull",
     "Subscription",
     "SubscriptionChangePlan",
     "SubscriptionCommand",
