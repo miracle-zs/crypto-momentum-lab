@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from uuid import UUID
@@ -46,6 +47,16 @@ class QualityCategory(StrEnum):
     ARCHIVE_FAILURE = "archive_failure"
     MANIFEST_BACKLOG = "manifest_backlog"
     DISK_THRESHOLD = "disk_threshold"
+
+
+class AggressorSide(StrEnum):
+    BUY = "buy"
+    SELL = "sell"
+
+
+class OrderSide(StrEnum):
+    BUY = "buy"
+    SELL = "sell"
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +147,161 @@ class QualityEvent:
     connection_session_id: UUID | None
     local_sequence: int | None
     details: dict[str, JsonValue]
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedEventSource:
+    schema_version: int
+    exchange: str
+    environment: str
+    symbol: str
+    event_at: datetime
+    received_at: datetime
+    source_connection_session_id: UUID
+    source_local_sequence: int
+    source_stream: CaptureStream
+
+    def __post_init__(self) -> None:
+        if not _is_aware(self.event_at):
+            raise ValueError("event_at must be timezone-aware")
+        if not _is_aware(self.received_at):
+            raise ValueError("received_at must be timezone-aware")
+        if self.source_local_sequence <= 0:
+            raise ValueError("source_local_sequence must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedAggTrade(NormalizedEventSource):
+    trade_id: str
+    price: Decimal
+    quantity: Decimal
+    notional: Decimal
+    aggressor_side: AggressorSide
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedBookTicker(NormalizedEventSource):
+    update_id: str
+    bid_price: Decimal
+    bid_quantity: Decimal
+    ask_price: Decimal
+    ask_quantity: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedMarkPrice(NormalizedEventSource):
+    mark_price: Decimal
+    index_price: Decimal | None
+    estimated_settle_price: Decimal | None
+    funding_rate: Decimal | None
+    next_funding_at: datetime | None
+
+    def __post_init__(self) -> None:
+        NormalizedEventSource.__post_init__(self)
+        if self.next_funding_at is not None and not _is_aware(
+            self.next_funding_at
+        ):
+            raise ValueError("next_funding_at must be timezone-aware")
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedKline1m(NormalizedEventSource):
+    open_time: datetime
+    close_time: datetime
+    open_price: Decimal
+    high_price: Decimal
+    low_price: Decimal
+    close_price: Decimal
+    volume: Decimal
+    quote_volume: Decimal
+    trade_count: int
+    closed: bool
+
+    def __post_init__(self) -> None:
+        NormalizedEventSource.__post_init__(self)
+        if not _is_aware(self.open_time):
+            raise ValueError("open_time must be timezone-aware")
+        if not _is_aware(self.close_time):
+            raise ValueError("close_time must be timezone-aware")
+        if self.trade_count < 0:
+            raise ValueError("trade_count must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedLiquidation(NormalizedEventSource):
+    order_side: OrderSide
+    price: Decimal
+    average_price: Decimal
+    quantity: Decimal
+    notional: Decimal
+    trade_time: datetime | None
+
+    def __post_init__(self) -> None:
+        NormalizedEventSource.__post_init__(self)
+        if self.trade_time is not None and not _is_aware(self.trade_time):
+            raise ValueError("trade_time must be timezone-aware")
+
+
+type NormalizedMarketEvent = (
+    NormalizedAggTrade
+    | NormalizedBookTicker
+    | NormalizedMarkPrice
+    | NormalizedKline1m
+    | NormalizedLiquidation
+)
+
+
+@dataclass(frozen=True, slots=True)
+class MarketState15s:
+    schema_version: int
+    exchange: str
+    environment: str
+    symbol: str
+    bucket_start: datetime
+    bucket_end: datetime
+    open_price: Decimal | None
+    high_price: Decimal | None
+    low_price: Decimal | None
+    close_price: Decimal | None
+    trade_count: int
+    trade_notional: Decimal
+    aggressive_buy_notional: Decimal
+    aggressive_sell_notional: Decimal
+    last_bid_price: Decimal | None
+    last_ask_price: Decimal | None
+    spread: Decimal | None
+    midpoint: Decimal | None
+    liquidation_count: int
+    liquidation_notional: Decimal
+    mark_price: Decimal | None
+    closed_kline_count: int
+    source_event_count: int
+    first_received_at: datetime | None
+    last_received_at: datetime | None
+
+    def __post_init__(self) -> None:
+        if not _is_aware(self.bucket_start):
+            raise ValueError("bucket_start must be timezone-aware")
+        if not _is_aware(self.bucket_end):
+            raise ValueError("bucket_end must be timezone-aware")
+        if self.bucket_end <= self.bucket_start:
+            raise ValueError("bucket_end must be after bucket_start")
+        if self.trade_count < 0:
+            raise ValueError("trade_count must be non-negative")
+        if self.liquidation_count < 0:
+            raise ValueError("liquidation_count must be non-negative")
+        if self.closed_kline_count < 0:
+            raise ValueError("closed_kline_count must be non-negative")
+        if self.source_event_count < 0:
+            raise ValueError("source_event_count must be non-negative")
+        if self.first_received_at is not None and not _is_aware(
+            self.first_received_at
+        ):
+            raise ValueError("first_received_at must be timezone-aware")
+        if self.last_received_at is not None and not _is_aware(
+            self.last_received_at
+        ):
+            raise ValueError("last_received_at must be timezone-aware")
 
 
 def transition_market_data_state(
