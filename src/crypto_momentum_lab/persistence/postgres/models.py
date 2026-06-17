@@ -96,3 +96,64 @@ class MonitoringMembershipRow(Base):
     left_target_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
+
+
+class RawArchiveManifestRow(Base):
+    __tablename__ = "raw_archive_manifests"
+
+    manifest_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        primary_key=True,
+    )
+    relative_path: Mapped[str] = mapped_column(Text, unique=True)
+    sha256: Mapped[str] = mapped_column(String(64))
+    schema_version: Mapped[int] = mapped_column(Integer)
+    exchange: Mapped[str] = mapped_column(String(32))
+    environment: Mapped[str] = mapped_column(String(32))
+    route: Mapped[str] = mapped_column(String(16))
+    stream: Mapped[str] = mapped_column(String(32))
+    symbol: Mapped[str | None] = mapped_column(String(32))
+    utc_date: Mapped[date] = mapped_column(Date)
+    utc_hour: Mapped[int] = mapped_column(Integer)
+    connection_session_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True))
+    subscription_generation_min: Mapped[int] = mapped_column(Integer)
+    subscription_generation_max: Mapped[int] = mapped_column(Integer)
+    row_count: Mapped[int] = mapped_column(Integer)
+    compressed_bytes: Mapped[int] = mapped_column(Integer)
+    first_exchange_event_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    last_exchange_event_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    first_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    capture_version: Mapped[str] = mapped_column(String(64))
+    recovery_status: Mapped[str] = mapped_column(String(32))
+    known_gap_count: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class MarketDataQualityEventRow(Base):
+    __tablename__ = "market_data_quality_events"
+
+    event_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    category: Mapped[str] = mapped_column(String(64))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    route: Mapped[str | None] = mapped_column(String(16))
+    stream: Mapped[str | None] = mapped_column(String(32))
+    symbol: Mapped[str | None] = mapped_column(String(32))
+    connection_session_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True)
+    )
+    local_sequence: Mapped[int | None] = mapped_column(Integer)
+    details: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class MarketDataProcessStateRow(Base):
+    __tablename__ = "market_data_process_states"
+
+    state_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    state: Mapped[str] = mapped_column(String(16))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reason: Mapped[str | None] = mapped_column(Text)

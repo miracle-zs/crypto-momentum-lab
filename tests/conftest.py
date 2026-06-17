@@ -23,9 +23,15 @@ from crypto_momentum_lab.domain.universe.models import (
 from crypto_momentum_lab.persistence.postgres.models import (
     ContractMetadataRow,
     DailyOpenRow,
+    MarketDataProcessStateRow,
+    MarketDataQualityEventRow,
     MonitoringMembershipRow,
+    RawArchiveManifestRow,
     UniverseEntryRow,
     UniverseSnapshotRow,
+)
+from crypto_momentum_lab.persistence.postgres.capture_repository import (
+    PostgresCaptureRepository,
 )
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
@@ -164,6 +170,9 @@ async def repository(
     async with factory() as session:
         async with session.begin():
             for model in (
+                MarketDataQualityEventRow,
+                MarketDataProcessStateRow,
+                RawArchiveManifestRow,
                 MonitoringMembershipRow,
                 UniverseEntryRow,
                 UniverseSnapshotRow,
@@ -172,6 +181,24 @@ async def repository(
             ):
                 await session.execute(delete(model))
     yield PostgresUniverseRepository(factory)
+    await engine.dispose()
+
+
+@pytest.fixture
+async def capture_repository(
+    async_database_url: str,
+) -> AsyncIterator[PostgresCaptureRepository]:
+    engine = create_async_database_engine(async_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        async with session.begin():
+            for model in (
+                MarketDataQualityEventRow,
+                MarketDataProcessStateRow,
+                RawArchiveManifestRow,
+            ):
+                await session.execute(delete(model))
+    yield PostgresCaptureRepository(factory)
     await engine.dispose()
 
 

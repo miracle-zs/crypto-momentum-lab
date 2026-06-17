@@ -13,6 +13,9 @@ def test_initial_migration_creates_universe_tables(database_url: str) -> None:
     assert {
         "contract_metadata",
         "daily_open_prices",
+        "market_data_process_states",
+        "market_data_quality_events",
+        "raw_archive_manifests",
         "universe_snapshots",
         "universe_entries",
         "monitoring_memberships",
