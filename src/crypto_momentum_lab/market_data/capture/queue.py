@@ -45,6 +45,13 @@ class BoundedEnvelopeQueue:
         envelope, _ = await self._queue.get()
         return envelope
 
+    def get_nowait(self) -> RawEnvelope | None:
+        try:
+            envelope, _ = self._queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+        return envelope
+
     def task_done(self, envelope: RawEnvelope) -> None:
         self._current_bytes -= _encoded_payload_size(envelope)
         self._queue.task_done()

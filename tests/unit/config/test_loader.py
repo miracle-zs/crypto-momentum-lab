@@ -171,6 +171,7 @@ def test_loads_websocket_capture_configuration(
         "kline_1m",
     )
     assert config.capture.max_subscriptions_per_connection == 100
+    assert config.capture.archive.max_open_writers == 512
     assert config.capture.archive.group_commit_max_events == 250
     assert config.capture.archive.group_commit_max_milliseconds == 250
 

@@ -31,7 +31,13 @@ async def recover_archive_root(
     capture_version: str,
 ) -> tuple[RecoveryResult, ...]:
     temporary_paths = await asyncio.to_thread(
-        lambda: tuple(sorted(root.rglob("*.tmp")))
+        lambda: tuple(
+            sorted(
+                path
+                for path in root.rglob("*.tmp")
+                if ".recovery-quarantine" not in path.parts
+            )
+        )
     )
     results = []
     for temporary in temporary_paths:
@@ -135,7 +141,11 @@ def _envelope_from_payload(payload: dict[str, object]) -> RawEnvelope:
 
 def _quarantine_temporary(temporary: Path, archive_root: Path) -> Path:
     relative = temporary.relative_to(archive_root)
-    destination = archive_root / ".recovery-quarantine" / relative
+    destination = (
+        archive_root
+        / ".recovery-quarantine"
+        / relative.with_name(f"{relative.name}.quarantined")
+    )
     destination.parent.mkdir(parents=True, exist_ok=True)
     os.replace(temporary, destination)
     _fsync_directory(destination.parent)

@@ -95,3 +95,28 @@ def test_rejects_malformed_combined_stream_payload() -> None:
             received_at=datetime(2026, 6, 15, 2, 0, tzinfo=UTC),
             received_monotonic_ns=10,
         )
+
+
+def test_parses_raw_stream_payload_when_expected_stream_is_known() -> None:
+    envelope = parse_binance_message(
+        route=route_for(CaptureStream.AGG_TRADE),
+        message=json.dumps(
+            {
+                "e": "aggTrade",
+                "E": 1781488800000,
+                "s": "BTCUSDT",
+                "a": 42,
+            }
+        ),
+        environment="test",
+        connection_session_id=UUID(int=1),
+        local_sequence=1,
+        subscription_generation=3,
+        received_at=datetime(2026, 6, 15, 2, 0, tzinfo=UTC),
+        received_monotonic_ns=10,
+        expected_stream=CaptureStream.AGG_TRADE,
+    )
+
+    assert envelope.stream is CaptureStream.AGG_TRADE
+    assert envelope.symbol == "BTCUSDT"
+    assert envelope.exchange_sequence == "42"

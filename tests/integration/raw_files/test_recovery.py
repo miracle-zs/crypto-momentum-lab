@@ -26,6 +26,7 @@ async def test_recovery_preserves_complete_records_and_quarantines_source(
     assert result.manifest.recovery_status == "recovered"
     assert result.discarded_bytes > 0
     assert result.quarantined_path.exists()
+    assert result.quarantined_path.suffix == ".quarantined"
     assert not temporary.exists()
 
 

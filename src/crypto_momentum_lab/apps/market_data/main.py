@@ -52,6 +52,7 @@ from crypto_momentum_lab.persistence.postgres.session import (
 )
 from crypto_momentum_lab.persistence.raw_files.archive import ZstdJsonlArchive
 from crypto_momentum_lab.persistence.raw_files.journal import PendingManifestJournal
+from crypto_momentum_lab.persistence.raw_files.recovery import recover_archive_root
 from crypto_momentum_lab.universe.refresh import UniverseRefreshService
 from crypto_momentum_lab.universe.scheduler import run_scheduler_loop
 
@@ -238,6 +239,13 @@ async def build_market_data_runtime(
             await capture_repository.save_manifest(manifest)
         except SQLAlchemyError:
             await manifest_journal.append(manifest)
+
+    for recovery_result in await recover_archive_root(
+        archive_config.root,
+        environment=runtime.environment,
+        capture_version=capture_version,
+    ):
+        await save_manifest(recovery_result.manifest)
 
     archive = ZstdJsonlArchive(
         root=archive_config.root,

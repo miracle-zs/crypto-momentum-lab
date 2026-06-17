@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,13 +23,17 @@ from crypto_momentum_lab.market_data.capture.queue import BoundedEnvelopeQueue
 class ControlledArchive:
     def __init__(self) -> None:
         self._append_started = asyncio.Event()
+        self._append_count_changed = asyncio.Event()
         self._append_released = asyncio.Event()
+        self.started_count = 0
 
     async def append(
         self,
         envelope: RawEnvelope,
     ) -> DurableArchiveAcknowledgement:
+        self.started_count += 1
         self._append_started.set()
+        self._append_count_changed.set()
         await self._append_released.wait()
         return DurableArchiveAcknowledgement(
             connection_session_id=envelope.connection_session_id,
@@ -42,6 +47,13 @@ class ControlledArchive:
 
     async def wait_until_append_started(self) -> None:
         await asyncio.wait_for(self._append_started.wait(), timeout=1)
+
+    async def wait_until_append_count(self, count: int) -> None:
+        while self.started_count < count:
+            self._append_count_changed.clear()
+            if self.started_count >= count:
+                return
+            await self._append_count_changed.wait()
 
     def release_append(self) -> None:
         self._append_released.set()
@@ -103,6 +115,28 @@ async def test_ack_is_emitted_only_after_archive_returns(
     await coordinator.stop()
     await task
     assert acknowledgements[0].local_sequence == 1
+
+
+async def test_coordinator_batches_archive_appends(
+    raw_envelope: RawEnvelope,
+) -> None:
+    archive = ControlledArchive()
+    coordinator = CaptureCoordinator(
+        queue=BoundedEnvelopeQueue(max_events=10, max_bytes=100000),
+        archive=archive,
+        quality=FakeQualityTracker(),
+        repository=FakeCaptureRepository(),
+        acknowledgement_sink=None,
+    )
+
+    task = asyncio.create_task(coordinator.run())
+    await coordinator.submit(raw_envelope)
+    await coordinator.submit(replace(raw_envelope, local_sequence=2))
+
+    await asyncio.wait_for(archive.wait_until_append_count(2), timeout=1)
+    archive.release_append()
+    await coordinator.stop()
+    await task
 
 
 async def test_lifecycle_events_are_persisted() -> None:

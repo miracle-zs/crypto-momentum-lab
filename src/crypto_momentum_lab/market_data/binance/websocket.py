@@ -168,6 +168,7 @@ class BinanceWebSocketConnection:
                         subscription_generation=self._generation,
                         received_at=received_at,
                         received_monotonic_ns=received_monotonic_ns,
+                        expected_stream=self._stream,
                     )
                 except BinancePayloadError:
                     continue
@@ -284,16 +285,21 @@ def parse_binance_message(
     subscription_generation: int,
     received_at: datetime,
     received_monotonic_ns: int,
+    expected_stream: CaptureStream | None = None,
 ) -> RawEnvelope:
     decoded = json.loads(message)
     if not isinstance(decoded, dict):
         raise BinancePayloadError("message must be an object")
     stream_name = decoded.get("stream")
-    payload = decoded.get("data")
-    if not isinstance(stream_name, str) or not isinstance(payload, dict):
-        raise BinancePayloadError("combined stream envelope is invalid")
-
-    stream = _stream_from_name(stream_name)
+    data = decoded.get("data")
+    if isinstance(stream_name, str) and isinstance(data, dict):
+        stream = _stream_from_name(stream_name)
+        payload = data
+    elif expected_stream is not None:
+        stream = expected_stream
+        payload = decoded
+    else:
+        raise BinancePayloadError("stream envelope is invalid")
     if route_for(stream) is not route:
         raise BinancePayloadError("stream arrived on unexpected route")
 
