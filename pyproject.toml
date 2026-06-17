@@ -44,6 +44,7 @@ testpaths = ["tests"]
 markers = [
   "integration: requires the local PostgreSQL test service",
   "e2e: exercises a full application slice",
+  "live: requires public Binance connectivity and a 30-minute runtime",
 ]
 
 [tool.ruff]
