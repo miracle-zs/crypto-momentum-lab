@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from crypto_momentum_lab.domain.market.models import (
+    ConnectionLifecycleEvent,
     DurableArchiveAcknowledgement,
     MarketDataState,
     QualityEvent,
@@ -16,6 +17,11 @@ from crypto_momentum_lab.market_data.capture.queue import BoundedEnvelopeQueue
 
 class QualityTracker(Protocol):
     def observe(self, envelope: RawEnvelope) -> tuple[QualityEvent, ...]: ...
+
+    def observe_lifecycle(
+        self,
+        event: ConnectionLifecycleEvent,
+    ) -> tuple[QualityEvent, ...]: ...
 
 
 class QualityRepository(Protocol):
@@ -53,6 +59,13 @@ class CaptureCoordinator:
     async def submit(self, envelope: RawEnvelope) -> None:
         await self._queue.put_nowait(envelope)
 
+    async def observe_lifecycle(
+        self,
+        event: ConnectionLifecycleEvent,
+    ) -> None:
+        for quality_event in self._quality.observe_lifecycle(event):
+            await self._repository.save_quality_event(quality_event)
+
     async def run(self) -> None:
         while not self._stopping or self._queue.size:
             try:
@@ -77,6 +90,7 @@ class CaptureCoordinator:
     async def stop(self) -> None:
         self._stopping = True
         await self._queue.join()
+        await self._archive.close()
 
     async def _halt(self, reason: str) -> None:
         await self._repository.save_process_state(

@@ -21,11 +21,20 @@ class FakeObligations:
         return self._symbols
 
 
+class FakeSnapshotObserver:
+    def __init__(self) -> None:
+        self.snapshots = []
+
+    async def snapshot_updated(self, snapshot) -> None:
+        self.snapshots.append(snapshot)
+
+
 def build_service(
     market_data,
     repository,
     *,
     obligations=None,
+    observer=None,
 ) -> UniverseRefreshService:
     return UniverseRefreshService(
         market_data=market_data,
@@ -38,6 +47,7 @@ def build_service(
         ),
         config_hash="a" * 64,
         obligations=obligations,
+        observer=observer,
     )
 
 
@@ -192,3 +202,39 @@ async def test_0101_activates_after_midnight_snapshot(
     assert first.activated is False
     assert second.activated is True
     assert len(second.memberships) == 1
+
+
+async def test_activated_snapshot_updates_subscriptions(
+    fake_market_data,
+    fake_repository,
+) -> None:
+    at = datetime(2026, 6, 15, 2, 1, tzinfo=UTC)
+    fake_market_data.seed_single_symbol(at)
+    observer = FakeSnapshotObserver()
+    service = build_service(
+        fake_market_data,
+        fake_repository,
+        observer=observer,
+    )
+
+    snapshot = await service.refresh(observed_at=at)
+
+    assert observer.snapshots == [snapshot]
+
+
+async def test_midnight_snapshot_does_not_update_subscriptions(
+    fake_market_data,
+    fake_repository,
+) -> None:
+    at = datetime(2026, 6, 15, 0, 1, tzinfo=UTC)
+    fake_market_data.seed_single_symbol(at)
+    observer = FakeSnapshotObserver()
+    service = build_service(
+        fake_market_data,
+        fake_repository,
+        observer=observer,
+    )
+
+    await service.refresh(observed_at=at)
+
+    assert observer.snapshots == []

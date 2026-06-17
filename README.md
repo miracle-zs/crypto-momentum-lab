@@ -24,11 +24,18 @@ export CML_ENVIRONMENT_CONFIG=configs/environments/research.yaml
 .venv/bin/cml-market-data refresh-universe
 ```
 
-## Hourly Service
+## Market Data Service
 
 ```bash
 docker compose up --build market-data
 ```
 
-The UTC 00:01 snapshot is recorded but not activated. The previous day's
-23:01 universe remains active until the 01:01 snapshot succeeds.
+This runs the hourly universe refresh and Binance USD-M WebSocket raw capture
+together. Raw archives are written under `data/raw` through the Compose volume:
+
+```bash
+find data/raw -name '*.jsonl.zst' -type f
+```
+
+The UTC 00:01 universe snapshot is recorded but not activated. The previous
+day's 23:01 universe remains active until the 01:01 snapshot succeeds.

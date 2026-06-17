@@ -4,6 +4,7 @@ from typing import Protocol
 from crypto_momentum_lab.domain.market.models import CaptureStream
 from crypto_momentum_lab.market_data.capture.subscriptions import (
     Subscription,
+    SubscriptionChangePlan,
     SubscriptionGroup,
     build_subscription_groups,
     plan_subscription_change,
@@ -43,6 +44,7 @@ class BinanceConnectionPool:
         self._control_messages_per_second = control_messages_per_second
         self._active_subscriptions: frozenset[Subscription] = frozenset()
         self._connections: dict[str, PoolConnection] = {}
+        self._subscription_connections: dict[Subscription, str] = {}
 
     async def start(self) -> None:
         return None
@@ -63,42 +65,84 @@ class BinanceConnectionPool:
             desired,
             max_per_connection=self._max_subscriptions_per_connection,
         )
-        connection = await self._ensure_connection(groups)
-        plan = plan_subscription_change(
-            self._active_subscriptions,
-            desired,
-            generation=generation,
-        )
-        if connection is not None:
-            for step in plan.steps:
-                if step.method == "SUBSCRIBE":
-                    await connection.subscribe(
-                        step.names,
-                        generation=step.generation,
-                    )
-                elif step.method == "UNSUBSCRIBE":
-                    await connection.unsubscribe(
-                        step.names,
-                        generation=step.generation,
-                    )
+        desired_groups = {group.group_id: group for group in groups}
+        desired_owners = {
+            subscription: group.group_id
+            for group in groups
+            for subscription in group.subscriptions
+        }
+        new_group_ids = await self._ensure_connections(groups)
+
+        for group in groups:
+            if group.group_id in new_group_ids:
+                continue
+            connection = self._connections[group.group_id]
+            current = frozenset(
+                subscription
+                for subscription in self._active_subscriptions
+                if self._subscription_connections.get(subscription)
+                == group.group_id
+            )
+            plan = plan_subscription_change(
+                current,
+                frozenset(group.subscriptions),
+                generation=generation,
+            )
+            await self._apply_plan(connection, plan)
+
+        for group_id in sorted(set(self._connections) - set(desired_groups)):
+            connection = self._connections[group_id]
+            current = frozenset(
+                subscription
+                for subscription in self._active_subscriptions
+                if self._subscription_connections.get(subscription) == group_id
+            )
+            plan = plan_subscription_change(
+                current,
+                frozenset(),
+                generation=generation,
+            )
+            await self._apply_plan(connection, plan)
+            await connection.stop()
+            del self._connections[group_id]
         self._active_subscriptions = desired
+        self._subscription_connections = desired_owners
 
     async def stop(self) -> None:
         for connection in tuple(self._connections.values()):
             await connection.stop()
         self._connections.clear()
         self._active_subscriptions = frozenset()
+        self._subscription_connections.clear()
 
-    async def _ensure_connection(
+    async def _ensure_connections(
         self,
         groups: tuple[SubscriptionGroup, ...],
-    ) -> PoolConnection | None:
-        if not groups:
-            return next(iter(self._connections.values()), None)
-        group = groups[0]
-        connection = self._connections.get(group.group_id)
-        if connection is None:
+    ) -> set[str]:
+        new_group_ids: set[str] = set()
+        for group in groups:
+            connection = self._connections.get(group.group_id)
+            if connection is not None:
+                continue
             connection = self._connection_factory(group)
             self._connections[group.group_id] = connection
+            new_group_ids.add(group.group_id)
             await connection.start()
-        return connection
+        return new_group_ids
+
+    async def _apply_plan(
+        self,
+        connection: PoolConnection,
+        plan: SubscriptionChangePlan,
+    ) -> None:
+        for step in plan.steps:
+            if step.method == "SUBSCRIBE":
+                await connection.subscribe(
+                    step.names,
+                    generation=step.generation,
+                )
+            elif step.method == "UNSUBSCRIBE":
+                await connection.unsubscribe(
+                    step.names,
+                    generation=step.generation,
+                )

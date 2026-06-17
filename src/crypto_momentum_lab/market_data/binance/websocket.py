@@ -49,6 +49,7 @@ class BinanceWebSocketConnection:
         self._route = route
         self._environment = environment
         self._desired_names = tuple(sorted(desired_names))
+        self._stream = _stream_from_name(self._desired_names[0])
         self._generation = generation
         self._on_envelope = on_envelope
         self._on_lifecycle = on_lifecycle
@@ -63,6 +64,12 @@ class BinanceWebSocketConnection:
         self._stopping = False
         self._connection: ClientConnection | None = None
         self._control_id = 0
+        self._task: asyncio.Task[None] | None = None
+        self._pending_acks: dict[int, asyncio.Future[None]] = {}
+
+    async def start(self) -> None:
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self.run())
 
     async def run(self) -> None:
         reconnect_attempt = 0
@@ -89,6 +96,8 @@ class BinanceWebSocketConnection:
         self._stopping = True
         if self._connection is not None:
             await self._connection.close()
+        if self._task is not None:
+            await self._task
 
     async def subscribe(
         self,
@@ -128,7 +137,12 @@ class BinanceWebSocketConnection:
         ) as connection:
             self._connection = connection
             await self._emit_lifecycle(session_id, opened=True, reason=None)
-            await self._send_control(connection, "SUBSCRIBE", self._desired_names)
+            await self._send_control(
+                connection,
+                "SUBSCRIBE",
+                self._desired_names,
+                receive_ack_direct=True,
+            )
             while not self._stopping:
                 if should_replace_connection(
                     opened_at=opened_at,
@@ -140,6 +154,8 @@ class BinanceWebSocketConnection:
                     connection.recv(),
                     timeout=self._silence_timeout_seconds,
                 )
+                if self._resolve_control_ack(message):
+                    continue
                 received_at = datetime.now(UTC)
                 received_monotonic_ns = time.monotonic_ns()
                 try:
@@ -165,6 +181,8 @@ class BinanceWebSocketConnection:
         connection: ClientConnection,
         method: str,
         names: tuple[str, ...],
+        *,
+        receive_ack_direct: bool = False,
     ) -> None:
         if not names:
             return
@@ -172,6 +190,10 @@ class BinanceWebSocketConnection:
             await asyncio.sleep(self._control_interval_seconds)
             self._control_id += 1
             control_id = self._control_id
+            future: asyncio.Future[None] | None = None
+            if not receive_ack_direct:
+                future = asyncio.get_running_loop().create_future()
+                self._pending_acks[control_id] = future
             await connection.send(
                 json.dumps(
                     {
@@ -181,7 +203,16 @@ class BinanceWebSocketConnection:
                     }
                 )
             )
-            await self._receive_ack(connection, control_id)
+            if receive_ack_direct:
+                await self._receive_ack(connection, control_id)
+            elif future is not None:
+                try:
+                    await asyncio.wait_for(
+                        future,
+                        timeout=self._open_timeout_seconds,
+                    )
+                finally:
+                    self._pending_acks.pop(control_id, None)
 
     async def _receive_ack(
         self,
@@ -193,6 +224,21 @@ class BinanceWebSocketConnection:
         if not isinstance(decoded, dict) or decoded.get("id") != control_id:
             raise BinancePayloadError("control acknowledgement is invalid")
 
+    def _resolve_control_ack(self, message: str | bytes) -> bool:
+        try:
+            decoded = json.loads(message)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(decoded, dict) or "id" not in decoded:
+            return False
+        control_id = decoded.get("id")
+        if not isinstance(control_id, int):
+            return False
+        future = self._pending_acks.pop(control_id, None)
+        if future is not None and not future.done():
+            future.set_result(None)
+        return True
+
     async def _emit_lifecycle(
         self,
         session_id: UUID,
@@ -200,12 +246,11 @@ class BinanceWebSocketConnection:
         opened: bool,
         reason: str | None,
     ) -> None:
-        stream = _stream_from_name(self._desired_names[0])
         await self._on_lifecycle(
             ConnectionLifecycleEvent(
                 session_id=session_id,
                 route=self._route,
-                stream=stream,
+                stream=self._stream,
                 symbols=tuple(
                     sorted(
                         {

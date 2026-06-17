@@ -2,7 +2,11 @@ from typing import Any
 
 import pytest
 
-from crypto_momentum_lab.domain.market.models import MarketDataState, RawEnvelope
+from crypto_momentum_lab.domain.market.models import (
+    CaptureStream,
+    MarketDataState,
+    RawEnvelope,
+)
 from crypto_momentum_lab.market_data.capture.queue import (
     BoundedEnvelopeQueue,
     CaptureQueueFull,
@@ -15,12 +19,24 @@ from crypto_momentum_lab.market_data.capture.service import (
 
 
 class FakeConnectionPool:
+    def __init__(self) -> None:
+        self.calls = []
+        self.stopped = False
+
     async def apply_symbols(self, *args: Any, **kwargs: Any) -> None:
+        self.calls.append((args, kwargs))
         return None
+
+    async def stop(self) -> None:
+        self.stopped = True
 
 
 class FakeRepository:
+    def __init__(self) -> None:
+        self.states = []
+
     async def save_process_state(self, *args: Any, **kwargs: Any) -> None:
+        self.states.append(kwargs["state"])
         return None
 
 
@@ -69,3 +85,29 @@ def test_disk_halt_requires_recovery_threshold() -> None:
     assert guard.evaluate(190) is DiskStatus.HALT
     assert guard.evaluate(220) is DiskStatus.HALT
     assert guard.evaluate(260) is DiskStatus.HEALTHY
+
+
+async def test_start_applies_initial_symbols_and_stop_persists_state() -> None:
+    repository = FakeRepository()
+    connection_pool = FakeConnectionPool()
+    service = MarketDataCaptureService(
+        queue=BoundedEnvelopeQueue(max_events=10, max_bytes=100000),
+        repository=repository,
+        connection_pool=connection_pool,
+        disk_guard=DiskSpaceGuard(
+            warning_free_bytes=300,
+            halt_free_bytes=200,
+            recovery_free_bytes=250,
+        ),
+    )
+
+    await service.start(
+        symbols=frozenset({"BTCUSDT"}),
+        streams=(CaptureStream.AGG_TRADE,),
+        generation=1,
+    )
+    await service.stop()
+
+    assert service.state is MarketDataState.STOPPED
+    assert repository.states == [MarketDataState.READY, MarketDataState.STOPPED]
+    assert connection_pool.stopped is True

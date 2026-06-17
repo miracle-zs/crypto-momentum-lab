@@ -34,6 +34,33 @@ def test_groups_are_stable_and_capped() -> None:
     assert groups == tuple(sorted(groups, key=lambda item: item.group_id))
 
 
+def test_group_id_is_stable_for_same_route_stream_and_chunk() -> None:
+    btc_group = build_subscription_groups(
+        frozenset(
+            {
+                Subscription.for_symbol(
+                    CaptureStream.AGG_TRADE,
+                    "BTCUSDT",
+                )
+            }
+        ),
+        max_per_connection=100,
+    )[0]
+    eth_group = build_subscription_groups(
+        frozenset(
+            {
+                Subscription.for_symbol(
+                    CaptureStream.AGG_TRADE,
+                    "ETHUSDT",
+                )
+            }
+        ),
+        max_per_connection=100,
+    )[0]
+
+    assert btc_group.group_id == eth_group.group_id
+
+
 def test_change_plan_adds_before_removing() -> None:
     old = frozenset(
         {

@@ -1,12 +1,14 @@
 import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from uuid import UUID
 
 import pytest
 from typer.testing import CliRunner
 
 from crypto_momentum_lab.apps.market_data import main
+from crypto_momentum_lab.domain.market.models import CaptureStream
 from crypto_momentum_lab.domain.universe.models import (
     MarketCandidate,
     MembershipStatus,
@@ -96,6 +98,28 @@ def test_refresh_command_rejects_invalid_timestamp() -> None:
     assert result.exit_code != 0
 
 
+def test_run_market_data_uses_combined_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[Path] = []
+
+    async def fake_run(config_path: Path) -> None:
+        called.append(config_path)
+
+    monkeypatch.setattr(main, "run_market_data", fake_run)
+    result = runner.invoke(
+        main.app,
+        [
+            "run-market-data",
+            "--config",
+            "configs/environments/research.yaml",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert called == [Path("configs/environments/research.yaml")]
+
+
 async def test_scheduler_propagates_cancellation_cleanly() -> None:
     class FakeService:
         async def refresh(self, *, observed_at: datetime) -> UniverseSnapshot:
@@ -111,3 +135,30 @@ async def test_scheduler_propagates_cancellation_cleanly() -> None:
             clock=lambda: datetime(2026, 6, 14, 10, 30, tzinfo=UTC),
             sleeper=cancelled_sleep,
         )
+
+
+async def test_capture_observer_applies_membership_symbols() -> None:
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def apply_symbols(self, symbols, *, streams, generation) -> None:
+            self.calls.append((symbols, streams, generation))
+
+    capture = FakeCapture()
+    observer = main.CaptureUniverseObserver(
+        capture,
+        streams=(CaptureStream.AGG_TRADE,),
+        initial_generation=1,
+    )
+    snapshot = fixture_snapshot()
+
+    await observer.snapshot_updated(snapshot)
+
+    assert capture.calls == [
+        (
+            frozenset({"BTCUSDT"}),
+            (CaptureStream.AGG_TRADE,),
+            2,
+        )
+    ]

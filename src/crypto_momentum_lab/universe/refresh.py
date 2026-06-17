@@ -14,8 +14,10 @@ from crypto_momentum_lab.domain.universe.models import (
 from crypto_momentum_lab.domain.universe.ports import (
     MonitoringObligationProvider,
     NoMonitoringObligations,
+    NoUniverseSnapshotObserver,
     UniverseMarketData,
     UniverseRepository,
+    UniverseSnapshotObserver,
 )
 from crypto_momentum_lab.domain.universe.ranking import rank_utc_day_returns
 
@@ -29,12 +31,14 @@ class UniverseRefreshService:
         config: UniverseConfig,
         config_hash: str,
         obligations: MonitoringObligationProvider | None = None,
+        observer: UniverseSnapshotObserver | None = None,
     ) -> None:
         self._market_data = market_data
         self._repository = repository
         self._config = config
         self._config_hash = config_hash
         self._obligations = obligations or NoMonitoringObligations()
+        self._observer = observer or NoUniverseSnapshotObserver()
 
     async def refresh(self, *, observed_at: datetime) -> UniverseSnapshot:
         if observed_at.tzinfo is None:
@@ -121,4 +125,6 @@ class UniverseRefreshService:
             ),
         )
         await self._repository.save_snapshot(snapshot)
+        if snapshot.activated:
+            await self._observer.snapshot_updated(snapshot)
         return snapshot

@@ -1,7 +1,11 @@
 from dataclasses import replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 from crypto_momentum_lab.domain.market.models import (
+    CaptureRoute,
+    CaptureStream,
+    ConnectionLifecycleEvent,
     QualityCategory,
     RawEnvelope,
 )
@@ -71,3 +75,28 @@ def test_event_time_regression_and_silence_are_recorded(
 
     assert regression[0].category is QualityCategory.EVENT_TIME_REGRESSION
     assert silence[0].category is QualityCategory.SILENCE
+
+
+def test_connection_lifecycle_events_are_recorded() -> None:
+    tracker = StreamQualityTracker()
+    opened = ConnectionLifecycleEvent(
+        session_id=UUID(int=1),
+        route=CaptureRoute.MARKET,
+        stream=CaptureStream.AGG_TRADE,
+        symbols=("BTCUSDT",),
+        occurred_at=datetime(2026, 6, 15, 2, 0, tzinfo=UTC),
+        opened=True,
+        reason=None,
+    )
+    closed = replace(opened, opened=False, reason="closed")
+
+    events = (
+        *tracker.observe_lifecycle(opened),
+        *tracker.observe_lifecycle(closed),
+    )
+
+    assert [event.category for event in events] == [
+        QualityCategory.CONNECTION_OPENED,
+        QualityCategory.CONNECTION_CLOSED,
+    ]
+    assert events[1].details["reason"] == "closed"

@@ -33,7 +33,9 @@ services:
     environment:
       CML_DATABASE_URL: postgresql+asyncpg://cml:cml@postgres:5432/cml
       CML_ENVIRONMENT_CONFIG: configs/environments/research.yaml
-    command: ["run-universe-scheduler"]
+    command: ["run-market-data"]
+    volumes:
+      - ./data:/app/data
     restart: unless-stopped
 
 volumes:

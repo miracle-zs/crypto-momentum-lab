@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from hashlib import sha256
 
 from crypto_momentum_lab.domain.market.models import (
     CaptureRoute,
@@ -83,14 +82,10 @@ def build_subscription_groups(
             range(0, len(items), max_per_connection)
         ):
             chunk = tuple(items[offset : offset + max_per_connection])
-            digest = sha256(
-                "\n".join(item.binance_name for item in chunk).encode()
-            ).hexdigest()[:12]
             groups.append(
                 SubscriptionGroup(
                     group_id=(
-                        f"{route.value}:{stream.value}:"
-                        f"{chunk_index:04d}:{digest}"
+                        f"{route.value}:{stream.value}:{chunk_index:04d}"
                     ),
                     route=route,
                     stream=stream,

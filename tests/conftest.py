@@ -20,6 +20,9 @@ from crypto_momentum_lab.domain.universe.models import (
     TrackedMembership,
     UniverseSnapshot,
 )
+from crypto_momentum_lab.persistence.postgres.capture_repository import (
+    PostgresCaptureRepository,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     ContractMetadataRow,
     DailyOpenRow,
@@ -29,9 +32,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     RawArchiveManifestRow,
     UniverseEntryRow,
     UniverseSnapshotRow,
-)
-from crypto_momentum_lab.persistence.postgres.capture_repository import (
-    PostgresCaptureRepository,
 )
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,

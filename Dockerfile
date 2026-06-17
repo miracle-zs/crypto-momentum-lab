@@ -14,4 +14,4 @@ COPY alembic ./alembic
 RUN python -m pip install --no-cache-dir .
 
 ENTRYPOINT ["cml-market-data"]
-CMD ["run-universe-scheduler"]
+CMD ["run-market-data"]

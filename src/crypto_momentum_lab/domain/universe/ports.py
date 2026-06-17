@@ -65,3 +65,18 @@ class MonitoringObligationProvider(Protocol):
 class NoMonitoringObligations:
     async def forced_symbols(self) -> frozenset[str]:
         return frozenset()
+
+
+class UniverseSnapshotObserver(Protocol):
+    async def snapshot_updated(
+        self,
+        snapshot: UniverseSnapshot,
+    ) -> None: ...
+
+
+class NoUniverseSnapshotObserver:
+    async def snapshot_updated(
+        self,
+        snapshot: UniverseSnapshot,
+    ) -> None:
+        return None

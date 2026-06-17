@@ -6,6 +6,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from crypto_momentum_lab.domain.market.models import (
     CaptureRoute,
     CaptureStream,
+    ConnectionLifecycleEvent,
     JsonValue,
     QualityCategory,
     QualityEvent,
@@ -110,6 +111,39 @@ class StreamQualityTracker:
             silence_reported=False,
         )
         return tuple(events)
+
+    def observe_lifecycle(
+        self,
+        event: ConnectionLifecycleEvent,
+    ) -> tuple[QualityEvent, ...]:
+        category = (
+            QualityCategory.CONNECTION_OPENED
+            if event.opened
+            else QualityCategory.CONNECTION_CLOSED
+        )
+        symbol = event.symbols[0] if len(event.symbols) == 1 else None
+        event_id_symbol = symbol or ",".join(event.symbols) or "_connection"
+        return (
+            QualityEvent(
+                event_id=_event_id(
+                    category,
+                    event.session_id,
+                    None,
+                    event_id_symbol,
+                ),
+                category=category,
+                occurred_at=event.occurred_at,
+                route=event.route,
+                stream=event.stream,
+                symbol=symbol,
+                connection_session_id=event.session_id,
+                local_sequence=None,
+                details={
+                    "reason": event.reason,
+                    "symbols": list(event.symbols),
+                },
+            ),
+        )
 
     def check_silence(self, *, now: datetime) -> tuple[QualityEvent, ...]:
         events = []

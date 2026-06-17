@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -87,6 +88,14 @@ class CaptureConnectionPool(Protocol):
         generation: int,
     ) -> None: ...
 
+    async def stop(self) -> None: ...
+
+
+class CaptureRunner(Protocol):
+    async def run(self) -> None: ...
+
+    async def stop(self) -> None: ...
+
 
 class MarketDataCaptureService:
     def __init__(
@@ -96,11 +105,13 @@ class MarketDataCaptureService:
         repository: CaptureStateRepository,
         connection_pool: CaptureConnectionPool,
         disk_guard: DiskSpaceGuard,
+        coordinator: CaptureRunner | None = None,
     ) -> None:
         self._queue = queue
         self._repository = repository
         self._connection_pool = connection_pool
         self._disk_guard = disk_guard
+        self._coordinator = coordinator
         self._state = MarketDataState.STARTING
         self._monitoring_generation = 0
         self._monitoring_symbols = 0
@@ -120,6 +131,32 @@ class MarketDataCaptureService:
     @property
     def state(self) -> MarketDataState:
         return self._state
+
+    async def start(
+        self,
+        *,
+        symbols: frozenset[str],
+        streams: tuple[CaptureStream, ...],
+        generation: int,
+    ) -> None:
+        await self.apply_symbols(
+            symbols,
+            streams=streams,
+            generation=generation,
+        )
+        await self._transition(MarketDataState.READY, reason=None)
+
+    async def run(self) -> None:
+        if self._coordinator is None:
+            await asyncio.Event().wait()
+        else:
+            await self._coordinator.run()
+
+    async def stop(self) -> None:
+        await self._connection_pool.stop()
+        if self._coordinator is not None:
+            await self._coordinator.stop()
+        await self._transition(MarketDataState.STOPPED, reason=None)
 
     async def submit(self, envelope: RawEnvelope) -> None:
         try:
