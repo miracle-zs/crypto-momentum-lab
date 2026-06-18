@@ -14,6 +14,7 @@ dependencies = [
   "httpx>=0.28,<1",
   "pydantic>=2.10,<3",
   "psycopg[binary]>=3.2,<4",
+  "pyarrow>=20,<23",
   "PyYAML>=6.0,<7",
   "sqlalchemy[asyncio]>=2.0,<3",
   "structlog>=25.1,<26",
@@ -33,6 +34,7 @@ dev = [
 
 [project.scripts]
 cml-market-data = "crypto_momentum_lab.apps.market_data.main:app"
+cml-research = "crypto_momentum_lab.apps.research.main:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/crypto_momentum_lab"]
@@ -63,5 +65,5 @@ strict = true
 packages = ["crypto_momentum_lab"]
 
 [[tool.mypy.overrides]]
-module = ["yaml"]
+module = ["yaml", "pyarrow", "pyarrow.parquet"]
 ignore_missing_imports = true
