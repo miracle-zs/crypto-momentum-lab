@@ -200,6 +200,16 @@ def write_market_states_15s_dataset(
     )
 
 
+def read_market_states_15s_dataset(
+    paths: Iterable[Path],
+) -> tuple[MarketState15s, ...]:
+    states: list[MarketState15s] = []
+    for path in _iter_parquet_paths(paths):
+        for row in pq.read_table(path).to_pylist():
+            states.append(_market_state_from_row(row, path))
+    return tuple(sorted(states, key=lambda item: (item.symbol, item.bucket_start)))
+
+
 def _base_event_row(event: NormalizedMarketEvent) -> dict[str, object]:
     return {
         "schema_version": event.schema_version,
@@ -395,3 +405,104 @@ def _parquet_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
         {key: value for key, value in row.items() if key != "symbol"}
         for row in rows
     ]
+
+
+def _iter_parquet_paths(paths: Iterable[Path]) -> tuple[Path, ...]:
+    discovered: dict[str, Path] = {}
+    for path in paths:
+        if path.is_dir():
+            for parquet_path in sorted(path.rglob("*.parquet")):
+                discovered[parquet_path.as_posix()] = parquet_path
+        elif path.suffix == ".parquet":
+            discovered[path.as_posix()] = path
+        else:
+            raise ValueError(f"market state path is not parquet or directory: {path}")
+    return tuple(discovered[key] for key in sorted(discovered))
+
+
+def _market_state_from_row(row: dict[str, object], path: Path) -> MarketState15s:
+    return MarketState15s(
+        schema_version=_required_int(row, "schema_version"),
+        exchange=_required_string(row, "exchange"),
+        environment=_required_string(row, "environment"),
+        symbol=_row_symbol(row, path),
+        bucket_start=_required_datetime(row, "bucket_start"),
+        bucket_end=_required_datetime(row, "bucket_end"),
+        open_price=_optional_decimal_row(row, "open_price"),
+        high_price=_optional_decimal_row(row, "high_price"),
+        low_price=_optional_decimal_row(row, "low_price"),
+        close_price=_optional_decimal_row(row, "close_price"),
+        trade_count=_required_int(row, "trade_count"),
+        trade_notional=_required_decimal(row, "trade_notional"),
+        aggressive_buy_notional=_required_decimal(row, "aggressive_buy_notional"),
+        aggressive_sell_notional=_required_decimal(row, "aggressive_sell_notional"),
+        last_bid_price=_optional_decimal_row(row, "last_bid_price"),
+        last_ask_price=_optional_decimal_row(row, "last_ask_price"),
+        spread=_optional_decimal_row(row, "spread"),
+        midpoint=_optional_decimal_row(row, "midpoint"),
+        liquidation_count=_required_int(row, "liquidation_count"),
+        liquidation_notional=_required_decimal(row, "liquidation_notional"),
+        mark_price=_optional_decimal_row(row, "mark_price"),
+        closed_kline_count=_required_int(row, "closed_kline_count"),
+        source_event_count=_required_int(row, "source_event_count"),
+        first_received_at=_optional_datetime(row, "first_received_at"),
+        last_received_at=_optional_datetime(row, "last_received_at"),
+    )
+
+
+def _required_string(row: dict[str, object], key: str) -> str:
+    value = row.get(key)
+    if value is None:
+        raise ValueError(f"{key} is required")
+    return str(value)
+
+
+def _required_int(row: dict[str, object], key: str) -> int:
+    value = row.get(key)
+    if value is None:
+        raise ValueError(f"{key} is required")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        return int(value)
+    raise ValueError(f"{key} must be an int")
+
+
+def _required_decimal(row: dict[str, object], key: str) -> Decimal:
+    value = row.get(key)
+    if value is None:
+        raise ValueError(f"{key} is required")
+    return Decimal(str(value))
+
+
+def _optional_decimal_row(row: dict[str, object], key: str) -> Decimal | None:
+    value = row.get(key)
+    if value is None:
+        return None
+    return Decimal(str(value))
+
+
+def _required_datetime(row: dict[str, object], key: str) -> datetime:
+    value = row.get(key)
+    if not isinstance(value, datetime):
+        raise ValueError(f"{key} must be a datetime")
+    return value
+
+
+def _optional_datetime(row: dict[str, object], key: str) -> datetime | None:
+    value = row.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        raise ValueError(f"{key} must be a datetime")
+    return value
+
+
+def _row_symbol(row: dict[str, object], path: Path) -> str:
+    value = row.get("symbol")
+    if value is not None:
+        return str(value)
+    for part in path.parts:
+        if part.startswith("symbol="):
+            return part.removeprefix("symbol=")
+    raise ValueError(f"symbol partition missing for {path}")
