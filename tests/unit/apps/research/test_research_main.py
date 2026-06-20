@@ -15,6 +15,9 @@ from crypto_momentum_lab.research.datasets import DerivedMarketDatasets
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
 )
+from crypto_momentum_lab.strategies.order_flow_impulse import (
+    OrderFlowImpulseConfig,
+)
 
 runner = CliRunner()
 
@@ -134,6 +137,82 @@ def test_compression_breakout_study_command_writes_report(
         )
     ]
     assert "compression_breakout_events=2" in result.stdout
+
+
+def test_order_flow_impulse_study_command_writes_report(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    states_root = tmp_path / "states"
+    states_root.mkdir()
+    output_path = tmp_path / "order-flow-report.json"
+    calls: list[tuple[tuple[Path, ...], Path, OrderFlowImpulseConfig]] = []
+
+    def fake_build_order_flow_impulse_report(
+        *,
+        state_paths: tuple[Path, ...],
+        output_path: Path,
+        config: OrderFlowImpulseConfig,
+    ) -> object:
+        calls.append((state_paths, output_path, config))
+        return SimpleNamespace(summary=SimpleNamespace(total_count=3))
+
+    monkeypatch.setattr(
+        main,
+        "build_order_flow_impulse_report",
+        fake_build_order_flow_impulse_report,
+    )
+
+    result = runner.invoke(
+        main.app,
+        [
+            "order-flow-impulse-study",
+            "--states-root",
+            str(states_root),
+            "--output",
+            str(output_path),
+            "--impulse-window-buckets",
+            "3",
+            "--baseline-window-buckets",
+            "4",
+            "--breakout-window-buckets",
+            "5",
+            "--min-return-pct",
+            "0.01",
+            "--min-aggressive-imbalance",
+            "0.50",
+            "--min-notional-intensity",
+            "2",
+            "--confirmation-buckets",
+            "2",
+            "--cooldown-buckets",
+            "6",
+            "--forward-horizon-buckets",
+            "1",
+            "--forward-horizon-buckets",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            (states_root,),
+            output_path,
+            OrderFlowImpulseConfig(
+                impulse_window_buckets=3,
+                baseline_window_buckets=4,
+                breakout_window_buckets=5,
+                min_return_pct=Decimal("0.01"),
+                min_aggressive_imbalance=Decimal("0.50"),
+                min_notional_intensity=Decimal("2"),
+                confirmation_buckets=2,
+                cooldown_buckets=6,
+                forward_horizon_buckets=(1, 2),
+            ),
+        )
+    ]
+    assert "order_flow_impulse_events=3" in result.stdout
 
 
 def _manifest(dataset: DatasetName, relative_path: str) -> DerivedDatasetManifest:
