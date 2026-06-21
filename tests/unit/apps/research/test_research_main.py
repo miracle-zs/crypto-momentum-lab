@@ -15,6 +15,9 @@ from crypto_momentum_lab.research.datasets import DerivedMarketDatasets
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
 )
+from crypto_momentum_lab.strategies.liquidation_cascade import (
+    LiquidationCascadeConfig,
+)
 from crypto_momentum_lab.strategies.order_flow_impulse import (
     OrderFlowImpulseConfig,
 )
@@ -213,6 +216,82 @@ def test_order_flow_impulse_study_command_writes_report(
         )
     ]
     assert "order_flow_impulse_events=3" in result.stdout
+
+
+def test_liquidation_cascade_study_command_writes_report(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    states_root = tmp_path / "states"
+    states_root.mkdir()
+    output_path = tmp_path / "liquidation-report.json"
+    calls: list[tuple[tuple[Path, ...], Path, LiquidationCascadeConfig]] = []
+
+    def fake_build_liquidation_cascade_report(
+        *,
+        state_paths: tuple[Path, ...],
+        output_path: Path,
+        config: LiquidationCascadeConfig,
+    ) -> object:
+        calls.append((state_paths, output_path, config))
+        return SimpleNamespace(summary=SimpleNamespace(total_count=4))
+
+    monkeypatch.setattr(
+        main,
+        "build_liquidation_cascade_report",
+        fake_build_liquidation_cascade_report,
+    )
+
+    result = runner.invoke(
+        main.app,
+        [
+            "liquidation-cascade-study",
+            "--states-root",
+            str(states_root),
+            "--output",
+            str(output_path),
+            "--liquidation-window-buckets",
+            "2",
+            "--breakout-window-buckets",
+            "5",
+            "--min-liquidation-count",
+            "2",
+            "--min-liquidation-notional",
+            "500",
+            "--min-price-move-pct",
+            "0.01",
+            "--min-aggressive-imbalance",
+            "0.50",
+            "--confirmation-buckets",
+            "2",
+            "--cooldown-buckets",
+            "6",
+            "--forward-horizon-buckets",
+            "1",
+            "--forward-horizon-buckets",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            (states_root,),
+            output_path,
+            LiquidationCascadeConfig(
+                liquidation_window_buckets=2,
+                breakout_window_buckets=5,
+                min_liquidation_count=2,
+                min_liquidation_notional=Decimal("500"),
+                min_price_move_pct=Decimal("0.01"),
+                min_aggressive_imbalance=Decimal("0.50"),
+                confirmation_buckets=2,
+                cooldown_buckets=6,
+                forward_horizon_buckets=(1, 2),
+            ),
+        )
+    ]
+    assert "liquidation_cascade_events=4" in result.stdout
 
 
 def _manifest(dataset: DatasetName, relative_path: str) -> DerivedDatasetManifest:

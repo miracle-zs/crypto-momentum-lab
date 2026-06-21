@@ -8,11 +8,17 @@ from crypto_momentum_lab.research.compression_breakout import (
     build_compression_breakout_report,
 )
 from crypto_momentum_lab.research.datasets import derive_market_datasets
+from crypto_momentum_lab.research.liquidation_cascade import (
+    build_liquidation_cascade_report,
+)
 from crypto_momentum_lab.research.order_flow_impulse import (
     build_order_flow_impulse_report,
 )
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
+)
+from crypto_momentum_lab.strategies.liquidation_cascade import (
+    LiquidationCascadeConfig,
 )
 from crypto_momentum_lab.strategies.order_flow_impulse import (
     OrderFlowImpulseConfig,
@@ -249,4 +255,114 @@ def order_flow_impulse_study_command(
         ),
     )
     typer.echo(f"order_flow_impulse_events={report.summary.total_count}")
+    typer.echo(output_path.as_posix())
+
+
+@app.command("liquidation-cascade-study")
+def liquidation_cascade_study_command(
+    states_root: Annotated[
+        Path,
+        typer.Option(
+            "--states-root",
+            exists=True,
+            file_okay=False,
+            readable=True,
+            help="Root directory containing market_states_15s Parquet files.",
+        ),
+    ],
+    output_path: Annotated[
+        Path,
+        typer.Option(
+            "--output",
+            dir_okay=False,
+            help="JSON report output path.",
+        ),
+    ],
+    liquidation_window_buckets: Annotated[
+        int,
+        typer.Option(
+            "--liquidation-window-buckets",
+            min=1,
+            help="15-second states used for liquidation cluster detection.",
+        ),
+    ] = 2,
+    breakout_window_buckets: Annotated[
+        int,
+        typer.Option(
+            "--breakout-window-buckets",
+            min=1,
+            help="Completed states before candidate used for frozen high/low.",
+        ),
+    ] = 8,
+    min_liquidation_count: Annotated[
+        int,
+        typer.Option(
+            "--min-liquidation-count",
+            min=1,
+            help="Minimum liquidation records in the cluster window.",
+        ),
+    ] = 1,
+    min_liquidation_notional: Annotated[
+        str,
+        typer.Option(
+            "--min-liquidation-notional",
+            help="Minimum liquidation notional in the cluster window.",
+        ),
+    ] = "10000",
+    min_price_move_pct: Annotated[
+        str,
+        typer.Option(
+            "--min-price-move-pct",
+            help="Minimum directional price move during the cluster.",
+        ),
+    ] = "0.003",
+    min_aggressive_imbalance: Annotated[
+        str,
+        typer.Option(
+            "--min-aggressive-imbalance",
+            help="Minimum absolute aggressive notional imbalance.",
+        ),
+    ] = "0.35",
+    confirmation_buckets: Annotated[
+        int,
+        typer.Option(
+            "--confirmation-buckets",
+            min=1,
+            help="Consecutive buckets that must stay beyond the breakout level.",
+        ),
+    ] = 1,
+    cooldown_buckets: Annotated[
+        int,
+        typer.Option(
+            "--cooldown-buckets",
+            min=0,
+            help="Buckets skipped after a detected event.",
+        ),
+    ] = 8,
+    forward_horizon_buckets: Annotated[
+        list[int] | None,
+        typer.Option(
+            "--forward-horizon-buckets",
+            min=1,
+            help="Forward-label horizon in 15-second buckets. Repeatable.",
+        ),
+    ] = None,
+) -> None:
+    horizons = tuple(forward_horizon_buckets or [2, 4, 6, 8, 20, 40])
+    report = build_liquidation_cascade_report(
+        state_paths=(states_root,),
+        output_path=output_path,
+        config=LiquidationCascadeConfig(
+            liquidation_window_buckets=liquidation_window_buckets,
+            breakout_window_buckets=breakout_window_buckets,
+            min_liquidation_count=min_liquidation_count,
+            min_liquidation_notional=Decimal(min_liquidation_notional),
+            min_price_move_pct=Decimal(min_price_move_pct),
+            min_aggressive_imbalance=Decimal(min_aggressive_imbalance),
+            confirmation_buckets=confirmation_buckets,
+            cooldown_buckets=cooldown_buckets,
+            forward_horizon_buckets=horizons,
+        ),
+    )
+    typer.echo(f"liquidation_cascade_events={report.summary.total_count}")
     typer.echo(output_path.as_posix())
