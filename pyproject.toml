@@ -35,6 +35,7 @@ dev = [
 [project.scripts]
 cml-market-data = "crypto_momentum_lab.apps.market_data.main:app"
 cml-research = "crypto_momentum_lab.apps.research.main:app"
+cml-strategy-runner = "crypto_momentum_lab.apps.strategy_runner.main:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/crypto_momentum_lab"]
