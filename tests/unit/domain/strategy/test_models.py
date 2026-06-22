@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -178,6 +179,191 @@ def test_strategy_decision_rejects_candidate_source_signal_mismatch() -> None:
         )
 
 
+def test_order_intent_candidate_rejects_expires_at_not_after_created_at() -> None:
+    identity = _identity()
+    detected_at = datetime(2026, 6, 22, 0, 1, tzinfo=UTC)
+
+    with pytest.raises(ValueError, match="expires_at must be after created_at"):
+        OrderIntentCandidate(
+            candidate_id="cand_1",
+            signal_id="sig_1",
+            run_id=identity.run_id,
+            strategy_name=identity.strategy_name,
+            strategy_version=identity.strategy_version,
+            config_hash=identity.config_hash,
+            symbol="BTCUSDT",
+            side=StrategySide.LONG,
+            entry_type=EntryType.MARKET,
+            limit_price=None,
+            desired_notional=Decimal("100"),
+            reduce_only=False,
+            expires_at=detected_at,
+            created_at=detected_at,
+            reason="compression_breakout",
+            features={"range_high": "100"},
+        )
+
+
+def test_order_intent_candidate_rejects_non_positive_desired_notional() -> None:
+    identity = _identity()
+    detected_at = datetime(2026, 6, 22, 0, 1, tzinfo=UTC)
+
+    with pytest.raises(ValueError, match="desired_notional must be positive"):
+        OrderIntentCandidate(
+            candidate_id="cand_1",
+            signal_id="sig_1",
+            run_id=identity.run_id,
+            strategy_name=identity.strategy_name,
+            strategy_version=identity.strategy_version,
+            config_hash=identity.config_hash,
+            symbol="BTCUSDT",
+            side=StrategySide.LONG,
+            entry_type=EntryType.MARKET,
+            limit_price=None,
+            desired_notional=Decimal("0"),
+            reduce_only=False,
+            expires_at=detected_at + timedelta(seconds=30),
+            created_at=detected_at,
+            reason="compression_breakout",
+            features={"range_high": "100"},
+        )
+
+
+def test_order_intent_candidate_rejects_reduce_only() -> None:
+    identity = _identity()
+    detected_at = datetime(2026, 6, 22, 0, 1, tzinfo=UTC)
+
+    with pytest.raises(
+        ValueError,
+        match="reduce_only candidates are out of scope for V0",
+    ):
+        OrderIntentCandidate(
+            candidate_id="cand_1",
+            signal_id="sig_1",
+            run_id=identity.run_id,
+            strategy_name=identity.strategy_name,
+            strategy_version=identity.strategy_version,
+            config_hash=identity.config_hash,
+            symbol="BTCUSDT",
+            side=StrategySide.LONG,
+            entry_type=EntryType.MARKET,
+            limit_price=None,
+            desired_notional=Decimal("100"),
+            reduce_only=True,
+            expires_at=detected_at + timedelta(seconds=30),
+            created_at=detected_at,
+            reason="compression_breakout",
+            features={"range_high": "100"},
+        )
+
+
+def test_strategy_payload_fields_store_normalized_json_values() -> None:
+    identity = _identity()
+    detected_at = datetime(2026, 6, 22, 0, 1, tzinfo=UTC)
+    payload = _normalizable_payload(detected_at)
+    expected_payload = _normalized_payload(detected_at)
+
+    signal = StrategySignal(
+        signal_id="sig_1",
+        run_id=identity.run_id,
+        strategy_name=identity.strategy_name,
+        strategy_version=identity.strategy_version,
+        config_hash=identity.config_hash,
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        detected_at=detected_at,
+        source_state_at=detected_at,
+        reason="compression_breakout",
+        features=payload,
+        reference_prices=payload,
+    )
+    candidate = OrderIntentCandidate(
+        candidate_id="cand_1",
+        signal_id=signal.signal_id,
+        run_id=identity.run_id,
+        strategy_name=identity.strategy_name,
+        strategy_version=identity.strategy_version,
+        config_hash=identity.config_hash,
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        entry_type=EntryType.MARKET,
+        limit_price=None,
+        desired_notional=Decimal("100"),
+        reduce_only=False,
+        expires_at=detected_at + timedelta(seconds=30),
+        created_at=detected_at,
+        reason="compression_breakout",
+        features=payload,
+    )
+    rejection = StrategyRejection(
+        reason=RejectionReason.NO_SIGNAL,
+        symbol="ETHUSDT",
+        bucket_start=detected_at,
+        details=payload,
+    )
+    checkpoint = StrategyCheckpoint(
+        last_processed_at_by_symbol={"BTCUSDT": detected_at},
+        warmup_buckets_by_symbol={"BTCUSDT": 4},
+        cooldown_buckets_remaining_by_symbol={"BTCUSDT": 0},
+        payload=payload,
+    )
+
+    assert signal.features == expected_payload
+    assert signal.reference_prices == expected_payload
+    assert candidate.features == expected_payload
+    assert rejection.details == expected_payload
+    assert checkpoint.payload == expected_payload
+
+
+def test_strategy_payload_fields_reject_unsupported_values() -> None:
+    identity = _identity()
+    detected_at = datetime(2026, 6, 22, 0, 1, tzinfo=UTC)
+
+    with pytest.raises(TypeError, match="features must be JSON-normalizable"):
+        StrategySignal(
+            signal_id="sig_1",
+            run_id=identity.run_id,
+            strategy_name=identity.strategy_name,
+            strategy_version=identity.strategy_version,
+            config_hash=identity.config_hash,
+            symbol="BTCUSDT",
+            side=StrategySide.LONG,
+            detected_at=detected_at,
+            source_state_at=detected_at,
+            reason="compression_breakout",
+            features={"unsupported": object()},
+            reference_prices={"breakout_price": "101"},
+        )
+
+
+def test_strategy_payload_fields_reject_non_string_mapping_keys() -> None:
+    detected_at = datetime(2026, 6, 22, 0, 1, tzinfo=UTC)
+
+    with pytest.raises(TypeError, match="details must be JSON-normalizable"):
+        StrategyRejection(
+            reason=RejectionReason.NO_SIGNAL,
+            symbol="ETHUSDT",
+            bucket_start=detected_at,
+            details={"nested": {1: "invalid"}},
+        )
+
+
+def test_non_finite_float_is_rejected_from_payload_and_config_hash() -> None:
+    detected_at = datetime(2026, 6, 22, 0, 1, tzinfo=UTC)
+
+    for non_finite in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(TypeError, match="payload must be JSON-normalizable"):
+            StrategyCheckpoint(
+                last_processed_at_by_symbol={"BTCUSDT": detected_at},
+                warmup_buckets_by_symbol={"BTCUSDT": 4},
+                cooldown_buckets_remaining_by_symbol={"BTCUSDT": 0},
+                payload={"value": non_finite},
+            )
+
+        with pytest.raises(TypeError, match="JSON numbers must be finite"):
+            deterministic_config_hash({"value": non_finite})
+
+
 def test_data_requirement_rejects_invalid_values() -> None:
     with pytest.raises(ValueError, match="warmup_buckets must be positive"):
         StrategyDataRequirement(
@@ -264,3 +450,43 @@ def _checkpoint(detected_at: datetime) -> StrategyCheckpoint:
         cooldown_buckets_remaining_by_symbol={"BTCUSDT": 0},
         payload={"buffer_sizes": {"BTCUSDT": 4}},
     )
+
+
+@dataclass(frozen=True)
+class _PayloadRecord:
+    amount: Decimal
+    observed_at: datetime
+    side: StrategySide
+
+
+def _normalizable_payload(observed_at: datetime) -> dict[str, object]:
+    return {
+        "decimal": Decimal("1.25"),
+        "datetime": observed_at,
+        "enum": StrategySide.SHORT,
+        "dataclass": _PayloadRecord(
+            amount=Decimal("2.50"),
+            observed_at=observed_at,
+            side=StrategySide.LONG,
+        ),
+        "mapping": {"inner_decimal": Decimal("3.75")},
+        "list": [Decimal("4.00"), observed_at, StrategySide.SHORT],
+        "tuple": (Decimal("5.25"), observed_at, StrategySide.LONG),
+    }
+
+
+def _normalized_payload(observed_at: datetime) -> dict[str, object]:
+    observed_at_value = observed_at.isoformat()
+    return {
+        "decimal": "1.25",
+        "datetime": observed_at_value,
+        "enum": "short",
+        "dataclass": {
+            "amount": "2.50",
+            "observed_at": observed_at_value,
+            "side": "long",
+        },
+        "mapping": {"inner_decimal": "3.75"},
+        "list": ["4.00", observed_at_value, "short"],
+        "tuple": ["5.25", observed_at_value, "long"],
+    }

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime
@@ -120,8 +121,16 @@ class StrategySignal:
             raise ValueError("detected_at must be timezone-aware")
         if not _is_aware(self.source_state_at):
             raise ValueError("source_state_at must be timezone-aware")
-        _ensure_json_normalizable(self.features, "features")
-        _ensure_json_normalizable(self.reference_prices, "reference_prices")
+        object.__setattr__(
+            self,
+            "features",
+            _normalize_json_mapping(self.features, "features"),
+        )
+        object.__setattr__(
+            self,
+            "reference_prices",
+            _normalize_json_mapping(self.reference_prices, "reference_prices"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,7 +173,11 @@ class OrderIntentCandidate:
             raise ValueError("desired_notional must be positive")
         if self.reduce_only:
             raise ValueError("reduce_only candidates are out of scope for V0")
-        _ensure_json_normalizable(self.features, "features")
+        object.__setattr__(
+            self,
+            "features",
+            _normalize_json_mapping(self.features, "features"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,7 +191,11 @@ class StrategyRejection:
         _require_non_empty(self.symbol, "symbol")
         if not _is_aware(self.bucket_start):
             raise ValueError("bucket_start must be timezone-aware")
-        _ensure_json_normalizable(self.details, "details")
+        object.__setattr__(
+            self,
+            "details",
+            _normalize_json_mapping(self.details, "details"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +219,11 @@ class StrategyCheckpoint:
         _require_non_negative_counts(
             self.cooldown_buckets_remaining_by_symbol,
             "cooldown_buckets_remaining_by_symbol",
+        )
+        object.__setattr__(
+            self,
+            "payload",
+            _normalize_json_mapping(self.payload, "payload"),
         )
         _ensure_json_normalizable(asdict(self), "checkpoint")
 
@@ -229,6 +251,7 @@ def deterministic_config_hash(config: object) -> str:
     normalized = _normalize_json_value(config)
     encoded = json.dumps(
         normalized,
+        allow_nan=False,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -276,7 +299,11 @@ def _normalize_json_value(value: object) -> JsonValue:
         return str(value)
     if isinstance(value, datetime):
         return value.isoformat()
-    if value is None or isinstance(value, str | int | float | bool):
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise TypeError("JSON numbers must be finite")
+        return value
+    if value is None or isinstance(value, str | int | bool):
         return value
     if is_dataclass(value) and not isinstance(value, type):
         return _normalize_json_value(asdict(cast(Any, value)))
@@ -297,6 +324,16 @@ def _ensure_json_normalizable(value: object, field_name: str) -> None:
         _normalize_json_value(value)
     except TypeError as exc:
         raise TypeError(f"{field_name} must be JSON-normalizable") from exc
+
+
+def _normalize_json_mapping(value: object, field_name: str) -> dict[str, JsonValue]:
+    try:
+        normalized = _normalize_json_value(value)
+    except TypeError as exc:
+        raise TypeError(f"{field_name} must be JSON-normalizable") from exc
+    if not isinstance(normalized, dict):
+        raise TypeError(f"{field_name} must be JSON-normalizable")
+    return normalized
 
 
 def _candidate_matches_signal(
