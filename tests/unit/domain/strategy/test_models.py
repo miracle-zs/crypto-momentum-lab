@@ -133,6 +133,51 @@ def test_strategy_records_validate_timestamps_and_relationships() -> None:
     assert decision.checkpoint == checkpoint
 
 
+def test_strategy_decision_rejects_unknown_candidate_signal_id() -> None:
+    identity = _identity()
+    detected_at = datetime(2026, 6, 22, 0, 1, tzinfo=UTC)
+    signal = _signal(identity=identity, detected_at=detected_at)
+    candidate = _candidate(
+        identity=identity,
+        signal_id="sig_unknown",
+        detected_at=detected_at,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="candidate signal_id must reference a decision signal",
+    ):
+        StrategyDecision(
+            signals=(signal,),
+            candidates=(candidate,),
+            rejections=(),
+            checkpoint=_checkpoint(detected_at),
+        )
+
+
+def test_strategy_decision_rejects_candidate_source_signal_mismatch() -> None:
+    identity = _identity()
+    detected_at = datetime(2026, 6, 22, 0, 1, tzinfo=UTC)
+    signal = _signal(identity=identity, detected_at=detected_at)
+    candidate = _candidate(
+        identity=identity,
+        signal_id=signal.signal_id,
+        detected_at=detected_at,
+        symbol="ETHUSDT",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="candidate must match source signal identity",
+    ):
+        StrategyDecision(
+            signals=(signal,),
+            candidates=(candidate,),
+            rejections=(),
+            checkpoint=_checkpoint(detected_at),
+        )
+
+
 def test_data_requirement_rejects_invalid_values() -> None:
     with pytest.raises(ValueError, match="warmup_buckets must be positive"):
         StrategyDataRequirement(
@@ -161,4 +206,61 @@ def _identity() -> StrategyRunIdentity:
         code_commit="unknown",
         created_at=datetime(2026, 6, 22, 0, 0, tzinfo=UTC),
         source_paths=("states",),
+    )
+
+
+def _signal(
+    *,
+    identity: StrategyRunIdentity,
+    detected_at: datetime,
+) -> StrategySignal:
+    return StrategySignal(
+        signal_id="sig_1",
+        run_id=identity.run_id,
+        strategy_name=identity.strategy_name,
+        strategy_version=identity.strategy_version,
+        config_hash=identity.config_hash,
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        detected_at=detected_at,
+        source_state_at=detected_at,
+        reason="compression_breakout",
+        features={"range_high": "100"},
+        reference_prices={"breakout_price": "101"},
+    )
+
+
+def _candidate(
+    *,
+    identity: StrategyRunIdentity,
+    signal_id: str,
+    detected_at: datetime,
+    symbol: str = "BTCUSDT",
+) -> OrderIntentCandidate:
+    return OrderIntentCandidate(
+        candidate_id="cand_1",
+        signal_id=signal_id,
+        run_id=identity.run_id,
+        strategy_name=identity.strategy_name,
+        strategy_version=identity.strategy_version,
+        config_hash=identity.config_hash,
+        symbol=symbol,
+        side=StrategySide.LONG,
+        entry_type=EntryType.MARKET,
+        limit_price=None,
+        desired_notional=Decimal("100"),
+        reduce_only=False,
+        expires_at=detected_at + timedelta(seconds=30),
+        created_at=detected_at,
+        reason="compression_breakout",
+        features={"range_high": "100"},
+    )
+
+
+def _checkpoint(detected_at: datetime) -> StrategyCheckpoint:
+    return StrategyCheckpoint(
+        last_processed_at_by_symbol={"BTCUSDT": detected_at},
+        warmup_buckets_by_symbol={"BTCUSDT": 4},
+        cooldown_buckets_remaining_by_symbol={"BTCUSDT": 0},
+        payload={"buffer_sizes": {"BTCUSDT": 4}},
     )

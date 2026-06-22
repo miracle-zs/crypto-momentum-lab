@@ -213,6 +213,17 @@ class StrategyDecision:
     rejections: tuple[StrategyRejection, ...]
     checkpoint: StrategyCheckpoint
 
+    def __post_init__(self) -> None:
+        signals_by_id = {signal.signal_id: signal for signal in self.signals}
+        for candidate in self.candidates:
+            signal = signals_by_id.get(candidate.signal_id)
+            if signal is None:
+                raise ValueError(
+                    "candidate signal_id must reference a decision signal"
+                )
+            if not _candidate_matches_signal(candidate, signal):
+                raise ValueError("candidate must match source signal identity")
+
 
 def deterministic_config_hash(config: object) -> str:
     normalized = _normalize_json_value(config)
@@ -286,6 +297,20 @@ def _ensure_json_normalizable(value: object, field_name: str) -> None:
         _normalize_json_value(value)
     except TypeError as exc:
         raise TypeError(f"{field_name} must be JSON-normalizable") from exc
+
+
+def _candidate_matches_signal(
+    candidate: OrderIntentCandidate,
+    signal: StrategySignal,
+) -> bool:
+    return (
+        candidate.run_id == signal.run_id
+        and candidate.strategy_name == signal.strategy_name
+        and candidate.strategy_version == signal.strategy_version
+        and candidate.config_hash == signal.config_hash
+        and candidate.symbol == signal.symbol
+        and candidate.side == signal.side
+    )
 
 
 def _require_common_record_fields(
