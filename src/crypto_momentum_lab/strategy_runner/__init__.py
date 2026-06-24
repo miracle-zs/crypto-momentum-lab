@@ -1,6 +1,9 @@
 from crypto_momentum_lab.strategy_runner.replay import (
     ReplayConfig,
     ReplayError,
+    ReplayExecutionConfig,
+    SimulatedFill,
+    SimulatedFillStatus,
     StrategyReplayReport,
     build_strategy_replay_report,
     run_strategy_replay,
@@ -10,6 +13,9 @@ from crypto_momentum_lab.strategy_runner.replay import (
 __all__ = [
     "ReplayConfig",
     "ReplayError",
+    "ReplayExecutionConfig",
+    "SimulatedFill",
+    "SimulatedFillStatus",
     "StrategyReplayReport",
     "build_strategy_replay_report",
     "run_strategy_replay",

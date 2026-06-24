@@ -56,3 +56,20 @@ The smoke run should produce non-empty `aggTrade`, `bookTicker`,
 `markPrice@1s`, and `kline_1m` archives with matching PostgreSQL manifests.
 `forceOrder` is subscribed but can legitimately remain empty during quiet
 market periods.
+
+## Strategy Replay
+
+```bash
+.venv/bin/cml-strategy-runner replay \
+  --strategy compression_breakout \
+  --states-root data/derived/market_states_15s \
+  --output reports/compression-breakout-replay.json \
+  --execution-latency-buckets 1 \
+  --taker-fee-rate 0.0004 \
+  --slippage-bps 0
+```
+
+Replay reports are deterministic JSON artifacts. They include standardized
+signals, order-intent candidates, and cost-aware simulated fills using the
+configured latency, taker fee, spread, and slippage assumptions. Use
+`--no-simulate-fills` to produce a signal/candidate-only report.

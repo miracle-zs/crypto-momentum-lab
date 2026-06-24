@@ -9,7 +9,7 @@ from crypto_momentum_lab.apps.strategy_runner import main
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
 )
-from crypto_momentum_lab.strategy_runner import ReplayConfig
+from crypto_momentum_lab.strategy_runner import ReplayConfig, ReplayExecutionConfig
 
 runner = CliRunner()
 
@@ -75,6 +75,12 @@ def test_replay_command_writes_report(tmp_path: Path, monkeypatch) -> None:
             "250",
             "--candidate-ttl-buckets",
             "3",
+            "--execution-latency-buckets",
+            "2",
+            "--taker-fee-rate",
+            "0.0005",
+            "--slippage-bps",
+            "1.5",
         ],
     )
 
@@ -97,6 +103,11 @@ def test_replay_command_writes_report(tmp_path: Path, monkeypatch) -> None:
                 ),
                 candidate_notional=Decimal("250"),
                 candidate_ttl_buckets=3,
+                execution=ReplayExecutionConfig(
+                    latency_buckets=2,
+                    taker_fee_rate=Decimal("0.0005"),
+                    slippage_bps=Decimal("1.5"),
+                ),
             ),
         )
     ]

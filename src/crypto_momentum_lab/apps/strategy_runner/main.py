@@ -11,6 +11,8 @@ from crypto_momentum_lab.strategies.compression_breakout import (
 )
 from crypto_momentum_lab.strategy_runner import (
     ReplayConfig,
+    ReplayExecutionConfig,
+    SimulatedFillStatus,
     build_strategy_replay_report,
     write_strategy_replay_report,
 )
@@ -86,8 +88,36 @@ def replay_command(
         int,
         typer.Option("--candidate-ttl-buckets", min=1),
     ] = 4,
+    simulate_fills: Annotated[
+        bool,
+        typer.Option(
+            "--simulate-fills/--no-simulate-fills",
+            help="Enable deterministic cost-aware simulated fills.",
+        ),
+    ] = True,
+    execution_latency_buckets: Annotated[
+        int,
+        typer.Option("--execution-latency-buckets", min=0),
+    ] = 1,
+    taker_fee_rate: Annotated[
+        str,
+        typer.Option("--taker-fee-rate"),
+    ] = "0.0004",
+    slippage_bps: Annotated[
+        str,
+        typer.Option("--slippage-bps"),
+    ] = "0",
 ) -> None:
     created_at = _parse_generated_at(generated_at)
+    execution = (
+        ReplayExecutionConfig(
+            latency_buckets=execution_latency_buckets,
+            taker_fee_rate=Decimal(taker_fee_rate),
+            slippage_bps=Decimal(slippage_bps),
+        )
+        if simulate_fills
+        else None
+    )
     config = ReplayConfig(
         strategy_name=strategy_name,
         run_id=run_id or f"replay-{uuid4()}",
@@ -103,6 +133,7 @@ def replay_command(
         ),
         candidate_notional=Decimal(candidate_notional),
         candidate_ttl_buckets=candidate_ttl_buckets,
+        execution=execution,
     )
     report = build_strategy_replay_report(
         state_paths=(states_root,),
@@ -115,6 +146,21 @@ def replay_command(
         f"signals={len(report.signals)} "
         f"candidates={len(report.candidates)}"
     )
+    if execution is not None:
+        simulated_fills = tuple(getattr(report, "simulated_fills", ()))
+        filled_count = sum(
+            1 for fill in simulated_fills if fill.status is SimulatedFillStatus.FILLED
+        )
+        total_cost = sum(
+            (fill.total_cost for fill in simulated_fills),
+            Decimal("0"),
+        )
+        typer.echo(
+            "Simulated fills: "
+            f"filled={filled_count} "
+            f"unfilled={len(simulated_fills) - filled_count} "
+            f"total_cost={total_cost}"
+        )
     typer.echo(output_path.as_posix())
 
 
