@@ -73,3 +73,19 @@ Replay reports are deterministic JSON artifacts. They include standardized
 signals, order-intent candidates, and cost-aware simulated fills using the
 configured latency, taker fee, spread, and slippage assumptions. Use
 `--no-simulate-fills` to produce a signal/candidate-only report.
+
+## Paper Trading Runner
+
+```bash
+.venv/bin/cml-strategy-runner paper \
+  --strategy compression_breakout \
+  --states-root data/derived/market_states_15s \
+  --output reports/compression-breakout-paper.json \
+  --execution-latency-buckets 1 \
+  --taker-fee-rate 0.0004 \
+  --slippage-bps 0
+```
+
+Paper mode reuses the same strategy core and writes a local JSON report with
+signals, order-intent candidates, and simulated paper fills. It does not connect
+to a Binance account or submit real orders.

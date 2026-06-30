@@ -40,7 +40,9 @@ class PaperRunnerError(RuntimeError):
 
 
 class PaperMarketStateSource(Protocol):
-    description: str
+    @property
+    def description(self) -> str:
+        pass
 
     def __iter__(self) -> Iterator[MarketState15s]:
         pass

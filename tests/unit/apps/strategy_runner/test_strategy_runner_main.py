@@ -9,7 +9,11 @@ from crypto_momentum_lab.apps.strategy_runner import main
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
 )
-from crypto_momentum_lab.strategy_runner import ReplayConfig, ReplayExecutionConfig
+from crypto_momentum_lab.strategy_runner import (
+    PaperRunnerConfig,
+    ReplayConfig,
+    ReplayExecutionConfig,
+)
 
 runner = CliRunner()
 
@@ -153,3 +157,113 @@ def test_replay_command_generates_default_run_id(tmp_path: Path, monkeypatch) ->
     assert result.exit_code == 0
     assert configs[0].run_id.startswith("replay-")
     assert configs[0].generated_at.tzinfo is not None
+
+
+def test_paper_command_writes_report(tmp_path: Path, monkeypatch) -> None:
+    states_root = tmp_path / "states"
+    states_root.mkdir()
+    output_path = tmp_path / "paper.json"
+    source = object()
+    calls: list[tuple[object, PaperRunnerConfig]] = []
+    writes: list[tuple[object, Path]] = []
+
+    def fake_build_source(state_paths: tuple[Path, ...]) -> object:
+        assert state_paths == (states_root,)
+        return source
+
+    def fake_run_paper_trading(
+        *,
+        source: object,
+        config: PaperRunnerConfig,
+    ) -> object:
+        calls.append((source, config))
+        return SimpleNamespace(
+            input_state_count=6,
+            signals=(object(),),
+            candidates=(object(),),
+            paper_fills=(object(),),
+        )
+
+    def fake_write_paper_trading_report(report: object, path: Path) -> None:
+        writes.append((report, path))
+
+    monkeypatch.setattr(main, "build_paper_state_source", fake_build_source)
+    monkeypatch.setattr(main, "run_paper_trading", fake_run_paper_trading)
+    monkeypatch.setattr(
+        main,
+        "write_paper_trading_report",
+        fake_write_paper_trading_report,
+    )
+
+    result = runner.invoke(
+        main.app,
+        [
+            "paper",
+            "--strategy",
+            "compression_breakout",
+            "--states-root",
+            str(states_root),
+            "--output",
+            str(output_path),
+            "--run-id",
+            "paper-cli",
+            "--generated-at",
+            "2026-06-30T00:00:00+00:00",
+            "--compression-window-buckets",
+            "3",
+            "--max-range-width-pct",
+            "0.01",
+            "--min-breakout-pct",
+            "0.001",
+            "--acceptance-buckets",
+            "2",
+            "--cooldown-buckets",
+            "4",
+            "--candidate-notional",
+            "250",
+            "--candidate-ttl-buckets",
+            "3",
+            "--execution-latency-buckets",
+            "2",
+            "--taker-fee-rate",
+            "0.0005",
+            "--slippage-bps",
+            "1.5",
+            "--max-states",
+            "10",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            source,
+            PaperRunnerConfig(
+                strategy_name="compression_breakout",
+                run_id="paper-cli",
+                code_commit="unknown",
+                generated_at=datetime(2026, 6, 30, 0, 0, tzinfo=UTC),
+                compression_breakout=CompressionBreakoutConfig(
+                    compression_window_buckets=3,
+                    max_range_width_pct=Decimal("0.01"),
+                    min_breakout_pct=Decimal("0.001"),
+                    acceptance_buckets=2,
+                    cooldown_buckets=4,
+                    forward_horizon_buckets=(1,),
+                ),
+                candidate_notional=Decimal("250"),
+                candidate_ttl_buckets=3,
+                execution=ReplayExecutionConfig(
+                    latency_buckets=2,
+                    taker_fee_rate=Decimal("0.0005"),
+                    slippage_bps=Decimal("1.5"),
+                ),
+                max_states=10,
+            ),
+        )
+    ]
+    assert writes[0][1] == output_path
+    assert "Paper run completed: states=6 signals=1 candidates=1 fills=1" in (
+        result.stdout
+    )
+    assert output_path.as_posix() in result.stdout
