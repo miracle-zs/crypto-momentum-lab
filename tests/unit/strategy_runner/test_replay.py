@@ -56,6 +56,7 @@ def test_run_strategy_replay_emits_report_from_in_memory_states() -> None:
     assert report.signals[0].side is StrategySide.LONG
     assert report.candidates[0].signal_id == report.signals[0].signal_id
     assert len(report.simulated_fills) == 1
+    assert report.simulated_fills[0].fill_id.startswith("fill_")
     assert report.simulated_fills[0].status is SimulatedFillStatus.EXPIRED
     assert report.summary_counts["signals_by_side"] == {"long": 1}
     assert report.summary_counts["signals_by_symbol"] == {"BTCUSDT": 1}
@@ -186,6 +187,7 @@ def test_write_strategy_replay_report_serializes_decimal_and_timestamps(
     assert payload["execution_config"]["latency_buckets"] == 1
     assert payload["signals"][0]["features"]["breakout_price"] == "101.2"
     assert payload["candidates"][0]["desired_notional"] == "100"
+    assert payload["simulated_fills"][0]["fill_id"].startswith("fill_")
     assert payload["simulated_fills"][0]["status"] == "expired"
     assert payload["final_checkpoint"]["payload"]["buffer_sizes"] == {"BTCUSDT": 5}
 
