@@ -8,6 +8,15 @@ from crypto_momentum_lab.strategy_runner.fills import (
     simulate_candidate_fill,
     simulate_candidate_fills,
 )
+from crypto_momentum_lab.strategy_runner.paper import (
+    InMemoryPaperMarketStateSource,
+    PaperMarketStateSource,
+    PaperRunnerConfig,
+    PaperRunnerError,
+    PaperTradingRunReport,
+    run_paper_trading,
+    write_paper_trading_report,
+)
 from crypto_momentum_lab.strategy_runner.replay import (
     ReplayConfig,
     ReplayError,
@@ -23,13 +32,20 @@ __all__ = [
     "ReplayExecutionConfig",
     "SimulatedFill",
     "SimulatedFillStatus",
+    "InMemoryPaperMarketStateSource",
+    "PaperMarketStateSource",
+    "PaperRunnerConfig",
+    "PaperRunnerError",
+    "PaperTradingRunReport",
     "StrategyReplayReport",
     "build_strategy_replay_report",
     "deterministic_fill_id",
     "fill_summary",
     "pending_candidate_fill",
+    "run_paper_trading",
     "run_strategy_replay",
     "simulate_candidate_fill",
     "simulate_candidate_fills",
+    "write_paper_trading_report",
     "write_strategy_replay_report",
 ]
