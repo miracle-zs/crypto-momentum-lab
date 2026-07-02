@@ -43,4 +43,7 @@ def test_strategy_run_relationships_are_declared() -> None:
 
 def _foreign_key_targets(table: object, column_name: str) -> set[str]:
     column = table.c[column_name]
-    return {f"{key.column.table.name}.{key.column.name}" for key in column.foreign_keys}
+    return {
+        f"{key.column.table.name}.{key.column.name}"
+        for key in column.foreign_keys
+    }
