@@ -157,3 +157,156 @@ class MarketDataProcessStateRow(Base):
     state: Mapped[str] = mapped_column(String(16))
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     reason: Mapped[str | None] = mapped_column(Text)
+
+
+class StrategyRunRow(Base):
+    __tablename__ = "strategy_runs"
+
+    run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    strategy_name: Mapped[str] = mapped_column(String(64))
+    strategy_version: Mapped[str] = mapped_column(String(32))
+    config_hash: Mapped[str] = mapped_column(String(64))
+    run_mode: Mapped[str] = mapped_column(String(16))
+    code_commit: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    schema_version: Mapped[int] = mapped_column(Integer)
+    source_paths: Mapped[list[str]] = mapped_column(JSONB)
+    source_description: Mapped[str] = mapped_column(Text)
+    execution_config: Mapped[dict[str, object]] = mapped_column(JSONB)
+    input_state_count: Mapped[int] = mapped_column(Integer)
+    processed_symbol_count: Mapped[int] = mapped_column(Integer)
+    signal_count: Mapped[int] = mapped_column(Integer)
+    candidate_count: Mapped[int] = mapped_column(Integer)
+    fill_count: Mapped[int] = mapped_column(Integer)
+    pending_candidate_count: Mapped[int] = mapped_column(Integer)
+    rejection_summary: Mapped[dict[str, object]] = mapped_column(JSONB)
+    summary_counts: Mapped[dict[str, object]] = mapped_column(JSONB)
+    fill_summary: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class StrategySignalRow(Base):
+    __tablename__ = "strategy_signals"
+
+    signal_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("strategy_runs.run_id", ondelete="CASCADE"),
+    )
+    strategy_name: Mapped[str] = mapped_column(String(64))
+    strategy_version: Mapped[str] = mapped_column(String(32))
+    config_hash: Mapped[str] = mapped_column(String(64))
+    symbol: Mapped[str] = mapped_column(String(32))
+    side: Mapped[str] = mapped_column(String(16))
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    source_state_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reason: Mapped[str] = mapped_column(Text)
+    features: Mapped[dict[str, object]] = mapped_column(JSONB)
+    reference_prices: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+    __table_args__ = (
+        Index(
+            "ix_strategy_signals_run_time_symbol",
+            "run_id",
+            "detected_at",
+            "symbol",
+        ),
+        Index("ix_strategy_signals_run_symbol", "run_id", "symbol"),
+    )
+
+
+class OrderIntentCandidateRow(Base):
+    __tablename__ = "order_intent_candidates"
+
+    candidate_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    signal_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("strategy_signals.signal_id", ondelete="CASCADE"),
+    )
+    run_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("strategy_runs.run_id", ondelete="CASCADE"),
+    )
+    strategy_name: Mapped[str] = mapped_column(String(64))
+    strategy_version: Mapped[str] = mapped_column(String(32))
+    config_hash: Mapped[str] = mapped_column(String(64))
+    symbol: Mapped[str] = mapped_column(String(32))
+    side: Mapped[str] = mapped_column(String(16))
+    entry_type: Mapped[str] = mapped_column(String(16))
+    limit_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    desired_notional: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    reduce_only: Mapped[bool] = mapped_column(Boolean)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reason: Mapped[str] = mapped_column(Text)
+    features: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+    __table_args__ = (
+        Index(
+            "ix_order_intent_candidates_run_created_symbol",
+            "run_id",
+            "created_at",
+            "symbol",
+        ),
+        Index("ix_order_intent_candidates_run_symbol", "run_id", "symbol"),
+    )
+
+
+class PaperFillRow(Base):
+    __tablename__ = "paper_fills"
+
+    fill_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("order_intent_candidates.candidate_id", ondelete="CASCADE"),
+    )
+    signal_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("strategy_signals.signal_id", ondelete="CASCADE"),
+    )
+    run_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("strategy_runs.run_id", ondelete="CASCADE"),
+    )
+    symbol: Mapped[str] = mapped_column(String(32))
+    side: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16))
+    target_fill_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    filled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    requested_notional: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    filled_notional: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    reference_midpoint: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    spread: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    fill_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    fee: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    total_cost: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    cost_bps: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    reason: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index(
+            "ix_paper_fills_run_target_symbol",
+            "run_id",
+            "target_fill_at",
+            "symbol",
+        ),
+        Index("ix_paper_fills_run_status", "run_id", "status"),
+    )
+
+
+class StrategyCheckpointRow(Base):
+    __tablename__ = "strategy_checkpoints"
+
+    run_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("strategy_runs.run_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    last_processed_at_by_symbol: Mapped[dict[str, object]] = mapped_column(JSONB)
+    warmup_buckets_by_symbol: Mapped[dict[str, int]] = mapped_column(JSONB)
+    cooldown_buckets_remaining_by_symbol: Mapped[dict[str, int]] = (
+        mapped_column(JSONB)
+    )
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB)
+    saved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
