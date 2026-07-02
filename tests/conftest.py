@@ -29,7 +29,12 @@ from crypto_momentum_lab.persistence.postgres.models import (
     MarketDataProcessStateRow,
     MarketDataQualityEventRow,
     MonitoringMembershipRow,
+    OrderIntentCandidateRow,
+    PaperFillRow,
     RawArchiveManifestRow,
+    StrategyCheckpointRow,
+    StrategyRunRow,
+    StrategySignalRow,
     UniverseEntryRow,
     UniverseSnapshotRow,
 )
@@ -170,6 +175,11 @@ async def repository(
     async with factory() as session:
         async with session.begin():
             for model in (
+                PaperFillRow,
+                OrderIntentCandidateRow,
+                StrategySignalRow,
+                StrategyCheckpointRow,
+                StrategyRunRow,
                 MarketDataQualityEventRow,
                 MarketDataProcessStateRow,
                 RawArchiveManifestRow,
@@ -193,6 +203,11 @@ async def capture_repository(
     async with factory() as session:
         async with session.begin():
             for model in (
+                PaperFillRow,
+                OrderIntentCandidateRow,
+                StrategySignalRow,
+                StrategyCheckpointRow,
+                StrategyRunRow,
                 MarketDataQualityEventRow,
                 MarketDataProcessStateRow,
                 RawArchiveManifestRow,
