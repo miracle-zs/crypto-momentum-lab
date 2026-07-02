@@ -266,4 +266,99 @@ def test_paper_command_writes_report(tmp_path: Path, monkeypatch) -> None:
     assert "Paper run completed: states=6 signals=1 candidates=1 fills=1" in (
         result.stdout
     )
+    assert "persisted=false" in result.stdout
     assert output_path.as_posix() in result.stdout
+
+
+def test_paper_command_rejects_persist_without_database_url(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    states_root = tmp_path / "states"
+    states_root.mkdir()
+    output_path = tmp_path / "paper.json"
+
+    monkeypatch.setattr(main, "build_paper_state_source", lambda paths: object())
+    monkeypatch.setattr(
+        main,
+        "run_paper_trading",
+        lambda **kwargs: SimpleNamespace(
+            input_state_count=1,
+            signals=(),
+            candidates=(),
+            paper_fills=(),
+        ),
+    )
+    monkeypatch.setattr(main, "write_paper_trading_report", lambda report, path: None)
+    monkeypatch.delenv("CML_DATABASE_URL", raising=False)
+
+    result = runner.invoke(
+        main.app,
+        [
+            "paper",
+            "--strategy",
+            "compression_breakout",
+            "--states-root",
+            str(states_root),
+            "--output",
+            str(output_path),
+            "--persist",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "--persist requires --database-url or CML_DATABASE_URL" in result.output
+
+
+def test_paper_command_persists_with_database_url(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    states_root = tmp_path / "states"
+    states_root.mkdir()
+    output_path = tmp_path / "paper.json"
+    report = SimpleNamespace(
+        input_state_count=1,
+        signals=(),
+        candidates=(),
+        paper_fills=(),
+    )
+    persisted: list[tuple[object, str]] = []
+
+    async def fake_persist_paper_report(
+        paper_report: object,
+        database_url: str,
+    ) -> None:
+        persisted.append((paper_report, database_url))
+
+    monkeypatch.setattr(main, "build_paper_state_source", lambda paths: object())
+    monkeypatch.setattr(main, "run_paper_trading", lambda **kwargs: report)
+    monkeypatch.setattr(main, "write_paper_trading_report", lambda report, path: None)
+    monkeypatch.setattr(
+        main,
+        "persist_paper_report",
+        fake_persist_paper_report,
+        raising=False,
+    )
+
+    result = runner.invoke(
+        main.app,
+        [
+            "paper",
+            "--strategy",
+            "compression_breakout",
+            "--states-root",
+            str(states_root),
+            "--output",
+            str(output_path),
+            "--persist",
+            "--database-url",
+            "postgresql+asyncpg://cml:cml@localhost:54329/cml",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert persisted == [
+        (report, "postgresql+asyncpg://cml:cml@localhost:54329/cml")
+    ]
+    assert "persisted=true" in result.stdout

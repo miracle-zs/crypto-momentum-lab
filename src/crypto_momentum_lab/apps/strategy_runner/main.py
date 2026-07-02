@@ -1,3 +1,5 @@
+import asyncio
+import os
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -5,14 +7,20 @@ from typing import Annotated
 from uuid import uuid4
 
 import typer
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.persistence.parquet import read_market_states_15s_dataset
+from crypto_momentum_lab.persistence.postgres import (
+    PostgresStrategyRunRepository,
+    create_async_database_engine,
+)
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
 )
 from crypto_momentum_lab.strategy_runner import (
     InMemoryPaperMarketStateSource,
     PaperRunnerConfig,
+    PaperTradingRunReport,
     ReplayConfig,
     ReplayExecutionConfig,
     SimulatedFillStatus,
@@ -248,6 +256,20 @@ def paper_command(
         int | None,
         typer.Option("--max-states", min=1),
     ] = None,
+    persist: Annotated[
+        bool,
+        typer.Option(
+            "--persist",
+            help="Persist the paper report to PostgreSQL.",
+        ),
+    ] = False,
+    database_url: Annotated[
+        str | None,
+        typer.Option(
+            "--database-url",
+            help="Async PostgreSQL URL for --persist.",
+        ),
+    ] = None,
 ) -> None:
     created_at = _parse_generated_at(generated_at)
     source = build_paper_state_source((states_root,))
@@ -275,12 +297,22 @@ def paper_command(
     )
     report = run_paper_trading(source=source, config=config)
     write_paper_trading_report(report, output_path)
+    persisted = False
+    if persist:
+        resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
+        if not resolved_database_url:
+            raise typer.BadParameter(
+                "--persist requires --database-url or CML_DATABASE_URL"
+            )
+        asyncio.run(persist_paper_report(report, resolved_database_url))
+        persisted = True
     typer.echo(
         "Paper run completed: "
         f"states={report.input_state_count} "
         f"signals={len(report.signals)} "
         f"candidates={len(report.candidates)} "
-        f"fills={len(report.paper_fills)}"
+        f"fills={len(report.paper_fills)} "
+        f"persisted={str(persisted).lower()}"
     )
     typer.echo(output_path.as_posix())
 
@@ -298,6 +330,19 @@ def build_paper_state_source(
         states=states,
         description=",".join(path.as_posix() for path in state_paths),
     )
+
+
+async def persist_paper_report(
+    report: PaperTradingRunReport,
+    database_url: str,
+) -> None:
+    engine = create_async_database_engine(database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        repository = PostgresStrategyRunRepository(factory)
+        await repository.save_paper_report(report)
+    finally:
+        await engine.dispose()
 
 
 def _parse_generated_at(value: str | None) -> datetime:
