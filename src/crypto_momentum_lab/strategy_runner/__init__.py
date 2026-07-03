@@ -8,6 +8,11 @@ from crypto_momentum_lab.strategy_runner.fills import (
     simulate_candidate_fill,
     simulate_candidate_fills,
 )
+from crypto_momentum_lab.strategy_runner.live_source import (
+    AsyncPostgresRuntimeStateLoader,
+    PaperLiveSourceConfig,
+    PostgresPaperMarketStateSource,
+)
 from crypto_momentum_lab.strategy_runner.paper import (
     InMemoryPaperMarketStateSource,
     PaperMarketStateSource,
@@ -30,9 +35,11 @@ __all__ = [
     "ReplayConfig",
     "ReplayError",
     "ReplayExecutionConfig",
+    "AsyncPostgresRuntimeStateLoader",
     "SimulatedFill",
     "SimulatedFillStatus",
     "InMemoryPaperMarketStateSource",
+    "PaperLiveSourceConfig",
     "PaperMarketStateSource",
     "PaperRunnerConfig",
     "PaperRunnerError",
@@ -42,6 +49,7 @@ __all__ = [
     "deterministic_fill_id",
     "fill_summary",
     "pending_candidate_fill",
+    "PostgresPaperMarketStateSource",
     "run_paper_trading",
     "run_strategy_replay",
     "simulate_candidate_fill",
