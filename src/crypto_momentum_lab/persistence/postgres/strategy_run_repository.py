@@ -369,7 +369,7 @@ def _jsonable(value: object) -> JsonValue:
 
 def _normalize_for_compare(value: object) -> object:
     if isinstance(value, Decimal):
-        return str(value)
+        return str(value.normalize())
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, StrEnum):

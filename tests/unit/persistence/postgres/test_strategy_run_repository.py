@@ -82,6 +82,13 @@ def test_core_field_match_detects_conflict() -> None:
     )
 
 
+def test_core_field_match_normalizes_decimal_scale() -> None:
+    assert core_fields_match(
+        {"candidate_id": "cand_1", "desired_notional": Decimal("100.0")},
+        {"candidate_id": "cand_1", "desired_notional": Decimal("100")},
+    )
+
+
 def fixture_paper_report() -> PaperTradingRunReport:
     identity = StrategyRunIdentity(
         run_id="paper-test-run",
