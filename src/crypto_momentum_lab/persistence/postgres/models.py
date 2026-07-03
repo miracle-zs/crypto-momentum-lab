@@ -159,6 +159,71 @@ class MarketDataProcessStateRow(Base):
     reason: Mapped[str | None] = mapped_column(Text)
 
 
+class RuntimeMarketState15sRow(Base):
+    __tablename__ = "runtime_market_states_15s"
+
+    environment: Mapped[str] = mapped_column(String(32), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    bucket_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        primary_key=True,
+    )
+    schema_version: Mapped[int] = mapped_column(Integer)
+    exchange: Mapped[str] = mapped_column(String(32))
+    bucket_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    open_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    high_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    low_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    close_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    trade_count: Mapped[int] = mapped_column(Integer)
+    trade_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    aggressive_buy_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    aggressive_sell_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    last_bid_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    last_ask_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    spread: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    midpoint: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    liquidation_count: Mapped[int] = mapped_column(Integer)
+    liquidation_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    mark_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    closed_kline_count: Mapped[int] = mapped_column(Integer)
+    source_event_count: Mapped[int] = mapped_column(Integer)
+    first_received_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    last_received_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    source_watermark_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True)
+    )
+    closure_reason: Mapped[str] = mapped_column(String(32))
+    input_sequence_min: Mapped[int | None] = mapped_column(Integer)
+    input_sequence_max: Mapped[int | None] = mapped_column(Integer)
+
+    __table_args__ = (
+        Index(
+            "ix_runtime_market_states_15s_polling",
+            "environment",
+            "bucket_start",
+            "symbol",
+        ),
+        Index(
+            "ix_runtime_market_states_15s_symbol_time",
+            "environment",
+            "symbol",
+            "bucket_start",
+        ),
+        Index(
+            "ix_runtime_market_states_15s_created",
+            "environment",
+            "created_at",
+        ),
+    )
+
+
 class StrategyRunRow(Base):
     __tablename__ = "strategy_runs"
 

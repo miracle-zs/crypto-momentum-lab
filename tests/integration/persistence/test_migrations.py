@@ -18,6 +18,7 @@ def test_initial_migration_creates_universe_tables(database_url: str) -> None:
         "order_intent_candidates",
         "paper_fills",
         "raw_archive_manifests",
+        "runtime_market_states_15s",
         "strategy_checkpoints",
         "strategy_runs",
         "strategy_signals",
