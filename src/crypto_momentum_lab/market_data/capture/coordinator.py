@@ -37,6 +37,7 @@ class QualityRepository(Protocol):
 
 
 type AcknowledgementSink = Callable[[DurableArchiveAcknowledgement], object]
+type ArchivedEnvelopeSink = Callable[[RawEnvelope], object]
 
 _MAX_ARCHIVE_BATCH_SIZE = 10000
 
@@ -50,12 +51,14 @@ class CaptureCoordinator:
         quality: QualityTracker,
         repository: QualityRepository,
         acknowledgement_sink: AcknowledgementSink | None = None,
+        archived_envelope_sink: ArchivedEnvelopeSink | None = None,
     ) -> None:
         self._queue = queue
         self._archive = archive
         self._quality = quality
         self._repository = repository
         self._acknowledgement_sink = acknowledgement_sink
+        self._archived_envelope_sink = archived_envelope_sink
         self._stopping = False
 
     async def submit(self, envelope: RawEnvelope) -> None:
@@ -83,21 +86,25 @@ class CaptureCoordinator:
             await self._process_batch(tuple(batch))
 
     async def _process_batch(self, batch: tuple[RawEnvelope, ...]) -> None:
-        tasks = tuple(
-            asyncio.create_task(self._process_envelope(envelope))
-            for envelope in batch
-        )
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for envelope in batch:
-            self._queue.task_done(envelope)
+        try:
+            tasks = tuple(
+                asyncio.create_task(self._process_envelope(envelope))
+                for envelope in batch
+            )
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        failures = tuple(
-            result for result in results if isinstance(result, Exception)
-        )
-        if failures:
-            reason = f"archive failure: {failures[0]}"
-            await self._halt(reason)
-            raise failures[0]
+            failures = tuple(
+                result for result in results if isinstance(result, Exception)
+            )
+            if failures:
+                reason = f"archive failure: {failures[0]}"
+                await self._halt(reason)
+                raise failures[0]
+
+            await self._publish_archived_batch(batch)
+        finally:
+            for envelope in batch:
+                self._queue.task_done(envelope)
 
     async def _process_envelope(self, envelope: RawEnvelope) -> None:
         quality_events = self._quality.observe(envelope)
@@ -106,6 +113,17 @@ class CaptureCoordinator:
             await self._repository.save_quality_event(event)
         if self._acknowledgement_sink is not None:
             result = self._acknowledgement_sink(acknowledgement)
+            if inspect.isawaitable(result):
+                await result
+
+    async def _publish_archived_batch(
+        self,
+        batch: tuple[RawEnvelope, ...],
+    ) -> None:
+        if self._archived_envelope_sink is None:
+            return
+        for envelope in batch:
+            result = self._archived_envelope_sink(envelope)
             if inspect.isawaitable(result):
                 await result
 

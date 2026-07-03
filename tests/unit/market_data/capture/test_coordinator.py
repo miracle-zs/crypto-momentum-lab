@@ -26,6 +26,7 @@ class ControlledArchive:
         self._append_count_changed = asyncio.Event()
         self._append_released = asyncio.Event()
         self.started_count = 0
+        self.appended: list[RawEnvelope] = []
 
     async def append(
         self,
@@ -35,6 +36,7 @@ class ControlledArchive:
         self._append_started.set()
         self._append_count_changed.set()
         await self._append_released.wait()
+        self.appended.append(envelope)
         return DurableArchiveAcknowledgement(
             connection_session_id=envelope.connection_session_id,
             local_sequence=envelope.local_sequence,
@@ -137,6 +139,36 @@ async def test_coordinator_batches_archive_appends(
     archive.release_append()
     await coordinator.stop()
     await task
+
+
+async def test_archived_envelope_sink_runs_after_successful_batch_in_queue_order(
+    raw_envelope: RawEnvelope,
+) -> None:
+    archive = ControlledArchive()
+    published: list[RawEnvelope] = []
+    coordinator = CaptureCoordinator(
+        queue=BoundedEnvelopeQueue(max_events=10, max_bytes=100000),
+        archive=archive,
+        quality=FakeQualityTracker(),
+        repository=FakeCaptureRepository(),
+        acknowledgement_sink=None,
+        archived_envelope_sink=published.append,
+    )
+
+    task = asyncio.create_task(coordinator.run())
+    second = replace(raw_envelope, local_sequence=2)
+    await coordinator.submit(raw_envelope)
+    await coordinator.submit(second)
+    await asyncio.wait_for(archive.wait_until_append_count(2), timeout=1)
+
+    assert published == []
+
+    archive.release_append()
+    await coordinator.stop()
+    await task
+
+    assert tuple(item.local_sequence for item in archive.appended) == (1, 2)
+    assert tuple(item.local_sequence for item in published) == (1, 2)
 
 
 async def test_lifecycle_events_are_persisted() -> None:
