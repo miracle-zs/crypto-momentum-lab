@@ -105,3 +105,22 @@ write:
   --persist \
   --database-url "$CML_DATABASE_URL"
 ```
+
+### Paper Live Source
+
+After `market-data` is writing closed runtime states to PostgreSQL, run a
+bounded paper session directly from those rows:
+
+```bash
+.venv/bin/cml-strategy-runner paper-live-source \
+  --strategy compression_breakout \
+  --database-url "$CML_DATABASE_URL" \
+  --environment research \
+  --output reports/compression-breakout-paper-live-source.json \
+  --max-states 1000 \
+  --idle-timeout-seconds 60 \
+  --persist
+```
+
+This is still simulated paper execution. It does not connect to Binance private
+APIs, read account state, submit real orders, or enforce a live risk engine.

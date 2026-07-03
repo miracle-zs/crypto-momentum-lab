@@ -362,3 +362,92 @@ def test_paper_command_persists_with_database_url(
         (report, "postgresql+asyncpg://cml:cml@localhost:54329/cml")
     ]
     assert "persisted=true" in result.stdout
+
+
+def test_paper_live_source_requires_database_url(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("CML_DATABASE_URL", raising=False)
+
+    result = runner.invoke(
+        main.app,
+        [
+            "paper-live-source",
+            "--strategy",
+            "compression_breakout",
+            "--environment",
+            "research",
+            "--output",
+            str(tmp_path / "paper-live.json"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "--database-url or CML_DATABASE_URL is required" in result.output
+
+
+def test_paper_live_source_runs_bounded_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    output_path = tmp_path / "paper-live.json"
+    calls: list[tuple[str, str, int, int]] = []
+    report = SimpleNamespace(
+        input_state_count=2,
+        signals=(),
+        candidates=(),
+        paper_fills=(),
+    )
+
+    def fake_build_source(
+        *,
+        database_url: str,
+        environment: str,
+        start_at,
+        poll_interval_seconds: float,
+        idle_timeout_seconds: float,
+        max_states: int,
+        batch_size: int,
+    ) -> object:
+        calls.append((database_url, environment, max_states, batch_size))
+        return object()
+
+    monkeypatch.setattr(main, "build_postgres_paper_source", fake_build_source)
+    monkeypatch.setattr(main, "run_paper_trading", lambda **kwargs: report)
+    monkeypatch.setattr(main, "write_paper_trading_report", lambda report, path: None)
+
+    result = runner.invoke(
+        main.app,
+        [
+            "paper-live-source",
+            "--strategy",
+            "compression_breakout",
+            "--database-url",
+            "postgresql+asyncpg://cml:cml@localhost:54329/cml",
+            "--environment",
+            "research",
+            "--output",
+            str(output_path),
+            "--max-states",
+            "2",
+            "--batch-size",
+            "5",
+            "--idle-timeout-seconds",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            "postgresql+asyncpg://cml:cml@localhost:54329/cml",
+            "research",
+            2,
+            5,
+        )
+    ]
+    assert (
+        "Paper live-source run completed: states=2 signals=0 candidates=0 "
+        "fills=0 persisted=false"
+    ) in result.stdout
