@@ -531,3 +531,24 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
     assert calls[0].checkpoint_every_seconds == 30
     assert calls[0].max_market_state_age_seconds == 90
     assert "Paper live daemon completed: states=3 halt=none" in result.stdout
+
+
+def test_runtime_strategy_builder_supports_orderflow() -> None:
+    strategy = main.build_runtime_strategy_for_cli(
+        strategy_name="orderflow_impulse",
+        run_id="run-orderflow",
+        generated_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        source_description="memory",
+        compression_breakout=CompressionBreakoutConfig(
+            compression_window_buckets=3,
+            max_range_width_pct=Decimal("0.01"),
+            min_breakout_pct=Decimal("0.001"),
+            acceptance_buckets=1,
+            cooldown_buckets=2,
+            forward_horizon_buckets=(1,),
+        ),
+        candidate_notional=Decimal("100"),
+        candidate_ttl_buckets=2,
+    )
+
+    assert strategy.metadata().name == "orderflow_impulse"

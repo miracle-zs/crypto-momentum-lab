@@ -23,8 +23,6 @@ from crypto_momentum_lab.persistence.postgres import (
 )
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
-    CompressionBreakoutRuntimeConfig,
-    CompressionBreakoutRuntimeStrategy,
 )
 from crypto_momentum_lab.strategy_runner import (
     AsyncPostgresRuntimeStateLoader,
@@ -42,6 +40,11 @@ from crypto_momentum_lab.strategy_runner import (
     run_paper_trading,
     write_paper_trading_report,
     write_strategy_replay_report,
+)
+from crypto_momentum_lab.strategy_runner.registry import (
+    RuntimeStrategyProtocol,
+    build_runtime_config,
+    build_runtime_strategy,
 )
 
 app = typer.Typer(no_args_is_help=True)
@@ -716,13 +719,15 @@ def build_runtime_strategy_for_cli(
     compression_breakout: CompressionBreakoutConfig,
     candidate_notional: Decimal | None,
     candidate_ttl_buckets: int,
-) -> CompressionBreakoutRuntimeStrategy:
-    if strategy_name != "compression_breakout":
-        raise typer.BadParameter(f"unsupported strategy: {strategy_name}")
-    runtime_config = CompressionBreakoutRuntimeConfig(
-        event_config=compression_breakout,
-        candidate_notional=candidate_notional,
-        candidate_ttl_buckets=candidate_ttl_buckets,
+) -> RuntimeStrategyProtocol:
+    config_payload: dict[str, object] = {
+        "candidate_notional": candidate_notional,
+        "candidate_ttl_buckets": candidate_ttl_buckets,
+        "compression_breakout": compression_breakout,
+    }
+    runtime_config = build_runtime_config(
+        strategy_name,
+        config=config_payload,
     )
     identity = StrategyRunIdentity(
         run_id=run_id,
@@ -734,8 +739,9 @@ def build_runtime_strategy_for_cli(
         created_at=generated_at,
         source_paths=(source_description,),
     )
-    return CompressionBreakoutRuntimeStrategy(
-        config=runtime_config,
+    return build_runtime_strategy(
+        strategy_name,
+        config=config_payload,
         identity=identity,
     )
 

@@ -99,6 +99,26 @@ def test_run_paper_trading_rejects_backward_symbol_state() -> None:
         )
 
 
+def test_run_paper_trading_accepts_orderflow_impulse_strategy() -> None:
+    report = run_paper_trading(
+        source=InMemoryPaperMarketStateSource(_orderflow_states()),
+        config=_paper_config(strategy_name="orderflow_impulse"),
+    )
+
+    assert report.run.strategy_name == "orderflow_impulse"
+    assert report.input_state_count == 7
+
+
+def test_run_paper_trading_accepts_liquidation_cascade_strategy() -> None:
+    report = run_paper_trading(
+        source=InMemoryPaperMarketStateSource(_liquidation_states()),
+        config=_paper_config(strategy_name="liquidation_cascade"),
+    )
+
+    assert report.run.strategy_name == "liquidation_cascade"
+    assert report.input_state_count == 6
+
+
 def test_run_paper_trading_rejects_empty_source() -> None:
     with pytest.raises(PaperRunnerError, match="no market states"):
         run_paper_trading(
@@ -107,9 +127,13 @@ def test_run_paper_trading_rejects_empty_source() -> None:
         )
 
 
-def _paper_config(max_states: int | None = None) -> PaperRunnerConfig:
+def _paper_config(
+    max_states: int | None = None,
+    *,
+    strategy_name: str = "compression_breakout",
+) -> PaperRunnerConfig:
     return PaperRunnerConfig(
-        strategy_name="compression_breakout",
+        strategy_name=strategy_name,
         run_id="paper-1",
         code_commit="unknown",
         generated_at=datetime(2026, 6, 22, 0, 0, tzinfo=UTC),
@@ -138,17 +162,84 @@ def _breakout_states() -> tuple[MarketState15s, ...]:
     )
 
 
+def _orderflow_states() -> tuple[MarketState15s, ...]:
+    return (
+        _state(0, close=Decimal("100"), trade_notional=Decimal("100")),
+        _state(1, close=Decimal("100"), trade_notional=Decimal("100")),
+        _state(2, close=Decimal("100"), trade_notional=Decimal("100")),
+        _state(3, close=Decimal("100"), trade_notional=Decimal("100")),
+        _state(
+            4,
+            close=Decimal("100"),
+            trade_notional=Decimal("300"),
+            aggressive_buy_notional=Decimal("250"),
+        ),
+        _state(
+            5,
+            close=Decimal("101"),
+            trade_notional=Decimal("300"),
+            aggressive_buy_notional=Decimal("250"),
+        ),
+        _state(
+            6,
+            close=Decimal("102"),
+            trade_notional=Decimal("300"),
+            aggressive_buy_notional=Decimal("250"),
+        ),
+    )
+
+
+def _liquidation_states() -> tuple[MarketState15s, ...]:
+    return (
+        _state(0, close=Decimal("100")),
+        _state(1, close=Decimal("100")),
+        _state(2, close=Decimal("100")),
+        _state(3, close=Decimal("100")),
+        _state(
+            4,
+            close=Decimal("100"),
+            aggressive_buy_notional=Decimal("250"),
+            aggressive_sell_notional=Decimal("50"),
+            liquidation_count=1,
+            liquidation_notional=Decimal("300"),
+        ),
+        _state(
+            5,
+            close=Decimal("102"),
+            aggressive_buy_notional=Decimal("250"),
+            aggressive_sell_notional=Decimal("50"),
+            liquidation_count=1,
+            liquidation_notional=Decimal("300"),
+        ),
+    )
+
+
 def _state(
     bucket_index: int,
     *,
     close: Decimal,
     high: Decimal | None = None,
     low: Decimal | None = None,
+    trade_notional: Decimal = Decimal("1000"),
+    aggressive_buy_notional: Decimal | None = None,
+    aggressive_sell_notional: Decimal | None = None,
+    liquidation_count: int = 0,
+    liquidation_notional: Decimal = Decimal("0"),
 ) -> MarketState15s:
     bucket_start = datetime(2026, 6, 22, 0, 0, tzinfo=UTC) + timedelta(
         seconds=15 * bucket_index
     )
     bucket_end = bucket_start + timedelta(seconds=15)
+    buy_notional = (
+        trade_notional * Decimal("0.6")
+        if aggressive_buy_notional is None
+        else aggressive_buy_notional
+    )
+    sell_notional = (
+        trade_notional - buy_notional
+        if aggressive_sell_notional is None
+        else aggressive_sell_notional
+    )
     return MarketState15s(
         schema_version=1,
         exchange="binance-usdm",
@@ -161,15 +252,15 @@ def _state(
         low_price=low if low is not None else close,
         close_price=close,
         trade_count=10,
-        trade_notional=Decimal("1000"),
-        aggressive_buy_notional=Decimal("600"),
-        aggressive_sell_notional=Decimal("400"),
+        trade_notional=trade_notional,
+        aggressive_buy_notional=buy_notional,
+        aggressive_sell_notional=sell_notional,
         last_bid_price=close - Decimal("0.01"),
         last_ask_price=close + Decimal("0.01"),
         spread=Decimal("0.02"),
         midpoint=close,
-        liquidation_count=0,
-        liquidation_notional=Decimal("0"),
+        liquidation_count=liquidation_count,
+        liquidation_notional=liquidation_notional,
         mark_price=close,
         closed_kline_count=0,
         source_event_count=10,

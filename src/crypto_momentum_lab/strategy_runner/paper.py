@@ -20,9 +20,11 @@ from crypto_momentum_lab.domain.strategy import (
 )
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
-    CompressionBreakoutRuntimeConfig,
-    CompressionBreakoutRuntimeStrategy,
 )
+from crypto_momentum_lab.strategies.liquidation_cascade import (
+    LiquidationCascadeConfig,
+)
+from crypto_momentum_lab.strategies.order_flow_impulse import OrderFlowImpulseConfig
 from crypto_momentum_lab.strategy_runner.fills import (
     FillSummaryValue,
     ReplayExecutionConfig,
@@ -32,6 +34,11 @@ from crypto_momentum_lab.strategy_runner.fills import (
     fill_summary,
     pending_candidate_fill,
     simulate_candidate_fill,
+)
+from crypto_momentum_lab.strategy_runner.registry import (
+    StrategyRegistryError,
+    build_runtime_config,
+    build_runtime_strategy,
 )
 
 
@@ -66,6 +73,8 @@ class PaperRunnerConfig:
     compression_breakout: CompressionBreakoutConfig
     candidate_notional: Decimal | None
     candidate_ttl_buckets: int
+    order_flow_impulse: OrderFlowImpulseConfig | None = None
+    liquidation_cascade: LiquidationCascadeConfig | None = None
     execution: ReplayExecutionConfig = field(default_factory=ReplayExecutionConfig)
     max_states: int | None = None
 
@@ -110,14 +119,13 @@ def run_paper_trading(
     source: PaperMarketStateSource,
     config: PaperRunnerConfig,
 ) -> PaperTradingRunReport:
-    if config.strategy_name != "compression_breakout":
-        raise PaperRunnerError(f"unsupported strategy: {config.strategy_name}")
-
-    runtime_config = CompressionBreakoutRuntimeConfig(
-        event_config=config.compression_breakout,
-        candidate_notional=config.candidate_notional,
-        candidate_ttl_buckets=config.candidate_ttl_buckets,
-    )
+    try:
+        runtime_config = build_runtime_config(
+            config.strategy_name,
+            config=_runtime_config_payload(config),
+        )
+    except StrategyRegistryError as error:
+        raise PaperRunnerError(str(error)) from error
     identity = StrategyRunIdentity(
         run_id=config.run_id,
         strategy_name=config.strategy_name,
@@ -128,8 +136,9 @@ def run_paper_trading(
         created_at=config.generated_at,
         source_paths=(source.description,),
     )
-    strategy = CompressionBreakoutRuntimeStrategy(
-        config=runtime_config,
+    strategy = build_runtime_strategy(
+        config.strategy_name,
+        config=_runtime_config_payload(config),
         identity=identity,
     )
 
@@ -285,6 +294,19 @@ def _validate_state(
     previous = last_processed_at_by_symbol.get(state.symbol)
     if previous is not None and state.bucket_start < previous:
         raise PaperRunnerError("state moved backward for symbol")
+
+
+def _runtime_config_payload(config: PaperRunnerConfig) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "candidate_notional": config.candidate_notional,
+        "candidate_ttl_buckets": config.candidate_ttl_buckets,
+        "compression_breakout": config.compression_breakout,
+    }
+    if config.order_flow_impulse is not None:
+        payload["order_flow_impulse"] = config.order_flow_impulse
+    if config.liquidation_cascade is not None:
+        payload["liquidation_cascade"] = config.liquidation_cascade
+    return payload
 
 
 def _validate_unique_ids(
