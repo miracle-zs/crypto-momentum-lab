@@ -5,6 +5,7 @@ from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     RejectionReason,
     RunMode,
+    StrategyCheckpoint,
     StrategyRunIdentity,
     StrategySide,
     deterministic_config_hash,
@@ -113,6 +114,26 @@ def test_runtime_checkpoint_contains_symbol_state() -> None:
     ).bucket_start
     assert checkpoint.warmup_buckets_by_symbol["BTCUSDT"] == 3
     assert checkpoint.payload["buffer_sizes"] == {"BTCUSDT": 3}
+
+
+def test_runtime_restore_checkpoint_alias_restores_cooldown() -> None:
+    strategy = _strategy()
+    checkpoint = StrategyCheckpoint(
+        last_processed_at_by_symbol={
+            "BTCUSDT": datetime(2026, 6, 22, 0, 1, tzinfo=UTC)
+        },
+        warmup_buckets_by_symbol={"BTCUSDT": 3},
+        cooldown_buckets_remaining_by_symbol={"BTCUSDT": 2},
+        payload={},
+    )
+
+    strategy.restore_checkpoint(checkpoint)
+    restored = strategy.checkpoint()
+
+    assert restored.last_processed_at_by_symbol == (
+        checkpoint.last_processed_at_by_symbol
+    )
+    assert restored.cooldown_buckets_remaining_by_symbol == {"BTCUSDT": 2}
 
 
 def test_runtime_does_not_need_future_rows_for_detection() -> None:

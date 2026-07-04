@@ -375,3 +375,41 @@ class StrategyCheckpointRow(Base):
     )
     payload: Mapped[dict[str, object]] = mapped_column(JSONB)
     saved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class StrategyRuntimeEventRow(Base):
+    __tablename__ = "strategy_runtime_events"
+
+    event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(128))
+    event_type: Mapped[str] = mapped_column(String(64))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    symbol: Mapped[str | None] = mapped_column(String(32))
+    bucket_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    details: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+    __table_args__ = (
+        Index(
+            "ix_strategy_runtime_events_run_time",
+            "run_id",
+            "occurred_at",
+        ),
+        Index(
+            "ix_strategy_runtime_events_type_time",
+            "event_type",
+            "occurred_at",
+        ),
+    )
+
+
+class StrategyRuntimeCheckpointRow(Base):
+    __tablename__ = "strategy_runtime_checkpoints"
+
+    run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    last_processed_at_by_symbol: Mapped[dict[str, object]] = mapped_column(JSONB)
+    warmup_buckets_by_symbol: Mapped[dict[str, int]] = mapped_column(JSONB)
+    cooldown_buckets_remaining_by_symbol: Mapped[dict[str, int]] = (
+        mapped_column(JSONB)
+    )
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB)
+    saved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

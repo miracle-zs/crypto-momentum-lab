@@ -91,6 +91,9 @@ class CompressionBreakoutRuntimeStrategy:
         )
         self._last_processed = dict(checkpoint.last_processed_at_by_symbol)
 
+    def restore_checkpoint(self, checkpoint: StrategyCheckpoint) -> None:
+        self.restore(checkpoint)
+
     def on_market_state(self, state: MarketState15s) -> StrategyDecision:
         self._last_processed[state.symbol] = state.bucket_start
         if _state_price(state) is None:

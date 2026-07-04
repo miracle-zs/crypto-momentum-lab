@@ -451,3 +451,83 @@ def test_paper_live_source_runs_bounded_source(
         "Paper live-source run completed: states=2 signals=0 candidates=0 "
         "fills=0 persisted=false"
     ) in result.stdout
+
+
+def test_paper_live_daemon_requires_database_url(monkeypatch) -> None:
+    monkeypatch.delenv("CML_DATABASE_URL", raising=False)
+
+    result = runner.invoke(
+        main.app,
+        [
+            "paper-live-daemon",
+            "--strategy",
+            "compression_breakout",
+            "--environment",
+            "research",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "--database-url or CML_DATABASE_URL is required" in result.output
+
+
+def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
+    calls: list[object] = []
+
+    def fake_run_daemon(**kwargs) -> object:
+        calls.append(kwargs["config"])
+        return SimpleNamespace(
+            processed_state_count=3,
+            halt_reason=None,
+            final_cursor=datetime(2026, 7, 4, 0, 0, 30, tzinfo=UTC),
+            final_checkpoint_saved_at=datetime(2026, 7, 4, 0, 0, 45, tzinfo=UTC),
+        )
+
+    monkeypatch.setattr(
+        main,
+        "build_postgres_paper_source",
+        lambda **kwargs: SimpleNamespace(description="fake-source"),
+    )
+    monkeypatch.setattr(
+        main,
+        "build_runtime_strategy_for_cli",
+        lambda **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        main,
+        "build_paper_daemon_repository",
+        lambda database_url: object(),
+    )
+    monkeypatch.setattr(main, "run_paper_live_daemon", fake_run_daemon)
+
+    result = runner.invoke(
+        main.app,
+        [
+            "paper-live-daemon",
+            "--strategy",
+            "compression_breakout",
+            "--database-url",
+            "postgresql+asyncpg://cml:cml@localhost:54329/cml",
+            "--environment",
+            "research",
+            "--run-id",
+            "daemon-run",
+            "--checkpoint-every-states",
+            "7",
+            "--checkpoint-every-seconds",
+            "30",
+            "--max-market-state-age-seconds",
+            "90",
+            "--max-states",
+            "3",
+            "--idle-timeout-seconds",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls[0].run_id == "daemon-run"
+    assert calls[0].checkpoint_every_states == 7
+    assert calls[0].checkpoint_every_seconds == 30
+    assert calls[0].max_market_state_age_seconds == 90
+    assert "Paper live daemon completed: states=3 halt=none" in result.stdout
