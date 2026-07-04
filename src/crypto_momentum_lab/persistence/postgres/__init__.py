@@ -1,3 +1,6 @@
+from crypto_momentum_lab.persistence.postgres.account_repository import (
+    PostgresAccountRepository,
+)
 from crypto_momentum_lab.persistence.postgres.base import Base
 from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     PostgresPaperDaemonRepository,
@@ -20,6 +23,7 @@ from crypto_momentum_lab.persistence.postgres.strategy_run_repository import (
 
 __all__ = [
     "Base",
+    "PostgresAccountRepository",
     "PostgresRuntimeMarketStateRepository",
     "PostgresPaperDaemonRepository",
     "PostgresStrategyRunRepository",

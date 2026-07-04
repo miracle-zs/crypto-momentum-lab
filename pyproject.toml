@@ -34,6 +34,7 @@ dev = [
 
 [project.scripts]
 cml-market-data = "crypto_momentum_lab.apps.market_data.main:app"
+cml-execution-account = "crypto_momentum_lab.apps.execution_account.main:app"
 cml-research = "crypto_momentum_lab.apps.research.main:app"
 cml-strategy-runner = "crypto_momentum_lab.apps.strategy_runner.main:app"
 

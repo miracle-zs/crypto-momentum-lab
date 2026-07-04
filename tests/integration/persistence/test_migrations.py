@@ -11,8 +11,15 @@ def test_initial_migration_creates_universe_tables(database_url: str) -> None:
         engine.dispose()
 
     assert {
+        "account_balance_snapshots",
+        "account_config_snapshots",
+        "account_fill_events",
+        "account_open_orders",
+        "account_position_snapshots",
+        "account_reconciliation_runs",
         "contract_metadata",
         "daily_open_prices",
+        "execution_account_process_states",
         "market_data_process_states",
         "market_data_quality_events",
         "order_intent_candidates",

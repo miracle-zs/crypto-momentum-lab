@@ -413,3 +413,133 @@ class StrategyRuntimeCheckpointRow(Base):
     )
     payload: Mapped[dict[str, object]] = mapped_column(JSONB)
     saved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AccountBalanceSnapshotRow(Base):
+    __tablename__ = "account_balance_snapshots"
+
+    snapshot_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    environment: Mapped[str] = mapped_column(String(32))
+    account_label: Mapped[str] = mapped_column(String(64))
+    asset: Mapped[str] = mapped_column(String(32))
+    wallet_balance: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    available_balance: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    unrealized_pnl: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    raw_payload: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+    __table_args__ = (
+        Index(
+            "ix_account_balance_latest",
+            "environment",
+            "account_label",
+            "asset",
+            "observed_at",
+        ),
+    )
+
+
+class AccountPositionSnapshotRow(Base):
+    __tablename__ = "account_position_snapshots"
+
+    snapshot_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    environment: Mapped[str] = mapped_column(String(32))
+    account_label: Mapped[str] = mapped_column(String(64))
+    symbol: Mapped[str] = mapped_column(String(32))
+    position_side: Mapped[str] = mapped_column(String(16))
+    position_amt: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    entry_price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    mark_price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    unrealized_pnl: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    leverage: Mapped[int | None] = mapped_column(Integer)
+    margin_type: Mapped[str | None] = mapped_column(String(32))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    raw_payload: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+    __table_args__ = (
+        Index(
+            "ix_account_position_latest",
+            "environment",
+            "account_label",
+            "symbol",
+            "observed_at",
+        ),
+    )
+
+
+class AccountOpenOrderRow(Base):
+    __tablename__ = "account_open_orders"
+
+    environment: Mapped[str] = mapped_column(String(32), primary_key=True)
+    account_label: Mapped[str] = mapped_column(String(64), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    order_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    client_order_id: Mapped[str] = mapped_column(String(128))
+    side: Mapped[str] = mapped_column(String(16))
+    order_type: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32))
+    price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    original_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    executed_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    reduce_only: Mapped[bool] = mapped_column(Boolean)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    raw_payload: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class AccountFillEventRow(Base):
+    __tablename__ = "account_fill_events"
+
+    environment: Mapped[str] = mapped_column(String(32), primary_key=True)
+    account_label: Mapped[str] = mapped_column(String(64), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    trade_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    order_id: Mapped[str] = mapped_column(String(64))
+    side: Mapped[str] = mapped_column(String(16))
+    price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    realized_pnl: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    fee: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    fee_asset: Mapped[str] = mapped_column(String(32))
+    trade_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    raw_payload: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class AccountConfigSnapshotRow(Base):
+    __tablename__ = "account_config_snapshots"
+
+    snapshot_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    environment: Mapped[str] = mapped_column(String(32))
+    account_label: Mapped[str] = mapped_column(String(64))
+    multi_assets_mode: Mapped[bool] = mapped_column(Boolean)
+    can_trade: Mapped[bool] = mapped_column(Boolean)
+    fee_tier: Mapped[int | None] = mapped_column(Integer)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    raw_payload: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class AccountReconciliationRunRow(Base):
+    __tablename__ = "account_reconciliation_runs"
+
+    reconciliation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    environment: Mapped[str] = mapped_column(String(32))
+    account_label: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    balance_count: Mapped[int] = mapped_column(Integer)
+    position_count: Mapped[int] = mapped_column(Integer)
+    open_order_count: Mapped[int] = mapped_column(Integer)
+    fill_count: Mapped[int] = mapped_column(Integer)
+    mismatch_count: Mapped[int] = mapped_column(Integer)
+    details: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class ExecutionAccountProcessStateRow(Base):
+    __tablename__ = "execution_account_process_states"
+
+    state_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    environment: Mapped[str] = mapped_column(String(32))
+    account_label: Mapped[str] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(String(32))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reason: Mapped[str | None] = mapped_column(Text)
