@@ -109,6 +109,7 @@ def quantize_order_plan(
         price=price,
         reduce_only=intent.reduce_only,
         created_at=intent.created_at,
+        quantized=True,
     )
 
 

@@ -26,6 +26,9 @@ from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,
     create_sync_engine,
 )
+from crypto_momentum_lab.persistence.postgres.shadow_repository import (
+    PostgresShadowRepository,
+)
 from crypto_momentum_lab.persistence.postgres.strategy_run_repository import (
     PostgresStrategyRunRepository,
 )
@@ -37,6 +40,7 @@ __all__ = [
     "PostgresRuntimeMarketStateRepository",
     "PostgresPaperDaemonRepository",
     "PostgresRiskRepository",
+    "PostgresShadowRepository",
     "PostgresStrategyRunRepository",
     "PostgresUniverseRepository",
     "RuntimeStateCursor",

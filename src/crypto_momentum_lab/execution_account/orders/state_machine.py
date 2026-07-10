@@ -11,6 +11,7 @@ from crypto_momentum_lab.domain.execution import (
     ExchangeOrderSnapshot,
     ExchangeOrderState,
     OrderExecutionPlan,
+    ShadowSuppressionEvent,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
 
@@ -54,6 +55,12 @@ class OrderStateRepository(Protocol):
     async def save_fill(self, fill: ExchangeOrderFill) -> bool:
         pass
 
+    async def save_shadow_suppression(
+        self,
+        event: ShadowSuppressionEvent,
+    ) -> None:
+        pass
+
 
 @dataclass(frozen=True, slots=True)
 class OrderExecutionResult:
@@ -83,6 +90,8 @@ class OrderExecutionStateMachine:
         self,
         plan: OrderExecutionPlan,
     ) -> OrderExecutionResult:
+        if not plan.quantized:
+            raise ValueError("order plan must be quantized before execution")
         if (
             self._submit_policy is SubmitPolicy.LIVE_SUBMIT
             and not self._live_submit_enabled
@@ -92,6 +101,22 @@ class OrderExecutionStateMachine:
             )
         await self._repository.save_planned_order(plan)
         if self._submit_policy is SubmitPolicy.SHADOW_SUPPRESS:
+            await self._repository.save_shadow_suppression(
+                ShadowSuppressionEvent(
+                    order_plan_id=plan.client_order_id,
+                    client_order_id=plan.client_order_id,
+                    suppressed_at=self._now(),
+                    reason="shadow_submit_policy",
+                    order_payload={
+                        "symbol": plan.symbol,
+                        "side": plan.side,
+                        "type": plan.order_type,
+                        "quantity": str(plan.quantity),
+                        "price": None if plan.price is None else str(plan.price),
+                        "reduce_only": plan.reduce_only,
+                    },
+                )
+            )
             return OrderExecutionResult(
                 client_order_id=plan.client_order_id,
                 state=ExchangeOrderState.PLANNED,

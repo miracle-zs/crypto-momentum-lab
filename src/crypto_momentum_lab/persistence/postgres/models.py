@@ -771,3 +771,102 @@ class ExecutionReconciliationEventRow(Base):
     outcome: Mapped[str] = mapped_column(String(64))
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     details: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class ShadowSessionRow(Base):
+    __tablename__ = "shadow_sessions"
+
+    run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    account_label: Mapped[str] = mapped_column(String(64))
+    strategy_name: Mapped[str] = mapped_column(String(64))
+    strategy_config_hash: Mapped[str] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(String(32))
+    account_readiness: Mapped[str] = mapped_column(String(32))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    details: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class ShadowOrderPlanRow(Base):
+    __tablename__ = "shadow_order_plans"
+
+    order_plan_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("shadow_sessions.run_id", ondelete="CASCADE"),
+    )
+    order_intent_id: Mapped[str] = mapped_column(String(128))
+    symbol: Mapped[str] = mapped_column(String(32))
+    decision_state: Mapped[str] = mapped_column(String(32))
+    account_readiness: Mapped[str] = mapped_column(String(32))
+    market_freshness: Mapped[str] = mapped_column(String(32))
+    risk_result: Mapped[str] = mapped_column(String(32))
+    state_closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    order_payload: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+    __table_args__ = (
+        Index(
+            "uq_shadow_order_plans_run_intent",
+            "run_id",
+            "order_intent_id",
+            unique=True,
+        ),
+        Index("ix_shadow_order_plans_run_created", "run_id", "created_at"),
+        Index(
+            "ix_shadow_order_plans_symbol_decision",
+            "symbol",
+            "decision_state",
+        ),
+    )
+
+
+class ShadowSuppressionEventRow(Base):
+    __tablename__ = "shadow_suppression_events"
+
+    order_plan_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("shadow_order_plans.order_plan_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    client_order_id: Mapped[str] = mapped_column(String(36))
+    suppressed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reason: Mapped[str] = mapped_column(String(64))
+    order_payload: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class ShadowDecisionMetricRow(Base):
+    __tablename__ = "shadow_decision_metrics"
+
+    metric_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("shadow_sessions.run_id", ondelete="CASCADE"),
+    )
+    symbol: Mapped[str | None] = mapped_column(String(32))
+    category: Mapped[str] = mapped_column(String(64))
+    reason: Mapped[str | None] = mapped_column(String(128))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    details: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+    __table_args__ = (
+        Index(
+            "ix_shadow_decision_metrics_run_category",
+            "run_id",
+            "category",
+        ),
+    )
+
+
+class ShadowDrillResultRow(Base):
+    __tablename__ = "shadow_drill_results"
+
+    drill_result_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("shadow_sessions.run_id", ondelete="CASCADE"),
+    )
+    drill_name: Mapped[str] = mapped_column(String(64))
+    outcome: Mapped[str] = mapped_column(String(32))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    details: Mapped[dict[str, object]] = mapped_column(JSONB)

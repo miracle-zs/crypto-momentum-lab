@@ -179,4 +179,5 @@ def _plan() -> OrderExecutionPlan:
         price=None,
         reduce_only=False,
         created_at=NOW,
+        quantized=True,
     )

@@ -168,4 +168,5 @@ def _order_plan() -> OrderExecutionPlan:
         price=None,
         reduce_only=False,
         created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        quantized=True,
     )

@@ -13,6 +13,7 @@ from crypto_momentum_lab.domain.execution import (
     ExchangeOrderFill,
     ExchangeOrderState,
     OrderExecutionPlan,
+    ShadowSuppressionEvent,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
@@ -25,6 +26,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ExecutionReconciliationEventRow,
     OrderIntentClaimRow,
     OrderIntentExecutionRow,
+    ShadowSuppressionEventRow,
 )
 
 
@@ -191,6 +193,21 @@ class PostgresOrderRepository:
                 )
         return inserted is not None
 
+    async def save_shadow_suppression(
+        self,
+        event: ShadowSuppressionEvent,
+    ) -> None:
+        await self._insert_immutable(
+            ShadowSuppressionEventRow,
+            {
+                "order_plan_id": event.order_plan_id,
+                "client_order_id": event.client_order_id,
+                "suppressed_at": event.suppressed_at,
+                "reason": event.reason,
+                "order_payload": _jsonable(event.order_payload),
+            },
+        )
+
     async def load_unresolved_orders(self) -> tuple[PersistedExchangeOrder, ...]:
         terminal_states = tuple(
             state.value for state in ExchangeOrderState if state.terminal
@@ -287,6 +304,7 @@ def _persisted_order(row: ExchangeOrderRow) -> PersistedExchangeOrder:
             price=row.price,
             reduce_only=row.reduce_only,
             created_at=row.created_at,
+            quantized=True,
         ),
         state=ExchangeOrderState(row.state),
         exchange_order_id=row.exchange_order_id,

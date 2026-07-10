@@ -42,6 +42,7 @@ class OrderExecutionPlan:
     price: Decimal | None
     reduce_only: bool
     created_at: datetime
+    quantized: bool = False
 
     def __post_init__(self) -> None:
         for value, field_name in (

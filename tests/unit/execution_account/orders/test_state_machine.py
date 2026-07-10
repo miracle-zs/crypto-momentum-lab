@@ -7,6 +7,7 @@ from crypto_momentum_lab.domain.execution import (
     ExchangeOrderSnapshot,
     ExchangeOrderState,
     OrderExecutionPlan,
+    ShadowSuppressionEvent,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeOrderRejectedError,
@@ -111,6 +112,7 @@ class FakeOrderRepository:
         self.plans: list[OrderExecutionPlan] = []
         self.events: list[ExchangeOrderEvent] = []
         self.fills: list[ExchangeOrderFill] = []
+        self.suppressions: list[ShadowSuppressionEvent] = []
 
     async def save_planned_order(self, plan: OrderExecutionPlan) -> None:
         self.plans.append(plan)
@@ -122,6 +124,12 @@ class FakeOrderRepository:
     async def save_fill(self, fill: ExchangeOrderFill) -> bool:
         self.fills.append(fill)
         return True
+
+    async def save_shadow_suppression(
+        self,
+        event: ShadowSuppressionEvent,
+    ) -> None:
+        self.suppressions.append(event)
 
 
 def _machine(
@@ -149,6 +157,7 @@ def _plan() -> OrderExecutionPlan:
         price=None,
         reduce_only=False,
         created_at=NOW,
+        quantized=True,
     )
 
 
