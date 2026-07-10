@@ -106,6 +106,28 @@ class ExchangeOrderFill:
         _require_aware(self.filled_at, "filled_at")
 
 
+@dataclass(frozen=True, slots=True)
+class ExchangeOrderSnapshot:
+    client_order_id: str
+    exchange_order_id: str
+    state: ExchangeOrderState
+    observed_at: datetime
+    executed_quantity: Decimal
+    average_price: Decimal
+    fills: tuple[ExchangeOrderFill, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.client_order_id, "client_order_id")
+        _require_non_empty(self.exchange_order_id, "exchange_order_id")
+        if not isinstance(self.state, ExchangeOrderState):
+            raise ValueError("state must be an ExchangeOrderState")
+        if self.executed_quantity < 0:
+            raise ValueError("executed_quantity must be non-negative")
+        if self.average_price < 0:
+            raise ValueError("average_price must be non-negative")
+        _require_aware(self.observed_at, "observed_at")
+
+
 def _require_non_empty(value: str, field_name: str) -> None:
     if not value.strip():
         raise ValueError(f"{field_name} must not be empty")

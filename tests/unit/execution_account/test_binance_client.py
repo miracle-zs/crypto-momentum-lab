@@ -2,9 +2,15 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
+import pytest
 
+from crypto_momentum_lab.domain.execution import ExchangeOrderState, OrderExecutionPlan
 from crypto_momentum_lab.execution_account.binance.client import (
     BinanceUsdMPrivateReadClient,
+    BinanceUsdMTradeClient,
+)
+from crypto_momentum_lab.execution_account.orders.state_machine import (
+    LiveSubmissionDisabledError,
 )
 
 
@@ -90,3 +96,76 @@ def test_client_does_not_expose_order_submit_methods() -> None:
     assert not hasattr(client, "submit_order")
     assert not hasattr(client, "cancel_order")
     assert not hasattr(client, "flatten_position")
+
+
+async def test_trade_client_requires_explicit_live_enablement() -> None:
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=False,
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        with pytest.raises(LiveSubmissionDisabledError):
+            await client.submit_order(_order_plan())
+    finally:
+        await client.aclose()
+
+
+async def test_trade_client_submits_signed_binance_order() -> None:
+    captured_body = ""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_body
+        captured_body = request.content.decode()
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": _order_plan().client_order_id,
+                "orderId": 12345,
+                "status": "FILLED",
+                "executedQty": "0.003",
+                "avgPrice": "30000",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        snapshot = await client.submit_order(_order_plan())
+    finally:
+        await client.aclose()
+
+    assert "newClientOrderId=" in captured_body
+    assert "signature=" in captured_body
+    assert snapshot.state is ExchangeOrderState.FILLED
+
+
+def _order_plan() -> OrderExecutionPlan:
+    return OrderExecutionPlan(
+        intent_id="candidate-1",
+        run_id="run-1",
+        client_order_id="cml_12345678901234567890123456789012",
+        symbol="BTCUSDT",
+        side="BUY",
+        order_type="MARKET",
+        quantity=Decimal("0.003"),
+        price=None,
+        reduce_only=False,
+        created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )

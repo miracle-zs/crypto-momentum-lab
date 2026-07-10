@@ -15,7 +15,17 @@ from crypto_momentum_lab.domain.account import (
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
 )
+from crypto_momentum_lab.domain.execution import (
+    ExchangeOrderSnapshot,
+    ExchangeOrderState,
+    OrderExecutionPlan,
+)
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.execution_account.orders.state_machine import (
+    ExchangeOrderRejectedError,
+    ExchangeSubmissionTimeoutError,
+    LiveSubmissionDisabledError,
+)
 
 # Official Binance USD-M Futures USER_DATA endpoints verified 2026-07-04:
 # /fapi/v3/account, /fapi/v3/balance, /fapi/v3/positionRisk,
@@ -149,6 +159,20 @@ class BinanceUsdMPrivateReadClient:
         response.raise_for_status()
         return response.json()
 
+    async def _signed_post(
+        self,
+        path: str,
+        params: dict[str, str | int | float | bool | None],
+    ) -> object:
+        signed_params = self._signed_params(params)
+        response = await self._client.post(
+            path,
+            data=signed_params,
+            headers={"X-MBX-APIKEY": self._api_key},
+        )
+        response.raise_for_status()
+        return response.json()
+
     def _signed_params(
         self,
         params: dict[str, str | int | float | bool | None],
@@ -171,6 +195,89 @@ class BinanceUsdMPrivateReadClient:
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("clock must return timezone-aware datetime")
         return now
+
+
+class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        api_secret: str,
+        environment: str,
+        account_label: str,
+        live_submit_enabled: bool,
+        base_url: str = "https://fapi.binance.com",
+        http_client: httpx.AsyncClient | None = None,
+        clock: Callable[[], datetime] | None = None,
+        recv_window_ms: int = 5000,
+    ) -> None:
+        super().__init__(
+            api_key=api_key,
+            api_secret=api_secret,
+            environment=environment,
+            account_label=account_label,
+            base_url=base_url,
+            http_client=http_client,
+            clock=clock,
+            recv_window_ms=recv_window_ms,
+        )
+        self._live_submit_enabled = live_submit_enabled
+
+    async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
+        if not self._live_submit_enabled:
+            raise LiveSubmissionDisabledError(
+                "Binance trade client requires explicit live submit enablement"
+            )
+        params: dict[str, str | int | float | bool | None] = {
+            "symbol": plan.symbol,
+            "side": plan.side,
+            "type": plan.order_type,
+            "quantity": format(plan.quantity, "f"),
+            "newClientOrderId": plan.client_order_id,
+            "reduceOnly": str(plan.reduce_only).lower(),
+            "newOrderRespType": "RESULT",
+        }
+        if plan.price is not None:
+            params["price"] = format(plan.price, "f")
+            params["timeInForce"] = "GTC"
+        try:
+            payload = await self._signed_post("/fapi/v1/order", params)
+        except httpx.TimeoutException as exc:
+            raise ExchangeSubmissionTimeoutError(
+                "Binance order submit timed out"
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise ExchangeOrderRejectedError(_exchange_error_message(exc)) from exc
+        return self._order_snapshot(_require_mapping(payload))
+
+    async def query_order_by_client_id(
+        self,
+        symbol: str,
+        client_order_id: str,
+    ) -> ExchangeOrderSnapshot | None:
+        try:
+            payload = await self._signed_get(
+                "/fapi/v1/order",
+                {
+                    "symbol": symbol,
+                    "origClientOrderId": client_order_id,
+                },
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 400 and _exchange_error_code(exc) == -2013:
+                return None
+            raise
+        return self._order_snapshot(_require_mapping(payload))
+
+    def _order_snapshot(self, data: dict[str, object]) -> ExchangeOrderSnapshot:
+        return ExchangeOrderSnapshot(
+            client_order_id=str(data.get("clientOrderId", "")),
+            exchange_order_id=str(data.get("orderId", "")),
+            state=_exchange_order_state(str(data.get("status", ""))),
+            observed_at=self._now(),
+            executed_quantity=_decimal(data.get("executedQty", "0")),
+            average_price=_decimal(data.get("avgPrice", "0")),
+        )
 
 
 def _decimal(value: object) -> Decimal:
@@ -217,3 +324,40 @@ def _json_value(value: object) -> JsonValue:
     if isinstance(value, dict):
         return {str(key): _json_value(item) for key, item in value.items()}
     return str(value)
+
+
+def _exchange_order_state(status: str) -> ExchangeOrderState:
+    states = {
+        "NEW": ExchangeOrderState.ACKNOWLEDGED,
+        "PARTIALLY_FILLED": ExchangeOrderState.PARTIALLY_FILLED,
+        "FILLED": ExchangeOrderState.FILLED,
+        "CANCELED": ExchangeOrderState.CANCELED,
+        "REJECTED": ExchangeOrderState.REJECTED,
+        "EXPIRED": ExchangeOrderState.EXPIRED,
+        "EXPIRED_IN_MATCH": ExchangeOrderState.EXPIRED,
+    }
+    try:
+        return states[status]
+    except KeyError as exc:
+        raise ValueError(f"unsupported Binance order status: {status}") from exc
+
+
+def _exchange_error_code(exc: httpx.HTTPStatusError) -> int | None:
+    try:
+        payload = exc.response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    code = payload.get("code")
+    return int(code) if code is not None else None
+
+
+def _exchange_error_message(exc: httpx.HTTPStatusError) -> str:
+    try:
+        payload = exc.response.json()
+    except ValueError:
+        return f"Binance rejected order with HTTP {exc.response.status_code}"
+    if isinstance(payload, dict) and payload.get("msg"):
+        return str(payload["msg"])
+    return f"Binance rejected order with HTTP {exc.response.status_code}"

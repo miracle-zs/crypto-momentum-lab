@@ -1,0 +1,192 @@
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Protocol
+from uuid import NAMESPACE_URL, uuid5
+
+from crypto_momentum_lab.domain.execution import (
+    ExchangeOrderEvent,
+    ExchangeOrderFill,
+    ExchangeOrderSnapshot,
+    ExchangeOrderState,
+    OrderExecutionPlan,
+)
+from crypto_momentum_lab.domain.market.models import JsonValue
+
+
+class SubmitPolicy(StrEnum):
+    SHADOW_SUPPRESS = "shadow_suppress"
+    LIVE_SUBMIT = "live_submit"
+
+
+class LiveSubmissionDisabledError(RuntimeError):
+    pass
+
+
+class ExchangeOrderRejectedError(RuntimeError):
+    pass
+
+
+class ExchangeSubmissionTimeoutError(TimeoutError):
+    pass
+
+
+class OrderExchangeClient(Protocol):
+    async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
+        pass
+
+    async def query_order_by_client_id(
+        self,
+        symbol: str,
+        client_order_id: str,
+    ) -> ExchangeOrderSnapshot | None:
+        pass
+
+
+class OrderStateRepository(Protocol):
+    async def save_planned_order(self, plan: OrderExecutionPlan) -> None:
+        pass
+
+    async def append_order_event(self, event: ExchangeOrderEvent) -> bool:
+        pass
+
+    async def save_fill(self, fill: ExchangeOrderFill) -> bool:
+        pass
+
+
+@dataclass(frozen=True, slots=True)
+class OrderExecutionResult:
+    client_order_id: str
+    state: ExchangeOrderState
+    exchange_order_id: str | None
+    suppressed: bool = False
+
+
+class OrderExecutionStateMachine:
+    def __init__(
+        self,
+        *,
+        exchange: OrderExchangeClient,
+        repository: OrderStateRepository,
+        submit_policy: SubmitPolicy,
+        live_submit_enabled: bool,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._exchange = exchange
+        self._repository = repository
+        self._submit_policy = submit_policy
+        self._live_submit_enabled = live_submit_enabled
+        self._clock = clock or (lambda: datetime.now(tz=UTC))
+
+    async def execute_approved_intent(
+        self,
+        plan: OrderExecutionPlan,
+    ) -> OrderExecutionResult:
+        if (
+            self._submit_policy is SubmitPolicy.LIVE_SUBMIT
+            and not self._live_submit_enabled
+        ):
+            raise LiveSubmissionDisabledError(
+                "live_submit policy requires explicit live_submit_enabled"
+            )
+        await self._repository.save_planned_order(plan)
+        if self._submit_policy is SubmitPolicy.SHADOW_SUPPRESS:
+            return OrderExecutionResult(
+                client_order_id=plan.client_order_id,
+                state=ExchangeOrderState.PLANNED,
+                exchange_order_id=None,
+                suppressed=True,
+            )
+
+        await self._append_event(plan, ExchangeOrderState.SUBMITTING)
+        try:
+            snapshot = await self._exchange.submit_order(plan)
+        except ExchangeOrderRejectedError as exc:
+            await self._append_event(
+                plan,
+                ExchangeOrderState.REJECTED,
+                details={"reason": str(exc)},
+            )
+            return OrderExecutionResult(
+                plan.client_order_id,
+                ExchangeOrderState.REJECTED,
+                None,
+            )
+        except ExchangeSubmissionTimeoutError:
+            queried_snapshot = await self._exchange.query_order_by_client_id(
+                plan.symbol,
+                plan.client_order_id,
+            )
+            if queried_snapshot is None:
+                await self._append_event(
+                    plan,
+                    ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                    details={"reason": "submit_timeout_order_not_found"},
+                )
+                return OrderExecutionResult(
+                    plan.client_order_id,
+                    ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                    None,
+                )
+            snapshot = queried_snapshot
+        return await self._apply_snapshot(plan, snapshot)
+
+    async def _apply_snapshot(
+        self,
+        plan: OrderExecutionPlan,
+        snapshot: ExchangeOrderSnapshot,
+    ) -> OrderExecutionResult:
+        if snapshot.client_order_id != plan.client_order_id:
+            raise ValueError("exchange response client order id mismatch")
+        for fill in snapshot.fills:
+            await self._repository.save_fill(fill)
+        await self._append_event(
+            plan,
+            snapshot.state,
+            exchange_order_id=snapshot.exchange_order_id,
+            details={
+                "executed_quantity": str(snapshot.executed_quantity),
+                "average_price": str(snapshot.average_price),
+            },
+            occurred_at=snapshot.observed_at,
+        )
+        return OrderExecutionResult(
+            plan.client_order_id,
+            snapshot.state,
+            snapshot.exchange_order_id,
+        )
+
+    async def _append_event(
+        self,
+        plan: OrderExecutionPlan,
+        state: ExchangeOrderState,
+        *,
+        exchange_order_id: str | None = None,
+        details: dict[str, JsonValue] | None = None,
+        occurred_at: datetime | None = None,
+    ) -> None:
+        event_at = occurred_at or self._now()
+        event_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                f"order-event:{plan.client_order_id}:{state.value}:"
+                f"{event_at.isoformat()}",
+            )
+        )
+        await self._repository.append_order_event(
+            ExchangeOrderEvent(
+                event_id=event_id,
+                client_order_id=plan.client_order_id,
+                state=state,
+                occurred_at=event_at,
+                exchange_order_id=exchange_order_id,
+                details=details or {},
+            )
+        )
+
+    def _now(self) -> datetime:
+        now = self._clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("clock must return timezone-aware datetime")
+        return now
