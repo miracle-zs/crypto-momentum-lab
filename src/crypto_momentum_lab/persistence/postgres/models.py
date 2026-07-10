@@ -543,3 +543,111 @@ class ExecutionAccountProcessStateRow(Base):
     state: Mapped[str] = mapped_column(String(32))
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     reason: Mapped[str | None] = mapped_column(Text)
+
+
+class TradingLeaseRow(Base):
+    __tablename__ = "trading_leases"
+
+    lease_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    environment: Mapped[str] = mapped_column(String(32))
+    account_label: Mapped[str] = mapped_column(String(64))
+    strategy_name: Mapped[str] = mapped_column(String(64))
+    owner: Mapped[str] = mapped_column(String(128))
+    state: Mapped[str] = mapped_column(String(16))
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index(
+            "uq_trading_leases_active_account",
+            "environment",
+            "account_label",
+            unique=True,
+            postgresql_where=(state == "active"),
+        ),
+        Index(
+            "ix_trading_leases_account_expiry",
+            "environment",
+            "account_label",
+            "expires_at",
+        ),
+    )
+
+
+class RiskConfigSnapshotRow(Base):
+    __tablename__ = "risk_config_snapshots"
+
+    config_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    environment: Mapped[str] = mapped_column(String(32))
+    account_label: Mapped[str] = mapped_column(String(64))
+    max_order_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    max_gross_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    max_daily_loss: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    max_open_positions: Mapped[int] = mapped_column(Integer)
+    max_market_state_age_seconds: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    max_account_state_age_seconds: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    allow_reduce_only_while_draining: Mapped[bool] = mapped_column(Boolean)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class RiskEvaluationRow(Base):
+    __tablename__ = "risk_evaluations"
+
+    evaluation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(128))
+    decision: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str] = mapped_column(String(128))
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    details: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+    __table_args__ = (
+        Index(
+            "ix_risk_evaluations_candidate_time",
+            "candidate_id",
+            "evaluated_at",
+        ),
+    )
+
+
+class RiskRejectionRow(Base):
+    __tablename__ = "risk_rejections"
+
+    evaluation_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("risk_evaluations.evaluation_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    reason: Mapped[str] = mapped_column(String(128))
+    details: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class RiskHaltRow(Base):
+    __tablename__ = "risk_halts"
+
+    halt_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    environment: Mapped[str] = mapped_column(String(32))
+    account_label: Mapped[str] = mapped_column(String(64))
+    reason: Mapped[str] = mapped_column(String(128))
+    active: Mapped[bool] = mapped_column(Boolean)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    details: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+    __table_args__ = (
+        Index(
+            "ix_risk_halts_active_account",
+            "environment",
+            "account_label",
+            "active",
+        ),
+    )
+
+
+class StrategyLiveStateRow(Base):
+    __tablename__ = "strategy_live_states"
+
+    environment: Mapped[str] = mapped_column(String(32), primary_key=True)
+    account_label: Mapped[str] = mapped_column(String(64), primary_key=True)
+    strategy_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    state: Mapped[str] = mapped_column(String(16))
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reason: Mapped[str | None] = mapped_column(Text)

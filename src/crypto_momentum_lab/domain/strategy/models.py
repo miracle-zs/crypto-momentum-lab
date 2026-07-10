@@ -171,8 +171,6 @@ class OrderIntentCandidate:
             raise ValueError("expires_at must be after created_at")
         if self.desired_notional is not None and self.desired_notional <= 0:
             raise ValueError("desired_notional must be positive")
-        if self.reduce_only:
-            raise ValueError("reduce_only candidates are out of scope for V0")
         object.__setattr__(
             self,
             "features",
@@ -248,7 +246,7 @@ class StrategyDecision:
 
 
 def deterministic_config_hash(config: object) -> str:
-    normalized = _normalize_json_value(config)
+    normalized = _normalize_json_value(config, canonical_decimals=True)
     encoded = json.dumps(
         normalized,
         allow_nan=False,
@@ -292,10 +290,16 @@ def deterministic_candidate_id(*, signal_id: str, sequence: int) -> str:
     return f"cand_{uuid5(NAMESPACE_URL, f'{signal_id}|{sequence}')}"
 
 
-def _normalize_json_value(value: object) -> JsonValue:
+def _normalize_json_value(
+    value: object,
+    *,
+    canonical_decimals: bool = False,
+) -> JsonValue:
     if isinstance(value, StrEnum):
         return value.value
     if isinstance(value, Decimal):
+        if canonical_decimals:
+            return format(value.normalize(), "f")
         return str(value)
     if isinstance(value, datetime):
         return value.isoformat()
@@ -306,16 +310,28 @@ def _normalize_json_value(value: object) -> JsonValue:
     if value is None or isinstance(value, str | int | bool):
         return value
     if is_dataclass(value) and not isinstance(value, type):
-        return _normalize_json_value(asdict(cast(Any, value)))
+        return _normalize_json_value(
+            asdict(cast(Any, value)),
+            canonical_decimals=canonical_decimals,
+        )
     if isinstance(value, Mapping):
         normalized: dict[str, JsonValue] = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise TypeError("JSON object keys must be strings")
-            normalized[key] = _normalize_json_value(item)
+            normalized[key] = _normalize_json_value(
+                item,
+                canonical_decimals=canonical_decimals,
+            )
         return normalized
     if isinstance(value, list | tuple):
-        return [_normalize_json_value(item) for item in value]
+        return [
+            _normalize_json_value(
+                item,
+                canonical_decimals=canonical_decimals,
+            )
+            for item in value
+        ]
     raise TypeError(f"Unsupported JSON value: {type(value).__name__}")
 
 

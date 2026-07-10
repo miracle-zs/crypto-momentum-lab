@@ -229,32 +229,30 @@ def test_order_intent_candidate_rejects_non_positive_desired_notional() -> None:
         )
 
 
-def test_order_intent_candidate_rejects_reduce_only() -> None:
+def test_order_intent_candidate_preserves_reduce_only() -> None:
     identity = _identity()
     detected_at = datetime(2026, 6, 22, 0, 1, tzinfo=UTC)
 
-    with pytest.raises(
-        ValueError,
-        match="reduce_only candidates are out of scope for V0",
-    ):
-        OrderIntentCandidate(
-            candidate_id="cand_1",
-            signal_id="sig_1",
-            run_id=identity.run_id,
-            strategy_name=identity.strategy_name,
-            strategy_version=identity.strategy_version,
-            config_hash=identity.config_hash,
-            symbol="BTCUSDT",
-            side=StrategySide.LONG,
-            entry_type=EntryType.MARKET,
-            limit_price=None,
-            desired_notional=Decimal("100"),
-            reduce_only=True,
-            expires_at=detected_at + timedelta(seconds=30),
-            created_at=detected_at,
-            reason="compression_breakout",
-            features={"range_high": "100"},
-        )
+    candidate = OrderIntentCandidate(
+        candidate_id="cand_1",
+        signal_id="sig_1",
+        run_id=identity.run_id,
+        strategy_name=identity.strategy_name,
+        strategy_version=identity.strategy_version,
+        config_hash=identity.config_hash,
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        entry_type=EntryType.MARKET,
+        limit_price=None,
+        desired_notional=Decimal("100"),
+        reduce_only=True,
+        expires_at=detected_at + timedelta(seconds=30),
+        created_at=detected_at,
+        reason="compression_breakout",
+        features={"range_high": "100"},
+    )
+
+    assert candidate.reduce_only is True
 
 
 def test_strategy_payload_fields_store_normalized_json_values() -> None:
