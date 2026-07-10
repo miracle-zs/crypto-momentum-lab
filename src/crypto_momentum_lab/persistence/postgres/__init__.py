@@ -2,6 +2,9 @@ from crypto_momentum_lab.persistence.postgres.account_repository import (
     PostgresAccountRepository,
 )
 from crypto_momentum_lab.persistence.postgres.base import Base
+from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
+    PostgresLiveRolloutRepository,
+)
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PersistedExchangeOrder,
     PostgresOrderRepository,
@@ -37,6 +40,7 @@ __all__ = [
     "Base",
     "PostgresAccountRepository",
     "PostgresOrderRepository",
+    "PostgresLiveRolloutRepository",
     "PostgresRuntimeMarketStateRepository",
     "PostgresPaperDaemonRepository",
     "PostgresRiskRepository",

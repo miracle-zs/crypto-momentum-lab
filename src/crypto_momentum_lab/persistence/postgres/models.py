@@ -870,3 +870,70 @@ class ShadowDrillResultRow(Base):
     outcome: Mapped[str] = mapped_column(String(32))
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     details: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class LiveOperatorApprovalRow(Base):
+    __tablename__ = "live_operator_approvals"
+
+    approval_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    account_label: Mapped[str] = mapped_column(String(64))
+    strategy_name: Mapped[str] = mapped_column(String(64))
+    strategy_config_hash: Mapped[str] = mapped_column(String(64))
+    risk_config_hash: Mapped[str] = mapped_column(String(64))
+    git_commit_hash: Mapped[str] = mapped_column(String(64))
+    database_migration_revision: Mapped[str] = mapped_column(String(32))
+    approved_notional_cap: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    approved_max_open_positions: Mapped[int] = mapped_column(Integer)
+    approved_max_daily_loss: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    approver_name: Mapped[str] = mapped_column(String(128))
+    approval_text: Mapped[str] = mapped_column(String(128))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index(
+            "ix_live_approvals_account_strategy_expiry",
+            "account_label",
+            "strategy_name",
+            "expires_at",
+        ),
+    )
+
+
+class LiveSessionTransitionRow(Base):
+    __tablename__ = "live_session_transitions"
+
+    transition_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(128))
+    state: Mapped[str] = mapped_column(String(32))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    operator: Mapped[str] = mapped_column(String(128))
+    strategy_config_hash: Mapped[str] = mapped_column(String(64))
+    risk_config_hash: Mapped[str] = mapped_column(String(64))
+    reason: Mapped[str | None] = mapped_column(String(128))
+    details: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+    __table_args__ = (
+        Index(
+            "ix_live_session_transitions_session_time",
+            "session_id",
+            "occurred_at",
+        ),
+    )
+
+
+class LiveRollbackCommandRow(Base):
+    __tablename__ = "live_rollback_commands"
+
+    command_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    command_type: Mapped[str] = mapped_column(String(64))
+    requested_by: Mapped[str] = mapped_column(String(128))
+    confirmation_text: Mapped[str] = mapped_column(String(128))
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    idempotency_key: Mapped[str] = mapped_column(String(128), unique=True)
+    account_label: Mapped[str] = mapped_column(String(64))
+    strategy_name: Mapped[str] = mapped_column(String(64))
+    session_id: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(32))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(Text)
