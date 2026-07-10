@@ -20,11 +20,17 @@ from crypto_momentum_lab.domain.execution import (
     ExchangeOrderState,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.live_rollout import RollbackCommand
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
     LiveSubmissionDisabledError,
+)
+from crypto_momentum_lab.live_rollout.commands import (
+    CANCEL_ALL_CONFIRMATION,
+    EMERGENCY_FLATTEN_CONFIRMATION,
+    require_authorized_command,
 )
 
 # Official Binance USD-M Futures USER_DATA endpoints verified 2026-07-04:
@@ -173,6 +179,20 @@ class BinanceUsdMPrivateReadClient:
         response.raise_for_status()
         return response.json()
 
+    async def _signed_delete(
+        self,
+        path: str,
+        params: dict[str, str | int | float | bool | None],
+    ) -> object:
+        signed_params = self._signed_params(params)
+        response = await self._client.delete(
+            path,
+            params=signed_params,
+            headers={"X-MBX-APIKEY": self._api_key},
+        )
+        response.raise_for_status()
+        return response.json()
+
     def _signed_params(
         self,
         params: dict[str, str | int | float | bool | None],
@@ -268,6 +288,46 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 return None
             raise
         return self._order_snapshot(_require_mapping(payload))
+
+    async def cancel_order(
+        self,
+        *,
+        symbol: str,
+        client_order_id: str,
+        command: RollbackCommand | None,
+    ) -> ExchangeOrderSnapshot:
+        if not self._live_submit_enabled:
+            raise LiveSubmissionDisabledError(
+                "Binance trade client requires explicit live submit enablement"
+            )
+        require_authorized_command(
+            command,
+            command_type="cancel_all_open_orders",
+            confirmation_text=CANCEL_ALL_CONFIRMATION,
+        )
+        payload = await self._signed_delete(
+            "/fapi/v1/order",
+            {
+                "symbol": symbol,
+                "origClientOrderId": client_order_id,
+            },
+        )
+        return self._order_snapshot(_require_mapping(payload))
+
+    async def emergency_flatten(
+        self,
+        *,
+        plan: OrderExecutionPlan,
+        command: RollbackCommand | None,
+    ) -> ExchangeOrderSnapshot:
+        require_authorized_command(
+            command,
+            command_type="emergency_flatten",
+            confirmation_text=EMERGENCY_FLATTEN_CONFIRMATION,
+        )
+        if not plan.reduce_only:
+            raise ValueError("emergency flatten plan must be reduce-only")
+        return await self.submit_order(plan)
 
     def _order_snapshot(self, data: dict[str, object]) -> ExchangeOrderSnapshot:
         return ExchangeOrderSnapshot(

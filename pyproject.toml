@@ -38,6 +38,7 @@ cml-execution-account = "crypto_momentum_lab.apps.execution_account.main:app"
 cml-research = "crypto_momentum_lab.apps.research.main:app"
 cml-strategy-runner = "crypto_momentum_lab.apps.strategy_runner.main:app"
 cml-shadow-operation = "crypto_momentum_lab.apps.shadow_operation.main:app"
+cml-live-rollout = "crypto_momentum_lab.apps.live_rollout.main:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/crypto_momentum_lab"]
