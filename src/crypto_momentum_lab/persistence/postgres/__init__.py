@@ -2,6 +2,10 @@ from crypto_momentum_lab.persistence.postgres.account_repository import (
     PostgresAccountRepository,
 )
 from crypto_momentum_lab.persistence.postgres.base import Base
+from crypto_momentum_lab.persistence.postgres.order_repository import (
+    PersistedExchangeOrder,
+    PostgresOrderRepository,
+)
 from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     PostgresPaperDaemonRepository,
 )
@@ -29,6 +33,7 @@ from crypto_momentum_lab.persistence.postgres.strategy_run_repository import (
 __all__ = [
     "Base",
     "PostgresAccountRepository",
+    "PostgresOrderRepository",
     "PostgresRuntimeMarketStateRepository",
     "PostgresPaperDaemonRepository",
     "PostgresRiskRepository",
@@ -38,6 +43,7 @@ __all__ = [
     "RuntimeStateSequenceRange",
     "LeaseAlreadyHeldError",
     "LeaseOwnershipError",
+    "PersistedExchangeOrder",
     "create_async_database_engine",
     "create_sync_engine",
 ]

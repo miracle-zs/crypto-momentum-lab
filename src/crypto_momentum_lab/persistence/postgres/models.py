@@ -651,3 +651,123 @@ class StrategyLiveStateRow(Base):
     state: Mapped[str] = mapped_column(String(16))
     changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     reason: Mapped[str | None] = mapped_column(Text)
+
+
+class OrderIntentExecutionRow(Base):
+    __tablename__ = "order_intents"
+
+    intent_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(128), unique=True)
+    run_id: Mapped[str] = mapped_column(String(128))
+    risk_evaluation_id: Mapped[str] = mapped_column(String(128), unique=True)
+    strategy_name: Mapped[str] = mapped_column(String(64))
+    symbol: Mapped[str] = mapped_column(String(32))
+    state: Mapped[str] = mapped_column(String(32))
+    approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    details: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class OrderIntentClaimRow(Base):
+    __tablename__ = "order_intent_claims"
+
+    intent_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("order_intents.intent_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    worker_id: Mapped[str] = mapped_column(String(128))
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ExchangeOrderRow(Base):
+    __tablename__ = "exchange_orders"
+
+    client_order_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    intent_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("order_intents.intent_id", ondelete="RESTRICT"),
+        unique=True,
+    )
+    run_id: Mapped[str] = mapped_column(String(128))
+    exchange_order_id: Mapped[str | None] = mapped_column(String(64))
+    symbol: Mapped[str] = mapped_column(String(32))
+    side: Mapped[str] = mapped_column(String(16))
+    order_type: Mapped[str] = mapped_column(String(32))
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    reduce_only: Mapped[bool] = mapped_column(Boolean)
+    state: Mapped[str] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_exchange_orders_state_updated", "state", "updated_at"),
+        Index("ix_exchange_orders_symbol_state", "symbol", "state"),
+    )
+
+
+class ExchangeOrderEventRow(Base):
+    __tablename__ = "exchange_order_events"
+
+    event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    client_order_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("exchange_orders.client_order_id", ondelete="CASCADE"),
+    )
+    state: Mapped[str] = mapped_column(String(48))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    exchange_order_id: Mapped[str | None] = mapped_column(String(64))
+    details: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+    __table_args__ = (
+        Index(
+            "ix_exchange_order_events_order_time",
+            "client_order_id",
+            "occurred_at",
+        ),
+    )
+
+
+class ExchangeFillRow(Base):
+    __tablename__ = "exchange_fills"
+
+    fill_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    client_order_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("exchange_orders.client_order_id", ondelete="CASCADE"),
+    )
+    exchange_trade_id: Mapped[str] = mapped_column(String(64))
+    price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    fee: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    fee_asset: Mapped[str] = mapped_column(String(32))
+    filled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    details: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+    __table_args__ = (
+        Index("ix_exchange_fills_order_time", "client_order_id", "filled_at"),
+    )
+
+
+class ExecutionCommandRow(Base):
+    __tablename__ = "execution_commands"
+
+    command_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    client_order_id: Mapped[str | None] = mapped_column(String(36))
+    command: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32))
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    details: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class ExecutionReconciliationEventRow(Base):
+    __tablename__ = "execution_reconciliation_events"
+
+    reconciliation_event_id: Mapped[str] = mapped_column(
+        String(128), primary_key=True
+    )
+    client_order_id: Mapped[str] = mapped_column(String(36))
+    outcome: Mapped[str] = mapped_column(String(64))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    details: Mapped[dict[str, object]] = mapped_column(JSONB)
