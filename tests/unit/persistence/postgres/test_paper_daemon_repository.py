@@ -11,6 +11,7 @@ from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     runtime_event_row,
 )
 from crypto_momentum_lab.strategy_runner.daemon import StrategyRuntimeEvent
+from crypto_momentum_lab.strategy_runner.portfolio import PaperExitConfig
 from tests.unit.persistence.postgres.test_strategy_run_repository import (
     fixture_paper_report,
 )
@@ -67,6 +68,7 @@ def test_paper_live_run_row_initializes_zero_count_summary() -> None:
         identity=report.run,
         source_description=report.source_description,
         execution=report.execution_config,
+        portfolio=PaperExitConfig(),
     )
 
     assert row["run_id"] == report.run.run_id
@@ -74,7 +76,8 @@ def test_paper_live_run_row_initializes_zero_count_summary() -> None:
     assert row["signal_count"] == 0
     assert row["candidate_count"] == 0
     assert row["fill_count"] == 0
-    assert row["execution_config"]["taker_fee_rate"] == "0.0004"
+    assert row["execution_config"]["fills"]["taker_fee_rate"] == "0.0004"
+    assert row["execution_config"]["portfolio"]["take_profit_pct"] == "0.02"
 
 
 def test_candidate_from_row_restores_pending_candidate() -> None:

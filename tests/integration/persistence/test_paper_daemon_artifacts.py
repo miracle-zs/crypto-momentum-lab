@@ -1,5 +1,7 @@
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from datetime import timedelta
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import delete
@@ -8,7 +10,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from crypto_momentum_lab.domain.strategy import StrategyDecision
 from crypto_momentum_lab.persistence.postgres.models import (
     OrderIntentCandidateRow,
+    PaperEquitySnapshotRow,
     PaperFillRow,
+    PaperPositionRow,
     StrategyRunRow,
     StrategySignalRow,
 )
@@ -20,6 +24,10 @@ from crypto_momentum_lab.persistence.postgres.session import (
 )
 from crypto_momentum_lab.persistence.postgres.strategy_run_repository import (
     PostgresStrategyRunRepository,
+)
+from crypto_momentum_lab.strategy_runner.portfolio import (
+    PaperExitConfig,
+    PaperPositionStatus,
 )
 from tests.unit.persistence.postgres.test_strategy_run_repository import (
     fixture_paper_report,
@@ -39,6 +47,8 @@ async def paper_artifact_repositories(
     async with factory() as session:
         async with session.begin():
             for model in (
+                PaperEquitySnapshotRow,
+                PaperPositionRow,
                 PaperFillRow,
                 OrderIntentCandidateRow,
                 StrategySignalRow,
@@ -54,6 +64,8 @@ async def paper_artifact_repositories(
     async with factory() as session:
         async with session.begin():
             for model in (
+                PaperEquitySnapshotRow,
+                PaperPositionRow,
                 PaperFillRow,
                 OrderIntentCandidateRow,
                 StrategySignalRow,
@@ -94,6 +106,7 @@ async def test_live_paper_artifacts_are_idempotent_and_resume_pending_candidates
         report.run,
         report.source_description,
         report.execution_config,
+        PaperExitConfig(),
     )
     await artifacts.save_decision(decision)
     await artifacts.save_decision(decision)
@@ -102,10 +115,34 @@ async def test_live_paper_artifacts_are_idempotent_and_resume_pending_candidates
         report.candidates[0],
     )
 
-    await artifacts.save_fills(report.run.run_id, report.paper_fills)
+    opened = await artifacts.save_fills(
+        report.run.run_id,
+        report.paper_fills,
+    )
     await artifacts.save_fills(report.run.run_id, report.paper_fills)
 
     assert await artifacts.load_pending_candidates(report.run.run_id) == ()
+    assert await artifacts.load_open_positions(report.run.run_id) == opened
+    closed_at = opened[0].opened_at + timedelta(minutes=20)
+    closed = replace(
+        opened[0],
+        status=PaperPositionStatus.CLOSED,
+        closed_at=closed_at,
+        exit_price=opened[0].entry_price,
+        exit_fee=Decimal("0.04"),
+        unrealized_pnl=Decimal("0"),
+        realized_pnl=Decimal("-0.08"),
+        return_pct=Decimal("-0.0008"),
+        close_reason="max_holding_period",
+        updated_at=closed_at,
+    )
+    await artifacts.save_portfolio(
+        report.run.run_id,
+        (closed,),
+        closed_at,
+        PaperExitConfig(),
+    )
+    assert await artifacts.load_open_positions(report.run.run_id) == ()
     summary = await reports.load_run_summary(report.run.run_id)
     assert summary is not None
     assert summary["signal_count"] == 1

@@ -3,6 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any, cast
+from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
@@ -19,7 +20,9 @@ from crypto_momentum_lab.domain.strategy import (
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     OrderIntentCandidateRow,
+    PaperEquitySnapshotRow,
     PaperFillRow,
+    PaperPositionRow,
     StrategyRunRow,
     StrategyRuntimeCheckpointRow,
     StrategyRuntimeEventRow,
@@ -34,6 +37,12 @@ from crypto_momentum_lab.strategy_runner.daemon import StrategyRuntimeEvent
 from crypto_momentum_lab.strategy_runner.fills import (
     ReplayExecutionConfig,
     SimulatedFill,
+)
+from crypto_momentum_lab.strategy_runner.portfolio import (
+    PaperExitConfig,
+    PaperPosition,
+    PaperPositionStatus,
+    position_from_entry_fill,
 )
 
 
@@ -97,6 +106,7 @@ def paper_live_run_row(
     identity: StrategyRunIdentity,
     source_description: str,
     execution: ReplayExecutionConfig,
+    portfolio: PaperExitConfig,
 ) -> dict[str, object]:
     return {
         "run_id": identity.run_id,
@@ -110,7 +120,10 @@ def paper_live_run_row(
         "schema_version": 1,
         "source_paths": list(identity.source_paths),
         "source_description": source_description,
-        "execution_config": _jsonable(asdict(execution)),
+        "execution_config": {
+            "fills": _jsonable(asdict(execution)),
+            "portfolio": _jsonable(asdict(portfolio)),
+        },
         "input_state_count": 0,
         "processed_symbol_count": 0,
         "signal_count": 0,
@@ -144,6 +157,58 @@ def candidate_from_row(row: OrderIntentCandidateRow) -> OrderIntentCandidate:
     )
 
 
+def paper_position_row(position: PaperPosition) -> dict[str, object]:
+    return {
+        "position_id": position.position_id,
+        "run_id": position.run_id,
+        "entry_fill_id": position.entry_fill_id,
+        "signal_id": position.signal_id,
+        "symbol": position.symbol,
+        "side": position.side.value,
+        "status": position.status.value,
+        "opened_at": position.opened_at,
+        "closed_at": position.closed_at,
+        "entry_price": position.entry_price,
+        "exit_price": position.exit_price,
+        "quantity": position.quantity,
+        "entry_notional": position.entry_notional,
+        "entry_fee": position.entry_fee,
+        "exit_fee": position.exit_fee,
+        "last_mark_price": position.last_mark_price,
+        "unrealized_pnl": position.unrealized_pnl,
+        "realized_pnl": position.realized_pnl,
+        "return_pct": position.return_pct,
+        "close_reason": position.close_reason,
+        "updated_at": position.updated_at,
+    }
+
+
+def paper_position_from_row(row: PaperPositionRow) -> PaperPosition:
+    return PaperPosition(
+        position_id=row.position_id,
+        run_id=row.run_id,
+        entry_fill_id=row.entry_fill_id,
+        signal_id=row.signal_id,
+        symbol=row.symbol,
+        side=StrategySide(row.side),
+        status=PaperPositionStatus(row.status),
+        opened_at=row.opened_at,
+        closed_at=row.closed_at,
+        entry_price=row.entry_price,
+        exit_price=row.exit_price,
+        quantity=row.quantity,
+        entry_notional=row.entry_notional,
+        entry_fee=row.entry_fee,
+        exit_fee=row.exit_fee,
+        last_mark_price=row.last_mark_price,
+        unrealized_pnl=row.unrealized_pnl,
+        realized_pnl=row.realized_pnl,
+        return_pct=row.return_pct,
+        close_reason=row.close_reason,
+        updated_at=row.updated_at,
+    )
+
+
 class PostgresPaperDaemonRepository:
     def __init__(
         self,
@@ -156,11 +221,13 @@ class PostgresPaperDaemonRepository:
         identity: StrategyRunIdentity,
         source_description: str,
         execution: ReplayExecutionConfig,
+        portfolio: PaperExitConfig,
     ) -> None:
         values = paper_live_run_row(
             identity=identity,
             source_description=source_description,
             execution=execution,
+            portfolio=portfolio,
         )
         async with self._session_factory() as session:
             async with session.begin():
@@ -250,9 +317,14 @@ class PostgresPaperDaemonRepository:
         self,
         run_id: str,
         fills: tuple[SimulatedFill, ...],
-    ) -> None:
+    ) -> tuple[PaperPosition, ...]:
         if not fills:
-            return
+            return ()
+        positions = tuple(
+            position
+            for fill in fills
+            if (position := position_from_entry_fill(run_id, fill)) is not None
+        )
         async with self._session_factory() as session:
             async with session.begin():
                 run = await _load_run(session, run_id)
@@ -263,7 +335,79 @@ class PostgresPaperDaemonRepository:
                         paper_fill_row(fill, run_id=run_id),
                         "paper fill conflict",
                     )
+                for position in positions:
+                    await _insert_idempotent(
+                        session,
+                        PaperPositionRow,
+                        paper_position_row(position),
+                        "paper position conflict",
+                    )
                 await _refresh_run_counts(session, run)
+        return positions
+
+    async def load_open_positions(
+        self,
+        run_id: str,
+    ) -> tuple[PaperPosition, ...]:
+        async with self._session_factory() as session:
+            rows = (
+                await session.scalars(
+                    select(PaperPositionRow)
+                    .where(
+                        PaperPositionRow.run_id == run_id,
+                        PaperPositionRow.status
+                        == PaperPositionStatus.OPEN.value,
+                    )
+                    .order_by(
+                        PaperPositionRow.opened_at,
+                        PaperPositionRow.position_id,
+                    )
+                )
+            ).all()
+        return tuple(paper_position_from_row(row) for row in rows)
+
+    async def save_portfolio(
+        self,
+        run_id: str,
+        positions: tuple[PaperPosition, ...],
+        observed_at: datetime,
+        config: PaperExitConfig,
+    ) -> None:
+        _require_aware(observed_at, "observed_at")
+        async with self._session_factory() as session:
+            async with session.begin():
+                await _load_run(session, run_id)
+                for position in positions:
+                    if position.run_id != run_id:
+                        raise ValueError("paper position run_id mismatch")
+                    row = await session.scalar(
+                        select(PaperPositionRow).where(
+                            PaperPositionRow.position_id
+                            == position.position_id
+                        )
+                    )
+                    if row is None:
+                        raise ValueError("paper position is not initialized")
+                    for key, value in paper_position_row(position).items():
+                        setattr(row, key, value)
+                await session.flush()
+                snapshot = await _portfolio_snapshot(
+                    session=session,
+                    run_id=run_id,
+                    observed_at=observed_at,
+                    config=config,
+                )
+                statement = insert(PaperEquitySnapshotRow).values(snapshot)
+                await session.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=["snapshot_id"],
+                        set_={
+                            key: value
+                            for key, value in snapshot.items()
+                            if key != "snapshot_id"
+                        },
+                    )
+                )
 
     async def save_runtime_event(self, event: StrategyRuntimeEvent) -> None:
         async with self._session_factory() as session:
@@ -376,13 +520,75 @@ async def _refresh_run_counts(
     run.pending_candidate_count = max(run.candidate_count - run.fill_count, 0)
 
 
+async def _portfolio_snapshot(
+    *,
+    session: AsyncSession,
+    run_id: str,
+    observed_at: datetime,
+    config: PaperExitConfig,
+) -> dict[str, object]:
+    realized_pnl = await _decimal_sum(
+        session,
+        PaperPositionRow.realized_pnl,
+        PaperPositionRow.run_id == run_id,
+        PaperPositionRow.status == PaperPositionStatus.CLOSED.value,
+    )
+    unrealized_pnl = await _decimal_sum(
+        session,
+        PaperPositionRow.unrealized_pnl,
+        PaperPositionRow.run_id == run_id,
+        PaperPositionRow.status == PaperPositionStatus.OPEN.value,
+    )
+    entry_fees = await _decimal_sum(
+        session,
+        PaperPositionRow.entry_fee,
+        PaperPositionRow.run_id == run_id,
+    )
+    exit_fees = await _decimal_sum(
+        session,
+        PaperPositionRow.exit_fee,
+        PaperPositionRow.run_id == run_id,
+    )
+    open_position_count = await _row_count(
+        session,
+        PaperPositionRow,
+        PaperPositionRow.run_id == run_id,
+        PaperPositionRow.status == PaperPositionStatus.OPEN.value,
+    )
+    balance = config.initial_balance + realized_pnl
+    return {
+        "snapshot_id": (
+            f"equity_{uuid5(NAMESPACE_URL, f'{run_id}:{observed_at.isoformat()}')}"
+        ),
+        "run_id": run_id,
+        "observed_at": observed_at,
+        "balance": balance,
+        "equity": balance + unrealized_pnl,
+        "realized_pnl": realized_pnl,
+        "unrealized_pnl": unrealized_pnl,
+        "total_fees": entry_fees + exit_fees,
+        "open_position_count": open_position_count,
+    }
+
+
+async def _decimal_sum(
+    session: AsyncSession,
+    column: Any,
+    *conditions: Any,
+) -> Decimal:
+    value = await session.scalar(
+        select(func.coalesce(func.sum(column), Decimal("0"))).where(*conditions)
+    )
+    return Decimal(value or 0)
+
+
 async def _row_count(
     session: AsyncSession,
     model: type[Any],
-    condition: Any,
+    *conditions: Any,
 ) -> int:
     value = await session.scalar(
-        select(func.count()).select_from(model).where(condition)
+        select(func.count()).select_from(model).where(*conditions)
     )
     return int(value or 0)
 

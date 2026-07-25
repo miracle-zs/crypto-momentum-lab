@@ -27,6 +27,7 @@ from crypto_momentum_lab.strategies.compression_breakout import (
 from crypto_momentum_lab.strategy_runner import (
     AsyncPostgresRuntimeStateLoader,
     InMemoryPaperMarketStateSource,
+    PaperExitConfig,
     PaperLiveDaemonConfig,
     PaperLiveSourceConfig,
     PaperRunnerConfig,
@@ -558,6 +559,22 @@ def paper_live_daemon_command(
         int,
         typer.Option("--candidate-ttl-buckets", min=1),
     ] = 4,
+    paper_initial_balance: Annotated[
+        str,
+        typer.Option("--paper-initial-balance"),
+    ] = "1000",
+    take_profit_pct: Annotated[
+        str,
+        typer.Option("--take-profit-pct"),
+    ] = "0.02",
+    stop_loss_pct: Annotated[
+        str,
+        typer.Option("--stop-loss-pct"),
+    ] = "0.01",
+    max_holding_buckets: Annotated[
+        int,
+        typer.Option("--max-holding-buckets", min=1),
+    ] = 80,
     max_states: Annotated[
         int,
         typer.Option("--max-states", min=1),
@@ -656,6 +673,12 @@ def paper_live_daemon_command(
             run_identity=identity,
             source_description=source.description,
             execution=ReplayExecutionConfig(),
+            portfolio=PaperExitConfig(
+                initial_balance=Decimal(paper_initial_balance),
+                take_profit_pct=Decimal(take_profit_pct),
+                stop_loss_pct=Decimal(stop_loss_pct),
+                max_holding_buckets=max_holding_buckets,
+            ),
         ),
         clock=_SystemClock(),
     )

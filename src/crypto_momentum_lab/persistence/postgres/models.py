@@ -360,6 +360,79 @@ class PaperFillRow(Base):
     )
 
 
+class PaperPositionRow(Base):
+    __tablename__ = "paper_positions"
+
+    position_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("strategy_runs.run_id", ondelete="CASCADE"),
+    )
+    entry_fill_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("paper_fills.fill_id", ondelete="CASCADE"),
+        unique=True,
+    )
+    signal_id: Mapped[str] = mapped_column(String(128))
+    symbol: Mapped[str] = mapped_column(String(32))
+    side: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16))
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    entry_price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    exit_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    entry_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    entry_fee: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    exit_fee: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    last_mark_price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    unrealized_pnl: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    realized_pnl: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    return_pct: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    close_reason: Mapped[str | None] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index(
+            "ix_paper_positions_run_status_updated",
+            "run_id",
+            "status",
+            "updated_at",
+        ),
+        Index(
+            "ix_paper_positions_run_symbol_opened",
+            "run_id",
+            "symbol",
+            "opened_at",
+        ),
+    )
+
+
+class PaperEquitySnapshotRow(Base):
+    __tablename__ = "paper_equity_snapshots"
+
+    snapshot_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("strategy_runs.run_id", ondelete="CASCADE"),
+    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    balance: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    equity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    realized_pnl: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    unrealized_pnl: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    total_fees: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    open_position_count: Mapped[int] = mapped_column(Integer)
+
+    __table_args__ = (
+        Index(
+            "ix_paper_equity_run_observed",
+            "run_id",
+            "observed_at",
+        ),
+    )
+
+
 class StrategyCheckpointRow(Base):
     __tablename__ = "strategy_checkpoints"
 

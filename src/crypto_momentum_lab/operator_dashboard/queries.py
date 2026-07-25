@@ -29,7 +29,9 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ExecutionAccountProcessStateRow,
     LiveSessionTransitionRow,
     MonitoringMembershipRow,
+    PaperEquitySnapshotRow,
     PaperFillRow,
+    PaperPositionRow,
     RiskEvaluationRow,
     RiskHaltRow,
     RuntimeMarketState15sRow,
@@ -211,6 +213,11 @@ class DashboardQueries:
                     strategy_name=None,
                     config_hash=None,
                     checkpoint_at=None,
+                    portfolio_summary={},
+                    equity_curve=[],
+                    open_positions=[],
+                    closed_trades=[],
+                    trade_events=[],
                     latest_signals=[],
                     latest_paper_fills=[],
                     rejection_summary={},
@@ -240,12 +247,93 @@ class DashboardQueries:
                     .limit(20)
                 )
             ).all()
+            open_positions = (
+                await session.scalars(
+                    select(PaperPositionRow)
+                    .where(
+                        PaperPositionRow.run_id == run.run_id,
+                        PaperPositionRow.status == "open",
+                    )
+                    .order_by(PaperPositionRow.opened_at.desc())
+                )
+            ).all()
+            closed_positions = (
+                await session.scalars(
+                    select(PaperPositionRow)
+                    .where(
+                        PaperPositionRow.run_id == run.run_id,
+                        PaperPositionRow.status == "closed",
+                    )
+                    .order_by(PaperPositionRow.closed_at.desc())
+                    .limit(30)
+                )
+            ).all()
+            equity_desc = (
+                await session.scalars(
+                    select(PaperEquitySnapshotRow)
+                    .where(PaperEquitySnapshotRow.run_id == run.run_id)
+                    .order_by(PaperEquitySnapshotRow.observed_at.desc())
+                    .limit(240)
+                )
+            ).all()
+        equity = list(reversed(equity_desc))
+        latest_equity = equity[-1] if equity else None
+        closed_trade_count = len(closed_positions)
+        winning_trade_count = sum(
+            1 for row in closed_positions if (row.realized_pnl or 0) > 0
+        )
+        trade_events = sorted(
+            (
+                *(_position_open_event(row) for row in open_positions),
+                *(_position_open_event(row) for row in closed_positions),
+                *(_position_close_event(row) for row in closed_positions),
+            ),
+            key=lambda item: str(item["occurred_at"]),
+            reverse=True,
+        )[:40]
         return StrategyRunResponse(
             status=OperationalStatus.READY,
             run_id=run.run_id,
             strategy_name=run.strategy_name,
             config_hash=run.config_hash,
             checkpoint_at=checkpoint_at,
+            portfolio_summary={
+                "balance": None
+                if latest_equity is None
+                else str(latest_equity.balance),
+                "equity": None
+                if latest_equity is None
+                else str(latest_equity.equity),
+                "realized_pnl": None
+                if latest_equity is None
+                else str(latest_equity.realized_pnl),
+                "unrealized_pnl": None
+                if latest_equity is None
+                else str(latest_equity.unrealized_pnl),
+                "total_fees": None
+                if latest_equity is None
+                else str(latest_equity.total_fees),
+                "open_position_count": len(open_positions),
+                "closed_trade_count": closed_trade_count,
+                "win_rate": None
+                if closed_trade_count == 0
+                else str(winning_trade_count / closed_trade_count),
+            },
+            equity_curve=[
+                {
+                    "observed_at": row.observed_at.isoformat(),
+                    "balance": str(row.balance),
+                    "equity": str(row.equity),
+                    "realized_pnl": str(row.realized_pnl),
+                    "unrealized_pnl": str(row.unrealized_pnl),
+                }
+                for row in equity
+            ],
+            open_positions=[_paper_position(row) for row in open_positions],
+            closed_trades=[
+                _paper_position(row) for row in closed_positions
+            ],
+            trade_events=trade_events,
             latest_signals=[
                 {
                     "symbol": row.symbol,
@@ -514,6 +602,69 @@ def _exchange_order(row: ExchangeOrderRow) -> dict[str, JsonValue]:
         "state": row.state,
         "quantity": str(row.quantity),
         "updated_at": row.updated_at.isoformat(),
+    }
+
+
+def _paper_position(row: PaperPositionRow) -> dict[str, JsonValue]:
+    return {
+        "position_id": row.position_id,
+        "symbol": row.symbol,
+        "side": row.side,
+        "status": row.status,
+        "opened_at": row.opened_at.isoformat(),
+        "closed_at": None
+        if row.closed_at is None
+        else row.closed_at.isoformat(),
+        "entry_price": str(row.entry_price),
+        "exit_price": None
+        if row.exit_price is None
+        else str(row.exit_price),
+        "last_mark_price": str(row.last_mark_price),
+        "quantity": str(row.quantity),
+        "entry_notional": str(row.entry_notional),
+        "unrealized_pnl": str(row.unrealized_pnl),
+        "realized_pnl": None
+        if row.realized_pnl is None
+        else str(row.realized_pnl),
+        "return_pct": None
+        if row.return_pct is None
+        else str(row.return_pct),
+        "fees": str(row.entry_fee + row.exit_fee),
+        "close_reason": row.close_reason,
+    }
+
+
+def _position_open_event(row: PaperPositionRow) -> dict[str, JsonValue]:
+    is_long = row.side == "long"
+    return {
+        "occurred_at": row.opened_at.isoformat(),
+        "symbol": row.symbol,
+        "event": "OPEN_LONG" if is_long else "OPEN_SHORT",
+        "label": "开多" if is_long else "开空",
+        "order_action": "BUY" if is_long else "SELL",
+        "price": str(row.entry_price),
+        "quantity": str(row.quantity),
+        "pnl": None,
+        "reason": "strategy_signal",
+    }
+
+
+def _position_close_event(row: PaperPositionRow) -> dict[str, JsonValue]:
+    is_long = row.side == "long"
+    return {
+        "occurred_at": None
+        if row.closed_at is None
+        else row.closed_at.isoformat(),
+        "symbol": row.symbol,
+        "event": "CLOSE_LONG" if is_long else "CLOSE_SHORT",
+        "label": "平多" if is_long else "平空",
+        "order_action": "SELL" if is_long else "BUY",
+        "price": None if row.exit_price is None else str(row.exit_price),
+        "quantity": str(row.quantity),
+        "pnl": None
+        if row.realized_pnl is None
+        else str(row.realized_pnl),
+        "reason": row.close_reason,
     }
 
 

@@ -1,8 +1,8 @@
 import asyncio
 import json
 from collections.abc import Coroutine, Iterable
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
@@ -19,6 +19,12 @@ from crypto_momentum_lab.strategy_runner.fills import (
     SimulatedFill,
     candidate_target_fill_at,
     simulate_candidate_fill,
+)
+from crypto_momentum_lab.strategy_runner.portfolio import (
+    PaperExitConfig,
+    PaperPosition,
+    PaperPositionStatus,
+    mark_positions,
 )
 
 
@@ -57,6 +63,7 @@ class PaperLiveArtifactRepository(Protocol):
         identity: StrategyRunIdentity,
         source_description: str,
         execution: ReplayExecutionConfig,
+        portfolio: PaperExitConfig,
     ) -> None:
         pass
 
@@ -73,6 +80,21 @@ class PaperLiveArtifactRepository(Protocol):
         self,
         run_id: str,
         fills: tuple[SimulatedFill, ...],
+    ) -> tuple[PaperPosition, ...]:
+        pass
+
+    async def load_open_positions(
+        self,
+        run_id: str,
+    ) -> tuple[PaperPosition, ...]:
+        pass
+
+    async def save_portfolio(
+        self,
+        run_id: str,
+        positions: tuple[PaperPosition, ...],
+        observed_at: datetime,
+        config: PaperExitConfig,
     ) -> None:
         pass
 
@@ -111,6 +133,7 @@ class PaperLiveDaemonConfig:
     run_identity: StrategyRunIdentity | None = None
     source_description: str = "paper-live"
     execution: ReplayExecutionConfig = ReplayExecutionConfig()
+    portfolio: PaperExitConfig = field(default_factory=PaperExitConfig)
 
     def __post_init__(self) -> None:
         _require_non_empty(self.run_id, "run_id")
@@ -154,6 +177,7 @@ def run_paper_live_daemon(
     if checkpoint is not None:
         strategy.restore_checkpoint(checkpoint)
     pending_candidates: list[OrderIntentCandidate] = []
+    open_positions: dict[str, PaperPosition] = {}
     if artifact_repository is not None:
         if config.run_identity is None:
             raise ValueError("run_identity is required for paper artifacts")
@@ -162,12 +186,21 @@ def run_paper_live_daemon(
                 config.run_identity,
                 config.source_description,
                 config.execution,
+                config.portfolio,
             )
         )
         pending_candidates.extend(
             _run_async(
                 artifact_repository.load_pending_candidates(config.run_id)
             )
+        )
+        open_positions.update(
+            {
+                position.position_id: position
+                for position in _run_async(
+                    artifact_repository.load_open_positions(config.run_id)
+                )
+            }
         )
 
     processed = 0
@@ -177,6 +210,7 @@ def run_paper_live_daemon(
     latest_checkpoint_dirty = False
     last_checkpoint_saved_at: datetime | None = None
     last_checkpoint_elapsed_anchor = clock.now()
+    last_equity_snapshot_at: datetime | None = None
 
     for state in source:
         if state.environment != config.environment:
@@ -209,15 +243,49 @@ def run_paper_live_daemon(
             )
 
         if artifact_repository is not None:
+            position_updates = mark_positions(
+                positions=tuple(open_positions.values()),
+                state=state,
+                config=config.portfolio,
+                taker_fee_rate=config.execution.taker_fee_rate,
+            )
+            for position in position_updates:
+                if position.status is PaperPositionStatus.CLOSED:
+                    open_positions.pop(position.position_id, None)
+                else:
+                    open_positions[position.position_id] = position
             pending_candidates, fills = _resolve_pending_candidates(
                 pending_candidates=tuple(pending_candidates),
                 state=state,
                 execution=config.execution,
             )
             if fills:
-                _run_async(
+                opened_positions = _run_async(
                     artifact_repository.save_fills(config.run_id, tuple(fills))
                 )
+                open_positions.update(
+                    {
+                        position.position_id: position
+                        for position in opened_positions
+                        if position.status is PaperPositionStatus.OPEN
+                    }
+                )
+            should_snapshot = (
+                last_equity_snapshot_at is None
+                or state.bucket_start - last_equity_snapshot_at
+                >= timedelta(minutes=1)
+            )
+            if position_updates or fills or should_snapshot:
+                _run_async(
+                    artifact_repository.save_portfolio(
+                        config.run_id,
+                        position_updates,
+                        state.bucket_start,
+                        config.portfolio,
+                    )
+                )
+                if should_snapshot:
+                    last_equity_snapshot_at = state.bucket_start
 
         decision = strategy.on_market_state(state)
         if artifact_repository is not None and (

@@ -30,6 +30,13 @@ from crypto_momentum_lab.strategy_runner.paper import (
     run_paper_trading,
     write_paper_trading_report,
 )
+from crypto_momentum_lab.strategy_runner.portfolio import (
+    PaperExitConfig,
+    PaperPosition,
+    PaperPositionStatus,
+    mark_positions,
+    position_from_entry_fill,
+)
 from crypto_momentum_lab.strategy_runner.replay import (
     ReplayConfig,
     ReplayError,
@@ -51,6 +58,9 @@ __all__ = [
     "PaperLiveDaemonConfig",
     "PaperLiveDaemonRepository",
     "PaperLiveDaemonResult",
+    "PaperExitConfig",
+    "PaperPosition",
+    "PaperPositionStatus",
     "PaperMarketStateSource",
     "PaperRunnerConfig",
     "PaperRunnerError",
@@ -62,10 +72,12 @@ __all__ = [
     "deterministic_fill_id",
     "fill_summary",
     "pending_candidate_fill",
+    "position_from_entry_fill",
     "PostgresPaperMarketStateSource",
     "run_paper_trading",
     "run_paper_live_daemon",
     "run_strategy_replay",
+    "mark_positions",
     "simulate_candidate_fill",
     "simulate_candidate_fills",
     "write_paper_trading_report",

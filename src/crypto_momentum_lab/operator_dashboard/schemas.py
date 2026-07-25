@@ -40,6 +40,11 @@ class StrategyRunResponse(DashboardSchema):
     strategy_name: str | None
     config_hash: str | None
     checkpoint_at: datetime | None
+    portfolio_summary: dict[str, JsonValue] = Field(default_factory=dict)
+    equity_curve: list[dict[str, JsonValue]] = Field(default_factory=list)
+    open_positions: list[dict[str, JsonValue]] = Field(default_factory=list)
+    closed_trades: list[dict[str, JsonValue]] = Field(default_factory=list)
+    trade_events: list[dict[str, JsonValue]] = Field(default_factory=list)
     latest_signals: list[dict[str, JsonValue]]
     latest_paper_fills: list[dict[str, JsonValue]] = Field(default_factory=list)
     rejection_summary: dict[str, JsonValue]

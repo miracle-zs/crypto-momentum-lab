@@ -67,9 +67,17 @@ services:
       - --environment
       - research
       - --run-id
-      - server-paper-compression-breakout
+      - server-paper-compression-breakout-v2
       - --candidate-notional
       - "25"
+      - --paper-initial-balance
+      - "1000"
+      - --take-profit-pct
+      - "0.02"
+      - --stop-loss-pct
+      - "0.01"
+      - --max-holding-buckets
+      - "80"
       - --max-states
       - "100000000"
       - --idle-timeout-seconds

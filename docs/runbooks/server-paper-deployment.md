@@ -46,12 +46,24 @@ The paper daemon persists strategy signals, order-intent candidates, and
 simulated fills in PostgreSQL. Pending candidates are reloaded after a daemon
 restart, and repeated writes are idempotent.
 
-The dashboard's `Virtual Buy / Sell` table shows the latest simulated fills:
+The dashboard separates the paper account into:
 
-- `BUY` is a long-entry fill;
-- `SELL` is a short-entry fill;
-- neither action represents a position exit, realized PnL, take profit, or stop
-  loss.
+- account equity and balance history;
+- currently open positions with mark price and unrealized PnL;
+- closed trades with net realized PnL;
+- a lifecycle ledger labeled `开多`, `开空`, `平多`, or `平空`.
+
+The server profile starts with 1,000 USDT of virtual equity. A filled entry opens
+a paper position. Positions close on the first closed 15-second state that
+reaches one of these rules:
+
+- take profit at 2%;
+- stop loss at 1%;
+- maximum holding period of 80 buckets, or 20 minutes.
+
+PnL includes both entry and exit taker fees. The small-server profile evaluates
+the closed state's trade close, rather than intrabucket high/low, because it
+subscribes only to Binance `aggTrade`.
 
 The small-server `aggTrade` profile has no order-book quotes, so virtual fills
 use the closed 15-second state's trade close as the executable reference price.

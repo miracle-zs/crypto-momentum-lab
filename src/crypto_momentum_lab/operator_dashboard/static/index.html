@@ -39,12 +39,12 @@
       <div class="panel-body loading">Awaiting service telemetry...</div>
     </section>
 
-    <section id="risk" class="panel panel-alert" data-endpoint="api/risk-execution">
+    <section id="strategy" class="panel panel-wide trading-ledger" data-endpoint="api/strategy-runs/current">
       <div class="panel-heading">
-        <div><span class="index">02</span><h2>Risk / Execution</h2></div>
+        <div><span class="index">02</span><h2>Paper Portfolio</h2></div>
         <span class="section-state status-UNKNOWN">UNKNOWN</span>
       </div>
-      <div class="panel-body loading">No risk decision stream.</div>
+      <div class="panel-body loading">Portfolio runtime: UNKNOWN</div>
     </section>
 
     <section id="universe" class="panel panel-tall" data-endpoint="api/universe">
@@ -55,12 +55,12 @@
       <div class="panel-body loading">Top gainers / losers: NO DATA</div>
     </section>
 
-    <section id="strategy" class="panel" data-endpoint="api/strategy-runs/current">
+    <section id="risk" class="panel panel-alert" data-endpoint="api/risk-execution">
       <div class="panel-heading">
-        <div><span class="index">04</span><h2>Selected Strategy</h2></div>
+        <div><span class="index">04</span><h2>Risk / Execution</h2></div>
         <span class="section-state status-UNKNOWN">UNKNOWN</span>
       </div>
-      <div class="panel-body loading">Strategy runtime: UNKNOWN</div>
+      <div class="panel-body loading">No risk decision stream.</div>
     </section>
 
     <section id="account" class="panel" data-endpoint="api/account">

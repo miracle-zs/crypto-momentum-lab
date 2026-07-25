@@ -25,6 +25,11 @@ from crypto_momentum_lab.strategy_runner.fills import (
     SimulatedFill,
     SimulatedFillStatus,
 )
+from crypto_momentum_lab.strategy_runner.portfolio import (
+    PaperExitConfig,
+    PaperPosition,
+    position_from_entry_fill,
+)
 from tests.unit.persistence.postgres.test_runtime_state_repository import (
     fixture_state,
 )
@@ -137,14 +142,17 @@ class FakeArtifactRepository(PaperLiveArtifactRepository):
         self.initialized: list[tuple[StrategyRunIdentity, str]] = []
         self.decisions: list[StrategyDecision] = []
         self.fills: list[SimulatedFill] = []
+        self.positions: dict[str, PaperPosition] = {}
+        self.portfolio_updates: list[tuple[PaperPosition, ...]] = []
 
     async def initialize_run(
         self,
         identity: StrategyRunIdentity,
         source_description: str,
         execution: ReplayExecutionConfig,
+        portfolio: PaperExitConfig,
     ) -> None:
-        del execution
+        del execution, portfolio
         self.initialized.append((identity, source_description))
 
     async def load_pending_candidates(
@@ -161,9 +169,34 @@ class FakeArtifactRepository(PaperLiveArtifactRepository):
         self,
         run_id: str,
         fills: tuple[SimulatedFill, ...],
-    ) -> None:
-        del run_id
+    ) -> tuple[PaperPosition, ...]:
         self.fills.extend(fills)
+        positions = tuple(
+            position
+            for fill in fills
+            if (position := position_from_entry_fill(run_id, fill)) is not None
+        )
+        self.positions.update(
+            {position.position_id: position for position in positions}
+        )
+        return positions
+
+    async def load_open_positions(
+        self,
+        run_id: str,
+    ) -> tuple[PaperPosition, ...]:
+        del run_id
+        return tuple(self.positions.values())
+
+    async def save_portfolio(
+        self,
+        run_id: str,
+        positions: tuple[PaperPosition, ...],
+        observed_at: datetime,
+        config: PaperExitConfig,
+    ) -> None:
+        del run_id, observed_at, config
+        self.portfolio_updates.append(positions)
 
 
 def test_daemon_saves_checkpoint_after_state_count_threshold() -> None:

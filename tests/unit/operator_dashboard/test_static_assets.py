@@ -36,10 +36,20 @@ def test_degraded_status_labels_are_visible() -> None:
         assert label in text
 
 
-def test_strategy_panel_renders_virtual_buy_and_sell_records() -> None:
+def test_strategy_panel_renders_portfolio_and_position_lifecycle() -> None:
     text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
 
-    assert "Virtual Buy / Sell" in text
-    assert "latest_paper_fills" in text
-    for field in ("action", "fill_price", "quantity", "filled_notional"):
-        assert f'"{field}"' in text
+    for label in (
+        "资产权益走势",
+        "当前持仓",
+        "已平仓交易",
+        "开平仓流水",
+    ):
+        assert label in text
+    for field in (
+        "equity_curve",
+        "open_positions",
+        "closed_trades",
+        "trade_events",
+    ):
+        assert field in text
