@@ -16,6 +16,7 @@ from crypto_momentum_lab.domain.market.models import (
     JsonValue,
     RawEnvelope,
 )
+from crypto_momentum_lab.market_data.capture.queue import CaptureQueueFull
 
 
 class BinancePayloadError(ValueError):
@@ -78,7 +79,12 @@ class BinanceWebSocketConnection:
             reason = "stopped"
             try:
                 reason = await self._run_once(session_id)
-            except (ConnectionClosed, TimeoutError, OSError) as error:
+            except (
+                CaptureQueueFull,
+                ConnectionClosed,
+                TimeoutError,
+                OSError,
+            ) as error:
                 reason = error.__class__.__name__
             finally:
                 await self._emit_lifecycle(session_id, opened=False, reason=reason)
