@@ -116,8 +116,9 @@ On startup with an existing `run_id`, the daemon:
    not match the existing run;
 5. records a resume event.
 
-If no checkpoint exists, the daemon starts from `--start-at` or from the oldest
-available closed state.
+If no checkpoint exists, the daemon starts from `--start-at` or from the current
+startup time minus `--max-market-state-age-seconds`. This avoids immediately
+halting a newly deployed daemon on historical rows that are already stale.
 
 ## 7. Error Handling
 

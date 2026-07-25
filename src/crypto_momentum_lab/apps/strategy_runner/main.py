@@ -1,6 +1,6 @@
 import asyncio
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
@@ -598,10 +598,15 @@ def paper_live_daemon_command(
         )
     resolved_run_id = run_id or f"paper-live-daemon-{uuid4()}"
     created_at = _parse_generated_at(generated_at)
+    resolved_start_at = _parse_optional_start_at(start_at)
+    if resolved_start_at is None:
+        resolved_start_at = created_at - timedelta(
+            seconds=max_market_state_age_seconds
+        )
     source = build_postgres_paper_source(
         database_url=resolved_database_url,
         environment=environment,
-        start_at=_parse_optional_start_at(start_at),
+        start_at=resolved_start_at,
         poll_interval_seconds=poll_interval_seconds,
         idle_timeout_seconds=idle_timeout_seconds,
         max_states=max_states,

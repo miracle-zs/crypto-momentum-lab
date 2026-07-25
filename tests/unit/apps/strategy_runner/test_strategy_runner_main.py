@@ -473,6 +473,7 @@ def test_paper_live_daemon_requires_database_url(monkeypatch) -> None:
 
 def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
     calls: list[object] = []
+    source_calls: list[object] = []
 
     def fake_run_daemon(**kwargs) -> object:
         calls.append(kwargs["config"])
@@ -483,11 +484,11 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
             final_checkpoint_saved_at=datetime(2026, 7, 4, 0, 0, 45, tzinfo=UTC),
         )
 
-    monkeypatch.setattr(
-        main,
-        "build_postgres_paper_source",
-        lambda **kwargs: SimpleNamespace(description="fake-source"),
-    )
+    def fake_build_source(**kwargs) -> object:
+        source_calls.append(kwargs)
+        return SimpleNamespace(description="fake-source")
+
+    monkeypatch.setattr(main, "build_postgres_paper_source", fake_build_source)
     monkeypatch.setattr(
         main,
         "build_runtime_strategy_for_cli",
@@ -512,6 +513,8 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
             "research",
             "--run-id",
             "daemon-run",
+            "--generated-at",
+            "2026-07-04T00:05:00+00:00",
             "--checkpoint-every-states",
             "7",
             "--checkpoint-every-seconds",
@@ -530,6 +533,9 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
     assert calls[0].checkpoint_every_states == 7
     assert calls[0].checkpoint_every_seconds == 30
     assert calls[0].max_market_state_age_seconds == 90
+    assert source_calls[0]["start_at"] == datetime(
+        2026, 7, 4, 0, 3, 30, tzinfo=UTC
+    )
     assert "Paper live daemon completed: states=3 halt=none" in result.stdout
 
 
