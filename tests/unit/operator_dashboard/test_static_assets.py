@@ -34,3 +34,12 @@ def test_degraded_status_labels_are_visible() -> None:
 
     for label in ("UNKNOWN", "STALE", "HALTED", "LIVE"):
         assert label in text
+
+
+def test_strategy_panel_renders_virtual_buy_and_sell_records() -> None:
+    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+
+    assert "Virtual Buy / Sell" in text
+    assert "latest_paper_fills" in text
+    for field in ("action", "fill_price", "quantity", "filled_notional"):
+        assert f'"{field}"' in text

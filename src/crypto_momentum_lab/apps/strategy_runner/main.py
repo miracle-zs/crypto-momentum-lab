@@ -612,27 +612,39 @@ def paper_live_daemon_command(
         max_states=max_states,
         batch_size=batch_size,
     )
+    compression_breakout = CompressionBreakoutConfig(
+        compression_window_buckets=compression_window_buckets,
+        max_range_width_pct=Decimal(max_range_width_pct),
+        min_breakout_pct=Decimal(min_breakout_pct),
+        acceptance_buckets=acceptance_buckets,
+        cooldown_buckets=cooldown_buckets,
+        forward_horizon_buckets=(1,),
+    )
+    identity = build_runtime_identity_for_cli(
+        strategy_name=strategy_name,
+        run_id=resolved_run_id,
+        generated_at=created_at,
+        source_description=source.description,
+        compression_breakout=compression_breakout,
+        candidate_notional=Decimal(candidate_notional),
+        candidate_ttl_buckets=candidate_ttl_buckets,
+    )
     strategy = build_runtime_strategy_for_cli(
         strategy_name=strategy_name,
         run_id=resolved_run_id,
         generated_at=created_at,
         source_description=source.description,
-        compression_breakout=CompressionBreakoutConfig(
-            compression_window_buckets=compression_window_buckets,
-            max_range_width_pct=Decimal(max_range_width_pct),
-            min_breakout_pct=Decimal(min_breakout_pct),
-            acceptance_buckets=acceptance_buckets,
-            cooldown_buckets=cooldown_buckets,
-            forward_horizon_buckets=(1,),
-        ),
+        compression_breakout=compression_breakout,
         candidate_notional=Decimal(candidate_notional),
         candidate_ttl_buckets=candidate_ttl_buckets,
+        identity=identity,
     )
     repository = build_paper_daemon_repository(resolved_database_url)
     result = run_paper_live_daemon(
         source=source,
         strategy=strategy,
         repository=repository,
+        artifact_repository=repository,
         config=PaperLiveDaemonConfig(
             run_id=resolved_run_id,
             strategy_name=strategy_name,
@@ -641,6 +653,9 @@ def paper_live_daemon_command(
             checkpoint_every_seconds=checkpoint_every_seconds,
             max_market_state_age_seconds=max_market_state_age_seconds,
             continue_while_halted=continue_while_halted,
+            run_identity=identity,
+            source_description=source.description,
+            execution=ReplayExecutionConfig(),
         ),
         clock=_SystemClock(),
     )
@@ -725,7 +740,39 @@ def build_runtime_strategy_for_cli(
     compression_breakout: CompressionBreakoutConfig,
     candidate_notional: Decimal | None,
     candidate_ttl_buckets: int,
+    identity: StrategyRunIdentity | None = None,
 ) -> RuntimeStrategyProtocol:
+    resolved_identity = identity or build_runtime_identity_for_cli(
+        strategy_name=strategy_name,
+        run_id=run_id,
+        generated_at=generated_at,
+        source_description=source_description,
+        compression_breakout=compression_breakout,
+        candidate_notional=candidate_notional,
+        candidate_ttl_buckets=candidate_ttl_buckets,
+    )
+    config_payload: dict[str, object] = {
+        "candidate_notional": candidate_notional,
+        "candidate_ttl_buckets": candidate_ttl_buckets,
+        "compression_breakout": compression_breakout,
+    }
+    return build_runtime_strategy(
+        strategy_name,
+        config=config_payload,
+        identity=resolved_identity,
+    )
+
+
+def build_runtime_identity_for_cli(
+    *,
+    strategy_name: str,
+    run_id: str,
+    generated_at: datetime,
+    source_description: str,
+    compression_breakout: CompressionBreakoutConfig,
+    candidate_notional: Decimal | None,
+    candidate_ttl_buckets: int,
+) -> StrategyRunIdentity:
     config_payload: dict[str, object] = {
         "candidate_notional": candidate_notional,
         "candidate_ttl_buckets": candidate_ttl_buckets,
@@ -735,7 +782,7 @@ def build_runtime_strategy_for_cli(
         strategy_name,
         config=config_payload,
     )
-    identity = StrategyRunIdentity(
+    return StrategyRunIdentity(
         run_id=run_id,
         strategy_name=strategy_name,
         strategy_version="v0",
@@ -744,11 +791,6 @@ def build_runtime_strategy_for_cli(
         code_commit="unknown",
         created_at=generated_at,
         source_paths=(source_description,),
-    )
-    return build_runtime_strategy(
-        strategy_name,
-        config=config_payload,
-        identity=identity,
     )
 
 

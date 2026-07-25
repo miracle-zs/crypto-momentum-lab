@@ -42,7 +42,7 @@ function renderUniverse(data) {
 }
 
 function renderStrategy(data) {
-  const body = `<div class="metric-grid">${metric("Strategy", data.strategy_name)}${metric("Run ID", data.run_id)}${metric("Config Hash", data.config_hash, "immutable")}${metric("Checkpoint", data.checkpoint_at)}</div><p class="subhead" style="margin-top:22px">Latest Signals</p>${table(data.latest_signals, [["Time", "detected_at"], ["Symbol", "symbol"], ["Side", "side"], ["Reason", "reason"]])}<p class="subhead" style="margin-top:22px">Rejections</p><pre>${esc(JSON.stringify(data.rejection_summary || {}, null, 2))}</pre>`;
+  const body = `<div class="metric-grid">${metric("Strategy", data.strategy_name)}${metric("Run ID", data.run_id)}${metric("Config Hash", data.config_hash, "immutable")}${metric("Checkpoint", data.checkpoint_at)}</div><p class="subhead" style="margin-top:22px">Latest Signals</p>${table(data.latest_signals, [["Time", "detected_at"], ["Symbol", "symbol"], ["Side", "side"], ["Reason", "reason"]])}<p class="subhead" style="margin-top:22px">Virtual Buy / Sell</p>${table(data.latest_paper_fills, [["Time", "filled_at"], ["Symbol", "symbol"], ["Action", "action"], ["Side", "side"], ["Status", "status"], ["Price", "fill_price"], ["Quantity", "quantity"], ["Notional", "filled_notional"], ["Fee", "fee"]])}<p class="subhead" style="margin-top:22px">Rejections</p><pre>${esc(JSON.stringify(data.rejection_summary || {}, null, 2))}</pre>`;
   return [data.status, body];
 }
 

@@ -472,11 +472,12 @@ def test_paper_live_daemon_requires_database_url(monkeypatch) -> None:
 
 
 def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
-    calls: list[object] = []
+    calls: list[dict[str, object]] = []
     source_calls: list[object] = []
+    repository = object()
 
     def fake_run_daemon(**kwargs) -> object:
-        calls.append(kwargs["config"])
+        calls.append(kwargs)
         return SimpleNamespace(
             processed_state_count=3,
             halt_reason=None,
@@ -497,7 +498,7 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
     monkeypatch.setattr(
         main,
         "build_paper_daemon_repository",
-        lambda database_url: object(),
+        lambda database_url: repository,
     )
     monkeypatch.setattr(main, "run_paper_live_daemon", fake_run_daemon)
 
@@ -529,10 +530,15 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
-    assert calls[0].run_id == "daemon-run"
-    assert calls[0].checkpoint_every_states == 7
-    assert calls[0].checkpoint_every_seconds == 30
-    assert calls[0].max_market_state_age_seconds == 90
+    config = calls[0]["config"]
+    assert calls[0]["repository"] is repository
+    assert calls[0]["artifact_repository"] is repository
+    assert config.run_id == "daemon-run"
+    assert config.run_identity is not None
+    assert config.run_identity.run_id == "daemon-run"
+    assert config.checkpoint_every_states == 7
+    assert config.checkpoint_every_seconds == 30
+    assert config.max_market_state_age_seconds == 90
     assert source_calls[0]["start_at"] == datetime(
         2026, 7, 4, 0, 3, 30, tzinfo=UTC
     )

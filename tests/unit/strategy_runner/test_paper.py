@@ -277,6 +277,7 @@ def _without_fill_price(state: MarketState15s) -> MarketState15s:
         "spread": None,
         "midpoint": None,
         "mark_price": None,
+        "close_price": None,
     }
     for field in fields(MarketState15s):
         object.__setattr__(

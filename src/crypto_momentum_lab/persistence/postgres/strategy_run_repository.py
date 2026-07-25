@@ -99,12 +99,13 @@ def strategy_run_report_rows(
             "summary_counts": _jsonable(report.summary_counts),
             "fill_summary": _jsonable(report.fill_summary),
         },
-        signals=tuple(_signal_row(signal) for signal in report.signals),
+        signals=tuple(strategy_signal_row(signal) for signal in report.signals),
         candidates=tuple(
-            _candidate_row(candidate) for candidate in report.candidates
+            order_intent_candidate_row(candidate)
+            for candidate in report.candidates
         ),
         fills=tuple(
-            _fill_row(fill, run_id=report.run.run_id)
+            paper_fill_row(fill, run_id=report.run.run_id)
             for fill in report.paper_fills
         ),
         checkpoint={
@@ -248,7 +249,7 @@ class PostgresStrategyRunRepository:
         }
 
 
-def _signal_row(signal: Any) -> dict[str, object]:
+def strategy_signal_row(signal: Any) -> dict[str, object]:
     return {
         "signal_id": signal.signal_id,
         "run_id": signal.run_id,
@@ -265,7 +266,7 @@ def _signal_row(signal: Any) -> dict[str, object]:
     }
 
 
-def _candidate_row(candidate: Any) -> dict[str, object]:
+def order_intent_candidate_row(candidate: Any) -> dict[str, object]:
     return {
         "candidate_id": candidate.candidate_id,
         "signal_id": candidate.signal_id,
@@ -286,7 +287,7 @@ def _candidate_row(candidate: Any) -> dict[str, object]:
     }
 
 
-def _fill_row(fill: Any, *, run_id: str) -> dict[str, object]:
+def paper_fill_row(fill: Any, *, run_id: str) -> dict[str, object]:
     return {
         "fill_id": fill.fill_id,
         "candidate_id": fill.candidate_id,

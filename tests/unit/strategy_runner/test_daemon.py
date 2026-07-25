@@ -1,13 +1,29 @@
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
-from crypto_momentum_lab.domain.strategy import StrategyCheckpoint, StrategyDecision
+from crypto_momentum_lab.domain.strategy import (
+    EntryType,
+    OrderIntentCandidate,
+    RunMode,
+    StrategyCheckpoint,
+    StrategyDecision,
+    StrategyRunIdentity,
+    StrategySide,
+    StrategySignal,
+)
 from crypto_momentum_lab.strategy_runner.daemon import (
+    PaperLiveArtifactRepository,
     PaperLiveDaemonConfig,
     PaperLiveDaemonRepository,
     PaperLiveDaemonResult,
     RuntimeStrategy,
     run_paper_live_daemon,
+)
+from crypto_momentum_lab.strategy_runner.fills import (
+    ReplayExecutionConfig,
+    SimulatedFill,
+    SimulatedFillStatus,
 )
 from tests.unit.persistence.postgres.test_runtime_state_repository import (
     fixture_state,
@@ -65,6 +81,89 @@ class FakeStrategy(RuntimeStrategy):
             rejections=(),
             checkpoint=checkpoint,
         )
+
+
+class SignalStrategy(FakeStrategy):
+    def __init__(self, identity: StrategyRunIdentity) -> None:
+        super().__init__()
+        self._identity = identity
+
+    def on_market_state(self, state: MarketState15s) -> StrategyDecision:
+        decision = super().on_market_state(state)
+        if len(self.processed) > 1:
+            return decision
+        signal = StrategySignal(
+            signal_id="signal-1",
+            run_id=self._identity.run_id,
+            strategy_name=self._identity.strategy_name,
+            strategy_version=self._identity.strategy_version,
+            config_hash=self._identity.config_hash,
+            symbol=state.symbol,
+            side=StrategySide.LONG,
+            detected_at=state.bucket_start,
+            source_state_at=state.bucket_start,
+            reason="compression_breakout",
+            features={},
+            reference_prices={"close": str(state.close_price)},
+        )
+        candidate = OrderIntentCandidate(
+            candidate_id="candidate-1",
+            signal_id=signal.signal_id,
+            run_id=self._identity.run_id,
+            strategy_name=self._identity.strategy_name,
+            strategy_version=self._identity.strategy_version,
+            config_hash=self._identity.config_hash,
+            symbol=state.symbol,
+            side=signal.side,
+            entry_type=EntryType.MARKET,
+            limit_price=None,
+            desired_notional=Decimal("25"),
+            reduce_only=False,
+            expires_at=state.bucket_start + timedelta(seconds=60),
+            created_at=state.bucket_start,
+            reason=signal.reason,
+            features={},
+        )
+        return StrategyDecision(
+            signals=(signal,),
+            candidates=(candidate,),
+            rejections=(),
+            checkpoint=decision.checkpoint,
+        )
+
+
+class FakeArtifactRepository(PaperLiveArtifactRepository):
+    def __init__(self) -> None:
+        self.initialized: list[tuple[StrategyRunIdentity, str]] = []
+        self.decisions: list[StrategyDecision] = []
+        self.fills: list[SimulatedFill] = []
+
+    async def initialize_run(
+        self,
+        identity: StrategyRunIdentity,
+        source_description: str,
+        execution: ReplayExecutionConfig,
+    ) -> None:
+        del execution
+        self.initialized.append((identity, source_description))
+
+    async def load_pending_candidates(
+        self,
+        run_id: str,
+    ) -> tuple[OrderIntentCandidate, ...]:
+        del run_id
+        return ()
+
+    async def save_decision(self, decision: StrategyDecision) -> None:
+        self.decisions.append(decision)
+
+    async def save_fills(
+        self,
+        run_id: str,
+        fills: tuple[SimulatedFill, ...],
+    ) -> None:
+        del run_id
+        self.fills.extend(fills)
 
 
 def test_daemon_saves_checkpoint_after_state_count_threshold() -> None:
@@ -132,10 +231,38 @@ def test_daemon_halts_on_stale_market_state() -> None:
     assert repository.saved_checkpoints == []
 
 
+def test_daemon_persists_signal_candidate_and_virtual_fill() -> None:
+    states = (fixture_state("BTCUSDT", 0), fixture_state("BTCUSDT", 1))
+    identity = _identity()
+    artifacts = FakeArtifactRepository()
+
+    result = run_paper_live_daemon(
+        source=states,
+        strategy=SignalStrategy(identity),
+        repository=FakeRepository(),
+        artifact_repository=artifacts,
+        config=_config(
+            run_identity=identity,
+            execution=ReplayExecutionConfig(latency_buckets=1),
+        ),
+        clock=FakeClock(states[-1].bucket_end + timedelta(seconds=1)),
+    )
+
+    assert result.processed_state_count == 2
+    assert artifacts.initialized == [(identity, "postgres-runtime-states:research")]
+    assert len(artifacts.decisions) == 1
+    assert artifacts.decisions[0].signals[0].signal_id == "signal-1"
+    assert len(artifacts.fills) == 1
+    assert artifacts.fills[0].status is SimulatedFillStatus.FILLED
+    assert artifacts.fills[0].filled_notional == Decimal("25")
+
+
 def _config(
     *,
     checkpoint_every_states: int = 10,
     max_market_state_age_seconds: float = 120.0,
+    run_identity: StrategyRunIdentity | None = None,
+    execution: ReplayExecutionConfig | None = None,
 ) -> PaperLiveDaemonConfig:
     return PaperLiveDaemonConfig(
         run_id="run-1",
@@ -144,4 +271,20 @@ def _config(
         checkpoint_every_states=checkpoint_every_states,
         checkpoint_every_seconds=999,
         max_market_state_age_seconds=max_market_state_age_seconds,
+        run_identity=run_identity,
+        source_description="postgres-runtime-states:research",
+        execution=execution or ReplayExecutionConfig(),
+    )
+
+
+def _identity() -> StrategyRunIdentity:
+    return StrategyRunIdentity(
+        run_id="run-1",
+        strategy_name="compression_breakout",
+        strategy_version="v0",
+        config_hash="config-hash",
+        run_mode=RunMode.PAPER,
+        code_commit="unknown",
+        created_at=datetime(2026, 7, 3, 0, 0, tzinfo=UTC),
+        source_paths=("postgres-runtime-states:research",),
     )

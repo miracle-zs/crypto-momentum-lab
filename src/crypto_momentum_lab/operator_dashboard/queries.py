@@ -29,6 +29,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ExecutionAccountProcessStateRow,
     LiveSessionTransitionRow,
     MonitoringMembershipRow,
+    PaperFillRow,
     RiskEvaluationRow,
     RiskHaltRow,
     RuntimeMarketState15sRow,
@@ -211,6 +212,7 @@ class DashboardQueries:
                     config_hash=None,
                     checkpoint_at=None,
                     latest_signals=[],
+                    latest_paper_fills=[],
                     rejection_summary={},
                 )
             signals = (
@@ -227,6 +229,17 @@ class DashboardQueries:
                     StrategyRuntimeEventRow.event_type == "checkpoint_saved",
                 )
             )
+            fills = (
+                await session.scalars(
+                    select(PaperFillRow)
+                    .where(PaperFillRow.run_id == run.run_id)
+                    .order_by(
+                        PaperFillRow.filled_at.desc().nulls_last(),
+                        PaperFillRow.target_fill_at.desc(),
+                    )
+                    .limit(20)
+                )
+            ).all()
         return StrategyRunResponse(
             status=OperationalStatus.READY,
             run_id=run.run_id,
@@ -241,6 +254,28 @@ class DashboardQueries:
                     "reason": row.reason,
                 }
                 for row in signals
+            ],
+            latest_paper_fills=[
+                {
+                    "filled_at": None
+                    if row.filled_at is None
+                    else row.filled_at.isoformat(),
+                    "symbol": row.symbol,
+                    "action": "BUY" if row.side == "long" else "SELL",
+                    "side": row.side,
+                    "status": row.status,
+                    "fill_price": None
+                    if row.fill_price is None
+                    else str(row.fill_price),
+                    "quantity": None
+                    if row.quantity is None
+                    else str(row.quantity),
+                    "filled_notional": None
+                    if row.filled_notional is None
+                    else str(row.filled_notional),
+                    "fee": str(row.fee),
+                }
+                for row in fills
             ],
             rejection_summary=_json_mapping(run.rejection_summary),
         )

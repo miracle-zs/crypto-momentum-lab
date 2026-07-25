@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -65,6 +66,31 @@ def test_pending_fill_records_source_ended_before_fill() -> None:
     assert fill.status is SimulatedFillStatus.PENDING
     assert fill.filled_at is None
     assert fill.reason == "source_ended_before_fill"
+
+
+def test_simulate_candidate_fill_uses_close_when_order_book_is_unavailable() -> None:
+    identity = _identity()
+    signal = _signal(identity)
+    candidate = _candidate(identity=identity, signal_id=signal.signal_id)
+    state = replace(
+        _state(5, close=Decimal("101.4")),
+        last_bid_price=None,
+        last_ask_price=None,
+        spread=None,
+        midpoint=None,
+        mark_price=None,
+    )
+
+    fill = simulate_candidate_fill(
+        candidate=candidate,
+        states=(state,),
+        execution=ReplayExecutionConfig(latency_buckets=1),
+    )
+
+    assert fill.status is SimulatedFillStatus.FILLED
+    assert fill.fill_price == Decimal("101.4")
+    assert fill.reference_midpoint == Decimal("101.4")
+    assert fill.spread is None
 
 
 def test_fill_summary_counts_status_and_costs() -> None:

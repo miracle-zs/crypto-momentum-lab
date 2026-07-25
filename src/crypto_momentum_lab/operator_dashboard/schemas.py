@@ -41,6 +41,7 @@ class StrategyRunResponse(DashboardSchema):
     config_hash: str | None
     checkpoint_at: datetime | None
     latest_signals: list[dict[str, JsonValue]]
+    latest_paper_fills: list[dict[str, JsonValue]] = Field(default_factory=list)
     rejection_summary: dict[str, JsonValue]
 
 

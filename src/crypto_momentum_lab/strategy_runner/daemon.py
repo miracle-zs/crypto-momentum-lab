@@ -7,7 +7,19 @@ from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
 from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
-from crypto_momentum_lab.domain.strategy import StrategyCheckpoint, StrategyDecision
+from crypto_momentum_lab.domain.strategy import (
+    OrderIntentCandidate,
+    RunMode,
+    StrategyCheckpoint,
+    StrategyDecision,
+    StrategyRunIdentity,
+)
+from crypto_momentum_lab.strategy_runner.fills import (
+    ReplayExecutionConfig,
+    SimulatedFill,
+    candidate_target_fill_at,
+    simulate_candidate_fill,
+)
 
 
 class Clock(Protocol):
@@ -36,6 +48,32 @@ class PaperLiveDaemonRepository(Protocol):
         pass
 
     async def load_checkpoint(self, run_id: str) -> StrategyCheckpoint | None:
+        pass
+
+
+class PaperLiveArtifactRepository(Protocol):
+    async def initialize_run(
+        self,
+        identity: StrategyRunIdentity,
+        source_description: str,
+        execution: ReplayExecutionConfig,
+    ) -> None:
+        pass
+
+    async def load_pending_candidates(
+        self,
+        run_id: str,
+    ) -> tuple[OrderIntentCandidate, ...]:
+        pass
+
+    async def save_decision(self, decision: StrategyDecision) -> None:
+        pass
+
+    async def save_fills(
+        self,
+        run_id: str,
+        fills: tuple[SimulatedFill, ...],
+    ) -> None:
         pass
 
 
@@ -70,6 +108,9 @@ class PaperLiveDaemonConfig:
     checkpoint_every_seconds: float
     max_market_state_age_seconds: float
     continue_while_halted: bool = False
+    run_identity: StrategyRunIdentity | None = None
+    source_description: str = "paper-live"
+    execution: ReplayExecutionConfig = ReplayExecutionConfig()
 
     def __post_init__(self) -> None:
         _require_non_empty(self.run_id, "run_id")
@@ -81,6 +122,15 @@ class PaperLiveDaemonConfig:
             raise ValueError("checkpoint_every_seconds must be positive")
         if self.max_market_state_age_seconds <= 0:
             raise ValueError("max_market_state_age_seconds must be positive")
+        if not self.source_description.strip():
+            raise ValueError("source_description must not be empty")
+        if self.run_identity is not None:
+            if self.run_identity.run_id != self.run_id:
+                raise ValueError("run identity run_id mismatch")
+            if self.run_identity.strategy_name != self.strategy_name:
+                raise ValueError("run identity strategy_name mismatch")
+            if self.run_identity.run_mode is not RunMode.PAPER:
+                raise ValueError("paper daemon run mode must be paper")
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,12 +146,29 @@ def run_paper_live_daemon(
     source: Iterable[MarketState15s],
     strategy: RuntimeStrategy,
     repository: PaperLiveDaemonRepository,
+    artifact_repository: PaperLiveArtifactRepository | None = None,
     config: PaperLiveDaemonConfig,
     clock: Clock,
 ) -> PaperLiveDaemonResult:
     checkpoint = _run_async(repository.load_checkpoint(config.run_id))
     if checkpoint is not None:
         strategy.restore_checkpoint(checkpoint)
+    pending_candidates: list[OrderIntentCandidate] = []
+    if artifact_repository is not None:
+        if config.run_identity is None:
+            raise ValueError("run_identity is required for paper artifacts")
+        _run_async(
+            artifact_repository.initialize_run(
+                config.run_identity,
+                config.source_description,
+                config.execution,
+            )
+        )
+        pending_candidates.extend(
+            _run_async(
+                artifact_repository.load_pending_candidates(config.run_id)
+            )
+        )
 
     processed = 0
     processed_since_checkpoint = 0
@@ -141,7 +208,23 @@ def run_paper_live_daemon(
                 final_checkpoint_saved_at=last_checkpoint_saved_at,
             )
 
+        if artifact_repository is not None:
+            pending_candidates, fills = _resolve_pending_candidates(
+                pending_candidates=tuple(pending_candidates),
+                state=state,
+                execution=config.execution,
+            )
+            if fills:
+                _run_async(
+                    artifact_repository.save_fills(config.run_id, tuple(fills))
+                )
+
         decision = strategy.on_market_state(state)
+        if artifact_repository is not None and (
+            decision.signals or decision.candidates
+        ):
+            _run_async(artifact_repository.save_decision(decision))
+            pending_candidates.extend(decision.candidates)
         latest_checkpoint = decision.checkpoint
         latest_checkpoint_dirty = True
         processed += 1
@@ -188,6 +271,32 @@ def run_paper_live_daemon(
         final_cursor=final_cursor,
         final_checkpoint_saved_at=last_checkpoint_saved_at,
     )
+
+
+def _resolve_pending_candidates(
+    *,
+    pending_candidates: tuple[OrderIntentCandidate, ...],
+    state: MarketState15s,
+    execution: ReplayExecutionConfig,
+) -> tuple[list[OrderIntentCandidate], list[SimulatedFill]]:
+    remaining: list[OrderIntentCandidate] = []
+    fills: list[SimulatedFill] = []
+    for candidate in pending_candidates:
+        if candidate.symbol != state.symbol:
+            remaining.append(candidate)
+            continue
+        target_fill_at = candidate_target_fill_at(candidate, execution)
+        if state.bucket_start < target_fill_at:
+            remaining.append(candidate)
+            continue
+        fills.append(
+            simulate_candidate_fill(
+                candidate=candidate,
+                states=(state,),
+                execution=execution,
+            )
+        )
+    return remaining, fills
 
 
 def _save_checkpoint_and_event(
