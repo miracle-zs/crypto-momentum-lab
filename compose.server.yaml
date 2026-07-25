@@ -1,0 +1,110 @@
+name: crypto-momentum-lab
+
+x-app: &app
+  build: .
+  environment: &app-environment
+    CML_DATABASE_URL: postgresql+asyncpg://cml:${CML_POSTGRES_PASSWORD:?set CML_POSTGRES_PASSWORD}@postgres:5432/cml
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: cml
+      POSTGRES_USER: cml
+      POSTGRES_PASSWORD: ${CML_POSTGRES_PASSWORD:?set CML_POSTGRES_PASSWORD}
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cml -d cml"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    mem_limit: 384m
+
+  migrate:
+    <<: *app
+    entrypoint: ["alembic"]
+    command: ["upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  bootstrap-universe:
+    <<: *app
+    entrypoint: ["cml-market-data"]
+    command: ["refresh-universe", "--config", "configs/environments/server_paper.yaml"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  market-data:
+    <<: *app
+    environment:
+      <<: *app-environment
+      CML_ENVIRONMENT_CONFIG: configs/environments/server_paper.yaml
+    entrypoint: ["cml-market-data"]
+    command: ["run-market-data"]
+    depends_on:
+      bootstrap-universe:
+        condition: service_completed_successfully
+    volumes:
+      - market-data:/app/data
+    mem_limit: 640m
+
+  paper-trader:
+    <<: *app
+    entrypoint: ["cml-strategy-runner"]
+    command:
+      - paper-live-daemon
+      - --strategy
+      - compression_breakout
+      - --environment
+      - research
+      - --run-id
+      - server-paper-compression-breakout
+      - --candidate-notional
+      - "25"
+      - --max-states
+      - "100000000"
+      - --idle-timeout-seconds
+      - "86400"
+      - --checkpoint-every-states
+      - "100"
+      - --checkpoint-every-seconds
+      - "60"
+      - --max-market-state-age-seconds
+      - "120"
+    depends_on:
+      market-data:
+        condition: service_started
+    mem_limit: 384m
+
+  dashboard:
+    <<: *app
+    entrypoint: ["cml-operator-dashboard"]
+    command: ["--host", "0.0.0.0", "--port", "8765"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8765:8765"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    mem_limit: 256m
+
+volumes:
+  postgres-data:
+  market-data:

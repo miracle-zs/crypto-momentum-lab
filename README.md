@@ -124,3 +124,18 @@ bounded paper session directly from those rows:
 
 This is still simulated paper execution. It does not connect to Binance private
 APIs, read account state, submit real orders, or enforce a live risk engine.
+
+## Server Paper Deployment
+
+The production-style paper stack includes PostgreSQL, migrations, an initial
+universe refresh, public Binance market-data capture, the compression-breakout
+paper daemon, and the read-only operator dashboard. It never receives Binance
+private API credentials and cannot place orders.
+
+```bash
+cp .env.server.example .env.server
+# Replace the placeholder with a random alphanumeric PostgreSQL password.
+docker compose --env-file .env.server -f compose.server.yaml up -d --build
+```
+
+See `docs/runbooks/server-paper-deployment.md` for Nginx setup and verification.

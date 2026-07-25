@@ -1,0 +1,30 @@
+market_websocket_url: wss://fstream.binance.com/market/ws
+public_websocket_url: wss://fstream.binance.com/public/ws
+enabled_streams:
+  - aggTrade
+  - bookTicker
+  - forceOrder
+  - markPrice@1s
+  - kline_1m
+max_subscriptions_per_connection: 100
+control_messages_per_second: 5
+connection_lifetime_seconds: 82800
+open_timeout_seconds: 10
+ping_interval_seconds: 180
+ping_timeout_seconds: 600
+silence_timeout_seconds: 30
+queue_max_events: 25000
+queue_max_bytes: 67108864
+shutdown_timeout_seconds: 30
+archive:
+  root: data/raw
+  zstd_level: 3
+  rotation_uncompressed_bytes: 67108864
+  max_open_writers: 128
+  group_commit_max_events: 250
+  group_commit_max_milliseconds: 250
+  warning_free_bytes: 10737418240
+  halt_free_bytes: 5368709120
+  recovery_free_bytes: 8589934592
+  disk_check_interval_seconds: 10
+  pending_manifest_max_age_seconds: 300

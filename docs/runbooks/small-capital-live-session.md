@@ -19,6 +19,12 @@ strategy, and the operator is prepared to stop and reconcile the session.
 The confirmation text is exactly `ENABLE SMALL LIVE TRADING`.
 
 ```bash
+cml-live-rollout preflight \
+  --database-url "$CML_DATABASE_URL" \
+  --account-label primary \
+  --strategy compression_breakout
+
+# Set STRATEGY_CONFIG_HASH and RISK_CONFIG_HASH from the preflight JSON.
 cml-live-rollout approve \
   --database-url "$CML_DATABASE_URL" \
   --account-label primary \
@@ -36,9 +42,12 @@ cml-live-rollout preflight --database-url "$CML_DATABASE_URL" --account-label pr
 
 ## Live Run
 
-The order-plan file must come from the risk-approved, quantized execution path
-and its intent must already exist in PostgreSQL. The following flag is the
-real-money confirmation: `--i-understand-this-places-real-orders`.
+`run` continuously consumes newly closed 15-second market states from
+PostgreSQL. For every state it reloads approval, lease, account health, halts,
+unresolved orders, positions, PnL, exposure, trading rules, and cooldowns before
+the strategy can submit an order. It restores and saves the strategy checkpoint
+under the session ID. The following flag is the real-money confirmation:
+`--i-understand-this-places-real-orders`.
 
 ```bash
 cml-live-rollout run \
@@ -49,11 +58,18 @@ cml-live-rollout run \
   --strategy-config-hash "$STRATEGY_CONFIG_HASH" \
   --git-commit-hash "$GIT_COMMIT" \
   --migration-revision 20260704_0010 \
-  --order-plan-json "$ORDER_PLAN_JSON" \
+  --max-runtime-seconds 3600 \
+  --state-stale-after-seconds 30 \
+  --checkpoint-every-states 100 \
+  --max-spread 5 --cooldown-seconds 300 \
   --i-understand-this-places-real-orders
 
 cml-live-rollout status --database-url "$CML_DATABASE_URL" --session-id "$SESSION_ID"
 ```
+
+The separate `submit-plan` command exists for a controlled single-order probe.
+Its quantized plan must reference an already persisted risk-approved intent; it
+uses the same live gate and explicit real-money confirmation flag.
 
 ## Drain And Emergency Controls
 

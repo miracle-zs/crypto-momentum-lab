@@ -23,6 +23,7 @@ def test_live_cli_exposes_required_commands() -> None:
         "approve",
         "preflight",
         "run",
+        "submit-plan",
         "status",
         "disable-new-entries",
         "report",

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CML / Operator Console</title>
+  <link rel="stylesheet" href="static/dashboard.css">
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+  <header class="masthead">
+    <div>
+      <p class="eyebrow">CRYPTO MOMENTUM LAB / LOCAL READ-ONLY TERMINAL</p>
+      <h1>Execution<br><span>Control Room</span></h1>
+    </div>
+    <div class="masthead-meta">
+      <div class="clock"><span>UTC</span><strong id="utc-clock">--:--:--</strong></div>
+      <div id="global-mode" class="mode-stamp status-UNKNOWN">UNKNOWN</div>
+      <p>Browser transport: <b>PostgreSQL API only</b><br>Exchange writes: <b>backend gated</b></p>
+    </div>
+  </header>
+
+  <nav class="status-rail" aria-label="Status legend">
+    <span class="status-UNKNOWN">UNKNOWN</span>
+    <span class="status-STALE">STALE</span>
+    <span class="status-HALTED">HALTED</span>
+    <span class="status-SHADOW">SHADOW</span>
+    <span class="status-LIVE">LIVE</span>
+    <span class="status-READY">READY</span>
+    <i>Refresh / 5 seconds</i>
+  </nav>
+
+  <main class="console-grid">
+    <section id="overview" class="panel panel-wide" data-endpoint="api/overview">
+      <div class="panel-heading">
+        <div><span class="index">01</span><h2>System Overview</h2></div>
+        <span class="section-state status-UNKNOWN">UNKNOWN</span>
+      </div>
+      <div class="panel-body loading">Awaiting service telemetry...</div>
+    </section>
+
+    <section id="risk" class="panel panel-alert" data-endpoint="api/risk-execution">
+      <div class="panel-heading">
+        <div><span class="index">02</span><h2>Risk / Execution</h2></div>
+        <span class="section-state status-UNKNOWN">UNKNOWN</span>
+      </div>
+      <div class="panel-body loading">No risk decision stream.</div>
+    </section>
+
+    <section id="universe" class="panel panel-tall" data-endpoint="api/universe">
+      <div class="panel-heading">
+        <div><span class="index">03</span><h2>UTC+0 Momentum Field</h2></div>
+        <span class="section-state status-UNKNOWN">UNKNOWN</span>
+      </div>
+      <div class="panel-body loading">Top gainers / losers: NO DATA</div>
+    </section>
+
+    <section id="strategy" class="panel" data-endpoint="api/strategy-runs/current">
+      <div class="panel-heading">
+        <div><span class="index">04</span><h2>Selected Strategy</h2></div>
+        <span class="section-state status-UNKNOWN">UNKNOWN</span>
+      </div>
+      <div class="panel-body loading">Strategy runtime: UNKNOWN</div>
+    </section>
+
+    <section id="account" class="panel" data-endpoint="api/account">
+      <div class="panel-heading">
+        <div><span class="index">05</span><h2>Execution Account</h2></div>
+        <span class="section-state status-UNKNOWN">UNKNOWN</span>
+      </div>
+      <div class="panel-body loading">Read-only account sync: UNKNOWN</div>
+    </section>
+
+    <section id="reports" class="panel panel-wide" data-endpoint="api/reports">
+      <div class="panel-heading">
+        <div><span class="index">06</span><h2>Run Ledger</h2></div>
+        <span class="section-state status-UNKNOWN">UNKNOWN</span>
+      </div>
+      <div class="panel-body loading">Paper / shadow / live reports: NO DATA</div>
+    </section>
+
+    <section id="actions" class="panel panel-actions panel-wide">
+      <div class="panel-heading">
+        <div><span class="index">07</span><h2>Controlled Actions</h2></div>
+        <span class="lock">READ ONLY</span>
+      </div>
+      <div class="action-grid">
+        <button disabled>Global Halt<small>Requires audited command record</small></button>
+        <button disabled>Drain Strategy<small>Requires strategy transition record</small></button>
+        <button disabled>Cancel Open Orders<small>Requires cancel confirmation record</small></button>
+        <button disabled>Emergency Flatten<small>Requires explicit flatten confirmation</small></button>
+        <button disabled>Release Lease<small>Requires flat reconciliation</small></button>
+      </div>
+      <p class="action-note">This surface never calls Binance directly. Use signed backend commands and inspect their audit events here.</p>
+    </section>
+  </main>
+
+  <footer>
+    <span>CML // OPERATOR CONSOLE</span>
+    <span id="last-cycle">LAST POLL: UNKNOWN</span>
+    <span>LOCALHOST / NO CREDENTIAL FIELDS</span>
+  </footer>
+  <script src="static/dashboard.js" defer></script>
+</body>
+</html>
