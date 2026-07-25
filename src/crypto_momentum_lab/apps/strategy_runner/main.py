@@ -677,6 +677,7 @@ def build_postgres_paper_source(
     loader = AsyncPostgresRuntimeStateLoader(
         repository=repository,
         environment=environment,
+        shutdown=engine.dispose,
     )
     return PostgresPaperMarketStateSource(
         loader=loader,

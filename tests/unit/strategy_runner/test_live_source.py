@@ -1,9 +1,11 @@
+import asyncio
 from datetime import UTC, datetime
 
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     RuntimeStateCursor,
 )
 from crypto_momentum_lab.strategy_runner.live_source import (
+    AsyncPostgresRuntimeStateLoader,
     PaperLiveSourceConfig,
     PostgresPaperMarketStateSource,
 )
@@ -27,6 +29,39 @@ class FakeLoader:
         if not self.batches:
             return ()
         return self.batches.pop(0)
+
+    def close(self) -> None:
+        pass
+
+
+class LoopRecordingRepository:
+    def __init__(self) -> None:
+        self.loops: list[asyncio.AbstractEventLoop] = []
+
+    async def load_after(
+        self,
+        *,
+        environment: str,
+        cursor: RuntimeStateCursor,
+        limit: int,
+    ):
+        del environment, cursor, limit
+        self.loops.append(asyncio.get_running_loop())
+        return ()
+
+
+def test_async_loader_reuses_one_event_loop_for_pooled_database_connections() -> None:
+    repository = LoopRecordingRepository()
+    loader = AsyncPostgresRuntimeStateLoader(
+        repository=repository,
+        environment="research",
+    )
+
+    loader.load_after(cursor=RuntimeStateCursor(), limit=10)
+    loader.load_after(cursor=RuntimeStateCursor(), limit=10)
+
+    assert repository.loops[0] is repository.loops[1]
+    loader.close()
 
 
 def test_postgres_paper_source_yields_in_order_and_advances_cursor() -> None:

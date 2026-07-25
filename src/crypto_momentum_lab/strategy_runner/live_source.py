@@ -1,7 +1,7 @@
 import asyncio
 import time
-from collections.abc import Iterator
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterator
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
@@ -19,6 +19,8 @@ class RuntimeStateLoader(Protocol):
         cursor: RuntimeStateCursor,
         limit: int,
     ) -> tuple[MarketState15s, ...]: ...
+
+    def close(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,44 +60,56 @@ class PostgresPaperMarketStateSource:
         cursor = _initial_cursor(self.config)
         yielded = 0
         idle_started_at = time.monotonic()
-        while yielded < self.config.max_states:
-            limit = min(self.config.batch_size, self.config.max_states - yielded)
-            batch = self.loader.load_after(cursor=cursor, limit=limit)
-            if batch:
-                idle_started_at = time.monotonic()
-                for state in batch:
-                    if state.environment != self.config.environment:
-                        raise ValueError("runtime state environment mismatch")
-                    yield state
-                    yielded += 1
-                    cursor = RuntimeStateCursor(
-                        bucket_start=state.bucket_start,
-                        symbol=state.symbol,
-                    )
-                    if yielded >= self.config.max_states:
-                        return
-                continue
+        try:
+            while yielded < self.config.max_states:
+                limit = min(
+                    self.config.batch_size,
+                    self.config.max_states - yielded,
+                )
+                batch = self.loader.load_after(cursor=cursor, limit=limit)
+                if batch:
+                    idle_started_at = time.monotonic()
+                    for state in batch:
+                        if state.environment != self.config.environment:
+                            raise ValueError("runtime state environment mismatch")
+                        yield state
+                        yielded += 1
+                        cursor = RuntimeStateCursor(
+                            bucket_start=state.bucket_start,
+                            symbol=state.symbol,
+                        )
+                        if yielded >= self.config.max_states:
+                            return
+                    continue
 
-            elapsed_idle = time.monotonic() - idle_started_at
-            if elapsed_idle >= self.config.idle_timeout_seconds:
-                return
-            sleep_seconds = min(
-                self.config.poll_interval_seconds,
-                self.config.idle_timeout_seconds - elapsed_idle,
-            )
-            if sleep_seconds <= 0:
+                elapsed_idle = time.monotonic() - idle_started_at
+                if elapsed_idle >= self.config.idle_timeout_seconds:
+                    return
                 sleep_seconds = min(
-                    0.01,
+                    self.config.poll_interval_seconds,
                     self.config.idle_timeout_seconds - elapsed_idle,
                 )
-            if sleep_seconds > 0:
-                time.sleep(sleep_seconds)
+                if sleep_seconds <= 0:
+                    sleep_seconds = min(
+                        0.01,
+                        self.config.idle_timeout_seconds - elapsed_idle,
+                    )
+                if sleep_seconds > 0:
+                    time.sleep(sleep_seconds)
+        finally:
+            self.loader.close()
 
 
 @dataclass(frozen=True, slots=True)
 class AsyncPostgresRuntimeStateLoader:
     repository: PostgresRuntimeMarketStateRepository
     environment: str
+    shutdown: Callable[[], Awaitable[None]] | None = None
+    _event_loop: asyncio.AbstractEventLoop = field(
+        default_factory=asyncio.new_event_loop,
+        repr=False,
+        compare=False,
+    )
 
     def load_after(
         self,
@@ -103,13 +117,20 @@ class AsyncPostgresRuntimeStateLoader:
         cursor: RuntimeStateCursor,
         limit: int,
     ) -> tuple[MarketState15s, ...]:
-        return asyncio.run(
+        return self._event_loop.run_until_complete(
             self.repository.load_after(
                 environment=self.environment,
                 cursor=cursor,
                 limit=limit,
             )
         )
+
+    def close(self) -> None:
+        if self._event_loop.is_closed():
+            return
+        if self.shutdown is not None:
+            self._event_loop.run_until_complete(self.shutdown())
+        self._event_loop.close()
 
 
 def _initial_cursor(config: PaperLiveSourceConfig) -> RuntimeStateCursor:
