@@ -4,6 +4,10 @@ This deployment consumes Binance public USD-M market data and runs the selected
 strategy in paper mode. It does not accept Binance credentials and cannot place
 orders.
 
+The small-server profile subscribes only to Binance `aggTrade`, which is the
+stream required to build OHLC states for compression breakout. Deploy other
+strategies with a separate capture profile sized for their required streams.
+
 ## Deploy
 
 1. Install Docker Engine with the Compose plugin.

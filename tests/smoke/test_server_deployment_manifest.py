@@ -23,6 +23,14 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert "BINANCE_API_SECRET" not in str(manifest)
 
 
+def test_server_paper_capture_only_subscribes_to_strategy_required_streams() -> None:
+    capture = yaml.safe_load(
+        Path("configs/capture/server_paper.yaml").read_text(encoding="utf-8")
+    )
+
+    assert capture["enabled_streams"] == ["aggTrade"]
+
+
 def test_nginx_proxy_keeps_existing_site_and_mounts_console() -> None:
     config = Path("deploy/nginx/crypto-momentum-lab.conf").read_text(
         encoding="utf-8"
