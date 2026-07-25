@@ -7,6 +7,7 @@ import zstandard
 from crypto_momentum_lab.domain.market.models import RawEnvelope
 from crypto_momentum_lab.persistence.raw_files.archive import serialize_envelope
 from crypto_momentum_lab.persistence.raw_files.recovery import (
+    recover_archive_root,
     recover_temporary_archive,
 )
 
@@ -55,6 +56,24 @@ async def test_recovery_commits_multiple_batches_without_serial_timer_waits(
     )
 
     assert result.manifest.row_count == 251
+
+
+async def test_recovery_quarantines_empty_temporary_and_continues(
+    tmp_path: Path,
+) -> None:
+    temporary = _temporary_path(tmp_path)
+    temporary.parent.mkdir(parents=True)
+    temporary.write_bytes(b"partial-frame")
+
+    results = await recover_archive_root(
+        tmp_path,
+        environment="test",
+        capture_version="test",
+    )
+
+    assert results == ()
+    assert not temporary.exists()
+    assert tuple((tmp_path / ".recovery-quarantine").rglob("*.quarantined"))
 
 
 def write_truncated_archive(

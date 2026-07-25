@@ -20,6 +20,10 @@ from crypto_momentum_lab.persistence.raw_files.archive import ZstdJsonlArchive
 _RECOVERY_BATCH_SIZE = 250
 
 
+class EmptyTemporaryArchiveError(ValueError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class RecoveryResult:
     manifest: ArchiveManifest
@@ -44,14 +48,21 @@ async def recover_archive_root(
     )
     results = []
     for temporary in temporary_paths:
-        results.append(
-            await recover_temporary_archive(
-                temporary,
-                archive_root=root,
-                environment=environment,
-                capture_version=capture_version,
+        try:
+            results.append(
+                await recover_temporary_archive(
+                    temporary,
+                    archive_root=root,
+                    environment=environment,
+                    capture_version=capture_version,
+                )
             )
-        )
+        except EmptyTemporaryArchiveError:
+            await asyncio.to_thread(
+                _quarantine_temporary,
+                temporary,
+                root,
+            )
     return tuple(results)
 
 
@@ -63,15 +74,20 @@ async def recover_temporary_archive(
     capture_version: str,
 ) -> RecoveryResult:
     data = await asyncio.to_thread(temporary.read_bytes)
-    decompressed, discarded_bytes = await asyncio.to_thread(
-        _decompress_complete_frame,
-        data,
-    )
+    try:
+        decompressed, discarded_bytes = await asyncio.to_thread(
+            _decompress_complete_frame,
+            data,
+        )
+    except zstandard.ZstdError as error:
+        raise EmptyTemporaryArchiveError(
+            "temporary archive contains no recoverable frame"
+        ) from error
     envelopes = _envelopes_from_jsonl(decompressed)
     try:
         first_envelope = next(envelopes)
     except StopIteration:
-        raise ValueError(
+        raise EmptyTemporaryArchiveError(
             "temporary archive contains no complete records"
         ) from None
 
