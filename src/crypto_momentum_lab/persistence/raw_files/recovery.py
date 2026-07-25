@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +16,8 @@ from crypto_momentum_lab.domain.market.models import (
     RawEnvelope,
 )
 from crypto_momentum_lab.persistence.raw_files.archive import ZstdJsonlArchive
+
+_RECOVERY_BATCH_SIZE = 250
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,9 +67,13 @@ async def recover_temporary_archive(
         _decompress_complete_frame,
         data,
     )
-    envelopes = tuple(_envelopes_from_jsonl(decompressed))
-    if not envelopes:
-        raise ValueError("temporary archive contains no complete records")
+    envelopes = _envelopes_from_jsonl(decompressed)
+    try:
+        first_envelope = next(envelopes)
+    except StopIteration:
+        raise ValueError(
+            "temporary archive contains no complete records"
+        ) from None
 
     quarantined_path = await asyncio.to_thread(
         _quarantine_temporary,
@@ -88,11 +95,14 @@ async def recover_temporary_archive(
         zstd_level=1,
         rotation_uncompressed_bytes=10_000_000_000,
         max_open_writers=4,
-        group_commit_max_events=1,
-        group_commit_max_milliseconds=10_000,
+        group_commit_max_events=_RECOVERY_BATCH_SIZE,
+        group_commit_max_milliseconds=250,
     )
-    for envelope in envelopes:
-        await archive.append(envelope)
+    await _append_in_batches(
+        archive,
+        _prepend(first_envelope, envelopes),
+        batch_size=_RECOVERY_BATCH_SIZE,
+    )
     await archive.close()
 
     return RecoveryResult(
@@ -108,14 +118,36 @@ def _decompress_complete_frame(data: bytes) -> tuple[bytes, int]:
     return decompressed, len(decompressor.unused_data)
 
 
-def _envelopes_from_jsonl(data: bytes) -> list[RawEnvelope]:
-    envelopes = []
+async def _append_in_batches(
+    archive: ZstdJsonlArchive,
+    envelopes: Iterator[RawEnvelope],
+    *,
+    batch_size: int,
+) -> None:
+    batch: list[RawEnvelope] = []
+    for envelope in envelopes:
+        batch.append(envelope)
+        if len(batch) >= batch_size:
+            await asyncio.gather(*(archive.append(item) for item in batch))
+            batch.clear()
+    if batch:
+        await asyncio.gather(*(archive.append(item) for item in batch))
+
+
+def _prepend(
+    first: RawEnvelope,
+    remaining: Iterator[RawEnvelope],
+) -> Iterator[RawEnvelope]:
+    yield first
+    yield from remaining
+
+
+def _envelopes_from_jsonl(data: bytes) -> Iterator[RawEnvelope]:
     for line in data.splitlines():
         if not line:
             continue
         payload = json.loads(line)
-        envelopes.append(_envelope_from_payload(payload))
-    return envelopes
+        yield _envelope_from_payload(payload)
 
 
 def _envelope_from_payload(payload: dict[str, object]) -> RawEnvelope:

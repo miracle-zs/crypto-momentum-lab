@@ -1,3 +1,5 @@
+import asyncio
+from dataclasses import replace
 from pathlib import Path
 
 import zstandard
@@ -30,11 +32,46 @@ async def test_recovery_preserves_complete_records_and_quarantines_source(
     assert not temporary.exists()
 
 
+async def test_recovery_commits_multiple_batches_without_serial_timer_waits(
+    tmp_path: Path,
+    raw_envelope: RawEnvelope,
+) -> None:
+    temporary = _temporary_path(tmp_path)
+    temporary.parent.mkdir(parents=True)
+    rows = b"".join(
+        serialize_envelope(replace(raw_envelope, local_sequence=index))
+        for index in range(1, 252)
+    )
+    temporary.write_bytes(zstandard.ZstdCompressor(level=1).compress(rows))
+
+    result = await asyncio.wait_for(
+        recover_temporary_archive(
+            temporary,
+            archive_root=tmp_path,
+            environment="test",
+            capture_version="test",
+        ),
+        timeout=2,
+    )
+
+    assert result.manifest.row_count == 251
+
+
 def write_truncated_archive(
     tmp_path: Path,
     raw_envelope: RawEnvelope,
 ) -> Path:
-    temporary = (
+    temporary = _temporary_path(tmp_path)
+    temporary.parent.mkdir(parents=True)
+    frame = zstandard.ZstdCompressor(level=1).compress(
+        serialize_envelope(raw_envelope)
+    )
+    temporary.write_bytes(frame + b"partial-frame")
+    return temporary
+
+
+def _temporary_path(tmp_path: Path) -> Path:
+    return (
         tmp_path
         / "exchange=binance-usdm"
         / "date=2026-06-15"
@@ -46,9 +83,3 @@ def write_truncated_archive(
             "00000000000000000001.jsonl.zst.tmp"
         )
     )
-    temporary.parent.mkdir(parents=True)
-    frame = zstandard.ZstdCompressor(level=1).compress(
-        serialize_envelope(raw_envelope)
-    )
-    temporary.write_bytes(frame + b"partial-frame")
-    return temporary
