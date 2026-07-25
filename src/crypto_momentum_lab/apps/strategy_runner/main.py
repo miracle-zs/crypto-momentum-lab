@@ -706,7 +706,7 @@ async def persist_paper_report(
 
 
 def build_paper_daemon_repository(database_url: str) -> PostgresPaperDaemonRepository:
-    engine = create_async_database_engine(database_url)
+    engine = create_async_database_engine(database_url, pooled=False)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     return PostgresPaperDaemonRepository(factory)
 

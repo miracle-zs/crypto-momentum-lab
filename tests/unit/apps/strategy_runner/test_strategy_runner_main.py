@@ -533,6 +533,36 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
     assert "Paper live daemon completed: states=3 halt=none" in result.stdout
 
 
+def test_paper_daemon_repository_disables_async_connection_pool(monkeypatch) -> None:
+    calls: list[tuple[str, bool]] = []
+    engine = object()
+    factory = object()
+
+    def fake_create_engine(database_url: str, *, pooled: bool = True) -> object:
+        calls.append((database_url, pooled))
+        return engine
+
+    monkeypatch.setattr(main, "create_async_database_engine", fake_create_engine)
+    monkeypatch.setattr(
+        main,
+        "async_sessionmaker",
+        lambda candidate, expire_on_commit: (
+            factory
+            if candidate is engine and expire_on_commit is False
+            else None
+        ),
+    )
+
+    repository = main.build_paper_daemon_repository(
+        "postgresql+asyncpg://cml:cml@localhost:54329/cml"
+    )
+
+    assert calls == [
+        ("postgresql+asyncpg://cml:cml@localhost:54329/cml", False)
+    ]
+    assert repository._session_factory is factory
+
+
 def test_runtime_strategy_builder_supports_orderflow() -> None:
     strategy = main.build_runtime_strategy_for_cli(
         strategy_name="orderflow_impulse",
