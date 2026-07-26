@@ -89,23 +89,31 @@ def compression_breakout_study_command(
         typer.Option(
             "--compression-window-buckets",
             min=1,
-            help="Completed 15-second states used for the frozen range.",
+            help="Completed signal buckets used for the frozen range.",
         ),
     ] = 20,
+    signal_interval_seconds: Annotated[
+        int,
+        typer.Option(
+            "--signal-interval-seconds",
+            min=15,
+            help="Signal bucket duration; raw 15-second states are aggregated.",
+        ),
+    ] = 300,
     max_range_width_pct: Annotated[
         str,
         typer.Option(
             "--max-range-width-pct",
             help="Maximum lookback range width as a decimal percentage.",
         ),
-    ] = "0.005",
+    ] = "0.025",
     min_breakout_pct: Annotated[
         str,
         typer.Option(
             "--min-breakout-pct",
             help="Minimum breakout distance beyond the frozen range boundary.",
         ),
-    ] = "0.001",
+    ] = "0.003",
     acceptance_buckets: Annotated[
         int,
         typer.Option(
@@ -121,20 +129,21 @@ def compression_breakout_study_command(
             min=0,
             help="Buckets skipped after a detected event.",
         ),
-    ] = 8,
+    ] = 12,
     forward_horizon_buckets: Annotated[
         list[int] | None,
         typer.Option(
             "--forward-horizon-buckets",
             min=1,
-            help="Forward-label horizon in 15-second buckets. Repeatable.",
+            help="Forward-label horizon in signal buckets. Repeatable.",
         ),
     ] = None,
 ) -> None:
-    horizons = tuple(forward_horizon_buckets or [2, 4, 8, 12, 20, 40, 60, 120, 240])
+    horizons = tuple(forward_horizon_buckets or [1, 3, 6, 12])
     report = build_compression_breakout_report(
         state_paths=(states_root,),
         output_path=output_path,
+        signal_interval_seconds=signal_interval_seconds,
         config=CompressionBreakoutConfig(
             compression_window_buckets=compression_window_buckets,
             max_range_width_pct=Decimal(max_range_width_pct),

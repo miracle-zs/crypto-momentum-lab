@@ -68,7 +68,6 @@ class OrderFlowImpulseRuntimeStrategy:
                 "trade_notional",
                 "aggressive_buy_notional",
                 "aggressive_sell_notional",
-                "midpoint",
             ),
             max_gap_seconds=30,
             allow_entries_before_warmup=False,
@@ -76,9 +75,7 @@ class OrderFlowImpulseRuntimeStrategy:
 
     def restore(self, checkpoint: StrategyCheckpoint) -> None:
         self._warmup = dict(checkpoint.warmup_buckets_by_symbol)
-        self._cooldown_remaining = dict(
-            checkpoint.cooldown_buckets_remaining_by_symbol
-        )
+        self._cooldown_remaining = dict(checkpoint.cooldown_buckets_remaining_by_symbol)
         self._last_processed = dict(checkpoint.last_processed_at_by_symbol)
 
     def restore_checkpoint(self, checkpoint: StrategyCheckpoint) -> None:
@@ -86,17 +83,6 @@ class OrderFlowImpulseRuntimeStrategy:
 
     def on_market_state(self, state: MarketState15s) -> StrategyDecision:
         self._last_processed[state.symbol] = state.bucket_start
-        if state.midpoint is None:
-            return self._decision(
-                rejections=(
-                    StrategyRejection(
-                        reason=RejectionReason.MISSING_REQUIRED_PRICE,
-                        symbol=state.symbol,
-                        bucket_start=state.bucket_start,
-                        details={"field": "midpoint"},
-                    ),
-                )
-            )
         if state.close_price is None:
             return self._decision(
                 rejections=(

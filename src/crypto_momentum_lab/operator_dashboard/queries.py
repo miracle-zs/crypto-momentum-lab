@@ -9,6 +9,7 @@ from crypto_momentum_lab.domain.execution import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
+    PaperAccountsResponse,
     RiskExecutionResponse,
     RunReportSummaryResponse,
     ServiceStatusResponse,
@@ -199,12 +200,44 @@ class DashboardQueries:
             ],
         )
 
-    async def strategy_run(self) -> StrategyRunResponse:
+    async def paper_accounts(self) -> PaperAccountsResponse:
         async with self._session_factory() as session:
+            runs = (
+                await session.scalars(
+                    select(StrategyRunRow)
+                    .where(StrategyRunRow.run_mode == "paper")
+                    .order_by(StrategyRunRow.created_at.desc())
+                    .limit(50)
+                )
+            ).all()
+        latest_by_strategy: dict[str, StrategyRunRow] = {}
+        for run in runs:
+            latest_by_strategy.setdefault(run.strategy_name, run)
+        strategy_order = (
+            "compression_breakout",
+            "orderflow_impulse",
+            "liquidation_cascade",
+        )
+        accounts = [
+            await self.strategy_run(run_id=latest_by_strategy[name].run_id)
+            for name in strategy_order
+            if name in latest_by_strategy
+        ]
+        return PaperAccountsResponse(
+            status=(OperationalStatus.READY if accounts else OperationalStatus.NO_DATA),
+            accounts=accounts,
+        )
+
+    async def strategy_run(
+        self,
+        run_id: str | None = None,
+    ) -> StrategyRunResponse:
+        async with self._session_factory() as session:
+            statement = select(StrategyRunRow)
+            if run_id is not None:
+                statement = statement.where(StrategyRunRow.run_id == run_id)
             run = await session.scalar(
-                select(StrategyRunRow)
-                .order_by(StrategyRunRow.created_at.desc())
-                .limit(1)
+                statement.order_by(StrategyRunRow.created_at.desc()).limit(1)
             )
             if run is None:
                 return StrategyRunResponse(
@@ -301,9 +334,7 @@ class DashboardQueries:
                 "balance": None
                 if latest_equity is None
                 else str(latest_equity.balance),
-                "equity": None
-                if latest_equity is None
-                else str(latest_equity.equity),
+                "equity": None if latest_equity is None else str(latest_equity.equity),
                 "realized_pnl": None
                 if latest_equity is None
                 else str(latest_equity.realized_pnl),
@@ -330,9 +361,7 @@ class DashboardQueries:
                 for row in equity
             ],
             open_positions=[_paper_position(row) for row in open_positions],
-            closed_trades=[
-                _paper_position(row) for row in closed_positions
-            ],
+            closed_trades=[_paper_position(row) for row in closed_positions],
             trade_events=trade_events,
             latest_signals=[
                 {
@@ -355,9 +384,7 @@ class DashboardQueries:
                     "fill_price": None
                     if row.fill_price is None
                     else str(row.fill_price),
-                    "quantity": None
-                    if row.quantity is None
-                    else str(row.quantity),
+                    "quantity": None if row.quantity is None else str(row.quantity),
                     "filled_notional": None
                     if row.filled_notional is None
                     else str(row.filled_notional),
@@ -587,9 +614,7 @@ def _universe_entry(row: UniverseEntryRow, side: str) -> dict[str, JsonValue]:
         "utc_day_return": None
         if row.utc_day_return is None
         else str(row.utc_day_return),
-        "current_price": None
-        if row.current_price is None
-        else str(row.current_price),
+        "current_price": None if row.current_price is None else str(row.current_price),
     }
 
 
@@ -612,23 +637,15 @@ def _paper_position(row: PaperPositionRow) -> dict[str, JsonValue]:
         "side": row.side,
         "status": row.status,
         "opened_at": row.opened_at.isoformat(),
-        "closed_at": None
-        if row.closed_at is None
-        else row.closed_at.isoformat(),
+        "closed_at": None if row.closed_at is None else row.closed_at.isoformat(),
         "entry_price": str(row.entry_price),
-        "exit_price": None
-        if row.exit_price is None
-        else str(row.exit_price),
+        "exit_price": None if row.exit_price is None else str(row.exit_price),
         "last_mark_price": str(row.last_mark_price),
         "quantity": str(row.quantity),
         "entry_notional": str(row.entry_notional),
         "unrealized_pnl": str(row.unrealized_pnl),
-        "realized_pnl": None
-        if row.realized_pnl is None
-        else str(row.realized_pnl),
-        "return_pct": None
-        if row.return_pct is None
-        else str(row.return_pct),
+        "realized_pnl": None if row.realized_pnl is None else str(row.realized_pnl),
+        "return_pct": None if row.return_pct is None else str(row.return_pct),
         "fees": str(row.entry_fee + row.exit_fee),
         "close_reason": row.close_reason,
     }
@@ -652,18 +669,14 @@ def _position_open_event(row: PaperPositionRow) -> dict[str, JsonValue]:
 def _position_close_event(row: PaperPositionRow) -> dict[str, JsonValue]:
     is_long = row.side == "long"
     return {
-        "occurred_at": None
-        if row.closed_at is None
-        else row.closed_at.isoformat(),
+        "occurred_at": None if row.closed_at is None else row.closed_at.isoformat(),
         "symbol": row.symbol,
         "event": "CLOSE_LONG" if is_long else "CLOSE_SHORT",
         "label": "平多" if is_long else "平空",
         "order_action": "SELL" if is_long else "BUY",
         "price": None if row.exit_price is None else str(row.exit_price),
         "quantity": str(row.quantity),
-        "pnl": None
-        if row.realized_pnl is None
-        else str(row.realized_pnl),
+        "pnl": None if row.realized_pnl is None else str(row.realized_pnl),
         "reason": row.close_reason,
     }
 

@@ -18,6 +18,7 @@ def test_run_compression_breakout_event_study_builds_report() -> None:
         states=_states(),
         config=_config(),
         source_paths=(Path("data/derived/market_states_15s"),),
+        signal_interval_seconds=15,
     )
 
     assert report.schema_version == 1
@@ -34,6 +35,7 @@ def test_write_compression_breakout_report_serializes_json(
         states=_states(),
         config=_config(),
         source_paths=(Path("states.parquet"),),
+        signal_interval_seconds=15,
     )
     output_path = tmp_path / "reports" / "compression-breakout.json"
 
@@ -42,6 +44,7 @@ def test_write_compression_breakout_report_serializes_json(
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == 1
     assert payload["config"]["compression_window_buckets"] == 4
+    assert payload["signal_interval_seconds"] == 15
     assert payload["source_paths"] == ["states.parquet"]
     assert payload["summary"]["total_count"] == 1
     assert payload["events"][0]["direction"] == "up"

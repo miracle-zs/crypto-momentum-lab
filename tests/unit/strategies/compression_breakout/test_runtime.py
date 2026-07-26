@@ -108,10 +108,13 @@ def test_runtime_checkpoint_contains_symbol_state() -> None:
 
     checkpoint = decision.checkpoint
 
-    assert checkpoint.last_processed_at_by_symbol["BTCUSDT"] == _state(
-        2,
-        close=Decimal("100"),
-    ).bucket_start
+    assert (
+        checkpoint.last_processed_at_by_symbol["BTCUSDT"]
+        == _state(
+            2,
+            close=Decimal("100"),
+        ).bucket_start
+    )
     assert checkpoint.warmup_buckets_by_symbol["BTCUSDT"] == 3
     assert checkpoint.payload["buffer_sizes"] == {"BTCUSDT": 3}
 
@@ -153,15 +156,88 @@ def test_runtime_does_not_need_future_rows_for_detection() -> None:
     assert base_signal.features == future_signal.features
 
 
+def test_runtime_aggregates_closed_five_minute_signal_buckets() -> None:
+    strategy = _strategy(
+        compression_window_buckets=2,
+        acceptance_buckets=1,
+        signal_interval_seconds=300,
+    )
+    states = tuple(
+        _state(
+            index,
+            close=Decimal("100") if index < 40 else Decimal("101"),
+            high=Decimal("100.1") if index < 40 else Decimal("101"),
+            low=Decimal("99.9") if index < 40 else Decimal("101"),
+        )
+        for index in range(60)
+    )
+
+    decisions = tuple(strategy.on_market_state(state) for state in states)
+
+    assert all(decision.signals == () for decision in decisions[:-1])
+    signal = decisions[-1].signals[0]
+    candidate = decisions[-1].candidates[0]
+    assert signal.detected_at == datetime(2026, 6, 22, 0, 15, tzinfo=UTC)
+    assert signal.source_state_at == datetime(2026, 6, 22, 0, 10, tzinfo=UTC)
+    assert signal.features["range_start"] == "2026-06-22T00:00:00+00:00"
+    assert signal.features["range_end"] == "2026-06-22T00:10:00+00:00"
+    assert candidate.created_at == signal.detected_at
+    assert candidate.expires_at == signal.detected_at + timedelta(seconds=30)
+    assert strategy.required_data().warmup_buckets == 60
+
+
+def test_runtime_restores_completed_signal_buckets_from_checkpoint() -> None:
+    original = _strategy(
+        compression_window_buckets=2,
+        acceptance_buckets=1,
+        signal_interval_seconds=300,
+    )
+    compression_states = tuple(
+        _state(
+            index,
+            close=Decimal("100"),
+            high=Decimal("100.1"),
+            low=Decimal("99.9"),
+        )
+        for index in range(40)
+    )
+    checkpoint = _last_decision(original, compression_states).checkpoint
+
+    restored = _strategy(
+        compression_window_buckets=2,
+        acceptance_buckets=1,
+        signal_interval_seconds=300,
+    )
+    restored.restore_checkpoint(checkpoint)
+    breakout_states = tuple(
+        _state(
+            index,
+            close=Decimal("101"),
+            high=Decimal("101"),
+            low=Decimal("101"),
+        )
+        for index in range(40, 60)
+    )
+
+    decision = _last_decision(restored, breakout_states)
+
+    assert len(decision.signals) == 1
+    assert decision.signals[0].side is StrategySide.LONG
+    assert decision.checkpoint.payload["buffer_sizes"] == {"BTCUSDT": 3}
+
+
 def _strategy(
     *,
     cooldown_buckets: int = 3,
+    compression_window_buckets: int = 3,
+    acceptance_buckets: int = 2,
+    signal_interval_seconds: int = 15,
 ) -> CompressionBreakoutRuntimeStrategy:
     event_config = CompressionBreakoutConfig(
-        compression_window_buckets=3,
+        compression_window_buckets=compression_window_buckets,
         max_range_width_pct=Decimal("0.01"),
         min_breakout_pct=Decimal("0.001"),
-        acceptance_buckets=2,
+        acceptance_buckets=acceptance_buckets,
         cooldown_buckets=cooldown_buckets,
         forward_horizon_buckets=(1,),
     )
@@ -169,6 +245,7 @@ def _strategy(
         event_config=event_config,
         candidate_notional=Decimal("100"),
         candidate_ttl_buckets=2,
+        signal_interval_seconds=signal_interval_seconds,
     )
     identity = StrategyRunIdentity(
         run_id="run-1",

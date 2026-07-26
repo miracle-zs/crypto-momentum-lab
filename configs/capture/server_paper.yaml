@@ -2,6 +2,7 @@ market_websocket_url: wss://fstream.binance.com/market/ws
 public_websocket_url: wss://fstream.binance.com/public/ws
 enabled_streams:
   - aggTrade
+  - forceOrder
 max_subscriptions_per_connection: 100
 control_messages_per_second: 5
 connection_lifetime_seconds: 82800

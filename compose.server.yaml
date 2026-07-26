@@ -6,6 +6,14 @@ x-app: &app
     CML_DATABASE_URL: postgresql+asyncpg://cml:${CML_POSTGRES_PASSWORD:?set CML_POSTGRES_PASSWORD}@postgres:5432/cml
   restart: unless-stopped
 
+x-paper: &paper
+  <<: *app
+  entrypoint: ["cml-strategy-runner"]
+  depends_on:
+    market-data:
+      condition: service_started
+  mem_limit: 192m
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -57,9 +65,8 @@ services:
       - market-data:/app/data
     mem_limit: 640m
 
-  paper-trader:
-    <<: *app
-    entrypoint: ["cml-strategy-runner"]
+  paper-compression:
+    <<: *paper
     command:
       - paper-live-daemon
       - --strategy
@@ -67,7 +74,49 @@ services:
       - --environment
       - research
       - --run-id
-      - server-paper-compression-breakout-v2
+      - paper-account-01-compression-v1
+      - --signal-interval-seconds
+      - "300"
+      - --compression-window-buckets
+      - "20"
+      - --max-range-width-pct
+      - "0.025"
+      - --min-breakout-pct
+      - "0.003"
+      - --acceptance-buckets
+      - "1"
+      - --cooldown-buckets
+      - "12"
+      - --candidate-notional
+      - "25"
+      - --paper-initial-balance
+      - "1000"
+      - --take-profit-pct
+      - "0.03"
+      - --stop-loss-pct
+      - "0.015"
+      - --max-holding-buckets
+      - "480"
+      - --max-states
+      - "100000000"
+      - --idle-timeout-seconds
+      - "86400"
+      - --checkpoint-every-states
+      - "100"
+      - --checkpoint-every-seconds
+      - "60"
+      - --max-market-state-age-seconds
+      - "120"
+  paper-orderflow:
+    <<: *paper
+    command:
+      - paper-live-daemon
+      - --strategy
+      - orderflow_impulse
+      - --environment
+      - research
+      - --run-id
+      - paper-account-02-orderflow-v1
       - --candidate-notional
       - "25"
       - --paper-initial-balance
@@ -88,10 +137,37 @@ services:
       - "60"
       - --max-market-state-age-seconds
       - "120"
-    depends_on:
-      market-data:
-        condition: service_started
-    mem_limit: 384m
+
+  paper-liquidation:
+    <<: *paper
+    command:
+      - paper-live-daemon
+      - --strategy
+      - liquidation_cascade
+      - --environment
+      - research
+      - --run-id
+      - paper-account-03-liquidation-v1
+      - --candidate-notional
+      - "25"
+      - --paper-initial-balance
+      - "1000"
+      - --take-profit-pct
+      - "0.025"
+      - --stop-loss-pct
+      - "0.0125"
+      - --max-holding-buckets
+      - "60"
+      - --max-states
+      - "100000000"
+      - --idle-timeout-seconds
+      - "86400"
+      - --checkpoint-every-states
+      - "100"
+      - --checkpoint-every-seconds
+      - "60"
+      - --max-market-state-age-seconds
+      - "120"
 
   dashboard:
     <<: *app

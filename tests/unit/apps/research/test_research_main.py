@@ -82,15 +82,16 @@ def test_compression_breakout_study_command_writes_report(
     states_root = tmp_path / "states"
     states_root.mkdir()
     output_path = tmp_path / "report.json"
-    calls: list[tuple[tuple[Path, ...], Path, CompressionBreakoutConfig]] = []
+    calls: list[tuple[tuple[Path, ...], Path, int, CompressionBreakoutConfig]] = []
 
     def fake_build_compression_breakout_report(
         *,
         state_paths: tuple[Path, ...],
         output_path: Path,
+        signal_interval_seconds: int,
         config: CompressionBreakoutConfig,
     ) -> object:
-        calls.append((state_paths, output_path, config))
+        calls.append((state_paths, output_path, signal_interval_seconds, config))
         return SimpleNamespace(summary=SimpleNamespace(total_count=2))
 
     monkeypatch.setattr(
@@ -129,6 +130,7 @@ def test_compression_breakout_study_command_writes_report(
         (
             (states_root,),
             output_path,
+            300,
             CompressionBreakoutConfig(
                 compression_window_buckets=4,
                 max_range_width_pct=Decimal("0.01"),

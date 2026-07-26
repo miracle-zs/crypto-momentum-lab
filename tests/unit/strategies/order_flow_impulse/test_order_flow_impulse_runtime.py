@@ -32,22 +32,20 @@ def test_orderflow_impulse_emits_long_signal_on_buy_imbalance() -> None:
     assert decision.candidates[0].desired_notional == Decimal("100")
 
 
-def test_orderflow_impulse_rejects_missing_midpoint() -> None:
+def test_orderflow_impulse_accepts_missing_midpoint_when_trade_price_exists() -> None:
     strategy = _strategy()
 
     decision = strategy.on_market_state(_state(0, Decimal("100"), midpoint=None))
 
     assert decision.signals == ()
-    assert decision.rejections[0].reason is RejectionReason.MISSING_REQUIRED_PRICE
-    assert decision.rejections[0].details == {"field": "midpoint"}
+    assert decision.rejections[0].reason is RejectionReason.INSUFFICIENT_WARMUP
+    assert "midpoint" not in strategy.required_data().required_fields
 
 
 def test_orderflow_impulse_restores_checkpoint() -> None:
     strategy = _strategy()
     checkpoint = StrategyCheckpoint(
-        last_processed_at_by_symbol={
-            "BTCUSDT": datetime(2026, 7, 4, 0, 1, tzinfo=UTC)
-        },
+        last_processed_at_by_symbol={"BTCUSDT": datetime(2026, 7, 4, 0, 1, tzinfo=UTC)},
         warmup_buckets_by_symbol={"BTCUSDT": 7},
         cooldown_buckets_remaining_by_symbol={"BTCUSDT": 2},
         payload={},
@@ -55,9 +53,7 @@ def test_orderflow_impulse_restores_checkpoint() -> None:
 
     strategy.restore_checkpoint(checkpoint)
 
-    assert strategy.checkpoint().cooldown_buckets_remaining_by_symbol == {
-        "BTCUSDT": 2
-    }
+    assert strategy.checkpoint().cooldown_buckets_remaining_by_symbol == {"BTCUSDT": 2}
 
 
 def _strategy() -> OrderFlowImpulseRuntimeStrategy:

@@ -128,9 +128,14 @@ APIs, read account state, submit real orders, or enforce a live risk engine.
 ## Server Paper Deployment
 
 The production-style paper stack includes PostgreSQL, migrations, an initial
-universe refresh, public Binance market-data capture, the compression-breakout
-paper daemon, and the read-only operator dashboard. It never receives Binance
-private API credentials and cannot place orders.
+universe refresh, public Binance market-data capture, three independent paper
+strategy daemons, and the read-only operator dashboard. It never receives
+Binance private API credentials and cannot place orders.
+
+The server compression profile evaluates 20 closed 5-minute bars, representing
+a 100-minute compression window. The order-flow and liquidation profiles use
+15-second states. Raw 15-second states remain the execution and risk-monitoring
+clock for all three accounts.
 
 ```bash
 cp .env.server.example .env.server

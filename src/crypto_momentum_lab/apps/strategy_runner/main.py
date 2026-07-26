@@ -98,11 +98,11 @@ def replay_command(
     max_range_width_pct: Annotated[
         str,
         typer.Option("--max-range-width-pct"),
-    ] = "0.005",
+    ] = "0.025",
     min_breakout_pct: Annotated[
         str,
         typer.Option("--min-breakout-pct"),
-    ] = "0.001",
+    ] = "0.003",
     acceptance_buckets: Annotated[
         int,
         typer.Option("--acceptance-buckets", min=1),
@@ -110,7 +110,11 @@ def replay_command(
     cooldown_buckets: Annotated[
         int,
         typer.Option("--cooldown-buckets", min=0),
-    ] = 8,
+    ] = 12,
+    signal_interval_seconds: Annotated[
+        int,
+        typer.Option("--signal-interval-seconds", min=15),
+    ] = 300,
     candidate_notional: Annotated[
         str,
         typer.Option("--candidate-notional"),
@@ -164,6 +168,7 @@ def replay_command(
         ),
         candidate_notional=Decimal(candidate_notional),
         candidate_ttl_buckets=candidate_ttl_buckets,
+        signal_interval_seconds=signal_interval_seconds,
         execution=execution,
     )
     report = build_strategy_replay_report(
@@ -237,11 +242,11 @@ def paper_command(
     max_range_width_pct: Annotated[
         str,
         typer.Option("--max-range-width-pct"),
-    ] = "0.005",
+    ] = "0.025",
     min_breakout_pct: Annotated[
         str,
         typer.Option("--min-breakout-pct"),
-    ] = "0.001",
+    ] = "0.003",
     acceptance_buckets: Annotated[
         int,
         typer.Option("--acceptance-buckets", min=1),
@@ -249,7 +254,11 @@ def paper_command(
     cooldown_buckets: Annotated[
         int,
         typer.Option("--cooldown-buckets", min=0),
-    ] = 8,
+    ] = 12,
+    signal_interval_seconds: Annotated[
+        int,
+        typer.Option("--signal-interval-seconds", min=15),
+    ] = 300,
     candidate_notional: Annotated[
         str,
         typer.Option("--candidate-notional"),
@@ -306,6 +315,7 @@ def paper_command(
         ),
         candidate_notional=Decimal(candidate_notional),
         candidate_ttl_buckets=candidate_ttl_buckets,
+        signal_interval_seconds=signal_interval_seconds,
         execution=ReplayExecutionConfig(
             latency_buckets=execution_latency_buckets,
             taker_fee_rate=Decimal(taker_fee_rate),
@@ -385,11 +395,11 @@ def paper_live_source_command(
     max_range_width_pct: Annotated[
         str,
         typer.Option("--max-range-width-pct"),
-    ] = "0.005",
+    ] = "0.025",
     min_breakout_pct: Annotated[
         str,
         typer.Option("--min-breakout-pct"),
-    ] = "0.001",
+    ] = "0.003",
     acceptance_buckets: Annotated[
         int,
         typer.Option("--acceptance-buckets", min=1),
@@ -397,7 +407,11 @@ def paper_live_source_command(
     cooldown_buckets: Annotated[
         int,
         typer.Option("--cooldown-buckets", min=0),
-    ] = 8,
+    ] = 12,
+    signal_interval_seconds: Annotated[
+        int,
+        typer.Option("--signal-interval-seconds", min=15),
+    ] = 300,
     candidate_notional: Annotated[
         str,
         typer.Option("--candidate-notional"),
@@ -444,9 +458,7 @@ def paper_live_source_command(
 ) -> None:
     resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
     if not resolved_database_url:
-        raise typer.BadParameter(
-            "--database-url or CML_DATABASE_URL is required"
-        )
+        raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
     created_at = _parse_generated_at(generated_at)
     source = build_postgres_paper_source(
         database_url=resolved_database_url,
@@ -472,6 +484,7 @@ def paper_live_source_command(
         ),
         candidate_notional=Decimal(candidate_notional),
         candidate_ttl_buckets=candidate_ttl_buckets,
+        signal_interval_seconds=signal_interval_seconds,
         execution=ReplayExecutionConfig(
             latency_buckets=execution_latency_buckets,
             taker_fee_rate=Decimal(taker_fee_rate),
@@ -538,11 +551,11 @@ def paper_live_daemon_command(
     max_range_width_pct: Annotated[
         str,
         typer.Option("--max-range-width-pct"),
-    ] = "0.005",
+    ] = "0.025",
     min_breakout_pct: Annotated[
         str,
         typer.Option("--min-breakout-pct"),
-    ] = "0.001",
+    ] = "0.003",
     acceptance_buckets: Annotated[
         int,
         typer.Option("--acceptance-buckets", min=1),
@@ -550,7 +563,11 @@ def paper_live_daemon_command(
     cooldown_buckets: Annotated[
         int,
         typer.Option("--cooldown-buckets", min=0),
-    ] = 8,
+    ] = 12,
+    signal_interval_seconds: Annotated[
+        int,
+        typer.Option("--signal-interval-seconds", min=15),
+    ] = 300,
     candidate_notional: Annotated[
         str,
         typer.Option("--candidate-notional"),
@@ -610,16 +627,12 @@ def paper_live_daemon_command(
 ) -> None:
     resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
     if not resolved_database_url:
-        raise typer.BadParameter(
-            "--database-url or CML_DATABASE_URL is required"
-        )
+        raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
     resolved_run_id = run_id or f"paper-live-daemon-{uuid4()}"
     created_at = _parse_generated_at(generated_at)
     resolved_start_at = _parse_optional_start_at(start_at)
     if resolved_start_at is None:
-        resolved_start_at = created_at - timedelta(
-            seconds=max_market_state_age_seconds
-        )
+        resolved_start_at = created_at - timedelta(seconds=max_market_state_age_seconds)
     source = build_postgres_paper_source(
         database_url=resolved_database_url,
         environment=environment,
@@ -645,6 +658,7 @@ def paper_live_daemon_command(
         compression_breakout=compression_breakout,
         candidate_notional=Decimal(candidate_notional),
         candidate_ttl_buckets=candidate_ttl_buckets,
+        signal_interval_seconds=signal_interval_seconds,
     )
     strategy = build_runtime_strategy_for_cli(
         strategy_name=strategy_name,
@@ -654,6 +668,7 @@ def paper_live_daemon_command(
         compression_breakout=compression_breakout,
         candidate_notional=Decimal(candidate_notional),
         candidate_ttl_buckets=candidate_ttl_buckets,
+        signal_interval_seconds=signal_interval_seconds,
         identity=identity,
     )
     repository = build_paper_daemon_repository(resolved_database_url)
@@ -763,6 +778,7 @@ def build_runtime_strategy_for_cli(
     compression_breakout: CompressionBreakoutConfig,
     candidate_notional: Decimal | None,
     candidate_ttl_buckets: int,
+    signal_interval_seconds: int = 300,
     identity: StrategyRunIdentity | None = None,
 ) -> RuntimeStrategyProtocol:
     resolved_identity = identity or build_runtime_identity_for_cli(
@@ -773,10 +789,12 @@ def build_runtime_strategy_for_cli(
         compression_breakout=compression_breakout,
         candidate_notional=candidate_notional,
         candidate_ttl_buckets=candidate_ttl_buckets,
+        signal_interval_seconds=signal_interval_seconds,
     )
     config_payload: dict[str, object] = {
         "candidate_notional": candidate_notional,
         "candidate_ttl_buckets": candidate_ttl_buckets,
+        "signal_interval_seconds": signal_interval_seconds,
         "compression_breakout": compression_breakout,
     }
     return build_runtime_strategy(
@@ -795,10 +813,12 @@ def build_runtime_identity_for_cli(
     compression_breakout: CompressionBreakoutConfig,
     candidate_notional: Decimal | None,
     candidate_ttl_buckets: int,
+    signal_interval_seconds: int = 300,
 ) -> StrategyRunIdentity:
     config_payload: dict[str, object] = {
         "candidate_notional": candidate_notional,
         "candidate_ttl_buckets": candidate_ttl_buckets,
+        "signal_interval_seconds": signal_interval_seconds,
         "compression_breakout": compression_breakout,
     }
     runtime_config = build_runtime_config(

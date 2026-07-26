@@ -44,6 +44,7 @@ def test_run_strategy_replay_emits_report_from_in_memory_states() -> None:
             ),
             candidate_notional=Decimal("100"),
             candidate_ttl_buckets=2,
+            signal_interval_seconds=15,
         ),
     )
 
@@ -161,6 +162,7 @@ def test_build_strategy_replay_report_reads_parquet_states(tmp_path: Path) -> No
             ),
             candidate_notional=Decimal("100"),
             candidate_ttl_buckets=2,
+            signal_interval_seconds=15,
         ),
     )
 
@@ -252,6 +254,7 @@ def _replay_config(
         ),
         candidate_notional=Decimal("100"),
         candidate_ttl_buckets=2,
+        signal_interval_seconds=15,
         execution=execution,
     )
 

@@ -50,6 +50,11 @@ class StrategyRunResponse(DashboardSchema):
     rejection_summary: dict[str, JsonValue]
 
 
+class PaperAccountsResponse(DashboardSchema):
+    status: OperationalStatus
+    accounts: list[StrategyRunResponse] = Field(default_factory=list)
+
+
 class AccountOverviewResponse(DashboardSchema):
     status: OperationalStatus
     observed_at: datetime | None

@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from crypto_momentum_lab.operator_dashboard.api import create_dashboard_app
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
+    PaperAccountsResponse,
     RiskExecutionResponse,
     RunReportSummaryResponse,
     StrategyRunResponse,
@@ -64,6 +65,12 @@ class FakeQueries:
             checkpoint_at=None,
             latest_signals=[],
             rejection_summary={},
+        )
+
+    async def paper_accounts(self) -> PaperAccountsResponse:
+        return PaperAccountsResponse(
+            status=OperationalStatus.READY,
+            accounts=[await self.strategy_run()],
         )
 
     async def account(self) -> AccountOverviewResponse:

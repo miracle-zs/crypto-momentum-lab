@@ -253,6 +253,29 @@ h2 { margin: 0; font: 400 clamp(24px, 3vw, 38px)/1 var(--display); text-transfor
 .event-open { color: var(--cyan); }
 .event-close { color: var(--amber); }
 .secondary-ledger { opacity: .82; }
+.paper-account-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 24px;
+}
+.paper-account-card {
+  display: grid;
+  gap: 7px;
+  min-height: 138px;
+  padding: 18px;
+  border: 1px solid var(--line-hot);
+  background: linear-gradient(145deg, rgba(76, 201, 192, .08), rgba(7, 16, 22, .72));
+}
+.paper-account-card span,
+.paper-account-card small { color: var(--muted); font-size: 9px; letter-spacing: .12em; }
+.paper-account-card b { font: 400 18px/1.2 var(--display); }
+.paper-account-card strong { color: var(--cyan); font: 400 28px/1 var(--mono); }
+.paper-account-stack { display: grid; gap: 32px; }
+.paper-account {
+  padding-top: 24px;
+  border-top: 2px solid var(--line-hot);
+}
 
 .service-list { display: grid; gap: 7px; margin-top: 20px; }
 .service-row { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 18px; border-bottom: 1px solid var(--line); padding: 10px 0; }
@@ -308,6 +331,7 @@ footer { display: flex; justify-content: space-between; gap: 20px; padding: 18px
   .console-grid { grid-template-columns: 1fr; }
   .panel-wide { grid-column: auto; }
   .split { grid-template-columns: 1fr; }
+  .paper-account-grid { grid-template-columns: 1fr; }
   .portfolio-metrics { grid-template-columns: 1fr 1fr; }
   .ledger-split { grid-template-columns: 1fr; }
   .action-grid { grid-template-columns: 1fr 1fr; }

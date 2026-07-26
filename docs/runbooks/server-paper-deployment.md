@@ -1,12 +1,30 @@
 # Server Paper Deployment
 
-This deployment consumes Binance public USD-M market data and runs the selected
-strategy in paper mode. It does not accept Binance credentials and cannot place
-orders.
+This deployment consumes Binance public USD-M market data and runs three
+independent strategies in paper mode. It does not accept Binance credentials
+and cannot place orders.
 
-The small-server profile subscribes only to Binance `aggTrade`, which is the
-stream required to build OHLC states for compression breakout. Deploy other
-strategies with a separate capture profile sized for their required streams.
+The server profile subscribes to `aggTrade` and `forceOrder`. `aggTrade` feeds
+all three strategies and `forceOrder` feeds the liquidation cascade strategy.
+The order-flow strategy uses trade-close prices for signal evaluation, so it
+does not require the high-volume `bookTicker` stream.
+
+The compression-breakout daemon keeps 15-second states for execution and risk
+monitoring, but aggregates them into closed UTC-aligned 5-minute signal bars.
+Its initial medium-frequency profile is:
+
+- 20 signal bars, or 100 minutes, in the frozen compression range;
+- maximum range width of 2.5%;
+- minimum breakout distance of 0.3%;
+- one closed 5-minute bar for acceptance;
+- 12 signal bars, or 60 minutes, of per-symbol cooldown.
+
+The three virtual accounts are isolated by run ID and each starts with 1,000
+USDT:
+
+- `paper-account-01-compression-v1`: `compression_breakout`;
+- `paper-account-02-orderflow-v1`: `orderflow_impulse`;
+- `paper-account-03-liquidation-v1`: `liquidation_cascade`.
 
 ## Deploy
 
@@ -31,7 +49,8 @@ strategies with a separate capture profile sized for their required streams.
 
 ```bash
 docker compose --env-file .env.server -f compose.server.yaml ps
-docker compose --env-file .env.server -f compose.server.yaml logs --tail=200 market-data paper-trader
+docker compose --env-file .env.server -f compose.server.yaml logs --tail=200 \
+  market-data paper-compression paper-orderflow paper-liquidation
 curl -fsS http://127.0.0.1:8765/api/health
 curl -fsS http://127.0.0.1/momentum/api/health
 ```
@@ -46,28 +65,27 @@ The paper daemon persists strategy signals, order-intent candidates, and
 simulated fills in PostgreSQL. Pending candidates are reloaded after a daemon
 restart, and repeated writes are idempotent.
 
-The dashboard separates the paper account into:
+The dashboard separates the three paper accounts into:
 
 - account equity and balance history;
 - currently open positions with mark price and unrealized PnL;
 - closed trades with net realized PnL;
 - a lifecycle ledger labeled `开多`, `开空`, `平多`, or `平空`.
 
-The server profile starts with 1,000 USDT of virtual equity. A filled entry opens
-a paper position. Positions close on the first closed 15-second state that
-reaches one of these rules:
+Each account starts with 1,000 USDT of virtual equity. A filled entry opens a
+paper position. The compression account closes on the first closed 15-second
+state that reaches one of these rules:
 
-- take profit at 2%;
-- stop loss at 1%;
-- maximum holding period of 80 buckets, or 20 minutes.
+- take profit at 3%;
+- stop loss at 1.5%;
+- maximum holding period of 480 execution buckets, or 2 hours.
 
-PnL includes both entry and exit taker fees. The small-server profile evaluates
-the closed state's trade close, rather than intrabucket high/low, because it
-subscribes only to Binance `aggTrade`.
+PnL includes both entry and exit taker fees. All three accounts evaluate the
+closed state's trade close, rather than intrabucket high/low.
 
-The small-server `aggTrade` profile has no order-book quotes, so virtual fills
-use the closed 15-second state's trade close as the executable reference price.
-No order is sent to Binance.
+The server profile has no private account connection, so virtual fills use the
+closed 15-second state's trade close as the executable reference price. No order
+is sent to Binance.
 
 Inspect persisted artifact counts with:
 

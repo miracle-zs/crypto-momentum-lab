@@ -147,6 +147,7 @@ def _paper_config(
         ),
         candidate_notional=Decimal("100"),
         candidate_ttl_buckets=2,
+        signal_interval_seconds=15,
         execution=ReplayExecutionConfig(latency_buckets=1),
         max_states=max_states,
     )

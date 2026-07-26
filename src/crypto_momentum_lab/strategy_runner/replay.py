@@ -46,6 +46,7 @@ class ReplayConfig:
     compression_breakout: CompressionBreakoutConfig
     candidate_notional: Decimal | None
     candidate_ttl_buckets: int
+    signal_interval_seconds: int = 300
     execution: ReplayExecutionConfig | None = field(
         default_factory=ReplayExecutionConfig
     )
@@ -63,6 +64,8 @@ class ReplayConfig:
             raise ValueError("candidate_notional must be positive")
         if self.candidate_ttl_buckets <= 0:
             raise ValueError("candidate_ttl_buckets must be positive")
+        if self.signal_interval_seconds <= 0:
+            raise ValueError("signal_interval_seconds must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +120,7 @@ def run_strategy_replay(
         event_config=config.compression_breakout,
         candidate_notional=config.candidate_notional,
         candidate_ttl_buckets=config.candidate_ttl_buckets,
+        signal_interval_seconds=config.signal_interval_seconds,
     )
     identity = StrategyRunIdentity(
         run_id=config.run_id,

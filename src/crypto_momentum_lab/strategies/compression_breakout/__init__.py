@@ -10,6 +10,7 @@ from crypto_momentum_lab.strategies.compression_breakout.event_study import (
 from crypto_momentum_lab.strategies.compression_breakout.runtime import (
     CompressionBreakoutRuntimeConfig,
     CompressionBreakoutRuntimeStrategy,
+    aggregate_compression_signal_states,
 )
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "CompressionBreakoutRuntimeConfig",
     "CompressionBreakoutRuntimeStrategy",
     "CompressionBreakoutSummary",
+    "aggregate_compression_signal_states",
     "find_compression_breakouts",
     "summarize_compression_breakouts",
 ]

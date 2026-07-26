@@ -11,6 +11,7 @@ from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
     CompressionBreakoutEvent,
     CompressionBreakoutSummary,
+    aggregate_compression_signal_states,
     find_compression_breakouts,
     summarize_compression_breakouts,
 )
@@ -21,6 +22,7 @@ class CompressionBreakoutReport:
     schema_version: int
     generated_at: datetime
     config: CompressionBreakoutConfig
+    signal_interval_seconds: int
     source_paths: tuple[str, ...]
     events: tuple[CompressionBreakoutEvent, ...]
     summary: CompressionBreakoutSummary
@@ -31,12 +33,18 @@ def run_compression_breakout_event_study(
     states: tuple[MarketState15s, ...],
     config: CompressionBreakoutConfig,
     source_paths: tuple[Path, ...],
+    signal_interval_seconds: int = 300,
 ) -> CompressionBreakoutReport:
-    events = find_compression_breakouts(states, config)
+    signal_states = aggregate_compression_signal_states(
+        states,
+        signal_interval_seconds=signal_interval_seconds,
+    )
+    events = find_compression_breakouts(signal_states, config)
     return CompressionBreakoutReport(
         schema_version=1,
         generated_at=datetime.now(UTC),
         config=config,
+        signal_interval_seconds=signal_interval_seconds,
         source_paths=tuple(path.as_posix() for path in source_paths),
         events=events,
         summary=summarize_compression_breakouts(
@@ -51,11 +59,13 @@ def build_compression_breakout_report(
     state_paths: tuple[Path, ...],
     output_path: Path,
     config: CompressionBreakoutConfig,
+    signal_interval_seconds: int = 300,
 ) -> CompressionBreakoutReport:
     report = run_compression_breakout_event_study(
         states=read_market_states_15s_dataset(state_paths),
         config=config,
         source_paths=state_paths,
+        signal_interval_seconds=signal_interval_seconds,
     )
     write_compression_breakout_report(report, output_path)
     return report
@@ -84,6 +94,7 @@ def _report_payload(report: CompressionBreakoutReport) -> dict[str, object]:
         "schema_version": report.schema_version,
         "generated_at": report.generated_at.isoformat(),
         "config": _config_payload(report.config),
+        "signal_interval_seconds": report.signal_interval_seconds,
         "source_paths": list(report.source_paths),
         "events": [_event_payload(event) for event in report.events],
         "summary": _summary_payload(report.summary),

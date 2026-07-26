@@ -17,6 +17,7 @@ def test_all_read_only_dashboard_routes_are_available() -> None:
         for route in (
             "/api/universe",
             "/api/strategy-runs/current",
+            "/api/paper-accounts",
             "/api/account",
             "/api/risk-execution",
             "/api/reports",

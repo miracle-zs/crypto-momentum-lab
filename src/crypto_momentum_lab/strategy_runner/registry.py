@@ -74,6 +74,11 @@ def build_runtime_config(
         field_name="candidate_ttl_buckets",
     )
     if strategy_name == "compression_breakout":
+        signal_interval_seconds = _int_value(
+            config.get("signal_interval_seconds"),
+            default=300,
+            field_name="signal_interval_seconds",
+        )
         event_config = config.get("compression_breakout")
         if event_config is None:
             event_config = _default_compression_config()
@@ -83,6 +88,7 @@ def build_runtime_config(
             event_config=event_config,
             candidate_notional=candidate_notional,
             candidate_ttl_buckets=candidate_ttl_buckets,
+            signal_interval_seconds=signal_interval_seconds,
         )
     if strategy_name == "orderflow_impulse":
         event_config = config.get("order_flow_impulse")
@@ -153,11 +159,11 @@ def _int_value(value: object, *, default: int, field_name: str) -> int:
 def _default_compression_config() -> CompressionBreakoutConfig:
     return CompressionBreakoutConfig(
         compression_window_buckets=20,
-        max_range_width_pct=Decimal("0.005"),
-        min_breakout_pct=Decimal("0.001"),
+        max_range_width_pct=Decimal("0.025"),
+        min_breakout_pct=Decimal("0.003"),
         acceptance_buckets=1,
-        cooldown_buckets=8,
-        forward_horizon_buckets=(1,),
+        cooldown_buckets=12,
+        forward_horizon_buckets=(1, 3, 6, 12),
     )
 
 

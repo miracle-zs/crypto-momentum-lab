@@ -1,6 +1,7 @@
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
@@ -30,12 +31,17 @@ class CompressionBreakoutRuntimeConfig:
     event_config: CompressionBreakoutConfig
     candidate_notional: Decimal | None
     candidate_ttl_buckets: int
+    signal_interval_seconds: int = 300
 
     def __post_init__(self) -> None:
         if self.candidate_notional is not None and self.candidate_notional <= 0:
             raise ValueError("candidate_notional must be positive")
         if self.candidate_ttl_buckets <= 0:
             raise ValueError("candidate_ttl_buckets must be positive")
+        if self.signal_interval_seconds <= 0:
+            raise ValueError("signal_interval_seconds must be positive")
+        if self.signal_interval_seconds % 15 != 0:
+            raise ValueError("signal_interval_seconds must be divisible by 15")
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +69,7 @@ class CompressionBreakoutRuntimeStrategy:
         self._config = config
         self._identity = identity
         self._buffers: dict[str, deque[MarketState15s]] = {}
+        self._pending_signal_states: dict[str, list[MarketState15s]] = {}
         self._warmup: dict[str, int] = {}
         self._cooldown_remaining: dict[str, int] = {}
         self._last_processed: dict[str, datetime] = {}
@@ -76,8 +83,12 @@ class CompressionBreakoutRuntimeStrategy:
         return StrategyDataRequirement(
             base_state_interval_seconds=15,
             warmup_buckets=(
-                event_config.compression_window_buckets
-                + event_config.acceptance_buckets
+                (
+                    event_config.compression_window_buckets
+                    + event_config.acceptance_buckets
+                )
+                * self._config.signal_interval_seconds
+                // 15
             ),
             required_fields=("close_price", "high_price", "low_price"),
             max_gap_seconds=30,
@@ -85,10 +96,17 @@ class CompressionBreakoutRuntimeStrategy:
         )
 
     def restore(self, checkpoint: StrategyCheckpoint) -> None:
-        self._warmup = dict(checkpoint.warmup_buckets_by_symbol)
-        self._cooldown_remaining = dict(
-            checkpoint.cooldown_buckets_remaining_by_symbol
-        )
+        restored_buffers = checkpoint.payload.get("signal_buffers")
+        if isinstance(restored_buffers, dict):
+            self._buffers = _restore_signal_buffers(
+                restored_buffers,
+                maxlen=(
+                    self._config.event_config.compression_window_buckets
+                    + self._config.event_config.acceptance_buckets
+                ),
+            )
+        self._warmup = {symbol: len(buffer) for symbol, buffer in self._buffers.items()}
+        self._cooldown_remaining = dict(checkpoint.cooldown_buckets_remaining_by_symbol)
         self._last_processed = dict(checkpoint.last_processed_at_by_symbol)
 
     def restore_checkpoint(self, checkpoint: StrategyCheckpoint) -> None:
@@ -108,38 +126,72 @@ class CompressionBreakoutRuntimeStrategy:
                 )
             )
 
+        signal_state = self._ingest_signal_state(state)
+        if signal_state is None:
+            warmup_complete = len(self._buffers.get(state.symbol, ())) >= (
+                self._config.event_config.compression_window_buckets
+                + self._config.event_config.acceptance_buckets
+            )
+            return self._decision(
+                rejections=(
+                    StrategyRejection(
+                        reason=(
+                            RejectionReason.NO_SIGNAL
+                            if warmup_complete
+                            else RejectionReason.INSUFFICIENT_WARMUP
+                        ),
+                        symbol=state.symbol,
+                        bucket_start=state.bucket_start,
+                        details={
+                            "have": self._raw_warmup_bucket_count(state.symbol),
+                            "need": self.required_data().warmup_buckets,
+                            "state": "building_signal_bucket",
+                        },
+                    ),
+                )
+            )
+
         requirement = self.required_data()
         buffer = self._buffers.setdefault(
-            state.symbol,
-            deque(maxlen=requirement.warmup_buckets),
+            signal_state.symbol,
+            deque(
+                maxlen=(
+                    self._config.event_config.compression_window_buckets
+                    + self._config.event_config.acceptance_buckets
+                )
+            ),
         )
-        buffer.append(state)
-        self._warmup[state.symbol] = len(buffer)
+        buffer.append(signal_state)
+        self._warmup[signal_state.symbol] = len(buffer)
 
-        if len(buffer) < requirement.warmup_buckets:
+        required_signal_buckets = (
+            self._config.event_config.compression_window_buckets
+            + self._config.event_config.acceptance_buckets
+        )
+        if len(buffer) < required_signal_buckets:
             return self._decision(
                 rejections=(
                     StrategyRejection(
                         reason=RejectionReason.INSUFFICIENT_WARMUP,
-                        symbol=state.symbol,
-                        bucket_start=state.bucket_start,
+                        symbol=signal_state.symbol,
+                        bucket_start=signal_state.bucket_start,
                         details={
-                            "have": len(buffer),
+                            "have": self._raw_warmup_bucket_count(signal_state.symbol),
                             "need": requirement.warmup_buckets,
                         },
                     ),
                 )
             )
 
-        cooldown = self._cooldown_remaining.get(state.symbol, 0)
+        cooldown = self._cooldown_remaining.get(signal_state.symbol, 0)
         if cooldown > 0:
-            self._cooldown_remaining[state.symbol] = cooldown - 1
+            self._cooldown_remaining[signal_state.symbol] = cooldown - 1
             return self._decision(
                 rejections=(
                     StrategyRejection(
                         reason=RejectionReason.COOLDOWN_ACTIVE,
-                        symbol=state.symbol,
-                        bucket_start=state.bucket_start,
+                        symbol=signal_state.symbol,
+                        bucket_start=signal_state.bucket_start,
                         details={"remaining": cooldown},
                     ),
                 )
@@ -151,18 +203,66 @@ class CompressionBreakoutRuntimeStrategy:
                 rejections=(
                     StrategyRejection(
                         reason=RejectionReason.NO_SIGNAL,
-                        symbol=state.symbol,
-                        bucket_start=state.bucket_start,
+                        symbol=signal_state.symbol,
+                        bucket_start=signal_state.bucket_start,
                         details={"state": "evaluated"},
                     ),
                 )
             )
 
-        signal, candidate = self._build_signal_and_candidate(state, evaluation)
-        self._cooldown_remaining[state.symbol] = (
+        signal, candidate = self._build_signal_and_candidate(
+            signal_state,
+            evaluation,
+        )
+        self._cooldown_remaining[signal_state.symbol] = (
             self._config.event_config.cooldown_buckets
         )
         return self._decision(signals=(signal,), candidates=(candidate,))
+
+    def _ingest_signal_state(
+        self,
+        state: MarketState15s,
+    ) -> MarketState15s | None:
+        interval_seconds = self._config.signal_interval_seconds
+        if _state_duration_seconds(state) == interval_seconds:
+            return state
+
+        signal_start = _signal_bucket_start(
+            state.bucket_start,
+            interval_seconds=interval_seconds,
+        )
+        pending = self._pending_signal_states.get(state.symbol)
+        if (
+            pending
+            and _signal_bucket_start(
+                pending[0].bucket_start,
+                interval_seconds=interval_seconds,
+            )
+            != signal_start
+        ):
+            pending = None
+        if pending is None:
+            pending = []
+            self._pending_signal_states[state.symbol] = pending
+        pending.append(state)
+
+        signal_end = signal_start + timedelta(seconds=interval_seconds)
+        if state.bucket_end < signal_end:
+            return None
+
+        self._pending_signal_states.pop(state.symbol, None)
+        if pending[0].bucket_start != signal_start or state.bucket_end != signal_end:
+            return None
+        return _aggregate_signal_state(
+            tuple(pending),
+            bucket_start=signal_start,
+            bucket_end=signal_end,
+        )
+
+    def _raw_warmup_bucket_count(self, symbol: str) -> int:
+        completed = len(self._buffers.get(symbol, ()))
+        pending = len(self._pending_signal_states.get(symbol, ()))
+        return completed * self._config.signal_interval_seconds // 15 + pending
 
     def checkpoint(self) -> StrategyCheckpoint:
         return StrategyCheckpoint(
@@ -172,7 +272,12 @@ class CompressionBreakoutRuntimeStrategy:
             payload={
                 "buffer_sizes": {
                     symbol: len(buffer) for symbol, buffer in self._buffers.items()
-                }
+                },
+                "signal_interval_seconds": self._config.signal_interval_seconds,
+                "signal_buffers": {
+                    symbol: [_signal_state_payload(state) for state in buffer]
+                    for symbol, buffer in self._buffers.items()
+                },
             },
         )
 
@@ -196,12 +301,17 @@ class CompressionBreakoutRuntimeStrategy:
         evaluation: _CompressionEvaluation,
     ) -> tuple[StrategySignal, OrderIntentCandidate]:
         self._signal_sequence += 1
+        detected_at = (
+            state.bucket_end
+            if self._config.signal_interval_seconds > 15
+            else state.bucket_start
+        )
         side = _strategy_side(evaluation.direction)
         signal_id = deterministic_signal_id(
             identity=self._identity,
             symbol=state.symbol,
             side=side,
-            detected_at=state.bucket_start,
+            detected_at=detected_at,
             sequence=self._signal_sequence,
         )
         features = _features(evaluation)
@@ -213,7 +323,7 @@ class CompressionBreakoutRuntimeStrategy:
             config_hash=self._identity.config_hash,
             symbol=state.symbol,
             side=side,
-            detected_at=state.bucket_start,
+            detected_at=detected_at,
             source_state_at=state.bucket_start,
             reason="compression_breakout",
             features=features,
@@ -239,9 +349,9 @@ class CompressionBreakoutRuntimeStrategy:
             limit_price=None,
             desired_notional=self._config.candidate_notional,
             reduce_only=False,
-            expires_at=state.bucket_start
+            expires_at=detected_at
             + timedelta(seconds=15 * self._config.candidate_ttl_buckets),
-            created_at=state.bucket_start,
+            created_at=detected_at,
             reason="compression_breakout",
             features=features,
         )
@@ -388,3 +498,200 @@ def _optional_decimal(value: Decimal | None) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def aggregate_compression_signal_states(
+    states: Iterable[MarketState15s],
+    *,
+    signal_interval_seconds: int,
+) -> tuple[MarketState15s, ...]:
+    if signal_interval_seconds <= 0 or signal_interval_seconds % 15 != 0:
+        raise ValueError("signal_interval_seconds must be positive and divisible by 15")
+    grouped: dict[tuple[str, datetime], list[MarketState15s]] = {}
+    completed: list[MarketState15s] = []
+    for state in sorted(states, key=lambda item: (item.bucket_start, item.symbol)):
+        if _state_duration_seconds(state) == signal_interval_seconds:
+            completed.append(state)
+            continue
+        bucket_start = _signal_bucket_start(
+            state.bucket_start,
+            interval_seconds=signal_interval_seconds,
+        )
+        grouped.setdefault((state.symbol, bucket_start), []).append(state)
+    for (_, bucket_start), bucket_states in grouped.items():
+        bucket_end = bucket_start + timedelta(seconds=signal_interval_seconds)
+        if (
+            bucket_states[0].bucket_start != bucket_start
+            or bucket_states[-1].bucket_end != bucket_end
+        ):
+            continue
+        completed.append(
+            _aggregate_signal_state(
+                tuple(bucket_states),
+                bucket_start=bucket_start,
+                bucket_end=bucket_end,
+            )
+        )
+    return tuple(sorted(completed, key=lambda item: (item.symbol, item.bucket_start)))
+
+
+def _state_duration_seconds(state: MarketState15s) -> int:
+    return int((state.bucket_end - state.bucket_start).total_seconds())
+
+
+def _signal_bucket_start(
+    value: datetime,
+    *,
+    interval_seconds: int,
+) -> datetime:
+    epoch_seconds = int(value.timestamp())
+    aligned_epoch = epoch_seconds - epoch_seconds % interval_seconds
+    return datetime.fromtimestamp(aligned_epoch, tz=UTC)
+
+
+def _aggregate_signal_state(
+    states: tuple[MarketState15s, ...],
+    *,
+    bucket_start: datetime,
+    bucket_end: datetime,
+) -> MarketState15s:
+    first = states[0]
+    prices = tuple(price for state in states if (price := _state_price(state)))
+    highs = tuple(price for state in states if (price := _state_high(state)))
+    lows = tuple(price for state in states if (price := _state_low(state)))
+    return MarketState15s(
+        schema_version=first.schema_version,
+        exchange=first.exchange,
+        environment=first.environment,
+        symbol=first.symbol,
+        bucket_start=bucket_start,
+        bucket_end=bucket_end,
+        open_price=prices[0] if prices else None,
+        high_price=max(highs) if highs else None,
+        low_price=min(lows) if lows else None,
+        close_price=prices[-1] if prices else None,
+        trade_count=sum(state.trade_count for state in states),
+        trade_notional=sum(
+            (state.trade_notional for state in states),
+            Decimal("0"),
+        ),
+        aggressive_buy_notional=sum(
+            (state.aggressive_buy_notional for state in states),
+            Decimal("0"),
+        ),
+        aggressive_sell_notional=sum(
+            (state.aggressive_sell_notional for state in states),
+            Decimal("0"),
+        ),
+        last_bid_price=_last_value(states, "last_bid_price"),
+        last_ask_price=_last_value(states, "last_ask_price"),
+        spread=_last_value(states, "spread"),
+        midpoint=_last_value(states, "midpoint"),
+        liquidation_count=sum(state.liquidation_count for state in states),
+        liquidation_notional=sum(
+            (state.liquidation_notional for state in states),
+            Decimal("0"),
+        ),
+        mark_price=_last_value(states, "mark_price"),
+        closed_kline_count=sum(state.closed_kline_count for state in states),
+        source_event_count=sum(state.source_event_count for state in states),
+        first_received_at=next(
+            (
+                state.first_received_at
+                for state in states
+                if state.first_received_at is not None
+            ),
+            None,
+        ),
+        last_received_at=next(
+            (
+                state.last_received_at
+                for state in reversed(states)
+                if state.last_received_at is not None
+            ),
+            None,
+        ),
+    )
+
+
+def _last_value(
+    states: tuple[MarketState15s, ...],
+    field_name: str,
+) -> Decimal | None:
+    for state in reversed(states):
+        value = getattr(state, field_name)
+        if isinstance(value, Decimal):
+            return value
+    return None
+
+
+def _signal_state_payload(state: MarketState15s) -> dict[str, JsonValue]:
+    return {
+        "schema_version": state.schema_version,
+        "exchange": state.exchange,
+        "environment": state.environment,
+        "symbol": state.symbol,
+        "bucket_start": state.bucket_start.isoformat(),
+        "bucket_end": state.bucket_end.isoformat(),
+        "open_price": _optional_decimal(state.open_price),
+        "high_price": _optional_decimal(state.high_price),
+        "low_price": _optional_decimal(state.low_price),
+        "close_price": _optional_decimal(state.close_price),
+        "spread": _optional_decimal(state.spread),
+        "midpoint": _optional_decimal(state.midpoint),
+        "mark_price": _optional_decimal(state.mark_price),
+    }
+
+
+def _restore_signal_buffers(
+    payload: dict[str, JsonValue],
+    *,
+    maxlen: int,
+) -> dict[str, deque[MarketState15s]]:
+    restored: dict[str, deque[MarketState15s]] = {}
+    for symbol, raw_states in payload.items():
+        if not isinstance(raw_states, list):
+            continue
+        states: deque[MarketState15s] = deque(maxlen=maxlen)
+        for raw_state in raw_states:
+            if isinstance(raw_state, dict):
+                states.append(_signal_state_from_payload(raw_state))
+        if states:
+            restored[symbol] = states
+    return restored
+
+
+def _signal_state_from_payload(payload: dict[str, JsonValue]) -> MarketState15s:
+    return MarketState15s(
+        schema_version=int(str(payload["schema_version"])),
+        exchange=str(payload["exchange"]),
+        environment=str(payload["environment"]),
+        symbol=str(payload["symbol"]),
+        bucket_start=datetime.fromisoformat(str(payload["bucket_start"])),
+        bucket_end=datetime.fromisoformat(str(payload["bucket_end"])),
+        open_price=_payload_decimal(payload.get("open_price")),
+        high_price=_payload_decimal(payload.get("high_price")),
+        low_price=_payload_decimal(payload.get("low_price")),
+        close_price=_payload_decimal(payload.get("close_price")),
+        trade_count=0,
+        trade_notional=Decimal("0"),
+        aggressive_buy_notional=Decimal("0"),
+        aggressive_sell_notional=Decimal("0"),
+        last_bid_price=None,
+        last_ask_price=None,
+        spread=_payload_decimal(payload.get("spread")),
+        midpoint=_payload_decimal(payload.get("midpoint")),
+        liquidation_count=0,
+        liquidation_notional=Decimal("0"),
+        mark_price=_payload_decimal(payload.get("mark_price")),
+        closed_kline_count=0,
+        source_event_count=0,
+        first_received_at=None,
+        last_received_at=None,
+    )
+
+
+def _payload_decimal(value: JsonValue) -> Decimal | None:
+    if value is None:
+        return None
+    return Decimal(str(value))

@@ -73,6 +73,7 @@ class PaperRunnerConfig:
     compression_breakout: CompressionBreakoutConfig
     candidate_notional: Decimal | None
     candidate_ttl_buckets: int
+    signal_interval_seconds: int = 300
     order_flow_impulse: OrderFlowImpulseConfig | None = None
     liquidation_cascade: LiquidationCascadeConfig | None = None
     execution: ReplayExecutionConfig = field(default_factory=ReplayExecutionConfig)
@@ -91,6 +92,8 @@ class PaperRunnerConfig:
             raise ValueError("candidate_notional must be positive")
         if self.candidate_ttl_buckets <= 0:
             raise ValueError("candidate_ttl_buckets must be positive")
+        if self.signal_interval_seconds <= 0:
+            raise ValueError("signal_interval_seconds must be positive")
         if self.max_states is not None and self.max_states <= 0:
             raise ValueError("max_states must be positive")
 
@@ -300,6 +303,7 @@ def _runtime_config_payload(config: PaperRunnerConfig) -> dict[str, object]:
     payload: dict[str, object] = {
         "candidate_notional": config.candidate_notional,
         "candidate_ttl_buckets": config.candidate_ttl_buckets,
+        "signal_interval_seconds": config.signal_interval_seconds,
         "compression_breakout": config.compression_breakout,
     }
     if config.order_flow_impulse is not None:
