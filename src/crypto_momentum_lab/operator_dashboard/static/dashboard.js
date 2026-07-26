@@ -1,4 +1,5 @@
 const sections = ["overview", "risk", "universe", "strategy", "account", "reports"];
+let selectedPaperAccount = 0;
 
 const esc = (value) => String(value ?? "NO DATA").replace(/[&<>'"]/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"
@@ -81,11 +82,13 @@ function strategyAccount(data, index) {
 function renderStrategy(data) {
   const accounts = data.accounts || [];
   if (!accounts.length) return [data.status, empty("等待三个虚拟账户启动")];
-  const overview = `<div class="paper-account-grid">${accounts.map((account, index) => {
+  selectedPaperAccount = Math.min(selectedPaperAccount, accounts.length - 1);
+  const tabs = `<div class="paper-account-tabs" role="tablist" aria-label="Paper strategy accounts">${accounts.map((account, index) => {
     const summary = account.portfolio_summary || {};
-    return `<div class="paper-account-card"><span>ACCOUNT 0${index + 1}</span><b>${esc(account.strategy_name)}</b><strong>${money(summary.equity)}</strong><small>${summary.open_position_count || 0} 持仓 · ${summary.closed_trade_count || 0} 已平仓</small></div>`;
+    return `<button class="paper-account-tab${index === selectedPaperAccount ? " is-active" : ""}" type="button" role="tab" aria-selected="${index === selectedPaperAccount}" data-account-index="${index}"><span>ACCOUNT 0${index + 1}</span><b>${esc(account.strategy_name)}</b><strong>${money(summary.equity)}</strong><small>${summary.open_position_count || 0} 持仓 · ${summary.closed_trade_count || 0} 已平仓</small></button>`;
   }).join("")}</div>`;
-  return [data.status, `${overview}<div class="paper-account-stack">${accounts.map(strategyAccount).join("")}</div>`];
+  const detail = `<div class="paper-account-detail" role="tabpanel">${strategyAccount(accounts[selectedPaperAccount], selectedPaperAccount)}</div>`;
+  return [data.status, `${tabs}${detail}`];
 }
 
 function renderAccount(data) {
@@ -118,6 +121,14 @@ async function refreshSection(id) {
     const body = section.querySelector(".panel-body");
     body.innerHTML = html;
     body.classList.remove("loading");
+    if (id === "strategy") {
+      body.querySelectorAll("[data-account-index]").forEach((tab) => {
+        tab.addEventListener("click", () => {
+          selectedPaperAccount = Number(tab.dataset.accountIndex);
+          refreshSection("strategy");
+        });
+      });
+    }
     section.classList.remove("updated");
     void section.offsetWidth;
     section.classList.add("updated");
