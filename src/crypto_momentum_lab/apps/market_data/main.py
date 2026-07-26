@@ -397,6 +397,17 @@ async def run_market_data(config_path: Path) -> None:
             streams=runtime.enabled_streams,
             generation=1,
         )
+        startup_observed_at = datetime.now(UTC).replace(
+            second=0,
+            microsecond=0,
+        )
+        startup_snapshot = await runtime.universe.refresh(
+            observed_at=startup_observed_at
+        )
+        log.info(
+            "universe_startup_refresh",
+            observed_at=startup_snapshot.observed_at.isoformat(),
+        )
         try:
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(runtime.capture.run())
@@ -419,6 +430,11 @@ async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
             streams=runtime.enabled_streams,
             generation=1,
         )
+        startup_observed_at = datetime.now(UTC).replace(
+            second=0,
+            microsecond=0,
+        )
+        await runtime.universe.refresh(observed_at=startup_observed_at)
         capture_task = asyncio.create_task(runtime.capture.run())
         scheduler_task = asyncio.create_task(
             run_scheduler_loop(
