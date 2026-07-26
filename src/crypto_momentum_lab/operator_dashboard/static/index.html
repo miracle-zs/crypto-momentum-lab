@@ -1,105 +1,140 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CML / Operator Console</title>
-  <link rel="stylesheet" href="static/dashboard.css?v=20260726-3">
+  <title>CML · Execution Control Room</title>
+  <link rel="stylesheet" href="static/dashboard.css">
 </head>
 <body>
-  <div class="grain" aria-hidden="true"></div>
-  <header class="masthead">
-    <div>
-      <p class="eyebrow">CRYPTO MOMENTUM LAB / LOCAL READ-ONLY TERMINAL</p>
-      <h1>Execution<br><span>Control Room</span></h1>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">CML</div>
+        <div class="brand-name">
+          <b>Execution<br>Control Room</b>
+          <small>加密动量实验室 · 只读操作台</small>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="控制台分区">
+        <a href="#overview" data-nav="overview"><i>01</i><span>系统总览<small>System Overview</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="overview"></em></a>
+        <a href="#strategy" data-nav="strategy"><i>02</i><span>模拟盘账户<small>Paper Accounts</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="strategy"></em></a>
+        <a href="#universe" data-nav="universe"><i>03</i><span>UTC 动量池<small>Momentum Field</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="universe"></em></a>
+        <a href="#risk" data-nav="risk"><i>04</i><span>风控与执行<small>Risk / Execution</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="risk"></em></a>
+        <a href="#account" data-nav="account"><i>05</i><span>交易所账户<small>Execution Account</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="account"></em></a>
+        <a href="#reports" data-nav="reports"><i>06</i><span>运行台账<small>Run Ledger</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="reports"></em></a>
+        <a href="#actions" data-nav="actions"><i>07</i><span>受控操作<small>Controlled Actions</small></span><em class="nav-dot is-locked"></em></a>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="legend" aria-label="状态图例">
+          <span><i class="dot status-READY"></i>READY</span>
+          <span><i class="dot status-FRESH"></i>FRESH</span>
+          <span><i class="dot status-SHADOW"></i>SHADOW</span>
+          <span><i class="dot status-STALE"></i>STALE</span>
+          <span><i class="dot status-HALTED"></i>HALTED</span>
+          <span><i class="dot status-LIVE"></i>LIVE</span>
+          <span><i class="dot status-UNKNOWN"></i>UNKNOWN</span>
+        </div>
+        <p>浏览器仅访问本机 PostgreSQL 只读 API。交易所写入全部由后端闸门管控，本页面不含任何凭据字段。</p>
+      </div>
+    </aside>
+
+    <div class="frame">
+      <header class="topbar">
+        <p class="crumb">CRYPTO MOMENTUM LAB <span>/</span> LOCAL READ-ONLY TERMINAL</p>
+        <div class="topbar-meta">
+          <div class="poll-state"><span class="pulse" aria-hidden="true"></span><span id="last-cycle">等待首次轮询…</span></div>
+          <div id="global-mode" class="mode-badge status-UNKNOWN">UNKNOWN</div>
+          <div class="clock"><small>UTC</small><strong id="utc-clock">--:--:--</strong></div>
+        </div>
+        <div class="pollbar" id="pollbar" aria-hidden="true"></div>
+      </header>
+
+      <main class="content">
+        <section id="overview" class="card" data-endpoint="api/overview">
+          <header class="card-head">
+            <div class="card-title"><i>01</i><div><h2>系统总览</h2><small>SYSTEM OVERVIEW · REFRESH 5S</small></div></div>
+            <span class="section-state status-UNKNOWN">UNKNOWN</span>
+          </header>
+          <div class="panel-body loading" aria-busy="true">
+            <div class="skeleton"><s style="width:38%"></s><s style="width:92%"></s><s style="width:74%"></s><s style="width:83%"></s></div>
+          </div>
+        </section>
+
+        <section id="strategy" class="card" data-endpoint="api/paper-accounts">
+          <header class="card-head">
+            <div class="card-title"><i>02</i><div><h2>模拟盘账户</h2><small>THREE INDEPENDENT PAPER ACCOUNTS</small></div></div>
+            <span class="section-state status-UNKNOWN">UNKNOWN</span>
+          </header>
+          <div class="panel-body loading" aria-busy="true">
+            <div class="skeleton"><s style="width:31%"></s><s style="width:88%"></s><s style="width:88%"></s><s style="width:64%"></s><s style="width:79%"></s></div>
+          </div>
+        </section>
+
+        <section id="universe" class="card" data-endpoint="api/universe">
+          <header class="card-head">
+            <div class="card-title"><i>03</i><div><h2>UTC 动量池</h2><small>TOP GAINERS / LOSERS · MONITORED 40</small></div></div>
+            <span class="section-state status-UNKNOWN">UNKNOWN</span>
+          </header>
+          <div class="panel-body loading" aria-busy="true">
+            <div class="skeleton"><s style="width:42%"></s><s style="width:85%"></s><s style="width:85%"></s><s style="width:58%"></s></div>
+          </div>
+        </section>
+
+        <section id="risk" class="card card-risk" data-endpoint="api/risk-execution">
+          <header class="card-head">
+            <div class="card-title"><i>04</i><div><h2>风控与执行</h2><small>HALTS · AMBIGUOUS ORDERS · DECISIONS</small></div></div>
+            <span class="section-state status-UNKNOWN">UNKNOWN</span>
+          </header>
+          <div class="panel-body loading" aria-busy="true">
+            <div class="skeleton"><s style="width:29%"></s><s style="width:76%"></s><s style="width:81%"></s></div>
+          </div>
+        </section>
+
+        <section id="account" class="card" data-endpoint="api/account">
+          <header class="card-head">
+            <div class="card-title"><i>05</i><div><h2>交易所账户</h2><small>READ-ONLY ACCOUNT SYNC</small></div></div>
+            <span class="section-state status-UNKNOWN">UNKNOWN</span>
+          </header>
+          <div class="panel-body loading" aria-busy="true">
+            <div class="skeleton"><s style="width:35%"></s><s style="width:82%"></s><s style="width:69%"></s></div>
+          </div>
+        </section>
+
+        <section id="reports" class="card" data-endpoint="api/reports">
+          <header class="card-head">
+            <div class="card-title"><i>06</i><div><h2>运行台账</h2><small>PAPER / SHADOW / LIVE SESSIONS</small></div></div>
+            <span class="section-state status-UNKNOWN">UNKNOWN</span>
+          </header>
+          <div class="panel-body loading" aria-busy="true">
+            <div class="skeleton"><s style="width:33%"></s><s style="width:87%"></s><s style="width:73%"></s></div>
+          </div>
+        </section>
+
+        <section id="actions" class="card card-actions">
+          <header class="card-head">
+            <div class="card-title"><i>07</i><div><h2>受控操作</h2><small>CONTROLLED ACTIONS · AUDITED BACKEND ONLY</small></div></div>
+            <span class="lock-badge">READ ONLY</span>
+          </header>
+          <div class="action-grid">
+            <button disabled><b>全局停机</b><span>Global Halt</span><small>需要审计命令记录</small></button>
+            <button disabled><b>策略退场</b><span>Drain Strategy</span><small>需要策略状态迁移记录</small></button>
+            <button disabled><b>撤销挂单</b><span>Cancel Open Orders</span><small>需要撤单确认记录</small></button>
+            <button disabled><b>紧急平仓</b><span>Emergency Flatten</span><small>需要显式平仓确认</small></button>
+            <button disabled><b>释放租约</b><span>Release Lease</span><small>需要持仓归零对账</small></button>
+          </div>
+          <p class="action-note">本界面永不直连交易所。所有操作须经签名后端命令执行，其审计事件可在本页回查。</p>
+        </section>
+      </main>
+
+      <footer class="page-foot">
+        <span>CML // OPERATOR CONSOLE</span>
+        <span>LOCALHOST / NO CREDENTIAL FIELDS</span>
+      </footer>
     </div>
-    <div class="masthead-meta">
-      <div class="clock"><span>UTC</span><strong id="utc-clock">--:--:--</strong></div>
-      <div id="global-mode" class="mode-stamp status-UNKNOWN">UNKNOWN</div>
-      <p>Browser transport: <b>PostgreSQL API only</b><br>Exchange writes: <b>backend gated</b></p>
-    </div>
-  </header>
-
-  <nav class="status-rail" aria-label="Status legend">
-    <span class="status-UNKNOWN">UNKNOWN</span>
-    <span class="status-STALE">STALE</span>
-    <span class="status-HALTED">HALTED</span>
-    <span class="status-SHADOW">SHADOW</span>
-    <span class="status-LIVE">LIVE</span>
-    <span class="status-READY">READY</span>
-    <i>Refresh / 5 seconds</i>
-  </nav>
-
-  <main class="console-grid">
-    <section id="overview" class="panel panel-wide" data-endpoint="api/overview">
-      <div class="panel-heading">
-        <div><span class="index">01</span><h2>System Overview</h2></div>
-        <span class="section-state status-UNKNOWN">UNKNOWN</span>
-      </div>
-      <div class="panel-body loading">Awaiting service telemetry...</div>
-    </section>
-
-    <section id="strategy" class="panel panel-wide trading-ledger" data-endpoint="api/paper-accounts">
-      <div class="panel-heading">
-        <div><span class="index">02</span><h2>Three Paper Accounts</h2></div>
-        <span class="section-state status-UNKNOWN">UNKNOWN</span>
-      </div>
-      <div class="panel-body loading">Three strategy accounts: UNKNOWN</div>
-    </section>
-
-    <section id="universe" class="panel panel-tall" data-endpoint="api/universe">
-      <div class="panel-heading">
-        <div><span class="index">03</span><h2>UTC+0 Momentum Field</h2></div>
-        <span class="section-state status-UNKNOWN">UNKNOWN</span>
-      </div>
-      <div class="panel-body loading">Top gainers / losers: NO DATA</div>
-    </section>
-
-    <section id="risk" class="panel panel-alert" data-endpoint="api/risk-execution">
-      <div class="panel-heading">
-        <div><span class="index">04</span><h2>Risk / Execution</h2></div>
-        <span class="section-state status-UNKNOWN">UNKNOWN</span>
-      </div>
-      <div class="panel-body loading">No risk decision stream.</div>
-    </section>
-
-    <section id="account" class="panel" data-endpoint="api/account">
-      <div class="panel-heading">
-        <div><span class="index">05</span><h2>Execution Account</h2></div>
-        <span class="section-state status-UNKNOWN">UNKNOWN</span>
-      </div>
-      <div class="panel-body loading">Read-only account sync: UNKNOWN</div>
-    </section>
-
-    <section id="reports" class="panel panel-wide" data-endpoint="api/reports">
-      <div class="panel-heading">
-        <div><span class="index">06</span><h2>Run Ledger</h2></div>
-        <span class="section-state status-UNKNOWN">UNKNOWN</span>
-      </div>
-      <div class="panel-body loading">Paper / shadow / live reports: NO DATA</div>
-    </section>
-
-    <section id="actions" class="panel panel-actions panel-wide">
-      <div class="panel-heading">
-        <div><span class="index">07</span><h2>Controlled Actions</h2></div>
-        <span class="lock">READ ONLY</span>
-      </div>
-      <div class="action-grid">
-        <button disabled>Global Halt<small>Requires audited command record</small></button>
-        <button disabled>Drain Strategy<small>Requires strategy transition record</small></button>
-        <button disabled>Cancel Open Orders<small>Requires cancel confirmation record</small></button>
-        <button disabled>Emergency Flatten<small>Requires explicit flatten confirmation</small></button>
-        <button disabled>Release Lease<small>Requires flat reconciliation</small></button>
-      </div>
-      <p class="action-note">This surface never calls Binance directly. Use signed backend commands and inspect their audit events here.</p>
-    </section>
-  </main>
-
-  <footer>
-    <span>CML // OPERATOR CONSOLE</span>
-    <span id="last-cycle">LAST POLL: UNKNOWN</span>
-    <span>LOCALHOST / NO CREDENTIAL FIELDS</span>
-  </footer>
-  <script src="static/dashboard.js?v=20260726-2" defer></script>
+  </div>
+  <script src="static/dashboard.js" defer></script>
 </body>
 </html>
