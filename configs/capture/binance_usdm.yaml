@@ -10,9 +10,10 @@ max_subscriptions_per_connection: 100
 control_messages_per_second: 5
 connection_lifetime_seconds: 82800
 open_timeout_seconds: 10
-ping_interval_seconds: 180
-ping_timeout_seconds: 600
+ping_interval_seconds: 30
+ping_timeout_seconds: 10
 silence_timeout_seconds: 30
+closure_delay_seconds: 3
 queue_max_events: 100000
 queue_max_bytes: 268435456
 shutdown_timeout_seconds: 30

@@ -37,7 +37,7 @@ class QualityRepository(Protocol):
 
 
 type AcknowledgementSink = Callable[[DurableArchiveAcknowledgement], object]
-type ArchivedEnvelopeSink = Callable[[RawEnvelope], object]
+type EnvelopeSink = Callable[[RawEnvelope], object]
 
 _MAX_ARCHIVE_BATCH_SIZE = 10000
 
@@ -51,13 +51,15 @@ class CaptureCoordinator:
         quality: QualityTracker,
         repository: QualityRepository,
         acknowledgement_sink: AcknowledgementSink | None = None,
-        archived_envelope_sink: ArchivedEnvelopeSink | None = None,
+        realtime_envelope_sink: EnvelopeSink | None = None,
+        archived_envelope_sink: EnvelopeSink | None = None,
     ) -> None:
         self._queue = queue
         self._archive = archive
         self._quality = quality
         self._repository = repository
         self._acknowledgement_sink = acknowledgement_sink
+        self._realtime_envelope_sink = realtime_envelope_sink
         self._archived_envelope_sink = archived_envelope_sink
         self._stopping = False
 
@@ -87,6 +89,7 @@ class CaptureCoordinator:
 
     async def _process_batch(self, batch: tuple[RawEnvelope, ...]) -> None:
         try:
+            await self._publish_batch(self._realtime_envelope_sink, batch)
             tasks = tuple(
                 asyncio.create_task(self._process_envelope(envelope))
                 for envelope in batch
@@ -101,7 +104,7 @@ class CaptureCoordinator:
                 await self._halt(reason)
                 raise failures[0]
 
-            await self._publish_archived_batch(batch)
+            await self._publish_batch(self._archived_envelope_sink, batch)
         finally:
             for envelope in batch:
                 self._queue.task_done(envelope)
@@ -116,14 +119,15 @@ class CaptureCoordinator:
             if inspect.isawaitable(result):
                 await result
 
-    async def _publish_archived_batch(
+    async def _publish_batch(
         self,
+        sink: EnvelopeSink | None,
         batch: tuple[RawEnvelope, ...],
     ) -> None:
-        if self._archived_envelope_sink is None:
+        if sink is None:
             return
         for envelope in batch:
-            result = self._archived_envelope_sink(envelope)
+            result = sink(envelope)
             if inspect.isawaitable(result):
                 await result
 

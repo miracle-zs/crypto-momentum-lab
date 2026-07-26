@@ -43,6 +43,7 @@ from crypto_momentum_lab.market_data.capture.subscriptions import (
 from crypto_momentum_lab.market_data.quality.tracker import StreamQualityTracker
 from crypto_momentum_lab.market_data.runtime_states import (
     ClosedMarketStatePublisher,
+    ClosedMarketStatePublisherConfig,
 )
 from crypto_momentum_lab.persistence.postgres.capture_repository import (
     PostgresCaptureRepository,
@@ -224,7 +225,10 @@ async def build_market_data_runtime(
     capture_repository = PostgresCaptureRepository(sessions)
     runtime_state_repository = PostgresRuntimeMarketStateRepository(sessions)
     runtime_state_publisher = ClosedMarketStatePublisher(
-        repository=runtime_state_repository
+        repository=runtime_state_repository,
+        config=ClosedMarketStatePublisherConfig(
+            closure_delay_seconds=runtime.capture.closure_delay_seconds
+        ),
     )
     initial_memberships = await universe_repository.load_active_memberships()
     initial_symbols = frozenset(initial_memberships)
@@ -281,7 +285,7 @@ async def build_market_data_runtime(
         quality=quality,
         repository=capture_repository,
         acknowledgement_sink=None,
-        archived_envelope_sink=runtime_state_publisher.observe,
+        realtime_envelope_sink=runtime_state_publisher.observe,
     )
 
     def connection_factory(group: SubscriptionGroup) -> BinanceWebSocketConnection:

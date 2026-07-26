@@ -1,5 +1,5 @@
 const SECTIONS = ["overview", "strategy", "universe", "risk", "account", "reports"];
-const POLL_MS = 5000;
+const POLL_MS = 2000;
 let selectedPaperAccount = 0;
 let lastPollAt = null;
 

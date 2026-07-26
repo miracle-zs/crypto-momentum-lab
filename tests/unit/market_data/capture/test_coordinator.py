@@ -171,6 +171,31 @@ async def test_archived_envelope_sink_runs_after_successful_batch_in_queue_order
     assert tuple(item.local_sequence for item in published) == (1, 2)
 
 
+async def test_realtime_envelope_sink_runs_before_archive(
+    raw_envelope: RawEnvelope,
+) -> None:
+    archive = ControlledArchive()
+    published: list[RawEnvelope] = []
+    coordinator = CaptureCoordinator(
+        queue=BoundedEnvelopeQueue(max_events=10, max_bytes=100000),
+        archive=archive,
+        quality=FakeQualityTracker(),
+        repository=FakeCaptureRepository(),
+        realtime_envelope_sink=published.append,
+    )
+
+    task = asyncio.create_task(coordinator.run())
+    await coordinator.submit(raw_envelope)
+    await archive.wait_until_append_started()
+
+    assert tuple(item.local_sequence for item in published) == (1,)
+    assert archive.appended == []
+
+    archive.release_append()
+    await coordinator.stop()
+    await task
+
+
 async def test_lifecycle_events_are_persisted() -> None:
     repository = FakeCaptureRepository()
     coordinator = CaptureCoordinator(
@@ -193,6 +218,4 @@ async def test_lifecycle_events_are_persisted() -> None:
         )
     )
 
-    assert repository.quality_events[0].category is (
-        QualityCategory.CONNECTION_OPENED
-    )
+    assert repository.quality_events[0].category is (QualityCategory.CONNECTION_OPENED)

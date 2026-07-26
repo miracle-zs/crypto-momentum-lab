@@ -36,7 +36,7 @@ class ClosedStateRepository(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ClosedMarketStatePublisherConfig:
-    closure_delay_seconds: int = 30
+    closure_delay_seconds: float = 3.0
 
     def __post_init__(self) -> None:
         if self.closure_delay_seconds <= 0:

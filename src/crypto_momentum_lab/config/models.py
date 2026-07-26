@@ -67,6 +67,7 @@ class CaptureConfig(BaseModel):
     ping_interval_seconds: float = Field(gt=0)
     ping_timeout_seconds: float = Field(gt=0)
     silence_timeout_seconds: float = Field(gt=0)
+    closure_delay_seconds: float = Field(default=3.0, gt=0, le=30)
     queue_max_events: int = Field(gt=0)
     queue_max_bytes: int = Field(gt=0)
     shutdown_timeout_seconds: float = Field(gt=0)
