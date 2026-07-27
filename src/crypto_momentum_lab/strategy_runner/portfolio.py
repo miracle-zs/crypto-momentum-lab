@@ -17,6 +17,11 @@ class PaperPositionStatus(StrEnum):
     CLOSED = "closed"
 
 
+class PaperExitMode(StrEnum):
+    FIXED = "fixed"
+    CANDLE_15M = "candle_15m"
+
+
 @dataclass(frozen=True, slots=True)
 class PaperExitConfig:
     take_profit_pct: Decimal = Decimal("0.02")
@@ -24,8 +29,11 @@ class PaperExitConfig:
     max_holding_buckets: int = 80
     state_interval_seconds: int = 15
     initial_balance: Decimal = Decimal("1000")
+    exit_mode: PaperExitMode = PaperExitMode.FIXED
 
     def __post_init__(self) -> None:
+        if not isinstance(self.exit_mode, PaperExitMode):
+            object.__setattr__(self, "exit_mode", PaperExitMode(self.exit_mode))
         if self.take_profit_pct <= 0:
             raise ValueError("take_profit_pct must be positive")
         if self.stop_loss_pct <= 0:
@@ -36,6 +44,70 @@ class PaperExitConfig:
             raise ValueError("state_interval_seconds must be positive")
         if self.initial_balance <= 0:
             raise ValueError("initial_balance must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class ClosedCandle15m:
+    symbol: str
+    candle_start: datetime
+    candle_end: datetime
+    open_price: Decimal
+    close_price: Decimal
+
+
+@dataclass(slots=True)
+class _CandleAccumulator:
+    candle_start: datetime
+    open_price: Decimal | None
+    close_price: Decimal
+    complete: bool
+
+
+class Candle15mAggregator:
+    def __init__(self) -> None:
+        self._candles: dict[str, _CandleAccumulator] = {}
+
+    def observe(self, state: MarketState15s) -> ClosedCandle15m | None:
+        close_price = state.close_price or state.mark_price
+        if close_price is None or close_price <= 0:
+            return None
+
+        candle_start = _candle_start_15m(state.bucket_start)
+        current = self._candles.get(state.symbol)
+        closed: ClosedCandle15m | None = None
+        if current is None:
+            current = _new_candle_accumulator(
+                state,
+                candle_start=candle_start,
+                close_price=close_price,
+            )
+            self._candles[state.symbol] = current
+        elif candle_start < current.candle_start:
+            return None
+        elif candle_start > current.candle_start:
+            closed = _closed_candle(state.symbol, current)
+            current = _new_candle_accumulator(
+                state,
+                candle_start=candle_start,
+                close_price=close_price,
+            )
+            self._candles[state.symbol] = current
+        else:
+            if (
+                current.open_price is None
+                and state.bucket_start == candle_start
+                and state.open_price is not None
+            ):
+                current.open_price = state.open_price
+                current.complete = True
+            current.close_price = close_price
+
+        if state.bucket_start >= candle_start + timedelta(minutes=14, seconds=45):
+            finished = _closed_candle(state.symbol, current)
+            if finished is not None:
+                closed = finished
+            self._candles.pop(state.symbol, None)
+        return closed
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +185,7 @@ def mark_positions(
     state: MarketState15s,
     config: PaperExitConfig,
     taker_fee_rate: Decimal,
+    closed_candle: ClosedCandle15m | None = None,
 ) -> tuple[PaperPosition, ...]:
     mark_price = state.close_price or state.mark_price
     if mark_price is None or mark_price <= 0:
@@ -133,6 +206,7 @@ def mark_positions(
             held_until=state.bucket_start,
             position=position,
             config=config,
+            closed_candle=closed_candle,
         )
         if close_reason is None:
             updates.append(
@@ -178,14 +252,70 @@ def _close_reason(
     held_until: datetime,
     position: PaperPosition,
     config: PaperExitConfig,
+    closed_candle: ClosedCandle15m | None,
 ) -> str | None:
-    if gross_return >= config.take_profit_pct:
-        return "take_profit"
-    if gross_return <= -config.stop_loss_pct:
-        return "stop_loss"
+    if config.exit_mode is PaperExitMode.CANDLE_15M:
+        if (
+            closed_candle is not None
+            and closed_candle.symbol == position.symbol
+            and closed_candle.candle_end > position.opened_at
+        ):
+            if (
+                position.side is StrategySide.LONG
+                and closed_candle.close_price < closed_candle.open_price
+            ):
+                return "candle_15m_bearish"
+            if (
+                position.side is StrategySide.SHORT
+                and closed_candle.close_price > closed_candle.open_price
+            ):
+                return "candle_15m_bullish"
+    else:
+        if gross_return >= config.take_profit_pct:
+            return "take_profit"
+        if gross_return <= -config.stop_loss_pct:
+            return "stop_loss"
     maximum_holding = timedelta(
         seconds=config.max_holding_buckets * config.state_interval_seconds
     )
     if held_until >= position.opened_at + maximum_holding:
         return "max_holding_period"
     return None
+
+
+def _new_candle_accumulator(
+    state: MarketState15s,
+    *,
+    candle_start: datetime,
+    close_price: Decimal,
+) -> _CandleAccumulator:
+    starts_at_boundary = state.bucket_start == candle_start
+    return _CandleAccumulator(
+        candle_start=candle_start,
+        open_price=state.open_price if starts_at_boundary else None,
+        close_price=close_price,
+        complete=starts_at_boundary and state.open_price is not None,
+    )
+
+
+def _closed_candle(
+    symbol: str,
+    accumulator: _CandleAccumulator,
+) -> ClosedCandle15m | None:
+    if not accumulator.complete or accumulator.open_price is None:
+        return None
+    return ClosedCandle15m(
+        symbol=symbol,
+        candle_start=accumulator.candle_start,
+        candle_end=accumulator.candle_start + timedelta(minutes=15),
+        open_price=accumulator.open_price,
+        close_price=accumulator.close_price,
+    )
+
+
+def _candle_start_15m(value: datetime) -> datetime:
+    return value.replace(
+        minute=value.minute - value.minute % 15,
+        second=0,
+        microsecond=0,
+    )

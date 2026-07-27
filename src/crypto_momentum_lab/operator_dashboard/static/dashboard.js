@@ -226,9 +226,10 @@ function accountCard(account, index) {
   const equity = asNumber(summary.equity);
   const returnSinceStart = equity == null ? null : equity / 1000 - 1;
   const active = index === selectedPaperAccount;
+  const exitMode = account.exit_mode === "candle_15m" ? "15M 收线退出" : "固定 TP / SL";
   return `<button class="acct-card${active ? " is-active" : ""}" type="button" role="tab"
     aria-selected="${active}" data-account-index="${index}">
-    <div class="acct-top"><span>账户 0${index + 1}</span>${pill(account.status)}</div>
+    <div class="acct-top"><span>账户 0${index + 1}</span><span class="acct-mode">${esc(exitMode)}</span>${pill(account.status)}</div>
     <b class="acct-name">${esc(account.strategy_name || "未启动")}</b>
     <div class="acct-equity"><strong class="num">${esc(money(summary.equity))}</strong>
       <em class="num ${pnlClass(returnSinceStart)}">${esc(signedPercent(returnSinceStart))}</em></div>
@@ -314,7 +315,7 @@ function accountDetail(account, index) {
 
 function renderStrategy(data) {
   const accounts = data.accounts || [];
-  if (!accounts.length) return [data.status, emptyBox("等待三个模拟账户启动", "compression_breakout · orderflow_impulse · liquidation_cascade")];
+  if (!accounts.length) return [data.status, emptyBox("等待模拟账户启动", "compression_breakout · orderflow_impulse · liquidation_cascade")];
   selectedPaperAccount = Math.min(selectedPaperAccount, accounts.length - 1);
   const cards = `<div class="acct-cards" role="tablist" aria-label="模拟盘策略账户">${accounts.map(accountCard).join("")}</div>`;
   return [data.status, cards + accountDetail(accounts[selectedPaperAccount], selectedPaperAccount)];

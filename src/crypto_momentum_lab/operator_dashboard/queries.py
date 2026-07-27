@@ -210,19 +210,31 @@ class DashboardQueries:
                     .limit(50)
                 )
             ).all()
-        latest_by_strategy: dict[str, StrategyRunRow] = {}
-        for run in runs:
-            latest_by_strategy.setdefault(run.strategy_name, run)
         strategy_order = (
             "compression_breakout",
             "orderflow_impulse",
             "liquidation_cascade",
         )
-        accounts = [
-            await self.strategy_run(run_id=latest_by_strategy[name].run_id)
-            for name in strategy_order
-            if name in latest_by_strategy
+        current_runs = [
+            run for run in runs if run.run_id.startswith("paper-account-")
         ]
+        selected_runs = current_runs or runs
+        accounts = []
+        for strategy_name in strategy_order:
+            strategy_runs = sorted(
+                (
+                    run
+                    for run in selected_runs
+                    if run.strategy_name == strategy_name
+                ),
+                key=lambda run: (run.created_at, run.run_id),
+            )
+            accounts.extend(
+                [
+                    await self.strategy_run(run_id=run.run_id)
+                    for run in strategy_runs[-2:]
+                ]
+            )
         return PaperAccountsResponse(
             status=(OperationalStatus.READY if accounts else OperationalStatus.NO_DATA),
             accounts=accounts,
@@ -244,6 +256,7 @@ class DashboardQueries:
                     status=OperationalStatus.NO_DATA,
                     run_id=None,
                     strategy_name=None,
+                    exit_mode=None,
                     config_hash=None,
                     checkpoint_at=None,
                     portfolio_summary={},
@@ -311,6 +324,13 @@ class DashboardQueries:
             ).all()
         equity = list(reversed(equity_desc))
         latest_equity = equity[-1] if equity else None
+        portfolio_config = run.execution_config.get("portfolio")
+        exit_mode = (
+            str(portfolio_config.get("exit_mode"))
+            if isinstance(portfolio_config, dict)
+            and portfolio_config.get("exit_mode") is not None
+            else None
+        )
         closed_trade_count = len(closed_positions)
         winning_trade_count = sum(
             1 for row in closed_positions if (row.realized_pnl or 0) > 0
@@ -328,6 +348,7 @@ class DashboardQueries:
             status=OperationalStatus.READY,
             run_id=run.run_id,
             strategy_name=run.strategy_name,
+            exit_mode=exit_mode,
             config_hash=run.config_hash,
             checkpoint_at=checkpoint_at,
             portfolio_summary={

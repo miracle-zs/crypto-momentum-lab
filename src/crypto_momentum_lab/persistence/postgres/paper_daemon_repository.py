@@ -40,6 +40,7 @@ from crypto_momentum_lab.strategy_runner.fills import (
 )
 from crypto_momentum_lab.strategy_runner.portfolio import (
     PaperExitConfig,
+    PaperExitMode,
     PaperPosition,
     PaperPositionStatus,
     position_from_entry_fill,
@@ -252,9 +253,9 @@ class PostgresPaperDaemonRepository:
                     )
                 }
                 actual = {key: getattr(existing, key) for key in expected}
-                if _normalize_for_compare(actual) != _normalize_for_compare(
-                    expected
-                ):
+                if _normalize_paper_run_for_compare(
+                    actual
+                ) != _normalize_paper_run_for_compare(expected):
                     raise ValueError("paper live run conflict")
 
     async def load_pending_candidates(
@@ -635,6 +636,20 @@ def _normalize_for_compare(value: object) -> object:
     if isinstance(value, list | tuple):
         return [_normalize_for_compare(item) for item in value]
     return value
+
+
+def _normalize_paper_run_for_compare(
+    value: dict[str, object],
+) -> dict[str, object]:
+    normalized = cast(dict[str, object], _normalize_for_compare(value))
+    execution_config = normalized.get("execution_config")
+    if not isinstance(execution_config, dict):
+        return normalized
+    portfolio = execution_config.get("portfolio")
+    if isinstance(portfolio, dict):
+        # Runs created before candle exits were introduced imply fixed exits.
+        portfolio.setdefault("exit_mode", PaperExitMode.FIXED.value)
+    return normalized
 
 
 def _require_aware(value: datetime, field_name: str) -> None:

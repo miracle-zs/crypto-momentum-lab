@@ -38,6 +38,7 @@ class StrategyRunResponse(DashboardSchema):
     status: OperationalStatus
     run_id: str | None
     strategy_name: str | None
+    exit_mode: str | None = None
     config_hash: str | None
     checkpoint_at: datetime | None
     portfolio_summary: dict[str, JsonValue] = Field(default_factory=dict)

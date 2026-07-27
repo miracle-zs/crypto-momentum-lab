@@ -31,7 +31,10 @@ from crypto_momentum_lab.strategy_runner.paper import (
     write_paper_trading_report,
 )
 from crypto_momentum_lab.strategy_runner.portfolio import (
+    Candle15mAggregator,
+    ClosedCandle15m,
     PaperExitConfig,
+    PaperExitMode,
     PaperPosition,
     PaperPositionStatus,
     mark_positions,
@@ -59,6 +62,9 @@ __all__ = [
     "PaperLiveDaemonRepository",
     "PaperLiveDaemonResult",
     "PaperExitConfig",
+    "PaperExitMode",
+    "Candle15mAggregator",
+    "ClosedCandle15m",
     "PaperPosition",
     "PaperPositionStatus",
     "PaperMarketStateSource",

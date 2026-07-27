@@ -21,7 +21,9 @@ from crypto_momentum_lab.strategy_runner.fills import (
     simulate_candidate_fill,
 )
 from crypto_momentum_lab.strategy_runner.portfolio import (
+    Candle15mAggregator,
     PaperExitConfig,
+    PaperExitMode,
     PaperPosition,
     PaperPositionStatus,
     mark_positions,
@@ -211,6 +213,11 @@ def run_paper_live_daemon(
     last_checkpoint_saved_at: datetime | None = None
     last_checkpoint_elapsed_anchor = clock.now()
     last_equity_snapshot_at: datetime | None = None
+    candle_aggregator = (
+        Candle15mAggregator()
+        if config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
+        else None
+    )
 
     for state in source:
         if state.environment != config.environment:
@@ -243,11 +250,17 @@ def run_paper_live_daemon(
             )
 
         if artifact_repository is not None:
+            closed_candle = (
+                None
+                if candle_aggregator is None
+                else candle_aggregator.observe(state)
+            )
             position_updates = mark_positions(
                 positions=tuple(open_positions.values()),
                 state=state,
                 config=config.portfolio,
                 taker_fee_rate=config.execution.taker_fee_rate,
+                closed_candle=closed_candle,
             )
             for position in position_updates:
                 if position.status is PaperPositionStatus.CLOSED:

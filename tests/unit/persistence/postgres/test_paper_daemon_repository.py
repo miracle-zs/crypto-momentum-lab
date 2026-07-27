@@ -5,6 +5,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     OrderIntentCandidateRow,
 )
 from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
+    _normalize_paper_run_for_compare,
     candidate_from_row,
     checkpoint_from_row_values,
     paper_live_run_row,
@@ -78,6 +79,30 @@ def test_paper_live_run_row_initializes_zero_count_summary() -> None:
     assert row["fill_count"] == 0
     assert row["execution_config"]["fills"]["taker_fee_rate"] == "0.0004"
     assert row["execution_config"]["portfolio"]["take_profit_pct"] == "0.02"
+
+
+def test_legacy_paper_run_without_exit_mode_defaults_to_fixed_for_compare() -> None:
+    legacy = {
+        "execution_config": {
+            "portfolio": {
+                "take_profit_pct": "0.02",
+                "stop_loss_pct": "0.01",
+            }
+        }
+    }
+    current = {
+        "execution_config": {
+            "portfolio": {
+                "take_profit_pct": "0.02",
+                "stop_loss_pct": "0.01",
+                "exit_mode": "fixed",
+            }
+        }
+    }
+
+    assert _normalize_paper_run_for_compare(legacy) == (
+        _normalize_paper_run_for_compare(current)
+    )
 
 
 def test_candidate_from_row_restores_pending_candidate() -> None:

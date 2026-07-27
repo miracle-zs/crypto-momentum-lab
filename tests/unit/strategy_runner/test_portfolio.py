@@ -9,7 +9,10 @@ from crypto_momentum_lab.strategy_runner.fills import (
     SimulatedFillStatus,
 )
 from crypto_momentum_lab.strategy_runner.portfolio import (
+    Candle15mAggregator,
+    ClosedCandle15m,
     PaperExitConfig,
+    PaperExitMode,
     PaperPositionStatus,
     mark_positions,
     position_from_entry_fill,
@@ -92,6 +95,98 @@ def test_open_position_updates_mark_and_unrealized_pnl() -> None:
     assert marked.unrealized_pnl == Decimal("0.46")
 
 
+def test_15m_aggregator_emits_only_after_the_candle_closes() -> None:
+    aggregator = Candle15mAggregator()
+    candle_start = datetime(2026, 7, 26, 0, 0, tzinfo=UTC)
+    closed: ClosedCandle15m | None = None
+
+    for index in range(60):
+        closed = aggregator.observe(
+            _state(
+                open_price=Decimal("100"),
+                close=Decimal("99") if index == 59 else Decimal("100.5"),
+                bucket_start=candle_start + timedelta(seconds=index * 15),
+            )
+        )
+        if index < 59:
+            assert closed is None
+
+    assert closed == ClosedCandle15m(
+        symbol="BTCUSDT",
+        candle_start=candle_start,
+        candle_end=candle_start + timedelta(minutes=15),
+        open_price=Decimal("100"),
+        close_price=Decimal("99"),
+    )
+
+
+def test_candle_exit_closes_on_first_opposite_candle() -> None:
+    position = position_from_entry_fill("run-1", _fill())
+    assert position is not None
+    config = PaperExitConfig(
+        exit_mode=PaperExitMode.CANDLE_15M,
+        max_holding_buckets=5760,
+    )
+
+    closed = mark_positions(
+        positions=(position,),
+        state=_state(close=Decimal("99")),
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+        closed_candle=ClosedCandle15m(
+            symbol="BTCUSDT",
+            candle_start=datetime(2026, 7, 26, 0, 0, tzinfo=UTC),
+            candle_end=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+            open_price=Decimal("100"),
+            close_price=Decimal("99"),
+        ),
+    )[0]
+
+    assert closed.status is PaperPositionStatus.CLOSED
+    assert closed.close_reason == "candle_15m_bearish"
+
+
+def test_candle_exit_holds_aligned_and_doji_candles_and_reverses_short() -> None:
+    long_position = position_from_entry_fill("run-1", _fill())
+    short_position = position_from_entry_fill(
+        "run-1",
+        replace(_fill(), side=StrategySide.SHORT),
+    )
+    assert long_position is not None
+    assert short_position is not None
+    config = PaperExitConfig(
+        exit_mode=PaperExitMode.CANDLE_15M,
+        max_holding_buckets=5760,
+    )
+
+    aligned_long = mark_positions(
+        positions=(long_position,),
+        state=_state(close=Decimal("105")),
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+        closed_candle=_candle(open_price="100", close_price="105"),
+    )[0]
+    doji_long = mark_positions(
+        positions=(long_position,),
+        state=_state(close=Decimal("100")),
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+        closed_candle=_candle(open_price="100", close_price="100"),
+    )[0]
+    reversed_short = mark_positions(
+        positions=(short_position,),
+        state=_state(close=Decimal("101")),
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+        closed_candle=_candle(open_price="100", close_price="101"),
+    )[0]
+
+    assert aligned_long.status is PaperPositionStatus.OPEN
+    assert doji_long.status is PaperPositionStatus.OPEN
+    assert reversed_short.status is PaperPositionStatus.CLOSED
+    assert reversed_short.close_reason == "candle_15m_bullish"
+
+
 def _fill() -> SimulatedFill:
     opened_at = datetime(2026, 7, 26, 0, 0, tzinfo=UTC)
     return SimulatedFill(
@@ -119,8 +214,11 @@ def _fill() -> SimulatedFill:
 def _state(
     *,
     close: Decimal,
+    open_price: Decimal | None = None,
     bucket_start: datetime = datetime(2026, 7, 26, 0, 0, 15, tzinfo=UTC),
 ) -> MarketState15s:
+    if open_price is None:
+        open_price = close
     return MarketState15s(
         schema_version=1,
         exchange="binance-usdm",
@@ -128,7 +226,7 @@ def _state(
         symbol="BTCUSDT",
         bucket_start=bucket_start,
         bucket_end=bucket_start + timedelta(seconds=15),
-        open_price=close,
+        open_price=open_price,
         high_price=close,
         low_price=close,
         close_price=close,
@@ -147,4 +245,15 @@ def _state(
         source_event_count=1,
         first_received_at=bucket_start,
         last_received_at=bucket_start + timedelta(seconds=15),
+    )
+
+
+def _candle(*, open_price: str, close_price: str) -> ClosedCandle15m:
+    candle_start = datetime(2026, 7, 26, 0, 0, tzinfo=UTC)
+    return ClosedCandle15m(
+        symbol="BTCUSDT",
+        candle_start=candle_start,
+        candle_end=candle_start + timedelta(minutes=15),
+        open_price=Decimal(open_price),
+        close_price=Decimal(close_price),
     )

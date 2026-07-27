@@ -28,6 +28,7 @@ from crypto_momentum_lab.strategy_runner import (
     AsyncPostgresRuntimeStateLoader,
     InMemoryPaperMarketStateSource,
     PaperExitConfig,
+    PaperExitMode,
     PaperLiveDaemonConfig,
     PaperLiveSourceConfig,
     PaperRunnerConfig,
@@ -580,6 +581,13 @@ def paper_live_daemon_command(
         str,
         typer.Option("--paper-initial-balance"),
     ] = "1000",
+    exit_mode: Annotated[
+        str,
+        typer.Option(
+            "--exit-mode",
+            help="Exit mode: fixed or candle_15m.",
+        ),
+    ] = PaperExitMode.FIXED.value,
     take_profit_pct: Annotated[
         str,
         typer.Option("--take-profit-pct"),
@@ -689,6 +697,7 @@ def paper_live_daemon_command(
             source_description=source.description,
             execution=ReplayExecutionConfig(),
             portfolio=PaperExitConfig(
+                exit_mode=PaperExitMode(exit_mode),
                 initial_balance=Decimal(paper_initial_balance),
                 take_profit_pct=Decimal(take_profit_pct),
                 stop_loss_pct=Decimal(stop_loss_pct),

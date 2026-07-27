@@ -657,6 +657,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .acct-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .acct-top > span { color: var(--faint); font: 9.5px var(--mono); letter-spacing: .14em; }
+.acct-top .acct-mode { color: var(--brand); letter-spacing: .06em; white-space: nowrap; }
 
 .acct-name { font-size: 14.5px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
