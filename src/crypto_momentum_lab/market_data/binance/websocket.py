@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID, uuid4
 
+import structlog
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
@@ -25,6 +26,8 @@ class BinancePayloadError(ValueError):
 
 type EnvelopeSink = Callable[[RawEnvelope], Awaitable[None]]
 type LifecycleSink = Callable[[ConnectionLifecycleEvent], Awaitable[None]]
+
+log = structlog.get_logger(__name__)
 
 
 class BinanceWebSocketConnection:
@@ -86,8 +89,32 @@ class BinanceWebSocketConnection:
                 OSError,
             ) as error:
                 reason = error.__class__.__name__
+            except Exception as error:
+                reason = error.__class__.__name__
+                log.exception(
+                    "binance_websocket_session_failed",
+                    route=self._route.value,
+                    stream=self._stream.value,
+                    symbols=self._desired_names,
+                    reason=reason,
+                    error=str(error),
+                )
             finally:
-                await self._emit_lifecycle(session_id, opened=False, reason=reason)
+                self._connection = None
+                try:
+                    await self._emit_lifecycle(
+                        session_id,
+                        opened=False,
+                        reason=reason,
+                    )
+                except Exception as error:
+                    log.exception(
+                        "binance_websocket_lifecycle_sink_failed",
+                        route=self._route.value,
+                        stream=self._stream.value,
+                        reason=error.__class__.__name__,
+                        error=str(error),
+                    )
 
             if self._stopping:
                 return

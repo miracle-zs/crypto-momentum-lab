@@ -165,3 +165,45 @@ async def test_connection_reconnects_after_capture_queue_backpressure(
 
     assert attempts == 2
     assert lifecycle_reasons == ["CaptureQueueFull", "stopped"]
+
+
+@pytest.mark.asyncio
+async def test_connection_reconnects_after_unexpected_session_error(
+    monkeypatch,
+) -> None:
+    attempts = 0
+    lifecycle_reasons: list[str | None] = []
+
+    async def observe_lifecycle(event) -> None:
+        lifecycle_reasons.append(event.reason)
+
+    connection = BinanceWebSocketConnection(
+        base_url="wss://example.test/ws",
+        route=route_for(CaptureStream.AGG_TRADE),
+        environment="test",
+        desired_names=("btcusdt@aggTrade",),
+        generation=1,
+        on_envelope=lambda envelope: asyncio.sleep(0),
+        on_lifecycle=observe_lifecycle,
+        reconnect_delays=(0.0,),
+        connection_lifetime_seconds=60,
+        open_timeout_seconds=1,
+        ping_interval_seconds=20,
+        ping_timeout_seconds=20,
+        silence_timeout_seconds=2,
+    )
+
+    async def fake_run_once(session_id) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("unexpected test failure")
+        connection._stopping = True
+        return "stopped"
+
+    monkeypatch.setattr(connection, "_run_once", fake_run_once)
+
+    await connection.run()
+
+    assert attempts == 2
+    assert lifecycle_reasons == ["RuntimeError", "stopped"]
