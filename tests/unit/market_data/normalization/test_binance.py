@@ -181,6 +181,31 @@ def test_normalizes_liquidation_snapshot() -> None:
     )
 
 
+def test_uses_accumulated_filled_quantity_for_liquidation_notional() -> None:
+    event = normalize_binance_envelope(
+        _envelope(
+            CaptureStream.FORCE_ORDER,
+            {
+                "e": "forceOrder",
+                "E": 1781488800000,
+                "o": {
+                    "s": "BTCUSDT",
+                    "S": "SELL",
+                    "p": "100",
+                    "ap": "100.5",
+                    "q": "0.4",
+                    "z": "0.25",
+                    "T": 1781488799000,
+                },
+            },
+        )
+    )
+
+    assert isinstance(event, NormalizedLiquidation)
+    assert event.quantity == Decimal("0.25")
+    assert event.notional == Decimal("25.125")
+
+
 def test_rejects_malformed_aggregate_trade() -> None:
     with pytest.raises(BinanceNormalizationError, match="p"):
         normalize_binance_envelope(

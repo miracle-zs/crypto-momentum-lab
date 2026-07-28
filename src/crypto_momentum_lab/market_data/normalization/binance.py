@@ -133,7 +133,11 @@ def _normalize_force_order(
     order_payload = order
     price = _required_decimal(order_payload, "p")
     average_price = _required_decimal(order_payload, "ap")
-    quantity = _required_decimal(order_payload, "q")
+    original_quantity = _required_decimal(order_payload, "q")
+    filled_quantity = _optional_decimal(order_payload, "z")
+    quantity = (
+        filled_quantity if filled_quantity is not None else original_quantity
+    )
     notional_price = average_price if average_price > 0 else price
     return NormalizedLiquidation(
         **_source_kwargs(envelope),
