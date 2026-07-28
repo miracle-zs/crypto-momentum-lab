@@ -19,6 +19,7 @@ from crypto_momentum_lab.persistence.postgres import (
     PostgresPaperDaemonRepository,
     PostgresRuntimeMarketStateRepository,
     PostgresStrategyRunRepository,
+    PostgresUniverseRepository,
     create_async_database_engine,
 )
 from crypto_momentum_lab.strategies.compression_breakout import (
@@ -705,6 +706,7 @@ def paper_live_daemon_command(
             ),
         ),
         clock=_SystemClock(),
+        entry_symbol_loader=source.load_active_symbols,
     )
     typer.echo(
         "Paper live daemon completed: "
@@ -744,6 +746,7 @@ def build_postgres_paper_source(
     loader = AsyncPostgresRuntimeStateLoader(
         repository=repository,
         environment=environment,
+        universe_repository=PostgresUniverseRepository(factory),
         shutdown=engine.dispose,
     )
     return PostgresPaperMarketStateSource(

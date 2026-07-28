@@ -92,6 +92,13 @@ state that reaches one of these rules:
 PnL includes both entry and exit taker fees. All three accounts evaluate the
 closed state's trade close, rather than intrabucket high/low.
 
+The market-data service subscribes to the 40-symbol momentum universe plus
+symbols with open positions in the paper runs listed by
+`CML_PAPER_EXIT_RUN_IDS`. Strategy runners continue to allow entries only for
+the active 40-symbol universe; protected symbols are consumed only so existing
+positions can be marked and exited. Keep the environment variable in
+`compose.server.yaml` aligned whenever a paper account is added or renamed.
+
 The server profile has no private account connection, so virtual fills use the
 closed 15-second state's trade close as the executable reference price. No order
 is sent to Binance.

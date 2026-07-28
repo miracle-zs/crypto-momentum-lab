@@ -1,6 +1,6 @@
 import asyncio
 import json
-from collections.abc import Coroutine, Iterable
+from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Protocol
@@ -131,6 +131,7 @@ class PaperLiveDaemonConfig:
     checkpoint_every_states: int
     checkpoint_every_seconds: float
     max_market_state_age_seconds: float
+    entry_symbol_refresh_seconds: float = 15.0
     continue_while_halted: bool = False
     run_identity: StrategyRunIdentity | None = None
     source_description: str = "paper-live"
@@ -147,6 +148,8 @@ class PaperLiveDaemonConfig:
             raise ValueError("checkpoint_every_seconds must be positive")
         if self.max_market_state_age_seconds <= 0:
             raise ValueError("max_market_state_age_seconds must be positive")
+        if self.entry_symbol_refresh_seconds <= 0:
+            raise ValueError("entry_symbol_refresh_seconds must be positive")
         if not self.source_description.strip():
             raise ValueError("source_description must not be empty")
         if self.run_identity is not None:
@@ -174,6 +177,7 @@ def run_paper_live_daemon(
     artifact_repository: PaperLiveArtifactRepository | None = None,
     config: PaperLiveDaemonConfig,
     clock: Clock,
+    entry_symbol_loader: Callable[[], frozenset[str]] | None = None,
 ) -> PaperLiveDaemonResult:
     checkpoint = _run_async(repository.load_checkpoint(config.run_id))
     if checkpoint is not None:
@@ -213,6 +217,8 @@ def run_paper_live_daemon(
     last_checkpoint_saved_at: datetime | None = None
     last_checkpoint_elapsed_anchor = clock.now()
     last_equity_snapshot_at: datetime | None = None
+    entry_symbols: frozenset[str] | None = None
+    entry_symbols_loaded_at: datetime | None = None
     candle_aggregator = (
         Candle15mAggregator()
         if config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
@@ -248,6 +254,17 @@ def run_paper_live_daemon(
                 final_cursor=final_cursor,
                 final_checkpoint_saved_at=last_checkpoint_saved_at,
             )
+
+        if entry_symbol_loader is not None and (
+            entry_symbols_loaded_at is None
+            or (now - entry_symbols_loaded_at).total_seconds()
+            >= config.entry_symbol_refresh_seconds
+        ):
+            entry_symbols = entry_symbol_loader()
+            entry_symbols_loaded_at = now
+        entry_allowed = (
+            entry_symbols is None or state.symbol in entry_symbols
+        )
 
         if artifact_repository is not None:
             closed_candle = (
@@ -301,7 +318,7 @@ def run_paper_live_daemon(
                     last_equity_snapshot_at = state.bucket_start
 
         decision = strategy.on_market_state(state)
-        if artifact_repository is not None and (
+        if artifact_repository is not None and entry_allowed and (
             decision.signals or decision.candidates
         ):
             _run_async(artifact_repository.save_decision(decision))

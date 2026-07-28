@@ -123,6 +123,12 @@ async def test_live_paper_artifacts_are_idempotent_and_resume_pending_candidates
 
     assert await artifacts.load_pending_candidates(report.run.run_id) == ()
     assert await artifacts.load_open_positions(report.run.run_id) == opened
+    assert await artifacts.load_open_position_symbols(
+        frozenset({report.run.run_id})
+    ) == frozenset({opened[0].symbol})
+    assert await artifacts.load_open_position_symbols(
+        frozenset({"another-run"})
+    ) == frozenset()
     closed_at = opened[0].opened_at + timedelta(minutes=20)
     closed = replace(
         opened[0],
@@ -143,6 +149,9 @@ async def test_live_paper_artifacts_are_idempotent_and_resume_pending_candidates
         PaperExitConfig(),
     )
     assert await artifacts.load_open_positions(report.run.run_id) == ()
+    assert await artifacts.load_open_position_symbols(
+        frozenset({report.run.run_id})
+    ) == frozenset()
     summary = await reports.load_run_summary(report.run.run_id)
     assert summary is not None
     assert summary["signal_count"] == 1

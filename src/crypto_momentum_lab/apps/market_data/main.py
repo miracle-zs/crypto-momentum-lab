@@ -48,6 +48,9 @@ from crypto_momentum_lab.market_data.runtime_states import (
 from crypto_momentum_lab.persistence.postgres.capture_repository import (
     PostgresCaptureRepository,
 )
+from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
+    PostgresPaperDaemonRepository,
+)
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
 )
@@ -71,6 +74,8 @@ _MARKET_DATA_STARTUP_GRACE_SECONDS = 120.0
 _MARKET_DATA_STALE_AFTER_SECONDS = 120.0
 _MARKET_DATA_WATCHDOG_INTERVAL_SECONDS = 15.0
 _CAPTURE_STOP_TIMEOUT_SECONDS = 30.0
+_PAPER_EXIT_RECONCILE_SECONDS = 15.0
+_PAPER_EXIT_RUN_IDS_ENV = "CML_PAPER_EXIT_RUN_IDS"
 
 
 class MarketDataStaleError(RuntimeError):
@@ -94,6 +99,19 @@ def resolve_config_path(value: Path | None) -> Path:
             "CML_ENVIRONMENT_CONFIG",
             "configs/environments/research.yaml",
         )
+    )
+
+
+def parse_paper_exit_run_ids(value: str | None = None) -> frozenset[str]:
+    raw_value = (
+        os.environ.get(_PAPER_EXIT_RUN_IDS_ENV, "")
+        if value is None
+        else value
+    )
+    return frozenset(
+        run_id
+        for item in raw_value.split(",")
+        if (run_id := item.strip())
     )
 
 
@@ -230,30 +248,76 @@ class CaptureUniverseObserver:
         *,
         streams: tuple[CaptureStream, ...],
         initial_generation: int,
+        protected_symbol_loader: (
+            Callable[[], Awaitable[frozenset[str]]] | None
+        ) = None,
     ) -> None:
         self._capture = capture
         self._streams = streams
         self._generation = initial_generation
+        self._protected_symbol_loader = protected_symbol_loader
         self._lock = asyncio.Lock()
+        self._universe_symbols: frozenset[str] | None = None
+        self._applied_symbols: frozenset[str] | None = None
 
     async def snapshot_updated(
         self,
         snapshot: UniverseSnapshot,
     ) -> None:
-        symbols = frozenset(item.symbol for item in snapshot.memberships)
         async with self._lock:
-            self._generation += 1
-            await self._capture.apply_symbols(
-                symbols,
-                streams=self._streams,
-                generation=self._generation,
+            self._universe_symbols = frozenset(
+                item.symbol for item in snapshot.memberships
             )
+            await self._apply_symbols()
+
+    async def refresh_protected_symbols(self) -> None:
+        async with self._lock:
+            if self._universe_symbols is None:
+                return
+            await self._apply_symbols()
+
+    async def _apply_symbols(self) -> None:
+        if self._universe_symbols is None:
+            return
+        protected_symbols = (
+            frozenset()
+            if self._protected_symbol_loader is None
+            else await self._protected_symbol_loader()
+        )
+        symbols = self._universe_symbols | protected_symbols
+        if symbols == self._applied_symbols:
+            return
+        self._generation += 1
+        await self._capture.apply_symbols(
+            symbols,
+            streams=self._streams,
+            generation=self._generation,
+        )
+        self._applied_symbols = symbols
+        log.info(
+            "capture_symbols_updated",
+            universe=len(self._universe_symbols),
+            protected=len(protected_symbols - self._universe_symbols),
+            total=len(symbols),
+        )
+
+
+async def reconcile_paper_exit_subscriptions(
+    observer: CaptureUniverseObserver,
+    *,
+    interval_seconds: float = _PAPER_EXIT_RECONCILE_SECONDS,
+    sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    while True:
+        await sleeper(interval_seconds)
+        await observer.refresh_protected_symbols()
 
 
 @dataclass(frozen=True, slots=True)
 class MarketDataRuntime:
     capture: MarketDataCaptureService
     universe: UniverseRefreshService
+    subscription_observer: CaptureUniverseObserver
     runtime_state_publisher: ClosedMarketStatePublisher
     universe_activation_minute: int
     enabled_streams: tuple[CaptureStream, ...]
@@ -269,6 +333,7 @@ async def build_market_data_runtime(
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     universe_repository = PostgresUniverseRepository(sessions)
     capture_repository = PostgresCaptureRepository(sessions)
+    paper_repository = PostgresPaperDaemonRepository(sessions)
     runtime_state_repository = PostgresRuntimeMarketStateRepository(sessions)
     runtime_state_publisher = ClosedMarketStatePublisher(
         repository=runtime_state_repository,
@@ -276,8 +341,17 @@ async def build_market_data_runtime(
             closure_delay_seconds=runtime.capture.closure_delay_seconds
         ),
     )
+    protected_run_ids = parse_paper_exit_run_ids()
+
+    async def load_protected_symbols() -> frozenset[str]:
+        return await paper_repository.load_open_position_symbols(
+            protected_run_ids
+        )
+
     initial_memberships = await universe_repository.load_active_memberships()
-    initial_symbols = frozenset(initial_memberships)
+    initial_symbols = (
+        frozenset(initial_memberships) | await load_protected_symbols()
+    )
     enabled_streams = tuple(
         CaptureStream(item) for item in runtime.capture.enabled_streams
     )
@@ -387,6 +461,7 @@ async def build_market_data_runtime(
         capture,
         streams=enabled_streams,
         initial_generation=1,
+        protected_symbol_loader=load_protected_symbols,
     )
     rest_client = BinanceUsdMRestClient(str(runtime.binance_base_url))
     universe = UniverseRefreshService(
@@ -400,6 +475,7 @@ async def build_market_data_runtime(
         yield MarketDataRuntime(
             capture=capture,
             universe=universe,
+            subscription_observer=observer,
             runtime_state_publisher=runtime_state_publisher,
             universe_activation_minute=runtime.universe.activation_minute,
             enabled_streams=enabled_streams,
@@ -477,6 +553,11 @@ async def run_market_data(config_path: Path) -> None:
                         )
                     )
                 )
+                tasks.create_task(
+                    reconcile_paper_exit_subscriptions(
+                        runtime.subscription_observer
+                    )
+                )
         finally:
             try:
                 async with asyncio.timeout(_CAPTURE_STOP_TIMEOUT_SECONDS):
@@ -507,15 +588,25 @@ async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
                 activation_minute=runtime.universe_activation_minute,
             )
         )
+        subscription_task = asyncio.create_task(
+            reconcile_paper_exit_subscriptions(
+                runtime.subscription_observer
+            )
+        )
         try:
             await asyncio.sleep(seconds)
         finally:
             await runtime.capture.stop()
-            for task in (capture_task, scheduler_task):
+            for task in (
+                capture_task,
+                scheduler_task,
+                subscription_task,
+            ):
                 task.cancel()
             await asyncio.gather(
                 capture_task,
                 scheduler_task,
+                subscription_task,
                 return_exceptions=True,
             )
 

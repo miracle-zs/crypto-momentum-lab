@@ -6,6 +6,9 @@ from datetime import datetime
 from typing import Protocol
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.persistence.postgres.repository import (
+    PostgresUniverseRepository,
+)
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
     RuntimeStateCursor,
@@ -19,6 +22,8 @@ class RuntimeStateLoader(Protocol):
         cursor: RuntimeStateCursor,
         limit: int,
     ) -> tuple[MarketState15s, ...]: ...
+
+    def load_active_symbols(self) -> frozenset[str]: ...
 
     def close(self) -> None: ...
 
@@ -55,6 +60,9 @@ class PostgresPaperMarketStateSource:
     @property
     def description(self) -> str:
         return f"postgres-runtime-states:{self.config.environment}"
+
+    def load_active_symbols(self) -> frozenset[str]:
+        return self.loader.load_active_symbols()
 
     def __iter__(self) -> Iterator[MarketState15s]:
         cursor = _initial_cursor(self.config)
@@ -104,6 +112,7 @@ class PostgresPaperMarketStateSource:
 class AsyncPostgresRuntimeStateLoader:
     repository: PostgresRuntimeMarketStateRepository
     environment: str
+    universe_repository: PostgresUniverseRepository | None = None
     shutdown: Callable[[], Awaitable[None]] | None = None
     _event_loop: asyncio.AbstractEventLoop = field(
         default_factory=asyncio.new_event_loop,
@@ -124,6 +133,14 @@ class AsyncPostgresRuntimeStateLoader:
                 limit=limit,
             )
         )
+
+    def load_active_symbols(self) -> frozenset[str]:
+        if self.universe_repository is None:
+            return frozenset()
+        memberships = self._event_loop.run_until_complete(
+            self.universe_repository.load_active_memberships()
+        )
+        return frozenset(memberships)
 
     def close(self) -> None:
         if self._event_loop.is_closed():

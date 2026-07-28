@@ -98,6 +98,12 @@ def test_refresh_command_rejects_invalid_timestamp() -> None:
     assert result.exit_code != 0
 
 
+def test_parse_paper_exit_run_ids_normalizes_csv() -> None:
+    assert main.parse_paper_exit_run_ids(
+        " run-1,run-2, run-1, ,"
+    ) == frozenset({"run-1", "run-2"})
+
+
 def test_run_market_data_uses_combined_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -162,6 +168,48 @@ async def test_capture_observer_applies_membership_symbols() -> None:
             2,
         )
     ]
+
+
+async def test_capture_observer_keeps_open_position_symbols_subscribed() -> None:
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def apply_symbols(self, symbols, *, streams, generation) -> None:
+            self.calls.append((symbols, streams, generation))
+
+    protected_symbols = frozenset({"OLDUSDT"})
+
+    async def load_protected_symbols() -> frozenset[str]:
+        return protected_symbols
+
+    capture = FakeCapture()
+    observer = main.CaptureUniverseObserver(
+        capture,
+        streams=(CaptureStream.AGG_TRADE,),
+        initial_generation=3,
+        protected_symbol_loader=load_protected_symbols,
+    )
+
+    await observer.snapshot_updated(fixture_snapshot())
+    await observer.refresh_protected_symbols()
+
+    assert capture.calls == [
+        (
+            frozenset({"BTCUSDT", "OLDUSDT"}),
+            (CaptureStream.AGG_TRADE,),
+            4,
+        )
+    ]
+
+    protected_symbols = frozenset()
+    await observer.refresh_protected_symbols()
+
+    assert capture.calls[-1] == (
+        frozenset({"BTCUSDT"}),
+        (CaptureStream.AGG_TRADE,),
+        5,
+    )
 
 
 async def test_logging_refresh_service_times_out_stalled_refresh() -> None:

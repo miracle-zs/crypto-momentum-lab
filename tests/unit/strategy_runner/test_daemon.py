@@ -28,6 +28,7 @@ from crypto_momentum_lab.strategy_runner.fills import (
 from crypto_momentum_lab.strategy_runner.portfolio import (
     PaperExitConfig,
     PaperPosition,
+    PaperPositionStatus,
     position_from_entry_fill,
 )
 from tests.unit.persistence.postgres.test_runtime_state_repository import (
@@ -290,12 +291,48 @@ def test_daemon_persists_signal_candidate_and_virtual_fill() -> None:
     assert artifacts.fills[0].filled_notional == Decimal("25")
 
 
+def test_daemon_uses_protected_symbol_for_exit_without_opening_new_trade() -> None:
+    state = fixture_state("BTCUSDT", 80)
+    identity = _identity()
+    artifacts = FakeArtifactRepository()
+    position = position_from_entry_fill(
+        identity.run_id,
+        _filled_entry(
+            symbol=state.symbol,
+            filled_at=state.bucket_start - timedelta(hours=1),
+        ),
+    )
+    assert position is not None
+    artifacts.positions[position.position_id] = position
+
+    result = run_paper_live_daemon(
+        source=(state,),
+        strategy=SignalStrategy(identity),
+        repository=FakeRepository(),
+        artifact_repository=artifacts,
+        config=_config(
+            run_identity=identity,
+            portfolio=PaperExitConfig(max_holding_buckets=1),
+        ),
+        clock=FakeClock(state.bucket_end + timedelta(seconds=1)),
+        entry_symbol_loader=lambda: frozenset({"ETHUSDT"}),
+    )
+
+    assert result.processed_state_count == 1
+    assert artifacts.decisions == []
+    assert artifacts.fills == []
+    closed = artifacts.portfolio_updates[0][0]
+    assert closed.status is PaperPositionStatus.CLOSED
+    assert closed.close_reason == "max_holding_period"
+
+
 def _config(
     *,
     checkpoint_every_states: int = 10,
     max_market_state_age_seconds: float = 120.0,
     run_identity: StrategyRunIdentity | None = None,
     execution: ReplayExecutionConfig | None = None,
+    portfolio: PaperExitConfig | None = None,
 ) -> PaperLiveDaemonConfig:
     return PaperLiveDaemonConfig(
         run_id="run-1",
@@ -307,6 +344,7 @@ def _config(
         run_identity=run_identity,
         source_description="postgres-runtime-states:research",
         execution=execution or ReplayExecutionConfig(),
+        portfolio=portfolio or PaperExitConfig(),
     )
 
 
@@ -320,4 +358,27 @@ def _identity() -> StrategyRunIdentity:
         code_commit="unknown",
         created_at=datetime(2026, 7, 3, 0, 0, tzinfo=UTC),
         source_paths=("postgres-runtime-states:research",),
+    )
+
+
+def _filled_entry(*, symbol: str, filled_at: datetime) -> SimulatedFill:
+    return SimulatedFill(
+        fill_id=f"fill-{symbol}",
+        candidate_id=f"candidate-{symbol}",
+        signal_id=f"signal-{symbol}",
+        symbol=symbol,
+        side=StrategySide.LONG,
+        status=SimulatedFillStatus.FILLED,
+        target_fill_at=filled_at,
+        filled_at=filled_at,
+        requested_notional=Decimal("25"),
+        filled_notional=Decimal("25"),
+        quantity=Decimal("0.25"),
+        reference_midpoint=Decimal("100"),
+        spread=None,
+        fill_price=Decimal("100"),
+        fee=Decimal("0.01"),
+        total_cost=Decimal("0.01"),
+        cost_bps=Decimal("4"),
+        reason="filled",
     )

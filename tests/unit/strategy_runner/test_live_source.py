@@ -50,6 +50,11 @@ class LoopRecordingRepository:
         return ()
 
 
+class FakeUniverseRepository:
+    async def load_active_memberships(self):
+        return {"BTCUSDT": object(), "ETHUSDT": object()}
+
+
 def test_async_loader_reuses_one_event_loop_for_pooled_database_connections() -> None:
     repository = LoopRecordingRepository()
     loader = AsyncPostgresRuntimeStateLoader(
@@ -61,6 +66,19 @@ def test_async_loader_reuses_one_event_loop_for_pooled_database_connections() ->
     loader.load_after(cursor=RuntimeStateCursor(), limit=10)
 
     assert repository.loops[0] is repository.loops[1]
+    loader.close()
+
+
+def test_async_loader_reads_active_entry_symbols_on_its_event_loop() -> None:
+    loader = AsyncPostgresRuntimeStateLoader(
+        repository=LoopRecordingRepository(),
+        environment="research",
+        universe_repository=FakeUniverseRepository(),
+    )
+
+    assert loader.load_active_symbols() == frozenset(
+        {"BTCUSDT", "ETHUSDT"}
+    )
     loader.close()
 
 

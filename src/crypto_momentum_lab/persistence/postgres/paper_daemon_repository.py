@@ -367,6 +367,27 @@ class PostgresPaperDaemonRepository:
             ).all()
         return tuple(paper_position_from_row(row) for row in rows)
 
+    async def load_open_position_symbols(
+        self,
+        run_ids: frozenset[str],
+    ) -> frozenset[str]:
+        if not run_ids:
+            return frozenset()
+        async with self._session_factory() as session:
+            symbols = (
+                await session.scalars(
+                    select(PaperPositionRow.symbol)
+                    .where(
+                        PaperPositionRow.run_id.in_(run_ids),
+                        PaperPositionRow.status
+                        == PaperPositionStatus.OPEN.value,
+                    )
+                    .distinct()
+                    .order_by(PaperPositionRow.symbol)
+                )
+            ).all()
+        return frozenset(symbols)
+
     async def save_portfolio(
         self,
         run_id: str,

@@ -56,6 +56,13 @@ services:
     environment:
       <<: *app-environment
       CML_ENVIRONMENT_CONFIG: configs/environments/server_paper.yaml
+      CML_PAPER_EXIT_RUN_IDS: >-
+        paper-account-01-compression-v1,
+        paper-account-02-orderflow-v1,
+        paper-account-03-liquidation-v1,
+        paper-account-04-compression-candle15m-v1,
+        paper-account-05-orderflow-candle15m-v1,
+        paper-account-06-liquidation-candle15m-v1
     entrypoint: ["cml-market-data"]
     command: ["run-market-data"]
     depends_on:

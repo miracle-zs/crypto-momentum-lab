@@ -487,7 +487,10 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
 
     def fake_build_source(**kwargs) -> object:
         source_calls.append(kwargs)
-        return SimpleNamespace(description="fake-source")
+        return SimpleNamespace(
+            description="fake-source",
+            load_active_symbols=lambda: frozenset({"BTCUSDT"}),
+        )
 
     monkeypatch.setattr(main, "build_postgres_paper_source", fake_build_source)
     monkeypatch.setattr(
@@ -533,6 +536,7 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
     config = calls[0]["config"]
     assert calls[0]["repository"] is repository
     assert calls[0]["artifact_repository"] is repository
+    assert calls[0]["entry_symbol_loader"]() == frozenset({"BTCUSDT"})
     assert config.run_id == "daemon-run"
     assert config.run_identity is not None
     assert config.run_identity.run_id == "daemon-run"
