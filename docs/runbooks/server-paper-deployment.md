@@ -55,9 +55,18 @@ curl -fsS http://127.0.0.1:8765/api/health
 curl -fsS http://127.0.0.1/momentum/api/health
 ```
 
-The remote console is available at `http://<server>/momentum/`. Account panels
-remain empty because this stack intentionally has no Binance private-account
-credentials.
+The market-data process fails and lets Docker restart it when an hourly
+universe refresh exceeds 120 seconds, when no live market state arrives within
+120 seconds after startup, or when the latest market-state watermark becomes
+more than 120 seconds old. Connection cleanup is capped at 30 seconds so a
+stuck socket cannot prevent restart. A restart scans and recovers the durable
+raw archive before opening live subscriptions; on a large archive this startup
+phase can take several minutes.
+
+The remote console is available at `http://<server>/momentum/`. The
+exchange-account panel remains empty because this stack intentionally has no
+Binance private-account credentials; the six paper-account panels remain
+active.
 
 ## Paper Artifacts
 

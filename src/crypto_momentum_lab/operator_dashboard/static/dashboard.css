@@ -663,19 +663,132 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .acct-equity { display: flex; align-items: baseline; gap: 10px; }
 .acct-equity strong { font: 500 23px/1 var(--mono); font-variant-numeric: tabular-nums; }
-.acct-equity em { font-style: normal; font-size: 12px; }
+.acct-total { display: inline-flex; align-items: baseline; gap: 5px; }
+.acct-total small { color: var(--faint); font-size: 8px; letter-spacing: .06em; }
+.acct-total em { font-style: normal; font-size: 12px; }
+
+.acct-window {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: -4px;
+}
+
+.acct-window span { color: var(--faint); font-size: 9px; letter-spacing: .03em; }
+.acct-window b { font-size: 10.5px; font-weight: 500; }
 
 .spark { width: 100%; height: 38px; }
 .spark polyline { fill: none; stroke: currentColor; stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+.spark-zero { stroke: var(--line-strong); stroke-width: 1; stroke-dasharray: 3 4; }
 .spark.pos { color: var(--up); }
 .spark.neg { color: var(--down); }
+.spark.fixed { color: var(--brand); }
+.spark.candle { color: var(--up); }
 .spark-empty { display: grid; place-items: center; color: var(--faint); background: var(--surface-3); border-radius: 6px; }
 
 .acct-card small { color: var(--faint); font-size: 10.5px; }
 
 .paper-account-detail { margin-top: 20px; }
 
+/* ============ paired equity comparison ============ */
+
+.pair-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.pair-panel {
+  min-width: 0;
+  padding: 13px 14px 11px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface-2);
+}
+
+.pair-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pair-head > div:first-child { min-width: 0; }
+
+.pair-head strong {
+  display: block;
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pair-head small {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--faint);
+  font: 8.5px var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pair-spread { flex: none; text-align: right; }
+.pair-spread span { display: block; color: var(--faint); font-size: 8.5px; }
+.pair-spread b { display: block; margin-top: 2px; font-size: 12px; font-weight: 600; }
+
+.pair-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.pair-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.pair-legend i { width: 12px; height: 2px; border-radius: 2px; }
+.pair-legend .fixed i { background: var(--brand); }
+.pair-legend .candle i { background: var(--up); }
+.pair-legend b { margin-left: 2px; font-size: 9.5px; font-weight: 500; }
+
+.pair-chart { margin: 3px -2px 0; }
+.pair-chart svg { display: block; width: 100%; height: auto; }
+
+.pair-line { fill: none; stroke-width: 1.8; vector-effect: non-scaling-stroke; }
+.pair-line.fixed { stroke: var(--brand); }
+.pair-line.candle { stroke: var(--up); }
+.pair-dot.fixed { fill: var(--brand); }
+.pair-dot.candle { fill: var(--up); }
+
+.pair-panel footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  color: var(--faint);
+  font-size: 8.5px;
+}
+
+.pair-panel footer b { color: var(--muted); font: 500 9px var(--mono); white-space: nowrap; }
+
 /* ============ equity chart ============ */
+
+.chart-context {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 5px;
+  color: var(--faint);
+  font-size: 9px;
+}
+
+.chart-context b { color: var(--muted); font-size: 9px; font-weight: 500; white-space: nowrap; }
 
 .equity-chart { width: 100%; }
 .equity-chart svg { display: block; width: 100%; height: auto; }
@@ -791,12 +904,14 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 @media (max-width: 1280px) {
   .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .pair-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 1080px) {
   .block-split { grid-template-columns: 1fr; }
   .block-split .block { margin-top: 20px; }
   .action-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pair-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 960px) {

@@ -41,6 +41,9 @@ class StrategyRunResponse(DashboardSchema):
     exit_mode: str | None = None
     config_hash: str | None
     checkpoint_at: datetime | None
+    equity_window_start: datetime | None = None
+    equity_window_end: datetime | None = None
+    equity_sample_interval_seconds: int | None = None
     portfolio_summary: dict[str, JsonValue] = Field(default_factory=dict)
     equity_curve: list[dict[str, JsonValue]] = Field(default_factory=list)
     open_positions: list[dict[str, JsonValue]] = Field(default_factory=list)

@@ -48,8 +48,26 @@ def test_strategy_panel_renders_portfolio_and_position_lifecycle() -> None:
         assert label in text
     for field in (
         "equity_curve",
+        "equity_window_start",
+        "equity_window_end",
+        "equity_sample_interval_seconds",
         "open_positions",
         "closed_trades",
         "trade_events",
     ):
         assert field in text
+
+
+def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
+    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+
+    for marker in (
+        "buildPairedEquityModels",
+        "PAIR-MATCHED EQUITY",
+        "COMMON START",
+        "SHARED AXES",
+        "ROLLING 24H",
+        "CLOSED TRADES · LATEST 30",
+        "wirePaperAccountTabs",
+    ):
+        assert marker in text

@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
@@ -162,3 +162,55 @@ async def test_capture_observer_applies_membership_symbols() -> None:
             2,
         )
     ]
+
+
+async def test_logging_refresh_service_times_out_stalled_refresh() -> None:
+    class StalledRefreshService:
+        async def refresh(self, *, observed_at: datetime) -> UniverseSnapshot:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    service = main.LoggingRefreshService(
+        StalledRefreshService(),
+        timeout_seconds=0.001,
+    )
+
+    with pytest.raises(TimeoutError):
+        await service.refresh(
+            observed_at=datetime(2026, 7, 28, 0, 0, tzinfo=UTC)
+        )
+
+
+async def test_market_data_watchdog_rejects_missing_startup_data() -> None:
+    now = datetime(2026, 7, 28, 0, 0, tzinfo=UTC)
+    clock_values = iter((now, now + timedelta(seconds=121)))
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    with pytest.raises(main.MarketDataStaleError, match="no market data"):
+        await main.monitor_market_data_freshness(
+            latest_observed_at=lambda: None,
+            startup_grace_seconds=120,
+            stale_after_seconds=120,
+            check_interval_seconds=1,
+            clock=lambda: next(clock_values),
+            sleeper=no_sleep,
+        )
+
+
+async def test_market_data_watchdog_rejects_stale_stream() -> None:
+    now = datetime(2026, 7, 28, 0, 0, tzinfo=UTC)
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    with pytest.raises(main.MarketDataStaleError, match="market data stale"):
+        await main.monitor_market_data_freshness(
+            latest_observed_at=lambda: now - timedelta(seconds=121),
+            startup_grace_seconds=120,
+            stale_after_seconds=120,
+            check_interval_seconds=1,
+            clock=lambda: now,
+            sleeper=no_sleep,
+        )

@@ -1,5 +1,5 @@
-from collections.abc import Callable
-from datetime import UTC, datetime
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, select, text
@@ -44,6 +44,10 @@ from crypto_momentum_lab.persistence.postgres.models import (
     UniverseEntryRow,
     UniverseSnapshotRow,
 )
+
+_EQUITY_WINDOW = timedelta(hours=24)
+_EQUITY_BUCKET_SECONDS = 6 * 60
+_EQUITY_MAX_POINTS = 240
 
 
 class DashboardQueries:
@@ -201,6 +205,7 @@ class DashboardQueries:
         )
 
     async def paper_accounts(self) -> PaperAccountsResponse:
+        equity_window_end = self._clock()
         async with self._session_factory() as session:
             runs = (
                 await session.scalars(
@@ -231,7 +236,10 @@ class DashboardQueries:
             )
             accounts.extend(
                 [
-                    await self.strategy_run(run_id=run.run_id)
+                    await self.strategy_run(
+                        run_id=run.run_id,
+                        equity_window_end=equity_window_end,
+                    )
                     for run in strategy_runs[-2:]
                 ]
             )
@@ -243,7 +251,11 @@ class DashboardQueries:
     async def strategy_run(
         self,
         run_id: str | None = None,
+        *,
+        equity_window_end: datetime | None = None,
     ) -> StrategyRunResponse:
+        window_end = equity_window_end or self._clock()
+        window_start = window_end - _EQUITY_WINDOW
         async with self._session_factory() as session:
             statement = select(StrategyRunRow)
             if run_id is not None:
@@ -259,6 +271,9 @@ class DashboardQueries:
                     exit_mode=None,
                     config_hash=None,
                     checkpoint_at=None,
+                    equity_window_start=window_start,
+                    equity_window_end=window_end,
+                    equity_sample_interval_seconds=_EQUITY_BUCKET_SECONDS,
                     portfolio_summary={},
                     equity_curve=[],
                     open_positions=[],
@@ -314,27 +329,55 @@ class DashboardQueries:
                     .limit(30)
                 )
             ).all()
-            equity_desc = (
+            closed_trade_count = await session.scalar(
+                select(func.count(PaperPositionRow.position_id)).where(
+                    PaperPositionRow.run_id == run.run_id,
+                    PaperPositionRow.status == "closed",
+                )
+            )
+            winning_trade_count = await session.scalar(
+                select(func.count(PaperPositionRow.position_id)).where(
+                    PaperPositionRow.run_id == run.run_id,
+                    PaperPositionRow.status == "closed",
+                    PaperPositionRow.realized_pnl > 0,
+                )
+            )
+            latest_equity = await session.scalar(
+                select(PaperEquitySnapshotRow)
+                .where(PaperEquitySnapshotRow.run_id == run.run_id)
+                .order_by(PaperEquitySnapshotRow.observed_at.desc())
+                .limit(1)
+            )
+            equity_bucket = func.floor(
+                func.extract("epoch", PaperEquitySnapshotRow.observed_at)
+                / _EQUITY_BUCKET_SECONDS
+            )
+            equity_rows = (
                 await session.scalars(
                     select(PaperEquitySnapshotRow)
-                    .where(PaperEquitySnapshotRow.run_id == run.run_id)
-                    .order_by(PaperEquitySnapshotRow.observed_at.desc())
-                    .limit(240)
+                    .where(
+                        PaperEquitySnapshotRow.run_id == run.run_id,
+                        PaperEquitySnapshotRow.observed_at >= window_start,
+                        PaperEquitySnapshotRow.observed_at <= window_end,
+                    )
+                    .distinct(equity_bucket)
+                    .order_by(
+                        equity_bucket.desc(),
+                        PaperEquitySnapshotRow.observed_at.desc(),
+                    )
+                    .limit(_EQUITY_MAX_POINTS)
                 )
             ).all()
-        equity = list(reversed(equity_desc))
-        latest_equity = equity[-1] if equity else None
+        equity = _downsample_equity_snapshots(equity_rows)
         portfolio_config = run.execution_config.get("portfolio")
         exit_mode = (
             str(portfolio_config.get("exit_mode"))
             if isinstance(portfolio_config, dict)
             and portfolio_config.get("exit_mode") is not None
-            else None
+            else "fixed"
         )
-        closed_trade_count = len(closed_positions)
-        winning_trade_count = sum(
-            1 for row in closed_positions if (row.realized_pnl or 0) > 0
-        )
+        total_closed_trades = int(closed_trade_count or 0)
+        total_winning_trades = int(winning_trade_count or 0)
         trade_events = sorted(
             (
                 *(_position_open_event(row) for row in open_positions),
@@ -351,6 +394,9 @@ class DashboardQueries:
             exit_mode=exit_mode,
             config_hash=run.config_hash,
             checkpoint_at=checkpoint_at,
+            equity_window_start=window_start,
+            equity_window_end=window_end,
+            equity_sample_interval_seconds=_EQUITY_BUCKET_SECONDS,
             portfolio_summary={
                 "balance": None
                 if latest_equity is None
@@ -366,10 +412,10 @@ class DashboardQueries:
                 if latest_equity is None
                 else str(latest_equity.total_fees),
                 "open_position_count": len(open_positions),
-                "closed_trade_count": closed_trade_count,
+                "closed_trade_count": total_closed_trades,
                 "win_rate": None
-                if closed_trade_count == 0
-                else str(winning_trade_count / closed_trade_count),
+                if total_closed_trades == 0
+                else str(total_winning_trades / total_closed_trades),
             },
             equity_curve=[
                 {
@@ -603,6 +649,23 @@ class DashboardQueries:
                 for row in live
             ],
         )
+
+
+def _downsample_equity_snapshots(
+    rows: Sequence[PaperEquitySnapshotRow],
+    *,
+    interval_seconds: int = _EQUITY_BUCKET_SECONDS,
+    max_points: int = _EQUITY_MAX_POINTS,
+) -> list[PaperEquitySnapshotRow]:
+    latest_by_bucket: dict[int, PaperEquitySnapshotRow] = {}
+    for row in rows:
+        observed_at = row.observed_at
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=UTC)
+        bucket = int(observed_at.timestamp()) // interval_seconds
+        latest_by_bucket[bucket] = row
+    ordered = [latest_by_bucket[key] for key in sorted(latest_by_bucket)]
+    return ordered[-max_points:]
 
 
 def _service(

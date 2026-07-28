@@ -1,6 +1,6 @@
 import asyncio
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -65,6 +65,16 @@ from crypto_momentum_lab.universe.scheduler import run_scheduler_loop
 
 app = typer.Typer(no_args_is_help=True)
 log = structlog.get_logger()
+
+_UNIVERSE_REFRESH_TIMEOUT_SECONDS = 120.0
+_MARKET_DATA_STARTUP_GRACE_SECONDS = 120.0
+_MARKET_DATA_STALE_AFTER_SECONDS = 120.0
+_MARKET_DATA_WATCHDOG_INTERVAL_SECONDS = 15.0
+_CAPTURE_STOP_TIMEOUT_SECONDS = 30.0
+
+
+class MarketDataStaleError(RuntimeError):
+    pass
 
 
 def parse_observed_at(value: str | None) -> datetime:
@@ -155,17 +165,52 @@ def log_snapshot(snapshot: UniverseSnapshot) -> None:
 
 
 class LoggingRefreshService:
-    def __init__(self, delegate: UniverseRefreshService) -> None:
+    def __init__(
+        self,
+        delegate: UniverseRefreshService,
+        *,
+        timeout_seconds: float = _UNIVERSE_REFRESH_TIMEOUT_SECONDS,
+    ) -> None:
         self._delegate = delegate
+        self._timeout_seconds = timeout_seconds
 
     async def refresh(
         self,
         *,
         observed_at: datetime,
     ) -> UniverseSnapshot:
-        snapshot = await self._delegate.refresh(observed_at=observed_at)
+        async with asyncio.timeout(self._timeout_seconds):
+            snapshot = await self._delegate.refresh(observed_at=observed_at)
         log_snapshot(snapshot)
         return snapshot
+
+
+async def monitor_market_data_freshness(
+    *,
+    latest_observed_at: Callable[[], datetime | None],
+    startup_grace_seconds: float = _MARKET_DATA_STARTUP_GRACE_SECONDS,
+    stale_after_seconds: float = _MARKET_DATA_STALE_AFTER_SECONDS,
+    check_interval_seconds: float = _MARKET_DATA_WATCHDOG_INTERVAL_SECONDS,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    started_at = clock()
+    while True:
+        await sleeper(check_interval_seconds)
+        now = clock()
+        observed_at = latest_observed_at()
+        if observed_at is None:
+            startup_age = (now - started_at).total_seconds()
+            if startup_age > startup_grace_seconds:
+                raise MarketDataStaleError(
+                    f"no market data after {startup_age:.1f} seconds"
+                )
+            continue
+        age = (now - observed_at).total_seconds()
+        if age > stale_after_seconds:
+            raise MarketDataStaleError(
+                f"market data stale by {age:.1f} seconds"
+            )
 
 
 class CaptureSubscriptionApplier(Protocol):
@@ -209,6 +254,7 @@ class CaptureUniverseObserver:
 class MarketDataRuntime:
     capture: MarketDataCaptureService
     universe: UniverseRefreshService
+    runtime_state_publisher: ClosedMarketStatePublisher
     universe_activation_minute: int
     enabled_streams: tuple[CaptureStream, ...]
     initial_symbols: frozenset[str]
@@ -354,6 +400,7 @@ async def build_market_data_runtime(
         yield MarketDataRuntime(
             capture=capture,
             universe=universe,
+            runtime_state_publisher=runtime_state_publisher,
             universe_activation_minute=runtime.universe.activation_minute,
             enabled_streams=enabled_streams,
             initial_symbols=initial_symbols,
@@ -423,8 +470,22 @@ async def run_market_data(config_path: Path) -> None:
                         ),
                     )
                 )
+                tasks.create_task(
+                    monitor_market_data_freshness(
+                        latest_observed_at=lambda: (
+                            runtime.runtime_state_publisher.metrics.latest_watermark_at
+                        )
+                    )
+                )
         finally:
-            await runtime.capture.stop()
+            try:
+                async with asyncio.timeout(_CAPTURE_STOP_TIMEOUT_SECONDS):
+                    await runtime.capture.stop()
+            except TimeoutError:
+                log.error(
+                    "market_data_capture_stop_timed_out",
+                    timeout_seconds=_CAPTURE_STOP_TIMEOUT_SECONDS,
+                )
 
 
 async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
