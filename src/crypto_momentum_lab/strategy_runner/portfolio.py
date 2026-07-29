@@ -66,13 +66,21 @@ class _CandleAccumulator:
 class Candle15mAggregator:
     def __init__(self) -> None:
         self._candles: dict[str, _CandleAccumulator] = {}
+        self._last_closed_candle_start: dict[str, datetime] = {}
 
     def observe(self, state: MarketState15s) -> ClosedCandle15m | None:
-        close_price = state.close_price or state.mark_price
+        close_price = (
+            state.close_price
+            if state.close_price is not None
+            else state.mark_price
+        )
         if close_price is None or close_price <= 0:
             return None
 
         candle_start = _candle_start_15m(state.bucket_start)
+        last_closed_start = self._last_closed_candle_start.get(state.symbol)
+        if last_closed_start is not None and candle_start <= last_closed_start:
+            return None
         current = self._candles.get(state.symbol)
         closed: ClosedCandle15m | None = None
         if current is None:
@@ -86,6 +94,7 @@ class Candle15mAggregator:
             return None
         elif candle_start > current.candle_start:
             closed = _closed_candle(state.symbol, current)
+            self._last_closed_candle_start[state.symbol] = current.candle_start
             current = _new_candle_accumulator(
                 state,
                 candle_start=candle_start,
@@ -106,6 +115,7 @@ class Candle15mAggregator:
             finished = _closed_candle(state.symbol, current)
             if finished is not None:
                 closed = finished
+            self._last_closed_candle_start[state.symbol] = current.candle_start
             self._candles.pop(state.symbol, None)
         return closed
 
@@ -187,7 +197,9 @@ def mark_positions(
     taker_fee_rate: Decimal,
     closed_candle: ClosedCandle15m | None = None,
 ) -> tuple[PaperPosition, ...]:
-    mark_price = state.close_price or state.mark_price
+    mark_price = (
+        state.close_price if state.close_price is not None else state.mark_price
+    )
     if mark_price is None or mark_price <= 0:
         return ()
     updates: list[PaperPosition] = []

@@ -11,8 +11,20 @@ x-paper: &paper
   entrypoint: ["cml-strategy-runner"]
   depends_on:
     market-data:
-      condition: service_started
+      condition: service_healthy
   mem_limit: 192m
+  healthcheck:
+    test:
+      - CMD
+      - python
+      - -m
+      - crypto_momentum_lab.apps.healthcheck
+      - --service
+      - paper
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 90s
 
 services:
   postgres:
@@ -51,6 +63,15 @@ services:
         condition: service_completed_successfully
     restart: "no"
 
+  volume-init:
+    <<: *app
+    user: root
+    entrypoint: ["sh", "-c"]
+    command: ["chown -R cml:cml /app/data"]
+    volumes:
+      - market-data:/app/data
+    restart: "no"
+
   market-data:
     <<: *app
     environment:
@@ -68,12 +89,29 @@ services:
     depends_on:
       bootstrap-universe:
         condition: service_completed_successfully
+      volume-init:
+        condition: service_completed_successfully
     volumes:
       - market-data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - crypto_momentum_lab.apps.healthcheck
+        - --service
+        - market-data
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
     mem_limit: 640m
 
   paper-compression:
     <<: *paper
+    environment:
+      <<: *app-environment
+      CML_HEALTHCHECK_RUN_ID: paper-account-01-compression-v1
     command:
       - paper-live-daemon
       - --strategy
@@ -118,6 +156,9 @@ services:
       - "120"
   paper-orderflow:
     <<: *paper
+    environment:
+      <<: *app-environment
+      CML_HEALTHCHECK_RUN_ID: paper-account-02-orderflow-v1
     command:
       - paper-live-daemon
       - --strategy
@@ -151,6 +192,9 @@ services:
 
   paper-liquidation:
     <<: *paper
+    environment:
+      <<: *app-environment
+      CML_HEALTHCHECK_RUN_ID: paper-account-03-liquidation-v1
     command:
       - paper-live-daemon
       - --strategy
@@ -184,6 +228,9 @@ services:
 
   paper-compression-candle:
     <<: *paper
+    environment:
+      <<: *app-environment
+      CML_HEALTHCHECK_RUN_ID: paper-account-04-compression-candle15m-v1
     command:
       - paper-live-daemon
       - --strategy
@@ -227,6 +274,9 @@ services:
 
   paper-orderflow-candle:
     <<: *paper
+    environment:
+      <<: *app-environment
+      CML_HEALTHCHECK_RUN_ID: paper-account-05-orderflow-candle15m-v1
     command:
       - paper-live-daemon
       - --strategy
@@ -258,6 +308,9 @@ services:
 
   paper-liquidation-candle:
     <<: *paper
+    environment:
+      <<: *app-environment
+      CML_HEALTHCHECK_RUN_ID: paper-account-06-liquidation-candle15m-v1
     command:
       - paper-live-daemon
       - --strategy
@@ -289,6 +342,10 @@ services:
 
   dashboard:
     <<: *app
+    environment:
+      <<: *app-environment
+      CML_DASHBOARD_USERNAME: ${CML_DASHBOARD_USERNAME:?set CML_DASHBOARD_USERNAME}
+      CML_DASHBOARD_PASSWORD: ${CML_DASHBOARD_PASSWORD:?set CML_DASHBOARD_PASSWORD}
     entrypoint: ["cml-operator-dashboard"]
     command: ["--host", "0.0.0.0", "--port", "8765"]
     depends_on:
@@ -301,7 +358,8 @@ services:
         - CMD
         - python
         - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=3)"
+        - >-
+          import base64, os, urllib.request; request = urllib.request.Request('http://127.0.0.1:8765/api/health'); request.add_header('Authorization', 'Basic ' + base64.b64encode(f"{os.environ['CML_DASHBOARD_USERNAME']}:{os.environ['CML_DASHBOARD_PASSWORD']}".encode()).decode()); urllib.request.urlopen(request, timeout=3)
       interval: 10s
       timeout: 5s
       retries: 12

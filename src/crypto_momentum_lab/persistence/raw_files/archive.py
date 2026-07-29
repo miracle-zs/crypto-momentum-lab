@@ -161,13 +161,24 @@ class ZstdJsonlArchive:
             writers = tuple(self._writers.values())
             self._writers.clear()
 
+        errors: list[Exception] = []
         for writer in writers:
-            await writer.finalize()
+            try:
+                await writer.finalize()
+            except Exception as error:
+                errors.append(error)
+                await writer.abort()
+        if errors:
+            raise errors[0]
 
     async def _evict_lru_writers(self) -> None:
         while len(self._writers) > self._max_open_writers:
             _, writer = self._writers.popitem(last=False)
-            await writer.finalize()
+            try:
+                await writer.finalize()
+            except Exception:
+                await writer.abort()
+                raise
 
 
 class _ArchiveWriter:
@@ -198,11 +209,14 @@ class _ArchiveWriter:
         self._rotation_uncompressed_bytes = rotation_uncompressed_bytes
         self._group_commit_max_events = group_commit_max_events
         self._group_commit_delay_seconds = group_commit_max_milliseconds / 1000
+        safe_exchange = _safe_path_component(exchange, "exchange")
+        safe_symbol = _safe_path_component(key.symbol, "symbol")
+        safe_stream = _safe_path_component(key.stream.value, "stream")
         self._relative_directory = Path(
-            f"exchange={exchange}",
+            f"exchange={safe_exchange}",
             f"date={key.utc_date.isoformat()}",
-            f"stream={key.stream.value}",
-            f"symbol={key.symbol}",
+            f"stream={safe_stream}",
+            f"symbol={safe_symbol}",
             f"hour={key.utc_hour:02d}",
         )
         base = f"{key.connection_session_id}-{first_sequence:020d}"
@@ -268,19 +282,40 @@ class _ArchiveWriter:
         async with self._lock:
             if self._closed:
                 raise RuntimeError("archive writer already finalized")
-            await self._commit_locked()
+            try:
+                await self._commit_locked()
+                manifest = await asyncio.to_thread(self._finish)
+            except Exception:
+                self._closed = True
+                await asyncio.to_thread(self._abort_sync)
+                raise
             self._closed = True
-            manifest = await asyncio.to_thread(self._finish)
         await self._manifest_sink(manifest)
         return manifest
+
+    async def abort(self) -> None:
+        async with self._lock:
+            self._closed = True
+            self._cancel_commit_timer()
+            for _, future in self._pending:
+                if not future.done():
+                    future.cancel()
+            self._pending.clear()
+            await asyncio.to_thread(self._abort_sync)
 
     def _open(self) -> None:
         self._temporary_path.parent.mkdir(parents=True, exist_ok=True)
         raw_file = self._temporary_path.open("wb")
+        try:
+            compressor = zstandard.ZstdCompressor(
+                level=self._zstd_level
+            ).stream_writer(raw_file, closefd=False)
+        except Exception:
+            raw_file.close()
+            self._temporary_path.unlink(missing_ok=True)
+            raise
         self._raw_file = raw_file
-        self._compressor = zstandard.ZstdCompressor(
-            level=self._zstd_level
-        ).stream_writer(raw_file, closefd=False)
+        self._compressor = compressor
 
     def _write(self, row: bytes) -> None:
         self._zstd_writer.write(row)
@@ -364,10 +399,20 @@ class _ArchiveWriter:
         os.fsync(self._file.fileno())
 
     def _finish(self) -> ArchiveManifest:
-        self._zstd_writer.close()
-        self._file.flush()
-        os.fsync(self._file.fileno())
-        self._file.close()
+        compressor = self._compressor
+        raw_file = self._raw_file
+        try:
+            if compressor is not None:
+                compressor.close()
+        finally:
+            self._compressor = None
+            try:
+                if raw_file is not None:
+                    raw_file.flush()
+                    os.fsync(raw_file.fileno())
+                    raw_file.close()
+            finally:
+                self._raw_file = None
 
         sha256 = _sha256_file(self._temporary_path)
         compressed_bytes = self._temporary_path.stat().st_size
@@ -409,6 +454,26 @@ class _ArchiveWriter:
             created_at=datetime.now(UTC),
         )
 
+    def _abort_sync(self) -> None:
+        compressor = self._compressor
+        raw_file = self._raw_file
+        self._compressor = None
+        self._raw_file = None
+        try:
+            if compressor is not None:
+                compressor.close()
+        except Exception:
+            pass
+        try:
+            if raw_file is not None:
+                raw_file.close()
+        except Exception:
+            pass
+        try:
+            self._temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     @property
     def _file(self) -> BinaryIO:
         if self._raw_file is None:
@@ -427,6 +492,18 @@ def _consume_task_exception(task: asyncio.Task[None]) -> None:
         task.result()
     except asyncio.CancelledError:
         return
+
+
+def _safe_path_component(value: str, field_name: str) -> str:
+    if (
+        not value
+        or value in {".", ".."}
+        or "/" in value
+        or "\\" in value
+        or any(ord(char) < 32 for char in value)
+    ):
+        raise ValueError(f"{field_name} must be a safe path component")
+    return value
 
 
 def _sha256_file(path: Path) -> str:

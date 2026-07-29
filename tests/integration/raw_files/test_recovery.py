@@ -2,8 +2,10 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 import zstandard
 
+import crypto_momentum_lab.persistence.raw_files.recovery as recovery_module
 from crypto_momentum_lab.domain.market.models import RawEnvelope
 from crypto_momentum_lab.persistence.raw_files.archive import serialize_envelope
 from crypto_momentum_lab.persistence.raw_files.recovery import (
@@ -74,6 +76,29 @@ async def test_recovery_quarantines_empty_temporary_and_continues(
     assert results == ()
     assert not temporary.exists()
     assert tuple((tmp_path / ".recovery-quarantine").rglob("*.quarantined"))
+
+
+async def test_recovery_keeps_source_when_rebuild_fails(
+    tmp_path: Path,
+    raw_envelope: RawEnvelope,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    temporary = write_truncated_archive(tmp_path, raw_envelope)
+
+    async def fail_rebuild(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("rebuild failed")
+
+    monkeypatch.setattr(recovery_module, "_append_in_batches", fail_rebuild)
+    with pytest.raises(RuntimeError, match="rebuild failed"):
+        await recover_temporary_archive(
+            temporary,
+            archive_root=tmp_path,
+            environment="test",
+            capture_version="test",
+        )
+
+    assert temporary.exists()
 
 
 def write_truncated_archive(

@@ -291,6 +291,28 @@ def test_daemon_persists_signal_candidate_and_virtual_fill() -> None:
     assert artifacts.fills[0].filled_notional == Decimal("25")
 
 
+def test_daemon_expires_pending_candidate_after_deadline() -> None:
+    states = (fixture_state("BTCUSDT", 0), fixture_state("BTCUSDT", 5))
+    identity = _identity()
+    artifacts = FakeArtifactRepository()
+
+    run_paper_live_daemon(
+        source=states,
+        strategy=SignalStrategy(identity),
+        repository=FakeRepository(),
+        artifact_repository=artifacts,
+        config=_config(
+            run_identity=identity,
+            execution=ReplayExecutionConfig(latency_buckets=1),
+        ),
+        clock=FakeClock(states[-1].bucket_end + timedelta(seconds=1)),
+    )
+
+    assert [fill.status for fill in artifacts.fills] == [
+        SimulatedFillStatus.EXPIRED
+    ]
+
+
 def test_daemon_uses_protected_symbol_for_exit_without_opening_new_trade() -> None:
     state = fixture_state("BTCUSDT", 80)
     identity = _identity()

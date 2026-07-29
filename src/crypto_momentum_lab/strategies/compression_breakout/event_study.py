@@ -338,15 +338,19 @@ def _aggressive_imbalance(state: MarketState15s) -> Decimal:
 
 
 def _state_price(state: MarketState15s) -> Decimal | None:
-    return state.close_price or state.midpoint or state.mark_price
+    if state.close_price is not None:
+        return state.close_price
+    if state.midpoint is not None:
+        return state.midpoint
+    return state.mark_price
 
 
 def _state_high(state: MarketState15s) -> Decimal | None:
-    return state.high_price or _state_price(state)
+    return state.high_price if state.high_price is not None else _state_price(state)
 
 
 def _state_low(state: MarketState15s) -> Decimal | None:
-    return state.low_price or _state_price(state)
+    return state.low_price if state.low_price is not None else _state_price(state)
 
 
 def _summarize_direction(

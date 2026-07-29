@@ -25,6 +25,10 @@ from crypto_momentum_lab.strategies.liquidation_cascade.event_study import (
     LiquidationCascadeEvent,
     find_liquidation_cascades,
 )
+from crypto_momentum_lab.strategies.runtime_checkpoint import (
+    market_state_payload,
+    restore_market_state_buffers,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +84,15 @@ class LiquidationCascadeRuntimeStrategy:
             checkpoint.cooldown_buckets_remaining_by_symbol
         )
         self._last_processed = dict(checkpoint.last_processed_at_by_symbol)
+        restored_buffers = checkpoint.payload.get("market_state_buffers")
+        if isinstance(restored_buffers, dict):
+            self._buffers = restore_market_state_buffers(
+                restored_buffers,
+                maxlen=self.required_data().warmup_buckets + 16,
+            )
+            for symbol, buffer in self._buffers.items():
+                self._warmup[symbol] = len(buffer)
+        self._signal_sequence = _checkpoint_sequence(checkpoint.payload)
 
     def restore_checkpoint(self, checkpoint: StrategyCheckpoint) -> None:
         self.restore(checkpoint)
@@ -165,7 +178,12 @@ class LiquidationCascadeRuntimeStrategy:
             payload={
                 "buffer_sizes": {
                     symbol: len(buffer) for symbol, buffer in self._buffers.items()
-                }
+                },
+                "market_state_buffers": {
+                    symbol: [market_state_payload(state) for state in buffer]
+                    for symbol, buffer in self._buffers.items()
+                },
+                "signal_sequence": self._signal_sequence,
             },
         )
 
@@ -282,3 +300,12 @@ def _features(event: LiquidationCascadeEvent) -> dict[str, JsonValue]:
 
 def _optional_decimal(value: Decimal | None) -> str | None:
     return None if value is None else str(value)
+
+
+def _checkpoint_sequence(payload: dict[str, JsonValue]) -> int:
+    value = payload.get("signal_sequence", 0)
+    try:
+        sequence = int(str(value))
+    except (TypeError, ValueError):
+        return 0
+    return max(sequence, 0)

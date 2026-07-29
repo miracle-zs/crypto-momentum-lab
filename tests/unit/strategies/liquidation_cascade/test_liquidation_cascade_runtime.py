@@ -58,6 +58,16 @@ def test_liquidation_cascade_restores_checkpoint() -> None:
     )
 
 
+def test_liquidation_cascade_restores_market_buffer_from_checkpoint() -> None:
+    original = _strategy()
+    checkpoint = _last_decision(original, _cascade_states()).checkpoint
+
+    restored = _strategy()
+    restored.restore_checkpoint(checkpoint)
+
+    assert restored.checkpoint().payload["buffer_sizes"] == {"BTCUSDT": 6}
+
+
 def _strategy() -> LiquidationCascadeRuntimeStrategy:
     config = LiquidationCascadeRuntimeConfig(
         event_config=LiquidationCascadeConfig(

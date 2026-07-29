@@ -23,6 +23,8 @@ from crypto_momentum_lab.domain.execution import (
 from crypto_momentum_lab.domain.live_rollout import RollbackCommand
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.orders.state_machine import (
+    ExchangeCancellationUnknownError,
+    ExchangeOrderQueryUnknownError,
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
     LiveSubmissionDisabledError,
@@ -67,7 +69,10 @@ class BinanceUsdMPrivateReadClient:
         self._account_label = account_label
         self._clock = clock or (lambda: datetime.now(tz=UTC))
         self._recv_window_ms = recv_window_ms
-        self._client = http_client or httpx.AsyncClient(base_url=base_url)
+        self._client = http_client or httpx.AsyncClient(
+            base_url=base_url,
+            trust_env=False,
+        )
 
     async def fetch_account_config(self) -> AccountConfigSnapshot:
         payload = await self._signed_get("/fapi/v3/account")
@@ -145,8 +150,44 @@ class BinanceUsdMPrivateReadClient:
             for item in _require_sequence_of_mappings(payload)
         )
 
-    async def fetch_recent_fills(self) -> tuple[AccountFillEvent, ...]:
-        return ()
+    async def fetch_recent_fills(
+        self,
+        symbols: tuple[str, ...] = (),
+    ) -> tuple[AccountFillEvent, ...]:
+        normalized_symbols = _normalize_symbols(symbols)
+        fills: dict[tuple[str, str], AccountFillEvent] = {}
+        for symbol in normalized_symbols:
+            payload = await self._signed_get(
+                "/fapi/v1/userTrades",
+                {"symbol": symbol, "limit": 1000},
+            )
+            for item in _require_sequence_of_mappings(payload):
+                trade_id = str(item.get("id", ""))
+                fill = AccountFillEvent(
+                    environment=self._environment,
+                    account_label=self._account_label,
+                    symbol=str(item.get("symbol", symbol)),
+                    trade_id=trade_id,
+                    order_id=str(item.get("orderId", "")),
+                    side=str(item.get("side", "")),
+                    price=_decimal(item.get("price", "0")),
+                    quantity=_decimal(item.get("qty", "0")),
+                    realized_pnl=_decimal(item.get("realizedPnl", "0")),
+                    fee=_decimal(item.get("commission", "0")),
+                    fee_asset=str(item.get("commissionAsset", "")),
+                    trade_at=datetime.fromtimestamp(
+                        int(str(item.get("time", 0))) / 1000,
+                        tz=UTC,
+                    ),
+                    raw_payload=_json_mapping(item),
+                )
+                fills[(fill.symbol, fill.trade_id)] = fill
+        return tuple(
+            sorted(
+                fills.values(),
+                key=lambda fill: (fill.trade_at, fill.symbol, fill.trade_id),
+            )
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -198,10 +239,14 @@ class BinanceUsdMPrivateReadClient:
         params: dict[str, str | int | float | bool | None],
     ) -> dict[str, str | int | float | bool | None]:
         payload = {
-            **params,
-            "timestamp": int(self._now().timestamp() * 1000),
-            "recvWindow": self._recv_window_ms,
+            key: value for key, value in params.items() if value is not None
         }
+        payload.update(
+            {
+                "timestamp": int(self._now().timestamp() * 1000),
+                "recvWindow": self._recv_window_ms,
+            }
+        )
         query = urlencode(payload)
         signature = hmac.new(
             self._api_secret.encode("utf-8"),
@@ -287,6 +332,14 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             if exc.response.status_code == 400 and _exchange_error_code(exc) == -2013:
                 return None
             raise
+        except httpx.TimeoutException as exc:
+            raise ExchangeOrderQueryUnknownError(
+                "Binance order lookup timed out; order state requires reconciliation"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise ExchangeOrderQueryUnknownError(
+                "Binance order lookup failed; order state requires reconciliation"
+            ) from exc
         return self._order_snapshot(_require_mapping(payload))
 
     async def cancel_order(
@@ -305,13 +358,22 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             command_type="cancel_all_open_orders",
             confirmation_text=CANCEL_ALL_CONFIRMATION,
         )
-        payload = await self._signed_delete(
-            "/fapi/v1/order",
-            {
-                "symbol": symbol,
-                "origClientOrderId": client_order_id,
-            },
-        )
+        try:
+            payload = await self._signed_delete(
+                "/fapi/v1/order",
+                {
+                    "symbol": symbol,
+                    "origClientOrderId": client_order_id,
+                },
+            )
+        except httpx.TimeoutException as exc:
+            raise ExchangeCancellationUnknownError(
+                "Binance cancel request timed out; order state must be reconciled"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise ExchangeCancellationUnknownError(
+                "Binance cancel request failed; order state must be reconciled"
+            ) from exc
         return self._order_snapshot(_require_mapping(payload))
 
     async def emergency_flatten(
@@ -355,6 +417,15 @@ def _optional_str(value: object) -> str | None:
         return None
     text = str(value)
     return text if text else None
+
+
+def _normalize_symbols(symbols: tuple[str, ...]) -> tuple[str, ...]:
+    normalized = tuple(sorted({symbol.strip().upper() for symbol in symbols}))
+    if any(not symbol for symbol in normalized):
+        raise ValueError("fill symbols must not be empty")
+    if any("/" in symbol or "\\" in symbol for symbol in normalized):
+        raise ValueError("fill symbols must be valid Binance symbols")
+    return normalized
 
 
 def _require_mapping(value: object) -> dict[str, object]:

@@ -3,10 +3,12 @@
 Start the local read-only dashboard with:
 
 ```bash
+export CML_DASHBOARD_USERNAME=operator
+export CML_DASHBOARD_PASSWORD='<local-password>'
 cml-operator-dashboard --database-url "$CML_DATABASE_URL" --host 127.0.0.1 --port 8765
 ```
 
-Open `http://127.0.0.1:8765/`. Review system freshness, the UTC+0 momentum
+Open `http://127.0.0.1:8765/` and sign in with the dashboard credentials. Review system freshness, the UTC+0 momentum
 universe, selected strategy, read-only account state, risk/execution state,
 ambiguous orders, and paper/shadow/live reports.
 

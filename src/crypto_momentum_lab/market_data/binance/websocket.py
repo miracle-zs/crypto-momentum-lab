@@ -65,6 +65,7 @@ class BinanceWebSocketConnection:
         self._silence_timeout_seconds = silence_timeout_seconds
         self._control_interval_seconds = 1 / control_messages_per_second
         self._send_lock = asyncio.Lock()
+        self._connection_lock = asyncio.Lock()
         self._stopping = False
         self._connection: ClientConnection | None = None
         self._control_id = 0
@@ -100,7 +101,9 @@ class BinanceWebSocketConnection:
                     error=str(error),
                 )
             finally:
-                self._connection = None
+                async with self._connection_lock:
+                    self._connection = None
+                    self._cancel_pending_acks()
                 try:
                     await self._emit_lifecycle(
                         session_id,
@@ -127,8 +130,10 @@ class BinanceWebSocketConnection:
 
     async def stop(self) -> None:
         self._stopping = True
-        if self._connection is not None:
-            await self._connection.close()
+        async with self._connection_lock:
+            connection = self._connection
+        if connection is not None:
+            await connection.close()
         if self._task is not None:
             await self._task
 
@@ -140,8 +145,9 @@ class BinanceWebSocketConnection:
     ) -> None:
         self._desired_names = tuple(sorted(set((*self._desired_names, *names))))
         self._generation = generation
-        if self._connection is not None:
-            await self._send_control(self._connection, "SUBSCRIBE", names)
+        async with self._connection_lock:
+            if self._connection is not None:
+                await self._send_control(self._connection, "SUBSCRIBE", names)
 
     async def unsubscribe(
         self,
@@ -154,8 +160,9 @@ class BinanceWebSocketConnection:
             name for name in self._desired_names if name not in remove
         )
         self._generation = generation
-        if self._connection is not None:
-            await self._send_control(self._connection, "UNSUBSCRIBE", names)
+        async with self._connection_lock:
+            if self._connection is not None:
+                await self._send_control(self._connection, "UNSUBSCRIBE", names)
 
     async def _run_once(self, session_id: UUID) -> str:
         uri = self._base_url.rstrip("/")
@@ -168,7 +175,8 @@ class BinanceWebSocketConnection:
             ping_timeout=self._ping_timeout_seconds,
             max_queue=16,
         ) as connection:
-            self._connection = connection
+            async with self._connection_lock:
+                self._connection = connection
             await self._emit_lifecycle(session_id, opened=True, reason=None)
             await self._send_control(
                 connection,
@@ -207,7 +215,8 @@ class BinanceWebSocketConnection:
                     continue
                 local_sequence += 1
                 await self._on_envelope(envelope)
-        self._connection = None
+        async with self._connection_lock:
+            self._connection = None
         return "closed"
 
     async def _send_control(
@@ -228,25 +237,33 @@ class BinanceWebSocketConnection:
             if not receive_ack_direct:
                 future = asyncio.get_running_loop().create_future()
                 self._pending_acks[control_id] = future
-            await connection.send(
-                json.dumps(
-                    {
-                        "method": method,
-                        "params": list(names),
-                        "id": control_id,
-                    }
+            try:
+                await connection.send(
+                    json.dumps(
+                        {
+                            "method": method,
+                            "params": list(names),
+                            "id": control_id,
+                        }
+                    )
                 )
-            )
-            if receive_ack_direct:
-                await self._receive_ack(connection, control_id)
-            elif future is not None:
-                try:
+                if receive_ack_direct:
+                    await self._receive_ack(connection, control_id)
+                elif future is not None:
                     await asyncio.wait_for(
                         future,
                         timeout=self._open_timeout_seconds,
                     )
-                finally:
+            finally:
+                if future is not None:
                     self._pending_acks.pop(control_id, None)
+
+    def _cancel_pending_acks(self) -> None:
+        pending = tuple(self._pending_acks.values())
+        self._pending_acks.clear()
+        for future in pending:
+            if not future.done():
+                future.cancel()
 
     async def _receive_ack(
         self,

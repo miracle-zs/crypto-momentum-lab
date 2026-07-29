@@ -629,6 +629,8 @@ details.secondary[open] summary { margin-bottom: 10px; }
 .acct-cards {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: repeat(2, auto);
+  grid-auto-flow: column;
   gap: 12px;
 }
 
@@ -815,7 +817,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .chip-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
   gap: 7px;
 }
 
@@ -825,17 +827,36 @@ details.secondary[open] summary { margin-bottom: 10px; }
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
-  padding: 8px 11px;
+  min-height: 40px;
+  padding: 7px 10px;
   border: 1px solid var(--line);
   border-radius: 9px;
   background: var(--surface-2);
   font-size: 11px;
 }
 
-.chip b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-main { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.chip b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
 .chip small { flex: none; font-size: 9px; color: var(--faint); }
+.chip-return, .chip-side { flex: none; font: 10px var(--mono); font-variant-numeric: tabular-nums; }
+.chip-side { color: var(--faint); font-size: 9px; }
 .chip.pos { box-shadow: inset 2px 0 0 rgba(52, 211, 153, .55); }
 .chip.neg { box-shadow: inset 2px 0 0 rgba(251, 113, 133, .55); }
+.chip.retained { border-style: dashed; background: color-mix(in srgb, var(--surface-2) 72%, var(--bg)); }
+
+.monitor-target-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.monitor-group, .monitor-secondary {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--surface-2) 62%, transparent);
+}
+.monitor-group .block-title, .monitor-secondary .block-title { margin: 0 0 9px; }
+.monitor-group .block-title b, .monitor-secondary .block-title b { font-size: 12px; }
+.monitor-secondary { margin-top: 12px; }
+.monitor-summary { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.monitor-summary b { color: var(--text); font: 600 10px var(--mono); }
 
 /* ============ actions ============ */
 
@@ -946,7 +967,12 @@ details.secondary[open] summary { margin-bottom: 10px; }
 }
 
 @media (max-width: 760px) {
-  .acct-cards { grid-template-columns: 1fr; }
+  .acct-cards {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    grid-auto-flow: row;
+  }
+  .monitor-target-grid { grid-template-columns: 1fr; }
   .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .service-row { grid-template-columns: minmax(0, 1fr) auto; }
   .service-meter { display: none; }

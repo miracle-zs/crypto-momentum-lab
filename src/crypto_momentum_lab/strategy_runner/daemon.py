@@ -384,6 +384,15 @@ def _resolve_pending_candidates(
             remaining.append(candidate)
             continue
         target_fill_at = candidate_target_fill_at(candidate, execution)
+        if state.bucket_start > candidate.expires_at:
+            fills.append(
+                simulate_candidate_fill(
+                    candidate=candidate,
+                    states=(),
+                    execution=execution,
+                )
+            )
+            continue
         if state.bucket_start < target_fill_at:
             remaining.append(candidate)
             continue

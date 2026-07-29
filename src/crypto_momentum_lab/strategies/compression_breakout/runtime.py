@@ -24,6 +24,9 @@ from crypto_momentum_lab.strategies.compression_breakout.event_study import (
     BreakoutDirection,
     CompressionBreakoutConfig,
 )
+from crypto_momentum_lab.strategies.runtime_checkpoint import (
+    market_state_payload,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +111,7 @@ class CompressionBreakoutRuntimeStrategy:
         self._warmup = {symbol: len(buffer) for symbol, buffer in self._buffers.items()}
         self._cooldown_remaining = dict(checkpoint.cooldown_buckets_remaining_by_symbol)
         self._last_processed = dict(checkpoint.last_processed_at_by_symbol)
+        self._signal_sequence = _checkpoint_sequence(checkpoint.payload)
 
     def restore_checkpoint(self, checkpoint: StrategyCheckpoint) -> None:
         self.restore(checkpoint)
@@ -274,8 +278,9 @@ class CompressionBreakoutRuntimeStrategy:
                     symbol: len(buffer) for symbol, buffer in self._buffers.items()
                 },
                 "signal_interval_seconds": self._config.signal_interval_seconds,
+                "signal_sequence": self._signal_sequence,
                 "signal_buffers": {
-                    symbol: [_signal_state_payload(state) for state in buffer]
+                    symbol: [market_state_payload(state) for state in buffer]
                     for symbol, buffer in self._buffers.items()
                 },
             },
@@ -483,15 +488,19 @@ def _strategy_side(direction: BreakoutDirection) -> StrategySide:
 
 
 def _state_price(state: MarketState15s) -> Decimal | None:
-    return state.close_price or state.midpoint or state.mark_price
+    if state.close_price is not None:
+        return state.close_price
+    if state.midpoint is not None:
+        return state.midpoint
+    return state.mark_price
 
 
 def _state_high(state: MarketState15s) -> Decimal | None:
-    return state.high_price or _state_price(state)
+    return state.high_price if state.high_price is not None else _state_price(state)
 
 
 def _state_low(state: MarketState15s) -> Decimal | None:
-    return state.low_price or _state_price(state)
+    return state.low_price if state.low_price is not None else _state_price(state)
 
 
 def _optional_decimal(value: Decimal | None) -> str | None:
@@ -556,9 +565,15 @@ def _aggregate_signal_state(
     bucket_end: datetime,
 ) -> MarketState15s:
     first = states[0]
-    prices = tuple(price for state in states if (price := _state_price(state)))
-    highs = tuple(price for state in states if (price := _state_high(state)))
-    lows = tuple(price for state in states if (price := _state_low(state)))
+    prices = tuple(
+        price for state in states if (price := _state_price(state)) is not None
+    )
+    highs = tuple(
+        price for state in states if (price := _state_high(state)) is not None
+    )
+    lows = tuple(
+        price for state in states if (price := _state_low(state)) is not None
+    )
     return MarketState15s(
         schema_version=first.schema_version,
         exchange=first.exchange,
@@ -695,3 +710,12 @@ def _payload_decimal(value: JsonValue) -> Decimal | None:
     if value is None:
         return None
     return Decimal(str(value))
+
+
+def _checkpoint_sequence(payload: dict[str, JsonValue]) -> int:
+    value = payload.get("signal_sequence", 0)
+    try:
+        sequence = int(str(value))
+    except (TypeError, ValueError):
+        return 0
+    return max(sequence, 0)

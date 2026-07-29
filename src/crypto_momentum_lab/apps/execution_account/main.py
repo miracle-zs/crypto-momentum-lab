@@ -51,6 +51,13 @@ def sync_once_command(
         bool,
         typer.Option("--expected-multi-assets-mode/--single-asset-mode"),
     ] = False,
+    fill_symbols: Annotated[
+        str,
+        typer.Option(
+            "--fill-symbols",
+            help="Comma-separated symbols for recent Binance fill reconciliation.",
+        ),
+    ] = "",
 ) -> None:
     resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
     if not resolved_database_url:
@@ -70,6 +77,7 @@ def sync_once_command(
             api_key=api_key,
             api_secret=api_secret,
             expected_multi_assets_mode=expected_multi_assets_mode,
+            fill_symbols=_parse_symbols(fill_symbols),
         )
     )
     typer.echo(
@@ -88,6 +96,7 @@ async def sync_once(
     api_key: str,
     api_secret: str,
     expected_multi_assets_mode: bool,
+    fill_symbols: tuple[str, ...] = (),
 ) -> ExecutionAccountSyncResult:
     engine = create_async_database_engine(database_url)
     try:
@@ -109,6 +118,7 @@ async def sync_once(
                     account_label=account_label,
                     expected_multi_assets_mode=expected_multi_assets_mode,
                     observed_at=datetime.now(tz=UTC),
+                    recent_fill_symbols=fill_symbols,
                 ),
             )
             return await service.sync_once()
@@ -116,3 +126,15 @@ async def sync_once(
             await client.aclose()
     finally:
         await engine.dispose()
+
+
+def _parse_symbols(value: str) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                symbol.strip().upper()
+                for symbol in value.split(",")
+                if symbol.strip()
+            }
+        )
+    )

@@ -34,6 +34,8 @@ USDT:
 
    ```text
    CML_POSTGRES_PASSWORD=<random-alphanumeric-password>
+   CML_DASHBOARD_USERNAME=operator
+   CML_DASHBOARD_PASSWORD=<random-dashboard-password>
    ```
 
 4. Build and start the stack:
@@ -42,8 +44,10 @@ USDT:
    docker compose --env-file .env.server -f compose.server.yaml up -d --build
    ```
 
-5. Add `deploy/nginx/crypto-momentum-lab.conf` inside the existing port 80
-   server block, validate with `nginx -t`, and reload Nginx.
+5. Add `deploy/nginx/crypto-momentum-lab.conf` inside the existing HTTPS
+   server block, validate with `nginx -t`, and reload Nginx. Do not expose
+   the dashboard's Basic Auth endpoint over plain HTTP; use TLS or a private
+   tunnel/VPN.
 
 ## Verify
 
@@ -51,11 +55,18 @@ USDT:
 docker compose --env-file .env.server -f compose.server.yaml ps
 docker compose --env-file .env.server -f compose.server.yaml logs --tail=200 \
   market-data paper-compression paper-orderflow paper-liquidation
-curl -fsS http://127.0.0.1:8765/api/health
-curl -fsS http://127.0.0.1/momentum/api/health
+curl -fsS -u "$CML_DASHBOARD_USERNAME:$CML_DASHBOARD_PASSWORD" \
+  http://127.0.0.1:8765/api/health
+curl -fsS -u "$CML_DASHBOARD_USERNAME:$CML_DASHBOARD_PASSWORD" \
+  http://127.0.0.1/momentum/api/health
 ```
 
-The market-data process fails and lets Docker restart it when an hourly
+The `market-data` healthcheck requires a recent 15-second market-state row.
+Each paper runner healthcheck requires a recent durable checkpoint for its run
+ID. Compose will restart a container whose process remains alive but stops
+advancing its heartbeat.
+
+The market-data process fails and lets Docker restart it when a 15-minute
 universe refresh exceeds 120 seconds, when no live market state arrives within
 120 seconds after startup, or when the latest market-state watermark becomes
 more than 120 seconds old. Connection cleanup is capped at 30 seconds so a
@@ -63,7 +74,7 @@ stuck socket cannot prevent restart. A restart scans and recovers the durable
 raw archive before opening live subscriptions; on a large archive this startup
 phase can take several minutes.
 
-The remote console is available at `http://<server>/momentum/`. The
+The remote console is available at `https://<server>/momentum/`. The
 exchange-account panel remains empty because this stack intentionally has no
 Binance private-account credentials; the six paper-account panels remain
 active.

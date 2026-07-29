@@ -56,6 +56,16 @@ def test_orderflow_impulse_restores_checkpoint() -> None:
     assert strategy.checkpoint().cooldown_buckets_remaining_by_symbol == {"BTCUSDT": 2}
 
 
+def test_orderflow_impulse_restores_market_buffer_from_checkpoint() -> None:
+    original = _strategy()
+    checkpoint = _last_decision(original, _impulse_states()).checkpoint
+
+    restored = _strategy()
+    restored.restore_checkpoint(checkpoint)
+
+    assert restored.checkpoint().payload["buffer_sizes"] == {"BTCUSDT": 7}
+
+
 def _strategy() -> OrderFlowImpulseRuntimeStrategy:
     config = OrderFlowImpulseRuntimeConfig(
         event_config=OrderFlowImpulseConfig(

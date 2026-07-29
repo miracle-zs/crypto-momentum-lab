@@ -118,7 +118,7 @@ def parse_paper_exit_run_ids(value: str | None = None) -> frozenset[str]:
 @asynccontextmanager
 async def build_refresh_service(
     config_path: Path,
-) -> AsyncIterator[tuple[UniverseRefreshService, int]]:
+) -> AsyncIterator[tuple[UniverseRefreshService, int, int]]:
     runtime = load_runtime_config(config_path)
     engine = create_async_database_engine(runtime.database_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -133,6 +133,7 @@ async def build_refresh_service(
                 config_hash=behavior_hash(runtime),
             ),
             runtime.universe.activation_minute,
+            runtime.universe.refresh_interval_minutes,
         )
     finally:
         await client.aclose()
@@ -143,7 +144,7 @@ async def refresh_once(
     config_path: Path,
     observed_at: datetime,
 ) -> UniverseSnapshot:
-    async with build_refresh_service(config_path) as (service, _):
+    async with build_refresh_service(config_path) as (service, _, _):
         snapshot = await service.refresh(observed_at=observed_at)
         log_snapshot(snapshot)
         return snapshot
@@ -306,11 +307,26 @@ async def reconcile_paper_exit_subscriptions(
     observer: CaptureUniverseObserver,
     *,
     interval_seconds: float = _PAPER_EXIT_RECONCILE_SECONDS,
+    retry_delay_seconds: float = 5.0,
     sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    if retry_delay_seconds < 0:
+        raise ValueError("retry_delay_seconds must be non-negative")
     while True:
         await sleeper(interval_seconds)
-        await observer.refresh_protected_symbols()
+        try:
+            await observer.refresh_protected_symbols()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            log.exception(
+                "paper_exit_subscription_reconcile_failed",
+                error=str(error),
+            )
+            if retry_delay_seconds > 0:
+                await sleeper(retry_delay_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,6 +336,7 @@ class MarketDataRuntime:
     subscription_observer: CaptureUniverseObserver
     runtime_state_publisher: ClosedMarketStatePublisher
     universe_activation_minute: int
+    universe_refresh_interval_minutes: int
     enabled_streams: tuple[CaptureStream, ...]
     initial_symbols: frozenset[str]
 
@@ -478,6 +495,9 @@ async def build_market_data_runtime(
             subscription_observer=observer,
             runtime_state_publisher=runtime_state_publisher,
             universe_activation_minute=runtime.universe.activation_minute,
+            universe_refresh_interval_minutes=(
+                runtime.universe.refresh_interval_minutes
+            ),
             enabled_streams=enabled_streams,
             initial_symbols=initial_symbols,
         )
@@ -506,14 +526,17 @@ async def run_scheduler(config_path: Path) -> None:
     async with build_refresh_service(config_path) as (
         service,
         activation_minute,
+        refresh_interval_minutes,
     ):
         log.info(
             "universe_scheduler_started",
             activation_minute=activation_minute,
+            refresh_interval_minutes=refresh_interval_minutes,
         )
         await run_scheduler_loop(
             LoggingRefreshService(service),
             activation_minute=activation_minute,
+            refresh_interval_minutes=refresh_interval_minutes,
         )
 
 
@@ -524,18 +547,18 @@ async def run_market_data(config_path: Path) -> None:
             streams=runtime.enabled_streams,
             generation=1,
         )
-        startup_observed_at = datetime.now(UTC).replace(
-            second=0,
-            microsecond=0,
-        )
-        startup_snapshot = await runtime.universe.refresh(
-            observed_at=startup_observed_at
-        )
-        log.info(
-            "universe_startup_refresh",
-            observed_at=startup_snapshot.observed_at.isoformat(),
-        )
         try:
+            startup_observed_at = datetime.now(UTC).replace(
+                second=0,
+                microsecond=0,
+            )
+            startup_snapshot = await runtime.universe.refresh(
+                observed_at=startup_observed_at
+            )
+            log.info(
+                "universe_startup_refresh",
+                observed_at=startup_snapshot.observed_at.isoformat(),
+            )
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(runtime.capture.run())
                 tasks.create_task(
@@ -543,6 +566,9 @@ async def run_market_data(config_path: Path) -> None:
                         LoggingRefreshService(runtime.universe),
                         activation_minute=(
                             runtime.universe_activation_minute
+                        ),
+                        refresh_interval_minutes=(
+                            runtime.universe_refresh_interval_minutes
                         ),
                     )
                 )
@@ -586,6 +612,9 @@ async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
             run_scheduler_loop(
                 LoggingRefreshService(runtime.universe),
                 activation_minute=runtime.universe_activation_minute,
+                refresh_interval_minutes=(
+                    runtime.universe_refresh_interval_minutes
+                ),
             )
         )
         subscription_task = asyncio.create_task(

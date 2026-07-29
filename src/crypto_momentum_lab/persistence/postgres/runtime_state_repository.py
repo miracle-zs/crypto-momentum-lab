@@ -213,6 +213,15 @@ async def _insert_idempotent(
     session: AsyncSession,
     values: dict[str, object],
 ) -> None:
+    inserted = await session.scalar(
+        insert(RuntimeMarketState15sRow)
+        .values(values)
+        .on_conflict_do_nothing()
+        .returning(RuntimeMarketState15sRow.environment)
+    )
+    if inserted is not None:
+        return
+
     existing = await session.scalar(
         select(RuntimeMarketState15sRow).where(
             RuntimeMarketState15sRow.environment == values["environment"],
@@ -231,7 +240,9 @@ async def _insert_idempotent(
         if not _core_fields_match(existing_values, new_values):
             raise ValueError("runtime market state conflict")
         return
-    await session.execute(insert(RuntimeMarketState15sRow).values(values))
+    raise RuntimeError(
+        "runtime market state insert conflicted but the existing row was not found"
+    )
 
 
 def _validate_sequence_range(sequence_range: RuntimeStateSequenceRange) -> None:
@@ -252,7 +263,7 @@ def _core_fields_match(
 
 def _normalize_for_compare(value: object) -> object:
     if isinstance(value, Decimal):
-        return str(value.normalize())
+        return format(value.normalize(), "f")
     if isinstance(value, datetime):
         return value.astimezone(UTC).isoformat()
     if isinstance(value, dict):

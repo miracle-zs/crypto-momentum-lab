@@ -69,6 +69,12 @@ class ConnectionLifecycleEvent:
     opened: bool
     reason: str | None
 
+    def __post_init__(self) -> None:
+        if not _is_aware(self.occurred_at):
+            raise ValueError("occurred_at must be timezone-aware")
+        if any(not symbol.strip() for symbol in self.symbols):
+            raise ValueError("symbols must not contain empty values")
+
 
 @dataclass(frozen=True, slots=True)
 class RawEnvelope:
@@ -126,6 +132,33 @@ class ArchiveManifest:
     recovery_status: str
     known_gap_count: int
     created_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.schema_version <= 0:
+            raise ValueError("schema_version must be positive")
+        if not self.exchange.strip() or not self.environment.strip():
+            raise ValueError("exchange and environment must not be empty")
+        if self.symbol is not None and not self.symbol.strip():
+            raise ValueError("symbol must not be empty")
+        if not 0 <= self.utc_hour <= 23:
+            raise ValueError("utc_hour must be between 0 and 23")
+        if self.relative_path.is_absolute() or ".." in self.relative_path.parts:
+            raise ValueError("relative_path must stay below the archive root")
+        if self.subscription_generation_min <= 0:
+            raise ValueError("subscription_generation_min must be positive")
+        if self.subscription_generation_max < self.subscription_generation_min:
+            raise ValueError(
+                "subscription_generation_max must be >= subscription_generation_min"
+            )
+        if self.row_count <= 0:
+            raise ValueError("row_count must be positive")
+        if self.compressed_bytes <= 0:
+            raise ValueError("compressed_bytes must be positive")
+        if self.known_gap_count < 0:
+            raise ValueError("known_gap_count must be non-negative")
+        _require_aware(self.first_received_at, "first_received_at")
+        _require_aware(self.last_received_at, "last_received_at")
+        _require_aware(self.created_at, "created_at")
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,3 +353,8 @@ def transition_market_data_state(
 
 def _is_aware(value: datetime) -> bool:
     return value.tzinfo is not None and value.utcoffset() is not None
+
+
+def _require_aware(value: datetime, field_name: str) -> None:
+    if not _is_aware(value):
+        raise ValueError(f"{field_name} must be timezone-aware")

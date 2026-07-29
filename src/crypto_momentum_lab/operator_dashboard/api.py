@@ -1,10 +1,13 @@
+import os
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Protocol
+from typing import Annotated, Protocol
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
@@ -23,6 +26,7 @@ from crypto_momentum_lab.persistence.postgres.session import (
 )
 
 STATIC_DIR = Path(__file__).with_name("static")
+_BASIC_AUTH = HTTPBasic(auto_error=False)
 
 
 class DashboardQueryProtocol(Protocol):
@@ -47,7 +51,21 @@ def create_dashboard_app(
     *,
     database_url: str | None = None,
     queries: DashboardQueryProtocol | None = None,
+    auth_username: str | None = None,
+    auth_password: str | None = None,
 ) -> FastAPI:
+    resolved_auth_username = auth_username or os.environ.get(
+        "CML_DASHBOARD_USERNAME"
+    )
+    resolved_auth_password = auth_password or os.environ.get(
+        "CML_DASHBOARD_PASSWORD"
+    )
+    if not resolved_auth_username or not resolved_auth_password:
+        raise ValueError(
+            "dashboard authentication requires CML_DASHBOARD_USERNAME and "
+            "CML_DASHBOARD_PASSWORD"
+        )
+
     engine: AsyncEngine | None = None
     resolved_queries = queries
     if resolved_queries is None and database_url is not None:
@@ -71,6 +89,28 @@ def create_dashboard_app(
     )
     dashboard.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+    def require_dashboard_auth(
+        credentials: Annotated[
+            HTTPBasicCredentials | None,
+            Depends(_BASIC_AUTH),
+        ],
+    ) -> None:
+        if credentials is None or not (
+            secrets.compare_digest(
+                credentials.username,
+                resolved_auth_username,
+            )
+            and secrets.compare_digest(
+                credentials.password,
+                resolved_auth_password,
+            )
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="dashboard authentication required",
+                headers={"WWW-Authenticate": "Basic"},
+            )
+
     def query_service() -> DashboardQueryProtocol:
         if resolved_queries is None:
             raise HTTPException(
@@ -83,7 +123,7 @@ def create_dashboard_app(
     async def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
 
-    @dashboard.get("/api/health")
+    @dashboard.get("/api/health", dependencies=[Depends(require_dashboard_auth)])
     async def health() -> dict[str, str]:
         service = query_service()
         try:
@@ -94,17 +134,26 @@ def create_dashboard_app(
                 detail={"app_status": "UP", "database_status": "DOWN"},
             ) from exc
 
-    @dashboard.get("/api/overview", response_model=SystemOverviewResponse)
+    @dashboard.get(
+        "/api/overview",
+        response_model=SystemOverviewResponse,
+        dependencies=[Depends(require_dashboard_auth)],
+    )
     async def overview() -> SystemOverviewResponse:
         return await query_service().overview()
 
-    @dashboard.get("/api/universe", response_model=UniverseStatusResponse)
+    @dashboard.get(
+        "/api/universe",
+        response_model=UniverseStatusResponse,
+        dependencies=[Depends(require_dashboard_auth)],
+    )
     async def universe() -> UniverseStatusResponse:
         return await query_service().universe()
 
     @dashboard.get(
         "/api/strategy-runs/current",
         response_model=StrategyRunResponse,
+        dependencies=[Depends(require_dashboard_auth)],
     )
     async def strategy_run() -> StrategyRunResponse:
         return await query_service().strategy_run()
@@ -112,19 +161,32 @@ def create_dashboard_app(
     @dashboard.get(
         "/api/paper-accounts",
         response_model=PaperAccountsResponse,
+        dependencies=[Depends(require_dashboard_auth)],
     )
     async def paper_accounts() -> PaperAccountsResponse:
         return await query_service().paper_accounts()
 
-    @dashboard.get("/api/account", response_model=AccountOverviewResponse)
+    @dashboard.get(
+        "/api/account",
+        response_model=AccountOverviewResponse,
+        dependencies=[Depends(require_dashboard_auth)],
+    )
     async def account() -> AccountOverviewResponse:
         return await query_service().account()
 
-    @dashboard.get("/api/risk-execution", response_model=RiskExecutionResponse)
+    @dashboard.get(
+        "/api/risk-execution",
+        response_model=RiskExecutionResponse,
+        dependencies=[Depends(require_dashboard_auth)],
+    )
     async def risk_execution() -> RiskExecutionResponse:
         return await query_service().risk_execution()
 
-    @dashboard.get("/api/reports", response_model=RunReportSummaryResponse)
+    @dashboard.get(
+        "/api/reports",
+        response_model=RunReportSummaryResponse,
+        dependencies=[Depends(require_dashboard_auth)],
+    )
     async def reports() -> RunReportSummaryResponse:
         return await query_service().reports()
 

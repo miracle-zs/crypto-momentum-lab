@@ -33,6 +33,18 @@ class ExchangeSubmissionTimeoutError(TimeoutError):
     pass
 
 
+class ExchangeOrderQueryUnknownError(RuntimeError):
+    """Order lookup failed before the exchange state was known."""
+
+    pass
+
+
+class ExchangeCancellationUnknownError(RuntimeError):
+    """The cancel request outcome is unknown and needs reconciliation."""
+
+    pass
+
+
 class OrderExchangeClient(Protocol):
     async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
         pass
@@ -139,10 +151,22 @@ class OrderExecutionStateMachine:
                 None,
             )
         except ExchangeSubmissionTimeoutError:
-            queried_snapshot = await self._exchange.query_order_by_client_id(
-                plan.symbol,
-                plan.client_order_id,
-            )
+            try:
+                queried_snapshot = await self._exchange.query_order_by_client_id(
+                    plan.symbol,
+                    plan.client_order_id,
+                )
+            except ExchangeOrderQueryUnknownError as exc:
+                await self._append_event(
+                    plan,
+                    ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                    details={"reason": str(exc)},
+                )
+                return OrderExecutionResult(
+                    plan.client_order_id,
+                    ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                    None,
+                )
             if queried_snapshot is None:
                 await self._append_event(
                     plan,

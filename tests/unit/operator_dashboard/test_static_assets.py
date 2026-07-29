@@ -22,8 +22,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert 'data-endpoint="api/overview"' in index
-    assert 'href="static/dashboard.css"' in index
-    assert 'src="static/dashboard.js"' in index
+    assert 'href="static/dashboard.css?v=20260728-account-pairs"' in index
+    assert 'src="static/dashboard.js?v=20260728-account-pairs"' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
@@ -71,3 +71,37 @@ def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
         "wirePaperAccountTabs",
     ):
         assert marker in text
+
+
+def test_universe_panel_separates_target_and_retained_symbols() -> None:
+    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+
+    for marker in (
+        "目标池 · 涨幅 Top 20",
+        "目标池 · 跌幅 Top 20",
+        "保留与持仓保护",
+        "RETAINED / POSITION PROTECTION",
+        "监控池 ${monitored.length}",
+    ):
+        assert marker in text
+
+
+def test_dashboard_polling_preserves_scroll_positions() -> None:
+    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+
+    for marker in (
+        "captureScrollState",
+        "restoreScrollState",
+        "window.scrollTo(state.pageX, state.pageY)",
+        'querySelectorAll(".table-scroll")',
+    ):
+        assert marker in text
+
+
+def test_paper_account_cards_pair_same_strategy_vertically() -> None:
+    text = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+
+    assert "grid-template-rows: repeat(2, auto)" in text
+    assert "grid-auto-flow: column" in text
+    assert "grid-template-rows: none" in text
+    assert "grid-auto-flow: row" in text

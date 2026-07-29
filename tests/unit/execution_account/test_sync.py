@@ -47,19 +47,28 @@ class FakeClient:
     async def fetch_open_orders(self):
         return ()
 
-    async def fetch_recent_fills(self):
+    async def fetch_recent_fills(self, symbols=()):
         return ()
 
     async def aclose(self) -> None:
         return None
 
 
+class FailingClient(FakeClient):
+    async def fetch_balances(self):
+        raise RuntimeError("temporary Binance failure")
+
+
 class FakeRepository:
     def __init__(self) -> None:
         self.process_states = []
         self.balances = []
+        self.positions = []
+        self.open_orders = []
+        self.fills = []
         self.configs = []
         self.reconciliation_runs = []
+        self.snapshot_calls = 0
 
     async def save_process_state(self, state):
         self.process_states.append(state)
@@ -82,6 +91,24 @@ class FakeRepository:
     async def save_reconciliation_run(self, run):
         self.reconciliation_runs.append(run)
 
+    async def save_reconciliation_snapshot(
+        self,
+        *,
+        config,
+        balances,
+        positions,
+        open_orders,
+        fills,
+        run,
+    ):
+        self.snapshot_calls += 1
+        self.configs.append(config)
+        self.balances.extend(balances)
+        self.positions.extend(positions)
+        self.open_orders.extend(open_orders)
+        self.fills.extend(fills)
+        self.reconciliation_runs.append(run)
+
 
 async def test_sync_once_persists_snapshot_and_ready_state() -> None:
     repository = FakeRepository()
@@ -94,6 +121,7 @@ async def test_sync_once_persists_snapshot_and_ready_state() -> None:
     result = await service.sync_once()
 
     assert result.status is ExecutionAccountStatus.READY_READONLY
+    assert repository.snapshot_calls == 1
     assert len(repository.balances) == 1
     assert repository.process_states[-1].state is ExecutionAccountStatus.READY_READONLY
     assert repository.reconciliation_runs[-1].status == "ready"
@@ -110,8 +138,27 @@ async def test_sync_once_halts_on_account_mode_mismatch() -> None:
     result = await service.sync_once()
 
     assert result.status is ExecutionAccountStatus.HALTED_READONLY
+    assert repository.snapshot_calls == 1
     assert repository.process_states[-1].state is ExecutionAccountStatus.HALTED_READONLY
     assert "multi_assets_mode_mismatch" in repository.process_states[-1].reason
+
+
+async def test_sync_once_marks_degraded_when_fetch_fails() -> None:
+    repository = FakeRepository()
+    service = ExecutionAccountSyncService(
+        client=FailingClient(),
+        repository=repository,
+        config=_config(),
+    )
+
+    try:
+        await service.sync_once()
+    except RuntimeError as error:
+        assert str(error) == "temporary Binance failure"
+    else:
+        raise AssertionError("expected sync failure")
+
+    assert repository.process_states[-1].state is ExecutionAccountStatus.DEGRADED
 
 
 def _config(expected_multi_assets_mode: bool = False) -> ExecutionAccountSyncConfig:

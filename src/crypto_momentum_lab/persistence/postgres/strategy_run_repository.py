@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any, cast
@@ -331,6 +331,19 @@ async def _insert_idempotent(
     primary_key = tuple(
         column.name for column in model_any.__table__.primary_key.columns
     )
+    inserted = (
+        await session.execute(
+            insert(model)
+            .values(values)
+            .on_conflict_do_nothing()
+            .returning(
+                *tuple(getattr(model_any, key) for key in primary_key)
+            )
+        )
+    ).first()
+    if inserted is not None:
+        return
+
     existing = await session.scalar(
         select(model).where(
             *(getattr(model_any, key) == values[key] for key in primary_key)
@@ -341,7 +354,9 @@ async def _insert_idempotent(
         if not core_fields_match(existing_values, values):
             raise ValueError(conflict_message)
         return
-    await session.execute(insert(model).values(values))
+    raise RuntimeError(
+        f"{conflict_message}: conflicting row disappeared before comparison"
+    )
 
 
 def _model_values(row: object) -> dict[str, object]:
@@ -356,9 +371,13 @@ def _jsonable(value: object) -> JsonValue:
     if isinstance(value, StrEnum):
         return value.value
     if isinstance(value, Decimal):
-        return str(value)
+        return format(value.normalize(), "f")
     if isinstance(value, datetime):
-        return value.isoformat()
+        return (
+            value.astimezone(UTC).isoformat()
+            if value.tzinfo is not None and value.utcoffset() is not None
+            else value.isoformat()
+        )
     if isinstance(value, dict):
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, list | tuple):
@@ -370,9 +389,13 @@ def _jsonable(value: object) -> JsonValue:
 
 def _normalize_for_compare(value: object) -> object:
     if isinstance(value, Decimal):
-        return str(value.normalize())
+        return format(value.normalize(), "f")
     if isinstance(value, datetime):
-        return value.isoformat()
+        return (
+            value.astimezone(UTC).isoformat()
+            if value.tzinfo is not None and value.utcoffset() is not None
+            else value.isoformat()
+        )
     if isinstance(value, StrEnum):
         return value.value
     if isinstance(value, dict):

@@ -30,7 +30,7 @@ export CML_ENVIRONMENT_CONFIG=configs/environments/research.yaml
 docker compose up --build market-data
 ```
 
-This runs the hourly universe refresh and Binance USD-M WebSocket raw capture
+This runs the 15-minute universe refresh and Binance USD-M WebSocket raw capture
 together. Raw archives are written under `data/raw` through the Compose volume:
 
 ```bash

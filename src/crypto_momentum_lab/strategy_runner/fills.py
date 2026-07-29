@@ -289,7 +289,9 @@ def _marketable_quote(
     if midpoint is None and bid is not None and ask is not None:
         midpoint = (bid + ask) / Decimal("2")
     if midpoint is None:
-        midpoint = state.close_price or state.mark_price
+        midpoint = (
+            state.close_price if state.close_price is not None else state.mark_price
+        )
     if spread is None and bid is not None and ask is not None:
         spread = ask - bid
     if midpoint is not None and spread is not None:

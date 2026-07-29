@@ -1,5 +1,5 @@
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
@@ -316,9 +316,13 @@ def _jsonable(value: object) -> JsonValue:
     if isinstance(value, StrEnum):
         return value.value
     if isinstance(value, Decimal):
-        return str(value)
+        return format(value.normalize(), "f")
     if isinstance(value, datetime):
-        return value.isoformat()
+        return (
+            value.astimezone(UTC).isoformat()
+            if value.tzinfo is not None and value.utcoffset() is not None
+            else value.isoformat()
+        )
     if isinstance(value, dict):
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, list | tuple):

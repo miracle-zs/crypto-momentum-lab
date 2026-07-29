@@ -143,6 +143,67 @@ async def test_scheduler_propagates_cancellation_cleanly() -> None:
         )
 
 
+async def test_scheduler_retries_failed_refresh_without_losing_schedule() -> None:
+    refresh_calls: list[datetime] = []
+    sleep_calls: list[float] = []
+
+    class FlakyService:
+        async def refresh(self, *, observed_at: datetime) -> UniverseSnapshot:
+            refresh_calls.append(observed_at)
+            if len(refresh_calls) == 1:
+                raise RuntimeError("temporary database failure")
+            raise asyncio.CancelledError
+
+    async def record_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        if len(sleep_calls) >= 4:
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_scheduler_loop(
+            FlakyService(),
+            activation_minute=1,
+            retry_delay_seconds=0.25,
+            clock=lambda: datetime(2026, 6, 14, 10, 30, tzinfo=UTC),
+            sleeper=record_sleep,
+        )
+
+    assert refresh_calls == [
+        datetime(2026, 6, 14, 11, 1, tzinfo=UTC),
+        datetime(2026, 6, 14, 11, 1, tzinfo=UTC),
+    ]
+    assert 0.25 in sleep_calls
+
+
+async def test_paper_exit_reconcile_retries_transient_failure() -> None:
+    calls = 0
+    sleep_calls: list[float] = []
+
+    class FlakyObserver:
+        async def refresh_protected_symbols(self) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("temporary database failure")
+            raise asyncio.CancelledError
+
+    async def record_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        if len(sleep_calls) >= 4:
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await main.reconcile_paper_exit_subscriptions(
+            FlakyObserver(),
+            interval_seconds=0.1,
+            retry_delay_seconds=0.25,
+            sleeper=record_sleep,
+        )
+
+    assert calls == 2
+    assert 0.25 in sleep_calls
+
+
 async def test_capture_observer_applies_membership_symbols() -> None:
     class FakeCapture:
         def __init__(self) -> None:

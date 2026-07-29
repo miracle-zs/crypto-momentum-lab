@@ -15,18 +15,28 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
 
 NOW = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+DASHBOARD_AUTH_KWARGS = {
+    "auth_username": "operator",
+    "auth_password": "test-password",
+}
+DASHBOARD_BASIC_AUTH = ("operator", "test-password")
 
 
 def test_dashboard_app_serves_health_endpoint() -> None:
-    with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
-        response = client.get("/api/health")
+    with TestClient(
+        create_dashboard_app(queries=FakeQueries(), **DASHBOARD_AUTH_KWARGS)
+    ) as client:
+        assert client.get("/api/health").status_code == 401
+        response = client.get("/api/health", auth=DASHBOARD_BASIC_AUTH)
 
     assert response.status_code == 200
     assert response.json() == {"app_status": "UP", "database_status": "UP"}
 
 
 def test_dashboard_app_mounts_static_index() -> None:
-    with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
+    with TestClient(
+        create_dashboard_app(queries=FakeQueries(), **DASHBOARD_AUTH_KWARGS)
+    ) as client:
         response = client.get("/")
 
     assert response.status_code == 200

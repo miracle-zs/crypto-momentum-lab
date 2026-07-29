@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from crypto_momentum_lab.domain.market.models import (
@@ -27,10 +27,25 @@ class _ObservedState:
 
 
 class StreamQualityTracker:
-    def __init__(self, *, silence_timeout_seconds: float = 30) -> None:
+    def __init__(
+        self,
+        *,
+        silence_timeout_seconds: float = 30,
+        closed_session_retention_seconds: float = 3600,
+    ) -> None:
+        if silence_timeout_seconds <= 0:
+            raise ValueError("silence_timeout_seconds must be positive")
+        if closed_session_retention_seconds <= 0:
+            raise ValueError(
+                "closed_session_retention_seconds must be positive"
+            )
         self._silence_timeout_seconds = silence_timeout_seconds
+        self._closed_session_retention = timedelta(
+            seconds=closed_session_retention_seconds
+        )
         self._observed: dict[_StateKey, _ObservedState] = {}
         self._known_gap_counts: dict[_StateKey, int] = {}
+        self._closed_sessions: dict[UUID, datetime] = {}
 
     def observe(self, envelope: RawEnvelope) -> tuple[QualityEvent, ...]:
         symbol = envelope.symbol or "_global"
@@ -116,6 +131,10 @@ class StreamQualityTracker:
         self,
         event: ConnectionLifecycleEvent,
     ) -> tuple[QualityEvent, ...]:
+        if event.opened:
+            self._closed_sessions.pop(event.session_id, None)
+        else:
+            self._closed_sessions[event.session_id] = event.occurred_at
         category = (
             QualityCategory.CONNECTION_OPENED
             if event.opened
@@ -146,12 +165,15 @@ class StreamQualityTracker:
         )
 
     def check_silence(self, *, now: datetime) -> tuple[QualityEvent, ...]:
+        self._prune_closed_sessions(now=now)
         events = []
         for (
             connection_session_id,
             stream,
             symbol,
         ), state in self._observed.items():
+            if connection_session_id in self._closed_sessions:
+                continue
             elapsed = (
                 now.astimezone(UTC)
                 - state.last_received_at.astimezone(UTC)
@@ -178,6 +200,24 @@ class StreamQualityTracker:
                 )
             )
         return tuple(events)
+
+    def _prune_closed_sessions(self, *, now: datetime) -> None:
+        cutoff = now.astimezone(UTC) - self._closed_session_retention
+        expired_sessions = {
+            session_id
+            for session_id, closed_at in self._closed_sessions.items()
+            if closed_at.astimezone(UTC) <= cutoff
+        }
+        for session_id in expired_sessions:
+            self._closed_sessions.pop(session_id, None)
+        if not expired_sessions:
+            return
+        for state_key in tuple(self._observed):
+            if state_key[0] in expired_sessions:
+                self._observed.pop(state_key, None)
+        for state_key in tuple(self._known_gap_counts):
+            if state_key[0] in expired_sessions:
+                self._known_gap_counts.pop(state_key, None)
 
     def known_gap_count(
         self,

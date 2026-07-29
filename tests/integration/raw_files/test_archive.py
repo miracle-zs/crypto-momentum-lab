@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
+import pytest
 import zstandard
 
 from crypto_momentum_lab.domain.market.models import ArchiveManifest, RawEnvelope
@@ -127,3 +128,28 @@ async def test_archive_reader_replays_finalized_file(
 
     assert [item.local_sequence for item in replayed] == [1, 2]
     assert {item.symbol for item in replayed} == {"BTCUSDT"}
+
+
+async def test_archive_rejects_path_traversal_symbol(
+    tmp_path: Path,
+    raw_envelope: RawEnvelope,
+) -> None:
+    archive = ZstdJsonlArchive(
+        root=tmp_path,
+        environment="test",
+        capture_version="test",
+        manifest_sink=lambda manifest: _noop_manifest(manifest),
+        known_gap_count_provider=lambda key: 0,
+        zstd_level=1,
+        rotation_uncompressed_bytes=10_000_000,
+        max_open_writers=4,
+        group_commit_max_events=1,
+        group_commit_max_milliseconds=10_000,
+    )
+
+    with pytest.raises(ValueError, match="safe path component"):
+        await archive.append(replace(raw_envelope, symbol="../../etc"))
+
+
+async def _noop_manifest(manifest: ArchiveManifest) -> None:
+    del manifest

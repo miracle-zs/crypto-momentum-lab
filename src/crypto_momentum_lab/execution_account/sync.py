@@ -29,7 +29,10 @@ class ReadOnlyAccountClient(Protocol):
     async def fetch_open_orders(self) -> tuple[AccountOpenOrderSnapshot, ...]:
         pass
 
-    async def fetch_recent_fills(self) -> tuple[AccountFillEvent, ...]:
+    async def fetch_recent_fills(
+        self,
+        symbols: tuple[str, ...] = (),
+    ) -> tuple[AccountFillEvent, ...]:
         pass
 
 
@@ -55,6 +58,18 @@ class AccountSyncRepository(Protocol):
     async def save_reconciliation_run(self, run: AccountReconciliationRun) -> None:
         pass
 
+    async def save_reconciliation_snapshot(
+        self,
+        *,
+        config: AccountConfigSnapshot,
+        balances: tuple[AccountBalanceSnapshot, ...],
+        positions: tuple[AccountPositionSnapshot, ...],
+        open_orders: tuple[AccountOpenOrderSnapshot, ...],
+        fills: tuple[AccountFillEvent, ...],
+        run: AccountReconciliationRun,
+    ) -> None:
+        pass
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutionAccountSyncConfig:
@@ -62,6 +77,7 @@ class ExecutionAccountSyncConfig:
     account_label: str
     expected_multi_assets_mode: bool
     observed_at: datetime
+    recent_fill_symbols: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.environment.strip():
@@ -70,6 +86,8 @@ class ExecutionAccountSyncConfig:
             raise ValueError("account_label must not be empty")
         if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
             raise ValueError("observed_at must be timezone-aware")
+        if any(not symbol.strip() for symbol in self.recent_fill_symbols):
+            raise ValueError("recent_fill_symbols must not contain empty values")
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,57 +112,85 @@ class ExecutionAccountSyncService:
     async def sync_once(self) -> ExecutionAccountSyncResult:
         await self._save_state(ExecutionAccountStatus.STARTING)
         await self._save_state(ExecutionAccountStatus.SYNCING)
-        account_config = await self._client.fetch_account_config()
-        await self._repository.save_config_snapshot(account_config)
-        reconciliation_id = _reconciliation_id(self._config)
-        if account_config.multi_assets_mode != self._config.expected_multi_assets_mode:
-            reason = "multi_assets_mode_mismatch"
-            run = _reconciliation_run(
-                self._config,
-                reconciliation_id=reconciliation_id,
-                status="halted",
-                mismatch_count=1,
-                details={"reason": reason},
-            )
-            await self._repository.save_reconciliation_run(run)
-            await self._save_state(ExecutionAccountStatus.HALTED_READONLY, reason)
-            return ExecutionAccountSyncResult(
-                status=ExecutionAccountStatus.HALTED_READONLY,
-                reconciliation_id=reconciliation_id,
-                mismatch_count=1,
-            )
+        try:
+            account_config = await self._client.fetch_account_config()
+            reconciliation_id = _reconciliation_id(self._config)
+            if (
+                account_config.multi_assets_mode
+                != self._config.expected_multi_assets_mode
+            ):
+                reason = "multi_assets_mode_mismatch"
+                await self._repository.save_reconciliation_snapshot(
+                    config=account_config,
+                    balances=(),
+                    positions=(),
+                    open_orders=(),
+                    fills=(),
+                    run=_reconciliation_run(
+                        self._config,
+                        reconciliation_id=reconciliation_id,
+                        status="halted",
+                        mismatch_count=1,
+                        details={"reason": reason},
+                    ),
+                )
+                await self._save_state(
+                    ExecutionAccountStatus.HALTED_READONLY,
+                    reason,
+                )
+                return ExecutionAccountSyncResult(
+                    status=ExecutionAccountStatus.HALTED_READONLY,
+                    reconciliation_id=reconciliation_id,
+                    mismatch_count=1,
+                )
 
-        balances = await self._client.fetch_balances()
-        positions = await self._client.fetch_positions()
-        open_orders = await self._client.fetch_open_orders()
-        fills = await self._client.fetch_recent_fills()
-        for balance in balances:
-            await self._repository.save_balance_snapshot(balance)
-        for position in positions:
-            await self._repository.save_position_snapshot(position)
-        for order in open_orders:
-            await self._repository.upsert_open_order(order)
-        for fill in fills:
-            await self._repository.save_fill_event(fill)
-        await self._repository.save_reconciliation_run(
-            _reconciliation_run(
-                self._config,
-                reconciliation_id=reconciliation_id,
-                status="ready",
-                mismatch_count=0,
-                details={},
-                balance_count=len(balances),
-                position_count=len(positions),
-                open_order_count=len(open_orders),
-                fill_count=len(fills),
+            balances = await self._client.fetch_balances()
+            positions = await self._client.fetch_positions()
+            open_orders = await self._client.fetch_open_orders()
+            fill_symbols = self._config.recent_fill_symbols or tuple(
+                sorted(
+                    {
+                        position.symbol
+                        for position in positions
+                        if position.position_amt != 0
+                    }
+                    | {order.symbol for order in open_orders}
+                )
             )
-        )
-        await self._save_state(ExecutionAccountStatus.READY_READONLY)
-        return ExecutionAccountSyncResult(
-            status=ExecutionAccountStatus.READY_READONLY,
-            reconciliation_id=reconciliation_id,
-            mismatch_count=0,
-        )
+            fills = await self._client.fetch_recent_fills(fill_symbols)
+            await self._repository.save_reconciliation_snapshot(
+                config=account_config,
+                balances=balances,
+                positions=positions,
+                open_orders=open_orders,
+                fills=fills,
+                run=_reconciliation_run(
+                    self._config,
+                    reconciliation_id=reconciliation_id,
+                    status="ready",
+                    mismatch_count=0,
+                    details={},
+                    balance_count=len(balances),
+                    position_count=len(positions),
+                    open_order_count=len(open_orders),
+                    fill_count=len(fills),
+                ),
+            )
+            await self._save_state(ExecutionAccountStatus.READY_READONLY)
+            return ExecutionAccountSyncResult(
+                status=ExecutionAccountStatus.READY_READONLY,
+                reconciliation_id=reconciliation_id,
+                mismatch_count=0,
+            )
+        except Exception as error:
+            try:
+                await self._save_state(
+                    ExecutionAccountStatus.DEGRADED,
+                    f"sync_failed:{type(error).__name__}",
+                )
+            except Exception:
+                pass
+            raise
 
     async def _save_state(
         self,

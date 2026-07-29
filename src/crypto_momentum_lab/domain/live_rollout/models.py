@@ -77,6 +77,14 @@ class LiveSessionTransition:
     reason: str | None
     details: dict[str, JsonValue]
 
+    def __post_init__(self) -> None:
+        _require_text(self.transition_id, "transition_id")
+        _require_text(self.session_id, "session_id")
+        _require_text(self.operator, "operator")
+        _require_text(self.strategy_config_hash, "strategy_config_hash")
+        _require_text(self.risk_config_hash, "risk_config_hash")
+        _require_aware(self.occurred_at, "occurred_at")
+
 
 @dataclass(frozen=True, slots=True)
 class RollbackCommand:
@@ -93,7 +101,29 @@ class RollbackCommand:
     completed_at: datetime | None
     failure_reason: str | None
 
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("command_id", self.command_id),
+            ("command_type", self.command_type),
+            ("requested_by", self.requested_by),
+            ("confirmation_text", self.confirmation_text),
+            ("idempotency_key", self.idempotency_key),
+            ("account_label", self.account_label),
+            ("strategy_name", self.strategy_name),
+            ("session_id", self.session_id),
+            ("status", self.status),
+        ):
+            _require_text(value, field_name)
+        _require_aware(self.requested_at, "requested_at")
+        if self.completed_at is not None:
+            _require_aware(self.completed_at, "completed_at")
+
 
 def _require_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
+
+
+def _require_text(value: str, field_name: str) -> None:
+    if not value.strip():
+        raise ValueError(f"{field_name} must not be empty")

@@ -1,5 +1,5 @@
 const SECTIONS = ["overview", "strategy", "universe", "risk", "account", "reports"];
-const POLL_MS = 2000;
+const POLL_MS = 5000;
 const DEFAULT_EQUITY_BUCKET_SECONDS = 6 * 60;
 const STRATEGY_ORDER = [
   "compression_breakout",
@@ -8,6 +8,7 @@ const STRATEGY_ORDER = [
 ];
 let selectedPaperAccount = 0;
 let lastPollAt = null;
+let pollInFlight = false;
 
 const esc = (value) => String(value ?? "—").replace(/[&<>'"]/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"
@@ -537,15 +538,50 @@ function renderUniverse(data) {
     { label: "现价", value: (row) => price(row.current_price), align: "right" },
     { label: "UTC 日内涨跌", value: (row) => returnBar(row.utc_day_return, maxAbs), html: true },
   ], rows, { emptyText: "暂无数据" });
-  const chips = (data.monitored_symbols || []).map((row) =>
-    `<span class="chip ${row.side === "gainer" ? "pos" : "neg"}"><b>${esc(row.symbol)}</b><small>${row.side === "gainer" ? "涨幅榜" : "跌幅榜"}</small></span>`).join("");
+  const monitored = data.monitored_symbols || [];
+  const statusBySymbol = new Map(monitored.map((row) => [row.symbol, row]));
+  const targetCount = monitored.filter((row) => row.status === "target").length;
+  const retainedRows = monitored.filter((row) => row.status === "retained");
+  const forcedRows = monitored.filter((row) => row.status === "forced");
+  const sideLabel = (side) => side === "gainer" ? "涨幅" : side === "loser" ? "跌幅" : "保护";
+  const targetChips = (rows, side) => rows
+    .filter((row) => (statusBySymbol.get(row.symbol)?.status || "target") === "target")
+    .map((row) => `<span class="chip ${side === "gainer" ? "pos" : "neg"}">
+      <span class="chip-main"><b>${esc(row.symbol)}</b><small>#${esc(row.rank)}</small></span>
+      <strong class="chip-return">${esc(signedPercent(row.utc_day_return, 1))}</strong>
+    </span>`)
+    .join("");
+  const secondaryChips = (rows) => rows
+    .map((row) => `<span class="chip retained ${row.side === "gainer" ? "pos" : "neg"}">
+      <span class="chip-main"><b>${esc(row.symbol)}</b><small>${esc(row.status === "forced" ? "持仓保护" : "保留")}</small></span>
+      <strong class="chip-side">${esc(sideLabel(row.side))}</strong>
+    </span>`)
+    .join("");
+  const targetGroups = `<div class="monitor-target-grid">
+    <div class="monitor-group">
+      ${blockTitle("目标池 · 涨幅 Top 20", "TARGET GAINERS")}
+      <div class="chip-grid">${targetChips(data.gainers || [], "gainer") || emptyBox("暂无涨幅目标")}</div>
+    </div>
+    <div class="monitor-group">
+      ${blockTitle("目标池 · 跌幅 Top 20", "TARGET LOSERS")}
+      <div class="chip-grid">${targetChips(data.losers || [], "loser") || emptyBox("暂无跌幅目标")}</div>
+    </div>
+  </div>`;
+  const secondaryRows = [...retainedRows, ...forcedRows];
+  const secondarySection = secondaryRows.length
+    ? `<div class="monitor-secondary">
+      ${blockTitle("保留与持仓保护", "RETAINED / POSITION PROTECTION", `<span class="num muted">${retainedRows.length} 保留 · ${forcedRows.length} 保护</span>`)}
+      <div class="chip-grid">${secondaryChips(secondaryRows)}</div>
+    </div>`
+    : "";
+  const summary = `<span class="monitor-summary"><b>${targetCount}</b> 目标 · <b>${retainedRows.length}</b> 保留 · <b>${forcedRows.length}</b> 保护</span>`;
   const body = `<div class="detail-meta"><span>快照时间 <b class="num">${esc(dayTime(data.observed_at))} UTC</b></span><span>${esc(relToNow(data.observed_at))}</span></div>
     <div class="block-split">
       <div class="block">${blockTitle("涨幅榜 Top 20", "TOP GAINERS · UTC DAY")}${universeTable(data.gainers)}</div>
       <div class="block">${blockTitle("跌幅榜 Top 20", "TOP LOSERS · UTC DAY")}${universeTable(data.losers)}</div>
     </div>
-    <div class="block">${blockTitle("监控池 40", "MONITORED CANDIDATES", `<span class="num muted">${(data.monitored_symbols || []).length} 个标的</span>`)}
-      ${chips ? `<div class="chip-grid">${chips}</div>` : emptyBox("监控池为空")}</div>`;
+    <div class="block">${blockTitle(`监控池 ${monitored.length}`, "MONITORED CANDIDATES", summary)}
+      ${targetGroups}${secondarySection}</div>`;
   return [data.status, body];
 }
 
@@ -677,6 +713,32 @@ function wirePaperAccountTabs(body, data) {
   });
 }
 
+function captureScrollState(body) {
+  return {
+    pageX: window.scrollX,
+    pageY: window.scrollY,
+    containers: Array.from(body.querySelectorAll(".table-scroll")).map((container) => ({
+      left: container.scrollLeft,
+      top: container.scrollTop,
+    })),
+  };
+}
+
+function restoreScrollState(body, state) {
+  const root = document.documentElement;
+  const previousBehavior = root.style.scrollBehavior;
+  root.style.scrollBehavior = "auto";
+  window.scrollTo(state.pageX, state.pageY);
+  root.style.scrollBehavior = previousBehavior;
+
+  body.querySelectorAll(".table-scroll").forEach((container, index) => {
+    const saved = state.containers[index];
+    if (!saved) return;
+    container.scrollLeft = saved.left;
+    container.scrollTop = saved.top;
+  });
+}
+
 async function refreshSection(id) {
   const section = document.getElementById(id);
   try {
@@ -686,7 +748,9 @@ async function refreshSection(id) {
     const [status, html] = renderers[id](data);
     setSectionStatus(id, status);
     const body = section.querySelector(".panel-body");
+    const scrollState = captureScrollState(body);
     body.innerHTML = html;
+    restoreScrollState(body, scrollState);
     body.classList.remove("loading");
     body.removeAttribute("aria-busy");
     if (id === "strategy") wirePaperAccountTabs(body, data);
@@ -694,20 +758,28 @@ async function refreshSection(id) {
   } catch (error) {
     setSectionStatus(id, "UNKNOWN");
     const body = section.querySelector(".panel-body");
+    const scrollState = captureScrollState(body);
     body.classList.remove("loading");
     body.innerHTML = emptyBox("接口不可达", `${section.dataset.endpoint} · ${error.message}`);
+    restoreScrollState(body, scrollState);
   }
 }
 
 async function poll() {
-  await Promise.allSettled(SECTIONS.map(refreshSection));
-  lastPollAt = new Date();
-  const pollbar = document.getElementById("pollbar");
-  pollbar.classList.remove("run");
-  void pollbar.offsetWidth;
-  pollbar.classList.add("run");
-  renderPollState();
-  updateSpy();
+  if (pollInFlight) return;
+  pollInFlight = true;
+  try {
+    await Promise.allSettled(SECTIONS.map(refreshSection));
+    lastPollAt = new Date();
+    const pollbar = document.getElementById("pollbar");
+    pollbar.classList.remove("run");
+    void pollbar.offsetWidth;
+    pollbar.classList.add("run");
+    renderPollState();
+    updateSpy();
+  } finally {
+    pollInFlight = false;
+  }
 }
 
 function renderPollState() {

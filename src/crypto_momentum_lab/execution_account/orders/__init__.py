@@ -8,6 +8,8 @@ from crypto_momentum_lab.execution_account.orders.quantization import (
     quantize_order_plan,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
+    ExchangeCancellationUnknownError,
+    ExchangeOrderQueryUnknownError,
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
     LiveSubmissionDisabledError,
@@ -23,6 +25,8 @@ __all__ = [
     "SymbolTradingRules",
     "quantize_order_plan",
     "ExchangeOrderRejectedError",
+    "ExchangeCancellationUnknownError",
+    "ExchangeOrderQueryUnknownError",
     "ExchangeSubmissionTimeoutError",
     "LiveSubmissionDisabledError",
     "OrderExecutionResult",

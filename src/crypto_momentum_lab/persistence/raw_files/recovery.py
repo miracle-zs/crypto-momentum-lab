@@ -1,11 +1,12 @@
 import asyncio
 import json
 import os
+import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import zstandard
 
@@ -37,12 +38,16 @@ async def recover_archive_root(
     environment: str,
     capture_version: str,
 ) -> tuple[RecoveryResult, ...]:
+    await asyncio.to_thread(_cleanup_recovery_working, root)
     temporary_paths = await asyncio.to_thread(
         lambda: tuple(
             sorted(
                 path
                 for path in root.rglob("*.tmp")
-                if ".recovery-quarantine" not in path.parts
+                if not {
+                    ".recovery-quarantine",
+                    ".recovery-working",
+                }.intersection(path.parts)
             )
         )
     )
@@ -73,17 +78,8 @@ async def recover_temporary_archive(
     environment: str,
     capture_version: str,
 ) -> RecoveryResult:
-    data = await asyncio.to_thread(temporary.read_bytes)
-    try:
-        decompressed, discarded_bytes = await asyncio.to_thread(
-            _decompress_complete_frame,
-            data,
-        )
-    except zstandard.ZstdError as error:
-        raise EmptyTemporaryArchiveError(
-            "temporary archive contains no recoverable frame"
-        ) from error
-    envelopes = _envelopes_from_jsonl(decompressed)
+    decode_stats = _RecoveryDecodeStats()
+    envelopes = _envelopes_from_temporary(temporary, decode_stats)
     try:
         first_envelope = next(envelopes)
     except StopIteration:
@@ -91,19 +87,14 @@ async def recover_temporary_archive(
             "temporary archive contains no complete records"
         ) from None
 
-    quarantined_path = await asyncio.to_thread(
-        _quarantine_temporary,
-        temporary,
-        archive_root,
-    )
-
+    staging_root = archive_root / ".recovery-working" / uuid4().hex
     manifests: list[ArchiveManifest] = []
 
     async def save_manifest(manifest: ArchiveManifest) -> None:
         manifests.append(manifest)
 
     archive = ZstdJsonlArchive(
-        root=archive_root,
+        root=staging_root,
         environment=environment,
         capture_version=capture_version,
         manifest_sink=save_manifest,
@@ -114,24 +105,91 @@ async def recover_temporary_archive(
         group_commit_max_events=_RECOVERY_BATCH_SIZE,
         group_commit_max_milliseconds=250,
     )
-    await _append_in_batches(
-        archive,
-        _prepend(first_envelope, envelopes),
-        batch_size=_RECOVERY_BATCH_SIZE,
+    try:
+        await _append_in_batches(
+            archive,
+            _prepend(first_envelope, envelopes),
+            batch_size=_RECOVERY_BATCH_SIZE,
+        )
+        await archive.close()
+        await asyncio.to_thread(
+            _promote_recovered_files,
+            manifests,
+            staging_root,
+            archive_root,
+        )
+    except Exception:
+        try:
+            await archive.close()
+        except Exception:
+            pass
+        await asyncio.to_thread(shutil.rmtree, staging_root, True)
+        raise
+
+    await asyncio.to_thread(shutil.rmtree, staging_root, True)
+
+    quarantined_path = await asyncio.to_thread(
+        _quarantine_temporary,
+        temporary,
+        archive_root,
     )
-    await archive.close()
+
+    if not manifests:
+        raise RuntimeError("recovery produced no archive manifest")
 
     return RecoveryResult(
         manifest=replace(manifests[0], recovery_status="recovered"),
         quarantined_path=quarantined_path,
-        discarded_bytes=discarded_bytes,
+        discarded_bytes=decode_stats.discarded_bytes,
     )
 
 
-def _decompress_complete_frame(data: bytes) -> tuple[bytes, int]:
+@dataclass(slots=True)
+class _RecoveryDecodeStats:
+    discarded_bytes: int = 0
+
+
+def _envelopes_from_temporary(
+    temporary: Path,
+    stats: _RecoveryDecodeStats,
+) -> Iterator[RawEnvelope]:
     decompressor = zstandard.ZstdDecompressor().decompressobj()
-    decompressed = decompressor.decompress(data)
-    return decompressed, len(decompressor.unused_data)
+    pending = b""
+    with temporary.open("rb") as compressed:
+        while chunk := compressed.read(1024 * 1024):
+            try:
+                decompressed = decompressor.decompress(chunk)
+            except zstandard.ZstdError:
+                return
+            pending += decompressed
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                if line:
+                    yield _envelope_from_json_line(line)
+            if decompressor.eof:
+                stats.discarded_bytes += len(decompressor.unused_data)
+                stats.discarded_bytes += sum(
+                    len(remaining)
+                    for remaining in iter(
+                        lambda: compressed.read(1024 * 1024),
+                        b"",
+                    )
+                )
+                break
+
+    if pending.strip():
+        try:
+            yield _envelope_from_json_line(pending)
+        except json.JSONDecodeError:
+            # A writer may have been interrupted in the middle of its last row.
+            return
+
+
+def _envelope_from_json_line(line: bytes) -> RawEnvelope:
+    payload = json.loads(line)
+    if not isinstance(payload, dict):
+        raise ValueError("temporary archive row must be a JSON object")
+    return _envelope_from_payload(payload)
 
 
 async def _append_in_batches(
@@ -156,14 +214,6 @@ def _prepend(
 ) -> Iterator[RawEnvelope]:
     yield first
     yield from remaining
-
-
-def _envelopes_from_jsonl(data: bytes) -> Iterator[RawEnvelope]:
-    for line in data.splitlines():
-        if not line:
-            continue
-        payload = json.loads(line)
-        yield _envelope_from_payload(payload)
 
 
 def _envelope_from_payload(payload: dict[str, object]) -> RawEnvelope:
@@ -199,6 +249,23 @@ def _quarantine_temporary(temporary: Path, archive_root: Path) -> Path:
     _fsync_directory(destination.parent)
     _fsync_directory(temporary.parent)
     return destination
+
+
+def _promote_recovered_files(
+    manifests: list[ArchiveManifest],
+    staging_root: Path,
+    archive_root: Path,
+) -> None:
+    for manifest in manifests:
+        source = staging_root / manifest.relative_path
+        destination = archive_root / manifest.relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source, destination)
+        _fsync_directory(destination.parent)
+
+
+def _cleanup_recovery_working(archive_root: Path) -> None:
+    shutil.rmtree(archive_root / ".recovery-working", ignore_errors=True)
 
 
 def _str_value(value: object) -> str:

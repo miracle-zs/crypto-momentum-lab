@@ -10,6 +10,7 @@ from crypto_momentum_lab.domain.execution import (
     ShadowSuppressionEvent,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
+    ExchangeOrderQueryUnknownError,
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
     OrderExecutionStateMachine,
@@ -30,6 +31,16 @@ async def test_timeout_queries_by_client_order_id_before_retry() -> None:
 
     assert exchange.calls == ["submit", "query"]
     assert result.state is ExchangeOrderState.ACKNOWLEDGED
+
+
+async def test_timeout_with_failed_lookup_is_marked_for_reconciliation() -> None:
+    exchange = QueryFailExchange()
+    repository = FakeOrderRepository()
+
+    result = await _machine(exchange, repository).execute_approved_intent(_plan())
+
+    assert result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+    assert repository.events[-1].details["reason"] == "lookup unavailable"
 
 
 async def test_clear_reject_persists_rejected_state() -> None:
@@ -105,6 +116,19 @@ class FakeExchange:
     ) -> ExchangeOrderSnapshot | None:
         self.calls.append("query")
         return self.query_result
+
+
+class QueryFailExchange(FakeExchange):
+    def __init__(self) -> None:
+        super().__init__(submit_result=ExchangeSubmissionTimeoutError())
+
+    async def query_order_by_client_id(
+        self,
+        symbol: str,
+        client_order_id: str,
+    ) -> ExchangeOrderSnapshot | None:
+        del symbol, client_order_id
+        raise ExchangeOrderQueryUnknownError("lookup unavailable")
 
 
 class FakeOrderRepository:

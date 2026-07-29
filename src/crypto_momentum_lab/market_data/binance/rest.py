@@ -27,6 +27,7 @@ class BinanceUsdMRestClient:
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             timeout=timeout_seconds,
+            trust_env=False,
         )
         self._daily_open_concurrency = daily_open_concurrency
         self._retry_delays = (0.25, 0.5, 1.0)

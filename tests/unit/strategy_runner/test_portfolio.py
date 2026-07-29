@@ -120,6 +120,28 @@ def test_15m_aggregator_emits_only_after_the_candle_closes() -> None:
     )
 
 
+def test_15m_aggregator_ignores_late_state_from_a_closed_candle() -> None:
+    aggregator = Candle15mAggregator()
+    candle_start = datetime(2026, 7, 26, 0, 0, tzinfo=UTC)
+
+    for index in range(60):
+        aggregator.observe(
+            _state(
+                open_price=Decimal("100"),
+                close=Decimal("99") if index == 59 else Decimal("100.5"),
+                bucket_start=candle_start + timedelta(seconds=index * 15),
+            )
+        )
+
+    assert aggregator.observe(
+        _state(
+            open_price=Decimal("100"),
+            close=Decimal("101"),
+            bucket_start=candle_start + timedelta(minutes=14),
+        )
+    ) is None
+
+
 def test_candle_exit_closes_on_first_opposite_candle() -> None:
     position = position_from_entry_fill("run-1", _fill())
     assert position is not None

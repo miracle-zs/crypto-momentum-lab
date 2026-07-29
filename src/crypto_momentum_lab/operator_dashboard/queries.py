@@ -1,4 +1,5 @@
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -48,6 +49,18 @@ from crypto_momentum_lab.persistence.postgres.models import (
 _EQUITY_WINDOW = timedelta(hours=24)
 _EQUITY_BUCKET_SECONDS = 6 * 60
 _EQUITY_MAX_POINTS = 240
+
+
+@asynccontextmanager
+async def _session_scope(
+    session_factory: async_sessionmaker[AsyncSession],
+    existing: AsyncSession | None,
+) -> AsyncIterator[AsyncSession]:
+    if existing is not None:
+        yield existing
+        return
+    async with session_factory() as session:
+        yield session
 
 
 class DashboardQueries:
@@ -215,34 +228,35 @@ class DashboardQueries:
                     .limit(50)
                 )
             ).all()
-        strategy_order = (
-            "compression_breakout",
-            "orderflow_impulse",
-            "liquidation_cascade",
-        )
-        current_runs = [
-            run for run in runs if run.run_id.startswith("paper-account-")
-        ]
-        selected_runs = current_runs or runs
-        accounts = []
-        for strategy_name in strategy_order:
-            strategy_runs = sorted(
-                (
-                    run
-                    for run in selected_runs
-                    if run.strategy_name == strategy_name
-                ),
-                key=lambda run: (run.created_at, run.run_id),
+            strategy_order = (
+                "compression_breakout",
+                "orderflow_impulse",
+                "liquidation_cascade",
             )
-            accounts.extend(
-                [
-                    await self.strategy_run(
-                        run_id=run.run_id,
-                        equity_window_end=equity_window_end,
-                    )
-                    for run in strategy_runs[-2:]
-                ]
-            )
+            current_runs = [
+                run for run in runs if run.run_id.startswith("paper-account-")
+            ]
+            selected_runs = current_runs or runs
+            accounts = []
+            for strategy_name in strategy_order:
+                strategy_runs = sorted(
+                    (
+                        run
+                        for run in selected_runs
+                        if run.strategy_name == strategy_name
+                    ),
+                    key=lambda run: (run.created_at, run.run_id),
+                )
+                accounts.extend(
+                    [
+                        await self.strategy_run(
+                            run_id=run.run_id,
+                            equity_window_end=equity_window_end,
+                            _session=session,
+                        )
+                        for run in strategy_runs[-2:]
+                    ]
+                )
         return PaperAccountsResponse(
             status=(OperationalStatus.READY if accounts else OperationalStatus.NO_DATA),
             accounts=accounts,
@@ -253,10 +267,11 @@ class DashboardQueries:
         run_id: str | None = None,
         *,
         equity_window_end: datetime | None = None,
+        _session: AsyncSession | None = None,
     ) -> StrategyRunResponse:
         window_end = equity_window_end or self._clock()
         window_start = window_end - _EQUITY_WINDOW
-        async with self._session_factory() as session:
+        async with _session_scope(self._session_factory, _session) as session:
             statement = select(StrategyRunRow)
             if run_id is not None:
                 statement = statement.where(StrategyRunRow.run_id == run_id)

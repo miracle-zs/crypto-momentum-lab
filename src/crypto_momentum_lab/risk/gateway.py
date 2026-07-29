@@ -90,6 +90,13 @@ class RiskGateway:
                 RiskDecision.REJECTED,
                 "missing_desired_notional",
             )
+        if desired_notional <= 0:
+            return _evaluation(
+                intent,
+                context,
+                RiskDecision.REJECTED,
+                "invalid_desired_notional",
+            )
         if desired_notional > context.risk_config.max_order_notional:
             return _evaluation(
                 intent,

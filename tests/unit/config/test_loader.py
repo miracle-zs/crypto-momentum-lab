@@ -19,6 +19,7 @@ def test_load_runtime_config_is_frozen_and_hash_is_stable(
                 "retention_rank: 30",
                 "retention_hours: 2",
                 "activation_minute: 1",
+                "refresh_interval_minutes: 15",
             ]
         ),
         encoding="utf-8",
@@ -78,6 +79,7 @@ def test_load_runtime_config_is_frozen_and_hash_is_stable(
     second = load_runtime_config(environment_path)
 
     assert first.universe.top_count == 20
+    assert first.universe.refresh_interval_minutes == 15
     assert behavior_hash(first) == behavior_hash(second)
     assert "secret" not in behavior_hash(first)
     with pytest.raises(ValidationError):
