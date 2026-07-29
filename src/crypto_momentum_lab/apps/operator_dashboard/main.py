@@ -22,11 +22,6 @@ def main() -> None:
     args = parser.parse_args()
     if not args.database_url:
         parser.error("--database-url or CML_DATABASE_URL is required")
-    if not args.username or not args.password:
-        parser.error(
-            "--username/--password or CML_DASHBOARD_USERNAME/"
-            "CML_DASHBOARD_PASSWORD are required"
-        )
     uvicorn.run(
         create_dashboard_app(
             database_url=args.database_url,

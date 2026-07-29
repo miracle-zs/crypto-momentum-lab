@@ -60,11 +60,14 @@ def create_dashboard_app(
     resolved_auth_password = auth_password or os.environ.get(
         "CML_DASHBOARD_PASSWORD"
     )
-    if not resolved_auth_username or not resolved_auth_password:
+    if (resolved_auth_username is None) != (resolved_auth_password is None):
         raise ValueError(
-            "dashboard authentication requires CML_DASHBOARD_USERNAME and "
-            "CML_DASHBOARD_PASSWORD"
+            "dashboard authentication requires both CML_DASHBOARD_USERNAME "
+            "and CML_DASHBOARD_PASSWORD"
         )
+    auth_enabled = (
+        resolved_auth_username is not None and resolved_auth_password is not None
+    )
 
     engine: AsyncEngine | None = None
     resolved_queries = queries
@@ -95,6 +98,10 @@ def create_dashboard_app(
             Depends(_BASIC_AUTH),
         ],
     ) -> None:
+        if not auth_enabled:
+            return
+        assert resolved_auth_username is not None
+        assert resolved_auth_password is not None
         if credentials is None or not (
             secrets.compare_digest(
                 credentials.username,

@@ -34,8 +34,6 @@ USDT:
 
    ```text
    CML_POSTGRES_PASSWORD=<random-alphanumeric-password>
-   CML_DASHBOARD_USERNAME=operator
-   CML_DASHBOARD_PASSWORD=<random-dashboard-password>
    ```
 
 4. Build and start the stack:
@@ -45,9 +43,8 @@ USDT:
    ```
 
 5. Add `deploy/nginx/crypto-momentum-lab.conf` inside the existing HTTPS
-   server block, validate with `nginx -t`, and reload Nginx. Do not expose
-   the dashboard's Basic Auth endpoint over plain HTTP; use TLS or a private
-   tunnel/VPN.
+   server block, validate with `nginx -t`, and reload Nginx. The dashboard is
+   anonymous by default, so expose it only over TLS or a private tunnel/VPN.
 
 ## Verify
 
@@ -55,10 +52,8 @@ USDT:
 docker compose --env-file .env.server -f compose.server.yaml ps
 docker compose --env-file .env.server -f compose.server.yaml logs --tail=200 \
   market-data paper-compression paper-orderflow paper-liquidation
-curl -fsS -u "$CML_DASHBOARD_USERNAME:$CML_DASHBOARD_PASSWORD" \
-  http://127.0.0.1:8765/api/health
-curl -fsS -u "$CML_DASHBOARD_USERNAME:$CML_DASHBOARD_PASSWORD" \
-  http://127.0.0.1/momentum/api/health
+curl -fsS http://127.0.0.1:8765/api/health
+curl -fsS http://127.0.0.1/momentum/api/health
 ```
 
 The `market-data` healthcheck requires a recent 15-second market-state row.

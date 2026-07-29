@@ -344,8 +344,6 @@ services:
     <<: *app
     environment:
       <<: *app-environment
-      CML_DASHBOARD_USERNAME: ${CML_DASHBOARD_USERNAME:?set CML_DASHBOARD_USERNAME}
-      CML_DASHBOARD_PASSWORD: ${CML_DASHBOARD_PASSWORD:?set CML_DASHBOARD_PASSWORD}
     entrypoint: ["cml-operator-dashboard"]
     command: ["--host", "0.0.0.0", "--port", "8765"]
     depends_on:
@@ -359,7 +357,7 @@ services:
         - python
         - -c
         - >-
-          import base64, os, urllib.request; request = urllib.request.Request('http://127.0.0.1:8765/api/health'); request.add_header('Authorization', 'Basic ' + base64.b64encode(f"{os.environ['CML_DASHBOARD_USERNAME']}:{os.environ['CML_DASHBOARD_PASSWORD']}".encode()).decode()); urllib.request.urlopen(request, timeout=3)
+          import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=3)
       interval: 10s
       timeout: 5s
       retries: 12

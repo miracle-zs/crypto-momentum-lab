@@ -33,6 +33,14 @@ def test_dashboard_app_serves_health_endpoint() -> None:
     assert response.json() == {"app_status": "UP", "database_status": "UP"}
 
 
+def test_dashboard_app_allows_anonymous_api_access_without_credentials() -> None:
+    with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
+        response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"app_status": "UP", "database_status": "UP"}
+
+
 def test_dashboard_app_mounts_static_index() -> None:
     with TestClient(
         create_dashboard_app(queries=FakeQueries(), **DASHBOARD_AUTH_KWARGS)
