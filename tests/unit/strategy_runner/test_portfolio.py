@@ -120,6 +120,35 @@ def test_15m_aggregator_emits_only_after_the_candle_closes() -> None:
     )
 
 
+def test_15m_aggregator_uses_first_available_state_when_boundary_is_missing() -> None:
+    aggregator = Candle15mAggregator()
+    candle_start = datetime(2026, 7, 26, 0, 0, tzinfo=UTC)
+
+    assert aggregator.observe(
+        _state(
+            open_price=Decimal("100"),
+            close=Decimal("100.5"),
+            bucket_start=candle_start + timedelta(minutes=2),
+        )
+    ) is None
+
+    closed = aggregator.observe(
+        _state(
+            open_price=Decimal("101"),
+            close=Decimal("99"),
+            bucket_start=candle_start + timedelta(minutes=14, seconds=45),
+        )
+    )
+
+    assert closed == ClosedCandle15m(
+        symbol="BTCUSDT",
+        candle_start=candle_start,
+        candle_end=candle_start + timedelta(minutes=15),
+        open_price=Decimal("100"),
+        close_price=Decimal("99"),
+    )
+
+
 def test_15m_aggregator_ignores_late_state_from_a_closed_candle() -> None:
     aggregator = Candle15mAggregator()
     candle_start = datetime(2026, 7, 26, 0, 0, tzinfo=UTC)

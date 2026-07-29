@@ -301,12 +301,15 @@ def _new_candle_accumulator(
     candle_start: datetime,
     close_price: Decimal,
 ) -> _CandleAccumulator:
-    starts_at_boundary = state.bucket_start == candle_start
+    # Market-state rows are event-driven, so a symbol may have no row exactly
+    # at the 15-minute boundary. The first available state is the best
+    # observable open for that candle.
+    open_price = state.open_price if state.open_price is not None else close_price
     return _CandleAccumulator(
         candle_start=candle_start,
-        open_price=state.open_price if starts_at_boundary else None,
+        open_price=open_price,
         close_price=close_price,
-        complete=starts_at_boundary and state.open_price is not None,
+        complete=True,
     )
 
 
