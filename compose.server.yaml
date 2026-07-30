@@ -147,7 +147,7 @@ services:
       - --idle-timeout-seconds
       - "86400"
       - --poll-interval-seconds
-      - "0.25"
+      - "1"
       - --checkpoint-every-states
       - "100"
       - --checkpoint-every-seconds
@@ -183,7 +183,7 @@ services:
       - --idle-timeout-seconds
       - "86400"
       - --poll-interval-seconds
-      - "0.25"
+      - "1"
       - --checkpoint-every-states
       - "100"
       - --checkpoint-every-seconds
@@ -220,7 +220,7 @@ services:
       - --idle-timeout-seconds
       - "86400"
       - --poll-interval-seconds
-      - "0.25"
+      - "1"
       - --checkpoint-every-states
       - "100"
       - --checkpoint-every-seconds
@@ -267,7 +267,7 @@ services:
       - --idle-timeout-seconds
       - "86400"
       - --poll-interval-seconds
-      - "0.25"
+      - "1"
       - --checkpoint-every-states
       - "100"
       - --checkpoint-every-seconds
@@ -302,7 +302,7 @@ services:
       - --idle-timeout-seconds
       - "86400"
       - --poll-interval-seconds
-      - "0.25"
+      - "1"
       - --checkpoint-every-states
       - "100"
       - --checkpoint-every-seconds
@@ -337,7 +337,7 @@ services:
       - --idle-timeout-seconds
       - "86400"
       - --poll-interval-seconds
-      - "0.25"
+      - "1"
       - --checkpoint-every-states
       - "100"
       - --checkpoint-every-seconds
