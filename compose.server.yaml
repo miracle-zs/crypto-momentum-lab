@@ -22,7 +22,7 @@ x-paper: &paper
       - --service
       - paper
     interval: 30s
-    timeout: 5s
+    timeout: 15s
     retries: 3
     start_period: 90s
 
@@ -102,7 +102,7 @@ services:
         - --service
         - market-data
       interval: 30s
-      timeout: 5s
+      timeout: 15s
       retries: 3
       start_period: 90s
     mem_limit: 640m
