@@ -549,6 +549,73 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
     assert "Paper live daemon completed: states=3 halt=none" in result.stdout
 
 
+def test_paper_live_pair_builds_two_exit_accounts(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+    repository = object()
+
+    def fake_run_pair(**kwargs) -> object:
+        calls.append(kwargs)
+        return SimpleNamespace(
+            account_results=(
+                SimpleNamespace(processed_state_count=3, halt_reason=None),
+                SimpleNamespace(processed_state_count=3, halt_reason=None),
+            )
+        )
+
+    monkeypatch.setattr(
+        main,
+        "build_postgres_paper_source",
+        lambda **kwargs: SimpleNamespace(
+            description="fake-source",
+            load_active_symbols=lambda: frozenset({"BTCUSDT"}),
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "build_runtime_strategy_for_cli",
+        lambda **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        main,
+        "build_paper_daemon_repository",
+        lambda database_url: repository,
+    )
+    monkeypatch.setattr(main, "run_paired_paper_live_daemon", fake_run_pair)
+
+    result = runner.invoke(
+        main.app,
+        [
+            "paper-live-pair",
+            "--strategy",
+            "orderflow_impulse",
+            "--database-url",
+            "postgresql+asyncpg://cml:cml@localhost:54329/cml",
+            "--fixed-run-id",
+            "fixed-run",
+            "--candle-run-id",
+            "candle-run",
+            "--generated-at",
+            "2026-07-04T00:05:00+00:00",
+            "--max-states",
+            "3",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert len(calls) == 1
+    assert calls[0]["strategy"] is not None
+    accounts = calls[0]["accounts"]
+    assert isinstance(accounts, tuple)
+    assert len(accounts) == 2
+    assert accounts[0].repository is repository
+    assert accounts[1].repository is repository
+    assert accounts[0].config.run_id == "fixed-run"
+    assert accounts[1].config.run_id == "candle-run"
+    assert accounts[0].config.portfolio.exit_mode.value == "fixed"
+    assert accounts[1].config.portfolio.exit_mode.value == "candle_15m"
+    assert "Paper live pair completed: strategy=orderflow_impulse" in result.stdout
+
+
 def test_paper_daemon_repository_disables_async_connection_pool(monkeypatch) -> None:
     calls: list[tuple[str, bool]] = []
     engine = object()

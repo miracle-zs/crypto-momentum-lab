@@ -1,9 +1,12 @@
 from crypto_momentum_lab.strategy_runner.daemon import (
+    PairedPaperLiveAccount,
+    PairedPaperLiveDaemonResult,
     PaperLiveDaemonConfig,
     PaperLiveDaemonRepository,
     PaperLiveDaemonResult,
     RuntimeStrategy,
     StrategyRuntimeEvent,
+    run_paired_paper_live_daemon,
     run_paper_live_daemon,
 )
 from crypto_momentum_lab.strategy_runner.fills import (
@@ -61,6 +64,8 @@ __all__ = [
     "PaperLiveDaemonConfig",
     "PaperLiveDaemonRepository",
     "PaperLiveDaemonResult",
+    "PairedPaperLiveAccount",
+    "PairedPaperLiveDaemonResult",
     "PaperExitConfig",
     "PaperExitMode",
     "Candle15mAggregator",
@@ -82,6 +87,7 @@ __all__ = [
     "PostgresPaperMarketStateSource",
     "run_paper_trading",
     "run_paper_live_daemon",
+    "run_paired_paper_live_daemon",
     "run_strategy_replay",
     "mark_positions",
     "simulate_candidate_fill",

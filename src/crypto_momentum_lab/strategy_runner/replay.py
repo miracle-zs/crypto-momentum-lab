@@ -140,15 +140,12 @@ def run_strategy_replay(
     signals: list[StrategySignal] = []
     candidates: list[OrderIntentCandidate] = []
     rejections: list[StrategyRejection] = []
-    checkpoint: StrategyCheckpoint | None = None
     for state in ordered_states:
         decision = strategy.on_market_state(state)
         signals.extend(decision.signals)
         candidates.extend(decision.candidates)
         rejections.extend(decision.rejections)
-        checkpoint = decision.checkpoint
-    if checkpoint is None:
-        raise ReplayError("strategy produced no checkpoint")
+    checkpoint = strategy.checkpoint()
     signal_tuple = tuple(signals)
     candidate_tuple = tuple(candidates)
     _validate_unique_ids(signal_tuple, candidate_tuple)

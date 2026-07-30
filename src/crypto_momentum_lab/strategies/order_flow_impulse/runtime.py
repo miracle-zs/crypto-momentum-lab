@@ -202,7 +202,6 @@ class OrderFlowImpulseRuntimeStrategy:
             signals=signals,
             candidates=candidates,
             rejections=rejections,
-            checkpoint=self.checkpoint(),
         )
 
     def _build_signal_and_candidate(

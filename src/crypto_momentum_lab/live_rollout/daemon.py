@@ -40,6 +40,8 @@ from crypto_momentum_lab.risk.gateway import RiskContext, RiskGateway
 class LiveRuntimeStrategy(Protocol):
     def on_market_state(self, state: MarketState15s) -> StrategyDecision: ...
 
+    def checkpoint(self) -> StrategyCheckpoint: ...
+
 
 class LiveDaemonRepository(Protocol):
     async def save_approved_intent(
@@ -131,8 +133,8 @@ class LiveStrategyDaemon:
     ) -> LiveDaemonResult:
         processed = approved = submitted = 0
         final_state_at: datetime | None = None
-        latest_checkpoint: StrategyCheckpoint | None = None
-        latest_saved_at: datetime | None = None
+        checkpoint_dirty = False
+        last_checkpoint_saved_at: datetime | None = None
         async for state in states:
             context = await self._context_provider(state)
             gate = evaluate_live_gate(
@@ -146,7 +148,10 @@ class LiveStrategyDaemon:
                 )
             )
             if not gate.approved:
-                await self._save_final_checkpoint(latest_checkpoint, latest_saved_at)
+                await self._save_final_checkpoint(
+                    dirty=checkpoint_dirty,
+                    saved_at=last_checkpoint_saved_at,
+                )
                 return LiveDaemonResult(
                     processed,
                     approved,
@@ -157,7 +162,10 @@ class LiveStrategyDaemon:
             if _market_age_seconds(context.now, state) > (
                 self._config.max_market_state_age_seconds
             ):
-                await self._save_final_checkpoint(latest_checkpoint, latest_saved_at)
+                await self._save_final_checkpoint(
+                    dirty=checkpoint_dirty,
+                    saved_at=last_checkpoint_saved_at,
+                )
                 return LiveDaemonResult(
                     processed,
                     approved,
@@ -168,8 +176,8 @@ class LiveStrategyDaemon:
             decision = self._strategy.on_market_state(state)
             processed += 1
             final_state_at = state.bucket_start
-            latest_checkpoint = decision.checkpoint
-            latest_saved_at = context.now
+            checkpoint_dirty = True
+            last_checkpoint_saved_at = context.now
             for candidate in decision.candidates:
                 executable_candidate = candidate
                 if not candidate.reduce_only:
@@ -241,8 +249,8 @@ class LiveStrategyDaemon:
                 submitted += int(not result.suppressed)
                 if result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
                     await self._save_final_checkpoint(
-                        latest_checkpoint,
-                        latest_saved_at,
+                        dirty=checkpoint_dirty,
+                        saved_at=last_checkpoint_saved_at,
                     )
                     return LiveDaemonResult(
                         processed,
@@ -254,12 +262,15 @@ class LiveStrategyDaemon:
             if processed % self._config.checkpoint_every_states == 0:
                 await self._repository.save_checkpoint(
                     self._config.run_id,
-                    decision.checkpoint,
+                    self._strategy.checkpoint(),
                     context.now,
                 )
-                latest_checkpoint = None
-                latest_saved_at = None
-        await self._save_final_checkpoint(latest_checkpoint, latest_saved_at)
+                checkpoint_dirty = False
+                last_checkpoint_saved_at = None
+        await self._save_final_checkpoint(
+            dirty=checkpoint_dirty,
+            saved_at=last_checkpoint_saved_at,
+        )
         return LiveDaemonResult(
             processed,
             approved,
@@ -270,14 +281,15 @@ class LiveStrategyDaemon:
 
     async def _save_final_checkpoint(
         self,
-        checkpoint: StrategyCheckpoint | None,
+        *,
+        dirty: bool,
         saved_at: datetime | None,
     ) -> None:
-        if checkpoint is None or saved_at is None:
+        if not dirty or saved_at is None:
             return
         await self._repository.save_checkpoint(
             self._config.run_id,
-            checkpoint,
+            self._strategy.checkpoint(),
             saved_at,
         )
 

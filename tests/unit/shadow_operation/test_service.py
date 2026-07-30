@@ -137,6 +137,9 @@ class FakeStrategy:
             checkpoint=StrategyCheckpoint({}, {}, {}, {}),
         )
 
+    def checkpoint(self) -> StrategyCheckpoint:
+        return StrategyCheckpoint({}, {}, {}, {})
+
 
 class FakeApprovedIntentRepository:
     async def save_approved_intent(

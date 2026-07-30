@@ -58,7 +58,8 @@ def test_orderflow_impulse_restores_checkpoint() -> None:
 
 def test_orderflow_impulse_restores_market_buffer_from_checkpoint() -> None:
     original = _strategy()
-    checkpoint = _last_decision(original, _impulse_states()).checkpoint
+    _last_decision(original, _impulse_states())
+    checkpoint = original.checkpoint()
 
     restored = _strategy()
     restored.restore_checkpoint(checkpoint)

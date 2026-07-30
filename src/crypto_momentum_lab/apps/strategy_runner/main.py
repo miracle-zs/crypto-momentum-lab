@@ -28,6 +28,7 @@ from crypto_momentum_lab.strategies.compression_breakout import (
 from crypto_momentum_lab.strategy_runner import (
     AsyncPostgresRuntimeStateLoader,
     InMemoryPaperMarketStateSource,
+    PairedPaperLiveAccount,
     PaperExitConfig,
     PaperExitMode,
     PaperLiveDaemonConfig,
@@ -39,6 +40,7 @@ from crypto_momentum_lab.strategy_runner import (
     ReplayExecutionConfig,
     SimulatedFillStatus,
     build_strategy_replay_report,
+    run_paired_paper_live_daemon,
     run_paper_live_daemon,
     run_paper_trading,
     write_paper_trading_report,
@@ -712,6 +714,236 @@ def paper_live_daemon_command(
         "Paper live daemon completed: "
         f"states={result.processed_state_count} "
         f"halt={result.halt_reason or 'none'}"
+    )
+
+
+@app.command("paper-live-pair")
+def paper_live_pair_command(
+    strategy_name: Annotated[
+        str,
+        typer.Option("--strategy", help="Strategy name."),
+    ],
+    fixed_run_id: Annotated[
+        str,
+        typer.Option("--fixed-run-id", help="Run ID for the fixed-exit account."),
+    ],
+    candle_run_id: Annotated[
+        str,
+        typer.Option(
+            "--candle-run-id",
+            help="Run ID for the 15-minute candle-exit account.",
+        ),
+    ],
+    database_url: Annotated[
+        str | None,
+        typer.Option("--database-url", help="Async PostgreSQL URL."),
+    ] = None,
+    environment: Annotated[
+        str,
+        typer.Option("--environment", help="Runtime state environment."),
+    ] = "research",
+    start_at: Annotated[
+        str | None,
+        typer.Option("--start-at", help="Optional inclusive ISO timestamp."),
+    ] = None,
+    generated_at: Annotated[
+        str | None,
+        typer.Option("--generated-at", help="Optional ISO timestamp for tests."),
+    ] = None,
+    compression_window_buckets: Annotated[
+        int,
+        typer.Option("--compression-window-buckets", min=1),
+    ] = 20,
+    max_range_width_pct: Annotated[
+        str,
+        typer.Option("--max-range-width-pct"),
+    ] = "0.025",
+    min_breakout_pct: Annotated[
+        str,
+        typer.Option("--min-breakout-pct"),
+    ] = "0.003",
+    acceptance_buckets: Annotated[
+        int,
+        typer.Option("--acceptance-buckets", min=1),
+    ] = 1,
+    cooldown_buckets: Annotated[
+        int,
+        typer.Option("--cooldown-buckets", min=0),
+    ] = 12,
+    signal_interval_seconds: Annotated[
+        int,
+        typer.Option("--signal-interval-seconds", min=15),
+    ] = 300,
+    candidate_notional: Annotated[
+        str,
+        typer.Option("--candidate-notional"),
+    ] = "25",
+    candidate_ttl_buckets: Annotated[
+        int,
+        typer.Option("--candidate-ttl-buckets", min=1),
+    ] = 4,
+    paper_initial_balance: Annotated[
+        str,
+        typer.Option("--paper-initial-balance"),
+    ] = "1000",
+    fixed_take_profit_pct: Annotated[
+        str,
+        typer.Option("--fixed-take-profit-pct"),
+    ] = "0.02",
+    fixed_stop_loss_pct: Annotated[
+        str,
+        typer.Option("--fixed-stop-loss-pct"),
+    ] = "0.01",
+    fixed_max_holding_buckets: Annotated[
+        int,
+        typer.Option("--fixed-max-holding-buckets", min=1),
+    ] = 80,
+    candle_max_holding_buckets: Annotated[
+        int,
+        typer.Option("--candle-max-holding-buckets", min=1),
+    ] = 5760,
+    max_states: Annotated[
+        int,
+        typer.Option("--max-states", min=1),
+    ] = 1000,
+    poll_interval_seconds: Annotated[
+        float,
+        typer.Option("--poll-interval-seconds", min=0),
+    ] = 1.0,
+    idle_timeout_seconds: Annotated[
+        float,
+        typer.Option("--idle-timeout-seconds", min=0),
+    ] = 60.0,
+    batch_size: Annotated[
+        int,
+        typer.Option("--batch-size", min=1),
+    ] = 500,
+    checkpoint_every_states: Annotated[
+        int,
+        typer.Option("--checkpoint-every-states", min=1),
+    ] = 100,
+    checkpoint_every_seconds: Annotated[
+        float,
+        typer.Option("--checkpoint-every-seconds", min=1),
+    ] = 60.0,
+    max_market_state_age_seconds: Annotated[
+        float,
+        typer.Option("--max-market-state-age-seconds", min=1),
+    ] = 120.0,
+    continue_while_halted: Annotated[
+        bool,
+        typer.Option("--continue-while-halted"),
+    ] = False,
+) -> None:
+    resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
+    if not resolved_database_url:
+        raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
+    created_at = _parse_generated_at(generated_at)
+    resolved_start_at = _parse_optional_start_at(start_at)
+    if resolved_start_at is None:
+        resolved_start_at = created_at - timedelta(seconds=max_market_state_age_seconds)
+    source = build_postgres_paper_source(
+        database_url=resolved_database_url,
+        environment=environment,
+        start_at=resolved_start_at,
+        poll_interval_seconds=poll_interval_seconds,
+        idle_timeout_seconds=idle_timeout_seconds,
+        max_states=max_states,
+        batch_size=batch_size,
+    )
+    compression_breakout = CompressionBreakoutConfig(
+        compression_window_buckets=compression_window_buckets,
+        max_range_width_pct=Decimal(max_range_width_pct),
+        min_breakout_pct=Decimal(min_breakout_pct),
+        acceptance_buckets=acceptance_buckets,
+        cooldown_buckets=cooldown_buckets,
+        forward_horizon_buckets=(1,),
+    )
+    candidate_notional_decimal = Decimal(candidate_notional)
+    fixed_identity = build_runtime_identity_for_cli(
+        run_id=fixed_run_id,
+        strategy_name=strategy_name,
+        generated_at=created_at,
+        source_description=source.description,
+        compression_breakout=compression_breakout,
+        candidate_notional=candidate_notional_decimal,
+        candidate_ttl_buckets=candidate_ttl_buckets,
+        signal_interval_seconds=signal_interval_seconds,
+    )
+    candle_identity = build_runtime_identity_for_cli(
+        run_id=candle_run_id,
+        strategy_name=strategy_name,
+        generated_at=created_at,
+        source_description=source.description,
+        compression_breakout=compression_breakout,
+        candidate_notional=candidate_notional_decimal,
+        candidate_ttl_buckets=candidate_ttl_buckets,
+        signal_interval_seconds=signal_interval_seconds,
+    )
+    strategy = build_runtime_strategy_for_cli(
+        strategy_name=strategy_name,
+        run_id=fixed_run_id,
+        generated_at=created_at,
+        source_description=source.description,
+        compression_breakout=compression_breakout,
+        candidate_notional=candidate_notional_decimal,
+        candidate_ttl_buckets=candidate_ttl_buckets,
+        signal_interval_seconds=signal_interval_seconds,
+        identity=fixed_identity,
+    )
+    repository = build_paper_daemon_repository(resolved_database_url)
+    fixed_config = PaperLiveDaemonConfig(
+        run_id=fixed_run_id,
+        strategy_name=strategy_name,
+        environment=environment,
+        checkpoint_every_states=checkpoint_every_states,
+        checkpoint_every_seconds=checkpoint_every_seconds,
+        max_market_state_age_seconds=max_market_state_age_seconds,
+        continue_while_halted=continue_while_halted,
+        run_identity=fixed_identity,
+        source_description=source.description,
+        execution=ReplayExecutionConfig(),
+        portfolio=PaperExitConfig(
+            exit_mode=PaperExitMode.FIXED,
+            initial_balance=Decimal(paper_initial_balance),
+            take_profit_pct=Decimal(fixed_take_profit_pct),
+            stop_loss_pct=Decimal(fixed_stop_loss_pct),
+            max_holding_buckets=fixed_max_holding_buckets,
+        ),
+    )
+    candle_config = PaperLiveDaemonConfig(
+        run_id=candle_run_id,
+        strategy_name=strategy_name,
+        environment=environment,
+        checkpoint_every_states=checkpoint_every_states,
+        checkpoint_every_seconds=checkpoint_every_seconds,
+        max_market_state_age_seconds=max_market_state_age_seconds,
+        continue_while_halted=continue_while_halted,
+        run_identity=candle_identity,
+        source_description=source.description,
+        execution=ReplayExecutionConfig(),
+        portfolio=PaperExitConfig(
+            exit_mode=PaperExitMode.CANDLE_15M,
+            initial_balance=Decimal(paper_initial_balance),
+            max_holding_buckets=candle_max_holding_buckets,
+        ),
+    )
+    result = run_paired_paper_live_daemon(
+        source=source,
+        strategy=strategy,
+        accounts=(
+            PairedPaperLiveAccount(repository, repository, fixed_config),
+            PairedPaperLiveAccount(repository, repository, candle_config),
+        ),
+        clock=_SystemClock(),
+        entry_symbol_loader=source.load_active_symbols,
+    )
+    states_processed = result.account_results[0].processed_state_count
+    halt_reason = result.account_results[0].halt_reason
+    typer.echo(
+        "Paper live pair completed: "
+        f"strategy={strategy_name} states={states_processed} "
+        f"halt={halt_reason or 'none'}"
     )
 
 

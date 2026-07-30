@@ -1,7 +1,7 @@
 import asyncio
 import json
 from collections.abc import Callable, Coroutine, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
@@ -13,6 +13,7 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyCheckpoint,
     StrategyDecision,
     StrategyRunIdentity,
+    StrategySignal,
 )
 from crypto_momentum_lab.strategy_runner.fills import (
     ReplayExecutionConfig,
@@ -40,6 +41,9 @@ class RuntimeStrategy(Protocol):
         pass
 
     def on_market_state(self, state: MarketState15s) -> StrategyDecision:
+        pass
+
+    def checkpoint(self) -> StrategyCheckpoint:
         pass
 
 
@@ -169,6 +173,390 @@ class PaperLiveDaemonResult:
     final_checkpoint_saved_at: datetime | None
 
 
+@dataclass(frozen=True, slots=True)
+class PairedPaperLiveAccount:
+    """One account adapter in a shared-entry paper strategy run."""
+
+    repository: PaperLiveDaemonRepository
+    artifact_repository: PaperLiveArtifactRepository
+    config: PaperLiveDaemonConfig
+
+    def __post_init__(self) -> None:
+        if self.config.run_identity is None:
+            raise ValueError("paired paper account requires run_identity")
+
+
+@dataclass(frozen=True, slots=True)
+class PairedPaperLiveDaemonResult:
+    account_results: tuple[PaperLiveDaemonResult, ...]
+
+
+def run_paired_paper_live_daemon(
+    *,
+    source: Iterable[MarketState15s],
+    strategy: RuntimeStrategy,
+    accounts: tuple[PairedPaperLiveAccount, ...],
+    clock: Clock,
+    entry_symbol_loader: Callable[[], frozenset[str]] | None = None,
+) -> PairedPaperLiveDaemonResult:
+    """Run two exit-only variants from one shared strategy calculation."""
+    if len(accounts) != 2:
+        raise ValueError("exactly two paired paper accounts are required")
+    first_config = accounts[0].config
+    first_identity = first_config.run_identity
+    if first_identity is None:
+        raise ValueError("paired paper account requires run_identity")
+    for account in accounts[1:]:
+        identity = account.config.run_identity
+        if identity is None:
+            raise ValueError("paired paper account requires run_identity")
+        if account.config.environment != first_config.environment:
+            raise ValueError("paired accounts must use one environment")
+        if account.config.strategy_name != first_config.strategy_name:
+            raise ValueError("paired accounts must use one strategy")
+        if (
+            identity.strategy_name != first_identity.strategy_name
+            or identity.strategy_version != first_identity.strategy_version
+            or identity.config_hash != first_identity.config_hash
+        ):
+            raise ValueError("paired accounts must share strategy identity")
+
+    checkpoints = tuple(
+        _run_async(
+            account.repository.load_checkpoint(account.config.run_id)
+        )
+        for account in accounts
+    )
+    available_checkpoints = tuple(
+        checkpoint for checkpoint in checkpoints if checkpoint is not None
+    )
+    # The two old daemons may have durable checkpoints from different polling
+    # turns. Resume from the older one so the shared strategy can replay the
+    # gap; idempotent artifact writes make that replay safe for the newer run.
+    restored_checkpoint = min(
+        available_checkpoints,
+        key=_checkpoint_progress,
+        default=None,
+    )
+    if restored_checkpoint is not None:
+        strategy.restore_checkpoint(restored_checkpoint)
+
+    pending_by_account: list[list[OrderIntentCandidate]] = []
+    open_positions_by_account: list[dict[str, PaperPosition]] = []
+    candle_aggregators: list[Candle15mAggregator | None] = []
+    for account in accounts:
+        config = account.config
+        identity = config.run_identity
+        if identity is None:
+            raise ValueError("paired paper account requires run_identity")
+        _run_async(
+            account.artifact_repository.initialize_run(
+                identity,
+                config.source_description,
+                config.execution,
+                config.portfolio,
+            )
+        )
+        pending_by_account.append(
+            list(
+                _run_async(
+                    account.artifact_repository.load_pending_candidates(
+                        config.run_id
+                    )
+                )
+            )
+        )
+        open_positions_by_account.append(
+            {
+                position.position_id: position
+                for position in _run_async(
+                    account.artifact_repository.load_open_positions(config.run_id)
+                )
+            }
+        )
+        candle_aggregators.append(
+            Candle15mAggregator()
+            if config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
+            else None
+        )
+
+    processed = 0
+    processed_since_checkpoint = 0
+    final_cursor: datetime | None = None
+    checkpoint_dirty = False
+    last_checkpoint_saved_at: datetime | None = None
+    last_checkpoint_elapsed_anchor = clock.now()
+    last_equity_snapshot_at: list[datetime | None] = [None, None]
+    entry_symbols: frozenset[str] | None = None
+    entry_symbols_loaded_at: datetime | None = None
+    halted = False
+    gapped_symbols: set[str] = set()
+
+    for state in source:
+        if state.environment != first_config.environment:
+            raise ValueError("runtime state environment mismatch")
+        if _already_processed(state, restored_checkpoint):
+            continue
+
+        now = clock.now()
+        if _state_age_seconds(now, state) > first_config.max_market_state_age_seconds:
+            if state.symbol not in gapped_symbols:
+                _reset_strategy_symbol(strategy, state.symbol)
+                gapped_symbols.add(state.symbol)
+            if not halted:
+                for account in accounts:
+                    _run_async(
+                        account.repository.save_runtime_event(
+                            _event(
+                                run_id=account.config.run_id,
+                                event_type="halted",
+                                occurred_at=now,
+                                symbol=state.symbol,
+                                bucket_start=state.bucket_start,
+                                details={
+                                    "reason": "stale_market_state",
+                                    "bucket_end": state.bucket_end.isoformat(),
+                                    "continue_while_halted": (
+                                        account.config.continue_while_halted
+                                    ),
+                                },
+                            )
+                        )
+                    )
+                halted = True
+            if all(account.config.continue_while_halted for account in accounts):
+                continue
+            return _paired_result(
+                accounts=accounts,
+                processed=processed,
+                halt_reason="stale_market_state",
+                final_cursor=final_cursor,
+                saved_at=last_checkpoint_saved_at,
+            )
+
+        if halted:
+            for account in accounts:
+                _run_async(
+                    account.repository.save_runtime_event(
+                        _event(
+                            run_id=account.config.run_id,
+                            event_type="recovered",
+                            occurred_at=now,
+                            symbol=state.symbol,
+                            bucket_start=state.bucket_start,
+                            details={
+                                "reason": "fresh_market_state",
+                                "bucket_end": state.bucket_end.isoformat(),
+                            },
+                        )
+                    )
+                )
+            halted = False
+        gapped_symbols.discard(state.symbol)
+
+        if entry_symbol_loader is not None and (
+            entry_symbols_loaded_at is None
+            or (now - entry_symbols_loaded_at).total_seconds()
+            >= first_config.entry_symbol_refresh_seconds
+        ):
+            entry_symbols = entry_symbol_loader()
+            entry_symbols_loaded_at = now
+        entry_allowed = entry_symbols is None or state.symbol in entry_symbols
+
+        for index, account in enumerate(accounts):
+            config = account.config
+            aggregator = candle_aggregators[index]
+            closed_candle = (
+                None if aggregator is None else aggregator.observe(state)
+            )
+            position_updates = mark_positions(
+                positions=tuple(open_positions_by_account[index].values()),
+                state=state,
+                config=config.portfolio,
+                taker_fee_rate=config.execution.taker_fee_rate,
+                closed_candle=closed_candle,
+            )
+            for position in position_updates:
+                if position.status is PaperPositionStatus.CLOSED:
+                    open_positions_by_account[index].pop(position.position_id, None)
+                else:
+                    open_positions_by_account[index][position.position_id] = position
+            pending_by_account[index], fills = _resolve_pending_candidates(
+                pending_candidates=tuple(pending_by_account[index]),
+                state=state,
+                execution=config.execution,
+            )
+            if fills:
+                opened_positions = _run_async(
+                    account.artifact_repository.save_fills(
+                        config.run_id,
+                        tuple(fills),
+                    )
+                )
+                open_positions_by_account[index].update(
+                    {
+                        position.position_id: position
+                        for position in opened_positions
+                        if position.status is PaperPositionStatus.OPEN
+                    }
+                )
+            last_snapshot_at = last_equity_snapshot_at[index]
+            should_snapshot = (
+                last_snapshot_at is None
+                or state.bucket_start - last_snapshot_at >= timedelta(minutes=1)
+            )
+            if position_updates or fills or should_snapshot:
+                _run_async(
+                    account.artifact_repository.save_portfolio(
+                        config.run_id,
+                        position_updates,
+                        state.bucket_start,
+                        config.portfolio,
+                    )
+                )
+                if should_snapshot:
+                    last_equity_snapshot_at[index] = state.bucket_start
+
+        decision = strategy.on_market_state(state)
+        for index, account in enumerate(accounts):
+            account_decision = _decision_for_account(
+                decision,
+                account.config.run_identity,
+            )
+            if entry_allowed and (
+                account_decision.signals or account_decision.candidates
+            ):
+                _run_async(
+                    account.artifact_repository.save_decision(account_decision)
+                )
+                pending_by_account[index].extend(account_decision.candidates)
+
+        checkpoint_dirty = True
+        processed += 1
+        processed_since_checkpoint += 1
+        final_cursor = state.bucket_start
+        checkpoint_due = (
+            processed_since_checkpoint
+            >= first_config.checkpoint_every_states
+            or (now - last_checkpoint_elapsed_anchor).total_seconds()
+            >= first_config.checkpoint_every_seconds
+        )
+        if checkpoint_due:
+            checkpoint_to_save = strategy.checkpoint()
+            for account in accounts:
+                _save_checkpoint_and_event(
+                    repository=account.repository,
+                    run_id=account.config.run_id,
+                    checkpoint=checkpoint_to_save,
+                    saved_at=now,
+                    symbol=state.symbol,
+                    bucket_start=state.bucket_start,
+                    processed_state_count=processed,
+                )
+            checkpoint_dirty = False
+            processed_since_checkpoint = 0
+            last_checkpoint_saved_at = now
+            last_checkpoint_elapsed_anchor = now
+
+    if checkpoint_dirty:
+        saved_at = clock.now()
+        checkpoint_to_save = strategy.checkpoint()
+        for account in accounts:
+            _save_checkpoint_and_event(
+                repository=account.repository,
+                run_id=account.config.run_id,
+                checkpoint=checkpoint_to_save,
+                saved_at=saved_at,
+                symbol=None,
+                bucket_start=final_cursor,
+                processed_state_count=processed,
+            )
+        last_checkpoint_saved_at = saved_at
+
+    return _paired_result(
+        accounts=accounts,
+        processed=processed,
+        halt_reason=None,
+        final_cursor=final_cursor,
+        saved_at=last_checkpoint_saved_at,
+    )
+
+
+def _paired_result(
+    *,
+    accounts: tuple[PairedPaperLiveAccount, ...],
+    processed: int,
+    halt_reason: str | None,
+    final_cursor: datetime | None,
+    saved_at: datetime | None,
+) -> PairedPaperLiveDaemonResult:
+    return PairedPaperLiveDaemonResult(
+        account_results=tuple(
+            PaperLiveDaemonResult(
+                processed_state_count=processed,
+                halt_reason=halt_reason,
+                final_cursor=final_cursor,
+                final_checkpoint_saved_at=saved_at,
+            )
+            for _ in accounts
+        )
+    )
+
+
+def _decision_for_account(
+    decision: StrategyDecision,
+    identity: StrategyRunIdentity | None,
+) -> StrategyDecision:
+    if identity is None:
+        raise ValueError("paired paper account requires run_identity")
+    signal_ids: dict[str, str] = {}
+    signals: list[StrategySignal] = []
+    for signal in decision.signals:
+        signal_id = _paired_record_id(
+            prefix="sig",
+            run_id=identity.run_id,
+            source_id=signal.signal_id,
+        )
+        signal_ids[signal.signal_id] = signal_id
+        signals.append(replace(signal, signal_id=signal_id, run_id=identity.run_id))
+    candidates: list[OrderIntentCandidate] = []
+    for candidate in decision.candidates:
+        mapped_signal_id = signal_ids.get(candidate.signal_id)
+        if mapped_signal_id is None:
+            raise ValueError("paired candidate references unknown signal")
+        candidates.append(
+            replace(
+                candidate,
+                candidate_id=_paired_record_id(
+                    prefix="cand",
+                    run_id=identity.run_id,
+                    source_id=candidate.candidate_id,
+                ),
+                signal_id=mapped_signal_id,
+                run_id=identity.run_id,
+            )
+        )
+    return StrategyDecision(
+        signals=tuple(signals),
+        candidates=tuple(candidates),
+        rejections=decision.rejections,
+    )
+
+
+def _paired_record_id(*, prefix: str, run_id: str, source_id: str) -> str:
+    return f"{prefix}_{uuid5(NAMESPACE_URL, f'paper-pair:{run_id}:{source_id}')}"
+
+
+def _checkpoint_progress(checkpoint: StrategyCheckpoint) -> float:
+    return max(
+        (
+            processed_at.timestamp()
+            for processed_at in checkpoint.last_processed_at_by_symbol.values()
+        ),
+        default=float("-inf"),
+    )
+
+
 def run_paper_live_daemon(
     *,
     source: Iterable[MarketState15s],
@@ -212,8 +600,7 @@ def run_paper_live_daemon(
     processed = 0
     processed_since_checkpoint = 0
     final_cursor: datetime | None = None
-    latest_checkpoint: StrategyCheckpoint | None = None
-    latest_checkpoint_dirty = False
+    checkpoint_dirty = False
     last_checkpoint_saved_at: datetime | None = None
     last_checkpoint_elapsed_anchor = clock.now()
     last_equity_snapshot_at: datetime | None = None
@@ -357,8 +744,7 @@ def run_paper_live_daemon(
         ):
             _run_async(artifact_repository.save_decision(decision))
             pending_candidates.extend(decision.candidates)
-        latest_checkpoint = decision.checkpoint
-        latest_checkpoint_dirty = True
+        checkpoint_dirty = True
         processed += 1
         processed_since_checkpoint += 1
         final_cursor = state.bucket_start
@@ -370,26 +756,28 @@ def run_paper_live_daemon(
             now - last_checkpoint_elapsed_anchor
         ).total_seconds() >= config.checkpoint_every_seconds
         if should_checkpoint_by_count or should_checkpoint_by_time:
+            checkpoint_to_save = strategy.checkpoint()
             _save_checkpoint_and_event(
                 repository=repository,
                 run_id=config.run_id,
-                checkpoint=decision.checkpoint,
+                checkpoint=checkpoint_to_save,
                 saved_at=now,
                 symbol=state.symbol,
                 bucket_start=state.bucket_start,
                 processed_state_count=processed,
             )
             last_checkpoint_saved_at = now
-            latest_checkpoint_dirty = False
+            checkpoint_dirty = False
             processed_since_checkpoint = 0
             last_checkpoint_elapsed_anchor = now
 
-    if latest_checkpoint is not None and latest_checkpoint_dirty:
+    if checkpoint_dirty:
         saved_at = clock.now()
+        checkpoint_to_save = strategy.checkpoint()
         _save_checkpoint_and_event(
             repository=repository,
             run_id=config.run_id,
-            checkpoint=latest_checkpoint,
+            checkpoint=checkpoint_to_save,
             saved_at=saved_at,
             symbol=None,
             bucket_start=final_cursor,

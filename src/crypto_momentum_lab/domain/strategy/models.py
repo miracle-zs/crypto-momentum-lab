@@ -231,7 +231,7 @@ class StrategyDecision:
     signals: tuple[StrategySignal, ...]
     candidates: tuple[OrderIntentCandidate, ...]
     rejections: tuple[StrategyRejection, ...]
-    checkpoint: StrategyCheckpoint
+    checkpoint: StrategyCheckpoint | None = None
 
     def __post_init__(self) -> None:
         signals_by_id = {signal.signal_id: signal for signal in self.signals}

@@ -129,8 +129,10 @@ APIs, read account state, submit real orders, or enforce a live risk engine.
 
 The production-style paper stack includes PostgreSQL, migrations, an initial
 universe refresh, public Binance market-data capture, three independent paper
-strategy daemons, and the read-only operator dashboard. It never receives
-Binance private API credentials and cannot place orders.
+strategy daemons, and the read-only operator dashboard. Each strategy daemon
+reads market states once and fans the same entry decision into its fixed-exit
+and 15-minute-candle-exit accounts; positions and exits remain independent. It
+never receives Binance private API credentials and cannot place orders.
 
 The server compression profile evaluates 20 closed 5-minute bars, representing
 a 100-minute compression window. The order-flow and liquidation profiles use

@@ -1,11 +1,11 @@
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid5
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -216,6 +216,7 @@ class PostgresPaperDaemonRepository:
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         self._session_factory = session_factory
+        self._portfolio_stats: dict[str, _PortfolioStats] = {}
 
     async def initialize_run(
         self,
@@ -257,6 +258,7 @@ class PostgresPaperDaemonRepository:
                     actual
                 ) != _normalize_paper_run_for_compare(expected):
                     raise ValueError("paper live run conflict")
+        self._portfolio_stats.pop(identity.run_id, None)
 
     async def load_pending_candidates(
         self,
@@ -298,21 +300,32 @@ class PostgresPaperDaemonRepository:
         async with self._session_factory() as session:
             async with session.begin():
                 run = await _load_run(session, run_id)
+                inserted_signal_count = 0
                 for signal in decision.signals:
-                    await _insert_idempotent(
-                        session,
-                        StrategySignalRow,
-                        strategy_signal_row(signal),
-                        "strategy signal conflict",
+                    inserted_signal_count += int(
+                        await _insert_idempotent(
+                            session,
+                            StrategySignalRow,
+                            strategy_signal_row(signal),
+                            "strategy signal conflict",
+                        )
                     )
+                inserted_candidate_count = 0
                 for candidate in decision.candidates:
-                    await _insert_idempotent(
-                        session,
-                        OrderIntentCandidateRow,
-                        order_intent_candidate_row(candidate),
-                        "order intent candidate conflict",
+                    inserted_candidate_count += int(
+                        await _insert_idempotent(
+                            session,
+                            OrderIntentCandidateRow,
+                            order_intent_candidate_row(candidate),
+                            "order intent candidate conflict",
+                        )
                     )
-                await _refresh_run_counts(session, run)
+                run.signal_count += inserted_signal_count
+                run.candidate_count += inserted_candidate_count
+                run.pending_candidate_count = max(
+                    run.candidate_count - run.fill_count,
+                    0,
+                )
 
     async def save_fills(
         self,
@@ -329,12 +342,15 @@ class PostgresPaperDaemonRepository:
         async with self._session_factory() as session:
             async with session.begin():
                 run = await _load_run(session, run_id)
+                inserted_fill_count = 0
                 for fill in fills:
-                    await _insert_idempotent(
-                        session,
-                        PaperFillRow,
-                        paper_fill_row(fill, run_id=run_id),
-                        "paper fill conflict",
+                    inserted_fill_count += int(
+                        await _insert_idempotent(
+                            session,
+                            PaperFillRow,
+                            paper_fill_row(fill, run_id=run_id),
+                            "paper fill conflict",
+                        )
                     )
                 for position in positions:
                     await _insert_idempotent(
@@ -343,7 +359,15 @@ class PostgresPaperDaemonRepository:
                         paper_position_row(position),
                         "paper position conflict",
                     )
-                await _refresh_run_counts(session, run)
+                run.fill_count += inserted_fill_count
+                run.pending_candidate_count = max(
+                    run.candidate_count - run.fill_count,
+                    0,
+                )
+        if positions:
+            # A newly filled candidate creates an open position before the next
+            # mark update. Reconcile the cached aggregate on the next snapshot.
+            self._portfolio_stats.pop(run_id, None)
         return positions
 
     async def load_open_positions(
@@ -402,6 +426,11 @@ class PostgresPaperDaemonRepository:
                 for position in positions:
                     if position.run_id != run_id:
                         raise ValueError("paper position run_id mismatch")
+                stats = self._portfolio_stats.get(run_id)
+                if stats is None:
+                    stats = await _load_portfolio_stats(session, run_id)
+                next_stats = replace(stats)
+                for position in positions:
                     row = await session.scalar(
                         select(PaperPositionRow).where(
                             PaperPositionRow.position_id
@@ -410,14 +439,16 @@ class PostgresPaperDaemonRepository:
                     )
                     if row is None:
                         raise ValueError("paper position is not initialized")
+                    next_stats.apply(row, -1)
                     for key, value in paper_position_row(position).items():
                         setattr(row, key, value)
+                    next_stats.apply(position, 1)
                 await session.flush()
                 snapshot = await _portfolio_snapshot(
-                    session=session,
                     run_id=run_id,
                     observed_at=observed_at,
                     config=config,
+                    stats=next_stats,
                 )
                 statement = insert(PaperEquitySnapshotRow).values(snapshot)
                 await session.execute(
@@ -430,6 +461,7 @@ class PostgresPaperDaemonRepository:
                         },
                     )
                 )
+                self._portfolio_stats[run_id] = next_stats
 
     async def save_runtime_event(self, event: StrategyRuntimeEvent) -> None:
         async with self._session_factory() as session:
@@ -493,7 +525,7 @@ async def _insert_idempotent(
     model: type[Any],
     values: dict[str, object],
     conflict_message: str,
-) -> None:
+) -> bool:
     model_any = cast(Any, model)
     primary_key = tuple(
         column.name for column in model_any.__table__.primary_key.columns
@@ -509,7 +541,7 @@ async def _insert_idempotent(
         )
     ).first()
     if inserted is not None:
-        return
+        return True
 
     existing = await session.scalar(
         select(model).where(
@@ -520,7 +552,7 @@ async def _insert_idempotent(
         existing_values = {key: getattr(existing, key) for key in values}
         if _normalize_for_compare(existing_values) != _normalize_for_compare(values):
             raise ValueError(conflict_message)
-        return
+        return False
     raise RuntimeError(
         f"{conflict_message}: conflicting row disappeared before comparison"
     )
@@ -535,64 +567,97 @@ async def _load_run(session: AsyncSession, run_id: str) -> StrategyRunRow:
     return run
 
 
-async def _refresh_run_counts(
+@dataclass(slots=True)
+class _PortfolioStats:
+    realized_pnl: Decimal = Decimal("0")
+    unrealized_pnl: Decimal = Decimal("0")
+    entry_fees: Decimal = Decimal("0")
+    exit_fees: Decimal = Decimal("0")
+    open_position_count: int = 0
+
+    def apply(
+        self,
+        position: PaperPosition | PaperPositionRow,
+        multiplier: int,
+    ) -> None:
+        status = position.status
+        status_value = getattr(status, "value", status)
+        if status_value == PaperPositionStatus.CLOSED.value:
+            self.realized_pnl += (position.realized_pnl or Decimal("0")) * multiplier
+        elif status_value == PaperPositionStatus.OPEN.value:
+            self.unrealized_pnl += position.unrealized_pnl * multiplier
+            self.open_position_count += multiplier
+        else:
+            raise ValueError(f"unknown paper position status: {status_value}")
+        self.entry_fees += position.entry_fee * multiplier
+        self.exit_fees += position.exit_fee * multiplier
+
+
+async def _load_portfolio_stats(
     session: AsyncSession,
-    run: StrategyRunRow,
-) -> None:
-    run.signal_count = await _row_count(
-        session,
-        StrategySignalRow,
-        StrategySignalRow.run_id == run.run_id,
+    run_id: str,
+) -> _PortfolioStats:
+    statement = select(
+        func.coalesce(
+            func.sum(
+                case(
+                    (
+                        PaperPositionRow.status
+                        == PaperPositionStatus.CLOSED.value,
+                        PaperPositionRow.realized_pnl,
+                    ),
+                    else_=Decimal("0"),
+                )
+            ),
+            Decimal("0"),
+        ),
+        func.coalesce(
+            func.sum(
+                case(
+                    (
+                        PaperPositionRow.status
+                        == PaperPositionStatus.OPEN.value,
+                        PaperPositionRow.unrealized_pnl,
+                    ),
+                    else_=Decimal("0"),
+                )
+            ),
+            Decimal("0"),
+        ),
+        func.coalesce(func.sum(PaperPositionRow.entry_fee), Decimal("0")),
+        func.coalesce(func.sum(PaperPositionRow.exit_fee), Decimal("0")),
+        func.coalesce(
+            func.sum(
+                case(
+                    (
+                        PaperPositionRow.status
+                        == PaperPositionStatus.OPEN.value,
+                        1,
+                    ),
+                    else_=0,
+                )
+            ),
+            0,
+        ),
+    ).where(PaperPositionRow.run_id == run_id)
+    values = (await session.execute(statement)).one()
+    return _PortfolioStats(
+        realized_pnl=Decimal(values[0] or 0),
+        unrealized_pnl=Decimal(values[1] or 0),
+        entry_fees=Decimal(values[2] or 0),
+        exit_fees=Decimal(values[3] or 0),
+        open_position_count=int(values[4] or 0),
     )
-    run.candidate_count = await _row_count(
-        session,
-        OrderIntentCandidateRow,
-        OrderIntentCandidateRow.run_id == run.run_id,
-    )
-    run.fill_count = await _row_count(
-        session,
-        PaperFillRow,
-        PaperFillRow.run_id == run.run_id,
-    )
-    run.pending_candidate_count = max(run.candidate_count - run.fill_count, 0)
 
 
 async def _portfolio_snapshot(
     *,
-    session: AsyncSession,
     run_id: str,
     observed_at: datetime,
     config: PaperExitConfig,
+    stats: _PortfolioStats,
 ) -> dict[str, object]:
-    realized_pnl = await _decimal_sum(
-        session,
-        PaperPositionRow.realized_pnl,
-        PaperPositionRow.run_id == run_id,
-        PaperPositionRow.status == PaperPositionStatus.CLOSED.value,
-    )
-    unrealized_pnl = await _decimal_sum(
-        session,
-        PaperPositionRow.unrealized_pnl,
-        PaperPositionRow.run_id == run_id,
-        PaperPositionRow.status == PaperPositionStatus.OPEN.value,
-    )
-    entry_fees = await _decimal_sum(
-        session,
-        PaperPositionRow.entry_fee,
-        PaperPositionRow.run_id == run_id,
-    )
-    exit_fees = await _decimal_sum(
-        session,
-        PaperPositionRow.exit_fee,
-        PaperPositionRow.run_id == run_id,
-    )
-    open_position_count = await _row_count(
-        session,
-        PaperPositionRow,
-        PaperPositionRow.run_id == run_id,
-        PaperPositionRow.status == PaperPositionStatus.OPEN.value,
-    )
-    balance = config.initial_balance + realized_pnl
+    balance = config.initial_balance + stats.realized_pnl
     return {
         "snapshot_id": (
             f"equity_{uuid5(NAMESPACE_URL, f'{run_id}:{observed_at.isoformat()}')}"
@@ -600,34 +665,12 @@ async def _portfolio_snapshot(
         "run_id": run_id,
         "observed_at": observed_at,
         "balance": balance,
-        "equity": balance + unrealized_pnl,
-        "realized_pnl": realized_pnl,
-        "unrealized_pnl": unrealized_pnl,
-        "total_fees": entry_fees + exit_fees,
-        "open_position_count": open_position_count,
+        "equity": balance + stats.unrealized_pnl,
+        "realized_pnl": stats.realized_pnl,
+        "unrealized_pnl": stats.unrealized_pnl,
+        "total_fees": stats.entry_fees + stats.exit_fees,
+        "open_position_count": stats.open_position_count,
     }
-
-
-async def _decimal_sum(
-    session: AsyncSession,
-    column: Any,
-    *conditions: Any,
-) -> Decimal:
-    value = await session.scalar(
-        select(func.coalesce(func.sum(column), Decimal("0"))).where(*conditions)
-    )
-    return Decimal(value or 0)
-
-
-async def _row_count(
-    session: AsyncSession,
-    model: type[Any],
-    *conditions: Any,
-) -> int:
-    value = await session.scalar(
-        select(func.count()).select_from(model).where(*conditions)
-    )
-    return int(value or 0)
 
 
 def _parse_datetime(value: object) -> datetime:

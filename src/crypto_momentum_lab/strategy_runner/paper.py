@@ -151,7 +151,6 @@ def run_paper_trading(
     paper_fills: list[SimulatedFill] = []
     pending_candidates: list[OrderIntentCandidate] = []
     last_processed_at_by_symbol: dict[str, datetime] = {}
-    checkpoint: StrategyCheckpoint | None = None
     input_state_count = 0
 
     for state in source:
@@ -171,13 +170,11 @@ def run_paper_trading(
         candidates.extend(decision.candidates)
         pending_candidates.extend(decision.candidates)
         rejections.extend(decision.rejections)
-        checkpoint = decision.checkpoint
         last_processed_at_by_symbol[state.symbol] = state.bucket_start
 
     if input_state_count == 0:
         raise PaperRunnerError("no market states to paper trade")
-    if checkpoint is None:
-        raise PaperRunnerError("strategy produced no checkpoint")
+    checkpoint = strategy.checkpoint()
 
     shutdown_fills = _finalize_pending_candidates(
         pending_candidates=tuple(pending_candidates),

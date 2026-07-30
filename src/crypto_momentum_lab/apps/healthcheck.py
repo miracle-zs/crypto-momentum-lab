@@ -36,13 +36,25 @@ def main() -> int:
                     connection,
                     max_age_seconds=args.max_age_seconds,
                 ) else 1
-            run_id = os.environ.get("CML_HEALTHCHECK_RUN_ID")
-            if not run_id:
+            configured_run_ids = os.environ.get("CML_HEALTHCHECK_RUN_IDS")
+            if configured_run_ids:
+                run_ids = tuple(
+                    item.strip()
+                    for item in configured_run_ids.split(",")
+                    if item.strip()
+                )
+            else:
+                run_id = os.environ.get("CML_HEALTHCHECK_RUN_ID")
+                run_ids = () if not run_id else (run_id,)
+            if not run_ids:
                 return 1
-            return 0 if _paper_ready(
-                connection,
-                run_id=run_id,
-                max_age_seconds=args.max_age_seconds,
+            return 0 if all(
+                _paper_ready(
+                    connection,
+                    run_id=run_id,
+                    max_age_seconds=args.max_age_seconds,
+                )
+                for run_id in run_ids
             ) else 1
     except SQLAlchemyError:
         return 1

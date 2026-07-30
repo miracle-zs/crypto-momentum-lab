@@ -13,11 +13,13 @@ from crypto_momentum_lab.domain.strategy import (
     StrategySignal,
 )
 from crypto_momentum_lab.strategy_runner.daemon import (
+    PairedPaperLiveAccount,
     PaperLiveArtifactRepository,
     PaperLiveDaemonConfig,
     PaperLiveDaemonRepository,
     PaperLiveDaemonResult,
     RuntimeStrategy,
+    run_paired_paper_live_daemon,
     run_paper_live_daemon,
 )
 from crypto_momentum_lab.strategy_runner.fills import (
@@ -70,6 +72,8 @@ class FakeStrategy(RuntimeStrategy):
         self.restored_checkpoint: StrategyCheckpoint | None = None
         self.processed: list[MarketState15s] = []
         self.reset_symbols: list[str] = []
+        self._checkpoint: StrategyCheckpoint | None = None
+        self.checkpoint_calls = 0
 
     def reset_symbol(self, symbol: str) -> None:
         self.reset_symbols.append(symbol)
@@ -85,12 +89,19 @@ class FakeStrategy(RuntimeStrategy):
             cooldown_buckets_remaining_by_symbol={state.symbol: 0},
             payload={"last_symbol": state.symbol},
         )
+        self._checkpoint = checkpoint
         return StrategyDecision(
             signals=(),
             candidates=(),
             rejections=(),
             checkpoint=checkpoint,
         )
+
+    def checkpoint(self) -> StrategyCheckpoint:
+        self.checkpoint_calls += 1
+        if self._checkpoint is None:
+            raise AssertionError("checkpoint requested before processing a state")
+        return self._checkpoint
 
 
 class SignalStrategy(FakeStrategy):
@@ -225,6 +236,22 @@ def test_daemon_saves_checkpoint_after_state_count_threshold() -> None:
     )
     assert len(repository.saved_checkpoints) == 1
     assert repository.saved_checkpoints[0][0] == "run-1"
+    assert strategy.checkpoint_calls == 1
+
+
+def test_daemon_does_not_build_checkpoint_for_each_state() -> None:
+    states = tuple(fixture_state("BTCUSDT", index) for index in range(3))
+    strategy = FakeStrategy()
+
+    run_paper_live_daemon(
+        source=states,
+        strategy=strategy,
+        repository=FakeRepository(),
+        config=_config(checkpoint_every_states=100),
+        clock=FakeClock(states[-1].bucket_end + timedelta(seconds=1)),
+    )
+
+    assert strategy.checkpoint_calls == 1
 
 
 def test_daemon_resumes_from_checkpoint_cursor() -> None:
@@ -343,6 +370,55 @@ def test_daemon_expires_pending_candidate_after_deadline() -> None:
     ]
 
 
+def test_paired_daemon_calculates_entries_once_and_fans_out_accounts() -> None:
+    states = (fixture_state("BTCUSDT", 0), fixture_state("BTCUSDT", 1))
+    first_identity = _identity()
+    second_identity = _identity("run-2")
+    strategy = SignalStrategy(first_identity)
+    first_artifacts = FakeArtifactRepository()
+    second_artifacts = FakeArtifactRepository()
+    first_config = _config(run_identity=first_identity)
+    second_config = _config(
+        run_id="run-2",
+        run_identity=second_identity,
+    )
+
+    result = run_paired_paper_live_daemon(
+        source=states,
+        strategy=strategy,
+        accounts=(
+            PairedPaperLiveAccount(
+                repository=FakeRepository(),
+                artifact_repository=first_artifacts,
+                config=first_config,
+            ),
+            PairedPaperLiveAccount(
+                repository=FakeRepository(),
+                artifact_repository=second_artifacts,
+                config=second_config,
+            ),
+        ),
+        clock=FakeClock(states[-1].bucket_end + timedelta(seconds=1)),
+    )
+
+    assert [item.processed_state_count for item in result.account_results] == [
+        2,
+        2,
+    ]
+    assert len(strategy.processed) == 2
+    assert strategy.checkpoint_calls == 1
+    assert len(first_artifacts.decisions) == 1
+    assert len(second_artifacts.decisions) == 1
+    first_signal = first_artifacts.decisions[0].signals[0]
+    second_signal = second_artifacts.decisions[0].signals[0]
+    assert first_signal.run_id == first_identity.run_id
+    assert second_signal.run_id == second_identity.run_id
+    assert first_signal.features == second_signal.features
+    assert first_signal.signal_id != second_signal.signal_id
+    assert first_artifacts.fills[0].filled_notional == Decimal("25")
+    assert second_artifacts.fills[0].filled_notional == Decimal("25")
+
+
 def test_daemon_uses_protected_symbol_for_exit_without_opening_new_trade() -> None:
     state = fixture_state("BTCUSDT", 80)
     identity = _identity()
@@ -380,6 +456,7 @@ def test_daemon_uses_protected_symbol_for_exit_without_opening_new_trade() -> No
 
 def _config(
     *,
+    run_id: str = "run-1",
     checkpoint_every_states: int = 10,
     max_market_state_age_seconds: float = 120.0,
     continue_while_halted: bool = False,
@@ -388,7 +465,7 @@ def _config(
     portfolio: PaperExitConfig | None = None,
 ) -> PaperLiveDaemonConfig:
     return PaperLiveDaemonConfig(
-        run_id="run-1",
+        run_id=run_id,
         strategy_name="compression_breakout",
         environment="research",
         checkpoint_every_states=checkpoint_every_states,
@@ -402,9 +479,9 @@ def _config(
     )
 
 
-def _identity() -> StrategyRunIdentity:
+def _identity(run_id: str = "run-1") -> StrategyRunIdentity:
     return StrategyRunIdentity(
-        run_id="run-1",
+        run_id=run_id,
         strategy_name="compression_breakout",
         strategy_version="v0",
         config_hash="config-hash",

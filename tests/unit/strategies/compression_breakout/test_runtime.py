@@ -97,7 +97,7 @@ def test_runtime_applies_cooldown_after_signal() -> None:
 
 def test_runtime_checkpoint_contains_symbol_state() -> None:
     strategy = _strategy()
-    decision = _last_decision(
+    _last_decision(
         strategy,
         (
             _state(0, close=Decimal("100")),
@@ -106,7 +106,7 @@ def test_runtime_checkpoint_contains_symbol_state() -> None:
         ),
     )
 
-    checkpoint = decision.checkpoint
+    checkpoint = strategy.checkpoint()
 
     assert (
         checkpoint.last_processed_at_by_symbol["BTCUSDT"]
@@ -201,7 +201,8 @@ def test_runtime_restores_completed_signal_buckets_from_checkpoint() -> None:
         )
         for index in range(40)
     )
-    checkpoint = _last_decision(original, compression_states).checkpoint
+    _last_decision(original, compression_states)
+    checkpoint = original.checkpoint()
 
     restored = _strategy(
         compression_window_buckets=2,
@@ -223,7 +224,7 @@ def test_runtime_restores_completed_signal_buckets_from_checkpoint() -> None:
 
     assert len(decision.signals) == 1
     assert decision.signals[0].side is StrategySide.LONG
-    assert decision.checkpoint.payload["buffer_sizes"] == {"BTCUSDT": 3}
+    assert restored.checkpoint().payload["buffer_sizes"] == {"BTCUSDT": 3}
 
 
 def _strategy(
