@@ -65,7 +65,11 @@ def _market_data_ready(
     if process is None or process["state"] not in {"ready", "degraded"}:
         return False
     latest_state_at = connection.execute(
-        text("SELECT MAX(bucket_end) FROM runtime_market_states_15s")
+        text(
+            "SELECT bucket_end "
+            "FROM runtime_market_states_15s "
+            "ORDER BY bucket_start DESC LIMIT 1"
+        )
     ).scalar_one_or_none()
     return _fresh(latest_state_at, max_age_seconds=max_age_seconds)
 

@@ -116,6 +116,14 @@ class CompressionBreakoutRuntimeStrategy:
     def restore_checkpoint(self, checkpoint: StrategyCheckpoint) -> None:
         self.restore(checkpoint)
 
+    def reset_symbol(self, symbol: str) -> None:
+        """Drop buffered state after the live source skips a data gap."""
+        self._buffers.pop(symbol, None)
+        self._pending_signal_states.pop(symbol, None)
+        self._warmup.pop(symbol, None)
+        self._cooldown_remaining.pop(symbol, None)
+        self._last_processed.pop(symbol, None)
+
     def on_market_state(self, state: MarketState15s) -> StrategyDecision:
         self._last_processed[state.symbol] = state.bucket_start
         if _state_price(state) is None:

@@ -220,6 +220,7 @@ def run_paper_live_daemon(
     entry_symbols: frozenset[str] | None = None
     entry_symbols_loaded_at: datetime | None = None
     halted = False
+    gapped_symbols: set[str] = set()
     candle_aggregator = (
         Candle15mAggregator()
         if config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
@@ -234,6 +235,9 @@ def run_paper_live_daemon(
 
         now = clock.now()
         if _state_age_seconds(now, state) > config.max_market_state_age_seconds:
+            if state.symbol not in gapped_symbols:
+                _reset_strategy_symbol(strategy, state.symbol)
+                gapped_symbols.add(state.symbol)
             if not halted:
                 _run_async(
                     repository.save_runtime_event(
@@ -283,6 +287,7 @@ def run_paper_live_daemon(
                 )
             )
             halted = False
+        gapped_symbols.discard(state.symbol)
 
         if entry_symbol_loader is not None and (
             entry_symbols_loaded_at is None
@@ -508,6 +513,12 @@ def _state_age_seconds(now: datetime, state: MarketState15s) -> float:
     _require_aware(now, "now")
     _require_aware(state.bucket_end, "bucket_end")
     return (now - state.bucket_end).total_seconds()
+
+
+def _reset_strategy_symbol(strategy: RuntimeStrategy, symbol: str) -> None:
+    reset = getattr(strategy, "reset_symbol", None)
+    if callable(reset):
+        reset(symbol)
 
 
 def _run_async[T](awaitable: Coroutine[object, object, T]) -> T:

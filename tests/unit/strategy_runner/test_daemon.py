@@ -69,6 +69,10 @@ class FakeStrategy(RuntimeStrategy):
     def __init__(self) -> None:
         self.restored_checkpoint: StrategyCheckpoint | None = None
         self.processed: list[MarketState15s] = []
+        self.reset_symbols: list[str] = []
+
+    def reset_symbol(self, symbol: str) -> None:
+        self.reset_symbols.append(symbol)
 
     def restore_checkpoint(self, checkpoint: StrategyCheckpoint) -> None:
         self.restored_checkpoint = checkpoint
@@ -269,10 +273,11 @@ def test_daemon_skips_stale_state_and_recovers_when_enabled() -> None:
     stale_state = fixture_state("BTCUSDT", 0)
     fresh_state = fixture_state("BTCUSDT", 1)
     repository = FakeRepository()
+    strategy = FakeStrategy()
 
     result = run_paper_live_daemon(
         source=(stale_state, fresh_state),
-        strategy=FakeStrategy(),
+        strategy=strategy,
         repository=repository,
         config=_config(
             max_market_state_age_seconds=10,
@@ -287,6 +292,7 @@ def test_daemon_skips_stale_state_and_recovers_when_enabled() -> None:
         "halted",
         "recovered",
     ]
+    assert strategy.reset_symbols == ["BTCUSDT"]
 
 
 def test_daemon_persists_signal_candidate_and_virtual_fill() -> None:

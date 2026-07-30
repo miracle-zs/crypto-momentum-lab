@@ -84,7 +84,9 @@ class DashboardQueries:
         now = self._clock()
         async with self._session_factory() as session:
             market_at = await session.scalar(
-                select(func.max(RuntimeMarketState15sRow.bucket_end))
+                select(RuntimeMarketState15sRow.bucket_end)
+                .order_by(RuntimeMarketState15sRow.bucket_start.desc())
+                .limit(1)
             )
             account = await session.scalar(
                 select(ExecutionAccountProcessStateRow)

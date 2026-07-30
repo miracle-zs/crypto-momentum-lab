@@ -66,6 +66,21 @@ def test_orderflow_impulse_restores_market_buffer_from_checkpoint() -> None:
     assert restored.checkpoint().payload["buffer_sizes"] == {"BTCUSDT": 7}
 
 
+def test_orderflow_impulse_resets_symbol_after_a_market_data_gap() -> None:
+    strategy = _strategy()
+    _last_decision(strategy, _impulse_states())
+
+    strategy.reset_symbol("BTCUSDT")
+
+    decision = strategy.on_market_state(
+        _state(20, Decimal("102.00"), notional=Decimal("100"))
+    )
+
+    assert decision.signals == ()
+    assert decision.rejections[0].reason is RejectionReason.INSUFFICIENT_WARMUP
+    assert strategy.checkpoint().payload["buffer_sizes"] == {"BTCUSDT": 1}
+
+
 def _strategy() -> OrderFlowImpulseRuntimeStrategy:
     config = OrderFlowImpulseRuntimeConfig(
         event_config=OrderFlowImpulseConfig(
