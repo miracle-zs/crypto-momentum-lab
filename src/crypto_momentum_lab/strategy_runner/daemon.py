@@ -219,6 +219,7 @@ def run_paper_live_daemon(
     last_equity_snapshot_at: datetime | None = None
     entry_symbols: frozenset[str] | None = None
     entry_symbols_loaded_at: datetime | None = None
+    halted = False
     candle_aggregator = (
         Candle15mAggregator()
         if config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
@@ -233,27 +234,55 @@ def run_paper_live_daemon(
 
         now = clock.now()
         if _state_age_seconds(now, state) > config.max_market_state_age_seconds:
-            _run_async(
-                repository.save_runtime_event(
-                    _event(
-                        run_id=config.run_id,
-                        event_type="halted",
-                        occurred_at=now,
-                        symbol=state.symbol,
-                        bucket_start=state.bucket_start,
-                        details={
-                            "reason": "stale_market_state",
-                            "bucket_end": state.bucket_end.isoformat(),
-                        },
+            if not halted:
+                _run_async(
+                    repository.save_runtime_event(
+                        _event(
+                            run_id=config.run_id,
+                            event_type="halted",
+                            occurred_at=now,
+                            symbol=state.symbol,
+                            bucket_start=state.bucket_start,
+                            details={
+                                "reason": "stale_market_state",
+                                "bucket_end": state.bucket_end.isoformat(),
+                                "continue_while_halted": (
+                                    config.continue_while_halted
+                                ),
+                            },
+                        )
                     )
                 )
-            )
+                halted = True
+            if config.continue_while_halted:
+                # Never use stale data for exits or new entries. Keep polling
+                # so a temporarily lagging daemon can recover without a loop
+                # of process restarts.
+                continue
             return PaperLiveDaemonResult(
                 processed_state_count=processed,
                 halt_reason="stale_market_state",
                 final_cursor=final_cursor,
                 final_checkpoint_saved_at=last_checkpoint_saved_at,
             )
+
+        if halted:
+            _run_async(
+                repository.save_runtime_event(
+                    _event(
+                        run_id=config.run_id,
+                        event_type="recovered",
+                        occurred_at=now,
+                        symbol=state.symbol,
+                        bucket_start=state.bucket_start,
+                        details={
+                            "reason": "fresh_market_state",
+                            "bucket_end": state.bucket_end.isoformat(),
+                        },
+                    )
+                )
+            )
+            halted = False
 
         if entry_symbol_loader is not None and (
             entry_symbols_loaded_at is None

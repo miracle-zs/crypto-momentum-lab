@@ -265,6 +265,30 @@ def test_daemon_halts_on_stale_market_state() -> None:
     assert repository.saved_checkpoints == []
 
 
+def test_daemon_skips_stale_state_and_recovers_when_enabled() -> None:
+    stale_state = fixture_state("BTCUSDT", 0)
+    fresh_state = fixture_state("BTCUSDT", 1)
+    repository = FakeRepository()
+
+    result = run_paper_live_daemon(
+        source=(stale_state, fresh_state),
+        strategy=FakeStrategy(),
+        repository=repository,
+        config=_config(
+            max_market_state_age_seconds=10,
+            continue_while_halted=True,
+        ),
+        clock=FakeClock(fresh_state.bucket_end + timedelta(seconds=1)),
+    )
+
+    assert result.processed_state_count == 1
+    assert result.halt_reason is None
+    assert [event.event_type for event in repository.events[:2]] == [
+        "halted",
+        "recovered",
+    ]
+
+
 def test_daemon_persists_signal_candidate_and_virtual_fill() -> None:
     states = (fixture_state("BTCUSDT", 0), fixture_state("BTCUSDT", 1))
     identity = _identity()
@@ -352,6 +376,7 @@ def _config(
     *,
     checkpoint_every_states: int = 10,
     max_market_state_age_seconds: float = 120.0,
+    continue_while_halted: bool = False,
     run_identity: StrategyRunIdentity | None = None,
     execution: ReplayExecutionConfig | None = None,
     portfolio: PaperExitConfig | None = None,
@@ -363,6 +388,7 @@ def _config(
         checkpoint_every_states=checkpoint_every_states,
         checkpoint_every_seconds=999,
         max_market_state_age_seconds=max_market_state_age_seconds,
+        continue_while_halted=continue_while_halted,
         run_identity=run_identity,
         source_description="postgres-runtime-states:research",
         execution=execution or ReplayExecutionConfig(),

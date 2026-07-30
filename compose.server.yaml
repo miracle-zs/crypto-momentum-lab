@@ -154,6 +154,7 @@ services:
       - "60"
       - --max-market-state-age-seconds
       - "120"
+      - --continue-while-halted
   paper-orderflow:
     <<: *paper
     environment:
@@ -189,6 +190,7 @@ services:
       - "60"
       - --max-market-state-age-seconds
       - "120"
+      - --continue-while-halted
 
   paper-liquidation:
     <<: *paper
@@ -225,6 +227,7 @@ services:
       - "60"
       - --max-market-state-age-seconds
       - "120"
+      - --continue-while-halted
 
   paper-compression-candle:
     <<: *paper
@@ -271,6 +274,7 @@ services:
       - "60"
       - --max-market-state-age-seconds
       - "120"
+      - --continue-while-halted
 
   paper-orderflow-candle:
     <<: *paper
@@ -305,6 +309,7 @@ services:
       - "60"
       - --max-market-state-age-seconds
       - "120"
+      - --continue-while-halted
 
   paper-liquidation-candle:
     <<: *paper
@@ -339,6 +344,7 @@ services:
       - "60"
       - --max-market-state-age-seconds
       - "120"
+      - --continue-while-halted
 
   dashboard:
     <<: *app
