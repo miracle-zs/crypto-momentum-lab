@@ -29,6 +29,12 @@ def test_orderflow_impulse_emits_long_signal_on_buy_imbalance() -> None:
     assert signal.side is StrategySide.LONG
     assert signal.reason == "orderflow_impulse"
     assert signal.features["direction"] == "up"
+    assert signal.features["impulse_trade_count"] == 30
+    assert signal.features["impulse_trade_notional"] == "900"
+    assert signal.features["aggressive_buy_notional"] == "750"
+    assert signal.features["aggressive_sell_notional"] == "150"
+    assert signal.features["baseline_notional"] == "300"
+    assert signal.features["liquidation_notional"] == "0"
     assert decision.candidates[0].desired_notional == Decimal("100")
 
 

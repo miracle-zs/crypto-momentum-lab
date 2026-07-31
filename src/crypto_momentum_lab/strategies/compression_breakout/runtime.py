@@ -60,6 +60,12 @@ class _CompressionEvaluation:
     breakout_distance_pct: Decimal
     spread: Decimal | None
     midpoint: Decimal | None
+    trade_count: int
+    trade_notional: Decimal
+    aggressive_buy_notional: Decimal
+    aggressive_sell_notional: Decimal
+    liquidation_count: int
+    liquidation_notional: Decimal
 
 
 class CompressionBreakoutRuntimeStrategy:
@@ -420,6 +426,12 @@ def _evaluate_buffer(
         ),
         spread=detection_state.spread,
         midpoint=detection_state.midpoint,
+        trade_count=detection_state.trade_count,
+        trade_notional=detection_state.trade_notional,
+        aggressive_buy_notional=detection_state.aggressive_buy_notional,
+        aggressive_sell_notional=detection_state.aggressive_sell_notional,
+        liquidation_count=detection_state.liquidation_count,
+        liquidation_notional=detection_state.liquidation_notional,
     )
 
 
@@ -485,6 +497,12 @@ def _features(evaluation: _CompressionEvaluation) -> dict[str, JsonValue]:
         "breakout_distance_pct": str(evaluation.breakout_distance_pct),
         "spread": _optional_decimal(evaluation.spread),
         "midpoint": _optional_decimal(evaluation.midpoint),
+        "trade_count": evaluation.trade_count,
+        "trade_notional": str(evaluation.trade_notional),
+        "aggressive_buy_notional": str(evaluation.aggressive_buy_notional),
+        "aggressive_sell_notional": str(evaluation.aggressive_sell_notional),
+        "liquidation_count": evaluation.liquidation_count,
+        "liquidation_notional": str(evaluation.liquidation_notional),
     }
 
 

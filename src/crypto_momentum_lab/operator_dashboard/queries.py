@@ -31,6 +31,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ExecutionAccountProcessStateRow,
     LiveSessionTransitionRow,
     MonitoringMembershipRow,
+    OrderIntentCandidateRow,
     PaperEquitySnapshotRow,
     PaperFillRow,
     PaperPositionRow,
@@ -308,6 +309,18 @@ class DashboardQueries:
                     .limit(20)
                 )
             ).all()
+            candidates_by_signal_id = {
+                row.signal_id: row
+                for row in (
+                    await session.scalars(
+                        select(OrderIntentCandidateRow).where(
+                            OrderIntentCandidateRow.signal_id.in_(
+                                [signal.signal_id for signal in signals]
+                            )
+                        )
+                    )
+                ).all()
+            }
             checkpoint_at = await session.scalar(
                 select(func.max(StrategyRuntimeEventRow.occurred_at)).where(
                     StrategyRuntimeEventRow.run_id == run.run_id,
@@ -449,10 +462,25 @@ class DashboardQueries:
             trade_events=trade_events,
             latest_signals=[
                 {
+                    "signal_id": row.signal_id,
+                    "strategy_name": row.strategy_name,
                     "symbol": row.symbol,
                     "side": row.side,
                     "detected_at": row.detected_at.isoformat(),
                     "reason": row.reason,
+                    "candidate_id": (
+                        None
+                        if (candidate := candidates_by_signal_id.get(row.signal_id))
+                        is None
+                        else candidate.candidate_id
+                    ),
+                    "requested_notional": (
+                        None
+                        if candidate is None or candidate.desired_notional is None
+                        else str(candidate.desired_notional)
+                    ),
+                    "features": _json_mapping(row.features),
+                    "reference_prices": _json_mapping(row.reference_prices),
                 }
                 for row in signals
             ],

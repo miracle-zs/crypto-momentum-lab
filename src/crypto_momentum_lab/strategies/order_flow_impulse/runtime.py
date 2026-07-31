@@ -292,11 +292,20 @@ def _features(event: OrderFlowImpulseEvent) -> dict[str, JsonValue]:
         "direction": event.direction.value,
         "impulse_start": event.impulse_start.isoformat(),
         "impulse_end": event.impulse_end.isoformat(),
+        "impulse_start_price": str(event.impulse_start_price),
+        "impulse_end_price": str(event.impulse_end_price),
         "impulse_return_pct": str(event.impulse_return_pct),
         "breakout_level": str(event.breakout_level),
         "breakout_distance_pct": str(event.breakout_distance_pct),
+        "impulse_trade_count": event.impulse_trade_count,
+        "impulse_trade_notional": str(event.impulse_trade_notional),
+        "aggressive_buy_notional": str(event.aggressive_buy_notional),
+        "aggressive_sell_notional": str(event.aggressive_sell_notional),
         "aggressive_imbalance": str(event.aggressive_imbalance),
+        "baseline_notional": str(event.baseline_notional),
         "notional_intensity": str(event.notional_intensity),
+        "liquidation_count": event.liquidation_count,
+        "liquidation_notional": str(event.liquidation_notional),
     }
 
 

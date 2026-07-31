@@ -114,6 +114,49 @@ const sideTag = (side) => side === "long"
   ? '<span class="side-tag long">多</span>'
   : '<span class="side-tag short">空</span>';
 
+const signalEvidence = (row) => {
+  const features = row.features || {};
+  const referencePrices = row.reference_prices || {};
+  const parts = [];
+  const add = (label, value) => {
+    if (value == null || value === "") return;
+    parts.push(`<span class="signal-evidence-item"><b>${esc(label)}</b>${esc(value)}</span>`);
+  };
+  const moneyValue = (value) => money(value);
+  const percentValue = (value, digits = 2) => percent(value, digits);
+
+  if (features.liquidation_notional != null) {
+    add("清算", `${moneyValue(features.liquidation_notional)} / ${num(features.liquidation_count, 0)} 笔`);
+  }
+  if (features.range_width_pct != null) {
+    add("压缩区间", percentValue(features.range_width_pct, 2));
+  }
+  if (features.impulse_return_pct != null) {
+    add("冲击收益", percentValue(features.impulse_return_pct, 2));
+  }
+  if (features.notional_intensity != null) {
+    add("成交强度", `${num(features.notional_intensity, 2)}x`);
+  }
+  if (features.breakout_distance_pct != null) {
+    add("突破距离", percentValue(features.breakout_distance_pct, 2));
+  }
+  if (features.aggressive_imbalance != null) {
+    add("主动不平衡", percentValue(features.aggressive_imbalance, 1));
+  }
+  const tradeNotional = features.trade_notional ?? features.impulse_trade_notional ?? features.cluster_trade_notional;
+  if (tradeNotional != null) add("成交额", moneyValue(tradeNotional));
+  if (features.aggressive_buy_notional != null) {
+    add("主动买", moneyValue(features.aggressive_buy_notional));
+  }
+  if (features.aggressive_sell_notional != null) {
+    add("主动卖", moneyValue(features.aggressive_sell_notional));
+  }
+  if (features.breakout_price != null) add("触发价", price(features.breakout_price));
+  else if (referencePrices.breakout_level != null) add("触发价", price(referencePrices.breakout_level));
+  if (!parts.length) return "—";
+  return `<div class="signal-evidence">${parts.join("")}</div>`;
+};
+
 const tile = (label, value, sub = "", cls = "") =>
   `<div class="tile"><label>${esc(label)}</label><strong class="${cls}">${esc(value)}</strong><small>${esc(sub)}</small></div>`;
 
@@ -490,6 +533,8 @@ function accountDetail(account, index) {
     { label: "币种", key: "symbol", cls: "sym" },
     { label: "方向", value: (row) => sideTag(row.side), html: true },
     { label: "原因", key: "reason", cls: "muted" },
+    { label: "买入名义", value: (row) => money(row.requested_notional), align: "right" },
+    { label: "触发依据", value: signalEvidence, html: true, cls: "signal-evidence-cell" },
   ], account.latest_signals, { emptyText: "尚无策略信号" });
   return `<div class="paper-account-detail" role="tabpanel">
     ${detailMeta}

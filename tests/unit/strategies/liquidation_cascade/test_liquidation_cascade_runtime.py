@@ -28,6 +28,12 @@ def test_liquidation_cascade_emits_signal_after_liquidation_and_break() -> None:
     assert signal.side is StrategySide.LONG
     assert signal.reason == "liquidation_cascade"
     assert signal.features["direction"] == "up"
+    assert signal.features["liquidation_count"] == 2
+    assert signal.features["liquidation_notional"] == "600"
+    assert signal.features["cluster_trade_count"] == 20
+    assert signal.features["cluster_trade_notional"] == "600"
+    assert signal.features["aggressive_buy_notional"] == "500"
+    assert signal.features["aggressive_sell_notional"] == "100"
 
 
 def test_liquidation_cascade_ignores_states_without_liquidation() -> None:

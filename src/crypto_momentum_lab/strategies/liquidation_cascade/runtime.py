@@ -295,12 +295,19 @@ def _features(event: LiquidationCascadeEvent) -> dict[str, JsonValue]:
         "direction": event.direction.value,
         "cluster_start": event.cluster_start.isoformat(),
         "cluster_end": event.cluster_end.isoformat(),
+        "cluster_start_price": str(event.cluster_start_price),
+        "cluster_end_price": str(event.cluster_end_price),
         "cluster_move_pct": str(event.cluster_move_pct),
         "breakout_level": str(event.breakout_level),
         "breakout_distance_pct": str(event.breakout_distance_pct),
         "liquidation_count": event.liquidation_count,
         "liquidation_notional": str(event.liquidation_notional),
+        "cluster_trade_count": event.cluster_trade_count,
+        "cluster_trade_notional": str(event.cluster_trade_notional),
+        "aggressive_buy_notional": str(event.aggressive_buy_notional),
+        "aggressive_sell_notional": str(event.aggressive_sell_notional),
         "aggressive_imbalance": str(event.aggressive_imbalance),
+        "mark_price": _optional_decimal(event.mark_price),
     }
 
 

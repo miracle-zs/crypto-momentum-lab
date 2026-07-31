@@ -42,6 +42,12 @@ def test_runtime_emits_upward_signal_after_acceptance_window() -> None:
     assert signal.features["range_high"] == "100.1"
     assert signal.features["range_low"] == "99.9"
     assert signal.features["breakout_price"] == "101.2"
+    assert signal.features["trade_count"] == 10
+    assert signal.features["trade_notional"] == "1000"
+    assert signal.features["aggressive_buy_notional"] == "600"
+    assert signal.features["aggressive_sell_notional"] == "400"
+    assert signal.features["liquidation_count"] == 0
+    assert signal.features["liquidation_notional"] == "0"
     assert candidate.signal_id == signal.signal_id
     assert candidate.side is StrategySide.LONG
     assert candidate.desired_notional == Decimal("100")

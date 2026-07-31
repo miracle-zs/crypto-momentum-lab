@@ -528,6 +528,11 @@ details.secondary[open] summary { margin-bottom: 10px; }
 .sym { font-weight: 600; letter-spacing: .02em; }
 .cut { max-width: 150px; font-size: 11px; color: var(--muted); }
 
+.signal-evidence-cell { min-width: 360px; white-space: normal !important; overflow: visible !important; }
+.signal-evidence { display: flex; flex-wrap: wrap; gap: 3px 12px; line-height: 1.45; }
+.signal-evidence-item { color: var(--muted); white-space: nowrap; }
+.signal-evidence-item b { margin-right: 3px; color: var(--text); font-weight: 600; }
+
 .side-tag {
   display: inline-grid;
   place-items: center;
