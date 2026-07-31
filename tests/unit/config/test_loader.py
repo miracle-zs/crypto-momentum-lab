@@ -177,6 +177,8 @@ def test_loads_websocket_capture_configuration(
     assert config.capture.archive.max_open_writers == 512
     assert config.capture.archive.group_commit_max_events == 250
     assert config.capture.archive.group_commit_max_milliseconds == 250
+    assert config.capture.archive.retention_days == 7
+    assert config.capture.archive.retention_check_interval_seconds == 3600
 
 
 def test_capture_config_rejects_invalid_disk_hysteresis() -> None:

@@ -16,6 +16,11 @@ from crypto_momentum_lab.persistence.raw_files.recovery import (
     recover_archive_root,
     recover_temporary_archive,
 )
+from crypto_momentum_lab.persistence.raw_files.retention import (
+    ArchiveFileDeletionResult,
+    delete_archive_files,
+    retention_cutoff_date,
+)
 
 __all__ = [
     "ArchiveManifestSink",
@@ -29,5 +34,8 @@ __all__ = [
     "partition_key",
     "recover_archive_root",
     "recover_temporary_archive",
+    "ArchiveFileDeletionResult",
+    "delete_archive_files",
+    "retention_cutoff_date",
     "serialize_envelope",
 ]

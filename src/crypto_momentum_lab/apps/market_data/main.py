@@ -63,6 +63,10 @@ from crypto_momentum_lab.persistence.postgres.session import (
 from crypto_momentum_lab.persistence.raw_files.archive import ZstdJsonlArchive
 from crypto_momentum_lab.persistence.raw_files.journal import PendingManifestJournal
 from crypto_momentum_lab.persistence.raw_files.recovery import recover_archive_root
+from crypto_momentum_lab.persistence.raw_files.retention import (
+    delete_archive_files,
+    retention_cutoff_date,
+)
 from crypto_momentum_lab.universe.refresh import UniverseRefreshService
 from crypto_momentum_lab.universe.scheduler import run_scheduler_loop
 
@@ -329,9 +333,75 @@ async def reconcile_paper_exit_subscriptions(
                 await sleeper(retry_delay_seconds)
 
 
+async def prune_expired_raw_archives(
+    repository: PostgresCaptureRepository,
+    root: Path,
+    *,
+    retention_days: int,
+    now: datetime | None = None,
+) -> None:
+    observed_at = datetime.now(UTC) if now is None else now
+    cutoff_date = retention_cutoff_date(
+        now=observed_at,
+        retention_days=retention_days,
+    )
+    manifest_paths = await repository.load_manifest_paths_before(cutoff_date)
+    if not manifest_paths:
+        return
+    result = await asyncio.to_thread(
+        delete_archive_files,
+        root,
+        manifest_paths,
+        cutoff_date=cutoff_date,
+    )
+    deleted_manifests = await repository.delete_manifests(
+        result.removable_paths
+    )
+    log.info(
+        "raw_archive_retention_pruned",
+        cutoff_date=cutoff_date.isoformat(),
+        candidate_manifests=len(manifest_paths),
+        deleted_files=len(result.removable_paths),
+        deleted_manifests=deleted_manifests,
+        deleted_bytes=result.deleted_bytes,
+        failed_files=len(result.failed_paths),
+    )
+
+
+async def run_raw_archive_retention_loop(
+    repository: PostgresCaptureRepository,
+    root: Path,
+    *,
+    retention_days: int,
+    interval_seconds: float,
+    sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    while True:
+        await sleeper(interval_seconds)
+        try:
+            await prune_expired_raw_archives(
+                repository,
+                root,
+                retention_days=retention_days,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            log.exception(
+                "raw_archive_retention_failed",
+                error=str(error),
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class MarketDataRuntime:
     capture: MarketDataCaptureService
+    capture_repository: PostgresCaptureRepository
+    archive_root: Path
+    archive_retention_days: int
+    archive_retention_interval_seconds: float
     universe: UniverseRefreshService
     subscription_observer: CaptureUniverseObserver
     runtime_state_publisher: ClosedMarketStatePublisher
@@ -397,6 +467,12 @@ async def build_market_data_runtime(
         capture_version=capture_version,
     ):
         await save_manifest(recovery_result.manifest)
+
+    await prune_expired_raw_archives(
+        capture_repository,
+        archive_config.root,
+        retention_days=archive_config.retention_days,
+    )
 
     archive = ZstdJsonlArchive(
         root=archive_config.root,
@@ -491,6 +567,12 @@ async def build_market_data_runtime(
     try:
         yield MarketDataRuntime(
             capture=capture,
+            capture_repository=capture_repository,
+            archive_root=archive_config.root,
+            archive_retention_days=archive_config.retention_days,
+            archive_retention_interval_seconds=(
+                archive_config.retention_check_interval_seconds
+            ),
             universe=universe,
             subscription_observer=observer,
             runtime_state_publisher=runtime_state_publisher,
@@ -584,6 +666,14 @@ async def run_market_data(config_path: Path) -> None:
                         runtime.subscription_observer
                     )
                 )
+                tasks.create_task(
+                    run_raw_archive_retention_loop(
+                        runtime.capture_repository,
+                        runtime.archive_root,
+                        retention_days=runtime.archive_retention_days,
+                        interval_seconds=runtime.archive_retention_interval_seconds,
+                    )
+                )
         finally:
             try:
                 async with asyncio.timeout(_CAPTURE_STOP_TIMEOUT_SECONDS):
@@ -622,6 +712,14 @@ async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
                 runtime.subscription_observer
             )
         )
+        retention_task = asyncio.create_task(
+            run_raw_archive_retention_loop(
+                runtime.capture_repository,
+                runtime.archive_root,
+                retention_days=runtime.archive_retention_days,
+                interval_seconds=runtime.archive_retention_interval_seconds,
+            )
+        )
         try:
             await asyncio.sleep(seconds)
         finally:
@@ -630,12 +728,14 @@ async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
                 capture_task,
                 scheduler_task,
                 subscription_task,
+                retention_task,
             ):
                 task.cancel()
             await asyncio.gather(
                 capture_task,
                 scheduler_task,
                 subscription_task,
+                retention_task,
                 return_exceptions=True,
             )
 

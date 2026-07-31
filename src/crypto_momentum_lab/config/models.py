@@ -41,6 +41,8 @@ class ArchiveConfig(BaseModel):
     recovery_free_bytes: int = Field(gt=0)
     disk_check_interval_seconds: float = Field(gt=0)
     pending_manifest_max_age_seconds: float = Field(gt=0)
+    retention_days: int = Field(default=7, gt=0)
+    retention_check_interval_seconds: float = Field(default=3600, gt=0)
 
     @model_validator(mode="after")
     def validate_disk_thresholds(self) -> "ArchiveConfig":

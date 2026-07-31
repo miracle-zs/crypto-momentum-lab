@@ -1,6 +1,7 @@
-from datetime import datetime
+from collections.abc import Iterable
+from datetime import date, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -39,6 +40,39 @@ class PostgresCaptureRepository:
                         )
                     return
                 session.add(_manifest_row(manifest))
+
+    async def load_manifest_paths_before(
+        self,
+        utc_date: date,
+    ) -> tuple[str, ...]:
+        async with self._session_factory() as session:
+            paths = await session.scalars(
+                select(RawArchiveManifestRow.relative_path).where(
+                    RawArchiveManifestRow.utc_date < utc_date
+                )
+            )
+            return tuple(paths)
+
+    async def delete_manifests(
+        self,
+        relative_paths: Iterable[str],
+    ) -> int:
+        paths = tuple(dict.fromkeys(relative_paths))
+        if not paths:
+            return 0
+        deleted_count = 0
+        async with self._session_factory() as session:
+            async with session.begin():
+                for start in range(0, len(paths), 1000):
+                    result = await session.execute(
+                        delete(RawArchiveManifestRow).where(
+                            RawArchiveManifestRow.relative_path.in_(
+                                paths[start : start + 1000]
+                            )
+                        )
+                    )
+                    deleted_count += int(getattr(result, "rowcount", 0) or 0)
+        return deleted_count
 
     async def save_quality_event(self, event: QualityEvent) -> None:
         statement = insert(MarketDataQualityEventRow).values(

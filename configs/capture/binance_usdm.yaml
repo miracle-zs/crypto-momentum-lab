@@ -29,3 +29,5 @@ archive:
   recovery_free_bytes: 80530636800
   disk_check_interval_seconds: 10
   pending_manifest_max_age_seconds: 300
+  retention_days: 7
+  retention_check_interval_seconds: 3600
