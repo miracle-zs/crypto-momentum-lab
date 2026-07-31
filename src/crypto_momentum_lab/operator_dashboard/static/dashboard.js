@@ -106,6 +106,11 @@ const relToNow = (value) => {
   return delta >= 0 ? relAge(delta) : `${Math.round(-delta / 60)} 分后`;
 };
 
+const shortHash = (value) => {
+  const hash = String(value || "").trim();
+  return hash.length > 8 ? `${hash.slice(0, 8)}…` : hash || "—";
+};
+
 /* ---------- building blocks ---------- */
 
 const pill = (status) => `<span class="pill ${statusClass(status)}"><i></i>${esc(status || "UNKNOWN")}</span>`;
@@ -477,9 +482,10 @@ function accountDetail(account, index) {
     (asNumber(account.equity_sample_interval_seconds) || DEFAULT_EQUITY_BUCKET_SECONDS) / 60,
   );
   const chartWindow = `${dayTime(account.equity_window_start)} → ${dayTime(account.equity_window_end)} UTC`;
+  const configHash = account.config_hash || "—";
   const detailMeta = `<div class="detail-meta">
     <span>RUN <b class="num">${esc(account.run_id || "—")}</b></span>
-    <span>CONFIG <b class="num">${esc(account.config_hash || "—")}</b></span>
+    <span>CONFIG <b class="num" title="${esc(configHash)}" aria-label="完整配置哈希 ${esc(configHash)}">${esc(shortHash(configHash))}</b></span>
     <span>检查点 <b class="num">${esc(relToNow(account.checkpoint_at))}</b></span>
   </div>`;
   const kpis = `<div class="tile-grid kpi-grid">

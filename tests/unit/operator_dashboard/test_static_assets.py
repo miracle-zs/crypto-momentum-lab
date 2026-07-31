@@ -22,8 +22,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert 'data-endpoint="api/overview"' in index
-    assert 'href="static/dashboard.css?v=20260731-signal-evidence"' in index
-    assert 'src="static/dashboard.js?v=20260731-signal-evidence"' in index
+    assert 'href="static/dashboard.css?v=20260731-config-short"' in index
+    assert 'src="static/dashboard.js?v=20260731-config-short"' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
@@ -57,6 +57,7 @@ def test_strategy_panel_renders_portfolio_and_position_lifecycle() -> None:
         "signalEvidence",
         "触发依据",
         "liquidation_notional",
+        "shortHash",
     ):
         assert field in text
 
