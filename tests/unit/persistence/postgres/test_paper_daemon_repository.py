@@ -155,7 +155,7 @@ def test_legacy_unknown_commit_run_can_upgrade_new_execution_flags() -> None:
     }
 
 
-def test_legacy_paper_run_upgrade_rejects_known_commit_or_parameter_changes() -> None:
+def test_known_commit_paper_run_can_upgrade_code_commit() -> None:
     actual = {
         "strategy_name": "compression_breakout",
         "strategy_version": "v0",
@@ -166,6 +166,31 @@ def test_legacy_paper_run_upgrade_rejects_known_commit_or_parameter_changes() ->
         "execution_config": {},
     }
     expected = {**actual, "code_commit": "new-commit"}
+
+    assert _legacy_paper_run_upgrade_values(
+        actual=actual,
+        expected=expected,
+    ) == {
+        "code_commit": "new-commit",
+        "execution_config": {},
+    }
+
+
+def test_known_commit_paper_run_rejects_parameter_changes() -> None:
+    actual = {
+        "strategy_name": "compression_breakout",
+        "strategy_version": "v0",
+        "config_hash": "config-hash",
+        "run_mode": "paper",
+        "code_commit": "old-known-commit",
+        "source_description": "postgres-runtime-states:research",
+        "execution_config": {},
+    }
+    expected = {
+        **actual,
+        "code_commit": "new-commit",
+        "execution_config": {"fills": {"latency_buckets": 2}},
+    }
 
     assert _legacy_paper_run_upgrade_values(
         actual=actual,

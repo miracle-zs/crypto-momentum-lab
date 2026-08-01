@@ -763,12 +763,28 @@ def _legacy_paper_run_upgrade_values(
     actual: dict[str, object],
     expected: dict[str, object],
 ) -> dict[str, object] | None:
-    """Return safe in-place upgrades for pre-versioned paper runs."""
+    """Return safe in-place upgrades for compatible paper runs."""
+    normalized_actual = _normalize_paper_run_for_compare(actual)
+    normalized_expected = _normalize_paper_run_for_compare(expected)
+    actual_without_commit = {
+        key: value
+        for key, value in normalized_actual.items()
+        if key != "code_commit"
+    }
+    expected_without_commit = {
+        key: value
+        for key, value in normalized_expected.items()
+        if key != "code_commit"
+    }
+    if actual_without_commit == expected_without_commit:
+        return {
+            "code_commit": expected["code_commit"],
+            "execution_config": expected["execution_config"],
+        }
+
     if actual.get("code_commit") not in _LEGACY_UNKNOWN_CODE_COMMITS:
         return None
 
-    normalized_actual = _normalize_paper_run_for_compare(actual)
-    normalized_expected = _normalize_paper_run_for_compare(expected)
     actual_execution = normalized_actual.get("execution_config")
     expected_execution = normalized_expected.get("execution_config")
     if not isinstance(actual_execution, dict) or not isinstance(
