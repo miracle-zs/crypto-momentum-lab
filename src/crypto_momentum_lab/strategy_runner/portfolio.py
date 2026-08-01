@@ -202,7 +202,11 @@ def mark_positions(
     config: PaperExitConfig,
     taker_fee_rate: Decimal,
     closed_candle: ClosedCandle15m | None = None,
+    closed_candles: tuple[ClosedCandle15m, ...] = (),
 ) -> tuple[PaperPosition, ...]:
+    available_candles = closed_candles
+    if closed_candle is not None:
+        available_candles = (*available_candles, closed_candle)
     updates: list[PaperPosition] = []
     for position in positions:
         if (
@@ -226,7 +230,7 @@ def mark_positions(
             held_until=state.bucket_start,
             position=position,
             config=config,
-            closed_candle=closed_candle,
+            closed_candles=available_candles,
         )
         if close_reason is None:
             updates.append(
@@ -272,14 +276,18 @@ def _close_reason(
     held_until: datetime,
     position: PaperPosition,
     config: PaperExitConfig,
-    closed_candle: ClosedCandle15m | None,
+    closed_candles: tuple[ClosedCandle15m, ...],
 ) -> str | None:
     if config.exit_mode is PaperExitMode.CANDLE_15M:
-        if (
-            closed_candle is not None
-            and closed_candle.symbol == position.symbol
-            and closed_candle.candle_end > position.opened_at
+        for closed_candle in sorted(
+            closed_candles,
+            key=lambda candle: candle.candle_end,
         ):
+            if (
+                closed_candle.symbol != position.symbol
+                or closed_candle.candle_end <= position.opened_at
+            ):
+                continue
             if (
                 position.side is StrategySide.LONG
                 and closed_candle.close_price < closed_candle.open_price

@@ -1,3 +1,8 @@
+from crypto_momentum_lab.strategy_runner.candle_source import (
+    BinanceRestClosedCandle15mSource,
+    ClosedCandle15mSource,
+    ClosedCandleSourceError,
+)
 from crypto_momentum_lab.strategy_runner.daemon import (
     PairedPaperLiveAccount,
     PairedPaperLiveDaemonResult,
@@ -57,6 +62,9 @@ __all__ = [
     "ReplayError",
     "ReplayExecutionConfig",
     "AsyncPostgresRuntimeStateLoader",
+    "BinanceRestClosedCandle15mSource",
+    "ClosedCandleSourceError",
+    "ClosedCandle15mSource",
     "SimulatedFill",
     "SimulatedFillStatus",
     "InMemoryPaperMarketStateSource",

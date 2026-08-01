@@ -2,7 +2,7 @@ import asyncio
 import json
 from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
@@ -15,6 +15,9 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyRunIdentity,
     StrategySignal,
 )
+from crypto_momentum_lab.strategy_runner.candle_source import (
+    ClosedCandle15mSource,
+)
 from crypto_momentum_lab.strategy_runner.fills import (
     ReplayExecutionConfig,
     SimulatedFill,
@@ -23,6 +26,7 @@ from crypto_momentum_lab.strategy_runner.fills import (
 )
 from crypto_momentum_lab.strategy_runner.portfolio import (
     Candle15mAggregator,
+    ClosedCandle15m,
     PaperExitConfig,
     PaperExitMode,
     PaperPosition,
@@ -199,6 +203,7 @@ def run_paired_paper_live_daemon(
     accounts: tuple[PairedPaperLiveAccount, ...],
     clock: Clock,
     entry_symbol_loader: Callable[[datetime], frozenset[str]] | None = None,
+    candle_source: ClosedCandle15mSource | None = None,
 ) -> PairedPaperLiveDaemonResult:
     """Run two exit-only variants from one shared strategy calculation."""
     if len(accounts) != 2:
@@ -279,7 +284,10 @@ def run_paired_paper_live_daemon(
         )
         candle_aggregators.append(
             Candle15mAggregator()
-            if config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
+            if (
+                config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
+                and candle_source is None
+            )
             else None
         )
 
@@ -378,12 +386,22 @@ def run_paired_paper_live_daemon(
             closed_candle = (
                 None if aggregator is None else aggregator.observe(state)
             )
+            closed_candles = _load_closed_candles_for_positions(
+                positions=tuple(open_positions_by_account[index].values()),
+                state=state,
+                source=(
+                    candle_source
+                    if config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
+                    else None
+                ),
+            )
             position_updates = mark_positions(
                 positions=tuple(open_positions_by_account[index].values()),
                 state=state,
                 config=config.portfolio,
                 taker_fee_rate=config.execution.taker_fee_rate,
                 closed_candle=closed_candle,
+                closed_candles=closed_candles,
             )
             for position in position_updates:
                 if position.status is PaperPositionStatus.CLOSED:
@@ -585,6 +603,43 @@ def _checkpoint_progress(checkpoint: StrategyCheckpoint) -> float:
     )
 
 
+def _load_closed_candles_for_positions(
+    *,
+    positions: tuple[PaperPosition, ...],
+    state: MarketState15s,
+    source: ClosedCandle15mSource | None,
+) -> tuple[ClosedCandle15m, ...]:
+    if source is None:
+        return ()
+    matching = tuple(
+        position
+        for position in positions
+        if position.status is PaperPositionStatus.OPEN
+        and position.symbol == state.symbol
+        and position.opened_at < state.bucket_start
+    )
+    if not matching:
+        return ()
+    start = _candle_start_15m(min(item.opened_at for item in matching))
+    end = _candle_start_15m(state.bucket_start)
+    if end <= start:
+        return ()
+    return source.load_closed_candles(
+        symbol=state.symbol,
+        start=start,
+        end=end,
+    )
+
+
+def _candle_start_15m(value: datetime) -> datetime:
+    utc_value = value.astimezone(UTC)
+    return utc_value.replace(
+        minute=utc_value.minute - utc_value.minute % 15,
+        second=0,
+        microsecond=0,
+    )
+
+
 def run_paper_live_daemon(
     *,
     source: Iterable[MarketState15s],
@@ -594,6 +649,7 @@ def run_paper_live_daemon(
     config: PaperLiveDaemonConfig,
     clock: Clock,
     entry_symbol_loader: Callable[[datetime], frozenset[str]] | None = None,
+    candle_source: ClosedCandle15mSource | None = None,
 ) -> PaperLiveDaemonResult:
     checkpoint = _run_async(repository.load_checkpoint(config.run_id))
     if checkpoint is not None:
@@ -643,7 +699,10 @@ def run_paper_live_daemon(
     gapped_symbols: set[str] = set()
     candle_aggregator = (
         Candle15mAggregator()
-        if config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
+        if (
+            config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
+            and candle_source is None
+        )
         else None
     )
 
@@ -732,12 +791,22 @@ def run_paper_live_daemon(
                 if candle_aggregator is None
                 else candle_aggregator.observe(state)
             )
+            closed_candles = _load_closed_candles_for_positions(
+                positions=tuple(open_positions.values()),
+                state=state,
+                source=(
+                    candle_source
+                    if config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
+                    else None
+                ),
+            )
             position_updates = mark_positions(
                 positions=tuple(open_positions.values()),
                 state=state,
                 config=config.portfolio,
                 taker_fee_rate=config.execution.taker_fee_rate,
                 closed_candle=closed_candle,
+                closed_candles=closed_candles,
             )
             for position in position_updates:
                 if position.status is PaperPositionStatus.CLOSED:

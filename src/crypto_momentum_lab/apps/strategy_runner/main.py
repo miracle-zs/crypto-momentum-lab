@@ -1,5 +1,6 @@
 import asyncio
 import os
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -28,6 +29,7 @@ from crypto_momentum_lab.strategies.compression_breakout import (
 )
 from crypto_momentum_lab.strategy_runner import (
     AsyncPostgresRuntimeStateLoader,
+    BinanceRestClosedCandle15mSource,
     InMemoryPaperMarketStateSource,
     PairedPaperLiveAccount,
     PaperExitConfig,
@@ -530,6 +532,13 @@ def paper_live_daemon_command(
             help="Async PostgreSQL URL for runtime state polling.",
         ),
     ] = None,
+    binance_base_url: Annotated[
+        str,
+        typer.Option(
+            "--binance-base-url",
+            help="Binance USD-M REST base URL for official 15m exits.",
+        ),
+    ] = "https://fapi.binance.com",
     environment: Annotated[
         str,
         typer.Option("--environment", help="Runtime state environment."),
@@ -698,37 +707,45 @@ def paper_live_daemon_command(
         identity=identity,
     )
     repository = build_paper_daemon_repository(resolved_database_url)
-    result = run_paper_live_daemon(
-        source=source,
-        strategy=strategy,
-        repository=repository,
-        artifact_repository=repository,
-        config=PaperLiveDaemonConfig(
-            run_id=resolved_run_id,
-            strategy_name=strategy_name,
-            environment=environment,
-            checkpoint_every_states=checkpoint_every_states,
-            checkpoint_every_seconds=checkpoint_every_seconds,
-            max_market_state_age_seconds=max_market_state_age_seconds,
-            continue_while_halted=continue_while_halted,
-            replay_stale_states=replay_stale_states,
-            run_identity=identity,
-            source_description=source.description,
-            execution=ReplayExecutionConfig(
-                require_market_quote=require_market_quote,
-            ),
-            portfolio=PaperExitConfig(
-                exit_mode=PaperExitMode(exit_mode),
-                initial_balance=Decimal(paper_initial_balance),
-                take_profit_pct=Decimal(take_profit_pct),
-                stop_loss_pct=Decimal(stop_loss_pct),
-                max_holding_buckets=max_holding_buckets,
-                require_executable_quote=require_market_quote,
-            ),
-        ),
-        clock=_SystemClock(),
-        entry_symbol_loader=source.load_active_symbols_at,
+    resolved_exit_mode = PaperExitMode(exit_mode)
+    candle_source_context = (
+        BinanceRestClosedCandle15mSource(binance_base_url)
+        if resolved_exit_mode is PaperExitMode.CANDLE_15M
+        else nullcontext(None)
     )
+    with candle_source_context as candle_source:
+        result = run_paper_live_daemon(
+            source=source,
+            strategy=strategy,
+            repository=repository,
+            artifact_repository=repository,
+            config=PaperLiveDaemonConfig(
+                run_id=resolved_run_id,
+                strategy_name=strategy_name,
+                environment=environment,
+                checkpoint_every_states=checkpoint_every_states,
+                checkpoint_every_seconds=checkpoint_every_seconds,
+                max_market_state_age_seconds=max_market_state_age_seconds,
+                continue_while_halted=continue_while_halted,
+                replay_stale_states=replay_stale_states,
+                run_identity=identity,
+                source_description=source.description,
+                execution=ReplayExecutionConfig(
+                    require_market_quote=require_market_quote,
+                ),
+                portfolio=PaperExitConfig(
+                    exit_mode=resolved_exit_mode,
+                    initial_balance=Decimal(paper_initial_balance),
+                    take_profit_pct=Decimal(take_profit_pct),
+                    stop_loss_pct=Decimal(stop_loss_pct),
+                    max_holding_buckets=max_holding_buckets,
+                    require_executable_quote=require_market_quote,
+                ),
+            ),
+            clock=_SystemClock(),
+            entry_symbol_loader=source.load_active_symbols_at,
+            candle_source=candle_source,
+        )
     typer.echo(
         "Paper live daemon completed: "
         f"states={result.processed_state_count} "
@@ -757,6 +774,13 @@ def paper_live_pair_command(
         str | None,
         typer.Option("--database-url", help="Async PostgreSQL URL."),
     ] = None,
+    binance_base_url: Annotated[
+        str,
+        typer.Option(
+            "--binance-base-url",
+            help="Binance USD-M REST base URL for official 15m exits.",
+        ),
+    ] = "https://fapi.binance.com",
     environment: Annotated[
         str,
         typer.Option("--environment", help="Runtime state environment."),
@@ -971,16 +995,18 @@ def paper_live_pair_command(
             require_executable_quote=require_market_quote,
         ),
     )
-    result = run_paired_paper_live_daemon(
-        source=source,
-        strategy=strategy,
-        accounts=(
-            PairedPaperLiveAccount(repository, repository, fixed_config),
-            PairedPaperLiveAccount(repository, repository, candle_config),
-        ),
-        clock=_SystemClock(),
-        entry_symbol_loader=source.load_active_symbols_at,
-    )
+    with BinanceRestClosedCandle15mSource(binance_base_url) as candle_source:
+        result = run_paired_paper_live_daemon(
+            source=source,
+            strategy=strategy,
+            accounts=(
+                PairedPaperLiveAccount(repository, repository, fixed_config),
+                PairedPaperLiveAccount(repository, repository, candle_config),
+            ),
+            clock=_SystemClock(),
+            entry_symbol_loader=source.load_active_symbols_at,
+            candle_source=candle_source,
+        )
     states_processed = result.account_results[0].processed_state_count
     halt_reason = result.account_results[0].halt_reason
     typer.echo(

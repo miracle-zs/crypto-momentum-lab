@@ -244,6 +244,46 @@ def test_candle_exit_holds_aligned_and_doji_candles_and_reverses_short() -> None
     assert reversed_short.close_reason == "candle_15m_bullish"
 
 
+def test_candle_exit_scans_historical_candles_after_restart() -> None:
+    position = position_from_entry_fill(
+        "run-1",
+        replace(_fill(), side=StrategySide.SHORT),
+    )
+    assert position is not None
+    first_start = position.opened_at
+    closed = mark_positions(
+        positions=(position,),
+        state=_state(
+            close=Decimal("102"),
+            bucket_start=position.opened_at + timedelta(minutes=45),
+        ),
+        config=PaperExitConfig(
+            exit_mode=PaperExitMode.CANDLE_15M,
+            max_holding_buckets=5760,
+        ),
+        taker_fee_rate=Decimal("0.0004"),
+        closed_candles=(
+            ClosedCandle15m(
+                symbol=position.symbol,
+                candle_start=first_start,
+                candle_end=first_start + timedelta(minutes=15),
+                open_price=Decimal("100"),
+                close_price=Decimal("99"),
+            ),
+            ClosedCandle15m(
+                symbol=position.symbol,
+                candle_start=first_start + timedelta(minutes=15),
+                candle_end=first_start + timedelta(minutes=30),
+                open_price=Decimal("99"),
+                close_price=Decimal("101"),
+            ),
+        ),
+    )[0]
+
+    assert closed.status is PaperPositionStatus.CLOSED
+    assert closed.close_reason == "candle_15m_bullish"
+
+
 def test_executable_exit_uses_the_side_of_the_book() -> None:
     position = position_from_entry_fill("run-1", _fill())
     assert position is not None

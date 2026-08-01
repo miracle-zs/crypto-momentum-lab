@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -28,7 +29,9 @@ from crypto_momentum_lab.strategy_runner.fills import (
     SimulatedFillStatus,
 )
 from crypto_momentum_lab.strategy_runner.portfolio import (
+    ClosedCandle15m,
     PaperExitConfig,
+    PaperExitMode,
     PaperPosition,
     PaperPositionStatus,
     position_from_entry_fill,
@@ -44,6 +47,28 @@ class FakeClock:
 
     def now(self) -> datetime:
         return self._now
+
+
+class FakeClosedCandleSource:
+    def __init__(self, candles: tuple[ClosedCandle15m, ...]) -> None:
+        self._candles = candles
+        self.calls: list[tuple[str, datetime, datetime]] = []
+
+    def load_closed_candles(
+        self,
+        *,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+    ) -> tuple[ClosedCandle15m, ...]:
+        self.calls.append((symbol, start, end))
+        return tuple(
+            candle
+            for candle in self._candles
+            if candle.symbol == symbol
+            and candle.candle_start >= start
+            and candle.candle_end <= end
+        )
 
 
 class FakeRepository(PaperLiveDaemonRepository):
@@ -467,6 +492,83 @@ def test_paired_daemon_calculates_entries_once_and_fans_out_accounts() -> None:
     assert first_signal.signal_id != second_signal.signal_id
     assert first_artifacts.fills[0].filled_notional == Decimal("25")
     assert second_artifacts.fills[0].filled_notional == Decimal("25")
+
+
+def test_paired_daemon_reconciles_candle_exit_after_restart() -> None:
+    state = fixture_state("BTCUSDT", 180)
+    checkpoint_at = state.bucket_start - timedelta(seconds=15)
+    checkpoint = StrategyCheckpoint(
+        last_processed_at_by_symbol={state.symbol: checkpoint_at},
+        warmup_buckets_by_symbol={state.symbol: 1},
+        cooldown_buckets_remaining_by_symbol={state.symbol: 0},
+        payload={},
+    )
+    fixed_identity = _identity()
+    candle_identity = _identity("run-2")
+    fixed_artifacts = FakeArtifactRepository()
+    candle_artifacts = FakeArtifactRepository()
+    position = position_from_entry_fill(
+        candle_identity.run_id,
+        replace(
+            _filled_entry(
+                symbol=state.symbol,
+                filled_at=state.bucket_start - timedelta(minutes=25),
+            ),
+            side=StrategySide.SHORT,
+        ),
+    )
+    assert position is not None
+    candle_artifacts.positions[position.position_id] = position
+    candle = ClosedCandle15m(
+        symbol=state.symbol,
+        candle_start=state.bucket_start - timedelta(minutes=15),
+        candle_end=state.bucket_start,
+        open_price=Decimal("100"),
+        close_price=Decimal("101"),
+    )
+    candle_source = FakeClosedCandleSource((candle,))
+
+    run_paired_paper_live_daemon(
+        source=(state,),
+        strategy=FakeStrategy(),
+        accounts=(
+            PairedPaperLiveAccount(
+                repository=FakeRepository(checkpoint),
+                artifact_repository=fixed_artifacts,
+                config=_config(run_identity=fixed_identity),
+            ),
+            PairedPaperLiveAccount(
+                repository=FakeRepository(checkpoint),
+                artifact_repository=candle_artifacts,
+                config=_config(
+                    run_id="run-2",
+                    run_identity=candle_identity,
+                    portfolio=PaperExitConfig(
+                        exit_mode=PaperExitMode.CANDLE_15M,
+                        max_holding_buckets=5760,
+                    ),
+                ),
+            ),
+        ),
+        clock=FakeClock(state.bucket_end + timedelta(seconds=1)),
+        candle_source=candle_source,
+    )
+
+    expected_start = position.opened_at.replace(
+        minute=position.opened_at.minute - position.opened_at.minute % 15,
+        second=0,
+        microsecond=0,
+    )
+    assert candle_source.calls == [
+        (
+            state.symbol,
+            expected_start,
+            state.bucket_start,
+        )
+    ]
+    closed = candle_artifacts.portfolio_updates[0][0]
+    assert closed.status is PaperPositionStatus.CLOSED
+    assert closed.close_reason == "candle_15m_bullish"
 
 
 def test_daemon_uses_protected_symbol_for_exit_without_opening_new_trade() -> None:
