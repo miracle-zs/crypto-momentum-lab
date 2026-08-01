@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import cast
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert
@@ -10,6 +11,7 @@ from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.persistence.postgres.models import (
     RuntimeMarketState15sRow,
     StrategyRuntimeCheckpointRow,
+    StrategyRuntimeEventRow,
 )
 
 
@@ -230,6 +232,28 @@ class PostgresRuntimeMarketStateRepository:
             return None
 
         async with self._session_factory() as session:
+            event_starts = (
+                await session.execute(
+                    select(
+                        StrategyRuntimeEventRow.run_id,
+                        func.max(StrategyRuntimeEventRow.bucket_start),
+                    )
+                    .where(
+                        StrategyRuntimeEventRow.run_id.in_(normalized_run_ids),
+                        StrategyRuntimeEventRow.event_type
+                        == "checkpoint_saved",
+                    )
+                    .group_by(StrategyRuntimeEventRow.run_id)
+                )
+            ).all()
+            event_timestamps = [
+                cast(datetime, bucket_start)
+                for _, bucket_start in event_starts
+                if bucket_start is not None
+            ]
+            if event_timestamps:
+                return min(event_timestamps)
+
             payloads = (
                 await session.scalars(
                     select(
