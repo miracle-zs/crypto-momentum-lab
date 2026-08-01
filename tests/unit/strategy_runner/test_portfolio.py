@@ -95,20 +95,30 @@ def test_open_position_updates_mark_and_unrealized_pnl() -> None:
     assert marked.unrealized_pnl == Decimal("0.46")
 
 
-def test_15m_aggregator_emits_only_after_the_candle_closes() -> None:
+def test_15m_aggregator_requires_officially_closed_one_minute_klines() -> None:
     aggregator = Candle15mAggregator()
     candle_start = datetime(2026, 7, 26, 0, 0, tzinfo=UTC)
-    closed: ClosedCandle15m | None = None
 
     for index in range(60):
-        closed = aggregator.observe(
+        assert aggregator.observe(
             _state(
                 open_price=Decimal("100"),
                 close=Decimal("99") if index == 59 else Decimal("100.5"),
                 bucket_start=candle_start + timedelta(seconds=index * 15),
             )
+        ) is None
+
+    closed: ClosedCandle15m | None = None
+    for index in range(15):
+        closed = aggregator.observe(
+            _state_with_closed_1m(
+                candle_start=candle_start,
+                minute_index=index,
+                open_price=Decimal("100"),
+                close_price=Decimal("99") if index == 14 else Decimal("100.5"),
+            )
         )
-        if index < 59:
+        if index < 14:
             assert closed is None
 
     assert closed == ClosedCandle15m(
@@ -120,33 +130,29 @@ def test_15m_aggregator_emits_only_after_the_candle_closes() -> None:
     )
 
 
-def test_15m_aggregator_uses_first_available_state_when_boundary_is_missing() -> None:
+def test_15m_aggregator_does_not_emit_an_incomplete_official_candle() -> None:
     aggregator = Candle15mAggregator()
     candle_start = datetime(2026, 7, 26, 0, 0, tzinfo=UTC)
 
     assert aggregator.observe(
-        _state(
+        _state_with_closed_1m(
+            candle_start=candle_start,
+            minute_index=0,
             open_price=Decimal("100"),
-            close=Decimal("100.5"),
-            bucket_start=candle_start + timedelta(minutes=2),
+            close_price=Decimal("100.5"),
         )
     ) is None
 
     closed = aggregator.observe(
-        _state(
+        _state_with_closed_1m(
+            candle_start=candle_start,
+            minute_index=14,
             open_price=Decimal("101"),
-            close=Decimal("99"),
-            bucket_start=candle_start + timedelta(minutes=14, seconds=45),
+            close_price=Decimal("99"),
         )
     )
 
-    assert closed == ClosedCandle15m(
-        symbol="BTCUSDT",
-        candle_start=candle_start,
-        candle_end=candle_start + timedelta(minutes=15),
-        open_price=Decimal("100"),
-        close_price=Decimal("99"),
-    )
+    assert closed is None
 
 
 def test_15m_aggregator_ignores_late_state_from_a_closed_candle() -> None:
@@ -238,6 +244,28 @@ def test_candle_exit_holds_aligned_and_doji_candles_and_reverses_short() -> None
     assert reversed_short.close_reason == "candle_15m_bullish"
 
 
+def test_executable_exit_uses_the_side_of_the_book() -> None:
+    position = position_from_entry_fill("run-1", _fill())
+    assert position is not None
+    state = replace(
+        _state(close=Decimal("103")),
+        last_bid_price=Decimal("102"),
+        last_ask_price=Decimal("104"),
+        spread=Decimal("2"),
+        midpoint=Decimal("103"),
+    )
+
+    closed = mark_positions(
+        positions=(position,),
+        state=state,
+        config=PaperExitConfig(require_executable_quote=True),
+        taker_fee_rate=Decimal("0.0004"),
+    )[0]
+
+    assert closed.status is PaperPositionStatus.CLOSED
+    assert closed.exit_price == Decimal("102")
+
+
 def _fill() -> SimulatedFill:
     opened_at = datetime(2026, 7, 26, 0, 0, tzinfo=UTC)
     return SimulatedFill(
@@ -296,6 +324,27 @@ def _state(
         source_event_count=1,
         first_received_at=bucket_start,
         last_received_at=bucket_start + timedelta(seconds=15),
+    )
+
+
+def _state_with_closed_1m(
+    *,
+    candle_start: datetime,
+    minute_index: int,
+    open_price: Decimal,
+    close_price: Decimal,
+) -> MarketState15s:
+    bucket_start = candle_start + timedelta(minutes=minute_index + 1)
+    return replace(
+        _state(close=close_price, open_price=open_price, bucket_start=bucket_start),
+        closed_kline_count=1,
+        closed_kline_1m_open_time=candle_start
+        + timedelta(minutes=minute_index),
+        closed_kline_1m_close_time=candle_start
+        + timedelta(minutes=minute_index + 1)
+        - timedelta(microseconds=1),
+        closed_kline_1m_open_price=open_price,
+        closed_kline_1m_close_price=close_price,
     )
 
 

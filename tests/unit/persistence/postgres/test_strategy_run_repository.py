@@ -35,6 +35,7 @@ def test_report_rows_convert_decimals_and_enums_to_json_values() -> None:
     assert rows.run["run_mode"] == "paper"
     assert rows.run["execution_config"] == {
         "latency_buckets": 1,
+        "require_market_quote": False,
         "slippage_bps": "0",
         "state_interval_seconds": 15,
         "taker_fee_rate": "0.0004",

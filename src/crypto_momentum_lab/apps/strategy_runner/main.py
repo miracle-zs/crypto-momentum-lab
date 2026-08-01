@@ -9,6 +9,7 @@ from uuid import uuid4
 import typer
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from crypto_momentum_lab.build_info import resolve_code_commit
 from crypto_momentum_lab.domain.strategy import (
     RunMode,
     StrategyRunIdentity,
@@ -635,6 +636,10 @@ def paper_live_daemon_command(
         bool,
         typer.Option("--continue-while-halted"),
     ] = False,
+    require_market_quote: Annotated[
+        bool,
+        typer.Option("--require-market-quote/--allow-close-fallback"),
+    ] = False,
 ) -> None:
     resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
     if not resolved_database_url:
@@ -698,13 +703,16 @@ def paper_live_daemon_command(
             continue_while_halted=continue_while_halted,
             run_identity=identity,
             source_description=source.description,
-            execution=ReplayExecutionConfig(),
+            execution=ReplayExecutionConfig(
+                require_market_quote=require_market_quote,
+            ),
             portfolio=PaperExitConfig(
                 exit_mode=PaperExitMode(exit_mode),
                 initial_balance=Decimal(paper_initial_balance),
                 take_profit_pct=Decimal(take_profit_pct),
                 stop_loss_pct=Decimal(stop_loss_pct),
                 max_holding_buckets=max_holding_buckets,
+                require_executable_quote=require_market_quote,
             ),
         ),
         clock=_SystemClock(),
@@ -834,6 +842,10 @@ def paper_live_pair_command(
         bool,
         typer.Option("--continue-while-halted"),
     ] = False,
+    require_market_quote: Annotated[
+        bool,
+        typer.Option("--require-market-quote/--allow-close-fallback"),
+    ] = False,
 ) -> None:
     resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
     if not resolved_database_url:
@@ -902,13 +914,16 @@ def paper_live_pair_command(
         continue_while_halted=continue_while_halted,
         run_identity=fixed_identity,
         source_description=source.description,
-        execution=ReplayExecutionConfig(),
+        execution=ReplayExecutionConfig(
+            require_market_quote=require_market_quote,
+        ),
         portfolio=PaperExitConfig(
             exit_mode=PaperExitMode.FIXED,
             initial_balance=Decimal(paper_initial_balance),
             take_profit_pct=Decimal(fixed_take_profit_pct),
             stop_loss_pct=Decimal(fixed_stop_loss_pct),
             max_holding_buckets=fixed_max_holding_buckets,
+            require_executable_quote=require_market_quote,
         ),
     )
     candle_config = PaperLiveDaemonConfig(
@@ -921,11 +936,14 @@ def paper_live_pair_command(
         continue_while_halted=continue_while_halted,
         run_identity=candle_identity,
         source_description=source.description,
-        execution=ReplayExecutionConfig(),
+        execution=ReplayExecutionConfig(
+            require_market_quote=require_market_quote,
+        ),
         portfolio=PaperExitConfig(
             exit_mode=PaperExitMode.CANDLE_15M,
             initial_balance=Decimal(paper_initial_balance),
             max_holding_buckets=candle_max_holding_buckets,
+            require_executable_quote=require_market_quote,
         ),
     )
     result = run_paired_paper_live_daemon(
@@ -1058,6 +1076,7 @@ def build_runtime_identity_for_cli(
     candidate_notional: Decimal | None,
     candidate_ttl_buckets: int,
     signal_interval_seconds: int = 300,
+    code_commit: str | None = None,
 ) -> StrategyRunIdentity:
     config_payload: dict[str, object] = {
         "candidate_notional": candidate_notional,
@@ -1075,7 +1094,11 @@ def build_runtime_identity_for_cli(
         strategy_version="v0",
         config_hash=deterministic_config_hash(runtime_config),
         run_mode=RunMode.PAPER,
-        code_commit="unknown",
+        code_commit=(
+            resolve_code_commit()
+            if code_commit is None
+            else code_commit
+        ),
         created_at=generated_at,
         source_paths=(source_description,),
     )

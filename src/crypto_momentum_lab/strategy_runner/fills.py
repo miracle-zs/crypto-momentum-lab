@@ -22,6 +22,7 @@ class ReplayExecutionConfig:
     state_interval_seconds: int = 15
     taker_fee_rate: Decimal = Decimal("0.0004")
     slippage_bps: Decimal = Decimal("0")
+    require_market_quote: bool = False
 
     def __post_init__(self) -> None:
         if self.latency_buckets < 0:
@@ -151,13 +152,21 @@ def simulate_candidate_fill(
             target_fill_at=target_fill_at,
             reason="missing_desired_notional",
         )
-    quote = _marketable_quote(fill_state, candidate.side)
+    quote = _marketable_quote(
+        fill_state,
+        candidate.side,
+        require_market_quote=execution.require_market_quote,
+    )
     if quote is None:
         return _unfilled(
             candidate=candidate,
             status=SimulatedFillStatus.REJECTED,
             target_fill_at=target_fill_at,
-            reason="missing_fill_price",
+            reason=(
+                "missing_executable_quote"
+                if execution.require_market_quote
+                else "missing_fill_price"
+            ),
         )
     fill_price, midpoint, spread = quote
     fill_price = _apply_slippage(
@@ -281,11 +290,21 @@ def _unfilled(
 def _marketable_quote(
     state: MarketState15s,
     side: StrategySide,
+    *,
+    require_market_quote: bool,
 ) -> tuple[Decimal, Decimal, Decimal | None] | None:
     bid = state.last_bid_price
     ask = state.last_ask_price
     spread = state.spread
     midpoint = state.midpoint
+    if require_market_quote and (
+        bid is None
+        or ask is None
+        or bid <= 0
+        or ask <= 0
+        or ask < bid
+    ):
+        return None
     if midpoint is None and bid is not None and ask is not None:
         midpoint = (bid + ask) / Decimal("2")
     if midpoint is None:

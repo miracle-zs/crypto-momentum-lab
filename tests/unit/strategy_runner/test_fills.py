@@ -93,6 +93,31 @@ def test_simulate_candidate_fill_uses_close_when_order_book_is_unavailable() -> 
     assert fill.spread is None
 
 
+def test_simulate_candidate_fill_can_require_an_executable_quote() -> None:
+    identity = _identity()
+    signal = _signal(identity)
+    candidate = _candidate(identity=identity, signal_id=signal.signal_id)
+    state = replace(
+        _state(5, close=Decimal("101.4")),
+        last_bid_price=None,
+        last_ask_price=None,
+        spread=None,
+        midpoint=None,
+    )
+
+    fill = simulate_candidate_fill(
+        candidate=candidate,
+        states=(state,),
+        execution=ReplayExecutionConfig(
+            latency_buckets=1,
+            require_market_quote=True,
+        ),
+    )
+
+    assert fill.status is SimulatedFillStatus.REJECTED
+    assert fill.reason == "missing_executable_quote"
+
+
 def test_fill_summary_counts_status_and_costs() -> None:
     filled = _filled_fill(symbol="BTCUSDT", notional=Decimal("100"))
     pending = _pending_fill(symbol="BTCUSDT")

@@ -311,6 +311,10 @@ class MarketState15s:
     source_event_count: int
     first_received_at: datetime | None
     last_received_at: datetime | None
+    closed_kline_1m_open_time: datetime | None = None
+    closed_kline_1m_close_time: datetime | None = None
+    closed_kline_1m_open_price: Decimal | None = None
+    closed_kline_1m_close_price: Decimal | None = None
 
     def __post_init__(self) -> None:
         if not _is_aware(self.bucket_start):
@@ -335,6 +339,24 @@ class MarketState15s:
             self.last_received_at
         ):
             raise ValueError("last_received_at must be timezone-aware")
+        kline_fields = (
+            self.closed_kline_1m_open_time,
+            self.closed_kline_1m_close_time,
+            self.closed_kline_1m_open_price,
+            self.closed_kline_1m_close_price,
+        )
+        if any(field is not None for field in kline_fields) and not all(
+            field is not None for field in kline_fields
+        ):
+            raise ValueError("closed 1m kline fields must be complete")
+        if self.closed_kline_1m_open_time is not None and not _is_aware(
+            self.closed_kline_1m_open_time
+        ):
+            raise ValueError("closed_kline_1m_open_time must be timezone-aware")
+        if self.closed_kline_1m_close_time is not None and not _is_aware(
+            self.closed_kline_1m_close_time
+        ):
+            raise ValueError("closed_kline_1m_close_time must be timezone-aware")
 
 
 def transition_market_data_state(

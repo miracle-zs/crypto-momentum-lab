@@ -1,5 +1,5 @@
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -27,6 +27,8 @@ def bucket_start_15s(value: datetime) -> datetime:
 
 def aggregate_market_states_15s(
     events: Iterable[NormalizedMarketEvent],
+    *,
+    initial_quotes: Mapping[str, tuple[Decimal, Decimal]] | None = None,
 ) -> tuple[MarketState15s, ...]:
     buckets: dict[tuple[str, datetime], _StateAccumulator] = {}
     for event in events:
@@ -37,13 +39,33 @@ def aggregate_market_states_15s(
             accumulator = _StateAccumulator.create(event, start)
             buckets[key] = accumulator
         accumulator.update(event)
-    return tuple(
-        accumulator.to_state()
-        for _, accumulator in sorted(
-            buckets.items(),
-            key=lambda item: (item[0][1], item[0][0]),
-        )
-    )
+    previous_quotes = dict(initial_quotes or {})
+    states: list[MarketState15s] = []
+    for _, accumulator in sorted(
+        buckets.items(),
+        key=lambda item: (item[0][1], item[0][0]),
+    ):
+        state = accumulator.to_state()
+        quote = previous_quotes.get(state.symbol)
+        if (
+            quote is not None
+            and (state.last_bid_price is None or state.last_ask_price is None)
+        ):
+            bid_price, ask_price = quote
+            state = replace(
+                state,
+                last_bid_price=bid_price,
+                last_ask_price=ask_price,
+                spread=ask_price - bid_price,
+                midpoint=(bid_price + ask_price) / Decimal("2"),
+            )
+        if state.last_bid_price is not None and state.last_ask_price is not None:
+            previous_quotes[state.symbol] = (
+                state.last_bid_price,
+                state.last_ask_price,
+            )
+        states.append(state)
+    return tuple(states)
 
 
 @dataclass(slots=True)
@@ -68,6 +90,10 @@ class _StateAccumulator:
     liquidation_notional: Decimal
     mark_price: Decimal | None
     closed_kline_count: int
+    closed_kline_1m_open_time: datetime | None
+    closed_kline_1m_close_time: datetime | None
+    closed_kline_1m_open_price: Decimal | None
+    closed_kline_1m_close_price: Decimal | None
     source_event_count: int
     first_received_at: datetime | None
     last_received_at: datetime | None
@@ -79,7 +105,7 @@ class _StateAccumulator:
         start: datetime,
     ) -> "_StateAccumulator":
         return cls(
-            schema_version=1,
+            schema_version=2,
             exchange=event.exchange,
             environment=event.environment,
             symbol=event.symbol,
@@ -99,6 +125,10 @@ class _StateAccumulator:
             liquidation_notional=Decimal("0"),
             mark_price=None,
             closed_kline_count=0,
+            closed_kline_1m_open_time=None,
+            closed_kline_1m_close_time=None,
+            closed_kline_1m_open_price=None,
+            closed_kline_1m_close_price=None,
             source_event_count=0,
             first_received_at=None,
             last_received_at=None,
@@ -127,6 +157,14 @@ class _StateAccumulator:
         if isinstance(event, NormalizedKline1m):
             if event.closed:
                 self.closed_kline_count += 1
+                if (
+                    self.closed_kline_1m_open_time is None
+                    or event.open_time >= self.closed_kline_1m_open_time
+                ):
+                    self.closed_kline_1m_open_time = event.open_time
+                    self.closed_kline_1m_close_time = event.close_time
+                    self.closed_kline_1m_open_price = event.open_price
+                    self.closed_kline_1m_close_price = event.close_price
             return
         raise TypeError(f"unsupported normalized event: {type(event)!r}")
 
@@ -159,6 +197,10 @@ class _StateAccumulator:
             liquidation_notional=self.liquidation_notional,
             mark_price=self.mark_price,
             closed_kline_count=self.closed_kline_count,
+            closed_kline_1m_open_time=self.closed_kline_1m_open_time,
+            closed_kline_1m_close_time=self.closed_kline_1m_close_time,
+            closed_kline_1m_open_price=self.closed_kline_1m_open_price,
+            closed_kline_1m_close_price=self.closed_kline_1m_close_price,
             source_event_count=self.source_event_count,
             first_received_at=self.first_received_at,
             last_received_at=self.last_received_at,

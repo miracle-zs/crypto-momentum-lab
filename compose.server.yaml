@@ -1,9 +1,13 @@
 name: crypto-momentum-lab
 
 x-app: &app
-  build: .
+  build:
+    context: .
+    args:
+      CML_CODE_COMMIT: ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
   environment: &app-environment
     CML_DATABASE_URL: postgresql+asyncpg://cml:${CML_POSTGRES_PASSWORD:?set CML_POSTGRES_PASSWORD}@postgres:5432/cml
+    CML_CODE_COMMIT: ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
   restart: unless-stopped
 
 x-paper: &paper
@@ -161,6 +165,7 @@ services:
       - --max-market-state-age-seconds
       - "120"
       - --continue-while-halted
+      - --require-market-quote
   paper-orderflow-pair:
     <<: *paper
     environment:
@@ -203,6 +208,7 @@ services:
       - --max-market-state-age-seconds
       - "120"
       - --continue-while-halted
+      - --require-market-quote
 
   paper-liquidation-pair:
     <<: *paper
@@ -246,6 +252,7 @@ services:
       - --max-market-state-age-seconds
       - "120"
       - --continue-while-halted
+      - --require-market-quote
 
   dashboard:
     <<: *app

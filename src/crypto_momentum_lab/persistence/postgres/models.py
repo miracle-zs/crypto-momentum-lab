@@ -187,6 +187,18 @@ class RuntimeMarketState15sRow(Base):
     liquidation_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     mark_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
     closed_kline_count: Mapped[int] = mapped_column(Integer)
+    closed_kline_1m_open_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    closed_kline_1m_close_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    closed_kline_1m_open_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18)
+    )
+    closed_kline_1m_close_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18)
+    )
     source_event_count: Mapped[int] = mapped_column(Integer)
     first_received_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)

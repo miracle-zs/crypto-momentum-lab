@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Protocol
 
 from crypto_momentum_lab.domain.market.models import (
@@ -70,6 +71,7 @@ class ClosedMarketStatePublisher:
             _BucketKey,
             list[NormalizedMarketEvent],
         ] = {}
+        self._latest_quotes: dict[tuple[str, str], tuple[Decimal, Decimal]] = {}
         self._closed_buckets: set[_BucketKey] = set()
         self._max_seen_event_at: datetime | None = None
         self._latest_watermark_at: datetime | None = None
@@ -134,7 +136,26 @@ class ClosedMarketStatePublisher:
         for key in ready_keys:
             events = tuple(self._events_by_bucket[key])
             closed_events.extend(events)
-            states.extend(aggregate_market_states_15s(events))
+            environment = events[0].environment
+            initial_quotes = {
+                symbol: quote
+                for (quote_environment, symbol), quote in self._latest_quotes.items()
+                if quote_environment == environment
+            }
+            batch_states = aggregate_market_states_15s(
+                events,
+                initial_quotes=initial_quotes,
+            )
+            states.extend(batch_states)
+            for state in batch_states:
+                if (
+                    state.last_bid_price is not None
+                    and state.last_ask_price is not None
+                ):
+                    self._latest_quotes[(state.environment, state.symbol)] = (
+                        state.last_bid_price,
+                        state.last_ask_price,
+                    )
         states_tuple = tuple(
             sorted(states, key=lambda state: (state.bucket_start, state.symbol))
         )

@@ -137,6 +137,14 @@ def market_state_15s_row(state: MarketState15s) -> dict[str, object]:
         "liquidation_notional": _decimal(state.liquidation_notional),
         "mark_price": _optional_decimal(state.mark_price),
         "closed_kline_count": state.closed_kline_count,
+        "closed_kline_1m_open_time": state.closed_kline_1m_open_time,
+        "closed_kline_1m_close_time": state.closed_kline_1m_close_time,
+        "closed_kline_1m_open_price": _optional_decimal(
+            state.closed_kline_1m_open_price
+        ),
+        "closed_kline_1m_close_price": _optional_decimal(
+            state.closed_kline_1m_close_price
+        ),
         "source_event_count": state.source_event_count,
         "first_received_at": state.first_received_at,
         "last_received_at": state.last_received_at,
@@ -444,6 +452,18 @@ def _market_state_from_row(row: dict[str, object], path: Path) -> MarketState15s
         liquidation_notional=_required_decimal(row, "liquidation_notional"),
         mark_price=_optional_decimal_row(row, "mark_price"),
         closed_kline_count=_required_int(row, "closed_kline_count"),
+        closed_kline_1m_open_time=_optional_datetime(
+            row, "closed_kline_1m_open_time"
+        ),
+        closed_kline_1m_close_time=_optional_datetime(
+            row, "closed_kline_1m_close_time"
+        ),
+        closed_kline_1m_open_price=_optional_decimal_row(
+            row, "closed_kline_1m_open_price"
+        ),
+        closed_kline_1m_close_price=_optional_decimal_row(
+            row, "closed_kline_1m_close_price"
+        ),
         source_event_count=_required_int(row, "source_event_count"),
         first_received_at=_optional_datetime(row, "first_received_at"),
         last_received_at=_optional_datetime(row, "last_received_at"),

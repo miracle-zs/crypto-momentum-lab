@@ -5,6 +5,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+ARG CML_CODE_COMMIT
+
 RUN addgroup --system cml && adduser --system --ingroup cml cml
 
 COPY pyproject.toml README.md ./
@@ -14,6 +16,8 @@ COPY alembic.ini ./
 COPY alembic ./alembic
 
 RUN python -m pip install --no-cache-dir .
+
+ENV CML_CODE_COMMIT=${CML_CODE_COMMIT}
 
 RUN mkdir -p /app/data && chown -R cml:cml /app
 

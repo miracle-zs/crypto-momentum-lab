@@ -4,10 +4,11 @@ This deployment consumes Binance public USD-M market data and runs three
 independent strategies in paper mode. It does not accept Binance credentials
 and cannot place orders.
 
-The server profile subscribes to `aggTrade` and `forceOrder`. `aggTrade` feeds
-all three strategies and `forceOrder` feeds the liquidation cascade strategy.
-The order-flow strategy uses trade-close prices for signal evaluation, so it
-does not require the high-volume `bookTicker` stream.
+The server profile subscribes to `aggTrade`, `bookTicker`, `forceOrder`, and
+`kline_1m`. `aggTrade` feeds all three strategies, `bookTicker` supplies the
+executable bid/ask for paper fills and marks, `forceOrder` feeds the
+liquidation cascade strategy, and closed one-minute klines are aggregated into
+official UTC-aligned 15-minute candles for candle exits.
 
 The compression-breakout daemon keeps 15-second states for execution and risk
 monitoring, but aggregates them into closed UTC-aligned 5-minute signal bars.
@@ -30,11 +31,17 @@ USDT:
 
 1. Install Docker Engine with the Compose plugin.
 2. Copy the repository to `/opt/crypto-momentum-lab`.
-3. Create `/opt/crypto-momentum-lab/.env.server` with mode `0600`:
+3. Resolve the exact commit that will be deployed and create
+   `/opt/crypto-momentum-lab/.env.server` with mode `0600`:
 
    ```text
    CML_POSTGRES_PASSWORD=<random-alphanumeric-password>
+   CML_CODE_COMMIT=<exact-git-commit-used-for-the-image>
    ```
+
+   Run `git rev-parse HEAD` in the checkout to obtain the commit value. The
+   compose build passes it into the image and the paper runners persist it in
+   their runtime identity; deployment fails closed when it is omitted.
 
 4. Build and start the stack:
 
@@ -105,9 +112,10 @@ the active 40-symbol universe; protected symbols are consumed only so existing
 positions can be marked and exited. Keep the environment variable in
 `compose.server.yaml` aligned whenever a paper account is added or renamed.
 
-The server profile has no private account connection, so virtual fills use the
-closed 15-second state's trade close as the executable reference price. No order
-is sent to Binance.
+The server profile has no private account connection, so virtual fills require
+the latest bid/ask and use the marketable side of that quote. Candle exits are
+triggered only after all 15 official one-minute klines in the UTC-aligned
+15-minute interval have reported `closed=true`. No order is sent to Binance.
 
 Inspect persisted artifact counts with:
 

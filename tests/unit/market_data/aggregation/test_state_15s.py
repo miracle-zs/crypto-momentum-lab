@@ -128,6 +128,14 @@ def test_liquidation_mark_price_and_closed_kline_update_bucket() -> None:
     assert state.liquidation_notional == Decimal("40.20")
     assert state.mark_price == Decimal("100.1")
     assert state.closed_kline_count == 1
+    assert state.closed_kline_1m_open_time == datetime(
+        2026, 6, 15, 2, 0, tzinfo=UTC
+    )
+    assert state.closed_kline_1m_close_time == datetime(
+        2026, 6, 15, 2, 0, 59, 999000, tzinfo=UTC
+    )
+    assert state.closed_kline_1m_open_price == Decimal("99")
+    assert state.closed_kline_1m_close_price == Decimal("100.5")
     assert state.source_event_count == 3
 
 
