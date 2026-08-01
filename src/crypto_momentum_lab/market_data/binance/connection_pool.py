@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Callable
 from typing import Protocol
 
@@ -109,11 +110,19 @@ class BinanceConnectionPool:
         self._subscription_connections = desired_owners
 
     async def stop(self) -> None:
-        for connection in tuple(self._connections.values()):
-            await connection.stop()
-        self._connections.clear()
-        self._active_subscriptions = frozenset()
-        self._subscription_connections.clear()
+        connections = tuple(self._connections.values())
+        try:
+            results = await asyncio.gather(
+                *(connection.stop() for connection in connections),
+                return_exceptions=True,
+            )
+        finally:
+            self._connections.clear()
+            self._active_subscriptions = frozenset()
+            self._subscription_connections.clear()
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     async def _ensure_connections(
         self,

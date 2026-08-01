@@ -93,16 +93,16 @@ policy can handle normal market-data stalls.
 The market-data process fails and lets Docker restart it when a 15-minute
 universe refresh exceeds 120 seconds, when no live market state arrives within
 120 seconds after startup, or when the latest market-state watermark becomes
-more than 120 seconds old. Connection cleanup is capped at 30 seconds so a
-stuck socket cannot prevent restart. A restart scans and recovers the durable
-raw archive before opening live subscriptions; on a large archive this startup
-phase can take several minutes. Compose grants 60 seconds for graceful stop so
-archive writers can finalize instead of being killed after Docker's default
-10-second grace period. The market-data healthcheck has a 15-minute startup
-period for archive recovery and rejects `ready` records written before the
-current container started. The process handles both `SIGTERM` and `SIGINT` by
-cancelling its service task and waiting for queued envelopes and open archive
-writers to flush. Do not use `SIGKILL` for planned deployments.
+more than 120 seconds old. Shutdown first cancels subscription-management
+tasks, closes WebSocket connections concurrently, keeps the archive consumer
+running until its bounded queue is empty, and then finalizes open writers. This
+cleanup is capped at 55 seconds inside Compose's 60-second stop grace period.
+A restart scans and recovers any interrupted raw archives before opening live
+subscriptions; on a large archive this startup phase can take several minutes.
+The market-data healthcheck has a 15-minute startup period for archive recovery
+and rejects `ready` records written before the current container started. The
+process handles both `SIGTERM` and `SIGINT` through this shutdown path. Do not
+use `SIGKILL` for planned deployments.
 
 The remote console is available at `https://<server>/momentum/`. The
 exchange-account panel remains empty because this stack intentionally has no

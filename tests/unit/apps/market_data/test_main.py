@@ -1,7 +1,9 @@
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -109,7 +111,12 @@ def test_run_market_data_uses_combined_service(
 ) -> None:
     called: list[Path] = []
 
-    async def fake_run(config_path: Path) -> None:
+    async def fake_run(
+        config_path: Path,
+        *,
+        stop_requested: asyncio.Event | None = None,
+    ) -> None:
+        del stop_requested
         called.append(config_path)
 
     monkeypatch.setattr(main, "run_market_data", fake_run)
@@ -132,11 +139,16 @@ async def test_run_market_data_until_stopped_cancels_and_awaits_cleanup(
     started = asyncio.Event()
     cleaned_up = asyncio.Event()
 
-    async def fake_run(config_path: Path) -> None:
+    async def fake_run(
+        config_path: Path,
+        *,
+        stop_requested: asyncio.Event | None = None,
+    ) -> None:
         del config_path
+        assert stop_requested is not None
         started.set()
         try:
-            await asyncio.Event().wait()
+            await stop_requested.wait()
         finally:
             cleaned_up.set()
 
@@ -151,6 +163,86 @@ async def test_run_market_data_until_stopped_cancels_and_awaits_cleanup(
     await asyncio.wait_for(task, timeout=1)
 
     assert cleaned_up.is_set()
+
+
+async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.run_started = asyncio.Event()
+            self.run_finished = asyncio.Event()
+            self.run_cancelled = False
+            self.stop_called = False
+
+        async def start(self, **kwargs) -> None:
+            del kwargs
+
+        async def run(self) -> None:
+            self.run_started.set()
+            try:
+                await self.run_finished.wait()
+            except asyncio.CancelledError:
+                self.run_cancelled = True
+                raise
+
+        async def stop(self) -> None:
+            self.stop_called = True
+            self.run_finished.set()
+
+    class FakeUniverse:
+        async def refresh(self, *, observed_at: datetime) -> UniverseSnapshot:
+            del observed_at
+            return fixture_snapshot()
+
+    async def block_forever(*args, **kwargs) -> None:
+        del args, kwargs
+        await asyncio.Event().wait()
+
+    capture = FakeCapture()
+    runtime = SimpleNamespace(
+        capture=capture,
+        initial_symbols=frozenset({"BTCUSDT"}),
+        enabled_streams=(CaptureStream.AGG_TRADE,),
+        universe=FakeUniverse(),
+        universe_activation_minute=1,
+        universe_refresh_interval_minutes=15,
+        runtime_state_publisher=SimpleNamespace(
+            metrics=SimpleNamespace(latest_watermark_at=None)
+        ),
+        subscription_observer=object(),
+        capture_repository=object(),
+        archive_root=Path("raw"),
+        archive_retention_days=7,
+        archive_retention_interval_seconds=3600,
+    )
+
+    @asynccontextmanager
+    async def fake_runtime(config_path: Path):
+        del config_path
+        yield runtime
+
+    monkeypatch.setattr(main, "build_market_data_runtime", fake_runtime)
+    monkeypatch.setattr(main, "run_scheduler_loop", block_forever)
+    monkeypatch.setattr(main, "monitor_market_data_freshness", block_forever)
+    monkeypatch.setattr(
+        main,
+        "reconcile_paper_exit_subscriptions",
+        block_forever,
+    )
+    monkeypatch.setattr(main, "run_raw_archive_retention_loop", block_forever)
+    stop_requested = asyncio.Event()
+    task = asyncio.create_task(
+        main.run_market_data(Path("server.yaml"), stop_requested=stop_requested)
+    )
+    await capture.run_started.wait()
+
+    stop_requested.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert capture.stop_called is True
+    assert capture.run_finished.is_set()
+    assert capture.run_cancelled is False
 
 
 async def test_scheduler_propagates_cancellation_cleanly() -> None:

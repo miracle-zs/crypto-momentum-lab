@@ -1,3 +1,5 @@
+import asyncio
+
 from crypto_momentum_lab.domain.market.models import (
     CaptureRoute,
     CaptureStream,
@@ -116,6 +118,51 @@ async def test_pool_reuses_group_and_adds_before_removing() -> None:
         ("SUBSCRIBE", ("ethusdt@aggTrade",)),
         ("UNSUBSCRIBE", ("btcusdt@aggTrade",)),
     ]
+
+
+async def test_pool_stops_connections_concurrently() -> None:
+    stop_started = 0
+    all_started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingConnection(FakeConnection):
+        async def stop(self) -> None:
+            nonlocal stop_started
+            stop_started += 1
+            if stop_started == 3:
+                all_started.set()
+            await release.wait()
+            self.stopped = True
+
+    connections: list[BlockingConnection] = []
+
+    def factory(group: SubscriptionGroup) -> BlockingConnection:
+        connection = BlockingConnection(group, [])
+        connections.append(connection)
+        return connection
+
+    pool = BinanceConnectionPool(
+        connection_factory=factory,
+        max_subscriptions_per_connection=100,
+        control_messages_per_second=5,
+    )
+    await pool.apply_symbols(
+        frozenset({"BTCUSDT"}),
+        streams=(
+            CaptureStream.AGG_TRADE,
+            CaptureStream.BOOK_TICKER,
+            CaptureStream.KLINE_1M,
+        ),
+        generation=1,
+    )
+
+    stop_task = asyncio.create_task(pool.stop())
+    await asyncio.wait_for(all_started.wait(), timeout=1)
+    assert stop_started == 3
+
+    release.set()
+    await stop_task
+    assert all(connection.stopped for connection in connections)
 
 
 def test_connection_is_replaced_before_lifetime() -> None:

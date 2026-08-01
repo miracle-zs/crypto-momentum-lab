@@ -78,7 +78,7 @@ _UNIVERSE_REFRESH_TIMEOUT_SECONDS = 120.0
 _MARKET_DATA_STARTUP_GRACE_SECONDS = 120.0
 _MARKET_DATA_STALE_AFTER_SECONDS = 120.0
 _MARKET_DATA_WATCHDOG_INTERVAL_SECONDS = 15.0
-_CAPTURE_STOP_TIMEOUT_SECONDS = 30.0
+_CAPTURE_STOP_TIMEOUT_SECONDS = 55.0
 _PAPER_EXIT_RECONCILE_SECONDS = 15.0
 _PAPER_EXIT_RUN_IDS_ENV = "CML_PAPER_EXIT_RUN_IDS"
 
@@ -623,13 +623,20 @@ async def run_scheduler(config_path: Path) -> None:
         )
 
 
-async def run_market_data(config_path: Path) -> None:
+async def run_market_data(
+    config_path: Path,
+    *,
+    stop_requested: asyncio.Event | None = None,
+) -> None:
     async with build_market_data_runtime(config_path) as runtime:
         await runtime.capture.start(
             symbols=runtime.initial_symbols,
             streams=runtime.enabled_streams,
             generation=1,
         )
+        capture_task: asyncio.Task[None] | None = None
+        auxiliary_tasks: tuple[asyncio.Task[None], ...] = ()
+        stop_task: asyncio.Task[bool] | None = None
         try:
             startup_observed_at = datetime.now(UTC).replace(
                 second=0,
@@ -642,9 +649,9 @@ async def run_market_data(config_path: Path) -> None:
                 "universe_startup_refresh",
                 observed_at=startup_snapshot.observed_at.isoformat(),
             )
-            async with asyncio.TaskGroup() as tasks:
-                tasks.create_task(runtime.capture.run())
-                tasks.create_task(
+            capture_task = asyncio.create_task(runtime.capture.run())
+            auxiliary_tasks = (
+                asyncio.create_task(
                     run_scheduler_loop(
                         LoggingRefreshService(runtime.universe),
                         activation_minute=(
@@ -654,28 +661,55 @@ async def run_market_data(config_path: Path) -> None:
                             runtime.universe_refresh_interval_minutes
                         ),
                     )
-                )
-                tasks.create_task(
+                ),
+                asyncio.create_task(
                     monitor_market_data_freshness(
                         latest_observed_at=lambda: (
                             runtime.runtime_state_publisher.metrics.latest_watermark_at
                         )
                     )
-                )
-                tasks.create_task(
+                ),
+                asyncio.create_task(
                     reconcile_paper_exit_subscriptions(
                         runtime.subscription_observer
                     )
-                )
-                tasks.create_task(
+                ),
+                asyncio.create_task(
                     run_raw_archive_retention_loop(
                         runtime.capture_repository,
                         runtime.archive_root,
                         retention_days=runtime.archive_retention_days,
                         interval_seconds=runtime.archive_retention_interval_seconds,
                     )
-                )
+                ),
+            )
+            monitored_tasks: tuple[asyncio.Task[object], ...] = (
+                capture_task,
+                *auxiliary_tasks,
+            )
+            if stop_requested is not None:
+                stop_task = asyncio.create_task(stop_requested.wait())
+                monitored_tasks = (*monitored_tasks, stop_task)
+            done, _ = await asyncio.wait(
+                monitored_tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task is not None and stop_task in done:
+                return
+            completed_service_task = next(iter(done))
+            await completed_service_task
+            raise RuntimeError("market-data service task stopped unexpectedly")
         finally:
+            if stop_task is not None:
+                stop_task.cancel()
+                await asyncio.gather(stop_task, return_exceptions=True)
+            for task in auxiliary_tasks:
+                task.cancel()
+            if auxiliary_tasks:
+                await asyncio.gather(
+                    *auxiliary_tasks,
+                    return_exceptions=True,
+                )
             try:
                 async with asyncio.timeout(_CAPTURE_STOP_TIMEOUT_SECONDS):
                     await runtime.capture.stop()
@@ -684,33 +718,23 @@ async def run_market_data(config_path: Path) -> None:
                     "market_data_capture_stop_timed_out",
                     timeout_seconds=_CAPTURE_STOP_TIMEOUT_SECONDS,
                 )
+            if capture_task is not None and not capture_task.done():
+                try:
+                    await asyncio.wait_for(capture_task, timeout=1)
+                except TimeoutError:
+                    capture_task.cancel()
+            if capture_task is not None:
+                await asyncio.gather(capture_task, return_exceptions=True)
 
 
 async def run_market_data_until_stopped(
     config_path: Path,
     stop_requested: asyncio.Event,
 ) -> None:
-    service_task = asyncio.create_task(run_market_data(config_path))
-    stop_task = asyncio.create_task(stop_requested.wait())
-    try:
-        done, _ = await asyncio.wait(
-            (service_task, stop_task),
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if service_task in done:
-            await service_task
-            return
-        service_task.cancel()
-        try:
-            await service_task
-        except asyncio.CancelledError:
-            pass
-    finally:
-        stop_task.cancel()
-        await asyncio.gather(stop_task, return_exceptions=True)
-        if not service_task.done():
-            service_task.cancel()
-            await asyncio.gather(service_task, return_exceptions=True)
+    await run_market_data(
+        config_path,
+        stop_requested=stop_requested,
+    )
 
 
 async def run_market_data_with_signal_handlers(config_path: Path) -> None:
