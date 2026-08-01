@@ -636,6 +636,13 @@ def paper_live_daemon_command(
         bool,
         typer.Option("--continue-while-halted"),
     ] = False,
+    replay_stale_states: Annotated[
+        bool,
+        typer.Option(
+            "--replay-stale-states",
+            help="Replay historical paper states after a restart.",
+        ),
+    ] = False,
     require_market_quote: Annotated[
         bool,
         typer.Option("--require-market-quote/--allow-close-fallback"),
@@ -653,6 +660,9 @@ def paper_live_daemon_command(
         database_url=resolved_database_url,
         environment=environment,
         start_at=resolved_start_at,
+        resume_run_ids=(
+            () if start_at is not None else (resolved_run_id,)
+        ),
         poll_interval_seconds=poll_interval_seconds,
         idle_timeout_seconds=idle_timeout_seconds,
         max_states=max_states,
@@ -701,6 +711,7 @@ def paper_live_daemon_command(
             checkpoint_every_seconds=checkpoint_every_seconds,
             max_market_state_age_seconds=max_market_state_age_seconds,
             continue_while_halted=continue_while_halted,
+            replay_stale_states=replay_stale_states,
             run_identity=identity,
             source_description=source.description,
             execution=ReplayExecutionConfig(
@@ -842,6 +853,13 @@ def paper_live_pair_command(
         bool,
         typer.Option("--continue-while-halted"),
     ] = False,
+    replay_stale_states: Annotated[
+        bool,
+        typer.Option(
+            "--replay-stale-states",
+            help="Replay historical paper states after a restart.",
+        ),
+    ] = False,
     require_market_quote: Annotated[
         bool,
         typer.Option("--require-market-quote/--allow-close-fallback"),
@@ -858,6 +876,11 @@ def paper_live_pair_command(
         database_url=resolved_database_url,
         environment=environment,
         start_at=resolved_start_at,
+        resume_run_ids=(
+            ()
+            if start_at is not None
+            else (fixed_run_id, candle_run_id)
+        ),
         poll_interval_seconds=poll_interval_seconds,
         idle_timeout_seconds=idle_timeout_seconds,
         max_states=max_states,
@@ -912,6 +935,7 @@ def paper_live_pair_command(
         checkpoint_every_seconds=checkpoint_every_seconds,
         max_market_state_age_seconds=max_market_state_age_seconds,
         continue_while_halted=continue_while_halted,
+        replay_stale_states=replay_stale_states,
         run_identity=fixed_identity,
         source_description=source.description,
         execution=ReplayExecutionConfig(
@@ -934,6 +958,7 @@ def paper_live_pair_command(
         checkpoint_every_seconds=checkpoint_every_seconds,
         max_market_state_age_seconds=max_market_state_age_seconds,
         continue_while_halted=continue_while_halted,
+        replay_stale_states=replay_stale_states,
         run_identity=candle_identity,
         source_description=source.description,
         execution=ReplayExecutionConfig(
@@ -985,6 +1010,7 @@ def build_postgres_paper_source(
     database_url: str,
     environment: str,
     start_at: datetime | None,
+    resume_run_ids: tuple[str, ...] = (),
     poll_interval_seconds: float,
     idle_timeout_seconds: float,
     max_states: int,
@@ -1008,6 +1034,7 @@ def build_postgres_paper_source(
             idle_timeout_seconds=idle_timeout_seconds,
             max_states=max_states,
             batch_size=batch_size,
+            resume_run_ids=resume_run_ids,
         ),
     )
 

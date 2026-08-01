@@ -165,6 +165,7 @@ services:
       - --max-market-state-age-seconds
       - "120"
       - --continue-while-halted
+      - --replay-stale-states
       - --require-market-quote
   paper-orderflow-pair:
     <<: *paper
@@ -208,6 +209,7 @@ services:
       - --max-market-state-age-seconds
       - "120"
       - --continue-while-halted
+      - --replay-stale-states
       - --require-market-quote
 
   paper-liquidation-pair:
@@ -252,6 +254,7 @@ services:
       - --max-market-state-age-seconds
       - "120"
       - --continue-while-halted
+      - --replay-stale-states
       - --require-market-quote
 
   dashboard:

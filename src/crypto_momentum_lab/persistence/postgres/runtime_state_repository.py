@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.persistence.postgres.models import (
     RuntimeMarketState15sRow,
+    StrategyRuntimeCheckpointRow,
 )
 
 
@@ -216,6 +217,38 @@ class PostgresRuntimeMarketStateRepository:
             )
         return latest
 
+    async def load_checkpoint_start_at(
+        self,
+        *,
+        run_ids: tuple[str, ...],
+    ) -> datetime | None:
+        """Return the earliest cursor needed to resume the given runs."""
+        normalized_run_ids = tuple(run_id.strip() for run_id in run_ids)
+        if any(not run_id for run_id in normalized_run_ids):
+            raise ValueError("run_ids must not contain empty values")
+        if not normalized_run_ids:
+            return None
+
+        async with self._session_factory() as session:
+            payloads = (
+                await session.scalars(
+                    select(
+                        StrategyRuntimeCheckpointRow.last_processed_at_by_symbol
+                    ).where(
+                        StrategyRuntimeCheckpointRow.run_id.in_(
+                            normalized_run_ids
+                        )
+                    )
+                )
+            ).all()
+
+        timestamps = [
+            _checkpoint_timestamp(value)
+            for payload in payloads
+            for value in payload.values()
+        ]
+        return min(timestamps, default=None)
+
 
 async def _insert_idempotent(
     session: AsyncSession,
@@ -287,3 +320,11 @@ def _normalize_for_compare(value: object) -> object:
 def _require_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
+
+
+def _checkpoint_timestamp(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("checkpoint cursor must be an ISO timestamp")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    _require_aware(parsed, "checkpoint cursor")
+    return parsed.astimezone(UTC)

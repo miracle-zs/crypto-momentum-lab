@@ -137,6 +137,7 @@ class PaperLiveDaemonConfig:
     max_market_state_age_seconds: float
     entry_symbol_refresh_seconds: float = 15.0
     continue_while_halted: bool = False
+    replay_stale_states: bool = False
     run_identity: StrategyRunIdentity | None = None
     source_description: str = "paper-live"
     execution: ReplayExecutionConfig = ReplayExecutionConfig()
@@ -243,6 +244,7 @@ def run_paired_paper_live_daemon(
 
     pending_by_account: list[list[OrderIntentCandidate]] = []
     open_positions_by_account: list[dict[str, PaperPosition]] = []
+    last_position_persisted_at_by_account: list[dict[str, datetime]] = []
     candle_aggregators: list[Candle15mAggregator | None] = []
     for account in accounts:
         config = account.config
@@ -266,13 +268,14 @@ def run_paired_paper_live_daemon(
                 )
             )
         )
+        open_positions = _run_async(
+            account.artifact_repository.load_open_positions(config.run_id)
+        )
         open_positions_by_account.append(
-            {
-                position.position_id: position
-                for position in _run_async(
-                    account.artifact_repository.load_open_positions(config.run_id)
-                )
-            }
+            {position.position_id: position for position in open_positions}
+        )
+        last_position_persisted_at_by_account.append(
+            {position.position_id: position.updated_at for position in open_positions}
         )
         candle_aggregators.append(
             Candle15mAggregator()
@@ -299,7 +302,11 @@ def run_paired_paper_live_daemon(
             continue
 
         now = clock.now()
-        if _state_age_seconds(now, state) > first_config.max_market_state_age_seconds:
+        if (
+            not first_config.replay_stale_states
+            and _state_age_seconds(now, state)
+            > first_config.max_market_state_age_seconds
+        ):
             if state.symbol not in gapped_symbols:
                 _reset_strategy_symbol(strategy, state.symbol)
                 gapped_symbols.add(state.symbol)
@@ -400,20 +407,39 @@ def run_paired_paper_live_daemon(
                         if position.status is PaperPositionStatus.OPEN
                     }
                 )
+                for position in opened_positions:
+                    if position.status is PaperPositionStatus.OPEN:
+                        last_position_persisted_at_by_account[index][
+                            position.position_id
+                        ] = state.bucket_start
             last_snapshot_at = last_equity_snapshot_at[index]
             should_snapshot = (
                 last_snapshot_at is None
                 or state.bucket_start - last_snapshot_at >= timedelta(minutes=1)
             )
-            if position_updates or fills or should_snapshot:
+            persisted_position_updates = _persistable_position_updates(
+                position_updates,
+                last_position_persisted_at_by_account[index],
+                state.bucket_start,
+            )
+            if persisted_position_updates or fills or should_snapshot:
                 _run_async(
                     account.artifact_repository.save_portfolio(
                         config.run_id,
-                        position_updates,
+                        persisted_position_updates,
                         state.bucket_start,
                         config.portfolio,
                     )
                 )
+                for position in persisted_position_updates:
+                    if position.status is PaperPositionStatus.CLOSED:
+                        last_position_persisted_at_by_account[index].pop(
+                            position.position_id, None
+                        )
+                    else:
+                        last_position_persisted_at_by_account[index][
+                            position.position_id
+                        ] = state.bucket_start
                 if should_snapshot:
                     last_equity_snapshot_at[index] = state.bucket_start
 
@@ -572,6 +598,7 @@ def run_paper_live_daemon(
         strategy.restore_checkpoint(checkpoint)
     pending_candidates: list[OrderIntentCandidate] = []
     open_positions: dict[str, PaperPosition] = {}
+    last_position_persisted_at: dict[str, datetime] = {}
     if artifact_repository is not None:
         if config.run_identity is None:
             raise ValueError("run_identity is required for paper artifacts")
@@ -588,12 +615,16 @@ def run_paper_live_daemon(
                 artifact_repository.load_pending_candidates(config.run_id)
             )
         )
+        loaded_open_positions = _run_async(
+            artifact_repository.load_open_positions(config.run_id)
+        )
         open_positions.update(
+            {position.position_id: position for position in loaded_open_positions}
+        )
+        last_position_persisted_at.update(
             {
-                position.position_id: position
-                for position in _run_async(
-                    artifact_repository.load_open_positions(config.run_id)
-                )
+                position.position_id: position.updated_at
+                for position in loaded_open_positions
             }
         )
 
@@ -621,7 +652,11 @@ def run_paper_live_daemon(
             continue
 
         now = clock.now()
-        if _state_age_seconds(now, state) > config.max_market_state_age_seconds:
+        if (
+            not config.replay_stale_states
+            and _state_age_seconds(now, state)
+            > config.max_market_state_age_seconds
+        ):
             if state.symbol not in gapped_symbols:
                 _reset_strategy_symbol(strategy, state.symbol)
                 gapped_symbols.add(state.symbol)
@@ -721,20 +756,37 @@ def run_paper_live_daemon(
                         if position.status is PaperPositionStatus.OPEN
                     }
                 )
+                for position in opened_positions:
+                    if position.status is PaperPositionStatus.OPEN:
+                        last_position_persisted_at[position.position_id] = (
+                            state.bucket_start
+                        )
             should_snapshot = (
                 last_equity_snapshot_at is None
                 or state.bucket_start - last_equity_snapshot_at
                 >= timedelta(minutes=1)
             )
-            if position_updates or fills or should_snapshot:
+            persisted_position_updates = _persistable_position_updates(
+                position_updates,
+                last_position_persisted_at,
+                state.bucket_start,
+            )
+            if persisted_position_updates or fills or should_snapshot:
                 _run_async(
                     artifact_repository.save_portfolio(
                         config.run_id,
-                        position_updates,
+                        persisted_position_updates,
                         state.bucket_start,
                         config.portfolio,
                     )
                 )
+                for position in persisted_position_updates:
+                    if position.status is PaperPositionStatus.CLOSED:
+                        last_position_persisted_at.pop(position.position_id, None)
+                    else:
+                        last_position_persisted_at[position.position_id] = (
+                            state.bucket_start
+                        )
                 if should_snapshot:
                     last_equity_snapshot_at = state.bucket_start
 
@@ -826,6 +878,22 @@ def _resolve_pending_candidates(
             )
         )
     return remaining, fills
+
+
+def _persistable_position_updates(
+    position_updates: tuple[PaperPosition, ...],
+    last_persisted_at: dict[str, datetime],
+    observed_at: datetime,
+) -> tuple[PaperPosition, ...]:
+    """Throttle open-position marks while keeping exits durable immediately."""
+    return tuple(
+        position
+        for position in position_updates
+        if position.status is PaperPositionStatus.CLOSED
+        or position.position_id not in last_persisted_at
+        or observed_at - last_persisted_at[position.position_id]
+        >= timedelta(minutes=1)
+    )
 
 
 def _save_checkpoint_and_event(

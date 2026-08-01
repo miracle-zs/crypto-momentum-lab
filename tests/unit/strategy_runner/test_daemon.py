@@ -296,6 +296,28 @@ def test_daemon_halts_on_stale_market_state() -> None:
     assert repository.saved_checkpoints == []
 
 
+def test_daemon_replays_stale_state_when_enabled() -> None:
+    stale_state = fixture_state("BTCUSDT", 0)
+    repository = FakeRepository()
+
+    result = run_paper_live_daemon(
+        source=(stale_state,),
+        strategy=FakeStrategy(),
+        repository=repository,
+        config=_config(
+            max_market_state_age_seconds=10,
+            replay_stale_states=True,
+        ),
+        clock=FakeClock(stale_state.bucket_end + timedelta(seconds=11)),
+    )
+
+    assert result.processed_state_count == 1
+    assert result.halt_reason is None
+    assert [event.event_type for event in repository.events] == [
+        "checkpoint_saved"
+    ]
+
+
 def test_daemon_skips_stale_state_and_recovers_when_enabled() -> None:
     stale_state = fixture_state("BTCUSDT", 0)
     fresh_state = fixture_state("BTCUSDT", 1)
@@ -368,6 +390,34 @@ def test_daemon_expires_pending_candidate_after_deadline() -> None:
     assert [fill.status for fill in artifacts.fills] == [
         SimulatedFillStatus.EXPIRED
     ]
+
+
+def test_daemon_throttles_open_position_mark_persistence() -> None:
+    states = tuple(fixture_state("BTCUSDT", index) for index in range(5))
+    identity = _identity()
+    artifacts = FakeArtifactRepository()
+    position = position_from_entry_fill(
+        identity.run_id,
+        _filled_entry(
+            symbol="BTCUSDT",
+            filled_at=states[0].bucket_start - timedelta(seconds=1),
+        ),
+    )
+    assert position is not None
+    artifacts.positions[position.position_id] = position
+
+    run_paper_live_daemon(
+        source=states,
+        strategy=FakeStrategy(),
+        repository=FakeRepository(),
+        artifact_repository=artifacts,
+        config=_config(run_identity=identity),
+        clock=FakeClock(states[-1].bucket_end + timedelta(seconds=1)),
+    )
+
+    assert len(artifacts.portfolio_updates) == 2
+    assert artifacts.portfolio_updates[0] == ()
+    assert artifacts.portfolio_updates[1][0].updated_at == states[-1].bucket_start
 
 
 def test_paired_daemon_calculates_entries_once_and_fans_out_accounts() -> None:
@@ -460,6 +510,7 @@ def _config(
     checkpoint_every_states: int = 10,
     max_market_state_age_seconds: float = 120.0,
     continue_while_halted: bool = False,
+    replay_stale_states: bool = False,
     run_identity: StrategyRunIdentity | None = None,
     execution: ReplayExecutionConfig | None = None,
     portfolio: PaperExitConfig | None = None,
@@ -472,6 +523,7 @@ def _config(
         checkpoint_every_seconds=999,
         max_market_state_age_seconds=max_market_state_age_seconds,
         continue_while_halted=continue_while_halted,
+        replay_stale_states=replay_stale_states,
         run_identity=run_identity,
         source_description="postgres-runtime-states:research",
         execution=execution or ReplayExecutionConfig(),
