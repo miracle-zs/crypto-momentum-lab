@@ -5,6 +5,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     OrderIntentCandidateRow,
 )
 from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
+    _legacy_paper_run_upgrade_values,
     _normalize_paper_run_for_compare,
     candidate_from_row,
     checkpoint_from_row_values,
@@ -103,6 +104,73 @@ def test_legacy_paper_run_without_exit_mode_defaults_to_fixed_for_compare() -> N
     assert _normalize_paper_run_for_compare(legacy) == (
         _normalize_paper_run_for_compare(current)
     )
+
+
+def test_legacy_unknown_commit_run_can_upgrade_new_execution_flags() -> None:
+    actual = {
+        "strategy_name": "compression_breakout",
+        "strategy_version": "v0",
+        "config_hash": "config-hash",
+        "run_mode": "paper",
+        "code_commit": "unknown",
+        "source_description": "postgres-runtime-states:research",
+        "execution_config": {
+            "fills": {
+                "latency_buckets": 1,
+                "state_interval_seconds": 15,
+                "taker_fee_rate": "0.0004",
+                "slippage_bps": "0",
+            },
+            "portfolio": {
+                "exit_mode": "fixed",
+                "take_profit_pct": "0.03",
+                "stop_loss_pct": "0.015",
+                "max_holding_buckets": 480,
+                "state_interval_seconds": 15,
+                "initial_balance": "1000",
+            },
+        },
+    }
+    expected = {
+        **actual,
+        "code_commit": "354faed4ae3b2075353cd921054efdd4a8b55682",
+        "execution_config": {
+            "fills": {
+                **actual["execution_config"]["fills"],
+                "require_market_quote": True,
+            },
+            "portfolio": {
+                **actual["execution_config"]["portfolio"],
+                "require_executable_quote": True,
+            },
+        },
+    }
+
+    assert _legacy_paper_run_upgrade_values(
+        actual=actual,
+        expected=expected,
+    ) == {
+        "code_commit": expected["code_commit"],
+        "execution_config": expected["execution_config"],
+    }
+
+
+def test_legacy_paper_run_upgrade_rejects_known_commit_or_parameter_changes() -> None:
+    actual = {
+        "strategy_name": "compression_breakout",
+        "strategy_version": "v0",
+        "config_hash": "config-hash",
+        "run_mode": "paper",
+        "code_commit": "old-known-commit",
+        "source_description": "postgres-runtime-states:research",
+        "execution_config": {},
+    }
+    expected = {**actual, "code_commit": "new-commit"}
+
+    assert _legacy_paper_run_upgrade_values(
+        actual=actual,
+        expected=expected,
+    ) is None
 
 
 def test_candidate_from_row_restores_pending_candidate() -> None:

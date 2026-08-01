@@ -46,6 +46,12 @@ from crypto_momentum_lab.strategy_runner.portfolio import (
     position_from_entry_fill,
 )
 
+_LEGACY_UNKNOWN_CODE_COMMITS = frozenset({"unknown", "unversioned"})
+_NEW_EXECUTION_FIELDS = {
+    "fills": ("require_market_quote",),
+    "portfolio": ("require_executable_quote",),
+}
+
 
 def runtime_event_row(event: StrategyRuntimeEvent) -> dict[str, object]:
     return {
@@ -257,7 +263,20 @@ class PostgresPaperDaemonRepository:
                 if _normalize_paper_run_for_compare(
                     actual
                 ) != _normalize_paper_run_for_compare(expected):
-                    raise ValueError("paper live run conflict")
+                    upgrade_values = _legacy_paper_run_upgrade_values(
+                        actual=actual,
+                        expected=expected,
+                    )
+                    if upgrade_values is None:
+                        raise ValueError("paper live run conflict")
+                    existing.code_commit = cast(
+                        str,
+                        upgrade_values["code_commit"],
+                    )
+                    existing.execution_config = cast(
+                        dict[str, object],
+                        upgrade_values["execution_config"],
+                    )
         self._portfolio_stats.pop(identity.run_id, None)
 
     async def load_pending_candidates(
@@ -737,6 +756,52 @@ def _normalize_paper_run_for_compare(
         # Runs created before candle exits were introduced imply fixed exits.
         portfolio.setdefault("exit_mode", PaperExitMode.FIXED.value)
     return normalized
+
+
+def _legacy_paper_run_upgrade_values(
+    *,
+    actual: dict[str, object],
+    expected: dict[str, object],
+) -> dict[str, object] | None:
+    """Return safe in-place upgrades for pre-versioned paper runs."""
+    if actual.get("code_commit") not in _LEGACY_UNKNOWN_CODE_COMMITS:
+        return None
+
+    normalized_actual = _normalize_paper_run_for_compare(actual)
+    normalized_expected = _normalize_paper_run_for_compare(expected)
+    actual_execution = normalized_actual.get("execution_config")
+    expected_execution = normalized_expected.get("execution_config")
+    if not isinstance(actual_execution, dict) or not isinstance(
+        expected_execution, dict
+    ):
+        return None
+
+    upgraded_execution = dict(actual_execution)
+    for section, field_names in _NEW_EXECUTION_FIELDS.items():
+        actual_section = actual_execution.get(section)
+        expected_section = expected_execution.get(section)
+        if not isinstance(actual_section, dict) or not isinstance(
+            expected_section, dict
+        ):
+            return None
+        upgraded_section = dict(actual_section)
+        for field_name in field_names:
+            if field_name in upgraded_section:
+                continue
+            if field_name not in expected_section:
+                return None
+            upgraded_section[field_name] = expected_section[field_name]
+        upgraded_execution[section] = upgraded_section
+
+    upgraded_actual = dict(normalized_actual)
+    upgraded_actual["code_commit"] = normalized_expected.get("code_commit")
+    upgraded_actual["execution_config"] = upgraded_execution
+    if upgraded_actual != normalized_expected:
+        return None
+    return {
+        "code_commit": expected["code_commit"],
+        "execution_config": expected["execution_config"],
+    }
 
 
 def _require_aware(value: datetime, field_name: str) -> None:
