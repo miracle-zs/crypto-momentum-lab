@@ -493,7 +493,7 @@ def test_daemon_uses_protected_symbol_for_exit_without_opening_new_trade() -> No
             portfolio=PaperExitConfig(max_holding_buckets=1),
         ),
         clock=FakeClock(state.bucket_end + timedelta(seconds=1)),
-        entry_symbol_loader=lambda: frozenset({"ETHUSDT"}),
+        entry_symbol_loader=lambda _observed_at: frozenset({"ETHUSDT"}),
     )
 
     assert result.processed_state_count == 1
@@ -502,6 +502,28 @@ def test_daemon_uses_protected_symbol_for_exit_without_opening_new_trade() -> No
     closed = artifacts.portfolio_updates[0][0]
     assert closed.status is PaperPositionStatus.CLOSED
     assert closed.close_reason == "max_holding_period"
+
+
+def test_daemon_loads_entry_symbols_for_historical_state_time() -> None:
+    first = fixture_state("BTCUSDT", 80)
+    second = fixture_state("BTCUSDT", 82)
+    observed_at: list[datetime] = []
+
+    def load_symbols(state_at: datetime) -> frozenset[str]:
+        observed_at.append(state_at)
+        return frozenset({"BTCUSDT"})
+
+    result = run_paper_live_daemon(
+        source=(first, second),
+        strategy=FakeStrategy(),
+        repository=FakeRepository(),
+        config=_config(replay_stale_states=True),
+        clock=FakeClock(second.bucket_end + timedelta(hours=1)),
+        entry_symbol_loader=load_symbols,
+    )
+
+    assert result.processed_state_count == 2
+    assert observed_at == [first.bucket_start, second.bucket_start]
 
 
 def _config(

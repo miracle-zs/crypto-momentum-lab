@@ -727,7 +727,7 @@ def paper_live_daemon_command(
             ),
         ),
         clock=_SystemClock(),
-        entry_symbol_loader=source.load_active_symbols,
+        entry_symbol_loader=source.load_active_symbols_at,
     )
     typer.echo(
         "Paper live daemon completed: "
@@ -979,7 +979,7 @@ def paper_live_pair_command(
             PairedPaperLiveAccount(repository, repository, candle_config),
         ),
         clock=_SystemClock(),
-        entry_symbol_loader=source.load_active_symbols,
+        entry_symbol_loader=source.load_active_symbols_at,
     )
     states_processed = result.account_results[0].processed_state_count
     halt_reason = result.account_results[0].halt_reason

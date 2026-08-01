@@ -452,6 +452,27 @@ body {
 
 .block-title strong { font: 500 15px var(--mono); }
 
+.history-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.history-button {
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: var(--accent);
+  background: transparent;
+  font: 600 9px var(--mono);
+  letter-spacing: .06em;
+  cursor: pointer;
+}
+
+.history-button:hover { border-color: var(--accent); }
+.history-button:disabled { opacity: .55; cursor: wait; }
+
 details.secondary summary {
   list-style: none;
   cursor: pointer;

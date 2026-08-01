@@ -9,6 +9,7 @@ const STRATEGY_ORDER = [
 let selectedPaperAccount = 0;
 let lastPollAt = null;
 let pollInFlight = false;
+const paperHistoryByRun = new Map();
 
 const esc = (value) => String(value ?? "—").replace(/[&<>'"]/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"
@@ -483,6 +484,11 @@ function accountDetail(account, index) {
   );
   const chartWindow = `${dayTime(account.equity_window_start)} → ${dayTime(account.equity_window_end)} UTC`;
   const configHash = account.config_hash || "—";
+  const historyLoaded = account.history_loaded === true;
+  const historyAction = `<span class="history-actions">
+    <span class="num muted">${historyLoaded ? "全部" : "最近"} ${(account.closed_trades || []).length} / 共 ${summary.closed_trade_count || 0}</span>
+    <button class="history-button" type="button" data-load-paper-history>${historyLoaded ? "刷新全部历史" : "查看全部历史"}</button>
+  </span>`;
   const detailMeta = `<div class="detail-meta">
     <span>RUN <b class="num">${esc(account.run_id || "—")}</b></span>
     <span>CONFIG <b class="num" title="${esc(configHash)}" aria-label="完整配置哈希 ${esc(configHash)}">${esc(shortHash(configHash))}</b></span>
@@ -548,7 +554,7 @@ function accountDetail(account, index) {
     ${chartBlock}
     <div class="block-split">
       <div class="block">${blockTitle("当前持仓", "OPEN POSITIONS", `<strong class="num">${positions.length}</strong>`)}${positionsTable}</div>
-      <div class="block">${blockTitle("已平仓交易", "CLOSED TRADES · LATEST 30", `<span class="num muted">最近 ${(account.closed_trades || []).length} / 共 ${summary.closed_trade_count || 0}</span>`)}${closedTable}</div>
+      <div class="block">${blockTitle("已平仓交易", historyLoaded ? "CLOSED TRADES · FULL HISTORY" : "CLOSED TRADES · LATEST 30", historyAction)}${closedTable}</div>
     </div>
     <div class="block">${blockTitle("开平仓流水", "POSITION LIFECYCLE · BUY / SELL WITH CONTEXT")}${eventsTable}</div>
     <details class="block secondary">
@@ -574,7 +580,8 @@ function renderStrategy(data) {
       <div class="pair-grid">${pairModels.map(pairedComparisonPanel).join("")}</div>
     </div>`
     : "";
-  return [data.status, cards + comparisons + accountDetail(accounts[selectedPaperAccount], selectedPaperAccount)];
+  const selectedAccount = withPaperHistory(accounts[selectedPaperAccount]);
+  return [data.status, cards + comparisons + accountDetail(selectedAccount, selectedPaperAccount)];
 }
 
 function renderUniverse(data) {
@@ -750,7 +757,7 @@ function wirePaperAccountTabs(body, data) {
   body.querySelectorAll("[data-account-index]").forEach((tab) => {
     tab.addEventListener("click", () => {
       const next = Number(tab.dataset.accountIndex);
-      const account = data.accounts?.[next];
+      const account = withPaperHistory(data.accounts?.[next]);
       if (!Number.isInteger(next) || !account || next === selectedPaperAccount) return;
       selectedPaperAccount = next;
       body.querySelectorAll("[data-account-index]").forEach((candidate) => {
@@ -760,8 +767,55 @@ function wirePaperAccountTabs(body, data) {
       });
       const detail = body.querySelector(".paper-account-detail");
       if (detail) detail.outerHTML = accountDetail(account, next);
+      wirePaperHistoryButton(body, account, next);
     });
   });
+  const account = withPaperHistory(data.accounts?.[selectedPaperAccount]);
+  if (account) wirePaperHistoryButton(body, account, selectedPaperAccount);
+}
+
+function withPaperHistory(account) {
+  if (!account?.run_id) return account;
+  const history = paperHistoryByRun.get(account.run_id);
+  if (!history) return account;
+  return {
+    ...account,
+    closed_trades: history.closed_trades,
+    trade_events: history.trade_events,
+    history_loaded: true,
+  };
+}
+
+function wirePaperHistoryButton(body, account, index) {
+  const button = body.querySelector("[data-load-paper-history]");
+  if (!button || !account?.run_id) return;
+  button.addEventListener("click", () => loadPaperAccountHistory(body, account, index));
+}
+
+async function loadPaperAccountHistory(body, account, index) {
+  const button = body.querySelector("[data-load-paper-history]");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "加载中…";
+  }
+  try {
+    const runId = encodeURIComponent(account.run_id);
+    const response = await fetch(`api/paper-accounts/${runId}/history`, {
+      headers: { "Accept": "application/json" },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const history = await response.json();
+    paperHistoryByRun.set(account.run_id, history);
+    const merged = withPaperHistory(account);
+    const detail = body.querySelector(".paper-account-detail");
+    if (detail) detail.outerHTML = accountDetail(merged, index);
+    wirePaperHistoryButton(body, merged, index);
+  } catch (error) {
+    if (button) {
+      button.disabled = false;
+      button.textContent = `加载失败 · ${error.message}`;
+    }
+  }
 }
 
 function captureScrollState(body) {

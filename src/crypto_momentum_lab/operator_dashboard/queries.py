@@ -10,6 +10,7 @@ from crypto_momentum_lab.domain.execution import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
+    PaperAccountHistoryResponse,
     PaperAccountsResponse,
     RiskExecutionResponse,
     RunReportSummaryResponse,
@@ -263,6 +264,46 @@ class DashboardQueries:
         return PaperAccountsResponse(
             status=(OperationalStatus.READY if accounts else OperationalStatus.NO_DATA),
             accounts=accounts,
+        )
+
+    async def paper_history(self, run_id: str) -> PaperAccountHistoryResponse:
+        async with self._session_factory() as session:
+            run_exists = await session.scalar(
+                select(StrategyRunRow.run_id).where(StrategyRunRow.run_id == run_id)
+            )
+            positions = (
+                await session.scalars(
+                    select(PaperPositionRow)
+                    .where(PaperPositionRow.run_id == run_id)
+                    .order_by(
+                        PaperPositionRow.opened_at.desc(),
+                        PaperPositionRow.position_id,
+                    )
+                )
+            ).all()
+        closed_positions = sorted(
+            (row for row in positions if row.status == "closed"),
+            key=lambda row: (row.closed_at or row.opened_at, row.position_id),
+            reverse=True,
+        )
+        trade_events = sorted(
+            (
+                *(_position_open_event(row) for row in positions),
+                *(_position_close_event(row) for row in closed_positions),
+            ),
+            key=lambda item: str(item["occurred_at"]),
+            reverse=True,
+        )
+        return PaperAccountHistoryResponse(
+            status=(
+                OperationalStatus.READY
+                if run_exists is not None
+                else OperationalStatus.NO_DATA
+            ),
+            run_id=run_id,
+            closed_trade_count=len(closed_positions),
+            closed_trades=[_paper_position(row) for row in closed_positions],
+            trade_events=trade_events,
         )
 
     async def strategy_run(

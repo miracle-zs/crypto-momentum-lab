@@ -18,6 +18,8 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         "dashboard",
     } <= services.keys()
     assert services["dashboard"]["ports"] == ["127.0.0.1:8765:8765"]
+    assert manifest["x-app"]["stop_grace_period"] == "60s"
+    assert services["market-data"]["healthcheck"]["start_period"] == "15m"
     for service in (
         "paper-compression-pair",
         "paper-orderflow-pair",

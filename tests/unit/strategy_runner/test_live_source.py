@@ -60,6 +60,10 @@ class FakeUniverseRepository:
     async def load_active_memberships(self):
         return {"BTCUSDT": object(), "ETHUSDT": object()}
 
+    async def load_active_memberships_at(self, observed_at):
+        assert observed_at == datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+        return {"BTCUSDT": object()}
+
 
 def test_async_loader_reuses_one_event_loop_for_pooled_database_connections() -> None:
     repository = LoopRecordingRepository()
@@ -85,6 +89,18 @@ def test_async_loader_reads_active_entry_symbols_on_its_event_loop() -> None:
     assert loader.load_active_symbols() == frozenset(
         {"BTCUSDT", "ETHUSDT"}
     )
+    loader.close()
+
+
+def test_async_loader_reads_entry_symbols_at_historical_state_time() -> None:
+    observed_at = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+    loader = AsyncPostgresRuntimeStateLoader(
+        repository=LoopRecordingRepository(),
+        environment="research",
+        universe_repository=FakeUniverseRepository(),
+    )
+
+    assert loader.load_active_symbols_at(observed_at) == frozenset({"BTCUSDT"})
     loader.close()
 
 

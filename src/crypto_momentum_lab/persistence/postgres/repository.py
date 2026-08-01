@@ -145,13 +145,24 @@ class PostgresUniverseRepository:
     async def load_active_memberships(
         self,
     ) -> dict[str, TrackedMembership]:
+        return await self.load_active_memberships_at(None)
+
+    async def load_active_memberships_at(
+        self,
+        observed_at: datetime | None,
+    ) -> dict[str, TrackedMembership]:
         async with self._session_factory() as session:
-            snapshot_id = await session.scalar(
+            snapshot_statement = (
                 select(UniverseSnapshotRow.snapshot_id)
                 .where(UniverseSnapshotRow.activated.is_(True))
                 .order_by(UniverseSnapshotRow.observed_at.desc())
                 .limit(1)
             )
+            if observed_at is not None:
+                snapshot_statement = snapshot_statement.where(
+                    UniverseSnapshotRow.observed_at <= observed_at
+                )
+            snapshot_id = await session.scalar(snapshot_statement)
             if snapshot_id is None:
                 return {}
             rows = (

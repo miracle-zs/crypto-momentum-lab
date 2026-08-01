@@ -198,7 +198,7 @@ def run_paired_paper_live_daemon(
     strategy: RuntimeStrategy,
     accounts: tuple[PairedPaperLiveAccount, ...],
     clock: Clock,
-    entry_symbol_loader: Callable[[], frozenset[str]] | None = None,
+    entry_symbol_loader: Callable[[datetime], frozenset[str]] | None = None,
 ) -> PairedPaperLiveDaemonResult:
     """Run two exit-only variants from one shared strategy calculation."""
     if len(accounts) != 2:
@@ -363,11 +363,13 @@ def run_paired_paper_live_daemon(
 
         if entry_symbol_loader is not None and (
             entry_symbols_loaded_at is None
-            or (now - entry_symbols_loaded_at).total_seconds()
+            or (
+                state.bucket_start - entry_symbols_loaded_at
+            ).total_seconds()
             >= first_config.entry_symbol_refresh_seconds
         ):
-            entry_symbols = entry_symbol_loader()
-            entry_symbols_loaded_at = now
+            entry_symbols = entry_symbol_loader(state.bucket_start)
+            entry_symbols_loaded_at = state.bucket_start
         entry_allowed = entry_symbols is None or state.symbol in entry_symbols
 
         for index, account in enumerate(accounts):
@@ -591,7 +593,7 @@ def run_paper_live_daemon(
     artifact_repository: PaperLiveArtifactRepository | None = None,
     config: PaperLiveDaemonConfig,
     clock: Clock,
-    entry_symbol_loader: Callable[[], frozenset[str]] | None = None,
+    entry_symbol_loader: Callable[[datetime], frozenset[str]] | None = None,
 ) -> PaperLiveDaemonResult:
     checkpoint = _run_async(repository.load_checkpoint(config.run_id))
     if checkpoint is not None:
@@ -713,11 +715,13 @@ def run_paper_live_daemon(
 
         if entry_symbol_loader is not None and (
             entry_symbols_loaded_at is None
-            or (now - entry_symbols_loaded_at).total_seconds()
+            or (
+                state.bucket_start - entry_symbols_loaded_at
+            ).total_seconds()
             >= config.entry_symbol_refresh_seconds
         ):
-            entry_symbols = entry_symbol_loader()
-            entry_symbols_loaded_at = now
+            entry_symbols = entry_symbol_loader(state.bucket_start)
+            entry_symbols_loaded_at = state.bucket_start
         entry_allowed = (
             entry_symbols is None or state.symbol in entry_symbols
         )

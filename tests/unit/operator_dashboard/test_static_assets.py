@@ -22,8 +22,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert 'data-endpoint="api/overview"' in index
-    assert 'href="static/dashboard.css?v=20260731-config-short"' in index
-    assert 'src="static/dashboard.js?v=20260731-config-short"' in index
+    assert 'href="static/dashboard.css?v=20260801-history-recovery"' in index
+    assert 'src="static/dashboard.js?v=20260801-history-recovery"' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
@@ -73,6 +73,8 @@ def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
         "ROLLING 24H",
         "CLOSED TRADES · LATEST 30",
         "wirePaperAccountTabs",
+        "loadPaperAccountHistory",
+        "查看全部历史",
     ):
         assert marker in text
 

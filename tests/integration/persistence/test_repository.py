@@ -96,3 +96,27 @@ async def test_load_active_memberships_ignores_unactivated_snapshot(
     memberships = await repository.load_active_memberships()
 
     assert set(memberships) == {"BTCUSDT"}
+
+
+async def test_load_active_memberships_at_uses_latest_activated_snapshot(
+    repository: PostgresUniverseRepository,
+    snapshot_factory,
+) -> None:
+    first = snapshot_factory(
+        day=14,
+        hour=22,
+        activated=True,
+        symbol="BTCUSDT",
+    )
+    second = snapshot_factory(
+        day=14,
+        hour=23,
+        activated=True,
+        symbol="ETHUSDT",
+    )
+    await repository.save_snapshot(first)
+    await repository.save_snapshot(second)
+
+    memberships = await repository.load_active_memberships_at(first.observed_at)
+
+    assert set(memberships) == {"BTCUSDT"}

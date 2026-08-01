@@ -20,12 +20,16 @@ Its initial medium-frequency profile is:
 - one closed 5-minute bar for acceptance;
 - 12 signal bars, or 60 minutes, of per-symbol cooldown.
 
-The three virtual accounts are isolated by run ID and each starts with 1,000
-USDT:
+The six virtual accounts are isolated by run ID and each starts with 1,000
+USDT. Every strategy has one fixed-exit account and one 15-minute candle-exit
+account:
 
 - `paper-account-01-compression-v1`: `compression_breakout`;
 - `paper-account-02-orderflow-v1`: `orderflow_impulse`;
-- `paper-account-03-liquidation-v1`: `liquidation_cascade`.
+- `paper-account-03-liquidation-v1`: `liquidation_cascade`;
+- `paper-account-04-compression-candle15m-v1`: `compression_breakout`;
+- `paper-account-05-orderflow-candle15m-v1`: `orderflow_impulse`;
+- `paper-account-06-liquidation-candle15m-v1`: `liquidation_cascade`.
 
 ## Deploy
 
@@ -43,11 +47,27 @@ USDT:
    compose build passes it into the image and the paper runners persist it in
    their runtime identity; deployment fails closed when it is omitted.
 
-4. Build and start the stack:
+4. Build and start the stack for the first deployment:
 
    ```bash
    docker compose --env-file .env.server -f compose.server.yaml up -d --build
    ```
+
+   For later upgrades, build first and recreate services in stages. Keep the
+   old strategy containers running while market data restarts, wait for market
+   data to become healthy, then recreate each strategy pair:
+
+   ```bash
+   docker compose --env-file .env.server -f compose.server.yaml build
+   docker compose --env-file .env.server -f compose.server.yaml up -d --no-deps market-data
+   docker compose --env-file .env.server -f compose.server.yaml ps market-data
+   docker compose --env-file .env.server -f compose.server.yaml up -d --no-deps \
+     paper-compression-pair paper-orderflow-pair paper-liquidation-pair dashboard
+   ```
+
+   Do not run the final command until `market-data` reports `healthy`. Strategy
+   runners replay every durable state after their checkpoint, so an orderly
+   restart catches up instead of silently skipping the interval.
 
 5. Add `deploy/nginx/crypto-momentum-lab.conf` inside the existing HTTPS
    server block, validate with `nginx -t`, and reload Nginx. The dashboard is
@@ -58,15 +78,17 @@ USDT:
 ```bash
 docker compose --env-file .env.server -f compose.server.yaml ps
 docker compose --env-file .env.server -f compose.server.yaml logs --tail=200 \
-  market-data paper-compression paper-orderflow paper-liquidation
+  market-data paper-compression-pair paper-orderflow-pair paper-liquidation-pair
 curl -fsS http://127.0.0.1:8765/api/health
 curl -fsS http://127.0.0.1/momentum/api/health
 ```
 
 The `market-data` healthcheck requires a recent 15-second market-state row.
 Each paper runner healthcheck requires a recent durable checkpoint for its run
-ID. Compose will restart a container whose process remains alive but stops
-advancing its heartbeat.
+ID. Docker's restart policy reacts to process exit, not health status alone; an
+alive container that becomes `unhealthy` must be investigated and explicitly
+restarted. The application exits on its own watchdog failures so the restart
+policy can handle normal market-data stalls.
 
 The market-data process fails and lets Docker restart it when a 15-minute
 universe refresh exceeds 120 seconds, when no live market state arrives within
@@ -74,7 +96,10 @@ universe refresh exceeds 120 seconds, when no live market state arrives within
 more than 120 seconds old. Connection cleanup is capped at 30 seconds so a
 stuck socket cannot prevent restart. A restart scans and recovers the durable
 raw archive before opening live subscriptions; on a large archive this startup
-phase can take several minutes.
+phase can take several minutes. Compose grants 60 seconds for graceful stop so
+archive writers can finalize instead of being killed after Docker's default
+10-second grace period. The market-data healthcheck has a 15-minute startup
+period for archive recovery.
 
 The remote console is available at `https://<server>/momentum/`. The
 exchange-account panel remains empty because this stack intentionally has no
@@ -93,6 +118,10 @@ The dashboard separates the three paper accounts into:
 - currently open positions with mark price and unrealized PnL;
 - closed trades with net realized PnL;
 - a lifecycle ledger labeled `开多`, `开空`, `平多`, or `平空`.
+
+The overview response stays bounded for normal polling. Select an account and
+use `查看全部历史` to load its complete closed-trade and lifecycle history on
+demand.
 
 Each account starts with 1,000 USDT of virtual equity. A filled entry opens a
 paper position. The compression account closes on the first closed 15-second

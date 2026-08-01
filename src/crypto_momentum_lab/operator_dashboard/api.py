@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from crypto_momentum_lab.operator_dashboard.queries import DashboardQueries
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
+    PaperAccountHistoryResponse,
     PaperAccountsResponse,
     RiskExecutionResponse,
     RunReportSummaryResponse,
@@ -39,6 +40,8 @@ class DashboardQueryProtocol(Protocol):
     async def strategy_run(self) -> StrategyRunResponse: ...
 
     async def paper_accounts(self) -> PaperAccountsResponse: ...
+
+    async def paper_history(self, run_id: str) -> PaperAccountHistoryResponse: ...
 
     async def account(self) -> AccountOverviewResponse: ...
 
@@ -172,6 +175,14 @@ def create_dashboard_app(
     )
     async def paper_accounts() -> PaperAccountsResponse:
         return await query_service().paper_accounts()
+
+    @dashboard.get(
+        "/api/paper-accounts/{run_id}/history",
+        response_model=PaperAccountHistoryResponse,
+        dependencies=[Depends(require_dashboard_auth)],
+    )
+    async def paper_history(run_id: str) -> PaperAccountHistoryResponse:
+        return await query_service().paper_history(run_id)
 
     @dashboard.get(
         "/api/account",

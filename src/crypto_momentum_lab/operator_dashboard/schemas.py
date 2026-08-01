@@ -59,6 +59,14 @@ class PaperAccountsResponse(DashboardSchema):
     accounts: list[StrategyRunResponse] = Field(default_factory=list)
 
 
+class PaperAccountHistoryResponse(DashboardSchema):
+    status: OperationalStatus
+    run_id: str
+    closed_trade_count: int
+    closed_trades: list[dict[str, JsonValue]] = Field(default_factory=list)
+    trade_events: list[dict[str, JsonValue]] = Field(default_factory=list)
+
+
 class AccountOverviewResponse(DashboardSchema):
     status: OperationalStatus
     observed_at: datetime | None

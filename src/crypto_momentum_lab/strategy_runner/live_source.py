@@ -25,6 +25,8 @@ class RuntimeStateLoader(Protocol):
 
     def load_active_symbols(self) -> frozenset[str]: ...
 
+    def load_active_symbols_at(self, observed_at: datetime) -> frozenset[str]: ...
+
     def load_checkpoint_start_at(
         self,
         *,
@@ -72,6 +74,9 @@ class PostgresPaperMarketStateSource:
 
     def load_active_symbols(self) -> frozenset[str]:
         return self.loader.load_active_symbols()
+
+    def load_active_symbols_at(self, observed_at: datetime) -> frozenset[str]:
+        return self.loader.load_active_symbols_at(observed_at)
 
     def __iter__(self) -> Iterator[MarketState15s]:
         start_at = self.config.start_at
@@ -155,6 +160,14 @@ class AsyncPostgresRuntimeStateLoader:
             return frozenset()
         memberships = self._event_loop.run_until_complete(
             self.universe_repository.load_active_memberships()
+        )
+        return frozenset(memberships)
+
+    def load_active_symbols_at(self, observed_at: datetime) -> frozenset[str]:
+        if self.universe_repository is None:
+            return frozenset()
+        memberships = self._event_loop.run_until_complete(
+            self.universe_repository.load_active_memberships_at(observed_at)
         )
         return frozenset(memberships)
 
