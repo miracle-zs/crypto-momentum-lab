@@ -99,7 +99,10 @@ raw archive before opening live subscriptions; on a large archive this startup
 phase can take several minutes. Compose grants 60 seconds for graceful stop so
 archive writers can finalize instead of being killed after Docker's default
 10-second grace period. The market-data healthcheck has a 15-minute startup
-period for archive recovery.
+period for archive recovery and rejects `ready` records written before the
+current container started. The process handles both `SIGTERM` and `SIGINT` by
+cancelling its service task and waiting for queued envelopes and open archive
+writers to flush. Do not use `SIGKILL` for planned deployments.
 
 The remote console is available at `https://<server>/momentum/`. The
 exchange-account panel remains empty because this stack intentionally has no

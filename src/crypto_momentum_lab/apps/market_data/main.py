@@ -1,5 +1,6 @@
 import asyncio
 import os
+import signal
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -685,6 +686,60 @@ async def run_market_data(config_path: Path) -> None:
                 )
 
 
+async def run_market_data_until_stopped(
+    config_path: Path,
+    stop_requested: asyncio.Event,
+) -> None:
+    service_task = asyncio.create_task(run_market_data(config_path))
+    stop_task = asyncio.create_task(stop_requested.wait())
+    try:
+        done, _ = await asyncio.wait(
+            (service_task, stop_task),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if service_task in done:
+            await service_task
+            return
+        service_task.cancel()
+        try:
+            await service_task
+        except asyncio.CancelledError:
+            pass
+    finally:
+        stop_task.cancel()
+        await asyncio.gather(stop_task, return_exceptions=True)
+        if not service_task.done():
+            service_task.cancel()
+            await asyncio.gather(service_task, return_exceptions=True)
+
+
+async def run_market_data_with_signal_handlers(config_path: Path) -> None:
+    stop_requested = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    registered_signals: list[signal.Signals] = []
+
+    def request_stop(signal_name: str) -> None:
+        if not stop_requested.is_set():
+            log.info("market_data_stop_requested", signal=signal_name)
+        stop_requested.set()
+
+    for shutdown_signal in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(
+                shutdown_signal,
+                request_stop,
+                shutdown_signal.name,
+            )
+        except (NotImplementedError, RuntimeError):
+            continue
+        registered_signals.append(shutdown_signal)
+    try:
+        await run_market_data_until_stopped(config_path, stop_requested)
+    finally:
+        for shutdown_signal in registered_signals:
+            loop.remove_signal_handler(shutdown_signal)
+
+
 async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
     async with build_market_data_runtime(config_path) as runtime:
         await runtime.capture.start(
@@ -755,6 +810,8 @@ def run_market_data_command(
     config: Path | None = typer.Option(None, "--config"),
 ) -> None:
     try:
-        asyncio.run(run_market_data(resolve_config_path(config)))
+        asyncio.run(
+            run_market_data_with_signal_handlers(resolve_config_path(config))
+        )
     except KeyboardInterrupt:
         log.info("market_data_stopped")

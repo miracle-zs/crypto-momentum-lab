@@ -126,6 +126,33 @@ def test_run_market_data_uses_combined_service(
     assert called == [Path("configs/environments/research.yaml")]
 
 
+async def test_run_market_data_until_stopped_cancels_and_awaits_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    cleaned_up = asyncio.Event()
+
+    async def fake_run(config_path: Path) -> None:
+        del config_path
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaned_up.set()
+
+    monkeypatch.setattr(main, "run_market_data", fake_run)
+    stop_requested = asyncio.Event()
+    task = asyncio.create_task(
+        main.run_market_data_until_stopped(Path("server.yaml"), stop_requested)
+    )
+    await started.wait()
+
+    stop_requested.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert cleaned_up.is_set()
+
+
 async def test_scheduler_propagates_cancellation_cleanly() -> None:
     class FakeService:
         async def refresh(self, *, observed_at: datetime) -> UniverseSnapshot:

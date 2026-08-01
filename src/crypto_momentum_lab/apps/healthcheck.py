@@ -3,6 +3,7 @@
 import argparse
 import os
 from datetime import UTC, datetime
+from pathlib import Path
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
@@ -35,6 +36,7 @@ def main() -> int:
                 return 0 if _market_data_ready(
                     connection,
                     max_age_seconds=args.max_age_seconds,
+                    not_before=_process_started_at(),
                 ) else 1
             configured_run_ids = os.environ.get("CML_HEALTHCHECK_RUN_IDS")
             if configured_run_ids:
@@ -66,6 +68,7 @@ def _market_data_ready(
     connection: Connection,
     *,
     max_age_seconds: float,
+    not_before: datetime | None = None,
 ) -> bool:
     process = connection.execute(
         text(
@@ -75,6 +78,12 @@ def _market_data_ready(
         )
     ).mappings().first()
     if process is None or process["state"] not in {"ready", "degraded"}:
+        return False
+    occurred_at = process["occurred_at"]
+    if not_before is not None and (
+        occurred_at is None
+        or _as_utc(occurred_at) < not_before.astimezone(UTC)
+    ):
         return False
     latest_state_at = connection.execute(
         text(
@@ -105,10 +114,42 @@ def _paper_ready(
 def _fresh(observed_at: datetime | None, *, max_age_seconds: float) -> bool:
     if observed_at is None:
         return False
-    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
-        observed_at = observed_at.replace(tzinfo=UTC)
-    age_seconds = (datetime.now(UTC) - observed_at.astimezone(UTC)).total_seconds()
+    age_seconds = (datetime.now(UTC) - _as_utc(observed_at)).total_seconds()
     return age_seconds <= max_age_seconds
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _process_started_at(
+    *,
+    pid: int = 1,
+    proc_root: Path = Path("/proc"),
+    clock_ticks_per_second: int | None = None,
+) -> datetime | None:
+    try:
+        process_stat = (proc_root / str(pid) / "stat").read_text()
+        fields_after_name = process_stat[process_stat.rfind(")") + 2 :].split()
+        start_ticks = int(fields_after_name[19])
+        boot_time = next(
+            int(line.split()[1])
+            for line in (proc_root / "stat").read_text().splitlines()
+            if line.startswith("btime ")
+        )
+        ticks_per_second = (
+            os.sysconf("SC_CLK_TCK")
+            if clock_ticks_per_second is None
+            else clock_ticks_per_second
+        )
+        return datetime.fromtimestamp(
+            boot_time + start_ticks / ticks_per_second,
+            tz=UTC,
+        )
+    except (IndexError, OSError, StopIteration, ValueError):
+        return None
 
 
 def _sync_database_url(database_url: str) -> str:
