@@ -59,6 +59,23 @@ async def test_late_event_for_closed_bucket_is_rejected() -> None:
     assert repository.saved_symbols == [("BTCUSDT",)]
 
 
+async def test_late_event_for_previously_unseen_bucket_is_rejected() -> None:
+    repository = FakeRuntimeStateRepository()
+    publisher = ClosedMarketStatePublisher(
+        repository=repository,
+        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+    )
+
+    await publisher.observe(fixture_trade(0, price="100", sequence=1))
+    await publisher.observe(fixture_trade(3, price="102", sequence=2))
+    await publisher.observe(
+        fixture_trade(0, price="99", sequence=3, symbol="ETHUSDT")
+    )
+
+    assert publisher.metrics.late_event_count == 1
+    assert repository.saved_symbols == [("BTCUSDT",)]
+
+
 async def test_publisher_carries_the_latest_book_quote_into_later_states() -> None:
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
@@ -86,6 +103,7 @@ def fixture_trade(
     *,
     price: str,
     sequence: int,
+    symbol: str = "BTCUSDT",
 ) -> RawEnvelope:
     event_at = datetime(2026, 7, 3, 0, 0, tzinfo=UTC) + timedelta(
         seconds=15 * bucket_index
@@ -96,7 +114,7 @@ def fixture_trade(
         environment="research",
         route=CaptureRoute.MARKET,
         stream=CaptureStream.AGG_TRADE,
-        symbol="BTCUSDT",
+        symbol=symbol,
         exchange_event_at=event_at,
         received_at=event_at,
         received_monotonic_ns=sequence,
@@ -106,7 +124,7 @@ def fixture_trade(
         subscription_generation=1,
         raw_payload={
             "e": "aggTrade",
-            "s": "BTCUSDT",
+            "s": symbol,
             "a": sequence,
             "p": price,
             "q": "1",

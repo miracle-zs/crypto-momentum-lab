@@ -39,7 +39,7 @@ class QualityRepository(Protocol):
 type AcknowledgementSink = Callable[[DurableArchiveAcknowledgement], object]
 type EnvelopeSink = Callable[[RawEnvelope], object]
 
-_MAX_ARCHIVE_BATCH_SIZE = 10000
+_DEFAULT_MAX_ARCHIVE_BATCH_SIZE = 1000
 
 
 class CaptureCoordinator:
@@ -53,7 +53,10 @@ class CaptureCoordinator:
         acknowledgement_sink: AcknowledgementSink | None = None,
         realtime_envelope_sink: EnvelopeSink | None = None,
         archived_envelope_sink: EnvelopeSink | None = None,
+        max_archive_batch_size: int = _DEFAULT_MAX_ARCHIVE_BATCH_SIZE,
     ) -> None:
+        if max_archive_batch_size <= 0:
+            raise ValueError("max_archive_batch_size must be positive")
         self._queue = queue
         self._archive = archive
         self._quality = quality
@@ -61,6 +64,7 @@ class CaptureCoordinator:
         self._acknowledgement_sink = acknowledgement_sink
         self._realtime_envelope_sink = realtime_envelope_sink
         self._archived_envelope_sink = archived_envelope_sink
+        self._max_archive_batch_size = max_archive_batch_size
         self._stopping = False
 
     async def submit(self, envelope: RawEnvelope) -> None:
@@ -80,7 +84,7 @@ class CaptureCoordinator:
             except TimeoutError:
                 continue
             batch = [envelope]
-            while len(batch) < _MAX_ARCHIVE_BATCH_SIZE:
+            while len(batch) < self._max_archive_batch_size:
                 next_envelope = self._queue.get_nowait()
                 if next_envelope is None:
                     break

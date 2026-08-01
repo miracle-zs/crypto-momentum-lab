@@ -72,7 +72,6 @@ class ClosedMarketStatePublisher:
             list[NormalizedMarketEvent],
         ] = {}
         self._latest_quotes: dict[tuple[str, str], tuple[Decimal, Decimal]] = {}
-        self._closed_buckets: set[_BucketKey] = set()
         self._max_seen_event_at: datetime | None = None
         self._latest_watermark_at: datetime | None = None
         self._received_envelope_count = 0
@@ -112,7 +111,7 @@ class ClosedMarketStatePublisher:
         self._latest_watermark_at = watermark
 
         key = _bucket_key(event)
-        if key in self._closed_buckets:
+        if key[2] + timedelta(seconds=_BUCKET_SECONDS) <= watermark:
             self._late_event_count += 1
             return
 
@@ -170,7 +169,6 @@ class ClosedMarketStatePublisher:
             sequence_range=sequence_range,
         )
         for key in ready_keys:
-            self._closed_buckets.add(key)
             del self._events_by_bucket[key]
         self._closed_state_count += len(states_tuple)
 

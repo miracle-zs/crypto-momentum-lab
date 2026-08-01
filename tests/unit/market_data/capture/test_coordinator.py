@@ -141,6 +141,34 @@ async def test_coordinator_batches_archive_appends(
     await task
 
 
+async def test_coordinator_limits_concurrent_archive_batch_size(
+    raw_envelope: RawEnvelope,
+) -> None:
+    archive = ControlledArchive()
+    coordinator = CaptureCoordinator(
+        queue=BoundedEnvelopeQueue(max_events=10, max_bytes=100000),
+        archive=archive,
+        quality=FakeQualityTracker(),
+        repository=FakeCaptureRepository(),
+        acknowledgement_sink=None,
+        max_archive_batch_size=2,
+    )
+
+    await coordinator.submit(raw_envelope)
+    await coordinator.submit(replace(raw_envelope, local_sequence=2))
+    await coordinator.submit(replace(raw_envelope, local_sequence=3))
+    task = asyncio.create_task(coordinator.run())
+
+    await asyncio.wait_for(archive.wait_until_append_count(2), timeout=1)
+    await asyncio.sleep(0)
+    assert archive.started_count == 2
+
+    archive.release_append()
+    await coordinator.stop()
+    await task
+    assert archive.started_count == 3
+
+
 async def test_archived_envelope_sink_runs_after_successful_batch_in_queue_order(
     raw_envelope: RawEnvelope,
 ) -> None:
