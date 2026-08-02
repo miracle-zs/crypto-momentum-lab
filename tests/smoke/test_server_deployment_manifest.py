@@ -81,6 +81,7 @@ def test_server_paper_capture_only_subscribes_to_strategy_required_streams() -> 
         "bookTicker",
         "forceOrder",
     ]
+    assert capture["archive"]["streams"] == ["forceOrder"]
 
 
 def test_nginx_proxy_keeps_existing_site_and_mounts_console() -> None:

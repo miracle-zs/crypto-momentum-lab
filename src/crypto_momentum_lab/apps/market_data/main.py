@@ -500,6 +500,13 @@ async def build_market_data_runtime(
         repository=capture_repository,
         acknowledgement_sink=None,
         realtime_envelope_sink=runtime_state_publisher.observe,
+        archive_streams=(
+            None
+            if archive_config.streams is None
+            else frozenset(
+                CaptureStream(item) for item in archive_config.streams
+            )
+        ),
     )
 
     def connection_factory(group: SubscriptionGroup) -> BinanceWebSocketConnection:

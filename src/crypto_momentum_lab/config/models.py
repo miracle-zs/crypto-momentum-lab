@@ -31,6 +31,7 @@ class ArchiveConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     root: Path
+    streams: tuple[str, ...] | None = None
     zstd_level: int = Field(ge=1, le=19)
     rotation_uncompressed_bytes: int = Field(gt=0)
     max_open_writers: int = Field(gt=0)
@@ -82,6 +83,18 @@ class CaptureConfig(BaseModel):
         if value.scheme not in {"ws", "wss"}:
             raise ValueError("websocket URLs must use ws or wss")
         return value
+
+    @model_validator(mode="after")
+    def validate_archive_streams(self) -> "CaptureConfig":
+        if self.archive.streams is None:
+            return self
+        unknown = set(self.archive.streams) - set(self.enabled_streams)
+        if unknown:
+            raise ValueError(
+                "archive streams must be enabled capture streams: "
+                + ", ".join(sorted(unknown))
+            )
+        return self
 
 
 class EnvironmentFile(BaseModel):

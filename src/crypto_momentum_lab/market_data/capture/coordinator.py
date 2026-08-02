@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from crypto_momentum_lab.domain.market.models import (
+    CaptureStream,
     ConnectionLifecycleEvent,
     DurableArchiveAcknowledgement,
     MarketDataState,
@@ -53,6 +54,7 @@ class CaptureCoordinator:
         acknowledgement_sink: AcknowledgementSink | None = None,
         realtime_envelope_sink: EnvelopeSink | None = None,
         archived_envelope_sink: EnvelopeSink | None = None,
+        archive_streams: frozenset[CaptureStream] | None = None,
         max_archive_batch_size: int = _DEFAULT_MAX_ARCHIVE_BATCH_SIZE,
     ) -> None:
         if max_archive_batch_size <= 0:
@@ -64,6 +66,7 @@ class CaptureCoordinator:
         self._acknowledgement_sink = acknowledgement_sink
         self._realtime_envelope_sink = realtime_envelope_sink
         self._archived_envelope_sink = archived_envelope_sink
+        self._archive_streams = archive_streams
         self._max_archive_batch_size = max_archive_batch_size
         self._stopping = False
 
@@ -115,10 +118,19 @@ class CaptureCoordinator:
 
     async def _process_envelope(self, envelope: RawEnvelope) -> None:
         quality_events = self._quality.observe(envelope)
-        acknowledgement = await self._archive.append(envelope)
+        should_archive = (
+            self._archive_streams is None
+            or envelope.stream in self._archive_streams
+        )
+        acknowledgement = (
+            await self._archive.append(envelope) if should_archive else None
+        )
         for event in quality_events:
             await self._repository.save_quality_event(event)
-        if self._acknowledgement_sink is not None:
+        if (
+            acknowledgement is not None
+            and self._acknowledgement_sink is not None
+        ):
             result = self._acknowledgement_sink(acknowledgement)
             if inspect.isawaitable(result):
                 await result

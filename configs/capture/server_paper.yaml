@@ -17,6 +17,8 @@ queue_max_bytes: 67108864
 shutdown_timeout_seconds: 30
 archive:
   root: data/raw
+  streams:
+    - forceOrder
   zstd_level: 3
   rotation_uncompressed_bytes: 67108864
   max_open_writers: 128

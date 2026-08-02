@@ -224,6 +224,36 @@ async def test_realtime_envelope_sink_runs_before_archive(
     await task
 
 
+async def test_coordinator_only_archives_selected_streams(
+    raw_envelope: RawEnvelope,
+) -> None:
+    archive = ControlledArchive()
+    archive.release_append()
+    published: list[RawEnvelope] = []
+    coordinator = CaptureCoordinator(
+        queue=BoundedEnvelopeQueue(max_events=10, max_bytes=100000),
+        archive=archive,
+        quality=FakeQualityTracker(),
+        repository=FakeCaptureRepository(),
+        realtime_envelope_sink=published.append,
+        archive_streams=frozenset({CaptureStream.FORCE_ORDER}),
+    )
+    liquidation = replace(
+        raw_envelope,
+        stream=CaptureStream.FORCE_ORDER,
+        local_sequence=2,
+    )
+
+    task = asyncio.create_task(coordinator.run())
+    await coordinator.submit(raw_envelope)
+    await coordinator.submit(liquidation)
+    await coordinator.stop()
+    await task
+
+    assert tuple(item.local_sequence for item in published) == (1, 2)
+    assert tuple(item.local_sequence for item in archive.appended) == (2,)
+
+
 async def test_lifecycle_events_are_persisted() -> None:
     repository = FakeCaptureRepository()
     coordinator = CaptureCoordinator(

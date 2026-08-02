@@ -71,6 +71,12 @@ account:
    states. A gap resets that symbol's warm-up cache; the online service never
    synthesizes historical entries or exits.
 
+   The server capture subscribes to `aggTrade`, `bookTicker`, and `forceOrder`
+   for live state generation, but raw-file archival is limited to
+   `forceOrder`. Strategy runners consume the aggregated 15-second PostgreSQL
+   states, so excluding the two high-volume streams from raw archival does not
+   change entries, fills, position marking, or exits.
+
 5. Add `deploy/nginx/crypto-momentum-lab.conf` inside the existing HTTPS
    server block, validate with `nginx -t`, and reload Nginx. The dashboard is
    anonymous by default, so expose it only over TLS or a private tunnel/VPN.
