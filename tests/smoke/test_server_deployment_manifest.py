@@ -33,6 +33,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
             )
             == "1000"
         )
+        assert "--replay-stale-states" not in services[service]["command"]
     compression = services["paper-compression-pair"]["command"]
     assert _option_value(compression, "--strategy") == "compression_breakout"
     assert _option_value(compression, "--signal-interval-seconds") == "300"
