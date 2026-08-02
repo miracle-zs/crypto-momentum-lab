@@ -818,6 +818,9 @@ function captureScrollState(body) {
       left: container.scrollLeft,
       top: container.scrollTop,
     })),
+    disclosures: Array.from(body.querySelectorAll("details")).map((details) => ({
+      open: details.open,
+    })),
   };
 }
 
@@ -833,6 +836,12 @@ function restoreScrollState(body, state) {
     if (!saved) return;
     container.scrollLeft = saved.left;
     container.scrollTop = saved.top;
+  });
+
+  body.querySelectorAll("details").forEach((details, index) => {
+    const saved = state.disclosures[index];
+    if (!saved) return;
+    details.open = saved.open;
   });
 }
 

@@ -22,8 +22,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert 'data-endpoint="api/overview"' in index
-    assert 'href="static/dashboard.css?v=20260802-paper-simple"' in index
-    assert 'src="static/dashboard.js?v=20260802-paper-simple"' in index
+    assert 'href="static/dashboard.css?v=20260802-paper-simple-details-state"' in index
+    assert 'src="static/dashboard.js?v=20260802-paper-simple-details-state"' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
@@ -102,6 +102,17 @@ def test_dashboard_polling_preserves_scroll_positions() -> None:
         'querySelectorAll(".table-scroll")',
     ):
         assert marker in text
+
+
+def test_dashboard_polling_preserves_open_strategy_signals() -> None:
+    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+
+    capture_start = text.index("function captureScrollState")
+    refresh_start = text.index("async function refreshSection")
+    scroll_state_code = text[capture_start:refresh_start]
+
+    assert 'querySelectorAll("details")' in scroll_state_code
+    assert "details.open = saved.open" in scroll_state_code
 
 
 def test_paper_account_cards_pair_same_strategy_vertically() -> None:
