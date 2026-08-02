@@ -80,7 +80,6 @@ def test_server_paper_capture_only_subscribes_to_strategy_required_streams() -> 
         "aggTrade",
         "bookTicker",
         "forceOrder",
-        "kline_1m",
     ]
 
 

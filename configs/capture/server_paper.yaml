@@ -4,7 +4,6 @@ enabled_streams:
   - aggTrade
   - bookTicker
   - forceOrder
-  - kline_1m
 max_subscriptions_per_connection: 100
 control_messages_per_second: 5
 connection_lifetime_seconds: 82800
