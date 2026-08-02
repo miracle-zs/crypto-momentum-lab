@@ -202,11 +202,7 @@ def mark_positions(
     config: PaperExitConfig,
     taker_fee_rate: Decimal,
     closed_candle: ClosedCandle15m | None = None,
-    closed_candles: tuple[ClosedCandle15m, ...] = (),
 ) -> tuple[PaperPosition, ...]:
-    available_candles = closed_candles
-    if closed_candle is not None:
-        available_candles = (*available_candles, closed_candle)
     updates: list[PaperPosition] = []
     for position in positions:
         if (
@@ -230,7 +226,7 @@ def mark_positions(
             held_until=state.bucket_start,
             position=position,
             config=config,
-            closed_candles=available_candles,
+            closed_candle=closed_candle,
         )
         if close_reason is None:
             updates.append(
@@ -242,22 +238,30 @@ def mark_positions(
                 )
             )
             continue
-        exit_notional = position.quantity * mark_price
+        exit_price = mark_price
+        closed_at = state.bucket_start
+        if close_reason.startswith("candle_15m_"):
+            if closed_candle is None:
+                raise AssertionError("candle exit requires a closed candle")
+            exit_price = closed_candle.close_price
+            closed_at = closed_candle.candle_end
+            gross_pnl = _gross_pnl(position, exit_price)
+        exit_notional = position.quantity * exit_price
         exit_fee = exit_notional * taker_fee_rate
         realized_pnl = gross_pnl - position.entry_fee - exit_fee
         updates.append(
             replace(
                 position,
                 status=PaperPositionStatus.CLOSED,
-                closed_at=state.bucket_start,
-                exit_price=mark_price,
+                closed_at=closed_at,
+                exit_price=exit_price,
                 exit_fee=exit_fee,
-                last_mark_price=mark_price,
+                last_mark_price=exit_price,
                 unrealized_pnl=Decimal("0"),
                 realized_pnl=realized_pnl,
                 return_pct=realized_pnl / position.entry_notional,
                 close_reason=close_reason,
-                updated_at=state.bucket_start,
+                updated_at=closed_at,
             )
         )
     return tuple(updates)
@@ -276,18 +280,14 @@ def _close_reason(
     held_until: datetime,
     position: PaperPosition,
     config: PaperExitConfig,
-    closed_candles: tuple[ClosedCandle15m, ...],
+    closed_candle: ClosedCandle15m | None,
 ) -> str | None:
     if config.exit_mode is PaperExitMode.CANDLE_15M:
-        for closed_candle in sorted(
-            closed_candles,
-            key=lambda candle: candle.candle_end,
+        if (
+            closed_candle is not None
+            and closed_candle.symbol == position.symbol
+            and position.opened_at < closed_candle.candle_end <= held_until
         ):
-            if (
-                closed_candle.symbol != position.symbol
-                or closed_candle.candle_end <= position.opened_at
-            ):
-                continue
             if (
                 position.side is StrategySide.LONG
                 and closed_candle.close_price < closed_candle.open_price

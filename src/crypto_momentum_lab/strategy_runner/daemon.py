@@ -1,16 +1,16 @@
 import asyncio
-import json
 from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
-from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
+from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     RunMode,
     StrategyCheckpoint,
+    StrategyDataRequirement,
     StrategyDecision,
     StrategyRunIdentity,
     StrategySignal,
@@ -50,11 +50,11 @@ class RuntimeStrategy(Protocol):
     def checkpoint(self) -> StrategyCheckpoint:
         pass
 
-
-class PaperLiveDaemonRepository(Protocol):
-    async def save_runtime_event(self, event: "StrategyRuntimeEvent") -> None:
+    def required_data(self) -> StrategyDataRequirement:
         pass
 
+
+class PaperLiveDaemonRepository(Protocol):
     async def save_checkpoint(
         self,
         run_id: str,
@@ -110,28 +110,6 @@ class PaperLiveArtifactRepository(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class StrategyRuntimeEvent:
-    event_id: str
-    run_id: str
-    event_type: str
-    occurred_at: datetime
-    symbol: str | None
-    bucket_start: datetime | None
-    details: dict[str, JsonValue]
-
-    def __post_init__(self) -> None:
-        _require_non_empty(self.event_id, "event_id")
-        _require_non_empty(self.run_id, "run_id")
-        _require_non_empty(self.event_type, "event_type")
-        _require_aware(self.occurred_at, "occurred_at")
-        if self.symbol is not None:
-            _require_non_empty(self.symbol, "symbol")
-        if self.bucket_start is not None:
-            _require_aware(self.bucket_start, "bucket_start")
-        _ensure_jsonable(self.details)
-
-
-@dataclass(frozen=True, slots=True)
 class PaperLiveDaemonConfig:
     run_id: str
     strategy_name: str
@@ -140,8 +118,6 @@ class PaperLiveDaemonConfig:
     checkpoint_every_seconds: float
     max_market_state_age_seconds: float
     entry_symbol_refresh_seconds: float = 15.0
-    continue_while_halted: bool = False
-    replay_stale_states: bool = False
     run_identity: StrategyRunIdentity | None = None
     source_description: str = "paper-live"
     execution: ReplayExecutionConfig = ReplayExecutionConfig()
@@ -236,10 +212,10 @@ def run_paired_paper_live_daemon(
     available_checkpoints = tuple(
         checkpoint for checkpoint in checkpoints if checkpoint is not None
     )
-    # The two old daemons may have durable checkpoints from different polling
-    # turns. Resume from the older one so the shared strategy can replay the
-    # gap; idempotent artifact writes make that replay safe for the newer run.
-    restored_checkpoint = min(
+    # Entry decisions are shared, so the newest checkpoint is authoritative.
+    # A lagging account is resumed as-is; online paper trading never backfills
+    # missed entries from an older cursor.
+    restored_checkpoint = max(
         available_checkpoints,
         key=_checkpoint_progress,
         default=None,
@@ -298,10 +274,16 @@ def run_paired_paper_live_daemon(
     last_checkpoint_saved_at: datetime | None = None
     last_checkpoint_elapsed_anchor = clock.now()
     last_equity_snapshot_at: list[datetime | None] = [None, None]
+    last_candle_end_by_account: list[dict[str, datetime]] = [{}, {}]
     entry_symbols: frozenset[str] | None = None
     entry_symbols_loaded_at: datetime | None = None
-    halted = False
     gapped_symbols: set[str] = set()
+    last_processed_at_by_symbol = (
+        {}
+        if restored_checkpoint is None
+        else dict(restored_checkpoint.last_processed_at_by_symbol)
+    )
+    max_gap_seconds = _strategy_max_gap_seconds(strategy)
 
     for state in source:
         if state.environment != first_config.environment:
@@ -311,62 +293,22 @@ def run_paired_paper_live_daemon(
 
         now = clock.now()
         if (
-            not first_config.replay_stale_states
-            and _state_age_seconds(now, state)
+            _state_age_seconds(now, state)
             > first_config.max_market_state_age_seconds
         ):
             if state.symbol not in gapped_symbols:
                 _reset_strategy_symbol(strategy, state.symbol)
                 gapped_symbols.add(state.symbol)
-            if not halted:
-                for account in accounts:
-                    _run_async(
-                        account.repository.save_runtime_event(
-                            _event(
-                                run_id=account.config.run_id,
-                                event_type="halted",
-                                occurred_at=now,
-                                symbol=state.symbol,
-                                bucket_start=state.bucket_start,
-                                details={
-                                    "reason": "stale_market_state",
-                                    "bucket_end": state.bucket_end.isoformat(),
-                                    "continue_while_halted": (
-                                        account.config.continue_while_halted
-                                    ),
-                                },
-                            )
-                        )
-                    )
-                halted = True
-            if all(account.config.continue_while_halted for account in accounts):
-                continue
-            return _paired_result(
-                accounts=accounts,
-                processed=processed,
-                halt_reason="stale_market_state",
-                final_cursor=final_cursor,
-                saved_at=last_checkpoint_saved_at,
-            )
+            continue
 
-        if halted:
-            for account in accounts:
-                _run_async(
-                    account.repository.save_runtime_event(
-                        _event(
-                            run_id=account.config.run_id,
-                            event_type="recovered",
-                            occurred_at=now,
-                            symbol=state.symbol,
-                            bucket_start=state.bucket_start,
-                            details={
-                                "reason": "fresh_market_state",
-                                "bucket_end": state.bucket_end.isoformat(),
-                            },
-                        )
-                    )
-                )
-            halted = False
+        if state.symbol not in gapped_symbols:
+            _reset_strategy_for_gap(
+                strategy=strategy,
+                symbol=state.symbol,
+                current_at=state.bucket_start,
+                last_processed_at=last_processed_at_by_symbol.get(state.symbol),
+                max_gap_seconds=max_gap_seconds,
+            )
         gapped_symbols.discard(state.symbol)
 
         if entry_symbol_loader is not None and (
@@ -382,26 +324,34 @@ def run_paired_paper_live_daemon(
 
         for index, account in enumerate(accounts):
             config = account.config
+            identity = config.run_identity
+            if identity is None:
+                raise ValueError("paired paper account requires run_identity")
             aggregator = candle_aggregators[index]
             closed_candle = (
                 None if aggregator is None else aggregator.observe(state)
             )
-            closed_candles = _load_closed_candles_for_positions(
-                positions=tuple(open_positions_by_account[index].values()),
-                state=state,
-                source=(
-                    candle_source
-                    if config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
-                    else None
-                ),
-            )
+            if (
+                closed_candle is None
+                and config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
+            ):
+                closed_candle = _load_latest_closed_candle_for_positions(
+                    positions=tuple(open_positions_by_account[index].values()),
+                    state=state,
+                    source=candle_source,
+                    not_before=identity.created_at,
+                    after=last_candle_end_by_account[index].get(state.symbol),
+                )
+            if closed_candle is not None:
+                last_candle_end_by_account[index][state.symbol] = (
+                    closed_candle.candle_end
+                )
             position_updates = mark_positions(
                 positions=tuple(open_positions_by_account[index].values()),
                 state=state,
                 config=config.portfolio,
                 taker_fee_rate=config.execution.taker_fee_rate,
                 closed_candle=closed_candle,
-                closed_candles=closed_candles,
             )
             for position in position_updates:
                 if position.status is PaperPositionStatus.CLOSED:
@@ -464,6 +414,7 @@ def run_paired_paper_live_daemon(
                     last_equity_snapshot_at[index] = state.bucket_start
 
         decision = strategy.on_market_state(state)
+        last_processed_at_by_symbol[state.symbol] = state.bucket_start
         for index, account in enumerate(accounts):
             account_decision = _decision_for_account(
                 decision,
@@ -490,14 +441,12 @@ def run_paired_paper_live_daemon(
         if checkpoint_due:
             checkpoint_to_save = strategy.checkpoint()
             for account in accounts:
-                _save_checkpoint_and_event(
-                    repository=account.repository,
-                    run_id=account.config.run_id,
-                    checkpoint=checkpoint_to_save,
-                    saved_at=now,
-                    symbol=state.symbol,
-                    bucket_start=state.bucket_start,
-                    processed_state_count=processed,
+                _run_async(
+                    account.repository.save_checkpoint(
+                        account.config.run_id,
+                        checkpoint_to_save,
+                        now,
+                    )
                 )
             checkpoint_dirty = False
             processed_since_checkpoint = 0
@@ -508,14 +457,12 @@ def run_paired_paper_live_daemon(
         saved_at = clock.now()
         checkpoint_to_save = strategy.checkpoint()
         for account in accounts:
-            _save_checkpoint_and_event(
-                repository=account.repository,
-                run_id=account.config.run_id,
-                checkpoint=checkpoint_to_save,
-                saved_at=saved_at,
-                symbol=None,
-                bucket_start=final_cursor,
-                processed_state_count=processed,
+            _run_async(
+                account.repository.save_checkpoint(
+                    account.config.run_id,
+                    checkpoint_to_save,
+                    saved_at,
+                )
             )
         last_checkpoint_saved_at = saved_at
 
@@ -603,32 +550,37 @@ def _checkpoint_progress(checkpoint: StrategyCheckpoint) -> float:
     )
 
 
-def _load_closed_candles_for_positions(
+def _load_latest_closed_candle_for_positions(
     *,
     positions: tuple[PaperPosition, ...],
     state: MarketState15s,
     source: ClosedCandle15mSource | None,
-) -> tuple[ClosedCandle15m, ...]:
+    not_before: datetime,
+    after: datetime | None,
+) -> ClosedCandle15m | None:
     if source is None:
-        return ()
+        return None
+    candle_end = _candle_start_15m(state.bucket_start)
+    if candle_end <= not_before or (
+        after is not None and candle_end <= after
+    ):
+        return None
     matching = tuple(
         position
         for position in positions
         if position.status is PaperPositionStatus.OPEN
         and position.symbol == state.symbol
-        and position.opened_at < state.bucket_start
+        and position.opened_at < candle_end
     )
     if not matching:
-        return ()
-    start = _candle_start_15m(min(item.opened_at for item in matching))
-    end = _candle_start_15m(state.bucket_start)
-    if end <= start:
-        return ()
-    return source.load_closed_candles(
+        return None
+    candle_start = candle_end - timedelta(minutes=15)
+    candles = source.load_closed_candles(
         symbol=state.symbol,
-        start=start,
-        end=end,
+        start=candle_start,
+        end=candle_end,
     )
+    return candles[-1] if candles else None
 
 
 def _candle_start_15m(value: datetime) -> datetime:
@@ -691,12 +643,24 @@ def run_paper_live_daemon(
     final_cursor: datetime | None = None
     checkpoint_dirty = False
     last_checkpoint_saved_at: datetime | None = None
-    last_checkpoint_elapsed_anchor = clock.now()
+    daemon_started_at = clock.now()
+    last_checkpoint_elapsed_anchor = daemon_started_at
     last_equity_snapshot_at: datetime | None = None
+    last_candle_end_by_symbol: dict[str, datetime] = {}
     entry_symbols: frozenset[str] | None = None
     entry_symbols_loaded_at: datetime | None = None
-    halted = False
     gapped_symbols: set[str] = set()
+    last_processed_at_by_symbol = (
+        {}
+        if checkpoint is None
+        else dict(checkpoint.last_processed_at_by_symbol)
+    )
+    max_gap_seconds = _strategy_max_gap_seconds(strategy)
+    candle_not_before = (
+        daemon_started_at
+        if config.run_identity is None
+        else config.run_identity.created_at
+    )
     candle_aggregator = (
         Candle15mAggregator()
         if (
@@ -714,62 +678,21 @@ def run_paper_live_daemon(
 
         now = clock.now()
         if (
-            not config.replay_stale_states
-            and _state_age_seconds(now, state)
-            > config.max_market_state_age_seconds
+            _state_age_seconds(now, state) > config.max_market_state_age_seconds
         ):
             if state.symbol not in gapped_symbols:
                 _reset_strategy_symbol(strategy, state.symbol)
                 gapped_symbols.add(state.symbol)
-            if not halted:
-                _run_async(
-                    repository.save_runtime_event(
-                        _event(
-                            run_id=config.run_id,
-                            event_type="halted",
-                            occurred_at=now,
-                            symbol=state.symbol,
-                            bucket_start=state.bucket_start,
-                            details={
-                                "reason": "stale_market_state",
-                                "bucket_end": state.bucket_end.isoformat(),
-                                "continue_while_halted": (
-                                    config.continue_while_halted
-                                ),
-                            },
-                        )
-                    )
-                )
-                halted = True
-            if config.continue_while_halted:
-                # Never use stale data for exits or new entries. Keep polling
-                # so a temporarily lagging daemon can recover without a loop
-                # of process restarts.
-                continue
-            return PaperLiveDaemonResult(
-                processed_state_count=processed,
-                halt_reason="stale_market_state",
-                final_cursor=final_cursor,
-                final_checkpoint_saved_at=last_checkpoint_saved_at,
-            )
+            continue
 
-        if halted:
-            _run_async(
-                repository.save_runtime_event(
-                    _event(
-                        run_id=config.run_id,
-                        event_type="recovered",
-                        occurred_at=now,
-                        symbol=state.symbol,
-                        bucket_start=state.bucket_start,
-                        details={
-                            "reason": "fresh_market_state",
-                            "bucket_end": state.bucket_end.isoformat(),
-                        },
-                    )
-                )
+        if state.symbol not in gapped_symbols:
+            _reset_strategy_for_gap(
+                strategy=strategy,
+                symbol=state.symbol,
+                current_at=state.bucket_start,
+                last_processed_at=last_processed_at_by_symbol.get(state.symbol),
+                max_gap_seconds=max_gap_seconds,
             )
-            halted = False
         gapped_symbols.discard(state.symbol)
 
         if entry_symbol_loader is not None and (
@@ -791,22 +714,27 @@ def run_paper_live_daemon(
                 if candle_aggregator is None
                 else candle_aggregator.observe(state)
             )
-            closed_candles = _load_closed_candles_for_positions(
-                positions=tuple(open_positions.values()),
-                state=state,
-                source=(
-                    candle_source
-                    if config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
-                    else None
-                ),
-            )
+            if (
+                closed_candle is None
+                and config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
+            ):
+                closed_candle = _load_latest_closed_candle_for_positions(
+                    positions=tuple(open_positions.values()),
+                    state=state,
+                    source=candle_source,
+                    not_before=candle_not_before,
+                    after=last_candle_end_by_symbol.get(state.symbol),
+                )
+            if closed_candle is not None:
+                last_candle_end_by_symbol[state.symbol] = (
+                    closed_candle.candle_end
+                )
             position_updates = mark_positions(
                 positions=tuple(open_positions.values()),
                 state=state,
                 config=config.portfolio,
                 taker_fee_rate=config.execution.taker_fee_rate,
                 closed_candle=closed_candle,
-                closed_candles=closed_candles,
             )
             for position in position_updates:
                 if position.status is PaperPositionStatus.CLOSED:
@@ -864,6 +792,7 @@ def run_paper_live_daemon(
                     last_equity_snapshot_at = state.bucket_start
 
         decision = strategy.on_market_state(state)
+        last_processed_at_by_symbol[state.symbol] = state.bucket_start
         if artifact_repository is not None and entry_allowed and (
             decision.signals or decision.candidates
         ):
@@ -882,14 +811,12 @@ def run_paper_live_daemon(
         ).total_seconds() >= config.checkpoint_every_seconds
         if should_checkpoint_by_count or should_checkpoint_by_time:
             checkpoint_to_save = strategy.checkpoint()
-            _save_checkpoint_and_event(
-                repository=repository,
-                run_id=config.run_id,
-                checkpoint=checkpoint_to_save,
-                saved_at=now,
-                symbol=state.symbol,
-                bucket_start=state.bucket_start,
-                processed_state_count=processed,
+            _run_async(
+                repository.save_checkpoint(
+                    config.run_id,
+                    checkpoint_to_save,
+                    now,
+                )
             )
             last_checkpoint_saved_at = now
             checkpoint_dirty = False
@@ -899,14 +826,12 @@ def run_paper_live_daemon(
     if checkpoint_dirty:
         saved_at = clock.now()
         checkpoint_to_save = strategy.checkpoint()
-        _save_checkpoint_and_event(
-            repository=repository,
-            run_id=config.run_id,
-            checkpoint=checkpoint_to_save,
-            saved_at=saved_at,
-            symbol=None,
-            bucket_start=final_cursor,
-            processed_state_count=processed,
+        _run_async(
+            repository.save_checkpoint(
+                config.run_id,
+                checkpoint_to_save,
+                saved_at,
+            )
         )
         last_checkpoint_saved_at = saved_at
 
@@ -969,65 +894,6 @@ def _persistable_position_updates(
     )
 
 
-def _save_checkpoint_and_event(
-    *,
-    repository: PaperLiveDaemonRepository,
-    run_id: str,
-    checkpoint: StrategyCheckpoint,
-    saved_at: datetime,
-    symbol: str | None,
-    bucket_start: datetime | None,
-    processed_state_count: int,
-) -> None:
-    _run_async(repository.save_checkpoint(run_id, checkpoint, saved_at))
-    _run_async(
-        repository.save_runtime_event(
-            _event(
-                run_id=run_id,
-                event_type="checkpoint_saved",
-                occurred_at=saved_at,
-                symbol=symbol,
-                bucket_start=bucket_start,
-                details={"processed_state_count": processed_state_count},
-            )
-        )
-    )
-
-
-def _event(
-    *,
-    run_id: str,
-    event_type: str,
-    occurred_at: datetime,
-    symbol: str | None,
-    bucket_start: datetime | None,
-    details: dict[str, JsonValue],
-) -> StrategyRuntimeEvent:
-    encoded = json.dumps(
-        {
-            "run_id": run_id,
-            "event_type": event_type,
-            "occurred_at": occurred_at.isoformat(),
-            "symbol": symbol,
-            "bucket_start": None
-            if bucket_start is None
-            else bucket_start.isoformat(),
-            "details": details,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return StrategyRuntimeEvent(
-        event_id=str(uuid5(NAMESPACE_URL, f"strategy-runtime-event:{encoded}")),
-        run_id=run_id,
-        event_type=event_type,
-        occurred_at=occurred_at,
-        symbol=symbol,
-        bucket_start=bucket_start,
-        details=details,
-    )
-
-
 def _already_processed(
     state: MarketState15s,
     checkpoint: StrategyCheckpoint | None,
@@ -1050,6 +916,24 @@ def _reset_strategy_symbol(strategy: RuntimeStrategy, symbol: str) -> None:
         reset(symbol)
 
 
+def _reset_strategy_for_gap(
+    *,
+    strategy: RuntimeStrategy,
+    symbol: str,
+    current_at: datetime,
+    last_processed_at: datetime | None,
+    max_gap_seconds: int,
+) -> None:
+    if last_processed_at is None:
+        return
+    if (current_at - last_processed_at).total_seconds() > max_gap_seconds:
+        _reset_strategy_symbol(strategy, symbol)
+
+
+def _strategy_max_gap_seconds(strategy: RuntimeStrategy) -> int:
+    return strategy.required_data().max_gap_seconds
+
+
 def _run_async[T](awaitable: Coroutine[object, object, T]) -> T:
     try:
         asyncio.get_running_loop()
@@ -1066,7 +950,3 @@ def _require_non_empty(value: str, field_name: str) -> None:
 def _require_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
-
-
-def _ensure_jsonable(value: JsonValue) -> None:
-    json.dumps(value, allow_nan=False)

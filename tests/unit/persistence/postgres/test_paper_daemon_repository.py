@@ -10,37 +10,11 @@ from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     candidate_from_row,
     checkpoint_from_row_values,
     paper_live_run_row,
-    runtime_event_row,
 )
-from crypto_momentum_lab.strategy_runner.daemon import StrategyRuntimeEvent
 from crypto_momentum_lab.strategy_runner.portfolio import PaperExitConfig
 from tests.unit.persistence.postgres.test_strategy_run_repository import (
     fixture_paper_report,
 )
-
-
-def test_runtime_event_row_preserves_details() -> None:
-    event = StrategyRuntimeEvent(
-        event_id="event-1",
-        run_id="run-1",
-        event_type="checkpoint_saved",
-        occurred_at=datetime(2026, 7, 4, 0, 1, tzinfo=UTC),
-        symbol="BTCUSDT",
-        bucket_start=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
-        details={"state_count": 10},
-    )
-
-    row = runtime_event_row(event)
-
-    assert row == {
-        "event_id": "event-1",
-        "run_id": "run-1",
-        "event_type": "checkpoint_saved",
-        "occurred_at": datetime(2026, 7, 4, 0, 1, tzinfo=UTC),
-        "symbol": "BTCUSDT",
-        "bucket_start": datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
-        "details": {"state_count": 10},
-    }
 
 
 def test_checkpoint_from_row_values_restores_checkpoint() -> None:

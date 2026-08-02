@@ -123,7 +123,6 @@ class FakeQueries:
     async def reports(self) -> RunReportSummaryResponse:
         return RunReportSummaryResponse(
             status=OperationalStatus.NO_DATA,
-            paper_runs=[],
             shadow_sessions=[],
             live_sessions=[],
         )

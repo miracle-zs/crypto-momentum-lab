@@ -1,7 +1,7 @@
 import asyncio
 import os
 from contextlib import nullcontext
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
@@ -543,20 +543,9 @@ def paper_live_daemon_command(
         str,
         typer.Option("--environment", help="Runtime state environment."),
     ] = "research",
-    start_at: Annotated[
-        str | None,
-        typer.Option(
-            "--start-at",
-            help="Optional inclusive ISO timestamp for the first bucket.",
-        ),
-    ] = None,
     run_id: Annotated[
         str | None,
         typer.Option("--run-id", help="Optional deterministic run ID."),
-    ] = None,
-    generated_at: Annotated[
-        str | None,
-        typer.Option("--generated-at", help="Optional ISO timestamp for tests."),
     ] = None,
     compression_window_buckets: Annotated[
         int,
@@ -641,17 +630,6 @@ def paper_live_daemon_command(
         float,
         typer.Option("--max-market-state-age-seconds", min=1),
     ] = 120.0,
-    continue_while_halted: Annotated[
-        bool,
-        typer.Option("--continue-while-halted"),
-    ] = False,
-    replay_stale_states: Annotated[
-        bool,
-        typer.Option(
-            "--replay-stale-states",
-            help="Replay historical paper states after a restart.",
-        ),
-    ] = False,
     require_market_quote: Annotated[
         bool,
         typer.Option("--require-market-quote/--allow-close-fallback"),
@@ -661,17 +639,12 @@ def paper_live_daemon_command(
     if not resolved_database_url:
         raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
     resolved_run_id = run_id or f"paper-live-daemon-{uuid4()}"
-    created_at = _parse_generated_at(generated_at)
-    resolved_start_at = _parse_optional_start_at(start_at)
-    if resolved_start_at is None:
-        resolved_start_at = created_at - timedelta(seconds=max_market_state_age_seconds)
+    clock = _SystemClock()
+    created_at = clock.now()
     source = build_postgres_paper_source(
         database_url=resolved_database_url,
         environment=environment,
-        start_at=resolved_start_at,
-        resume_run_ids=(
-            () if start_at is not None else (resolved_run_id,)
-        ),
+        start_at=created_at,
         poll_interval_seconds=poll_interval_seconds,
         idle_timeout_seconds=idle_timeout_seconds,
         max_states=max_states,
@@ -726,8 +699,6 @@ def paper_live_daemon_command(
                 checkpoint_every_states=checkpoint_every_states,
                 checkpoint_every_seconds=checkpoint_every_seconds,
                 max_market_state_age_seconds=max_market_state_age_seconds,
-                continue_while_halted=continue_while_halted,
-                replay_stale_states=replay_stale_states,
                 run_identity=identity,
                 source_description=source.description,
                 execution=ReplayExecutionConfig(
@@ -742,7 +713,7 @@ def paper_live_daemon_command(
                     require_executable_quote=require_market_quote,
                 ),
             ),
-            clock=_SystemClock(),
+            clock=clock,
             entry_symbol_loader=source.load_active_symbols_at,
             candle_source=candle_source,
         )
@@ -785,14 +756,6 @@ def paper_live_pair_command(
         str,
         typer.Option("--environment", help="Runtime state environment."),
     ] = "research",
-    start_at: Annotated[
-        str | None,
-        typer.Option("--start-at", help="Optional inclusive ISO timestamp."),
-    ] = None,
-    generated_at: Annotated[
-        str | None,
-        typer.Option("--generated-at", help="Optional ISO timestamp for tests."),
-    ] = None,
     compression_window_buckets: Annotated[
         int,
         typer.Option("--compression-window-buckets", min=1),
@@ -873,17 +836,6 @@ def paper_live_pair_command(
         float,
         typer.Option("--max-market-state-age-seconds", min=1),
     ] = 120.0,
-    continue_while_halted: Annotated[
-        bool,
-        typer.Option("--continue-while-halted"),
-    ] = False,
-    replay_stale_states: Annotated[
-        bool,
-        typer.Option(
-            "--replay-stale-states",
-            help="Replay historical paper states after a restart.",
-        ),
-    ] = False,
     require_market_quote: Annotated[
         bool,
         typer.Option("--require-market-quote/--allow-close-fallback"),
@@ -892,19 +844,12 @@ def paper_live_pair_command(
     resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
     if not resolved_database_url:
         raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
-    created_at = _parse_generated_at(generated_at)
-    resolved_start_at = _parse_optional_start_at(start_at)
-    if resolved_start_at is None:
-        resolved_start_at = created_at - timedelta(seconds=max_market_state_age_seconds)
+    clock = _SystemClock()
+    created_at = clock.now()
     source = build_postgres_paper_source(
         database_url=resolved_database_url,
         environment=environment,
-        start_at=resolved_start_at,
-        resume_run_ids=(
-            ()
-            if start_at is not None
-            else (fixed_run_id, candle_run_id)
-        ),
+        start_at=created_at,
         poll_interval_seconds=poll_interval_seconds,
         idle_timeout_seconds=idle_timeout_seconds,
         max_states=max_states,
@@ -958,8 +903,6 @@ def paper_live_pair_command(
         checkpoint_every_states=checkpoint_every_states,
         checkpoint_every_seconds=checkpoint_every_seconds,
         max_market_state_age_seconds=max_market_state_age_seconds,
-        continue_while_halted=continue_while_halted,
-        replay_stale_states=replay_stale_states,
         run_identity=fixed_identity,
         source_description=source.description,
         execution=ReplayExecutionConfig(
@@ -981,8 +924,6 @@ def paper_live_pair_command(
         checkpoint_every_states=checkpoint_every_states,
         checkpoint_every_seconds=checkpoint_every_seconds,
         max_market_state_age_seconds=max_market_state_age_seconds,
-        continue_while_halted=continue_while_halted,
-        replay_stale_states=replay_stale_states,
         run_identity=candle_identity,
         source_description=source.description,
         execution=ReplayExecutionConfig(
@@ -1003,7 +944,7 @@ def paper_live_pair_command(
                 PairedPaperLiveAccount(repository, repository, fixed_config),
                 PairedPaperLiveAccount(repository, repository, candle_config),
             ),
-            clock=_SystemClock(),
+            clock=clock,
             entry_symbol_loader=source.load_active_symbols_at,
             candle_source=candle_source,
         )
@@ -1036,7 +977,6 @@ def build_postgres_paper_source(
     database_url: str,
     environment: str,
     start_at: datetime | None,
-    resume_run_ids: tuple[str, ...] = (),
     poll_interval_seconds: float,
     idle_timeout_seconds: float,
     max_states: int,
@@ -1060,7 +1000,6 @@ def build_postgres_paper_source(
             idle_timeout_seconds=idle_timeout_seconds,
             max_states=max_states,
             batch_size=batch_size,
-            resume_run_ids=resume_run_ids,
         ),
     )
 

@@ -15,11 +15,9 @@ from tests.unit.persistence.postgres.test_runtime_state_repository import (
 
 
 class FakeLoader:
-    def __init__(self, batches, checkpoint_start_at=None) -> None:
+    def __init__(self, batches) -> None:
         self.batches = list(batches)
-        self.checkpoint_start_at = checkpoint_start_at
         self.cursors: list[RuntimeStateCursor] = []
-        self.resume_run_ids: list[tuple[str, ...]] = []
 
     def load_after(
         self,
@@ -34,11 +32,6 @@ class FakeLoader:
 
     def close(self) -> None:
         pass
-
-    def load_checkpoint_start_at(self, *, run_ids: tuple[str, ...]):
-        self.resume_run_ids.append(run_ids)
-        return self.checkpoint_start_at
-
 
 class LoopRecordingRepository:
     def __init__(self) -> None:
@@ -163,25 +156,5 @@ def test_postgres_paper_source_stops_after_idle_timeout() -> None:
     ]
 
 
-def test_postgres_paper_source_prefers_checkpoint_cursor_on_resume() -> None:
-    fallback = datetime(2026, 7, 3, 1, 0, tzinfo=UTC)
-    checkpoint_start = datetime(2026, 7, 3, 0, 30, tzinfo=UTC)
-    loader = FakeLoader([()], checkpoint_start_at=checkpoint_start)
-    source = PostgresPaperMarketStateSource(
-        loader=loader,
-        config=PaperLiveSourceConfig(
-            environment="research",
-            start_at=fallback,
-            poll_interval_seconds=0,
-            idle_timeout_seconds=0,
-            max_states=10,
-            batch_size=10,
-            resume_run_ids=("run-1", "run-2"),
-        ),
-    )
-
-    assert tuple(source) == ()
-    assert loader.resume_run_ids == [("run-1", "run-2")]
-    assert loader.cursors == [
-        RuntimeStateCursor(bucket_start=checkpoint_start, symbol="")
-    ]
+def test_paper_live_source_has_no_historical_resume_interface() -> None:
+    assert "resume_run_ids" not in PaperLiveSourceConfig.__dataclass_fields__

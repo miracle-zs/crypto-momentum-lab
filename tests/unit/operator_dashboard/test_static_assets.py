@@ -22,8 +22,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert 'data-endpoint="api/overview"' in index
-    assert 'href="static/dashboard.css?v=20260801-history-recovery"' in index
-    assert 'src="static/dashboard.js?v=20260801-history-recovery"' in index
+    assert 'href="static/dashboard.css?v=20260802-paper-simple"' in index
+    assert 'src="static/dashboard.js?v=20260802-paper-simple"' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
@@ -111,3 +111,11 @@ def test_paper_account_cards_pair_same_strategy_vertically() -> None:
     assert "grid-auto-flow: column" in text
     assert "grid-template-rows: none" in text
     assert "grid-auto-flow: row" in text
+
+
+def test_reports_panel_does_not_repeat_paper_accounts() -> None:
+    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+
+    assert "纸面运行" not in text
+    assert "PAPER RUNS" not in text
+    assert "paper_runs" not in text

@@ -505,6 +505,11 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
         lambda database_url: repository,
     )
     monkeypatch.setattr(main, "run_paper_live_daemon", fake_run_daemon)
+    monkeypatch.setattr(
+        main._SystemClock,
+        "now",
+        lambda _self: datetime(2026, 7, 4, 0, 5, tzinfo=UTC),
+    )
 
     result = runner.invoke(
         main.app,
@@ -518,8 +523,6 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
             "research",
             "--run-id",
             "daemon-run",
-            "--generated-at",
-            "2026-07-04T00:05:00+00:00",
             "--checkpoint-every-states",
             "7",
             "--checkpoint-every-seconds",
@@ -547,8 +550,9 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
     assert config.checkpoint_every_seconds == 30
     assert config.max_market_state_age_seconds == 90
     assert source_calls[0]["start_at"] == datetime(
-        2026, 7, 4, 0, 3, 30, tzinfo=UTC
+        2026, 7, 4, 0, 5, tzinfo=UTC
     )
+    assert "resume_run_ids" not in source_calls[0]
     assert "Paper live daemon completed: states=3 halt=none" in result.stdout
 
 
@@ -585,6 +589,11 @@ def test_paper_live_pair_builds_two_exit_accounts(monkeypatch) -> None:
         lambda database_url: repository,
     )
     monkeypatch.setattr(main, "run_paired_paper_live_daemon", fake_run_pair)
+    monkeypatch.setattr(
+        main._SystemClock,
+        "now",
+        lambda _self: datetime(2026, 7, 4, 0, 5, tzinfo=UTC),
+    )
 
     result = runner.invoke(
         main.app,
@@ -598,8 +607,6 @@ def test_paper_live_pair_builds_two_exit_accounts(monkeypatch) -> None:
             "fixed-run",
             "--candle-run-id",
             "candle-run",
-            "--generated-at",
-            "2026-07-04T00:05:00+00:00",
             "--max-states",
             "3",
         ],
@@ -618,6 +625,17 @@ def test_paper_live_pair_builds_two_exit_accounts(monkeypatch) -> None:
     assert accounts[0].config.portfolio.exit_mode.value == "fixed"
     assert accounts[1].config.portfolio.exit_mode.value == "candle_15m"
     assert "Paper live pair completed: strategy=orderflow_impulse" in result.stdout
+
+
+def test_paper_live_commands_do_not_expose_historical_recovery_options() -> None:
+    for command in ("paper-live-daemon", "paper-live-pair"):
+        result = runner.invoke(main.app, [command, "--help"])
+
+        assert result.exit_code == 0
+        assert "--start-at" not in result.output
+        assert "--generated-at" not in result.output
+        assert "--continue-while-halted" not in result.output
+        assert "--replay-stale-states" not in result.output
 
 
 def test_paper_daemon_repository_disables_async_connection_pool(monkeypatch) -> None:

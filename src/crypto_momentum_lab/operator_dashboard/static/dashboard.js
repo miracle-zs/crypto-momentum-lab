@@ -698,13 +698,6 @@ function renderAccount(data) {
 }
 
 function renderReports(data) {
-  const paperTable = dataTable([
-    { label: "运行 ID", key: "run_id", cls: "num cut" },
-    { label: "策略", key: "strategy_name", cls: "sym" },
-    { label: "信号数", key: "signal_count", align: "right" },
-    { label: "成交数", key: "fill_count", align: "right" },
-    { label: "创建时间", value: (row) => dayTime(row.created_at), align: "right", cls: "muted" },
-  ], data.paper_runs, { emptyText: "尚无纸面运行记录" });
   const shadowTable = dataTable([
     { label: "运行 ID", key: "run_id", cls: "num cut" },
     { label: "策略", key: "strategy_name", cls: "sym" },
@@ -719,8 +712,7 @@ function renderReports(data) {
   const body = `<div class="block-split">
       <div class="block">${blockTitle("影子会话", "SHADOW SESSIONS")}${shadowTable}</div>
       <div class="block">${blockTitle("实盘状态迁移", "LIVE TRANSITIONS")}${liveTable}</div>
-    </div>
-    <div class="block">${blockTitle("纸面运行", "PAPER RUNS · LATEST 10")}${paperTable}</div>`;
+    </div>`;
   return [data.status, body];
 }
 

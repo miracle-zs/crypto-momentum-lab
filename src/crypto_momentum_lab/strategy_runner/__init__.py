@@ -10,7 +10,6 @@ from crypto_momentum_lab.strategy_runner.daemon import (
     PaperLiveDaemonRepository,
     PaperLiveDaemonResult,
     RuntimeStrategy,
-    StrategyRuntimeEvent,
     run_paired_paper_live_daemon,
     run_paper_live_daemon,
 )
@@ -85,7 +84,6 @@ __all__ = [
     "PaperRunnerError",
     "PaperTradingRunReport",
     "RuntimeStrategy",
-    "StrategyRuntimeEvent",
     "StrategyReplayReport",
     "build_strategy_replay_report",
     "deterministic_fill_id",

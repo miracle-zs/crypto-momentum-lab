@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 from crypto_momentum_lab.operator_dashboard.queries import (
     _downsample_equity_snapshots,
@@ -35,6 +36,15 @@ def test_downsample_equity_snapshots_caps_result_to_latest_240_buckets() -> None
     assert len(sampled) == 240
     assert sampled[0].snapshot_id == "2"
     assert sampled[-1].snapshot_id == "241"
+
+
+def test_dashboard_uses_latest_checkpoint_without_append_only_events() -> None:
+    source = Path(
+        "src/crypto_momentum_lab/operator_dashboard/queries.py"
+    ).read_text(encoding="utf-8")
+
+    assert "StrategyRuntimeCheckpointRow" in source
+    assert "StrategyRuntimeEventRow" not in source
 
 
 def _snapshot(

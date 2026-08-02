@@ -25,7 +25,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     PaperPositionRow,
     StrategyRunRow,
     StrategyRuntimeCheckpointRow,
-    StrategyRuntimeEventRow,
     StrategySignalRow,
 )
 from crypto_momentum_lab.persistence.postgres.strategy_run_repository import (
@@ -33,7 +32,6 @@ from crypto_momentum_lab.persistence.postgres.strategy_run_repository import (
     paper_fill_row,
     strategy_signal_row,
 )
-from crypto_momentum_lab.strategy_runner.daemon import StrategyRuntimeEvent
 from crypto_momentum_lab.strategy_runner.fills import (
     ReplayExecutionConfig,
     SimulatedFill,
@@ -51,18 +49,6 @@ _NEW_EXECUTION_FIELDS = {
     "fills": ("require_market_quote",),
     "portfolio": ("require_executable_quote",),
 }
-
-
-def runtime_event_row(event: StrategyRuntimeEvent) -> dict[str, object]:
-    return {
-        "event_id": event.event_id,
-        "run_id": event.run_id,
-        "event_type": event.event_type,
-        "occurred_at": event.occurred_at,
-        "symbol": event.symbol,
-        "bucket_start": event.bucket_start,
-        "details": _jsonable(event.details),
-    }
 
 
 def checkpoint_row_values(
@@ -359,15 +345,13 @@ class PostgresPaperDaemonRepository:
                 run = await _load_run(session, run_id)
                 inserted_fill_count = 0
                 for fill in fills:
-                    inserted = await _insert_fill_idempotent(
+                    inserted = await _insert_idempotent(
                         session,
+                        PaperFillRow,
                         paper_fill_row(fill, run_id=run_id),
+                        "paper fill conflict",
                     )
                     if not inserted:
-                        # A replay can recalculate the same deterministic fill
-                        # from a different checkpoint or legacy quote fallback.
-                        # The durable fill is authoritative; do not overwrite it
-                        # or crash the runner during recovery.
                         continue
                     inserted_fill_count += 1
                     position = position_from_entry_fill(run_id, fill)
@@ -484,16 +468,6 @@ class PostgresPaperDaemonRepository:
                 )
                 self._portfolio_stats[run_id] = next_stats
 
-    async def save_runtime_event(self, event: StrategyRuntimeEvent) -> None:
-        async with self._session_factory() as session:
-            async with session.begin():
-                await _insert_idempotent(
-                    session,
-                    StrategyRuntimeEventRow,
-                    runtime_event_row(event),
-                    "strategy runtime event conflict",
-                )
-
     async def save_checkpoint(
         self,
         run_id: str,
@@ -577,22 +551,6 @@ async def _insert_idempotent(
     raise RuntimeError(
         f"{conflict_message}: conflicting row disappeared before comparison"
     )
-
-
-async def _insert_fill_idempotent(
-    session: AsyncSession,
-    values: dict[str, object],
-) -> bool:
-    """Insert a deterministic fill without rejecting legacy replay variants."""
-    inserted = (
-        await session.execute(
-            insert(PaperFillRow)
-            .values(values)
-            .on_conflict_do_nothing()
-            .returning(PaperFillRow.fill_id)
-        )
-    ).scalar_one_or_none()
-    return inserted is not None
 
 
 async def _load_run(session: AsyncSession, run_id: str) -> StrategyRunRow:

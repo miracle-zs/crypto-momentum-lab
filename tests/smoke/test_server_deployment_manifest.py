@@ -34,6 +34,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
             == "1000"
         )
         assert "--replay-stale-states" not in services[service]["command"]
+        assert "--continue-while-halted" not in services[service]["command"]
     compression = services["paper-compression-pair"]["command"]
     assert _option_value(compression, "--strategy") == "compression_breakout"
     assert _option_value(compression, "--signal-interval-seconds") == "300"
@@ -81,6 +82,15 @@ def test_nginx_proxy_keeps_existing_site_and_mounts_console() -> None:
 
     assert "location /momentum/" in config
     assert "proxy_pass http://127.0.0.1:8765/;" in config
+
+
+def test_repository_has_no_online_paper_gap_replay_script() -> None:
+    assert not {
+        "promote_paper_recovery.py",
+        "rebuild_gap_states_from_raw.py",
+        "recover_paper_gap.py",
+        "replay_paper_gap.py",
+    } & {path.name for path in Path("scripts").glob("*.py")}
 
 
 def _option_value(command: list[str], option: str) -> str:

@@ -41,7 +41,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     RuntimeMarketState15sRow,
     ShadowSessionRow,
     StrategyRunRow,
-    StrategyRuntimeEventRow,
+    StrategyRuntimeCheckpointRow,
     StrategySignalRow,
     TradingLeaseRow,
     UniverseEntryRow,
@@ -95,9 +95,9 @@ class DashboardQueries:
                 .order_by(ExecutionAccountProcessStateRow.occurred_at.desc())
                 .limit(1)
             )
-            strategy_event = await session.scalar(
-                select(StrategyRuntimeEventRow)
-                .order_by(StrategyRuntimeEventRow.occurred_at.desc())
+            strategy_checkpoint = await session.scalar(
+                select(StrategyRuntimeCheckpointRow)
+                .order_by(StrategyRuntimeCheckpointRow.saved_at.desc())
                 .limit(1)
             )
             halt_count = await session.scalar(
@@ -120,7 +120,9 @@ class DashboardQueries:
                 .limit(1)
             )
         account_at = None if account is None else account.occurred_at
-        strategy_at = None if strategy_event is None else strategy_event.occurred_at
+        strategy_at = (
+            None if strategy_checkpoint is None else strategy_checkpoint.saved_at
+        )
         services = [
             _service("market-data", now, market_at, self._stale_after_seconds),
             _service("execution-account", now, account_at, self._stale_after_seconds),
@@ -363,9 +365,8 @@ class DashboardQueries:
                 ).all()
             }
             checkpoint_at = await session.scalar(
-                select(func.max(StrategyRuntimeEventRow.occurred_at)).where(
-                    StrategyRuntimeEventRow.run_id == run.run_id,
-                    StrategyRuntimeEventRow.event_type == "checkpoint_saved",
+                select(StrategyRuntimeCheckpointRow.saved_at).where(
+                    StrategyRuntimeCheckpointRow.run_id == run.run_id,
                 )
             )
             fills = (
@@ -682,13 +683,6 @@ class DashboardQueries:
 
     async def reports(self) -> RunReportSummaryResponse:
         async with self._session_factory() as session:
-            paper = (
-                await session.scalars(
-                    select(StrategyRunRow)
-                    .order_by(StrategyRunRow.created_at.desc())
-                    .limit(10)
-                )
-            ).all()
             shadow = (
                 await session.scalars(
                     select(ShadowSessionRow)
@@ -705,18 +699,8 @@ class DashboardQueries:
             ).all()
         return RunReportSummaryResponse(
             status=OperationalStatus.READY
-            if paper or shadow or live
+            if shadow or live
             else OperationalStatus.NO_DATA,
-            paper_runs=[
-                {
-                    "run_id": row.run_id,
-                    "strategy_name": row.strategy_name,
-                    "created_at": row.created_at.isoformat(),
-                    "signal_count": row.signal_count,
-                    "fill_count": row.fill_count,
-                }
-                for row in paper
-            ],
             shadow_sessions=[
                 {
                     "run_id": row.run_id,

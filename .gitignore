@@ -3,6 +3,7 @@
 .env
 .env.server
 .mypy_cache/
+.local-backups/
 .pytest_cache/
 .ruff_cache/
 .venv

@@ -8,6 +8,7 @@ from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     RunMode,
     StrategyCheckpoint,
+    StrategyDataRequirement,
     StrategyDecision,
     StrategyRunIdentity,
     StrategySide,
@@ -75,10 +76,6 @@ class FakeRepository(PaperLiveDaemonRepository):
     def __init__(self, checkpoint: StrategyCheckpoint | None = None) -> None:
         self.loaded_checkpoint = checkpoint
         self.saved_checkpoints: list[tuple[str, StrategyCheckpoint, datetime]] = []
-        self.events: list[object] = []
-
-    async def save_runtime_event(self, event: object) -> None:
-        self.events.append(event)
 
     async def save_checkpoint(
         self,
@@ -102,6 +99,15 @@ class FakeStrategy(RuntimeStrategy):
 
     def reset_symbol(self, symbol: str) -> None:
         self.reset_symbols.append(symbol)
+
+    def required_data(self) -> StrategyDataRequirement:
+        return StrategyDataRequirement(
+            base_state_interval_seconds=15,
+            warmup_buckets=1,
+            required_fields=("close_price",),
+            max_gap_seconds=30,
+            allow_entries_before_warmup=False,
+        )
 
     def restore_checkpoint(self, checkpoint: StrategyCheckpoint) -> None:
         self.restored_checkpoint = checkpoint
@@ -304,7 +310,7 @@ def test_daemon_resumes_from_checkpoint_cursor() -> None:
     assert strategy.processed == [second]
 
 
-def test_daemon_halts_on_stale_market_state() -> None:
+def test_daemon_skips_stale_market_state_without_halting() -> None:
     stale_state = fixture_state("BTCUSDT", 0)
     repository = FakeRepository()
 
@@ -317,33 +323,11 @@ def test_daemon_halts_on_stale_market_state() -> None:
     )
 
     assert result.processed_state_count == 0
-    assert result.halt_reason == "stale_market_state"
+    assert result.halt_reason is None
     assert repository.saved_checkpoints == []
 
 
-def test_daemon_replays_stale_state_when_enabled() -> None:
-    stale_state = fixture_state("BTCUSDT", 0)
-    repository = FakeRepository()
-
-    result = run_paper_live_daemon(
-        source=(stale_state,),
-        strategy=FakeStrategy(),
-        repository=repository,
-        config=_config(
-            max_market_state_age_seconds=10,
-            replay_stale_states=True,
-        ),
-        clock=FakeClock(stale_state.bucket_end + timedelta(seconds=11)),
-    )
-
-    assert result.processed_state_count == 1
-    assert result.halt_reason is None
-    assert [event.event_type for event in repository.events] == [
-        "checkpoint_saved"
-    ]
-
-
-def test_daemon_skips_stale_state_and_recovers_when_enabled() -> None:
+def test_daemon_skips_stale_state_and_processes_fresh_state() -> None:
     stale_state = fixture_state("BTCUSDT", 0)
     fresh_state = fixture_state("BTCUSDT", 1)
     repository = FakeRepository()
@@ -355,18 +339,37 @@ def test_daemon_skips_stale_state_and_recovers_when_enabled() -> None:
         repository=repository,
         config=_config(
             max_market_state_age_seconds=10,
-            continue_while_halted=True,
         ),
         clock=FakeClock(fresh_state.bucket_end + timedelta(seconds=1)),
     )
 
     assert result.processed_state_count == 1
     assert result.halt_reason is None
-    assert [event.event_type for event in repository.events[:2]] == [
-        "halted",
-        "recovered",
-    ]
     assert strategy.reset_symbols == ["BTCUSDT"]
+
+
+def test_daemon_resets_restored_symbol_after_data_gap() -> None:
+    previous = fixture_state("BTCUSDT", 0)
+    fresh = fixture_state("BTCUSDT", 4)
+    checkpoint = StrategyCheckpoint(
+        last_processed_at_by_symbol={"BTCUSDT": previous.bucket_start},
+        warmup_buckets_by_symbol={"BTCUSDT": 1},
+        cooldown_buckets_remaining_by_symbol={"BTCUSDT": 0},
+        payload={},
+    )
+    strategy = FakeStrategy()
+
+    result = run_paper_live_daemon(
+        source=(fresh,),
+        strategy=strategy,
+        repository=FakeRepository(checkpoint),
+        config=_config(),
+        clock=FakeClock(fresh.bucket_end + timedelta(seconds=1)),
+    )
+
+    assert result.processed_state_count == 1
+    assert strategy.reset_symbols == ["BTCUSDT"]
+    assert strategy.processed == [fresh]
 
 
 def test_daemon_persists_signal_candidate_and_virtual_fill() -> None:
@@ -494,7 +497,7 @@ def test_paired_daemon_calculates_entries_once_and_fans_out_accounts() -> None:
     assert second_artifacts.fills[0].filled_notional == Decimal("25")
 
 
-def test_paired_daemon_reconciles_candle_exit_after_restart() -> None:
+def test_paired_daemon_only_reads_the_latest_closed_candle() -> None:
     state = fixture_state("BTCUSDT", 180)
     checkpoint_at = state.bucket_start - timedelta(seconds=15)
     checkpoint = StrategyCheckpoint(
@@ -554,11 +557,7 @@ def test_paired_daemon_reconciles_candle_exit_after_restart() -> None:
         candle_source=candle_source,
     )
 
-    expected_start = position.opened_at.replace(
-        minute=position.opened_at.minute - position.opened_at.minute % 15,
-        second=0,
-        microsecond=0,
-    )
+    expected_start = state.bucket_start - timedelta(minutes=15)
     assert candle_source.calls == [
         (
             state.symbol,
@@ -569,6 +568,8 @@ def test_paired_daemon_reconciles_candle_exit_after_restart() -> None:
     closed = candle_artifacts.portfolio_updates[0][0]
     assert closed.status is PaperPositionStatus.CLOSED
     assert closed.close_reason == "candle_15m_bullish"
+    assert closed.closed_at == candle.candle_end
+    assert closed.exit_price == candle.close_price
 
 
 def test_daemon_uses_protected_symbol_for_exit_without_opening_new_trade() -> None:
@@ -606,7 +607,7 @@ def test_daemon_uses_protected_symbol_for_exit_without_opening_new_trade() -> No
     assert closed.close_reason == "max_holding_period"
 
 
-def test_daemon_loads_entry_symbols_for_historical_state_time() -> None:
+def test_daemon_loads_entry_symbols_for_current_state_time() -> None:
     first = fixture_state("BTCUSDT", 80)
     second = fixture_state("BTCUSDT", 82)
     observed_at: list[datetime] = []
@@ -619,8 +620,8 @@ def test_daemon_loads_entry_symbols_for_historical_state_time() -> None:
         source=(first, second),
         strategy=FakeStrategy(),
         repository=FakeRepository(),
-        config=_config(replay_stale_states=True),
-        clock=FakeClock(second.bucket_end + timedelta(hours=1)),
+        config=_config(),
+        clock=FakeClock(second.bucket_end + timedelta(seconds=1)),
         entry_symbol_loader=load_symbols,
     )
 
@@ -633,8 +634,6 @@ def _config(
     run_id: str = "run-1",
     checkpoint_every_states: int = 10,
     max_market_state_age_seconds: float = 120.0,
-    continue_while_halted: bool = False,
-    replay_stale_states: bool = False,
     run_identity: StrategyRunIdentity | None = None,
     execution: ReplayExecutionConfig | None = None,
     portfolio: PaperExitConfig | None = None,
@@ -646,8 +645,6 @@ def _config(
         checkpoint_every_states=checkpoint_every_states,
         checkpoint_every_seconds=999,
         max_market_state_age_seconds=max_market_state_age_seconds,
-        continue_while_halted=continue_while_halted,
-        replay_stale_states=replay_stale_states,
         run_identity=run_identity,
         source_description="postgres-runtime-states:research",
         execution=execution or ReplayExecutionConfig(),

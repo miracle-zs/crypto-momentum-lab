@@ -124,7 +124,8 @@ async def test_live_paper_artifacts_are_idempotent_and_resume_pending_candidates
         report.paper_fills[0],
         fill_price=Decimal("123.456"),
     )
-    await artifacts.save_fills(report.run.run_id, (conflicting_fill,))
+    with pytest.raises(ValueError, match="paper fill conflict"):
+        await artifacts.save_fills(report.run.run_id, (conflicting_fill,))
 
     assert await artifacts.load_pending_candidates(report.run.run_id) == ()
     assert await artifacts.load_open_positions(report.run.run_id) == opened

@@ -86,6 +86,5 @@ class RiskExecutionResponse(DashboardSchema):
 
 class RunReportSummaryResponse(DashboardSchema):
     status: OperationalStatus
-    paper_runs: list[dict[str, JsonValue]]
     shadow_sessions: list[dict[str, JsonValue]]
     live_sessions: list[dict[str, JsonValue]]

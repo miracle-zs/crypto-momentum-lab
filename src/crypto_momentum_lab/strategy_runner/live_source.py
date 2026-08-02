@@ -27,12 +27,6 @@ class RuntimeStateLoader(Protocol):
 
     def load_active_symbols_at(self, observed_at: datetime) -> frozenset[str]: ...
 
-    def load_checkpoint_start_at(
-        self,
-        *,
-        run_ids: tuple[str, ...],
-    ) -> datetime | None: ...
-
     def close(self) -> None: ...
 
 
@@ -44,7 +38,6 @@ class PaperLiveSourceConfig:
     idle_timeout_seconds: float
     max_states: int
     batch_size: int
-    resume_run_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.environment.strip():
@@ -59,8 +52,6 @@ class PaperLiveSourceConfig:
             raise ValueError("max_states must be positive")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        if any(not run_id.strip() for run_id in self.resume_run_ids):
-            raise ValueError("resume_run_ids must not contain empty values")
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,12 +71,6 @@ class PostgresPaperMarketStateSource:
 
     def __iter__(self) -> Iterator[MarketState15s]:
         start_at = self.config.start_at
-        if self.config.resume_run_ids:
-            checkpoint_start_at = self.loader.load_checkpoint_start_at(
-                run_ids=self.config.resume_run_ids
-            )
-            if checkpoint_start_at is not None:
-                start_at = checkpoint_start_at
         cursor = _initial_cursor(start_at)
         yielded = 0
         idle_started_at = time.monotonic()
@@ -170,15 +155,6 @@ class AsyncPostgresRuntimeStateLoader:
             self.universe_repository.load_active_memberships_at(observed_at)
         )
         return frozenset(memberships)
-
-    def load_checkpoint_start_at(
-        self,
-        *,
-        run_ids: tuple[str, ...],
-    ) -> datetime | None:
-        return self._event_loop.run_until_complete(
-            self.repository.load_checkpoint_start_at(run_ids=run_ids)
-        )
 
     def close(self) -> None:
         if self._event_loop.is_closed():

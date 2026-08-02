@@ -159,15 +159,12 @@ services:
       - "86400"
       - --poll-interval-seconds
       - "1"
-      - --batch-size
-      - "5000"
       - --checkpoint-every-states
       - "1000"
       - --checkpoint-every-seconds
       - "60"
       - --max-market-state-age-seconds
       - "120"
-      - --continue-while-halted
       - --require-market-quote
   paper-orderflow-pair:
     <<: *paper
@@ -204,15 +201,12 @@ services:
       - "86400"
       - --poll-interval-seconds
       - "1"
-      - --batch-size
-      - "5000"
       - --checkpoint-every-states
       - "1000"
       - --checkpoint-every-seconds
       - "60"
       - --max-market-state-age-seconds
       - "120"
-      - --continue-while-halted
       - --require-market-quote
 
   paper-liquidation-pair:
@@ -250,15 +244,12 @@ services:
       - "86400"
       - --poll-interval-seconds
       - "1"
-      - --batch-size
-      - "5000"
       - --checkpoint-every-states
       - "1000"
       - --checkpoint-every-seconds
       - "60"
       - --max-market-state-age-seconds
       - "120"
-      - --continue-while-halted
       - --require-market-quote
 
   dashboard:

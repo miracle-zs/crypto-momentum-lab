@@ -187,7 +187,10 @@ def test_candle_exit_closes_on_first_opposite_candle() -> None:
 
     closed = mark_positions(
         positions=(position,),
-        state=_state(close=Decimal("99")),
+        state=_state(
+            close=Decimal("99"),
+            bucket_start=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+        ),
         config=config,
         taker_fee_rate=Decimal("0.0004"),
         closed_candle=ClosedCandle15m(
@@ -218,21 +221,30 @@ def test_candle_exit_holds_aligned_and_doji_candles_and_reverses_short() -> None
 
     aligned_long = mark_positions(
         positions=(long_position,),
-        state=_state(close=Decimal("105")),
+        state=_state(
+            close=Decimal("105"),
+            bucket_start=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+        ),
         config=config,
         taker_fee_rate=Decimal("0.0004"),
         closed_candle=_candle(open_price="100", close_price="105"),
     )[0]
     doji_long = mark_positions(
         positions=(long_position,),
-        state=_state(close=Decimal("100")),
+        state=_state(
+            close=Decimal("100"),
+            bucket_start=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+        ),
         config=config,
         taker_fee_rate=Decimal("0.0004"),
         closed_candle=_candle(open_price="100", close_price="100"),
     )[0]
     reversed_short = mark_positions(
         positions=(short_position,),
-        state=_state(close=Decimal("101")),
+        state=_state(
+            close=Decimal("101"),
+            bucket_start=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+        ),
         config=config,
         taker_fee_rate=Decimal("0.0004"),
         closed_candle=_candle(open_price="100", close_price="101"),
@@ -244,13 +256,19 @@ def test_candle_exit_holds_aligned_and_doji_candles_and_reverses_short() -> None
     assert reversed_short.close_reason == "candle_15m_bullish"
 
 
-def test_candle_exit_scans_historical_candles_after_restart() -> None:
+def test_candle_exit_uses_candle_close_time_and_price() -> None:
     position = position_from_entry_fill(
         "run-1",
         replace(_fill(), side=StrategySide.SHORT),
     )
     assert position is not None
-    first_start = position.opened_at
+    candle = ClosedCandle15m(
+        symbol=position.symbol,
+        candle_start=position.opened_at + timedelta(minutes=15),
+        candle_end=position.opened_at + timedelta(minutes=30),
+        open_price=Decimal("99"),
+        close_price=Decimal("101"),
+    )
     closed = mark_positions(
         positions=(position,),
         state=_state(
@@ -262,26 +280,13 @@ def test_candle_exit_scans_historical_candles_after_restart() -> None:
             max_holding_buckets=5760,
         ),
         taker_fee_rate=Decimal("0.0004"),
-        closed_candles=(
-            ClosedCandle15m(
-                symbol=position.symbol,
-                candle_start=first_start,
-                candle_end=first_start + timedelta(minutes=15),
-                open_price=Decimal("100"),
-                close_price=Decimal("99"),
-            ),
-            ClosedCandle15m(
-                symbol=position.symbol,
-                candle_start=first_start + timedelta(minutes=15),
-                candle_end=first_start + timedelta(minutes=30),
-                open_price=Decimal("99"),
-                close_price=Decimal("101"),
-            ),
-        ),
+        closed_candle=candle,
     )[0]
 
     assert closed.status is PaperPositionStatus.CLOSED
     assert closed.close_reason == "candle_15m_bullish"
+    assert closed.closed_at == candle.candle_end
+    assert closed.exit_price == candle.close_price
 
 
 def test_executable_exit_uses_the_side_of_the_book() -> None:

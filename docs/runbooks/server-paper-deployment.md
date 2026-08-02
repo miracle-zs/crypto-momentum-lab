@@ -65,10 +65,11 @@ account:
      paper-compression-pair paper-orderflow-pair paper-liquidation-pair dashboard
    ```
 
-   Do not run the final command until `market-data` reports `healthy`. After a
-   restart, strategy runners scan past stale states without evaluating entries
-   or exits. Trading decisions resume only after the source reaches current
-   market data; the online service does not synthesize historical trades.
+   Do not run the final command until `market-data` reports `healthy`. Each
+   strategy runner starts at its process creation time, restores open positions
+   and its latest strategy checkpoint, and consumes only newly closed market
+   states. A gap resets that symbol's warm-up cache; the online service never
+   synthesizes historical entries or exits.
 
 5. Add `deploy/nginx/crypto-momentum-lab.conf` inside the existing HTTPS
    server block, validate with `nginx -t`, and reload Nginx. The dashboard is
