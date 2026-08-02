@@ -20,6 +20,30 @@ const statusClass = (status) => `status-${statusSlug(status)}`;
 
 /* ---------- formatting ---------- */
 
+const DISPLAY_TIME_ZONE = "Asia/Shanghai";
+const DISPLAY_TIME_ZONE_LABEL = "UTC+8";
+const DISPLAY_TIME_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+  timeZone: DISPLAY_TIME_ZONE,
+  calendar: "gregory",
+  numberingSystem: "latn",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+});
+
+const displayTimeParts = (value) => {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return Object.fromEntries(
+    DISPLAY_TIME_FORMATTER.formatToParts(parsed)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  );
+};
+
 const asNumber = (value) => {
   if (value == null || value === "") return null;
   const parsed = Number(value);
@@ -68,15 +92,16 @@ const pnlClass = (value) => {
 
 const timeOnly = (value) => {
   if (!value) return "—";
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toISOString().slice(11, 19);
+  const parts = displayTimeParts(value);
+  return parts ? `${parts.hour}:${parts.minute}:${parts.second}` : String(value);
 };
 
 const dayTime = (value) => {
   if (!value) return "—";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return String(value);
-  return `${parsed.toISOString().slice(5, 10)} ${parsed.toISOString().slice(11, 19)}`;
+  const parts = displayTimeParts(value);
+  return parts
+    ? `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`
+    : String(value);
 };
 
 const elapsedTime = (start, end) => {
@@ -344,7 +369,7 @@ function equityChart(rows, chartId = "eq", windowStart = null, windowEnd = null)
   const lastUp = lastValue >= values[0];
   const axisTimes = [domainStart, domainStart + timeSpan / 2, domainEnd];
   const timeAxis = axisTimes.map((atMs, i) =>
-    `<text x="${x(atMs).toFixed(1)}" y="${height - 8}" class="chart-label" text-anchor="${i === 0 ? "start" : i === 2 ? "end" : "middle"}">${esc(i === 1 ? timeOnly(atMs) : dayTime(atMs))}${i === 2 ? " UTC" : ""}</text>`).join("");
+    `<text x="${x(atMs).toFixed(1)}" y="${height - 8}" class="chart-label" text-anchor="${i === 0 ? "start" : i === 2 ? "end" : "middle"}">${esc(i === 1 ? timeOnly(atMs) : dayTime(atMs))}${i === 2 ? ` ${DISPLAY_TIME_ZONE_LABEL}` : ""}</text>`).join("");
   return `<div class="equity-chart"><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="账户权益曲线">
     <defs><linearGradient id="${esc(chartId)}" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="${lastUp ? "var(--up)" : "var(--down)"}" stop-opacity=".22"/>
@@ -380,7 +405,7 @@ function pairedEquityChart(model) {
   const axisTimes = [model.startAt, model.startAt + timeSpan / 2, model.endAt];
   const timeAxis = axisTimes.map((atMs, index) =>
     `<text x="${(padL + (index / 2) * (width - padL - padR)).toFixed(1)}" y="${height - 8}" class="chart-label"
-      text-anchor="${index === 0 ? "start" : index === 2 ? "end" : "middle"}">${esc(timeOnly(atMs))}${index === 2 ? " UTC" : ""}</text>`).join("");
+      text-anchor="${index === 0 ? "start" : index === 2 ? "end" : "middle"}">${esc(timeOnly(atMs))}${index === 2 ? ` ${DISPLAY_TIME_ZONE_LABEL}` : ""}</text>`).join("");
   const last = model.points.at(-1);
   return `<div class="pair-chart"><svg viewBox="0 0 ${width} ${height}" role="img"
     aria-label="${esc(model.strategyName)} 固定止盈止损与 15 分钟收线退出同期权益对比">
@@ -412,7 +437,7 @@ function renderOverview(data) {
     ${tile("数据库", data.database_status || "UNKNOWN", "PostgreSQL 只读连接", statusSlug(data.database_status) === "READY" ? "pos" : "warn")}
     ${tile("活跃停机", haltCount, haltCount ? "入场信号已被阻断" : "无全局停机", haltCount ? "neg" : "")}
     ${tile("交易租约", lease?.strategy_name || "无租约", lease ? `持有者 ${lease.owner || "未知"}` : "当前无进程持有交易权", "txt")}
-    ${tile("租约到期", lease?.expires_at ? relToNow(lease.expires_at) : "—", lease?.expires_at ? dayTime(lease.expires_at) + " UTC" : "")}
+    ${tile("租约到期", lease?.expires_at ? relToNow(lease.expires_at) : "—", lease?.expires_at ? `${dayTime(lease.expires_at)} ${DISPLAY_TIME_ZONE_LABEL}` : "")}
   </div>`;
   const serviceRows = services.map((service) => {
     const age = service.age_seconds;
@@ -436,7 +461,7 @@ function pairedComparisonPanel(model) {
   return `<article class="pair-panel">
     <div class="pair-head">
       <div><strong>${esc(model.strategyName)}</strong>
-        <small>${esc(dayTime(model.startAt))} → ${esc(dayTime(model.endAt))} UTC · ${model.points.length} 个共同桶</small></div>
+        <small>${esc(dayTime(model.startAt))} → ${esc(dayTime(model.endAt))} ${DISPLAY_TIME_ZONE_LABEL} · ${model.points.length} 个共同桶</small></div>
       <div class="pair-spread"><span>退出差值</span><b class="num ${pnlClass(spread)}">${esc(signedMoney(spread))}</b></div>
     </div>
     <div class="pair-legend">
@@ -482,7 +507,7 @@ function accountDetail(account, index) {
   const sampleMinutes = Math.round(
     (asNumber(account.equity_sample_interval_seconds) || DEFAULT_EQUITY_BUCKET_SECONDS) / 60,
   );
-  const chartWindow = `${dayTime(account.equity_window_start)} → ${dayTime(account.equity_window_end)} UTC`;
+  const chartWindow = `${dayTime(account.equity_window_start)} → ${dayTime(account.equity_window_end)} ${DISPLAY_TIME_ZONE_LABEL}`;
   const configHash = account.config_hash || "—";
   const historyLoaded = account.history_loaded === true;
   const historyAction = `<span class="history-actions">
@@ -633,7 +658,7 @@ function renderUniverse(data) {
     </div>`
     : "";
   const summary = `<span class="monitor-summary"><b>${targetCount}</b> 目标 · <b>${retainedRows.length}</b> 保留 · <b>${forcedRows.length}</b> 保护</span>`;
-  const body = `<div class="detail-meta"><span>快照时间 <b class="num">${esc(dayTime(data.observed_at))} UTC</b></span><span>${esc(relToNow(data.observed_at))}</span></div>
+  const body = `<div class="detail-meta"><span>快照时间 <b class="num">${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</b></span><span>${esc(relToNow(data.observed_at))}</span></div>
     <div class="block-split">
       <div class="block">${blockTitle("涨幅榜 Top 20", "TOP GAINERS · UTC DAY")}${universeTable(data.gainers)}</div>
       <div class="block">${blockTitle("跌幅榜 Top 20", "TOP LOSERS · UTC DAY")}${universeTable(data.losers)}</div>
@@ -645,7 +670,7 @@ function renderUniverse(data) {
 
 function renderRisk(data) {
   const halts = data.active_halts?.length
-    ? data.active_halts.map((halt) => `<div class="alert-box"><strong>HALT</strong><div>${esc(halt.reason)}<small>${esc(dayTime(halt.created_at))} UTC</small></div></div>`).join("")
+    ? data.active_halts.map((halt) => `<div class="alert-box"><strong>HALT</strong><div>${esc(halt.reason)}<small>${esc(dayTime(halt.created_at))} ${DISPLAY_TIME_ZONE_LABEL}</small></div></div>`).join("")
     : `<div class="ok-box"><i></i>无活跃停机 · 风控闸门畅通</div>`;
   const ambiguousTable = dataTable([
     { label: "币种", key: "symbol", cls: "sym" },
@@ -688,7 +713,7 @@ function renderAccount(data) {
     { label: "状态", value: (row) => pill(row.status), html: true },
     { label: "只减仓", value: (row) => row.reduce_only ? "是" : "否", cls: "muted" },
   ], data.open_orders, { emptyText: "无挂单" });
-  const body = `<div class="detail-meta"><span>同步时间 <b class="num">${esc(dayTime(data.observed_at))} UTC</b></span><span>${esc(relToNow(data.observed_at))}</span></div>
+  const body = `<div class="detail-meta"><span>同步时间 <b class="num">${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</b></span><span>${esc(relToNow(data.observed_at))}</span></div>
     <div class="block-split">
       <div class="block">${blockTitle("资产余额", "BALANCES")}${balancesTable}</div>
       <div class="block">${blockTitle("交易所持仓", "EXCHANGE POSITIONS")}${positionsTable}</div>
@@ -892,11 +917,11 @@ function renderPollState() {
   const label = document.getElementById("last-cycle");
   if (!lastPollAt) return;
   const delta = Math.max(0, Math.round((Date.now() - lastPollAt.getTime()) / 1000));
-  label.textContent = `上次轮询 ${lastPollAt.toISOString().slice(11, 19)} UTC · ${delta}s 前`;
+  label.textContent = `上次轮询 ${timeOnly(lastPollAt)} ${DISPLAY_TIME_ZONE_LABEL} · ${delta}s 前`;
 }
 
 function tick() {
-  document.getElementById("utc-clock").textContent = new Date().toISOString().slice(11, 19);
+  document.getElementById("utc-clock").textContent = timeOnly(new Date());
   renderPollState();
 }
 

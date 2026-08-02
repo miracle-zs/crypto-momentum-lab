@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CML · Execution Control Room</title>
-    <link rel="stylesheet" href="static/dashboard.css?v=20260802-paper-simple-details-state">
+    <link rel="stylesheet" href="static/dashboard.css?v=20260802-paper-simple-timezone">
 </head>
 <body>
   <div class="shell">
@@ -47,7 +47,7 @@
         <div class="topbar-meta">
           <div class="poll-state"><span class="pulse" aria-hidden="true"></span><span id="last-cycle">等待首次轮询…</span></div>
           <div id="global-mode" class="mode-badge status-UNKNOWN">UNKNOWN</div>
-          <div class="clock"><small>UTC</small><strong id="utc-clock">--:--:--</strong></div>
+          <div class="clock"><small>UTC+8</small><strong id="utc-clock">--:--:--</strong></div>
         </div>
         <div class="pollbar" id="pollbar" aria-hidden="true"></div>
       </header>
@@ -135,6 +135,6 @@
       </footer>
     </div>
   </div>
-    <script src="static/dashboard.js?v=20260802-paper-simple-details-state" defer></script>
+    <script src="static/dashboard.js?v=20260802-paper-simple-timezone" defer></script>
 </body>
 </html>

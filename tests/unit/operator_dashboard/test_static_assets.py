@@ -22,8 +22,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert 'data-endpoint="api/overview"' in index
-    assert 'href="static/dashboard.css?v=20260802-paper-simple-details-state"' in index
-    assert 'src="static/dashboard.js?v=20260802-paper-simple-details-state"' in index
+    assert 'href="static/dashboard.css?v=20260802-paper-simple-timezone"' in index
+    assert 'src="static/dashboard.js?v=20260802-paper-simple-timezone"' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
@@ -113,6 +113,19 @@ def test_dashboard_polling_preserves_open_strategy_signals() -> None:
 
     assert 'querySelectorAll("details")' in scroll_state_code
     assert "details.open = saved.open" in scroll_state_code
+
+
+def test_dashboard_formats_display_times_in_fixed_utc_plus_8() -> None:
+    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    index = (STATIC / "index.html").read_text(encoding="utf-8")
+
+    assert 'const DISPLAY_TIME_ZONE = "Asia/Shanghai"' in text
+    assert 'timeZone: DISPLAY_TIME_ZONE' in text
+    assert "DISPLAY_TIME_FORMATTER.formatToParts" in text
+    assert "toISOString().slice" not in text
+    assert "UTC+8" in text
+    assert "<small>UTC+8</small>" in index
+    assert "UTC DAY" in text
 
 
 def test_paper_account_cards_pair_same_strategy_vertically() -> None:
