@@ -159,8 +159,10 @@ services:
       - "86400"
       - --poll-interval-seconds
       - "1"
+      - --batch-size
+      - "5000"
       - --checkpoint-every-states
-      - "100"
+      - "1000"
       - --checkpoint-every-seconds
       - "60"
       - --max-market-state-age-seconds
@@ -203,8 +205,10 @@ services:
       - "86400"
       - --poll-interval-seconds
       - "1"
+      - --batch-size
+      - "5000"
       - --checkpoint-every-states
-      - "100"
+      - "1000"
       - --checkpoint-every-seconds
       - "60"
       - --max-market-state-age-seconds
@@ -248,8 +252,10 @@ services:
       - "86400"
       - --poll-interval-seconds
       - "1"
+      - --batch-size
+      - "5000"
       - --checkpoint-every-states
-      - "100"
+      - "1000"
       - --checkpoint-every-seconds
       - "60"
       - --max-market-state-age-seconds
