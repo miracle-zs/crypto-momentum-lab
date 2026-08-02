@@ -33,6 +33,13 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
             )
             == "1000"
         )
+        assert (
+            _option_value(
+                services[service]["command"],
+                "--candidate-notional",
+            )
+            == "100"
+        )
         assert "--replay-stale-states" not in services[service]["command"]
         assert "--continue-while-halted" not in services[service]["command"]
     compression = services["paper-compression-pair"]["command"]

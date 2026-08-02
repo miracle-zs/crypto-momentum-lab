@@ -142,7 +142,7 @@ services:
       - --cooldown-buckets
       - "12"
       - --candidate-notional
-      - "25"
+      - "100"
       - --paper-initial-balance
       - "1000"
       - --fixed-take-profit-pct
@@ -184,7 +184,7 @@ services:
       - --candle-run-id
       - paper-account-05-orderflow-candle15m-v1
       - --candidate-notional
-      - "25"
+      - "100"
       - --paper-initial-balance
       - "1000"
       - --fixed-take-profit-pct
@@ -227,7 +227,7 @@ services:
       - --candle-run-id
       - paper-account-06-liquidation-candle15m-v1
       - --candidate-notional
-      - "25"
+      - "100"
       - --paper-initial-balance
       - "1000"
       - --fixed-take-profit-pct
