@@ -353,41 +353,43 @@ class PostgresPaperDaemonRepository:
     ) -> tuple[PaperPosition, ...]:
         if not fills:
             return ()
-        positions = tuple(
-            position
-            for fill in fills
-            if (position := position_from_entry_fill(run_id, fill)) is not None
-        )
+        opened_positions: list[PaperPosition] = []
         async with self._session_factory() as session:
             async with session.begin():
                 run = await _load_run(session, run_id)
                 inserted_fill_count = 0
                 for fill in fills:
-                    inserted_fill_count += int(
-                        await _insert_idempotent(
-                            session,
-                            PaperFillRow,
-                            paper_fill_row(fill, run_id=run_id),
-                            "paper fill conflict",
-                        )
+                    inserted = await _insert_fill_idempotent(
+                        session,
+                        paper_fill_row(fill, run_id=run_id),
                     )
-                for position in positions:
+                    if not inserted:
+                        # A replay can recalculate the same deterministic fill
+                        # from a different checkpoint or legacy quote fallback.
+                        # The durable fill is authoritative; do not overwrite it
+                        # or crash the runner during recovery.
+                        continue
+                    inserted_fill_count += 1
+                    position = position_from_entry_fill(run_id, fill)
+                    if position is None:
+                        continue
                     await _insert_idempotent(
                         session,
                         PaperPositionRow,
                         paper_position_row(position),
                         "paper position conflict",
                     )
+                    opened_positions.append(position)
                 run.fill_count += inserted_fill_count
                 run.pending_candidate_count = max(
                     run.candidate_count - run.fill_count,
                     0,
                 )
-        if positions:
+        if opened_positions:
             # A newly filled candidate creates an open position before the next
             # mark update. Reconcile the cached aggregate on the next snapshot.
             self._portfolio_stats.pop(run_id, None)
-        return positions
+        return tuple(opened_positions)
 
     async def load_open_positions(
         self,
@@ -575,6 +577,22 @@ async def _insert_idempotent(
     raise RuntimeError(
         f"{conflict_message}: conflicting row disappeared before comparison"
     )
+
+
+async def _insert_fill_idempotent(
+    session: AsyncSession,
+    values: dict[str, object],
+) -> bool:
+    """Insert a deterministic fill without rejecting legacy replay variants."""
+    inserted = (
+        await session.execute(
+            insert(PaperFillRow)
+            .values(values)
+            .on_conflict_do_nothing()
+            .returning(PaperFillRow.fill_id)
+        )
+    ).scalar_one_or_none()
+    return inserted is not None
 
 
 async def _load_run(session: AsyncSession, run_id: str) -> StrategyRunRow:
