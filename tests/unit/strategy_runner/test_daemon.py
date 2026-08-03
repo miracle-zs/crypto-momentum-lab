@@ -398,6 +398,29 @@ def test_daemon_persists_signal_candidate_and_virtual_fill() -> None:
     assert artifacts.fills[0].filled_notional == Decimal("25")
 
 
+def test_daemon_fills_new_candidate_on_current_state_without_extra_latency() -> None:
+    state = fixture_state("BTCUSDT", 0)
+    identity = _identity()
+    artifacts = FakeArtifactRepository()
+
+    run_paper_live_daemon(
+        source=(state,),
+        strategy=SignalStrategy(identity),
+        repository=FakeRepository(),
+        artifact_repository=artifacts,
+        config=_config(
+            run_identity=identity,
+            execution=ReplayExecutionConfig(latency_buckets=0),
+        ),
+        clock=FakeClock(state.bucket_end + timedelta(seconds=1)),
+    )
+
+    assert len(artifacts.fills) == 1
+    assert artifacts.fills[0].status is SimulatedFillStatus.FILLED
+    assert artifacts.fills[0].target_fill_at == state.bucket_start
+    assert artifacts.fills[0].filled_at == state.bucket_start
+
+
 def test_daemon_expires_pending_candidate_after_deadline() -> None:
     states = (fixture_state("BTCUSDT", 0), fixture_state("BTCUSDT", 5))
     identity = _identity()
@@ -455,10 +478,14 @@ def test_paired_daemon_calculates_entries_once_and_fans_out_accounts() -> None:
     strategy = SignalStrategy(first_identity)
     first_artifacts = FakeArtifactRepository()
     second_artifacts = FakeArtifactRepository()
-    first_config = _config(run_identity=first_identity)
+    first_config = _config(
+        run_identity=first_identity,
+        execution=ReplayExecutionConfig(latency_buckets=0),
+    )
     second_config = _config(
         run_id="run-2",
         run_identity=second_identity,
+        execution=ReplayExecutionConfig(latency_buckets=0),
     )
 
     result = run_paired_paper_live_daemon(
@@ -495,6 +522,8 @@ def test_paired_daemon_calculates_entries_once_and_fans_out_accounts() -> None:
     assert first_signal.signal_id != second_signal.signal_id
     assert first_artifacts.fills[0].filled_notional == Decimal("25")
     assert second_artifacts.fills[0].filled_notional == Decimal("25")
+    assert first_artifacts.fills[0].filled_at == states[0].bucket_start
+    assert second_artifacts.fills[0].filled_at == states[0].bucket_start
 
 
 def test_paired_daemon_only_reads_the_latest_closed_candle() -> None:

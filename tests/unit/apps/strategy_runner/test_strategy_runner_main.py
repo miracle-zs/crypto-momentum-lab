@@ -549,6 +549,7 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
     assert config.checkpoint_every_states == 7
     assert config.checkpoint_every_seconds == 30
     assert config.max_market_state_age_seconds == 90
+    assert config.execution.latency_buckets == 0
     assert source_calls[0]["start_at"] == datetime(
         2026, 7, 4, 0, 5, tzinfo=UTC
     )
@@ -624,6 +625,8 @@ def test_paper_live_pair_builds_two_exit_accounts(monkeypatch) -> None:
     assert accounts[1].config.run_id == "candle-run"
     assert accounts[0].config.portfolio.exit_mode.value == "fixed"
     assert accounts[1].config.portfolio.exit_mode.value == "candle_15m"
+    assert accounts[0].config.execution.latency_buckets == 0
+    assert accounts[1].config.execution.latency_buckets == 0
     assert "Paper live pair completed: strategy=orderflow_impulse" in result.stdout
 
 

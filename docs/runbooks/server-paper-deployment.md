@@ -123,6 +123,12 @@ The paper daemon persists strategy signals, order-intent candidates, and
 simulated fills in PostgreSQL. Pending candidates are reloaded after a daemon
 restart, and repeated writes are idempotent.
 
+Realtime paper commands use zero additional execution buckets: after a
+strategy consumes a newly closed 15-second state, a market candidate is filled
+immediately using that state's executable bid or ask. This matches the live
+order path. It does not remove the inherent 15-second aggregation delay; a
+signal that depends on a bucket is only known when that bucket closes.
+
 The dashboard separates the three paper accounts into:
 
 - account equity and balance history;

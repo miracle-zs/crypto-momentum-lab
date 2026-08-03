@@ -702,6 +702,7 @@ def paper_live_daemon_command(
                 run_identity=identity,
                 source_description=source.description,
                 execution=ReplayExecutionConfig(
+                    latency_buckets=0,
                     require_market_quote=require_market_quote,
                 ),
                 portfolio=PaperExitConfig(
@@ -906,6 +907,7 @@ def paper_live_pair_command(
         run_identity=fixed_identity,
         source_description=source.description,
         execution=ReplayExecutionConfig(
+            latency_buckets=0,
             require_market_quote=require_market_quote,
         ),
         portfolio=PaperExitConfig(
@@ -927,6 +929,7 @@ def paper_live_pair_command(
         run_identity=candle_identity,
         source_description=source.description,
         execution=ReplayExecutionConfig(
+            latency_buckets=0,
             require_market_quote=require_market_quote,
         ),
         portfolio=PaperExitConfig(

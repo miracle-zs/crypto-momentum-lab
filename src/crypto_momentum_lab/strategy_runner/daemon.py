@@ -120,7 +120,9 @@ class PaperLiveDaemonConfig:
     entry_symbol_refresh_seconds: float = 15.0
     run_identity: StrategyRunIdentity | None = None
     source_description: str = "paper-live"
-    execution: ReplayExecutionConfig = ReplayExecutionConfig()
+    execution: ReplayExecutionConfig = field(
+        default_factory=lambda: ReplayExecutionConfig(latency_buckets=0)
+    )
     portfolio: PaperExitConfig = field(default_factory=PaperExitConfig)
 
     def __post_init__(self) -> None:
@@ -322,6 +324,7 @@ def run_paired_paper_live_daemon(
             entry_symbols_loaded_at = state.bucket_start
         entry_allowed = entry_symbols is None or state.symbol in entry_symbols
 
+        position_updates_by_account: list[tuple[PaperPosition, ...]] = []
         for index, account in enumerate(accounts):
             config = account.config
             identity = config.run_identity
@@ -358,6 +361,27 @@ def run_paired_paper_live_daemon(
                     open_positions_by_account[index].pop(position.position_id, None)
                 else:
                     open_positions_by_account[index][position.position_id] = position
+            position_updates_by_account.append(position_updates)
+
+        decision = strategy.on_market_state(state)
+        last_processed_at_by_symbol[state.symbol] = state.bucket_start
+        for index, account in enumerate(accounts):
+            account_decision = _decision_for_account(
+                decision,
+                account.config.run_identity,
+            )
+            if entry_allowed and (
+                account_decision.signals or account_decision.candidates
+            ):
+                _run_async(
+                    account.artifact_repository.save_decision(account_decision)
+                )
+                pending_by_account[index].extend(account_decision.candidates)
+
+        # Resolve entries after the strategy decision so zero-latency paper
+        # execution uses the same closed state that live execution consumes.
+        for index, account in enumerate(accounts):
+            config = account.config
             pending_by_account[index], fills = _resolve_pending_candidates(
                 pending_candidates=tuple(pending_by_account[index]),
                 state=state,
@@ -388,7 +412,7 @@ def run_paired_paper_live_daemon(
                 or state.bucket_start - last_snapshot_at >= timedelta(minutes=1)
             )
             persisted_position_updates = _persistable_position_updates(
-                position_updates,
+                position_updates_by_account[index],
                 last_position_persisted_at_by_account[index],
                 state.bucket_start,
             )
@@ -412,21 +436,6 @@ def run_paired_paper_live_daemon(
                         ] = state.bucket_start
                 if should_snapshot:
                     last_equity_snapshot_at[index] = state.bucket_start
-
-        decision = strategy.on_market_state(state)
-        last_processed_at_by_symbol[state.symbol] = state.bucket_start
-        for index, account in enumerate(accounts):
-            account_decision = _decision_for_account(
-                decision,
-                account.config.run_identity,
-            )
-            if entry_allowed and (
-                account_decision.signals or account_decision.candidates
-            ):
-                _run_async(
-                    account.artifact_repository.save_decision(account_decision)
-                )
-                pending_by_account[index].extend(account_decision.candidates)
 
         checkpoint_dirty = True
         processed += 1
@@ -708,6 +717,7 @@ def run_paper_live_daemon(
             entry_symbols is None or state.symbol in entry_symbols
         )
 
+        position_updates: tuple[PaperPosition, ...] = ()
         if artifact_repository is not None:
             closed_candle = (
                 None
@@ -741,6 +751,15 @@ def run_paper_live_daemon(
                     open_positions.pop(position.position_id, None)
                 else:
                     open_positions[position.position_id] = position
+
+        decision = strategy.on_market_state(state)
+        last_processed_at_by_symbol[state.symbol] = state.bucket_start
+        if artifact_repository is not None and entry_allowed and (
+            decision.signals or decision.candidates
+        ):
+            _run_async(artifact_repository.save_decision(decision))
+            pending_candidates.extend(decision.candidates)
+        if artifact_repository is not None:
             pending_candidates, fills = _resolve_pending_candidates(
                 pending_candidates=tuple(pending_candidates),
                 state=state,
@@ -790,14 +809,6 @@ def run_paper_live_daemon(
                         )
                 if should_snapshot:
                     last_equity_snapshot_at = state.bucket_start
-
-        decision = strategy.on_market_state(state)
-        last_processed_at_by_symbol[state.symbol] = state.bucket_start
-        if artifact_repository is not None and entry_allowed and (
-            decision.signals or decision.candidates
-        ):
-            _run_async(artifact_repository.save_decision(decision))
-            pending_candidates.extend(decision.candidates)
         checkpoint_dirty = True
         processed += 1
         processed_since_checkpoint += 1
