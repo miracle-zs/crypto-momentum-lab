@@ -188,7 +188,7 @@ def _default_liquidation_config() -> LiquidationCascadeConfig:
         min_liquidation_count=1,
         min_liquidation_notional=Decimal("500"),
         min_price_move_pct=Decimal("0.01"),
-        min_aggressive_imbalance=Decimal("0.50"),
+        min_aggressive_imbalance=Decimal("0.33"),
         confirmation_buckets=1,
         cooldown_buckets=2,
         forward_horizon_buckets=(1,),

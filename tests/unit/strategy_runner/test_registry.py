@@ -6,6 +6,7 @@ import pytest
 from crypto_momentum_lab.domain.strategy import RunMode, StrategyRunIdentity
 from crypto_momentum_lab.strategy_runner.registry import (
     StrategyRegistryError,
+    build_runtime_config,
     build_runtime_strategy,
     supported_strategy_names,
 )
@@ -39,6 +40,12 @@ def test_registry_builds_orderflow_runtime_strategy() -> None:
     )
 
     assert strategy.metadata().name == "orderflow_impulse"
+
+
+def test_registry_uses_two_to_one_liquidation_imbalance_threshold() -> None:
+    runtime_config = build_runtime_config("liquidation_cascade", config={})
+
+    assert runtime_config.event_config.min_aggressive_imbalance == Decimal("0.33")
 
 
 def _identity(strategy_name: str) -> StrategyRunIdentity:
