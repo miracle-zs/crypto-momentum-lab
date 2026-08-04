@@ -92,6 +92,20 @@ async def test_terminal_fill_updates_order_state_and_persists_fill() -> None:
     assert repository.events[-1].state is ExchangeOrderState.FILLED
 
 
+async def test_reconcile_order_promotes_acknowledged_order_to_filled() -> None:
+    exchange = FakeExchange(
+        submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED),
+        query_result=_snapshot(ExchangeOrderState.FILLED),
+    )
+    repository = FakeOrderRepository()
+
+    result = await _machine(exchange, repository).reconcile_order(_plan())
+
+    assert exchange.calls == ["query"]
+    assert result.state is ExchangeOrderState.FILLED
+    assert repository.events[-1].state is ExchangeOrderState.FILLED
+
+
 class FakeExchange:
     def __init__(
         self,

@@ -46,6 +46,9 @@ from crypto_momentum_lab.market_data.runtime_states import (
     ClosedMarketStatePublisher,
     ClosedMarketStatePublisherConfig,
 )
+from crypto_momentum_lab.persistence.postgres.account_repository import (
+    PostgresAccountRepository,
+)
 from crypto_momentum_lab.persistence.postgres.capture_repository import (
     PostgresCaptureRepository,
 )
@@ -81,6 +84,7 @@ _MARKET_DATA_WATCHDOG_INTERVAL_SECONDS = 15.0
 _CAPTURE_STOP_TIMEOUT_SECONDS = 55.0
 _PAPER_EXIT_RECONCILE_SECONDS = 15.0
 _PAPER_EXIT_RUN_IDS_ENV = "CML_PAPER_EXIT_RUN_IDS"
+_LIVE_POSITION_ACCOUNT_LABEL_ENV = "CML_LIVE_POSITION_ACCOUNT_LABEL"
 
 
 class MarketDataStaleError(RuntimeError):
@@ -118,6 +122,16 @@ def parse_paper_exit_run_ids(value: str | None = None) -> frozenset[str]:
         for item in raw_value.split(",")
         if (run_id := item.strip())
     )
+
+
+def parse_live_position_account_label(value: str | None = None) -> str | None:
+    raw_value = (
+        os.environ.get(_LIVE_POSITION_ACCOUNT_LABEL_ENV, "")
+        if value is None
+        else value
+    )
+    normalized = raw_value.strip()
+    return normalized or None
 
 
 @asynccontextmanager
@@ -422,6 +436,7 @@ async def build_market_data_runtime(
     universe_repository = PostgresUniverseRepository(sessions)
     capture_repository = PostgresCaptureRepository(sessions)
     paper_repository = PostgresPaperDaemonRepository(sessions)
+    account_repository = PostgresAccountRepository(sessions)
     runtime_state_repository = PostgresRuntimeMarketStateRepository(sessions)
     runtime_state_publisher = ClosedMarketStatePublisher(
         repository=runtime_state_repository,
@@ -430,11 +445,19 @@ async def build_market_data_runtime(
         ),
     )
     protected_run_ids = parse_paper_exit_run_ids()
+    live_position_account_label = parse_live_position_account_label()
 
     async def load_protected_symbols() -> frozenset[str]:
-        return await paper_repository.load_open_position_symbols(
+        paper_symbols = await paper_repository.load_open_position_symbols(
             protected_run_ids
         )
+        if live_position_account_label is None:
+            return paper_symbols
+        live_symbols = await account_repository.load_active_position_symbols(
+            environment="live",
+            account_label=live_position_account_label,
+        )
+        return paper_symbols | live_symbols
 
     initial_memberships = await universe_repository.load_active_memberships()
     initial_symbols = (

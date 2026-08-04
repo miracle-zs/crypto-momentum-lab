@@ -70,7 +70,10 @@ from crypto_momentum_lab.shadow_operation.service import (
     ShadowOperationResult,
     ShadowOperationService,
 )
-from crypto_momentum_lab.strategy_runner.registry import build_runtime_strategy
+from crypto_momentum_lab.strategy_runner.registry import (
+    build_runtime_config,
+    build_runtime_strategy,
+)
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -85,6 +88,10 @@ def run_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
     strategy: Annotated[str, typer.Option("--strategy")] = "compression_breakout",
+    market_environment: Annotated[
+        str,
+        typer.Option("--market-environment"),
+    ] = "research",
     run_id: Annotated[str, typer.Option("--run-id")] = "shadow-manual",
     max_runtime_seconds: Annotated[
         int, typer.Option("--max-runtime-seconds", min=1)
@@ -98,6 +105,10 @@ def run_command(
     require_lease_owner: Annotated[
         str, typer.Option("--require-lease-owner")
     ] = "shadow-preflight",
+    hedge_mode: Annotated[
+        bool,
+        typer.Option("--hedge-mode/--one-way-mode"),
+    ] = True,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     del checkpoint_every_states
@@ -107,10 +118,12 @@ def run_command(
             database_url=resolved_url,
             account_label=account_label,
             strategy_name=strategy,
+            market_environment=market_environment,
             run_id=run_id,
             max_runtime_seconds=max_runtime_seconds,
             state_stale_after_seconds=state_stale_after_seconds,
             lease_owner=require_lease_owner,
+            hedge_mode=hedge_mode,
         )
     )
     payload = asdict(result)
@@ -145,10 +158,12 @@ async def _run_from_database(
     database_url: str,
     account_label: str,
     strategy_name: str,
+    market_environment: str,
     run_id: str,
     max_runtime_seconds: int,
     state_stale_after_seconds: float,
     lease_owner: str,
+    hedge_mode: bool,
 ) -> ShadowOperationResult:
     now = datetime.now(tz=UTC)
     engine = create_async_database_engine(database_url)
@@ -163,21 +178,21 @@ async def _run_from_database(
         halts = await risk_repository.load_active_halts("live", account_label)
         state_repository = PostgresRuntimeMarketStateRepository(factory)
         states = await state_repository.load_after(
-            environment="live",
+            environment=market_environment,
             cursor=RuntimeStateCursor(
                 bucket_start=now - timedelta(seconds=max_runtime_seconds),
                 symbol="",
             ),
-            limit=min(10000, max(1, max_runtime_seconds * 3)),
+            limit=min(100000, max(10000, max_runtime_seconds * 8)),
         )
         rules = await _load_trading_rules(factory, {state.symbol for state in states})
         strategy_config: dict[str, object] = {
-            "candidate_notional": min(
-                Decimal("100"), risk_config.max_order_notional
-            ),
+            "candidate_notional": Decimal("100"),
             "candidate_ttl_buckets": 4,
         }
-        config_hash = deterministic_config_hash(strategy_config)
+        config_hash = deterministic_config_hash(
+            build_runtime_config(strategy_name, config=strategy_config)
+        )
         strategy = build_runtime_strategy(
             strategy_name,
             config=strategy_config,
@@ -186,10 +201,12 @@ async def _run_from_database(
                 strategy_name=strategy_name,
                 strategy_version="v0",
                 config_hash=config_hash,
-                run_mode=RunMode.PAPER,
+                run_mode=RunMode.SHADOW,
                 code_commit="operator-shadow",
                 created_at=now,
-                source_paths=("postgres-runtime-states:live",),
+                source_paths=(
+                    f"postgres-runtime-states:{market_environment}",
+                ),
             ),
         )
         guarded_exchange = _WriteRejectingExchange()
@@ -217,6 +234,8 @@ async def _run_from_database(
                 lease_owner=lease_owner,
                 max_market_state_age_seconds=state_stale_after_seconds,
                 resize_tolerance=Decimal("0.10"),
+                hedge_mode=hedge_mode,
+                warm_stale_states=True,
             ),
         )
         return await service.run(

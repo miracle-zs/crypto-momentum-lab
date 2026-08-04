@@ -1,16 +1,22 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
 import pytest
 
-from crypto_momentum_lab.domain.execution import ExchangeOrderState, OrderExecutionPlan
+from crypto_momentum_lab.domain.execution import (
+    ExchangeOrderState,
+    FuturesPositionSide,
+    OrderExecutionPlan,
+)
 from crypto_momentum_lab.execution_account.binance.client import (
     BinanceUsdMPrivateReadClient,
     BinanceUsdMTradeClient,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeOrderQueryUnknownError,
+    ExchangeSubmissionTimeoutError,
     LiveSubmissionDisabledError,
 )
 
@@ -82,6 +88,48 @@ async def test_client_fetches_account_snapshot() -> None:
     assert balances[0].wallet_balance == Decimal("100.5")
     assert balances[0].available_balance == Decimal("80.25")
     assert balances[0].unrealized_pnl == Decimal("1.5")
+
+
+async def test_client_fetches_account_and_position_modes() -> None:
+    requested_paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/fapi/v3/account":
+            return httpx.Response(
+                200,
+                json={
+                    "multiAssetsMargin": False,
+                    "canTrade": True,
+                    "feeTier": 0,
+                },
+            )
+        assert request.url.path == "/fapi/v1/positionSide/dual"
+        return httpx.Response(200, json={"dualSidePosition": True})
+
+    client = BinanceUsdMPrivateReadClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        config = await client.fetch_account_config()
+    finally:
+        await client.aclose()
+
+    assert requested_paths == [
+        "/fapi/v3/account",
+        "/fapi/v1/positionSide/dual",
+    ]
+    assert config.hedge_mode is True
 
 
 async def test_client_fetches_recent_user_trades() -> None:
@@ -227,8 +275,126 @@ async def test_trade_client_submits_signed_binance_order() -> None:
         await client.aclose()
 
     assert "newClientOrderId=" in captured_body
+    assert "reduceOnly=false" in captured_body
+    assert "positionSide=" not in captured_body
     assert "signature=" in captured_body
     assert snapshot.state is ExchangeOrderState.FILLED
+
+
+async def test_trade_client_uses_position_side_for_hedge_mode_close() -> None:
+    captured_body = ""
+    plan = replace(
+        _order_plan(),
+        side="SELL",
+        reduce_only=True,
+        position_side=FuturesPositionSide.LONG,
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_body
+        captured_body = request.content.decode()
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": plan.client_order_id,
+                "orderId": 12345,
+                "status": "FILLED",
+                "executedQty": "0.003",
+                "avgPrice": "30000",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        await client.submit_order(plan)
+    finally:
+        await client.aclose()
+
+    assert "positionSide=LONG" in captured_body
+    assert "reduceOnly=" not in captured_body
+
+
+async def test_trade_client_treats_server_error_as_unknown_submit_outcome() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, request=request, json={"msg": "unknown"})
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        with pytest.raises(ExchangeSubmissionTimeoutError):
+            await client.submit_order(_order_plan())
+    finally:
+        await client.aclose()
+
+
+async def test_trade_client_confirms_entry_leverage_before_order() -> None:
+    requested_paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/fapi/v1/leverage":
+            assert "leverage=1" in request.content.decode()
+            return httpx.Response(
+                200,
+                json={"symbol": "BTCUSDT", "leverage": 1},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": _order_plan().client_order_id,
+                "orderId": 12345,
+                "status": "FILLED",
+                "executedQty": "0.003",
+                "avgPrice": "30000",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        entry_leverage=1,
+    )
+
+    try:
+        await client.submit_order(_order_plan())
+    finally:
+        await client.aclose()
+
+    assert requested_paths == ["/fapi/v1/leverage", "/fapi/v1/order"]
 
 
 def _order_plan() -> OrderExecutionPlan:

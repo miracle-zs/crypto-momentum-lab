@@ -67,8 +67,13 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         )
         == "liquidation_cascade"
     )
-    assert "BINANCE_API_KEY" not in str(manifest)
-    assert "BINANCE_API_SECRET" not in str(manifest)
+    assert services["execution-account-live"]["profiles"] == ["live"]
+    assert services["live-strategy"]["profiles"] == ["live"]
+    assert services["execution-account-live"]["environment"][
+        "BINANCE_API_KEY"
+    ] == "${BINANCE_API_KEY:-}"
+    assert "BINANCE_API_KEY" not in str(services["market-data"])
+    assert "BINANCE_API_KEY" not in str(services["paper-compression-pair"])
 
 
 def test_server_paper_capture_only_subscribes_to_strategy_required_streams() -> None:

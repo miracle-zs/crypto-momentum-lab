@@ -1,106 +1,177 @@
 # Small-Capital Live Session
 
-This runbook controls real-money Binance USD-M Futures execution. Do not run it
-until the shadow report is accepted, the account is dedicated to one selected
-strategy, and the operator is prepared to stop and reconcile the session.
+This runbook enables one selected strategy on one dedicated Binance USD-M
+Futures account. The existing paper account for that strategy keeps running
+from the same `research` market-state feed. Entries use the same strategy
+configuration; execution, balances, positions, and exits remain isolated.
 
-## Pre-Session Checklist
+Do not enable the `live` Compose profile on the current 2 GB server. Upgrade it
+to at least 4 GB RAM first. The default Compose deployment remains paper-only.
 
-- Record the Git commit, Alembic revision, strategy config hash, and risk config hash.
-- Confirm the execution account is `READY_READONLY`, fresh, and uses the expected margin mode.
-- Confirm one active lease is owned by the live worker for the selected strategy.
-- Confirm there are no active halts or unresolved/ambiguous exchange orders.
-- Confirm fixed notional, one-position, daily-loss, gross-exposure, spread,
-  min-notional, cooldown, account-freshness, and market-freshness limits.
-- Review a completed shadow session from the previous 24 hours with matching strategy hash.
+## Binance Account
 
-## Approval And Preflight
+Create one HMAC API key pair and store it only in an untracked server file or a
+secret manager. Enable Futures read/trade, disable withdrawals, and restrict the
+key to the server's public IP. Set USD-M Futures to Hedge Mode and make the
+account flat before the first session. One key pair is enough for one account.
+New entry symbols are explicitly set to the configured leverage, default 1x,
+before an order is submitted; a failed leverage confirmation blocks the order.
 
-The confirmation text is exactly `ENABLE SMALL LIVE TRADING`.
+Create `/opt/crypto-momentum-lab/.env.live` with mode `0600`, using
+`.env.live.example` as the field list. Never paste the secret into a command,
+Git commit, dashboard, or chat transcript.
+
+All commands below use both environment files:
 
 ```bash
-cml-live-rollout preflight \
-  --database-url "$CML_DATABASE_URL" \
-  --account-label primary \
-  --strategy compression_breakout
+set -a
+. ./.env.server
+. ./.env.live
+set +a
+COMPOSE="docker compose --env-file .env.server --env-file .env.live -f compose.server.yaml"
+```
 
-# Set STRATEGY_CONFIG_HASH and RISK_CONFIG_HASH from the preflight JSON.
-cml-live-rollout approve \
-  --database-url "$CML_DATABASE_URL" \
-  --account-label primary \
-  --strategy compression_breakout \
-  --strategy-config-hash "$STRATEGY_CONFIG_HASH" \
+## 1. Start Read-Only Account Sync
+
+Build the exact Git commit, apply migrations, and start only the authenticated
+read-only account service. This does not submit orders.
+
+```bash
+$COMPOSE --profile live build
+$COMPOSE --profile live up -d execution-account-live
+$COMPOSE --profile live ps execution-account-live
+```
+
+The service checks Binance account and Hedge Mode every 5 seconds, persists only
+active positions, and reconciles fills every 60 seconds. It must report
+`healthy` before continuing.
+
+## 2. Prepare Risk Gates
+
+Compute the stable entry-strategy hash, then create a short-lived lease and a
+risk snapshot. `prepare` does not call a Binance write endpoint.
+
+```bash
+STRATEGY_CONFIG_HASH="$($COMPOSE --profile live run --rm --no-deps \
+  live-strategy strategy-config-hash --strategy "$CML_LIVE_STRATEGY")"
+
+$COMPOSE --profile live run --rm --no-deps live-strategy prepare \
+  --account-label "$CML_LIVE_ACCOUNT_LABEL" \
+  --strategy "$CML_LIVE_STRATEGY" \
+  --lease-owner "$CML_LIVE_LEASE_OWNER" \
+  --lease-ttl-seconds 1800 \
+  --max-order-notional 100 \
+  --max-gross-notional 300 \
+  --max-daily-loss 25 \
+  --max-open-positions 3 \
+  --confirmation "PREPARE LIVE RISK GATES"
+```
+
+Record the returned `risk_config_hash`, `strategy_config_hash`, `lease_id`, and
+expiry. The live daemon renews its five-minute lease while healthy; if it stops,
+the lease expires without another process taking over.
+
+## 3. Run Matching Shadow
+
+The shadow run reads the same `research` states, generates Hedge Mode plans,
+and persists each order as terminal `suppressed`. It cannot call a Binance write
+endpoint.
+
+```bash
+$COMPOSE --profile live run --rm --no-deps \
+  --entrypoint cml-shadow-operation live-strategy run \
+  --account-label "$CML_LIVE_ACCOUNT_LABEL" \
+  --strategy "$CML_LIVE_STRATEGY" \
+  --market-environment research \
+  --run-id "shadow-${CML_LIVE_SESSION_ID}" \
+  --max-runtime-seconds 7200 \
+  --require-lease-owner "$CML_LIVE_LEASE_OWNER" \
+  --hedge-mode --json
+```
+
+Review the report and record all three drills from
+`docs/runbooks/shadow-operation-session.md`. A completed matching shadow session
+must be less than 24 hours old.
+
+## 4. Approve And Preflight
+
+Set `CML_LIVE_STRATEGY_CONFIG_HASH` in `.env.live` to the value from step 2.
+Use the exact Git commit and Alembic head from the deployed image. The approval
+confirmation is exactly `ENABLE SMALL LIVE TRADING`.
+
+```bash
+$COMPOSE --profile live run --rm --no-deps live-strategy approve \
+  --account-label "$CML_LIVE_ACCOUNT_LABEL" \
+  --strategy "$CML_LIVE_STRATEGY" \
+  --strategy-config-hash "$CML_LIVE_STRATEGY_CONFIG_HASH" \
   --risk-config-hash "$RISK_CONFIG_HASH" \
-  --git-commit-hash "$GIT_COMMIT" \
-  --migration-revision 20260704_0010 \
-  --notional-cap 25 --max-open-positions 1 --max-daily-loss 10 \
-  --approver "$OPERATOR" \
+  --git-commit-hash "$CML_CODE_COMMIT" \
+  --migration-revision "$CML_LIVE_MIGRATION_REVISION" \
+  --notional-cap 100 --max-open-positions 3 --max-daily-loss 25 \
+  --approver "$CML_LIVE_OPERATOR" \
+  --expires-in-minutes 1440 \
   --confirmation "ENABLE SMALL LIVE TRADING"
 
-cml-live-rollout preflight --database-url "$CML_DATABASE_URL" --account-label primary --strategy compression_breakout
+$COMPOSE --profile live run --rm --no-deps live-strategy preflight \
+  --account-label "$CML_LIVE_ACCOUNT_LABEL" \
+  --strategy "$CML_LIVE_STRATEGY"
 ```
 
-## Live Run
+## 5. Start Live
 
-`run` continuously consumes newly closed 15-second market states from
-PostgreSQL. For every state it reloads approval, lease, account health, halts,
-unresolved orders, positions, PnL, exposure, trading rules, and cooldowns before
-the strategy can submit an order. It restores and saves the strategy checkpoint
-under the session ID. The following flag is the real-money confirmation:
-`--i-understand-this-places-real-orders`.
+Select `fixed` or `candle_15m` in `.env.live`. To mirror a fixed paper account,
+also copy that strategy's fixed TP, SL, and maximum holding duration. For the
+15-minute variant, the first adverse official closed candle exits the position;
+the maximum duration remains a final safety exit.
 
 ```bash
-cml-live-rollout run \
-  --database-url "$CML_DATABASE_URL" \
-  --account-label primary --strategy compression_breakout \
-  --session-id "$SESSION_ID" --operator "$OPERATOR" \
-  --lease-owner live-worker \
-  --strategy-config-hash "$STRATEGY_CONFIG_HASH" \
-  --git-commit-hash "$GIT_COMMIT" \
-  --migration-revision 20260704_0010 \
-  --max-runtime-seconds 3600 \
-  --state-stale-after-seconds 30 \
-  --checkpoint-every-states 100 \
-  --max-spread 5 --cooldown-seconds 300 \
-  --i-understand-this-places-real-orders
-
-cml-live-rollout status --database-url "$CML_DATABASE_URL" --session-id "$SESSION_ID"
+$COMPOSE --profile live up -d live-strategy
+$COMPOSE --profile live ps execution-account-live live-strategy
+$COMPOSE --profile live logs --tail=200 live-strategy
 ```
 
-The separate `submit-plan` command exists for a controlled single-order probe.
-Its quantized plan must reference an already persisted risk-approved intent; it
-uses the same live gate and explicit real-money confirmation flag.
+The profile includes the mandatory
+`--i-understand-this-places-real-orders` flag. Any manual `run` invocation must
+also provide that exact flag; omission fails before credentials are used.
 
-## Drain And Emergency Controls
+The daemon rejects unowned/manual positions, suppresses duplicate symbol
+entries, restores its checkpoint by stable session ID, reconciles non-terminal
+orders by Binance client order ID, and warms a new session from two hours of
+historical states without submitting those historical signals. Active live
+position symbols remain in the 15-second market-data subscription even after
+leaving the momentum pool. The daemon stops if account state, market data,
+approval, lease, migration, commit, or risk state no longer matches.
 
-First disable new entries and allow only reduce-only orders:
+## Drain And Stop
+
+Disable new entries first; managed reduce-only exits continue while the process
+is in `draining` state. Draining is sticky for that session ID across container
+restarts; use a new session ID only after the account is reconciled flat.
+
+Emergency flatten is a separate audited operator action and requires the exact
+confirmation `EMERGENCY FLATTEN LIVE ACCOUNT`. Do not substitute a normal entry
+order or disable Hedge Mode while positions are open.
 
 ```bash
-cml-live-rollout disable-new-entries \
-  --database-url "$CML_DATABASE_URL" --session-id "$SESSION_ID" \
-  --operator "$OPERATOR" --strategy-config-hash "$STRATEGY_CONFIG_HASH" \
+$COMPOSE --profile live run --rm --no-deps live-strategy disable-new-entries \
+  --session-id "$CML_LIVE_SESSION_ID" \
+  --operator "$CML_LIVE_OPERATOR" \
+  --strategy-config-hash "$CML_LIVE_STRATEGY_CONFIG_HASH" \
   --risk-config-hash "$RISK_CONFIG_HASH"
 ```
 
-Cancel and emergency flatten operations require persisted audited command
-records with exact confirmations `CANCEL ALL OPEN ORDERS` and
-`EMERGENCY FLATTEN LIVE ACCOUNT`. Flatten plans must be reduce-only. Never
-release the trading lease until local and Binance positions/open orders agree
-and are flat.
-
-## Post-Session
-
-1. Disable the live-submit configuration immediately after the session.
-2. Synchronize balances, positions, open orders, and fills from Binance.
-3. Confirm account flat, no unresolved orders, and zero reconciliation mismatch.
-4. Release the lease only after flat reconciliation.
-5. Export the final report and review fees, slippage, PnL, drawdown, halts,
-   order states, account-flat confirmation, and lease-release confirmation.
+Do not stop account sync or release the lease until Binance positions and open
+orders are flat and local reconciliation agrees. Review the final transition:
 
 ```bash
-cml-live-rollout report --database-url "$CML_DATABASE_URL" --session-id "$SESSION_ID"
+$COMPOSE --profile live run --rm --no-deps live-strategy report \
+  --session-id "$CML_LIVE_SESSION_ID"
 ```
 
-Do not increase capital until multiple reviewed sessions complete without
-reconciliation mismatches, unresolved orders, failed rollback controls, or
-risk-limit breaches.
+Disable the live-submit configuration immediately after the session by stopping
+the `live-strategy` service once the account is reconciled flat. Keep the
+read-only account sync running until the post-session report is complete.
+
+Start with one position and materially less than the 100 USDT paper notional.
+Increase exposure only after several reviewed live sessions have no unresolved
+orders, reconciliation mismatch, unexpected exit, or operational halt.

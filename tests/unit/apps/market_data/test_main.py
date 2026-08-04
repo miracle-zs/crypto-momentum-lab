@@ -106,6 +106,11 @@ def test_parse_paper_exit_run_ids_normalizes_csv() -> None:
     ) == frozenset({"run-1", "run-2"})
 
 
+def test_parse_live_position_account_label_normalizes_optional_value() -> None:
+    assert main.parse_live_position_account_label(" primary ") == "primary"
+    assert main.parse_live_position_account_label("  ") is None
+
+
 def test_run_market_data_uses_combined_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

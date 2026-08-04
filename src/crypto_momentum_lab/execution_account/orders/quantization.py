@@ -1,7 +1,10 @@
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
 
-from crypto_momentum_lab.domain.execution import OrderExecutionPlan
+from crypto_momentum_lab.domain.execution import (
+    FuturesPositionSide,
+    OrderExecutionPlan,
+)
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
@@ -49,6 +52,8 @@ def quantize_order_plan(
     *,
     reference_price: Decimal,
     resize_tolerance: Decimal,
+    hedge_mode: bool = False,
+    requested_quantity: Decimal | None = None,
 ) -> OrderExecutionPlan | QuantizationRejection:
     if intent.symbol != rules.symbol:
         raise ValueError("intent symbol must match trading rules")
@@ -56,12 +61,19 @@ def quantize_order_plan(
         raise ValueError("reference_price must be positive")
     if resize_tolerance < 0 or resize_tolerance >= 1:
         raise ValueError("resize_tolerance must be in [0, 1)")
-    if intent.desired_notional is None:
+    if intent.desired_notional is None and requested_quantity is None:
         return QuantizationRejection("missing_desired_notional", {})
+    if requested_quantity is not None and requested_quantity <= 0:
+        raise ValueError("requested_quantity must be positive")
 
     price = _quantized_price(intent, rules, reference_price)
     sizing_price = reference_price if price is None else price
-    raw_quantity = intent.desired_notional / sizing_price
+    if requested_quantity is None:
+        if intent.desired_notional is None:
+            raise AssertionError("desired_notional was validated above")
+        raw_quantity = intent.desired_notional / sizing_price
+    else:
+        raw_quantity = requested_quantity
     quantity = _round_down(raw_quantity, rules.step_size)
     actual_notional = quantity * sizing_price
 
@@ -83,17 +95,20 @@ def quantize_order_plan(
             actual_notional=actual_notional,
             limit=rules.min_notional,
         )
-    resize_fraction = (intent.desired_notional - actual_notional).copy_abs() / (
-        intent.desired_notional
-    )
-    if resize_fraction > resize_tolerance:
-        return _rejection(
-            "resize_beyond_tolerance",
-            desired_notional=intent.desired_notional,
-            actual_notional=actual_notional,
-            resize_fraction=resize_fraction,
-            tolerance=resize_tolerance,
-        )
+    if requested_quantity is None:
+        if intent.desired_notional is None:
+            raise AssertionError("desired_notional was validated above")
+        resize_fraction = (
+            intent.desired_notional - actual_notional
+        ).copy_abs() / intent.desired_notional
+        if resize_fraction > resize_tolerance:
+            return _rejection(
+                "resize_beyond_tolerance",
+                desired_notional=intent.desired_notional,
+                actual_notional=actual_notional,
+                resize_fraction=resize_fraction,
+                tolerance=resize_tolerance,
+            )
 
     return OrderExecutionPlan(
         intent_id=intent.candidate_id,
@@ -109,6 +124,7 @@ def quantize_order_plan(
         price=price,
         reduce_only=intent.reduce_only,
         created_at=intent.created_at,
+        position_side=_position_side(intent, hedge_mode=hedge_mode),
         quantized=True,
     )
 
@@ -128,6 +144,18 @@ def _exchange_side(intent: OrderIntentCandidate) -> str:
     opening_buy = intent.side is StrategySide.LONG
     should_buy = not opening_buy if intent.reduce_only else opening_buy
     return "BUY" if should_buy else "SELL"
+
+
+def _position_side(
+    intent: OrderIntentCandidate,
+    *,
+    hedge_mode: bool,
+) -> FuturesPositionSide:
+    if not hedge_mode:
+        return FuturesPositionSide.BOTH
+    if intent.side is StrategySide.LONG:
+        return FuturesPositionSide.LONG
+    return FuturesPositionSide.SHORT
 
 
 def _round_down(value: Decimal, increment: Decimal) -> Decimal:

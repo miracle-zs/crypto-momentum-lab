@@ -3,6 +3,7 @@ from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderFill,
     ExchangeOrderSnapshot,
     ExchangeOrderState,
+    FuturesPositionSide,
     OrderExecutionPlan,
 )
 
@@ -11,6 +12,7 @@ __all__ = [
     "ExchangeOrderFill",
     "ExchangeOrderSnapshot",
     "ExchangeOrderState",
+    "FuturesPositionSide",
     "OrderExecutionPlan",
     "ExecutionRunMode",
     "ShadowSuppressionEvent",

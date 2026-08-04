@@ -2,7 +2,10 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.execution import OrderExecutionPlan
+from crypto_momentum_lab.domain.execution import (
+    FuturesPositionSide,
+    OrderExecutionPlan,
+)
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
@@ -54,6 +57,26 @@ def test_rejects_resize_beyond_tolerance() -> None:
 
     assert isinstance(result, QuantizationRejection)
     assert result.reason == "resize_beyond_tolerance"
+
+
+def test_hedge_mode_preserves_strategy_position_side_for_close() -> None:
+    result = quantize_order_plan(
+        replace(
+            _intent(Decimal("90")),
+            side=StrategySide.SHORT,
+            reduce_only=True,
+        ),
+        _rules(),
+        reference_price=Decimal("30000"),
+        resize_tolerance=Decimal("0.20"),
+        hedge_mode=True,
+        requested_quantity=Decimal("0.003"),
+    )
+
+    assert isinstance(result, OrderExecutionPlan)
+    assert result.side == "BUY"
+    assert result.position_side is FuturesPositionSide.SHORT
+    assert result.quantity == Decimal("0.003")
 
 
 def _rules() -> SymbolTradingRules:

@@ -129,9 +129,10 @@ class OrderExecutionStateMachine:
                     },
                 )
             )
+            await self._append_event(plan, ExchangeOrderState.SUPPRESSED)
             return OrderExecutionResult(
                 client_order_id=plan.client_order_id,
-                state=ExchangeOrderState.PLANNED,
+                state=ExchangeOrderState.SUPPRESSED,
                 exchange_order_id=None,
                 suppressed=True,
             )
@@ -179,6 +180,27 @@ class OrderExecutionStateMachine:
                     None,
                 )
             snapshot = queried_snapshot
+        return await self._apply_snapshot(plan, snapshot)
+
+    async def reconcile_order(
+        self,
+        plan: OrderExecutionPlan,
+    ) -> OrderExecutionResult:
+        snapshot = await self._exchange.query_order_by_client_id(
+            plan.symbol,
+            plan.client_order_id,
+        )
+        if snapshot is None:
+            await self._append_event(
+                plan,
+                ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                details={"reason": "reconciliation_order_not_found"},
+            )
+            return OrderExecutionResult(
+                plan.client_order_id,
+                ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                None,
+            )
         return await self._apply_snapshot(plan, snapshot)
 
     async def _apply_snapshot(

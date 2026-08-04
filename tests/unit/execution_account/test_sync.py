@@ -13,11 +13,17 @@ from crypto_momentum_lab.execution_account.sync import (
 
 
 class FakeClient:
-    def __init__(self, *, multi_assets_mode: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        multi_assets_mode: bool = False,
+        hedge_mode: bool = False,
+    ) -> None:
         self.config = AccountConfigSnapshot(
             environment="live",
             account_label="primary",
             multi_assets_mode=multi_assets_mode,
+            hedge_mode=hedge_mode,
             can_trade=True,
             fee_tier=0,
             observed_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
@@ -143,6 +149,21 @@ async def test_sync_once_halts_on_account_mode_mismatch() -> None:
     assert "multi_assets_mode_mismatch" in repository.process_states[-1].reason
 
 
+async def test_sync_once_halts_on_hedge_mode_mismatch() -> None:
+    repository = FakeRepository()
+    service = ExecutionAccountSyncService(
+        client=FakeClient(hedge_mode=False),
+        repository=repository,
+        config=_config(expected_hedge_mode=True),
+    )
+
+    result = await service.sync_once()
+
+    assert result.status is ExecutionAccountStatus.HALTED_READONLY
+    assert result.mismatch_count == 1
+    assert "hedge_mode_mismatch" in repository.process_states[-1].reason
+
+
 async def test_sync_once_marks_degraded_when_fetch_fails() -> None:
     repository = FakeRepository()
     service = ExecutionAccountSyncService(
@@ -161,10 +182,14 @@ async def test_sync_once_marks_degraded_when_fetch_fails() -> None:
     assert repository.process_states[-1].state is ExecutionAccountStatus.DEGRADED
 
 
-def _config(expected_multi_assets_mode: bool = False) -> ExecutionAccountSyncConfig:
+def _config(
+    expected_multi_assets_mode: bool = False,
+    expected_hedge_mode: bool = False,
+) -> ExecutionAccountSyncConfig:
     return ExecutionAccountSyncConfig(
         environment="live",
         account_label="primary",
         expected_multi_assets_mode=expected_multi_assets_mode,
+        expected_hedge_mode=expected_hedge_mode,
         observed_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
     )

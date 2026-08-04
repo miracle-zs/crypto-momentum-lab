@@ -21,6 +21,7 @@ Run the read-only account synchronization first:
 ```bash
 cml-execution-account sync-once \
   --account-label primary \
+  --hedge-mode \
   --database-url "$CML_DATABASE_URL"
 ```
 
@@ -30,10 +31,12 @@ Run a bounded shadow session:
 cml-shadow-operation run \
   --account-label primary \
   --strategy compression_breakout \
+  --market-environment research \
   --run-id "$RUN_ID" \
   --database-url "$CML_DATABASE_URL" \
-  --max-runtime-seconds 3600 \
+  --max-runtime-seconds 7200 \
   --require-lease-owner shadow-preflight \
+  --hedge-mode \
   --json
 ```
 

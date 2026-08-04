@@ -1,14 +1,16 @@
 # Server Paper Deployment
 
 This deployment consumes Binance public USD-M market data and runs three
-independent strategies in paper mode. It does not accept Binance credentials
-and cannot place orders.
+independent strategies in paper mode. The default profile does not accept
+Binance credentials and cannot place orders. The opt-in `live` profile is
+documented separately in `small-capital-live-session.md`.
 
-The server profile subscribes to `aggTrade`, `bookTicker`, `forceOrder`, and
-`kline_1m`. `aggTrade` feeds all three strategies, `bookTicker` supplies the
-executable bid/ask for paper fills and marks, `forceOrder` feeds the
-liquidation cascade strategy, and closed one-minute klines are aggregated into
-official UTC-aligned 15-minute candles for candle exits.
+The server profile subscribes to `aggTrade`, `bookTicker`, and `forceOrder`.
+`aggTrade` feeds all three strategies, `bookTicker` supplies executable bid/ask
+prices, and `forceOrder` feeds the liquidation strategy. Candle exits load
+immutable official UTC-aligned 15-minute klines from Binance REST only when
+positions require them; one-minute klines are not continuously subscribed or
+archived.
 
 The compression-breakout daemon keeps 15-second states for execution and risk
 monitoring, but aggregates them into closed UTC-aligned 5-minute signal bars.

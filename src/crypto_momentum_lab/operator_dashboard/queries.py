@@ -28,6 +28,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     AccountFillEventRow,
     AccountOpenOrderRow,
     AccountPositionSnapshotRow,
+    AccountReconciliationRunRow,
     ExchangeOrderRow,
     ExecutionAccountProcessStateRow,
     LiveSessionTransitionRow,
@@ -556,35 +557,85 @@ class DashboardQueries:
                 .order_by(ExecutionAccountProcessStateRow.occurred_at.desc())
                 .limit(1)
             )
-            balances = (
-                await session.scalars(
-                    select(AccountBalanceSnapshotRow)
-                    .order_by(AccountBalanceSnapshotRow.observed_at.desc())
-                    .limit(20)
+            balances: Sequence[AccountBalanceSnapshotRow] = ()
+            positions: Sequence[AccountPositionSnapshotRow] = ()
+            orders: Sequence[AccountOpenOrderRow] = ()
+            fills: Sequence[AccountFillEventRow] = ()
+            if process is not None:
+                environment = process.environment
+                account_label = process.account_label
+                reconciliation = await session.scalar(
+                    select(AccountReconciliationRunRow)
+                    .where(
+                        AccountReconciliationRunRow.environment == environment,
+                        AccountReconciliationRunRow.account_label == account_label,
+                        AccountReconciliationRunRow.status == "ready",
+                    )
+                    .order_by(AccountReconciliationRunRow.observed_at.desc())
+                    .limit(1)
                 )
-            ).all()
-            positions = (
-                await session.scalars(
-                    select(AccountPositionSnapshotRow)
-                    .where(AccountPositionSnapshotRow.position_amt != 0)
-                    .order_by(AccountPositionSnapshotRow.observed_at.desc())
-                    .limit(20)
+                balance_at = await session.scalar(
+                    select(func.max(AccountBalanceSnapshotRow.observed_at)).where(
+                        AccountBalanceSnapshotRow.environment == environment,
+                        AccountBalanceSnapshotRow.account_label == account_label,
+                    )
                 )
-            ).all()
-            orders = (
-                await session.scalars(
-                    select(AccountOpenOrderRow)
-                    .order_by(AccountOpenOrderRow.observed_at.desc())
-                    .limit(20)
-                )
-            ).all()
-            fills = (
-                await session.scalars(
-                    select(AccountFillEventRow)
-                    .order_by(AccountFillEventRow.trade_at.desc())
-                    .limit(20)
-                )
-            ).all()
+                if balance_at is not None:
+                    balances = (
+                        await session.scalars(
+                            select(AccountBalanceSnapshotRow).where(
+                                AccountBalanceSnapshotRow.environment == environment,
+                                AccountBalanceSnapshotRow.account_label
+                                == account_label,
+                                AccountBalanceSnapshotRow.observed_at == balance_at,
+                            )
+                        )
+                    ).all()
+                if reconciliation is not None and reconciliation.position_count > 0:
+                    position_at = await session.scalar(
+                        select(
+                            func.max(AccountPositionSnapshotRow.observed_at)
+                        ).where(
+                            AccountPositionSnapshotRow.environment == environment,
+                            AccountPositionSnapshotRow.account_label == account_label,
+                        )
+                    )
+                    if position_at is not None:
+                        positions = (
+                            await session.scalars(
+                                select(AccountPositionSnapshotRow).where(
+                                    AccountPositionSnapshotRow.environment
+                                    == environment,
+                                    AccountPositionSnapshotRow.account_label
+                                    == account_label,
+                                    AccountPositionSnapshotRow.observed_at
+                                    == position_at,
+                                    AccountPositionSnapshotRow.position_amt != 0,
+                                )
+                            )
+                        ).all()
+                orders = (
+                    await session.scalars(
+                        select(AccountOpenOrderRow)
+                        .where(
+                            AccountOpenOrderRow.environment == environment,
+                            AccountOpenOrderRow.account_label == account_label,
+                        )
+                        .order_by(AccountOpenOrderRow.observed_at.desc())
+                        .limit(20)
+                    )
+                ).all()
+                fills = (
+                    await session.scalars(
+                        select(AccountFillEventRow)
+                        .where(
+                            AccountFillEventRow.environment == environment,
+                            AccountFillEventRow.account_label == account_label,
+                        )
+                        .order_by(AccountFillEventRow.trade_at.desc())
+                        .limit(20)
+                    )
+                ).all()
         observed_at = None if process is None else process.occurred_at
         return AccountOverviewResponse(
             status=OperationalStatus.UNKNOWN
@@ -605,10 +656,12 @@ class DashboardQueries:
             positions=[
                 {
                     "symbol": row.symbol,
+                    "position_side": row.position_side,
                     "position_amt": str(row.position_amt),
                     "entry_price": str(row.entry_price),
                     "notional": str(row.notional),
                     "unrealized_pnl": str(row.unrealized_pnl),
+                    "leverage": row.leverage,
                 }
                 for row in positions
             ],

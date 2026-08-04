@@ -702,7 +702,9 @@ function renderAccount(data) {
   ], data.balances, { emptyText: "尚无余额快照" });
   const positionsTable = dataTable([
     { label: "币种", key: "symbol", cls: "sym" },
+    { label: "方向", value: (row) => pill(row.position_side || "BOTH"), html: true },
     { label: "持仓量", value: (row) => num(row.position_amt, 4), align: "right", cls: (row) => pnlClass(row.position_amt) },
+    { label: "杠杆", value: (row) => row.leverage ? `${esc(row.leverage)}x` : "—", align: "right", cls: "muted" },
     { label: "名义价值", value: (row) => money(row.notional), align: "right" },
     { label: "未实现盈亏", value: (row) => signedMoney(row.unrealized_pnl), align: "right", cls: (row) => pnlClass(row.unrealized_pnl) },
   ], data.positions, { emptyText: "交易所无持仓" });

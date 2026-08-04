@@ -16,13 +16,18 @@ from crypto_momentum_lab.apps.shadow_operation.main import (
     _latest_account_state,
     _latest_risk_config,
 )
-from crypto_momentum_lab.domain.execution import OrderExecutionPlan
+from crypto_momentum_lab.domain.execution import FuturesPositionSide, OrderExecutionPlan
 from crypto_momentum_lab.domain.live_rollout import (
     LiveOperatorApproval,
     LiveSessionState,
     LiveSessionTransition,
 )
-from crypto_momentum_lab.domain.risk import RiskEvaluation
+from crypto_momentum_lab.domain.risk import (
+    RiskConfigSnapshot,
+    RiskEvaluation,
+    TradingLease,
+    TradingLeaseState,
+)
 from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     RunMode,
@@ -38,7 +43,13 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 from crypto_momentum_lab.live_rollout.daemon import (
     LiveDaemonConfig,
     LiveDaemonResult,
+    LiveRuntimeStrategy,
     LiveStrategyDaemon,
+)
+from crypto_momentum_lab.live_rollout.exits import (
+    LiveExitConfig,
+    LiveExitManager,
+    ThreadedClosedCandle15mLoader,
 )
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext, evaluate_live_gate
 from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
@@ -56,6 +67,7 @@ from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
+    LiveSessionTransitionRow,
     OrderIntentExecutionRow,
     ShadowSessionRow,
 )
@@ -70,19 +82,93 @@ from crypto_momentum_lab.persistence.postgres.risk_repository import (
 )
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
+    RuntimeStateCursor,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,
 )
 from crypto_momentum_lab.risk.gateway import RiskGateway
-from crypto_momentum_lab.strategy_runner.registry import build_runtime_strategy
+from crypto_momentum_lab.strategy_runner.candle_source import (
+    BinanceRestClosedCandle15mSource,
+)
+from crypto_momentum_lab.strategy_runner.position_exit import (
+    PositionExitMode,
+    PositionExitPolicy,
+)
+from crypto_momentum_lab.strategy_runner.registry import (
+    build_runtime_config,
+    build_runtime_strategy,
+)
 
 app = typer.Typer(no_args_is_help=True)
+_PREPARE_CONFIRMATION = "PREPARE LIVE RISK GATES"
+_LIVE_WARMUP_SECONDS = 7200
+_LIVE_WARMUP_STATE_LIMIT = 100_000
 
 
 @app.callback()
 def live_rollout_app() -> None:
     """Operate explicitly approved small-capital live sessions."""
+
+
+@app.command("strategy-config-hash")
+def strategy_config_hash_command(
+    strategy: Annotated[str, typer.Option("--strategy")] = "compression_breakout",
+) -> None:
+    typer.echo(_live_strategy_config_hash(strategy))
+
+
+@app.command("prepare")
+def prepare_command(
+    database_url: Annotated[str | None, typer.Option("--database-url")] = None,
+    account_label: Annotated[str, typer.Option("--account-label")] = "primary",
+    strategy: Annotated[str, typer.Option("--strategy")] = "compression_breakout",
+    lease_owner: Annotated[str, typer.Option("--lease-owner")] = "live-worker",
+    lease_ttl_seconds: Annotated[
+        int,
+        typer.Option("--lease-ttl-seconds", min=180),
+    ] = 300,
+    max_order_notional: Annotated[
+        str,
+        typer.Option("--max-order-notional"),
+    ] = "100",
+    max_gross_notional: Annotated[
+        str,
+        typer.Option("--max-gross-notional"),
+    ] = "300",
+    max_daily_loss: Annotated[
+        str,
+        typer.Option("--max-daily-loss"),
+    ] = "25",
+    max_open_positions: Annotated[
+        int,
+        typer.Option("--max-open-positions", min=1),
+    ] = 3,
+    state_stale_after_seconds: Annotated[
+        float,
+        typer.Option("--state-stale-after-seconds", min=1),
+    ] = 30.0,
+    confirmation: Annotated[str, typer.Option("--confirmation")] = "",
+) -> None:
+    if confirmation != _PREPARE_CONFIRMATION:
+        raise typer.BadParameter(
+            f"--confirmation must equal '{_PREPARE_CONFIRMATION}'"
+        )
+    payload = asyncio.run(
+        _prepare_live_risk_gates(
+            database_url=_database_url(database_url),
+            account_label=account_label,
+            strategy_name=strategy,
+            lease_owner=lease_owner,
+            lease_ttl_seconds=lease_ttl_seconds,
+            max_order_notional=Decimal(max_order_notional),
+            max_gross_notional=Decimal(max_gross_notional),
+            max_daily_loss=Decimal(max_daily_loss),
+            max_open_positions=max_open_positions,
+            state_stale_after_seconds=state_stale_after_seconds,
+        )
+    )
+    typer.echo(json.dumps(payload, sort_keys=True))
 
 
 @app.command("approve")
@@ -157,6 +243,9 @@ def submit_plan_command(
     api_secret_env: Annotated[
         str, typer.Option("--api-secret-env")
     ] = "BINANCE_API_SECRET",
+    entry_leverage: Annotated[
+        int, typer.Option("--entry-leverage", min=1, max=125)
+    ] = 1,
     confirmation: Annotated[
         bool, typer.Option("--i-understand-this-places-real-orders")
     ] = False,
@@ -187,6 +276,7 @@ def submit_plan_command(
             base_url=base_url,
             api_key=api_key,
             api_secret=api_secret,
+            entry_leverage=entry_leverage,
         )
     )
     typer.echo(json.dumps(asdict(result), default=str, sort_keys=True))
@@ -197,6 +287,10 @@ def run_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
     strategy: Annotated[str, typer.Option("--strategy")] = "compression_breakout",
+    market_environment: Annotated[
+        str,
+        typer.Option("--market-environment"),
+    ] = "research",
     session_id: Annotated[str, typer.Option("--session-id")] = "live-manual",
     operator: Annotated[str, typer.Option("--operator")] = "",
     lease_owner: Annotated[str, typer.Option("--lease-owner")] = "live-worker",
@@ -219,11 +313,34 @@ def run_command(
     cooldown_seconds: Annotated[
         int, typer.Option("--cooldown-seconds", min=0)
     ] = 300,
+    hedge_mode: Annotated[
+        bool,
+        typer.Option("--hedge-mode/--one-way-mode"),
+    ] = True,
+    exit_mode: Annotated[
+        PositionExitMode,
+        typer.Option("--exit-mode"),
+    ] = PositionExitMode.FIXED,
+    take_profit_pct: Annotated[
+        str,
+        typer.Option("--take-profit-pct"),
+    ] = "0.02",
+    stop_loss_pct: Annotated[
+        str,
+        typer.Option("--stop-loss-pct"),
+    ] = "0.01",
+    max_holding_seconds: Annotated[
+        int,
+        typer.Option("--max-holding-seconds", min=1),
+    ] = 1200,
     base_url: Annotated[str, typer.Option("--base-url")] = "https://fapi.binance.com",
     api_key_env: Annotated[str, typer.Option("--api-key-env")] = "BINANCE_API_KEY",
     api_secret_env: Annotated[
         str, typer.Option("--api-secret-env")
     ] = "BINANCE_API_SECRET",
+    entry_leverage: Annotated[
+        int, typer.Option("--entry-leverage", min=1, max=125)
+    ] = 1,
     confirmation: Annotated[
         bool, typer.Option("--i-understand-this-places-real-orders")
     ] = False,
@@ -241,6 +358,7 @@ def run_command(
             database_url=_database_url(database_url),
             account_label=account_label,
             strategy_name=strategy,
+            market_environment=market_environment,
             session_id=session_id,
             operator=operator,
             lease_owner=lease_owner,
@@ -253,9 +371,15 @@ def run_command(
             checkpoint_every_states=checkpoint_every_states,
             max_spread=Decimal(max_spread),
             cooldown_seconds=cooldown_seconds,
+            hedge_mode=hedge_mode,
+            exit_mode=exit_mode,
+            take_profit_pct=Decimal(take_profit_pct),
+            stop_loss_pct=Decimal(stop_loss_pct),
+            max_holding_seconds=max_holding_seconds,
             base_url=base_url,
             api_key=api_key,
             api_secret=api_secret,
+            entry_leverage=entry_leverage,
         )
     )
     typer.echo(json.dumps(asdict(result), default=str, sort_keys=True))
@@ -330,7 +454,10 @@ async def _run_live_plan(
     base_url: str,
     api_key: str,
     api_secret: str,
+    entry_leverage: int,
 ) -> LiveSessionResult:
+    if plan.run_id != session_id:
+        raise ValueError("order plan run_id must match session_id")
     now = datetime.now(tz=UTC)
     engine = create_async_database_engine(database_url)
     client: BinanceUsdMTradeClient | None = None
@@ -345,7 +472,7 @@ async def _run_live_plan(
             strategy_name=strategy_name,
             now=now,
         )
-        unresolved = await order_repository.load_unresolved_orders()
+        unresolved = await order_repository.load_unresolved_orders(session_id)
         context = LiveGateContext(
             now=now,
             live_submit_enabled=True,
@@ -384,7 +511,12 @@ async def _run_live_plan(
             account_label=account_label,
             live_submit_enabled=True,
             base_url=base_url,
+            entry_leverage=entry_leverage,
         )
+        account_config = await client.fetch_account_config()
+        plan_uses_hedge_mode = plan.position_side is not FuturesPositionSide.BOTH
+        if account_config.hedge_mode != plan_uses_hedge_mode:
+            raise RuntimeError("order plan position mode does not match Binance")
         machine = OrderExecutionStateMachine(
             exchange=client,
             repository=order_repository,
@@ -437,6 +569,7 @@ async def _run_live_daemon(
     database_url: str,
     account_label: str,
     strategy_name: str,
+    market_environment: str,
     session_id: str,
     operator: str,
     lease_owner: str,
@@ -449,13 +582,20 @@ async def _run_live_daemon(
     checkpoint_every_states: int,
     max_spread: Decimal,
     cooldown_seconds: int,
+    hedge_mode: bool,
+    exit_mode: PositionExitMode,
+    take_profit_pct: Decimal,
+    stop_loss_pct: Decimal,
+    max_holding_seconds: int,
     base_url: str,
     api_key: str,
     api_secret: str,
+    entry_leverage: int,
 ) -> LiveDaemonResult:
     now = datetime.now(tz=UTC)
     engine = create_async_database_engine(database_url)
     client: BinanceUsdMTradeClient | None = None
+    candle_source: BinanceRestClosedCandle15mSource | None = None
     live_repository: PostgresLiveRolloutRepository | None = None
     risk_config_hash = ""
     try:
@@ -466,20 +606,50 @@ async def _run_live_daemon(
         checkpoint_repository = PostgresPaperDaemonRepository(factory)
         risk_config = await _latest_risk_config(factory, account_label)
         risk_config_hash = risk_config.config_hash
-        await _record_transition(
-            live_repository,
-            session_id=session_id,
-            operator=operator,
-            strategy_config_hash=strategy_config_hash,
-            risk_config_hash=risk_config_hash,
-            state=LiveSessionState.PREFLIGHT,
+        client = BinanceUsdMTradeClient(
+            api_key=api_key,
+            api_secret=api_secret,
+            environment="live",
+            account_label=account_label,
+            live_submit_enabled=True,
+            base_url=base_url,
+            entry_leverage=entry_leverage,
         )
+        account_config = await client.fetch_account_config()
+        if account_config.hedge_mode != hedge_mode:
+            expected = "hedge" if hedge_mode else "one-way"
+            actual = "hedge" if account_config.hedge_mode else "one-way"
+            raise RuntimeError(
+                f"position mode mismatch: expected {expected}, got {actual}"
+            )
+        state_machine = OrderExecutionStateMachine(
+            exchange=client,
+            repository=order_repository,
+            submit_policy=SubmitPolicy.LIVE_SUBMIT,
+            live_submit_enabled=True,
+            clock=lambda: datetime.now(tz=UTC),
+        )
+        await _reconcile_run_orders(
+            order_repository=order_repository,
+            state_machine=state_machine,
+            run_id=session_id,
+        )
+        draining = await _session_is_draining(factory, session_id)
+        if not draining:
+            await _record_transition(
+                live_repository,
+                session_id=session_id,
+                operator=operator,
+                strategy_config_hash=strategy_config_hash,
+                risk_config_hash=risk_config_hash,
+                state=LiveSessionState.PREFLIGHT,
+            )
         approval = await live_repository.load_active_approval(
             account_label=account_label,
             strategy_name=strategy_name,
             now=now,
         )
-        unresolved = await order_repository.load_unresolved_orders()
+        unresolved = await order_repository.load_unresolved_orders(session_id)
         gate_context = LiveGateContext(
             now=now,
             live_submit_enabled=True,
@@ -507,26 +677,22 @@ async def _run_live_daemon(
         if approval is None:
             raise RuntimeError("live approval is required")
 
-        strategy_config: dict[str, object] = {
-            "candidate_notional": min(
-                Decimal("100"),
-                risk_config.max_order_notional,
-            ),
-            "candidate_ttl_buckets": 4,
-        }
-        computed_hash = deterministic_config_hash(strategy_config)
+        strategy_config = _live_strategy_config()
+        runtime_config = build_runtime_config(strategy_name, config=strategy_config)
+        computed_hash = deterministic_config_hash(runtime_config)
         if computed_hash != strategy_config_hash:
             raise RuntimeError(
                 "strategy config hash does not match the live runtime configuration"
             )
-        await _record_transition(
-            live_repository,
-            session_id=session_id,
-            operator=operator,
-            strategy_config_hash=strategy_config_hash,
-            risk_config_hash=risk_config_hash,
-            state=LiveSessionState.SHADOW_PREFLIGHT,
-        )
+        if not draining:
+            await _record_transition(
+                live_repository,
+                session_id=session_id,
+                operator=operator,
+                strategy_config_hash=strategy_config_hash,
+                risk_config_hash=risk_config_hash,
+                state=LiveSessionState.SHADOW_PREFLIGHT,
+            )
         if not await _has_recent_shadow_session(
             factory,
             strategy_name=strategy_name,
@@ -543,37 +709,38 @@ async def _run_live_daemon(
                 strategy_name=strategy_name,
                 strategy_version="v0",
                 config_hash=strategy_config_hash,
-                run_mode=RunMode.PAPER,
+                run_mode=RunMode.LIVE,
                 code_commit=git_commit_hash,
                 created_at=now,
-                source_paths=("postgres-runtime-states:live",),
+                source_paths=(f"postgres-runtime-states:{market_environment}",),
             ),
         )
         checkpoint = await checkpoint_repository.load_checkpoint(session_id)
         if checkpoint is not None:
             strategy.restore_checkpoint(checkpoint)
+        state_repository = PostgresRuntimeMarketStateRepository(factory)
+        market_cursor = (
+            RuntimeStateCursor(bucket_start=now, symbol="")
+            if checkpoint is not None
+            else await _warm_live_strategy(
+                strategy=strategy,
+                repository=state_repository,
+                environment=market_environment,
+                now=now,
+                stale_after_seconds=state_stale_after_seconds,
+            )
+        )
 
-        client = BinanceUsdMTradeClient(
-            api_key=api_key,
-            api_secret=api_secret,
-            environment="live",
-            account_label=account_label,
-            live_submit_enabled=True,
-            base_url=base_url,
-        )
-        state_machine = OrderExecutionStateMachine(
-            exchange=client,
-            repository=order_repository,
-            submit_policy=SubmitPolicy.LIVE_SUBMIT,
-            live_submit_enabled=True,
-            clock=lambda: datetime.now(tz=UTC),
-        )
         notional_cap, max_positions, max_loss, max_gross = (
             live_limits_from_approval(
                 approval=approval,
                 risk_config=risk_config,
             )
         )
+        candle_loader = None
+        if exit_mode is PositionExitMode.CANDLE_15M:
+            candle_source = BinanceRestClosedCandle15mSource(base_url)
+            candle_loader = ThreadedClosedCandle15mLoader(candle_source)
         daemon = LiveStrategyDaemon(
             strategy=strategy,
             risk_gateway=RiskGateway(),
@@ -595,6 +762,7 @@ async def _run_live_daemon(
             context_provider=PostgresLiveContextProvider(
                 session_factory=factory,
                 account_label=account_label,
+                run_id=session_id,
                 strategy_name=strategy_name,
                 strategy_config_hash=strategy_config_hash,
                 git_commit_hash=git_commit_hash,
@@ -607,22 +775,45 @@ async def _run_live_daemon(
                 max_market_state_age_seconds=state_stale_after_seconds,
                 resize_tolerance=Decimal("0.10"),
                 checkpoint_every_states=checkpoint_every_states,
+                hedge_mode=hedge_mode,
+            ),
+            exit_manager=LiveExitManager(
+                config=LiveExitConfig(
+                    run_id=session_id,
+                    strategy_name=strategy_name,
+                    strategy_version="v0",
+                    strategy_config_hash=strategy_config_hash,
+                    policy=PositionExitPolicy(
+                        take_profit_pct=take_profit_pct,
+                        stop_loss_pct=stop_loss_pct,
+                        max_holding_seconds=max_holding_seconds,
+                        mode=exit_mode,
+                    ),
+                ),
+                candle_loader=candle_loader,
+            ),
+            reconcile_orders=lambda: _reconcile_run_orders(
+                order_repository=order_repository,
+                state_machine=state_machine,
+                run_id=session_id,
             ),
         )
-        await _record_transition(
-            live_repository,
-            session_id=session_id,
-            operator=operator,
-            strategy_config_hash=strategy_config_hash,
-            risk_config_hash=risk_config_hash,
-            state=LiveSessionState.LIVE_ENABLED,
-        )
+        if not draining:
+            await _record_transition(
+                live_repository,
+                session_id=session_id,
+                operator=operator,
+                strategy_config_hash=strategy_config_hash,
+                risk_config_hash=risk_config_hash,
+                state=LiveSessionState.LIVE_ENABLED,
+            )
         result = await daemon.run(
             poll_live_market_states(
-                repository=PostgresRuntimeMarketStateRepository(factory),
-                environment="live",
+                repository=state_repository,
+                environment=market_environment,
                 max_runtime_seconds=max_runtime_seconds,
                 poll_interval_seconds=poll_interval_seconds,
+                cursor=market_cursor,
             )
         )
         await _record_transition(
@@ -654,6 +845,8 @@ async def _run_live_daemon(
     finally:
         if client is not None:
             await client.aclose()
+        if candle_source is not None:
+            candle_source.close()
         await engine.dispose()
 
 
@@ -682,6 +875,16 @@ class _LiveDaemonRepositoryAdapter:
         await self._checkpoints.save_checkpoint(run_id, checkpoint, saved_at)
 
 
+async def _reconcile_run_orders(
+    *,
+    order_repository: PostgresOrderRepository,
+    state_machine: OrderExecutionStateMachine,
+    run_id: str,
+) -> None:
+    for order in await order_repository.load_unresolved_orders(run_id):
+        await state_machine.reconcile_order(order.plan)
+
+
 async def _has_recent_shadow_session(
     factory: async_sessionmaker[AsyncSession],
     *,
@@ -702,6 +905,57 @@ async def _has_recent_shadow_session(
             .limit(1)
         )
     return completed_shadow is not None
+
+
+async def _session_is_draining(
+    factory: async_sessionmaker[AsyncSession],
+    session_id: str,
+) -> bool:
+    async with factory() as database_session:
+        control_state = await database_session.scalar(
+            select(LiveSessionTransitionRow.state)
+            .where(
+                LiveSessionTransitionRow.session_id == session_id,
+                LiveSessionTransitionRow.state.in_(
+                    (
+                        LiveSessionState.LIVE_ENABLED.value,
+                        LiveSessionState.DRAINING.value,
+                    )
+                ),
+            )
+            .order_by(LiveSessionTransitionRow.occurred_at.desc())
+            .limit(1)
+        )
+    return control_state == LiveSessionState.DRAINING.value
+
+
+async def _warm_live_strategy(
+    *,
+    strategy: LiveRuntimeStrategy,
+    repository: PostgresRuntimeMarketStateRepository,
+    environment: str,
+    now: datetime,
+    stale_after_seconds: float,
+) -> RuntimeStateCursor:
+    cursor = RuntimeStateCursor(
+        bucket_start=now - timedelta(seconds=_LIVE_WARMUP_SECONDS),
+        symbol="",
+    )
+    states = await repository.load_after(
+        environment=environment,
+        cursor=cursor,
+        limit=_LIVE_WARMUP_STATE_LIMIT,
+    )
+    fresh_after = now - timedelta(seconds=stale_after_seconds)
+    for state in states:
+        if state.bucket_end >= fresh_after:
+            break
+        strategy.on_market_state(state)
+        cursor = RuntimeStateCursor(
+            bucket_start=state.bucket_start,
+            symbol=state.symbol,
+        )
+    return cursor
 
 
 async def _record_transition(
@@ -743,11 +997,83 @@ def _load_plan(path: Path) -> OrderExecutionPlan:
         price=None if payload.get("price") is None else Decimal(str(payload["price"])),
         reduce_only=bool(payload["reduce_only"]),
         created_at=datetime.fromisoformat(str(payload["created_at"])),
+        position_side=FuturesPositionSide(
+            str(payload.get("position_side", FuturesPositionSide.BOTH.value))
+        ),
         quantized=bool(payload.get("quantized", False)),
     )
     if not plan.quantized:
         raise typer.BadParameter("order plan must be quantized")
     return plan
+
+
+def _live_strategy_config() -> dict[str, object]:
+    return {
+        "candidate_notional": Decimal("100"),
+        "candidate_ttl_buckets": 4,
+    }
+
+
+def _live_strategy_config_hash(strategy_name: str) -> str:
+    return deterministic_config_hash(
+        build_runtime_config(
+            strategy_name,
+            config=_live_strategy_config(),
+        )
+    )
+
+
+async def _prepare_live_risk_gates(
+    *,
+    database_url: str,
+    account_label: str,
+    strategy_name: str,
+    lease_owner: str,
+    lease_ttl_seconds: int,
+    max_order_notional: Decimal,
+    max_gross_notional: Decimal,
+    max_daily_loss: Decimal,
+    max_open_positions: int,
+    state_stale_after_seconds: float,
+) -> dict[str, str]:
+    now = datetime.now(tz=UTC)
+    risk_config = RiskConfigSnapshot(
+        environment="live",
+        account_label=account_label,
+        max_order_notional=max_order_notional,
+        max_gross_notional=max_gross_notional,
+        max_daily_loss=max_daily_loss,
+        max_open_positions=max_open_positions,
+        max_market_state_age_seconds=state_stale_after_seconds,
+        max_account_state_age_seconds=state_stale_after_seconds,
+        allow_reduce_only_while_draining=True,
+        created_at=now,
+    )
+    lease = TradingLease(
+        lease_id=f"lease-{uuid4()}",
+        environment="live",
+        account_label=account_label,
+        strategy_name=strategy_name,
+        owner=lease_owner,
+        state=TradingLeaseState.ACTIVE,
+        acquired_at=now,
+        expires_at=now + timedelta(seconds=lease_ttl_seconds),
+    )
+    engine = create_async_database_engine(database_url)
+    try:
+        repository = PostgresRiskRepository(
+            async_sessionmaker(engine, expire_on_commit=False)
+        )
+        await repository.save_risk_config(risk_config)
+        await repository.acquire_lease(lease)
+    finally:
+        await engine.dispose()
+    return {
+        "lease_id": lease.lease_id,
+        "lease_expires_at": lease.expires_at.isoformat(),
+        "risk_config_hash": risk_config.config_hash,
+        "strategy_config_hash": _live_strategy_config_hash(strategy_name),
+    }
 
 
 async def _save_approval(
@@ -783,14 +1109,7 @@ async def _preflight_summary(
         )
         unresolved = await PostgresOrderRepository(factory).load_unresolved_orders()
         risk_config = await _latest_risk_config(factory, account_label)
-        runtime_strategy_config_hash = deterministic_config_hash(
-            {
-                "candidate_notional": min(
-                    Decimal("100"), risk_config.max_order_notional
-                ),
-                "candidate_ttl_buckets": 4,
-            }
-        )
+        runtime_strategy_config_hash = _live_strategy_config_hash(strategy_name)
         return {
             "approval_present": approval is not None,
             "lease_present": lease is not None,

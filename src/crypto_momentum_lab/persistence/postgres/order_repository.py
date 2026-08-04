@@ -12,6 +12,7 @@ from crypto_momentum_lab.domain.execution import (
     ExchangeOrderEvent,
     ExchangeOrderFill,
     ExchangeOrderState,
+    FuturesPositionSide,
     OrderExecutionPlan,
     ShadowSuppressionEvent,
 )
@@ -121,6 +122,7 @@ class PostgresOrderRepository:
             "quantity": plan.quantity,
             "price": plan.price,
             "reduce_only": plan.reduce_only,
+            "position_side": plan.position_side.value,
             "state": ExchangeOrderState.PLANNED.value,
             "created_at": plan.created_at,
             "updated_at": plan.created_at,
@@ -208,15 +210,22 @@ class PostgresOrderRepository:
             },
         )
 
-    async def load_unresolved_orders(self) -> tuple[PersistedExchangeOrder, ...]:
+    async def load_unresolved_orders(
+        self,
+        run_id: str | None = None,
+    ) -> tuple[PersistedExchangeOrder, ...]:
         terminal_states = tuple(
             state.value for state in ExchangeOrderState if state.terminal
         )
         async with self._session_factory() as session:
+            query = select(ExchangeOrderRow).where(
+                ExchangeOrderRow.state.not_in(terminal_states)
+            )
+            if run_id is not None:
+                query = query.where(ExchangeOrderRow.run_id == run_id)
             rows = (
                 await session.scalars(
-                    select(ExchangeOrderRow)
-                    .where(ExchangeOrderRow.state.not_in(terminal_states))
+                    query
                     .order_by(
                         ExchangeOrderRow.updated_at,
                         ExchangeOrderRow.client_order_id,
@@ -304,6 +313,7 @@ def _persisted_order(row: ExchangeOrderRow) -> PersistedExchangeOrder:
             price=row.price,
             reduce_only=row.reduce_only,
             created_at=row.created_at,
+            position_side=FuturesPositionSide(row.position_side),
             quantized=True,
         ),
         state=ExchangeOrderState(row.state),

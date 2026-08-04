@@ -5,6 +5,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -126,6 +127,12 @@ class PostgresAccountRepository:
                     AccountPositionSnapshotRow,
                     [position_snapshot_row(item) for item in positions],
                 )
+                await session.execute(
+                    delete(AccountOpenOrderRow).where(
+                        AccountOpenOrderRow.environment == config.environment,
+                        AccountOpenOrderRow.account_label == config.account_label,
+                    )
+                )
                 await self._insert_in_session(
                     session,
                     AccountOpenOrderRow,
@@ -144,6 +151,49 @@ class PostgresAccountRepository:
 
     async def save_process_state(self, state: ExecutionAccountProcessState) -> None:
         await self._insert(ExecutionAccountProcessStateRow, process_state_row(state))
+
+    async def load_active_position_symbols(
+        self,
+        *,
+        environment: str,
+        account_label: str,
+    ) -> frozenset[str]:
+        if not environment.strip():
+            raise ValueError("environment must not be empty")
+        if not account_label.strip():
+            raise ValueError("account_label must not be empty")
+        async with self._session_factory() as session:
+            reconciliation = await session.scalar(
+                select(AccountReconciliationRunRow)
+                .where(
+                    AccountReconciliationRunRow.environment == environment,
+                    AccountReconciliationRunRow.account_label == account_label,
+                    AccountReconciliationRunRow.status == "ready",
+                )
+                .order_by(AccountReconciliationRunRow.observed_at.desc())
+                .limit(1)
+            )
+            if reconciliation is None or reconciliation.position_count == 0:
+                return frozenset()
+            latest_observed_at = await session.scalar(
+                select(func.max(AccountPositionSnapshotRow.observed_at)).where(
+                    AccountPositionSnapshotRow.environment == environment,
+                    AccountPositionSnapshotRow.account_label == account_label,
+                )
+            )
+            if latest_observed_at is None:
+                raise RuntimeError(
+                    "ready reconciliation is missing active position snapshots"
+                )
+            symbols = await session.scalars(
+                select(AccountPositionSnapshotRow.symbol).where(
+                    AccountPositionSnapshotRow.environment == environment,
+                    AccountPositionSnapshotRow.account_label == account_label,
+                    AccountPositionSnapshotRow.observed_at == latest_observed_at,
+                    AccountPositionSnapshotRow.position_amt != 0,
+                )
+            )
+            return frozenset(symbols.all())
 
     async def _insert(self, model: Any, values: dict[str, object]) -> None:
         async with self._session_factory() as session:
@@ -185,7 +235,11 @@ def _snapshot_base(
 
 def position_snapshot_row(snapshot: AccountPositionSnapshot) -> dict[str, object]:
     return {
-        **_snapshot_base(snapshot, "account-position", snapshot.symbol),
+        **_snapshot_base(
+            snapshot,
+            "account-position",
+            f"{snapshot.symbol}:{snapshot.position_side}",
+        ),
         "symbol": snapshot.symbol,
         "position_side": snapshot.position_side,
         "position_amt": snapshot.position_amt,
@@ -240,6 +294,7 @@ def config_snapshot_row(snapshot: AccountConfigSnapshot) -> dict[str, object]:
     return {
         **_snapshot_base(snapshot, "account-config", "config"),
         "multi_assets_mode": snapshot.multi_assets_mode,
+        "hedge_mode": snapshot.hedge_mode,
         "can_trade": snapshot.can_trade,
         "fee_tier": snapshot.fee_tier,
         "raw_payload": _jsonable(snapshot.raw_payload),

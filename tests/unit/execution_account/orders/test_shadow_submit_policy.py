@@ -32,6 +32,7 @@ async def test_shadow_submit_policy_records_suppression_without_submit() -> None
     result = await machine.execute_approved_intent(_plan())
 
     assert result.suppressed is True
+    assert result.state is ExchangeOrderState.SUPPRESSED
     assert exchange.calls == []
     assert len(repository.suppressions) == 1
     assert repository.suppressions[0].order_payload["symbol"] == "BTCUSDT"

@@ -16,7 +16,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--service",
-        choices=("market-data", "paper"),
+        choices=("market-data", "paper", "execution-account"),
         required=True,
     )
     parser.add_argument(
@@ -24,6 +24,7 @@ def main() -> int:
         type=float,
         default=_DEFAULT_MAX_AGE_SECONDS,
     )
+    parser.add_argument("--account-label", default="primary")
     args = parser.parse_args()
     database_url = os.environ.get("CML_DATABASE_URL")
     if not database_url or args.max_age_seconds <= 0:
@@ -37,6 +38,12 @@ def main() -> int:
                     connection,
                     max_age_seconds=args.max_age_seconds,
                     not_before=_process_started_at(),
+                ) else 1
+            if args.service == "execution-account":
+                return 0 if _execution_account_ready(
+                    connection,
+                    account_label=args.account_label,
+                    max_age_seconds=args.max_age_seconds,
                 ) else 1
             configured_run_ids = os.environ.get("CML_HEALTHCHECK_RUN_IDS")
             if configured_run_ids:
@@ -109,6 +116,28 @@ def _paper_ready(
         {"run_id": run_id},
     ).scalar_one_or_none()
     return _fresh(checkpoint_at, max_age_seconds=max_age_seconds)
+
+
+def _execution_account_ready(
+    connection: Connection,
+    *,
+    account_label: str,
+    max_age_seconds: float,
+) -> bool:
+    process = connection.execute(
+        text(
+            "SELECT state, occurred_at "
+            "FROM execution_account_process_states "
+            "WHERE environment = 'live' AND account_label = :account_label "
+            "ORDER BY occurred_at DESC, state_id DESC LIMIT 1"
+        ),
+        {"account_label": account_label},
+    ).mappings().first()
+    return bool(
+        process is not None
+        and process["state"] == "ready_readonly"
+        and _fresh(process["occurred_at"], max_age_seconds=max_age_seconds)
+    )
 
 
 def _fresh(observed_at: datetime | None, *, max_age_seconds: float) -> bool:

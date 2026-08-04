@@ -64,6 +64,26 @@ def test_gateway_allows_reduce_only_while_draining() -> None:
     assert evaluation.reason == "reduce_only_draining"
 
 
+def test_gateway_does_not_cap_reduce_only_exit_notional() -> None:
+    evaluation = RiskGateway().evaluate(
+        _intent(reduce_only=True, desired_notional=Decimal("500")),
+        _context(),
+    )
+
+    assert evaluation.decision is RiskDecision.APPROVED
+    assert evaluation.reason == "reduce_only"
+
+
+def test_gateway_blocks_entries_when_strategy_is_halted() -> None:
+    evaluation = RiskGateway().evaluate(
+        _intent(),
+        _context(strategy_state=StrategyLiveState.HALTED),
+    )
+
+    assert evaluation.decision is RiskDecision.HALTED
+    assert evaluation.reason == "strategy_halted"
+
+
 def _context(
     *,
     active_lease: TradingLease | None | object = "default",
@@ -98,7 +118,10 @@ def _lease() -> TradingLease:
     )
 
 
-def _intent(reduce_only: bool = False) -> OrderIntentCandidate:
+def _intent(
+    reduce_only: bool = False,
+    desired_notional: Decimal = Decimal("50"),
+) -> OrderIntentCandidate:
     now = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
     return OrderIntentCandidate(
         candidate_id="candidate-1",
@@ -111,7 +134,7 @@ def _intent(reduce_only: bool = False) -> OrderIntentCandidate:
         side=StrategySide.LONG,
         entry_type=EntryType.MARKET,
         limit_price=None,
-        desired_notional=Decimal("50"),
+        desired_notional=desired_notional,
         reduce_only=reduce_only,
         expires_at=now + timedelta(seconds=30),
         created_at=now,

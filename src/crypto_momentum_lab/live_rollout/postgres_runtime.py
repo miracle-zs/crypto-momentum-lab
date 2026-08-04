@@ -1,10 +1,10 @@
 import asyncio
 import time
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.apps.shadow_operation.main import (
@@ -12,12 +12,17 @@ from crypto_momentum_lab.apps.shadow_operation.main import (
     _latest_risk_config,
     _load_trading_rules,
 )
-from crypto_momentum_lab.domain.execution import ExchangeOrderState
+from crypto_momentum_lab.domain.execution import (
+    ExchangeOrderState,
+    FuturesPositionSide,
+)
 from crypto_momentum_lab.domain.live_rollout import LiveOperatorApproval
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import RiskConfigSnapshot, StrategyLiveState
+from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.execution_account.orders.state_machine import SubmitPolicy
 from crypto_momentum_lab.live_rollout.daemon import LiveDaemonRuntimeContext
+from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
@@ -25,8 +30,10 @@ from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountFillEventRow,
     AccountPositionSnapshotRow,
+    AccountReconciliationRunRow,
     ExchangeOrderRow,
     ExecutionAccountProcessStateRow,
+    LiveSessionTransitionRow,
 )
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PostgresOrderRepository,
@@ -46,21 +53,33 @@ class PostgresLiveContextProvider:
         *,
         session_factory: async_sessionmaker[AsyncSession],
         account_label: str,
+        run_id: str,
         strategy_name: str,
         strategy_config_hash: str,
         git_commit_hash: str,
         migration_revision: str,
         lease_owner: str,
         approval_id: str,
+        lease_ttl_seconds: int = 300,
+        lease_renew_before_seconds: int = 120,
     ) -> None:
+        if lease_ttl_seconds <= 0:
+            raise ValueError("lease_ttl_seconds must be positive")
+        if not 0 < lease_renew_before_seconds < lease_ttl_seconds:
+            raise ValueError(
+                "lease_renew_before_seconds must be between zero and lease TTL"
+            )
         self._sessions = session_factory
         self._account_label = account_label
+        self._run_id = run_id
         self._strategy_name = strategy_name
         self._strategy_config_hash = strategy_config_hash
         self._git_commit_hash = git_commit_hash
         self._migration_revision = migration_revision
         self._lease_owner = lease_owner
         self._approval_id = approval_id
+        self._lease_ttl_seconds = lease_ttl_seconds
+        self._lease_renew_before_seconds = lease_renew_before_seconds
         self._risk_repository = PostgresRiskRepository(session_factory)
         self._live_repository = PostgresLiveRolloutRepository(session_factory)
         self._order_repository = PostgresOrderRepository(session_factory)
@@ -83,21 +102,40 @@ class PostgresLiveContextProvider:
             self._account_label,
             now,
         )
+        if (
+            lease is not None
+            and lease.owner == self._lease_owner
+            and lease.expires_at
+            <= now + timedelta(seconds=self._lease_renew_before_seconds)
+        ):
+            lease = await self._risk_repository.renew_lease(
+                lease.lease_id,
+                self._lease_owner,
+                now + timedelta(seconds=self._lease_ttl_seconds),
+            )
         halts = await self._risk_repository.load_active_halts(
             "live",
             self._account_label,
         )
-        unresolved = await self._order_repository.load_unresolved_orders()
+        unresolved = await self._order_repository.load_unresolved_orders(
+            self._run_id
+        )
         account_state = await _latest_account_state(
             self._sessions,
             self._account_label,
         )
-        account_observed_at, position_symbols, unrealized, gross = (
-            await self._account_position_view()
-        )
+        (
+            account_observed_at,
+            position_symbols,
+            unrealized,
+            gross,
+            managed_positions,
+            unmanaged_symbols,
+        ) = await self._account_position_view()
         realized = await self._daily_realized_pnl(now)
         rules = await _load_trading_rules(self._sessions, {state.symbol})
         last_entries = await self._last_entry_times()
+        strategy_state = await self._strategy_live_state()
         unresolved_states = tuple(item.state for item in unresolved)
         gate_context = LiveGateContext(
             now=now,
@@ -129,14 +167,23 @@ class PostgresLiveContextProvider:
             active_halts=halts,
             unresolved_order_states=unresolved_states,
             risk_config=risk_config,
-            strategy_state=StrategyLiveState.ACTIVE,
+            strategy_state=strategy_state,
             trading_rules=rules,
             last_entry_at_by_symbol=last_entries,
+            managed_positions=managed_positions,
+            unmanaged_position_symbols=unmanaged_symbols,
         )
 
     async def _account_position_view(
         self,
-    ) -> tuple[datetime | None, frozenset[str], Decimal, Decimal]:
+    ) -> tuple[
+        datetime | None,
+        frozenset[str],
+        Decimal,
+        Decimal,
+        tuple[ManagedLivePosition, ...],
+        frozenset[str],
+    ]:
         async with self._sessions() as session:
             process_at = await session.scalar(
                 select(ExecutionAccountProcessStateRow.occurred_at)
@@ -148,27 +195,62 @@ class PostgresLiveContextProvider:
                 .order_by(ExecutionAccountProcessStateRow.occurred_at.desc())
                 .limit(1)
             )
-            rows = (
-                await session.scalars(
-                    select(AccountPositionSnapshotRow)
-                    .where(
+            reconciliation = await session.scalar(
+                select(AccountReconciliationRunRow)
+                .where(
+                    AccountReconciliationRunRow.environment == "live",
+                    AccountReconciliationRunRow.account_label
+                    == self._account_label,
+                    AccountReconciliationRunRow.status == "ready",
+                )
+                .order_by(AccountReconciliationRunRow.observed_at.desc())
+                .limit(1)
+            )
+            rows: list[AccountPositionSnapshotRow] = []
+            if reconciliation is not None and reconciliation.position_count > 0:
+                latest_observed_at = await session.scalar(
+                    select(func.max(AccountPositionSnapshotRow.observed_at)).where(
                         AccountPositionSnapshotRow.environment == "live",
                         AccountPositionSnapshotRow.account_label
                         == self._account_label,
                     )
-                    .order_by(AccountPositionSnapshotRow.observed_at.desc())
-                    .limit(500)
                 )
-            ).all()
-        latest: dict[tuple[str, str], AccountPositionSnapshotRow] = {}
-        for row in rows:
-            latest.setdefault((row.symbol, row.position_side), row)
-        active = [row for row in latest.values() if row.position_amt != 0]
+                if latest_observed_at is None:
+                    raise RuntimeError(
+                        "ready account reconciliation is missing position rows"
+                    )
+                rows = list(
+                    (
+                        await session.scalars(
+                            select(AccountPositionSnapshotRow).where(
+                                AccountPositionSnapshotRow.environment == "live",
+                                AccountPositionSnapshotRow.account_label
+                                == self._account_label,
+                                AccountPositionSnapshotRow.observed_at
+                                == latest_observed_at,
+                            )
+                        )
+                    ).all()
+                )
+            orders = list(
+                (
+                    await session.scalars(
+                        select(ExchangeOrderRow)
+                        .where(ExchangeOrderRow.run_id == self._run_id)
+                        .order_by(ExchangeOrderRow.updated_at.desc())
+                        .limit(1000)
+                    )
+                ).all()
+            )
+        active = [row for row in rows if row.position_amt != 0]
+        managed, unmanaged = _classify_live_positions(active, orders)
         return (
             process_at,
             frozenset(row.symbol for row in active),
             sum((row.unrealized_pnl for row in active), start=Decimal("0")),
             sum((abs(row.notional) for row in active), start=Decimal("0")),
+            managed,
+            unmanaged,
         )
 
     async def _daily_realized_pnl(self, now: datetime) -> Decimal:
@@ -190,7 +272,10 @@ class PostgresLiveContextProvider:
             rows = (
                 await session.scalars(
                     select(ExchangeOrderRow)
-                    .where(ExchangeOrderRow.state == ExchangeOrderState.FILLED.value)
+                    .where(
+                        ExchangeOrderRow.run_id == self._run_id,
+                        ExchangeOrderRow.state == ExchangeOrderState.FILLED.value,
+                    )
                     .order_by(ExchangeOrderRow.updated_at.desc())
                     .limit(500)
                 )
@@ -201,6 +286,105 @@ class PostgresLiveContextProvider:
                 entries.setdefault(row.symbol, row.updated_at)
         return entries
 
+    async def _strategy_live_state(self) -> StrategyLiveState:
+        async with self._sessions() as session:
+            control_state = await session.scalar(
+                select(LiveSessionTransitionRow.state)
+                .where(
+                    LiveSessionTransitionRow.session_id == self._run_id,
+                    LiveSessionTransitionRow.state.in_(("live_enabled", "draining")),
+                )
+                .order_by(LiveSessionTransitionRow.occurred_at.desc())
+                .limit(1)
+            )
+            state = await session.scalar(
+                select(LiveSessionTransitionRow.state)
+                .where(LiveSessionTransitionRow.session_id == self._run_id)
+                .order_by(LiveSessionTransitionRow.occurred_at.desc())
+                .limit(1)
+            )
+        return _resolve_strategy_live_state(control_state, state)
+
+
+def _classify_live_positions(
+    positions: list[AccountPositionSnapshotRow],
+    orders: list[ExchangeOrderRow],
+) -> tuple[tuple[ManagedLivePosition, ...], frozenset[str]]:
+    filled_orders = [
+        row for row in orders if row.state == ExchangeOrderState.FILLED.value
+    ]
+    managed: list[ManagedLivePosition] = []
+    unmanaged: set[str] = set()
+    for position in positions:
+        try:
+            position_side = FuturesPositionSide(position.position_side)
+        except ValueError:
+            unmanaged.add(position.symbol)
+            continue
+        side = _strategy_side(position, position_side)
+        opening = next(
+            (
+                order
+                for order in filled_orders
+                if not order.reduce_only
+                and order.symbol == position.symbol
+                and FuturesPositionSide(order.position_side) is position_side
+                and _opening_order_matches_side(order.side, side)
+            ),
+            None,
+        )
+        if opening is None or position.entry_price <= 0:
+            unmanaged.add(position.symbol)
+            continue
+        closing_filled = any(
+            order.reduce_only
+            and order.symbol == position.symbol
+            and FuturesPositionSide(order.position_side) is position_side
+            and order.updated_at >= opening.updated_at
+            for order in filled_orders
+        )
+        managed.append(
+            ManagedLivePosition(
+                symbol=position.symbol,
+                side=side,
+                position_side=position_side,
+                quantity=abs(position.position_amt),
+                entry_price=position.entry_price,
+                opened_at=opening.updated_at,
+                closing_order_filled=closing_filled,
+            )
+        )
+    return (
+        tuple(sorted(managed, key=lambda item: (item.symbol, item.position_side))),
+        frozenset(unmanaged),
+    )
+
+
+def _strategy_side(
+    position: AccountPositionSnapshotRow,
+    position_side: FuturesPositionSide,
+) -> StrategySide:
+    if position_side is FuturesPositionSide.LONG:
+        return StrategySide.LONG
+    if position_side is FuturesPositionSide.SHORT:
+        return StrategySide.SHORT
+    return StrategySide.LONG if position.position_amt > 0 else StrategySide.SHORT
+
+
+def _opening_order_matches_side(order_side: str, side: StrategySide) -> bool:
+    return (order_side == "BUY") is (side is StrategySide.LONG)
+
+
+def _resolve_strategy_live_state(
+    control_state: str | None,
+    latest_state: str | None,
+) -> StrategyLiveState:
+    if control_state == "draining":
+        return StrategyLiveState.DRAINING
+    if latest_state == "halted":
+        return StrategyLiveState.HALTED
+    return StrategyLiveState.ACTIVE
+
 
 async def poll_live_market_states(
     *,
@@ -209,8 +393,9 @@ async def poll_live_market_states(
     max_runtime_seconds: float,
     poll_interval_seconds: float,
     batch_size: int = 500,
+    cursor: RuntimeStateCursor | None = None,
 ) -> AsyncIterator[MarketState15s]:
-    cursor = RuntimeStateCursor(
+    active_cursor = cursor or RuntimeStateCursor(
         bucket_start=datetime.now(tz=UTC),
         symbol="",
     )
@@ -218,7 +403,7 @@ async def poll_live_market_states(
     while time.monotonic() < deadline:
         batch = await repository.load_after(
             environment=environment,
-            cursor=cursor,
+            cursor=active_cursor,
             limit=batch_size,
         )
         if not batch:
@@ -226,7 +411,7 @@ async def poll_live_market_states(
             continue
         for state in batch:
             yield state
-            cursor = RuntimeStateCursor(
+            active_cursor = RuntimeStateCursor(
                 bucket_start=state.bucket_start,
                 symbol=state.symbol,
             )

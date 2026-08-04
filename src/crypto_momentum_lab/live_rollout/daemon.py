@@ -28,6 +28,10 @@ from crypto_momentum_lab.execution_account.orders.quantization import (
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
 )
+from crypto_momentum_lab.live_rollout.exits import (
+    LiveExitManager,
+    ManagedLivePosition,
+)
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext, evaluate_live_gate
 from crypto_momentum_lab.live_rollout.limits import (
     FixedLiveLimits,
@@ -64,6 +68,7 @@ class LiveDaemonConfig:
     max_market_state_age_seconds: float
     resize_tolerance: Decimal
     checkpoint_every_states: int
+    hedge_mode: bool = False
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -93,6 +98,8 @@ class LiveDaemonRuntimeContext:
     strategy_state: StrategyLiveState
     trading_rules: dict[str, SymbolTradingRules]
     last_entry_at_by_symbol: dict[str, datetime]
+    managed_positions: tuple[ManagedLivePosition, ...] = ()
+    unmanaged_position_symbols: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +125,8 @@ class LiveStrategyDaemon:
             Awaitable[LiveDaemonRuntimeContext],
         ],
         config: LiveDaemonConfig,
+        exit_manager: LiveExitManager | None = None,
+        reconcile_orders: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._strategy = strategy
         self._risk_gateway = risk_gateway
@@ -126,6 +135,8 @@ class LiveStrategyDaemon:
         self._state_machine = state_machine
         self._context_provider = context_provider
         self._config = config
+        self._exit_manager = exit_manager
+        self._reconcile_orders = reconcile_orders
 
     async def run(
         self,
@@ -136,6 +147,21 @@ class LiveStrategyDaemon:
         checkpoint_dirty = False
         last_checkpoint_saved_at: datetime | None = None
         async for state in states:
+            if self._reconcile_orders is not None:
+                try:
+                    await self._reconcile_orders()
+                except Exception as error:
+                    await self._save_final_checkpoint(
+                        dirty=checkpoint_dirty,
+                        saved_at=last_checkpoint_saved_at,
+                    )
+                    return LiveDaemonResult(
+                        processed,
+                        approved,
+                        submitted,
+                        f"order_reconciliation_failed:{type(error).__name__}",
+                        final_state_at,
+                    )
             context = await self._context_provider(state)
             gate = evaluate_live_gate(
                 replace(
@@ -173,14 +199,43 @@ class LiveStrategyDaemon:
                     "stale_market_state",
                     final_state_at,
                 )
+            if context.unmanaged_position_symbols:
+                await self._save_final_checkpoint(
+                    dirty=checkpoint_dirty,
+                    saved_at=last_checkpoint_saved_at,
+                )
+                symbols = ",".join(sorted(context.unmanaged_position_symbols))
+                return LiveDaemonResult(
+                    processed,
+                    approved,
+                    submitted,
+                    f"unmanaged_live_positions:{symbols}",
+                    final_state_at,
+                )
+            exit_requests = (
+                ()
+                if self._exit_manager is None
+                else await self._exit_manager.requests_for_state(
+                    state,
+                    context.managed_positions,
+                )
+            )
             decision = self._strategy.on_market_state(state)
             processed += 1
             final_state_at = state.bucket_start
             checkpoint_dirty = True
             last_checkpoint_saved_at = context.now
-            for candidate in decision.candidates:
+            execution_requests = tuple(
+                (request.candidate, request.quantity)
+                for request in exit_requests
+            ) + tuple((candidate, None) for candidate in decision.candidates)
+            for candidate, requested_quantity in execution_requests:
                 executable_candidate = candidate
                 if not candidate.reduce_only:
+                    if candidate.symbol in (
+                        context.open_position_symbols or frozenset()
+                    ):
+                        continue
                     limit_decision = evaluate_fixed_live_limits(
                         self._limits,
                         LiveLimitContext(
@@ -237,6 +292,8 @@ class LiveStrategyDaemon:
                     rules,
                     reference_price=reference_price,
                     resize_tolerance=self._config.resize_tolerance,
+                    hedge_mode=self._config.hedge_mode,
+                    requested_quantity=requested_quantity,
                 )
                 if isinstance(plan, QuantizationRejection):
                     continue

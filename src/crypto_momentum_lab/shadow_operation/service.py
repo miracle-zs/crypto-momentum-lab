@@ -80,6 +80,8 @@ class ShadowOperationConfig:
     lease_owner: str
     max_market_state_age_seconds: float
     resize_tolerance: Decimal
+    hedge_mode: bool = False
+    warm_stale_states: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,19 +146,23 @@ class ShadowOperationService:
 
         processed = approved = suppressed = 0
         for state in states:
-            if _market_age_seconds(context.now, state) > (
+            stale = _market_age_seconds(context.now, state) > (
                 self._config.max_market_state_age_seconds
-            ):
-                halt_reason = "stale_market_state"
+            )
+            if stale:
                 await self._save_metric(
                     "stale_data_block",
                     state,
-                    halt_reason,
+                    "stale_market_state",
                     context.now,
                 )
-                break
+                if not self._config.warm_stale_states:
+                    halt_reason = "stale_market_state"
+                    break
             decision = self._strategy.on_market_state(state)
             processed += 1
+            if stale:
+                continue
             for signal in decision.signals:
                 await self._save_metric("signal", state, None, signal.detected_at)
             for rejection in decision.rejections:
@@ -203,6 +209,7 @@ class ShadowOperationService:
                     rules,
                     reference_price=reference_price,
                     resize_tolerance=self._config.resize_tolerance,
+                    hedge_mode=self._config.hedge_mode,
                 )
                 if isinstance(plan, QuantizationRejection):
                     await self._save_metric(

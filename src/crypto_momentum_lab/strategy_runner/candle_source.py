@@ -8,7 +8,7 @@ from typing import Protocol, Self
 
 import httpx
 
-from crypto_momentum_lab.strategy_runner.portfolio import ClosedCandle15m
+from crypto_momentum_lab.strategy_runner.position_exit import ClosedCandle15m
 
 _CANDLE_INTERVAL = timedelta(minutes=15)
 _MAX_KLINES_PER_REQUEST = 1500

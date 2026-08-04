@@ -1,11 +1,13 @@
 .DS_Store
 .worktrees/
 .env
+.env.live
 .env.server
 .mypy_cache/
 .local-backups/
 .pytest_cache/
 .ruff_cache/
+/docs/HANDOFF.md
 .venv
 .venv/
 __pycache__/

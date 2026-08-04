@@ -18,6 +18,7 @@ class ExchangeOrderState(StrEnum):
     CANCELED = "canceled"
     REJECTED = "rejected"
     EXPIRED = "expired"
+    SUPPRESSED = "suppressed"
     UNKNOWN_PENDING_RECONCILIATION = "unknown_pending_reconciliation"
 
     @property
@@ -27,7 +28,14 @@ class ExchangeOrderState(StrEnum):
             self.CANCELED,
             self.REJECTED,
             self.EXPIRED,
+            self.SUPPRESSED,
         }
+
+
+class FuturesPositionSide(StrEnum):
+    BOTH = "BOTH"
+    LONG = "LONG"
+    SHORT = "SHORT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +50,7 @@ class OrderExecutionPlan:
     price: Decimal | None
     reduce_only: bool
     created_at: datetime
+    position_side: FuturesPositionSide = FuturesPositionSide.BOTH
     quantized: bool = False
 
     def __post_init__(self) -> None:
@@ -58,6 +67,12 @@ class OrderExecutionPlan:
             raise ValueError("quantity must be positive")
         if self.price is not None and self.price <= 0:
             raise ValueError("price must be positive when present")
+        if not isinstance(self.position_side, FuturesPositionSide):
+            object.__setattr__(
+                self,
+                "position_side",
+                FuturesPositionSide(self.position_side),
+            )
         _require_aware(self.created_at, "created_at")
 
 

@@ -77,15 +77,23 @@ class BinanceUsdMPrivateReadClient:
     async def fetch_account_config(self) -> AccountConfigSnapshot:
         payload = await self._signed_get("/fapi/v3/account")
         data = _require_mapping(payload)
+        position_mode_payload = await self._signed_get(
+            "/fapi/v1/positionSide/dual"
+        )
+        position_mode = _require_mapping(position_mode_payload)
+        hedge_mode = bool(position_mode.get("dualSidePosition", False))
+        raw_payload = _json_mapping(data)
+        raw_payload["dualSidePosition"] = hedge_mode
         observed_at = self._now()
         return AccountConfigSnapshot(
             environment=self._environment,
             account_label=self._account_label,
             multi_assets_mode=bool(data.get("multiAssetsMargin", False)),
+            hedge_mode=hedge_mode,
             can_trade=bool(data.get("canTrade", False)),
             fee_tier=_optional_int(data.get("feeTier")),
             observed_at=observed_at,
-            raw_payload=_json_mapping(data),
+            raw_payload=raw_payload,
         )
 
     async def fetch_balances(self) -> tuple[AccountBalanceSnapshot, ...]:
@@ -275,7 +283,10 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         http_client: httpx.AsyncClient | None = None,
         clock: Callable[[], datetime] | None = None,
         recv_window_ms: int = 5000,
+        entry_leverage: int | None = None,
     ) -> None:
+        if entry_leverage is not None and not 1 <= entry_leverage <= 125:
+            raise ValueError("entry_leverage must be between 1 and 125")
         super().__init__(
             api_key=api_key,
             api_secret=api_secret,
@@ -287,21 +298,28 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             recv_window_ms=recv_window_ms,
         )
         self._live_submit_enabled = live_submit_enabled
+        self._entry_leverage = entry_leverage
+        self._configured_leverage_symbols: set[str] = set()
 
     async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
         if not self._live_submit_enabled:
             raise LiveSubmissionDisabledError(
                 "Binance trade client requires explicit live submit enablement"
             )
+        if not plan.reduce_only:
+            await self._ensure_entry_leverage(plan.symbol)
         params: dict[str, str | int | float | bool | None] = {
             "symbol": plan.symbol,
             "side": plan.side,
             "type": plan.order_type,
             "quantity": format(plan.quantity, "f"),
             "newClientOrderId": plan.client_order_id,
-            "reduceOnly": str(plan.reduce_only).lower(),
             "newOrderRespType": "RESULT",
         }
+        if plan.position_side.value == "BOTH":
+            params["reduceOnly"] = str(plan.reduce_only).lower()
+        else:
+            params["positionSide"] = plan.position_side.value
         if plan.price is not None:
             params["price"] = format(plan.price, "f")
             params["timeInForce"] = "GTC"
@@ -312,8 +330,34 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 "Binance order submit timed out"
             ) from exc
         except httpx.HTTPStatusError as exc:
+            if exc.response.status_code >= 500:
+                raise ExchangeSubmissionTimeoutError(
+                    "Binance order submit returned an unknown server outcome"
+                ) from exc
             raise ExchangeOrderRejectedError(_exchange_error_message(exc)) from exc
         return self._order_snapshot(_require_mapping(payload))
+
+    async def _ensure_entry_leverage(self, symbol: str) -> None:
+        if (
+            self._entry_leverage is None
+            or symbol in self._configured_leverage_symbols
+        ):
+            return
+        try:
+            payload = await self._signed_post(
+                "/fapi/v1/leverage",
+                {"symbol": symbol, "leverage": self._entry_leverage},
+            )
+            response = _require_mapping(payload)
+            if str(response.get("symbol", "")) != symbol or int(
+                str(response.get("leverage", 0))
+            ) != self._entry_leverage:
+                raise ValueError("unexpected leverage response")
+        except (httpx.HTTPError, ValueError) as exc:
+            raise ExchangeOrderRejectedError(
+                "Binance entry leverage was not confirmed; order was not sent"
+            ) from exc
+        self._configured_leverage_symbols.add(symbol)
 
     async def query_order_by_client_id(
         self,

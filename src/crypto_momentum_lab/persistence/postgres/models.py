@@ -521,6 +521,12 @@ class AccountBalanceSnapshotRow(Base):
             "asset",
             "observed_at",
         ),
+        Index(
+            "ix_account_balance_account_observed",
+            "environment",
+            "account_label",
+            "observed_at",
+        ),
     )
 
 
@@ -548,6 +554,12 @@ class AccountPositionSnapshotRow(Base):
             "environment",
             "account_label",
             "symbol",
+            "observed_at",
+        ),
+        Index(
+            "ix_account_position_account_observed",
+            "environment",
+            "account_label",
             "observed_at",
         ),
     )
@@ -589,6 +601,15 @@ class AccountFillEventRow(Base):
     trade_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     raw_payload: Mapped[dict[str, object]] = mapped_column(JSONB)
 
+    __table_args__ = (
+        Index(
+            "ix_account_fill_account_trade",
+            "environment",
+            "account_label",
+            "trade_at",
+        ),
+    )
+
 
 class AccountConfigSnapshotRow(Base):
     __tablename__ = "account_config_snapshots"
@@ -597,6 +618,7 @@ class AccountConfigSnapshotRow(Base):
     environment: Mapped[str] = mapped_column(String(32))
     account_label: Mapped[str] = mapped_column(String(64))
     multi_assets_mode: Mapped[bool] = mapped_column(Boolean)
+    hedge_mode: Mapped[bool] = mapped_column(Boolean, default=False)
     can_trade: Mapped[bool] = mapped_column(Boolean)
     fee_tier: Mapped[int | None] = mapped_column(Integer)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -618,6 +640,16 @@ class AccountReconciliationRunRow(Base):
     mismatch_count: Mapped[int] = mapped_column(Integer)
     details: Mapped[dict[str, object]] = mapped_column(JSONB)
 
+    __table_args__ = (
+        Index(
+            "ix_account_reconciliation_latest",
+            "environment",
+            "account_label",
+            "status",
+            "observed_at",
+        ),
+    )
+
 
 class ExecutionAccountProcessStateRow(Base):
     __tablename__ = "execution_account_process_states"
@@ -628,6 +660,15 @@ class ExecutionAccountProcessStateRow(Base):
     state: Mapped[str] = mapped_column(String(32))
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     reason: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index(
+            "ix_execution_account_state_latest",
+            "environment",
+            "account_label",
+            "occurred_at",
+        ),
+    )
 
 
 class TradingLeaseRow(Base):
@@ -782,6 +823,7 @@ class ExchangeOrderRow(Base):
     quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
     reduce_only: Mapped[bool] = mapped_column(Boolean)
+    position_side: Mapped[str] = mapped_column(String(8), default="BOTH")
     state: Mapped[str] = mapped_column(String(48))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -789,6 +831,7 @@ class ExchangeOrderRow(Base):
     __table_args__ = (
         Index("ix_exchange_orders_state_updated", "state", "updated_at"),
         Index("ix_exchange_orders_symbol_state", "symbol", "state"),
+        Index("ix_exchange_orders_run_updated", "run_id", "updated_at"),
     )
 
 

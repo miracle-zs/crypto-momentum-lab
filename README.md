@@ -122,8 +122,10 @@ bounded paper session directly from those rows:
   --persist
 ```
 
-This is still simulated paper execution. It does not connect to Binance private
-APIs, read account state, submit real orders, or enforce a live risk engine.
+This command is simulated paper execution. The default server stack also starts
+without Binance private credentials. A separate explicit `live` Compose profile
+adds read-only account synchronization and one gated live strategy; see
+`docs/runbooks/small-capital-live-session.md`.
 
 ## Server Paper Deployment
 

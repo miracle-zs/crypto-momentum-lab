@@ -6,6 +6,7 @@ from decimal import Decimal
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderSnapshot,
     ExchangeOrderState,
+    FuturesPositionSide,
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.risk import RiskEvaluation
@@ -25,8 +26,14 @@ from crypto_momentum_lab.live_rollout.daemon import (
     LiveDaemonRuntimeContext,
     LiveStrategyDaemon,
 )
+from crypto_momentum_lab.live_rollout.exits import (
+    LiveExitConfig,
+    LiveExitManager,
+    ManagedLivePosition,
+)
 from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
 from crypto_momentum_lab.risk.gateway import RiskGateway
+from crypto_momentum_lab.strategy_runner.position_exit import PositionExitPolicy
 from tests.unit.execution_account.orders.test_state_machine import (
     FakeExchange,
     FakeOrderRepository,
@@ -89,6 +96,68 @@ async def test_live_daemon_saves_final_checkpoint_before_normal_exit() -> None:
     assert repository.saved_checkpoint_run_ids == ["run-1"]
 
 
+async def test_live_daemon_submits_hedge_mode_reduce_only_exit() -> None:
+    exchange = PlanAwareExchange()
+    position = ManagedLivePosition(
+        symbol="BTCUSDT",
+        side="long",
+        position_side=FuturesPositionSide.LONG,
+        quantity=Decimal("0.001"),
+        entry_price=Decimal("31000"),
+        opened_at=datetime(2026, 7, 3, 23, 59, tzinfo=UTC),
+    )
+
+    async def position_context(state: object) -> LiveDaemonRuntimeContext:
+        del state
+        return replace(
+            _runtime_context(),
+            open_position_symbols=frozenset({"BTCUSDT"}),
+            managed_positions=(position,),
+        )
+
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=position_context,
+        exit_manager=LiveExitManager(
+            config=LiveExitConfig(
+                run_id="run-1",
+                strategy_name="compression_breakout",
+                strategy_version="v0",
+                strategy_config_hash="a" * 64,
+                policy=PositionExitPolicy(),
+            )
+        ),
+        hedge_mode=True,
+    )
+
+    result = await daemon.run(_states())
+
+    assert result.approved_intent_count == 1
+    assert len(exchange.plans) == 1
+    assert exchange.plans[0].reduce_only is True
+    assert exchange.plans[0].side == "SELL"
+    assert exchange.plans[0].position_side is FuturesPositionSide.LONG
+
+
+async def test_live_daemon_halts_on_unmanaged_account_position() -> None:
+    exchange = PlanAwareExchange()
+
+    async def position_context(state: object) -> LiveDaemonRuntimeContext:
+        del state
+        return replace(
+            _runtime_context(),
+            open_position_symbols=frozenset({"ETHUSDT"}),
+            unmanaged_position_symbols=frozenset({"ETHUSDT"}),
+        )
+
+    daemon = _daemon(exchange=exchange, context_provider=position_context)
+
+    result = await daemon.run(_states())
+
+    assert result.halt_reason == "unmanaged_live_positions:ETHUSDT"
+    assert exchange.calls == []
+
+
 class FakeLiveRepository:
     def __init__(self) -> None:
         self.saved_checkpoint_run_ids: list[str] = []
@@ -115,6 +184,8 @@ def _daemon(
     context_provider=None,
     repository: FakeLiveRepository | None = None,
     checkpoint_every_states: int = 1,
+    exit_manager: LiveExitManager | None = None,
+    hedge_mode: bool = False,
 ) -> LiveStrategyDaemon:
     order_repository = FakeOrderRepository()
     machine = OrderExecutionStateMachine(
@@ -150,16 +221,20 @@ def _daemon(
             max_market_state_age_seconds=30,
             resize_tolerance=Decimal("0.20"),
             checkpoint_every_states=checkpoint_every_states,
+            hedge_mode=hedge_mode,
         ),
+        exit_manager=exit_manager,
     )
 
 
 class PlanAwareExchange:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.plans: list[OrderExecutionPlan] = []
 
     async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
         self.calls.append("submit")
+        self.plans.append(plan)
         return ExchangeOrderSnapshot(
             client_order_id=plan.client_order_id,
             exchange_order_id="exchange-1",

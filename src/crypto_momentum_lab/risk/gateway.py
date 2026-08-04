@@ -65,6 +65,13 @@ class RiskGateway:
                 RiskDecision.REJECTED,
                 "account_not_ready",
             )
+        if context.strategy_state is StrategyLiveState.HALTED:
+            return _evaluation(
+                intent,
+                context,
+                RiskDecision.HALTED,
+                "strategy_halted",
+            )
         if context.strategy_state is StrategyLiveState.DRAINING:
             if (
                 intent.reduce_only
@@ -96,6 +103,13 @@ class RiskGateway:
                 context,
                 RiskDecision.REJECTED,
                 "invalid_desired_notional",
+            )
+        if intent.reduce_only:
+            return _evaluation(
+                intent,
+                context,
+                RiskDecision.APPROVED,
+                "reduce_only",
             )
         if desired_notional > context.risk_config.max_order_notional:
             return _evaluation(

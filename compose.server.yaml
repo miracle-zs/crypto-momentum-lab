@@ -89,6 +89,7 @@ services:
         paper-account-04-compression-candle15m-v1,
         paper-account-05-orderflow-candle15m-v1,
         paper-account-06-liquidation-candle15m-v1
+      CML_LIVE_POSITION_ACCOUNT_LABEL: ${CML_LIVE_ACCOUNT_LABEL:-}
     entrypoint: ["cml-market-data"]
     command: ["run-market-data"]
     depends_on:
@@ -251,6 +252,116 @@ services:
       - --max-market-state-age-seconds
       - "120"
       - --require-market-quote
+
+  execution-account-live:
+    <<: *app
+    profiles: ["live"]
+    environment:
+      <<: *app-environment
+      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
+      BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
+    entrypoint: ["cml-execution-account"]
+    command:
+      - sync
+      - --environment
+      - live
+      - --account-label
+      - ${CML_LIVE_ACCOUNT_LABEL:-primary}
+      - --hedge-mode
+      - --interval-seconds
+      - "5"
+      - --fill-interval-seconds
+      - "60"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - crypto_momentum_lab.apps.healthcheck
+        - --service
+        - execution-account
+        - --account-label
+        - ${CML_LIVE_ACCOUNT_LABEL:-primary}
+        - --max-age-seconds
+        - "30"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    mem_limit: 128m
+
+  live-strategy:
+    <<: *app
+    profiles: ["live"]
+    environment:
+      <<: *app-environment
+      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
+      BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
+      CML_HEALTHCHECK_RUN_ID: ${CML_LIVE_SESSION_ID:-live-primary-v1}
+    entrypoint: ["cml-live-rollout"]
+    command:
+      - run
+      - --account-label
+      - ${CML_LIVE_ACCOUNT_LABEL:-primary}
+      - --strategy
+      - ${CML_LIVE_STRATEGY:-compression_breakout}
+      - --market-environment
+      - research
+      - --session-id
+      - ${CML_LIVE_SESSION_ID:-live-primary-v1}
+      - --operator
+      - ${CML_LIVE_OPERATOR:-operator}
+      - --lease-owner
+      - ${CML_LIVE_LEASE_OWNER:-live-worker}
+      - --strategy-config-hash
+      - ${CML_LIVE_STRATEGY_CONFIG_HASH:-unset}
+      - --git-commit-hash
+      - ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
+      - --migration-revision
+      - ${CML_LIVE_MIGRATION_REVISION:-20260804_0013}
+      - --max-runtime-seconds
+      - "31536000"
+      - --poll-interval-seconds
+      - "1"
+      - --state-stale-after-seconds
+      - "30"
+      - --checkpoint-every-states
+      - "100"
+      - --hedge-mode
+      - --entry-leverage
+      - ${CML_LIVE_ENTRY_LEVERAGE:-1}
+      - --exit-mode
+      - ${CML_LIVE_EXIT_MODE:-candle_15m}
+      - --take-profit-pct
+      - ${CML_LIVE_TAKE_PROFIT_PCT:-0.02}
+      - --stop-loss-pct
+      - ${CML_LIVE_STOP_LOSS_PCT:-0.01}
+      - --max-holding-seconds
+      - ${CML_LIVE_MAX_HOLDING_SECONDS:-86400}
+      - --i-understand-this-places-real-orders
+    depends_on:
+      market-data:
+        condition: service_healthy
+      execution-account-live:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - crypto_momentum_lab.apps.healthcheck
+        - --service
+        - paper
+        - --max-age-seconds
+        - "180"
+      interval: 30s
+      timeout: 10s
+      retries: 6
+      start_period: 2m
+    mem_limit: 192m
 
   dashboard:
     <<: *app

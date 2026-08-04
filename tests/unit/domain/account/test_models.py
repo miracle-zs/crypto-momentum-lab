@@ -9,6 +9,9 @@ from crypto_momentum_lab.domain.account.models import (
     ExecutionAccountProcessState,
     ExecutionAccountStatus,
 )
+from crypto_momentum_lab.persistence.postgres.account_repository import (
+    position_snapshot_row,
+)
 
 
 def test_account_balance_snapshot_requires_aware_time() -> None:
@@ -65,3 +68,30 @@ def test_account_sync_state_accepts_ready_readonly() -> None:
     )
 
     assert state.state is ExecutionAccountStatus.READY_READONLY
+
+
+def test_hedge_position_snapshots_have_distinct_ids() -> None:
+    observed_at = datetime.now().astimezone()
+    common = {
+        "environment": "live",
+        "account_label": "primary",
+        "symbol": "BTCUSDT",
+        "position_amt": Decimal("0.01"),
+        "entry_price": Decimal("60000"),
+        "mark_price": Decimal("60100"),
+        "unrealized_pnl": Decimal("1"),
+        "notional": Decimal("601"),
+        "leverage": 1,
+        "margin_type": "cross",
+        "observed_at": observed_at,
+        "raw_payload": {},
+    }
+
+    long_row = position_snapshot_row(
+        AccountPositionSnapshot(position_side="LONG", **common)
+    )
+    short_row = position_snapshot_row(
+        AccountPositionSnapshot(position_side="SHORT", **common)
+    )
+
+    assert long_row["snapshot_id"] != short_row["snapshot_id"]

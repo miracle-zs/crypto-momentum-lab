@@ -10,6 +10,14 @@ from crypto_momentum_lab.strategy_runner.fills import (
     SimulatedFill,
     SimulatedFillStatus,
 )
+from crypto_momentum_lab.strategy_runner.position_exit import (
+    ClosedCandle15m,
+    PositionExitMode,
+    PositionExitPolicy,
+    position_exit_reason,
+)
+
+__all__ = ["ClosedCandle15m"]
 
 
 class PaperPositionStatus(StrEnum):
@@ -17,9 +25,7 @@ class PaperPositionStatus(StrEnum):
     CLOSED = "closed"
 
 
-class PaperExitMode(StrEnum):
-    FIXED = "fixed"
-    CANDLE_15M = "candle_15m"
+PaperExitMode = PositionExitMode
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,15 +51,6 @@ class PaperExitConfig:
             raise ValueError("state_interval_seconds must be positive")
         if self.initial_balance <= 0:
             raise ValueError("initial_balance must be positive")
-
-
-@dataclass(frozen=True, slots=True)
-class ClosedCandle15m:
-    symbol: str
-    candle_start: datetime
-    candle_end: datetime
-    open_price: Decimal
-    close_price: Decimal
 
 
 @dataclass(slots=True)
@@ -282,33 +279,22 @@ def _close_reason(
     config: PaperExitConfig,
     closed_candle: ClosedCandle15m | None,
 ) -> str | None:
-    if config.exit_mode is PaperExitMode.CANDLE_15M:
-        if (
-            closed_candle is not None
-            and closed_candle.symbol == position.symbol
-            and position.opened_at < closed_candle.candle_end <= held_until
-        ):
-            if (
-                position.side is StrategySide.LONG
-                and closed_candle.close_price < closed_candle.open_price
-            ):
-                return "candle_15m_bearish"
-            if (
-                position.side is StrategySide.SHORT
-                and closed_candle.close_price > closed_candle.open_price
-            ):
-                return "candle_15m_bullish"
-    else:
-        if gross_return >= config.take_profit_pct:
-            return "take_profit"
-        if gross_return <= -config.stop_loss_pct:
-            return "stop_loss"
-    maximum_holding = timedelta(
-        seconds=config.max_holding_buckets * config.state_interval_seconds
+    return position_exit_reason(
+        gross_return=gross_return,
+        held_until=held_until,
+        opened_at=position.opened_at,
+        symbol=position.symbol,
+        side=position.side,
+        policy=PositionExitPolicy(
+            take_profit_pct=config.take_profit_pct,
+            stop_loss_pct=config.stop_loss_pct,
+            max_holding_seconds=(
+                config.max_holding_buckets * config.state_interval_seconds
+            ),
+            mode=config.exit_mode,
+        ),
+        closed_candle=closed_candle,
     )
-    if held_until >= position.opened_at + maximum_holding:
-        return "max_holding_period"
-    return None
 
 
 def _new_official_candle_accumulator(

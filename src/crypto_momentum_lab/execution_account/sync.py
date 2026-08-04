@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
@@ -76,6 +76,7 @@ class ExecutionAccountSyncConfig:
     environment: str
     account_label: str
     expected_multi_assets_mode: bool
+    expected_hedge_mode: bool
     observed_at: datetime
     recent_fill_symbols: tuple[str, ...] = ()
 
@@ -108,18 +109,49 @@ class ExecutionAccountSyncService:
         self._client = client
         self._repository = repository
         self._config = config
+        self._tracked_fill_symbols = set(config.recent_fill_symbols)
 
-    async def sync_once(self) -> ExecutionAccountSyncResult:
-        await self._save_state(ExecutionAccountStatus.STARTING)
-        await self._save_state(ExecutionAccountStatus.SYNCING)
+    async def sync_once(
+        self,
+        *,
+        observed_at: datetime | None = None,
+        publish_transient_states: bool = True,
+        include_fills: bool = True,
+    ) -> ExecutionAccountSyncResult:
+        config = (
+            self._config
+            if observed_at is None
+            else replace(self._config, observed_at=observed_at)
+        )
+        if publish_transient_states:
+            await self._save_state(
+                ExecutionAccountStatus.STARTING,
+                config=replace(
+                    config,
+                    observed_at=config.observed_at - timedelta(microseconds=2),
+                ),
+            )
+            await self._save_state(
+                ExecutionAccountStatus.SYNCING,
+                config=replace(
+                    config,
+                    observed_at=config.observed_at - timedelta(microseconds=1),
+                ),
+            )
         try:
             account_config = await self._client.fetch_account_config()
-            reconciliation_id = _reconciliation_id(self._config)
-            if (
-                account_config.multi_assets_mode
-                != self._config.expected_multi_assets_mode
+            reconciliation_id = _reconciliation_id(config)
+            mismatches: list[str] = []
+            if account_config.multi_assets_mode != (
+                config.expected_multi_assets_mode
             ):
-                reason = "multi_assets_mode_mismatch"
+                mismatches.append("multi_assets_mode_mismatch")
+            if account_config.hedge_mode != config.expected_hedge_mode:
+                mismatches.append("hedge_mode_mismatch")
+            if mismatches:
+                reason = ",".join(mismatches)
+                mismatch_details: list[JsonValue] = []
+                mismatch_details.extend(mismatches)
                 await self._repository.save_reconciliation_snapshot(
                     config=account_config,
                     balances=(),
@@ -127,56 +159,63 @@ class ExecutionAccountSyncService:
                     open_orders=(),
                     fills=(),
                     run=_reconciliation_run(
-                        self._config,
+                        config,
                         reconciliation_id=reconciliation_id,
                         status="halted",
-                        mismatch_count=1,
-                        details={"reason": reason},
+                        mismatch_count=len(mismatches),
+                        details={"reasons": mismatch_details},
                     ),
                 )
                 await self._save_state(
                     ExecutionAccountStatus.HALTED_READONLY,
                     reason,
+                    config=config,
                 )
                 return ExecutionAccountSyncResult(
                     status=ExecutionAccountStatus.HALTED_READONLY,
                     reconciliation_id=reconciliation_id,
-                    mismatch_count=1,
+                    mismatch_count=len(mismatches),
                 )
 
             balances = await self._client.fetch_balances()
             positions = await self._client.fetch_positions()
-            open_orders = await self._client.fetch_open_orders()
-            fill_symbols = self._config.recent_fill_symbols or tuple(
-                sorted(
-                    {
-                        position.symbol
-                        for position in positions
-                        if position.position_amt != 0
-                    }
-                    | {order.symbol for order in open_orders}
-                )
+            active_positions = tuple(
+                position for position in positions if position.position_amt != 0
             )
-            fills = await self._client.fetch_recent_fills(fill_symbols)
+            open_orders = await self._client.fetch_open_orders()
+            self._tracked_fill_symbols.update(
+                position.symbol for position in active_positions
+            )
+            self._tracked_fill_symbols.update(order.symbol for order in open_orders)
+            fills = (
+                await self._client.fetch_recent_fills(
+                    tuple(sorted(self._tracked_fill_symbols))
+                )
+                if include_fills and self._tracked_fill_symbols
+                else ()
+            )
             await self._repository.save_reconciliation_snapshot(
                 config=account_config,
                 balances=balances,
-                positions=positions,
+                positions=active_positions,
                 open_orders=open_orders,
                 fills=fills,
                 run=_reconciliation_run(
-                    self._config,
+                    config,
                     reconciliation_id=reconciliation_id,
                     status="ready",
                     mismatch_count=0,
                     details={},
                     balance_count=len(balances),
-                    position_count=len(positions),
+                    position_count=len(active_positions),
                     open_order_count=len(open_orders),
                     fill_count=len(fills),
                 ),
             )
-            await self._save_state(ExecutionAccountStatus.READY_READONLY)
+            await self._save_state(
+                ExecutionAccountStatus.READY_READONLY,
+                config=config,
+            )
             return ExecutionAccountSyncResult(
                 status=ExecutionAccountStatus.READY_READONLY,
                 reconciliation_id=reconciliation_id,
@@ -187,6 +226,7 @@ class ExecutionAccountSyncService:
                 await self._save_state(
                     ExecutionAccountStatus.DEGRADED,
                     f"sync_failed:{type(error).__name__}",
+                    config=config,
                 )
             except Exception:
                 pass
@@ -196,13 +236,16 @@ class ExecutionAccountSyncService:
         self,
         state: ExecutionAccountStatus,
         reason: str | None = None,
+        *,
+        config: ExecutionAccountSyncConfig | None = None,
     ) -> None:
+        resolved_config = config or self._config
         await self._repository.save_process_state(
             ExecutionAccountProcessState(
-                environment=self._config.environment,
-                account_label=self._config.account_label,
+                environment=resolved_config.environment,
+                account_label=resolved_config.account_label,
                 state=state,
-                occurred_at=self._config.observed_at,
+                occurred_at=resolved_config.observed_at,
                 reason=reason,
             )
         )
