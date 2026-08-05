@@ -557,7 +557,7 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
     assert "Paper live daemon completed: states=3 halt=none" in result.stdout
 
 
-def test_paper_live_pair_builds_two_exit_accounts(monkeypatch) -> None:
+def test_paper_live_pair_builds_three_exit_accounts(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
     repository = object()
 
@@ -565,6 +565,7 @@ def test_paper_live_pair_builds_two_exit_accounts(monkeypatch) -> None:
         calls.append(kwargs)
         return SimpleNamespace(
             account_results=(
+                SimpleNamespace(processed_state_count=3, halt_reason=None),
                 SimpleNamespace(processed_state_count=3, halt_reason=None),
                 SimpleNamespace(processed_state_count=3, halt_reason=None),
             )
@@ -608,6 +609,10 @@ def test_paper_live_pair_builds_two_exit_accounts(monkeypatch) -> None:
             "fixed-run",
             "--candle-run-id",
             "candle-run",
+            "--third-run-id",
+            "third-run",
+            "--third-candle-minimum-holding-buckets",
+            "180",
             "--max-states",
             "3",
         ],
@@ -618,15 +623,20 @@ def test_paper_live_pair_builds_two_exit_accounts(monkeypatch) -> None:
     assert calls[0]["strategy"] is not None
     accounts = calls[0]["accounts"]
     assert isinstance(accounts, tuple)
-    assert len(accounts) == 2
+    assert len(accounts) == 3
     assert accounts[0].repository is repository
     assert accounts[1].repository is repository
+    assert accounts[2].repository is repository
     assert accounts[0].config.run_id == "fixed-run"
     assert accounts[1].config.run_id == "candle-run"
+    assert accounts[2].config.run_id == "third-run"
     assert accounts[0].config.portfolio.exit_mode.value == "fixed"
     assert accounts[1].config.portfolio.exit_mode.value == "candle_15m"
+    assert accounts[2].config.portfolio.exit_mode.value == "candle_15m"
+    assert accounts[2].config.portfolio.candle_minimum_holding_buckets == 180
     assert accounts[0].config.execution.latency_buckets == 0
     assert accounts[1].config.execution.latency_buckets == 0
+    assert accounts[2].config.execution.latency_buckets == 0
     assert "Paper live pair completed: strategy=orderflow_impulse" in result.stdout
 
 

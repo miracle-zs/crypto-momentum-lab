@@ -475,9 +475,11 @@ def test_paired_daemon_calculates_entries_once_and_fans_out_accounts() -> None:
     states = (fixture_state("BTCUSDT", 0), fixture_state("BTCUSDT", 1))
     first_identity = _identity()
     second_identity = _identity("run-2")
+    third_identity = _identity("run-3")
     strategy = SignalStrategy(first_identity)
     first_artifacts = FakeArtifactRepository()
     second_artifacts = FakeArtifactRepository()
+    third_artifacts = FakeArtifactRepository()
     first_config = _config(
         run_identity=first_identity,
         execution=ReplayExecutionConfig(latency_buckets=0),
@@ -486,6 +488,16 @@ def test_paired_daemon_calculates_entries_once_and_fans_out_accounts() -> None:
         run_id="run-2",
         run_identity=second_identity,
         execution=ReplayExecutionConfig(latency_buckets=0),
+    )
+    third_config = _config(
+        run_id="run-3",
+        run_identity=third_identity,
+        execution=ReplayExecutionConfig(latency_buckets=0),
+        portfolio=PaperExitConfig(
+            exit_mode=PaperExitMode.CANDLE_15M,
+            max_holding_buckets=5760,
+            candle_minimum_holding_buckets=180,
+        ),
     )
 
     result = run_paired_paper_live_daemon(
@@ -502,6 +514,11 @@ def test_paired_daemon_calculates_entries_once_and_fans_out_accounts() -> None:
                 artifact_repository=second_artifacts,
                 config=second_config,
             ),
+            PairedPaperLiveAccount(
+                repository=FakeRepository(),
+                artifact_repository=third_artifacts,
+                config=third_config,
+            ),
         ),
         clock=FakeClock(states[-1].bucket_end + timedelta(seconds=1)),
     )
@@ -509,21 +526,30 @@ def test_paired_daemon_calculates_entries_once_and_fans_out_accounts() -> None:
     assert [item.processed_state_count for item in result.account_results] == [
         2,
         2,
+        2,
     ]
     assert len(strategy.processed) == 2
     assert strategy.checkpoint_calls == 1
     assert len(first_artifacts.decisions) == 1
     assert len(second_artifacts.decisions) == 1
+    assert len(third_artifacts.decisions) == 1
     first_signal = first_artifacts.decisions[0].signals[0]
     second_signal = second_artifacts.decisions[0].signals[0]
+    third_signal = third_artifacts.decisions[0].signals[0]
     assert first_signal.run_id == first_identity.run_id
     assert second_signal.run_id == second_identity.run_id
+    assert third_signal.run_id == third_identity.run_id
     assert first_signal.features == second_signal.features
+    assert first_signal.features == third_signal.features
     assert first_signal.signal_id != second_signal.signal_id
+    assert first_signal.signal_id != third_signal.signal_id
+    assert second_signal.signal_id != third_signal.signal_id
     assert first_artifacts.fills[0].filled_notional == Decimal("25")
     assert second_artifacts.fills[0].filled_notional == Decimal("25")
+    assert third_artifacts.fills[0].filled_notional == Decimal("25")
     assert first_artifacts.fills[0].filled_at == states[0].bucket_start
     assert second_artifacts.fills[0].filled_at == states[0].bucket_start
+    assert third_artifacts.fills[0].filled_at == states[0].bucket_start
 
 
 def test_paired_daemon_only_reads_the_latest_closed_candle() -> None:

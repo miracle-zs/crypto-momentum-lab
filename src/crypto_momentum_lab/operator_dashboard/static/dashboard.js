@@ -273,15 +273,22 @@ function buildPairedEquityModels(accounts) {
   for (const account of accounts) {
     if (!account.strategy_name) continue;
     const pair = pairs.get(account.strategy_name) || {};
-    if (account.exit_mode === "candle_15m") pair.candle = account;
-    else pair.fixed = account;
+    if (account.exit_mode === "candle_15m") {
+      pair.candles = pair.candles || [];
+      pair.candles.push(account);
+    } else pair.fixed = account;
     pairs.set(account.strategy_name, pair);
   }
   return STRATEGY_ORDER.flatMap((strategyName) => {
     const pair = pairs.get(strategyName);
-    if (!pair?.fixed || !pair?.candle) return [];
-    const model = pairedEquityModel(strategyName, pair.fixed, pair.candle);
-    return model ? [model] : [];
+    if (!pair?.fixed || !pair.candles?.length) return [];
+    return pair.candles.flatMap((candle) => {
+      const model = pairedEquityModel(strategyName, pair.fixed, candle);
+      if (!model) return [];
+      model.candleLabel = candle.exit_label || "15M 收线退出";
+      model.candleRunId = candle.run_id;
+      return [model];
+    });
   });
 }
 
@@ -315,7 +322,7 @@ function comparisonSparkline(account, model) {
     .map((point) => `${x(point).toFixed(1)},${y(point[seriesKey]).toFixed(1)}`)
     .join(" ");
   return `<svg class="spark ${seriesKey}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none"
-    role="img" aria-label="${seriesKey === "fixed" ? "固定止盈止损" : "15 分钟收线退出"}同期权益走势">
+    role="img" aria-label="${seriesKey === "fixed" ? "固定止盈止损" : (account.exit_label || "15 分钟收线退出")}同期权益走势">
     <line x1="0" y1="${y(0).toFixed(1)}" x2="${width}" y2="${y(0).toFixed(1)}" class="spark-zero"/>
     <polyline points="${line}"/>
   </svg>`;
@@ -466,7 +473,7 @@ function pairedComparisonPanel(model) {
     </div>
     <div class="pair-legend">
       <span class="fixed"><i></i>固定 TP / SL <b class="num ${pnlClass(model.fixedDelta)}">${esc(signedMoney(model.fixedDelta))}</b></span>
-      <span class="candle"><i></i>15M 收线退出 <b class="num ${pnlClass(model.candleDelta)}">${esc(signedMoney(model.candleDelta))}</b></span>
+      <span class="candle"><i></i>${esc(model.candleLabel || "15M 收线退出")} <b class="num ${pnlClass(model.candleDelta)}">${esc(signedMoney(model.candleDelta))}</b></span>
     </div>
     ${pairedEquityChart(model)}
     <footer><span>共同起点归零 · ${bucketMinutes} 分钟 UTC 采样</span><b>${esc(elapsedTime(model.startAt, model.endAt))}</b></footer>
@@ -482,7 +489,7 @@ function accountCard(account, index, pairModel) {
     ? (isCandle ? pairModel.candleDelta : pairModel.fixedDelta)
     : null;
   const active = index === selectedPaperAccount;
-  const exitMode = isCandle ? "15M 收线退出" : "固定 TP / SL";
+  const exitMode = account.exit_label || (isCandle ? "15M 收线退出" : "固定 TP / SL");
   return `<button class="acct-card${active ? " is-active" : ""}" type="button" role="tab"
     aria-selected="${active}" data-account-index="${index}">
     <div class="acct-top"><span>账户 0${index + 1}</span><span class="acct-mode">${esc(exitMode)}</span>${pill(account.status)}</div>
@@ -594,9 +601,13 @@ function renderStrategy(data) {
   if (!accounts.length) return [data.status, emptyBox("等待模拟账户启动", "compression_breakout · orderflow_impulse · liquidation_cascade")];
   selectedPaperAccount = Math.min(selectedPaperAccount, accounts.length - 1);
   const pairModels = buildPairedEquityModels(accounts);
-  const pairByStrategy = new Map(pairModels.map((model) => [model.strategyName, model]));
+  const pairByRun = new Map();
+  for (const model of pairModels) {
+    pairByRun.set(model.fixedAccount.run_id, model);
+    pairByRun.set(model.candleRunId, model);
+  }
   const cards = `<div class="acct-cards" role="tablist" aria-label="模拟盘策略账户">${accounts
-    .map((account, index) => accountCard(account, index, pairByStrategy.get(account.strategy_name)))
+    .map((account, index) => accountCard(account, index, pairByRun.get(account.run_id)))
     .join("")}</div>`;
   const comparisons = pairModels.length
     ? `<div class="block pair-section">

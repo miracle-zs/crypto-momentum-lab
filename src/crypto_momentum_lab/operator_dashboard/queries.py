@@ -73,10 +73,12 @@ class DashboardQueries:
         *,
         clock: Callable[[], datetime] | None = None,
         stale_after_seconds: float = 120.0,
+        paper_run_ids: frozenset[str] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._clock = clock or (lambda: datetime.now(tz=UTC))
         self._stale_after_seconds = stale_after_seconds
+        self._paper_run_ids = paper_run_ids
 
     async def health(self) -> dict[str, str]:
         async with self._session_factory() as session:
@@ -240,10 +242,16 @@ class DashboardQueries:
                 "orderflow_impulse",
                 "liquidation_cascade",
             )
-            current_runs = [
-                run for run in runs if run.run_id.startswith("paper-account-")
-            ]
-            selected_runs = current_runs or runs
+            selected_runs: Sequence[StrategyRunRow]
+            if self._paper_run_ids is not None:
+                selected_runs = [
+                    run for run in runs if run.run_id in self._paper_run_ids
+                ]
+            else:
+                current_runs = [
+                    run for run in runs if run.run_id.startswith("paper-account-")
+                ]
+                selected_runs = current_runs or runs
             accounts = []
             for strategy_name in strategy_order:
                 strategy_runs = sorted(
@@ -261,7 +269,11 @@ class DashboardQueries:
                             equity_window_end=equity_window_end,
                             _session=session,
                         )
-                        for run in strategy_runs[-2:]
+                        for run in (
+                            strategy_runs
+                            if self._paper_run_ids is not None
+                            else strategy_runs[-2:]
+                        )
                     ]
                 )
         return PaperAccountsResponse(
@@ -449,6 +461,7 @@ class DashboardQueries:
             and portfolio_config.get("exit_mode") is not None
             else "fixed"
         )
+        exit_label = _paper_exit_label(exit_mode, portfolio_config)
         total_closed_trades = int(closed_trade_count or 0)
         total_winning_trades = int(winning_trade_count or 0)
         trade_events = sorted(
@@ -465,6 +478,7 @@ class DashboardQueries:
             run_id=run.run_id,
             strategy_name=run.strategy_name,
             exit_mode=exit_mode,
+            exit_label=exit_label,
             config_hash=run.config_hash,
             checkpoint_at=checkpoint_at,
             equity_window_start=window_start,
@@ -886,6 +900,39 @@ def _position_close_event(row: PaperPositionRow) -> dict[str, JsonValue]:
         "pnl": None if row.realized_pnl is None else str(row.realized_pnl),
         "reason": row.close_reason,
     }
+
+
+def _paper_exit_label(
+    exit_mode: str,
+    portfolio_config: object,
+) -> str:
+    if exit_mode != "candle_15m":
+        return "固定 TP / SL"
+    if not isinstance(portfolio_config, dict):
+        return "15M 收线退出"
+    confirmation_count = _config_int(
+        portfolio_config.get("candle_confirmation_count"),
+        default=1,
+    )
+    minimum_buckets = _config_int(
+        portfolio_config.get("candle_minimum_holding_buckets"),
+        default=0,
+    )
+    if confirmation_count > 1:
+        return f"{confirmation_count} 根反向 15M 收线"
+    if minimum_buckets > 0:
+        minutes = minimum_buckets * 15 // 60
+        return f"持仓 {minutes} 分钟后反向 15M 收线"
+    return "15M 收线退出"
+
+
+def _config_int(value: object, *, default: int) -> int:
+    try:
+        if isinstance(value, int | str):
+            return int(value)
+        return default
+    except (TypeError, ValueError):
+        return default
 
 
 def _json_mapping(value: dict[str, object]) -> dict[str, JsonValue]:

@@ -37,6 +37,8 @@ class PaperExitConfig:
     initial_balance: Decimal = Decimal("1000")
     exit_mode: PaperExitMode = PaperExitMode.FIXED
     require_executable_quote: bool = False
+    candle_minimum_holding_buckets: int = 0
+    candle_confirmation_count: int = 1
 
     def __post_init__(self) -> None:
         if not isinstance(self.exit_mode, PaperExitMode):
@@ -51,6 +53,12 @@ class PaperExitConfig:
             raise ValueError("state_interval_seconds must be positive")
         if self.initial_balance <= 0:
             raise ValueError("initial_balance must be positive")
+        if self.candle_minimum_holding_buckets < 0:
+            raise ValueError(
+                "candle_minimum_holding_buckets must not be negative"
+            )
+        if self.candle_confirmation_count <= 0:
+            raise ValueError("candle_confirmation_count must be positive")
 
 
 @dataclass(slots=True)
@@ -199,6 +207,7 @@ def mark_positions(
     config: PaperExitConfig,
     taker_fee_rate: Decimal,
     closed_candle: ClosedCandle15m | None = None,
+    closed_candles: tuple[ClosedCandle15m, ...] = (),
 ) -> tuple[PaperPosition, ...]:
     updates: list[PaperPosition] = []
     for position in positions:
@@ -224,6 +233,7 @@ def mark_positions(
             position=position,
             config=config,
             closed_candle=closed_candle,
+            closed_candles=closed_candles,
         )
         if close_reason is None:
             updates.append(
@@ -278,6 +288,7 @@ def _close_reason(
     position: PaperPosition,
     config: PaperExitConfig,
     closed_candle: ClosedCandle15m | None,
+    closed_candles: tuple[ClosedCandle15m, ...],
 ) -> str | None:
     return position_exit_reason(
         gross_return=gross_return,
@@ -292,8 +303,14 @@ def _close_reason(
                 config.max_holding_buckets * config.state_interval_seconds
             ),
             mode=config.exit_mode,
+            minimum_holding_seconds=(
+                config.candle_minimum_holding_buckets
+                * config.state_interval_seconds
+            ),
+            candle_confirmation_count=config.candle_confirmation_count,
         ),
         closed_candle=closed_candle,
+        closed_candles=closed_candles,
     )
 
 

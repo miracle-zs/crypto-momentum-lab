@@ -289,6 +289,111 @@ def test_candle_exit_uses_candle_close_time_and_price() -> None:
     assert closed.exit_price == candle.close_price
 
 
+def test_candle_exit_waits_for_minimum_holding_period() -> None:
+    position = position_from_entry_fill("run-1", _fill())
+    assert position is not None
+    config = PaperExitConfig(
+        exit_mode=PaperExitMode.CANDLE_15M,
+        max_holding_buckets=5760,
+        candle_minimum_holding_buckets=180,
+    )
+    first_adverse = ClosedCandle15m(
+        symbol="BTCUSDT",
+        candle_start=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+        candle_end=datetime(2026, 7, 26, 0, 30, tzinfo=UTC),
+        open_price=Decimal("100"),
+        close_price=Decimal("99"),
+    )
+    held_before_minimum = mark_positions(
+        positions=(position,),
+        state=_state(
+            close=Decimal("99"),
+            bucket_start=datetime(2026, 7, 26, 0, 30, tzinfo=UTC),
+        ),
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+        closed_candle=first_adverse,
+        closed_candles=(first_adverse,),
+    )[0]
+
+    assert held_before_minimum.status is PaperPositionStatus.OPEN
+
+    second_adverse = ClosedCandle15m(
+        symbol="BTCUSDT",
+        candle_start=datetime(2026, 7, 26, 0, 30, tzinfo=UTC),
+        candle_end=datetime(2026, 7, 26, 0, 45, tzinfo=UTC),
+        open_price=Decimal("100"),
+        close_price=Decimal("98"),
+    )
+    closed_after_minimum = mark_positions(
+        positions=(position,),
+        state=_state(
+            close=Decimal("98"),
+            bucket_start=datetime(2026, 7, 26, 0, 45, tzinfo=UTC),
+        ),
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+        closed_candle=second_adverse,
+        closed_candles=(first_adverse, second_adverse),
+    )[0]
+
+    assert closed_after_minimum.status is PaperPositionStatus.CLOSED
+    assert closed_after_minimum.close_reason == (
+        "candle_15m_bearish_after_min_hold"
+    )
+
+
+def test_candle_exit_requires_consecutive_adverse_candles() -> None:
+    position = position_from_entry_fill("run-1", _fill())
+    assert position is not None
+    config = PaperExitConfig(
+        exit_mode=PaperExitMode.CANDLE_15M,
+        max_holding_buckets=5760,
+        candle_confirmation_count=2,
+    )
+    first_adverse = ClosedCandle15m(
+        symbol="BTCUSDT",
+        candle_start=datetime(2026, 7, 26, 0, 0, tzinfo=UTC),
+        candle_end=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+        open_price=Decimal("100"),
+        close_price=Decimal("99"),
+    )
+    second_adverse = ClosedCandle15m(
+        symbol="BTCUSDT",
+        candle_start=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+        candle_end=datetime(2026, 7, 26, 0, 30, tzinfo=UTC),
+        open_price=Decimal("99"),
+        close_price=Decimal("98"),
+    )
+
+    after_one = mark_positions(
+        positions=(position,),
+        state=_state(
+            close=Decimal("99"),
+            bucket_start=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+        ),
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+        closed_candle=first_adverse,
+        closed_candles=(first_adverse,),
+    )[0]
+    after_two = mark_positions(
+        positions=(position,),
+        state=_state(
+            close=Decimal("98"),
+            bucket_start=datetime(2026, 7, 26, 0, 30, tzinfo=UTC),
+        ),
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+        closed_candle=second_adverse,
+        closed_candles=(first_adverse, second_adverse),
+    )[0]
+
+    assert after_one.status is PaperPositionStatus.OPEN
+    assert after_two.status is PaperPositionStatus.CLOSED
+    assert after_two.close_reason == "candle_15m_bearish_2confirm"
+
+
 def test_executable_exit_uses_the_side_of_the_book() -> None:
     position = position_from_entry_fill("run-1", _fill())
     assert position is not None

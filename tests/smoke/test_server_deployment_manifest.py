@@ -42,16 +42,46 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         )
         assert "--replay-stale-states" not in services[service]["command"]
         assert "--continue-while-halted" not in services[service]["command"]
+    configured_run_ids = {
+        item.strip()
+        for item in services["market-data"]["environment"][
+            "CML_PAPER_EXIT_RUN_IDS"
+        ].split(",")
+        if item.strip()
+    }
+    assert configured_run_ids == {
+        "paper-account-01-compression-original-fixed-v1",
+        "paper-account-02-compression-original-candle15m-v1",
+        "paper-account-03-orderflow-fixed-v1",
+        "paper-account-04-orderflow-candle15m-v1",
+        "paper-account-05-orderflow-candle45m-v1",
+        "paper-account-06-liquidation-fixed-v1",
+        "paper-account-07-liquidation-candle15m-v1",
+        "paper-account-08-liquidation-candle2confirm-v1",
+    }
+    assert {
+        item.strip()
+        for item in services["dashboard"]["environment"][
+            "CML_PAPER_ACCOUNT_RUN_IDS"
+        ].split(",")
+        if item.strip()
+    } == configured_run_ids
     compression = services["paper-compression-pair"]["command"]
     assert _option_value(compression, "--strategy") == "compression_breakout"
-    assert _option_value(compression, "--signal-interval-seconds") == "300"
+    assert _option_value(compression, "--signal-interval-seconds") == "15"
     assert _option_value(compression, "--compression-window-buckets") == "20"
-    assert _option_value(compression, "--max-range-width-pct") == "0.025"
-    assert _option_value(compression, "--min-breakout-pct") == "0.003"
-    assert _option_value(compression, "--cooldown-buckets") == "12"
-    assert _option_value(compression, "--fixed-take-profit-pct") == "0.03"
-    assert _option_value(compression, "--fixed-stop-loss-pct") == "0.015"
-    assert _option_value(compression, "--fixed-max-holding-buckets") == "480"
+    assert _option_value(compression, "--max-range-width-pct") == "0.005"
+    assert _option_value(compression, "--min-breakout-pct") == "0.001"
+    assert _option_value(compression, "--cooldown-buckets") == "8"
+    assert _option_value(compression, "--fixed-take-profit-pct") == "0.02"
+    assert _option_value(compression, "--fixed-stop-loss-pct") == "0.01"
+    assert _option_value(compression, "--fixed-max-holding-buckets") == "80"
+    assert _option_value(compression, "--fixed-run-id") == (
+        "paper-account-01-compression-original-fixed-v1"
+    )
+    assert _option_value(compression, "--candle-run-id") == (
+        "paper-account-02-compression-original-candle15m-v1"
+    )
     assert "--require-market-quote" in compression
     assert (
         _option_value(
@@ -60,6 +90,13 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         )
         == "orderflow_impulse"
     )
+    orderflow = services["paper-orderflow-pair"]["command"]
+    assert _option_value(orderflow, "--third-run-id") == (
+        "paper-account-05-orderflow-candle45m-v1"
+    )
+    assert _option_value(orderflow, "--third-candle-minimum-holding-buckets") == (
+        "180"
+    )
     assert (
         _option_value(
             services["paper-liquidation-pair"]["command"],
@@ -67,6 +104,11 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         )
         == "liquidation_cascade"
     )
+    liquidation = services["paper-liquidation-pair"]["command"]
+    assert _option_value(liquidation, "--third-run-id") == (
+        "paper-account-08-liquidation-candle2confirm-v1"
+    )
+    assert _option_value(liquidation, "--third-candle-confirmation-count") == "2"
     assert services["execution-account-live"]["profiles"] == ["live"]
     assert services["live-strategy"]["profiles"] == ["live"]
     assert services["execution-account-live"]["environment"][

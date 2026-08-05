@@ -39,6 +39,7 @@ class StrategyRunResponse(DashboardSchema):
     run_id: str | None
     strategy_name: str | None
     exit_mode: str | None = None
+    exit_label: str | None = None
     config_hash: str | None
     checkpoint_at: datetime | None
     equity_window_start: datetime | None = None

@@ -742,6 +742,13 @@ def paper_live_pair_command(
             help="Run ID for the 15-minute candle-exit account.",
         ),
     ],
+    third_run_id: Annotated[
+        str | None,
+        typer.Option(
+            "--third-run-id",
+            help="Optional third candle-exit account sharing the same entries.",
+        ),
+    ] = None,
     database_url: Annotated[
         str | None,
         typer.Option("--database-url", help="Async PostgreSQL URL."),
@@ -764,11 +771,11 @@ def paper_live_pair_command(
     max_range_width_pct: Annotated[
         str,
         typer.Option("--max-range-width-pct"),
-    ] = "0.025",
+    ] = "0.005",
     min_breakout_pct: Annotated[
         str,
         typer.Option("--min-breakout-pct"),
-    ] = "0.003",
+    ] = "0.001",
     acceptance_buckets: Annotated[
         int,
         typer.Option("--acceptance-buckets", min=1),
@@ -776,11 +783,11 @@ def paper_live_pair_command(
     cooldown_buckets: Annotated[
         int,
         typer.Option("--cooldown-buckets", min=0),
-    ] = 12,
+    ] = 8,
     signal_interval_seconds: Annotated[
         int,
         typer.Option("--signal-interval-seconds", min=15),
-    ] = 300,
+    ] = 15,
     candidate_notional: Annotated[
         str,
         typer.Option("--candidate-notional"),
@@ -809,6 +816,22 @@ def paper_live_pair_command(
         int,
         typer.Option("--candle-max-holding-buckets", min=1),
     ] = 5760,
+    third_candle_minimum_holding_buckets: Annotated[
+        int,
+        typer.Option(
+            "--third-candle-minimum-holding-buckets",
+            min=0,
+            help="Minimum 15-second buckets before the third candle exit.",
+        ),
+    ] = 0,
+    third_candle_confirmation_count: Annotated[
+        int,
+        typer.Option(
+            "--third-candle-confirmation-count",
+            min=1,
+            help="Opposite 15-minute candles required for the third exit.",
+        ),
+    ] = 1,
     max_states: Annotated[
         int,
         typer.Option("--max-states", min=1),
@@ -885,6 +908,20 @@ def paper_live_pair_command(
         candidate_ttl_buckets=candidate_ttl_buckets,
         signal_interval_seconds=signal_interval_seconds,
     )
+    third_identity = (
+        None
+        if third_run_id is None
+        else build_runtime_identity_for_cli(
+            run_id=third_run_id,
+            strategy_name=strategy_name,
+            generated_at=created_at,
+            source_description=source.description,
+            compression_breakout=compression_breakout,
+            candidate_notional=candidate_notional_decimal,
+            candidate_ttl_buckets=candidate_ttl_buckets,
+            signal_interval_seconds=signal_interval_seconds,
+        )
+    )
     strategy = build_runtime_strategy_for_cli(
         strategy_name=strategy_name,
         run_id=fixed_run_id,
@@ -939,14 +976,48 @@ def paper_live_pair_command(
             require_executable_quote=require_market_quote,
         ),
     )
+    accounts = [
+        PairedPaperLiveAccount(repository, repository, fixed_config),
+        PairedPaperLiveAccount(repository, repository, candle_config),
+    ]
+    if third_run_id is not None:
+        if third_identity is None:
+            raise AssertionError("third identity must be present")
+        accounts.append(
+            PairedPaperLiveAccount(
+                repository,
+                repository,
+                PaperLiveDaemonConfig(
+                    run_id=third_run_id,
+                    strategy_name=strategy_name,
+                    environment=environment,
+                    checkpoint_every_states=checkpoint_every_states,
+                    checkpoint_every_seconds=checkpoint_every_seconds,
+                    max_market_state_age_seconds=max_market_state_age_seconds,
+                    run_identity=third_identity,
+                    source_description=source.description,
+                    execution=ReplayExecutionConfig(
+                        latency_buckets=0,
+                        require_market_quote=require_market_quote,
+                    ),
+                    portfolio=PaperExitConfig(
+                        exit_mode=PaperExitMode.CANDLE_15M,
+                        initial_balance=Decimal(paper_initial_balance),
+                        max_holding_buckets=candle_max_holding_buckets,
+                        candle_minimum_holding_buckets=(
+                            third_candle_minimum_holding_buckets
+                        ),
+                        candle_confirmation_count=third_candle_confirmation_count,
+                        require_executable_quote=require_market_quote,
+                    ),
+                ),
+            )
+        )
     with BinanceRestClosedCandle15mSource(binance_base_url) as candle_source:
         result = run_paired_paper_live_daemon(
             source=source,
             strategy=strategy,
-            accounts=(
-                PairedPaperLiveAccount(repository, repository, fixed_config),
-                PairedPaperLiveAccount(repository, repository, candle_config),
-            ),
+            accounts=tuple(accounts),
             clock=clock,
             entry_symbol_loader=source.load_active_symbols_at,
             candle_source=candle_source,
@@ -955,7 +1026,8 @@ def paper_live_pair_command(
     halt_reason = result.account_results[0].halt_reason
     typer.echo(
         "Paper live pair completed: "
-        f"strategy={strategy_name} states={states_processed} "
+        f"strategy={strategy_name} accounts={len(accounts)} "
+        f"states={states_processed} "
         f"halt={halt_reason or 'none'}"
     )
 

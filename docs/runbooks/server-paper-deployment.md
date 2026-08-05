@@ -13,25 +13,26 @@ positions require them; one-minute klines are not continuously subscribed or
 archived.
 
 The compression-breakout daemon keeps 15-second states for execution and risk
-monitoring, but aggregates them into closed UTC-aligned 5-minute signal bars.
-Its initial medium-frequency profile is:
+monitoring, and evaluates the original 15-second breakout profile:
 
-- 20 signal bars, or 100 minutes, in the frozen compression range;
-- maximum range width of 2.5%;
-- minimum breakout distance of 0.3%;
-- one closed 5-minute bar for acceptance;
-- 12 signal bars, or 60 minutes, of per-symbol cooldown.
+- 20 15-second buckets, or 5 minutes, in the frozen compression range;
+- maximum range width of 0.5%;
+- minimum breakout distance of 0.1%;
+- one closed 15-second bucket for acceptance;
+- 8 15-second buckets, or 2 minutes, of per-symbol cooldown.
 
-The six virtual accounts are isolated by run ID and each starts with 1,000
-USDT. Every strategy has one fixed-exit account and one 15-minute candle-exit
-account:
+The eight virtual accounts are isolated by run ID and each starts with 1,000
+USDT. Every strategy has one fixed-exit account and two independent
+15-minute candle-exit variants:
 
-- `paper-account-01-compression-v1`: `compression_breakout`;
-- `paper-account-02-orderflow-v1`: `orderflow_impulse`;
-- `paper-account-03-liquidation-v1`: `liquidation_cascade`;
-- `paper-account-04-compression-candle15m-v1`: `compression_breakout`;
-- `paper-account-05-orderflow-candle15m-v1`: `orderflow_impulse`;
-- `paper-account-06-liquidation-candle15m-v1`: `liquidation_cascade`.
+- `paper-account-01-compression-original-fixed-v1`: `compression_breakout`, fixed TP/SL;
+- `paper-account-02-compression-original-candle15m-v1`: `compression_breakout`, first adverse 15M close;
+- `paper-account-03-orderflow-fixed-v1`: `orderflow_impulse`, fixed TP/SL;
+- `paper-account-04-orderflow-candle15m-v1`: `orderflow_impulse`, first adverse 15M close;
+- `paper-account-05-orderflow-candle45m-v1`: `orderflow_impulse`, first adverse 15M close after 45 minutes;
+- `paper-account-06-liquidation-fixed-v1`: `liquidation_cascade`, fixed TP/SL;
+- `paper-account-07-liquidation-candle15m-v1`: `liquidation_cascade`, first adverse 15M close;
+- `paper-account-08-liquidation-candle2confirm-v1`: `liquidation_cascade`, two consecutive adverse 15M closes.
 
 ## Deploy
 
@@ -116,7 +117,7 @@ use `SIGKILL` for planned deployments.
 
 The remote console is available at `https://<server>/momentum/`. The
 exchange-account panel remains empty because this stack intentionally has no
-Binance private-account credentials; the six paper-account panels remain
+Binance private-account credentials; the eight paper-account panels remain
 active.
 
 ## Paper Artifacts
@@ -142,15 +143,16 @@ The overview response stays bounded for normal polling. Select an account and
 use `查看全部历史` to load its complete closed-trade and lifecycle history on
 demand.
 
-Each account starts with 1,000 USDT of virtual equity. A filled entry opens a
-paper position. The compression account closes on the first closed 15-second
-state that reaches one of these rules:
+Each account starts with 1,000 USDT of virtual equity and opens 100 USDT per
+filled entry. A filled entry opens a paper position. The original Compression
+fixed account closes on the first closed 15-second state that reaches one of
+these rules:
 
-- take profit at 3%;
-- stop loss at 1.5%;
-- maximum holding period of 480 execution buckets, or 2 hours.
+- take profit at 2%;
+- stop loss at 1%;
+- maximum holding period of 80 execution buckets, or 20 minutes.
 
-PnL includes both entry and exit taker fees. All three accounts evaluate the
+PnL includes both entry and exit taker fees. All paper accounts evaluate the
 closed state's trade close, rather than intrabucket high/low.
 
 The market-data service subscribes to the 40-symbol momentum universe plus

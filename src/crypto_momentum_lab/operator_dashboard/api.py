@@ -56,6 +56,7 @@ def create_dashboard_app(
     queries: DashboardQueryProtocol | None = None,
     auth_username: str | None = None,
     auth_password: str | None = None,
+    paper_run_ids: frozenset[str] | None = None,
 ) -> FastAPI:
     resolved_auth_username = auth_username or os.environ.get(
         "CML_DASHBOARD_USERNAME"
@@ -77,7 +78,8 @@ def create_dashboard_app(
     if resolved_queries is None and database_url is not None:
         engine = create_async_database_engine(database_url)
         resolved_queries = DashboardQueries(
-            async_sessionmaker(engine, expire_on_commit=False)
+            async_sessionmaker(engine, expire_on_commit=False),
+            paper_run_ids=paper_run_ids,
         )
 
     @asynccontextmanager

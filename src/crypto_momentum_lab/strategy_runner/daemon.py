@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -183,9 +184,9 @@ def run_paired_paper_live_daemon(
     entry_symbol_loader: Callable[[datetime], frozenset[str]] | None = None,
     candle_source: ClosedCandle15mSource | None = None,
 ) -> PairedPaperLiveDaemonResult:
-    """Run two exit-only variants from one shared strategy calculation."""
-    if len(accounts) != 2:
-        raise ValueError("exactly two paired paper accounts are required")
+    """Run multiple exit-only variants from one shared strategy calculation."""
+    if len(accounts) < 2:
+        raise ValueError("at least two paired paper accounts are required")
     first_config = accounts[0].config
     first_identity = first_config.run_identity
     if first_identity is None:
@@ -229,6 +230,9 @@ def run_paired_paper_live_daemon(
     open_positions_by_account: list[dict[str, PaperPosition]] = []
     last_position_persisted_at_by_account: list[dict[str, datetime]] = []
     candle_aggregators: list[Candle15mAggregator | None] = []
+    candle_history_by_account: list[
+        dict[str, deque[ClosedCandle15m]]
+    ] = []
     for account in accounts:
         config = account.config
         identity = config.run_identity
@@ -268,6 +272,7 @@ def run_paired_paper_live_daemon(
             )
             else None
         )
+        candle_history_by_account.append({})
 
     processed = 0
     processed_since_checkpoint = 0
@@ -275,8 +280,10 @@ def run_paired_paper_live_daemon(
     checkpoint_dirty = False
     last_checkpoint_saved_at: datetime | None = None
     last_checkpoint_elapsed_anchor = clock.now()
-    last_equity_snapshot_at: list[datetime | None] = [None, None]
-    last_candle_end_by_account: list[dict[str, datetime]] = [{}, {}]
+    last_equity_snapshot_at: list[datetime | None] = [None] * len(accounts)
+    last_candle_end_by_account: list[dict[str, datetime]] = [
+        {} for _ in accounts
+    ]
     entry_symbols: frozenset[str] | None = None
     entry_symbols_loaded_at: datetime | None = None
     gapped_symbols: set[str] = set()
@@ -345,16 +352,36 @@ def run_paired_paper_live_daemon(
                     not_before=identity.created_at,
                     after=last_candle_end_by_account[index].get(state.symbol),
                 )
+            candle_history: deque[ClosedCandle15m] | None = None
             if closed_candle is not None:
                 last_candle_end_by_account[index][state.symbol] = (
                     closed_candle.candle_end
                 )
+                candle_history = candle_history_by_account[index].setdefault(
+                    state.symbol,
+                    deque(
+                        maxlen=max(
+                            2,
+                            config.portfolio.candle_confirmation_count,
+                        )
+                    ),
+                )
+                if (
+                    not candle_history
+                    or candle_history[-1].candle_start
+                    != closed_candle.candle_start
+                ):
+                    candle_history.append(closed_candle)
+            candle_history = candle_history_by_account[index].get(state.symbol)
             position_updates = mark_positions(
                 positions=tuple(open_positions_by_account[index].values()),
                 state=state,
                 config=config.portfolio,
                 taker_fee_rate=config.execution.taker_fee_rate,
                 closed_candle=closed_candle,
+                closed_candles=(
+                    () if candle_history is None else tuple(candle_history)
+                ),
             )
             for position in position_updates:
                 if position.status is PaperPositionStatus.CLOSED:
@@ -656,6 +683,7 @@ def run_paper_live_daemon(
     last_checkpoint_elapsed_anchor = daemon_started_at
     last_equity_snapshot_at: datetime | None = None
     last_candle_end_by_symbol: dict[str, datetime] = {}
+    candle_history_by_symbol: dict[str, deque[ClosedCandle15m]] = {}
     entry_symbols: frozenset[str] | None = None
     entry_symbols_loaded_at: datetime | None = None
     gapped_symbols: set[str] = set()
@@ -735,16 +763,36 @@ def run_paper_live_daemon(
                     not_before=candle_not_before,
                     after=last_candle_end_by_symbol.get(state.symbol),
                 )
+            candle_history: deque[ClosedCandle15m] | None = None
             if closed_candle is not None:
                 last_candle_end_by_symbol[state.symbol] = (
                     closed_candle.candle_end
                 )
+                candle_history = candle_history_by_symbol.setdefault(
+                    state.symbol,
+                    deque(
+                        maxlen=max(
+                            2,
+                            config.portfolio.candle_confirmation_count,
+                        )
+                    ),
+                )
+                if (
+                    not candle_history
+                    or candle_history[-1].candle_start
+                    != closed_candle.candle_start
+                ):
+                    candle_history.append(closed_candle)
+            candle_history = candle_history_by_symbol.get(state.symbol)
             position_updates = mark_positions(
                 positions=tuple(open_positions.values()),
                 state=state,
                 config=config.portfolio,
                 taker_fee_rate=config.execution.taker_fee_rate,
                 closed_candle=closed_candle,
+                closed_candles=(
+                    () if candle_history is None else tuple(candle_history)
+                ),
             )
             for position in position_updates:
                 if position.status is PaperPositionStatus.CLOSED:

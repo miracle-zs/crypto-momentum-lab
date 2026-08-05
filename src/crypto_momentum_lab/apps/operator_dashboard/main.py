@@ -27,10 +27,23 @@ def main() -> None:
             database_url=args.database_url,
             auth_username=args.username,
             auth_password=args.password,
+            paper_run_ids=parse_paper_run_ids(),
         ),
         host=args.host,
         port=args.port,
     )
+
+
+def parse_paper_run_ids(value: str | None = None) -> frozenset[str] | None:
+    raw_value = (
+        os.environ.get("CML_PAPER_ACCOUNT_RUN_IDS", "")
+        if value is None
+        else value
+    )
+    run_ids = frozenset(
+        item.strip() for item in raw_value.split(",") if item.strip()
+    )
+    return run_ids or None
 
 
 if __name__ == "__main__":
