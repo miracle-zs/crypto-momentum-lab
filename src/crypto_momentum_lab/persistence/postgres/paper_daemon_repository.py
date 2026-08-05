@@ -44,10 +44,13 @@ from crypto_momentum_lab.strategy_runner.portfolio import (
     position_from_entry_fill,
 )
 
-_LEGACY_UNKNOWN_CODE_COMMITS = frozenset({"unknown", "unversioned"})
 _NEW_EXECUTION_FIELDS = {
     "fills": ("require_market_quote",),
-    "portfolio": ("require_executable_quote",),
+    "portfolio": (
+        "require_executable_quote",
+        "candle_minimum_holding_buckets",
+        "candle_confirmation_count",
+    ),
 }
 
 
@@ -757,9 +760,6 @@ def _legacy_paper_run_upgrade_values(
             "code_commit": expected["code_commit"],
             "execution_config": expected["execution_config"],
         }
-
-    if actual.get("code_commit") not in _LEGACY_UNKNOWN_CODE_COMMITS:
-        return None
 
     actual_execution = normalized_actual.get("execution_config")
     expected_execution = normalized_expected.get("execution_config")

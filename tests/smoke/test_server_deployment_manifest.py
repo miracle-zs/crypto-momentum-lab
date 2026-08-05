@@ -52,11 +52,11 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert configured_run_ids == {
         "paper-account-01-compression-original-fixed-v1",
         "paper-account-02-compression-original-candle15m-v1",
-        "paper-account-03-orderflow-fixed-v1",
-        "paper-account-04-orderflow-candle15m-v1",
-        "paper-account-05-orderflow-candle45m-v1",
-        "paper-account-06-liquidation-fixed-v1",
-        "paper-account-07-liquidation-candle15m-v1",
+        "paper-account-02-orderflow-v1",
+        "paper-account-05-orderflow-candle15m-v1",
+        "paper-account-07-orderflow-candle45m-v1",
+        "paper-account-03-liquidation-v1",
+        "paper-account-06-liquidation-candle15m-v1",
         "paper-account-08-liquidation-candle2confirm-v1",
     }
     assert {
@@ -92,7 +92,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     )
     orderflow = services["paper-orderflow-pair"]["command"]
     assert _option_value(orderflow, "--third-run-id") == (
-        "paper-account-05-orderflow-candle45m-v1"
+        "paper-account-07-orderflow-candle45m-v1"
     )
     assert _option_value(orderflow, "--third-candle-minimum-holding-buckets") == (
         "180"

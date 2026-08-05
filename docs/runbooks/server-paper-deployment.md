@@ -27,11 +27,11 @@ USDT. Every strategy has one fixed-exit account and two independent
 
 - `paper-account-01-compression-original-fixed-v1`: `compression_breakout`, fixed TP/SL;
 - `paper-account-02-compression-original-candle15m-v1`: `compression_breakout`, first adverse 15M close;
-- `paper-account-03-orderflow-fixed-v1`: `orderflow_impulse`, fixed TP/SL;
-- `paper-account-04-orderflow-candle15m-v1`: `orderflow_impulse`, first adverse 15M close;
-- `paper-account-05-orderflow-candle45m-v1`: `orderflow_impulse`, first adverse 15M close after 45 minutes;
-- `paper-account-06-liquidation-fixed-v1`: `liquidation_cascade`, fixed TP/SL;
-- `paper-account-07-liquidation-candle15m-v1`: `liquidation_cascade`, first adverse 15M close;
+- `paper-account-02-orderflow-v1`: `orderflow_impulse`, existing fixed TP/SL account;
+- `paper-account-05-orderflow-candle15m-v1`: `orderflow_impulse`, existing first adverse 15M close account;
+- `paper-account-07-orderflow-candle45m-v1`: `orderflow_impulse`, first adverse 15M close after 45 minutes;
+- `paper-account-03-liquidation-v1`: `liquidation_cascade`, existing fixed TP/SL account;
+- `paper-account-06-liquidation-candle15m-v1`: `liquidation_cascade`, existing first adverse 15M close account;
 - `paper-account-08-liquidation-candle2confirm-v1`: `liquidation_cascade`, two consecutive adverse 15M closes.
 
 ## Deploy

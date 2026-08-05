@@ -113,10 +113,12 @@ def test_legacy_unknown_commit_run_can_upgrade_new_execution_flags() -> None:
                 **actual["execution_config"]["fills"],
                 "require_market_quote": True,
             },
-            "portfolio": {
-                **actual["execution_config"]["portfolio"],
-                "require_executable_quote": True,
-            },
+                "portfolio": {
+                    **actual["execution_config"]["portfolio"],
+                    "require_executable_quote": True,
+                    "candle_minimum_holding_buckets": 0,
+                    "candle_confirmation_count": 1,
+                },
         },
     }
 
@@ -147,6 +149,47 @@ def test_known_commit_paper_run_can_upgrade_code_commit() -> None:
     ) == {
         "code_commit": "new-commit",
         "execution_config": {},
+    }
+
+
+def test_known_commit_paper_run_can_upgrade_candle_exit_fields() -> None:
+    actual = {
+        "strategy_name": "orderflow_impulse",
+        "strategy_version": "v0",
+        "config_hash": "config-hash",
+        "run_mode": "paper",
+        "code_commit": "old-known-commit",
+        "source_description": "postgres-runtime-states:research",
+        "execution_config": {
+            "fills": {"require_market_quote": True},
+            "portfolio": {
+                "exit_mode": "candle_15m",
+                "max_holding_buckets": 5760,
+                "require_executable_quote": True,
+            },
+        },
+    }
+    expected = {
+        **actual,
+        "code_commit": "new-commit",
+        "execution_config": {
+            "fills": {"require_market_quote": True},
+            "portfolio": {
+                "exit_mode": "candle_15m",
+                "max_holding_buckets": 5760,
+                "require_executable_quote": True,
+                "candle_minimum_holding_buckets": 0,
+                "candle_confirmation_count": 1,
+            },
+        },
+    }
+
+    assert _legacy_paper_run_upgrade_values(
+        actual=actual,
+        expected=expected,
+    ) == {
+        "code_commit": "new-commit",
+        "execution_config": expected["execution_config"],
     }
 
 
