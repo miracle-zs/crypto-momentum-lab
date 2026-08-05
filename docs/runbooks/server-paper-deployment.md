@@ -132,7 +132,7 @@ immediately using that state's executable bid or ask. This matches the live
 order path. It does not remove the inherent 15-second aggregation delay; a
 signal that depends on a bucket is only known when that bucket closes.
 
-The dashboard separates the three paper accounts into:
+The dashboard separates the eight paper accounts by strategy and exit mode into:
 
 - account equity and balance history;
 - currently open positions with mark price and unrealized PnL;
