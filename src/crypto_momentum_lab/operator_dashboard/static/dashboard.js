@@ -309,23 +309,12 @@ function standaloneSparkline(rows) {
   return `<svg class="spark ${dir}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true"><polyline points="${line}"/></svg>`;
 }
 
-function comparisonSparkline(account, model) {
-  if (!model) return standaloneSparkline(account.equity_curve);
-  const seriesKey = account.exit_mode === "candle_15m" ? "candle" : "fixed";
-  const points = model.points;
-  const width = 150;
-  const height = 40;
-  const timeSpan = Math.max(model.endAt - model.startAt, 1);
-  const x = (point) => ((point.at - model.startAt) / timeSpan) * width;
-  const y = (value) => 3 + ((model.max - value) / (model.max - model.min)) * (height - 6);
-  const line = points
-    .map((point) => `${x(point).toFixed(1)},${y(point[seriesKey]).toFixed(1)}`)
-    .join(" ");
-  return `<svg class="spark ${seriesKey}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none"
-    role="img" aria-label="${seriesKey === "fixed" ? "固定止盈止损" : (account.exit_label || "15 分钟收线退出")}同期权益走势">
-    <line x1="0" y1="${y(0).toFixed(1)}" x2="${width}" y2="${y(0).toFixed(1)}" class="spark-zero"/>
-    <polyline points="${line}"/>
-  </svg>`;
+function accountWindowDelta(account) {
+  const values = (account.equity_curve || [])
+    .map((row) => asNumber(row.equity))
+    .filter((value) => value != null);
+  if (values.length < 2) return null;
+  return values.at(-1) - values[0];
 }
 
 function equityChart(rows, chartId = "eq", windowStart = null, windowEnd = null) {
@@ -480,14 +469,12 @@ function pairedComparisonPanel(model) {
   </article>`;
 }
 
-function accountCard(account, index, pairModel) {
+function accountCard(account, index) {
   const summary = account.portfolio_summary || {};
   const equity = asNumber(summary.equity);
   const returnSinceStart = equity == null ? null : equity / 1000 - 1;
   const isCandle = account.exit_mode === "candle_15m";
-  const matchedDelta = pairModel
-    ? (isCandle ? pairModel.candleDelta : pairModel.fixedDelta)
-    : null;
+  const windowDelta = accountWindowDelta(account);
   const active = index === selectedPaperAccount;
   const exitMode = account.exit_label || (isCandle ? "15M 收线退出" : "固定 TP / SL");
   return `<button class="acct-card${active ? " is-active" : ""}" type="button" role="tab"
@@ -496,9 +483,9 @@ function accountCard(account, index, pairModel) {
     <b class="acct-name">${esc(account.strategy_name || "未启动")}</b>
     <div class="acct-equity"><strong class="num">${esc(money(summary.equity))}</strong>
       <span class="acct-total"><small>累计收益</small><em class="num ${pnlClass(returnSinceStart)}">${esc(signedPercent(returnSinceStart))}</em></span></div>
-    <div class="acct-window"><span>${pairModel ? `配对同期 ${elapsedTime(pairModel.startAt, pairModel.endAt)}` : "等待配对同期"}</span>
-      <b class="num ${pnlClass(matchedDelta)}">${esc(signedMoney(matchedDelta))}</b></div>
-    ${comparisonSparkline(account, pairModel)}
+    <div class="acct-window"><span>滚动 24H 权益变化</span>
+      <b class="num ${pnlClass(windowDelta)}">${esc(signedMoney(windowDelta))}</b></div>
+    ${standaloneSparkline(account.equity_curve)}
     <small>${summary.open_position_count || 0} 持仓 · ${summary.closed_trade_count || 0} 已平仓 · 胜率 ${esc(percent(summary.win_rate, 0))}</small>
   </button>`;
 }
@@ -601,18 +588,13 @@ function renderStrategy(data) {
   if (!accounts.length) return [data.status, emptyBox("等待模拟账户启动", "compression_breakout · orderflow_impulse · liquidation_cascade")];
   selectedPaperAccount = Math.min(selectedPaperAccount, accounts.length - 1);
   const pairModels = buildPairedEquityModels(accounts);
-  const pairByRun = new Map();
-  for (const model of pairModels) {
-    pairByRun.set(model.fixedAccount.run_id, model);
-    pairByRun.set(model.candleRunId, model);
-  }
   const cards = `<div class="acct-cards" role="tablist" aria-label="模拟盘策略账户">${accounts
-    .map((account, index) => accountCard(account, index, pairByRun.get(account.run_id)))
+    .map((account, index) => accountCard(account, index))
     .join("")}</div>`;
   const comparisons = pairModels.length
     ? `<div class="block pair-section">
       ${blockTitle("同期退出方式对比", "PAIR-MATCHED EQUITY · COMMON START · SHARED AXES",
-        '<span class="muted">15M 收线 − 固定 TP / SL</span>')}
+        '<span class="muted">固定 TP / SL 对照各 candle 变体</span>')}
       <div class="pair-grid">${pairModels.map(pairedComparisonPanel).join("")}</div>
     </div>`
     : "";

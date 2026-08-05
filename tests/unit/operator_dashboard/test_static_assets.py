@@ -22,8 +22,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert 'data-endpoint="api/overview"' in index
-    assert 'href="static/dashboard.css?v=20260802-paper-simple-timezone"' in index
-    assert 'src="static/dashboard.js?v=20260802-paper-simple-timezone"' in index
+    assert 'href="static/dashboard.css?v=20260806-paper-equity-card"' in index
+    assert 'src="static/dashboard.js?v=20260806-paper-equity-card"' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
@@ -77,6 +77,18 @@ def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
         "查看全部历史",
     ):
         assert marker in text
+
+
+def test_account_cards_use_each_account_equity_curve() -> None:
+    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    card_start = text.index("function accountCard")
+    card_end = text.index("function accountDetail", card_start)
+    card_code = text[card_start:card_end]
+
+    assert "function accountWindowDelta(account)" in text
+    assert "standaloneSparkline(account.equity_curve)" in card_code
+    assert "滚动 24H 权益变化" in card_code
+    assert "comparisonSparkline" not in card_code
 
 
 def test_universe_panel_separates_target_and_retained_symbols() -> None:
