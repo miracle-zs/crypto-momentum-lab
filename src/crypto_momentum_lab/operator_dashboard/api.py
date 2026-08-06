@@ -1,11 +1,14 @@
+import asyncio
 import os
 import secrets
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Protocol
+from typing import Annotated, Protocol, TypeVar, cast
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
@@ -15,6 +18,7 @@ from crypto_momentum_lab.operator_dashboard.queries import DashboardQueries
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
     PaperAccountHistoryResponse,
+    PaperAccountsEquityResponse,
     PaperAccountsResponse,
     RiskExecutionResponse,
     RunReportSummaryResponse,
@@ -28,6 +32,34 @@ from crypto_momentum_lab.persistence.postgres.session import (
 
 STATIC_DIR = Path(__file__).with_name("static")
 _BASIC_AUTH = HTTPBasic(auto_error=False)
+_PAPER_CACHE_TTL_SECONDS = 5.0
+_T = TypeVar("_T")
+
+
+class _ResponseCache:
+    def __init__(self, ttl_seconds: float) -> None:
+        self._ttl_seconds = ttl_seconds
+        self._entries: dict[str, tuple[float, object]] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    async def get(
+        self,
+        key: str,
+        loader: Callable[[], Awaitable[_T]],
+    ) -> _T:
+        now = time.monotonic()
+        entry = self._entries.get(key)
+        if entry is not None and entry[0] > now:
+            return cast(_T, entry[1])
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            now = time.monotonic()
+            entry = self._entries.get(key)
+            if entry is not None and entry[0] > now:
+                return cast(_T, entry[1])
+            value = await loader()
+            self._entries[key] = (time.monotonic() + self._ttl_seconds, value)
+            return value
 
 
 class DashboardQueryProtocol(Protocol):
@@ -40,6 +72,10 @@ class DashboardQueryProtocol(Protocol):
     async def strategy_run(self) -> StrategyRunResponse: ...
 
     async def paper_accounts(self) -> PaperAccountsResponse: ...
+
+    async def paper_account_equity(self) -> PaperAccountsEquityResponse: ...
+
+    async def paper_account(self, run_id: str) -> StrategyRunResponse: ...
 
     async def paper_history(self, run_id: str) -> PaperAccountHistoryResponse: ...
 
@@ -95,7 +131,9 @@ def create_dashboard_app(
         redoc_url=None,
         lifespan=lifespan,
     )
+    dashboard.add_middleware(GZipMiddleware, minimum_size=1024)
     dashboard.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    response_cache = _ResponseCache(_PAPER_CACHE_TTL_SECONDS)
 
     def require_dashboard_auth(
         credentials: Annotated[
@@ -152,7 +190,7 @@ def create_dashboard_app(
         dependencies=[Depends(require_dashboard_auth)],
     )
     async def overview() -> SystemOverviewResponse:
-        return await query_service().overview()
+        return await response_cache.get("overview", query_service().overview)
 
     @dashboard.get(
         "/api/universe",
@@ -160,7 +198,7 @@ def create_dashboard_app(
         dependencies=[Depends(require_dashboard_auth)],
     )
     async def universe() -> UniverseStatusResponse:
-        return await query_service().universe()
+        return await response_cache.get("universe", query_service().universe)
 
     @dashboard.get(
         "/api/strategy-runs/current",
@@ -168,7 +206,7 @@ def create_dashboard_app(
         dependencies=[Depends(require_dashboard_auth)],
     )
     async def strategy_run() -> StrategyRunResponse:
-        return await query_service().strategy_run()
+        return await response_cache.get("strategy-run", query_service().strategy_run)
 
     @dashboard.get(
         "/api/paper-accounts",
@@ -176,7 +214,32 @@ def create_dashboard_app(
         dependencies=[Depends(require_dashboard_auth)],
     )
     async def paper_accounts() -> PaperAccountsResponse:
-        return await query_service().paper_accounts()
+        return await response_cache.get(
+            "paper-accounts",
+            query_service().paper_accounts,
+        )
+
+    @dashboard.get(
+        "/api/paper-accounts/equity",
+        response_model=PaperAccountsEquityResponse,
+        dependencies=[Depends(require_dashboard_auth)],
+    )
+    async def paper_account_equity() -> PaperAccountsEquityResponse:
+        return await response_cache.get(
+            "paper-accounts-equity",
+            query_service().paper_account_equity,
+        )
+
+    @dashboard.get(
+        "/api/paper-accounts/{run_id}",
+        response_model=StrategyRunResponse,
+        dependencies=[Depends(require_dashboard_auth)],
+    )
+    async def paper_account(run_id: str) -> StrategyRunResponse:
+        return await response_cache.get(
+            f"paper-account:{run_id}",
+            lambda: query_service().paper_account(run_id),
+        )
 
     @dashboard.get(
         "/api/paper-accounts/{run_id}/history",
@@ -184,7 +247,10 @@ def create_dashboard_app(
         dependencies=[Depends(require_dashboard_auth)],
     )
     async def paper_history(run_id: str) -> PaperAccountHistoryResponse:
-        return await query_service().paper_history(run_id)
+        return await response_cache.get(
+            f"paper-history:{run_id}",
+            lambda: query_service().paper_history(run_id),
+        )
 
     @dashboard.get(
         "/api/account",
@@ -192,7 +258,7 @@ def create_dashboard_app(
         dependencies=[Depends(require_dashboard_auth)],
     )
     async def account() -> AccountOverviewResponse:
-        return await query_service().account()
+        return await response_cache.get("account", query_service().account)
 
     @dashboard.get(
         "/api/risk-execution",
@@ -200,7 +266,10 @@ def create_dashboard_app(
         dependencies=[Depends(require_dashboard_auth)],
     )
     async def risk_execution() -> RiskExecutionResponse:
-        return await query_service().risk_execution()
+        return await response_cache.get(
+            "risk-execution",
+            query_service().risk_execution,
+        )
 
     @dashboard.get(
         "/api/reports",
@@ -208,6 +277,6 @@ def create_dashboard_app(
         dependencies=[Depends(require_dashboard_auth)],
     )
     async def reports() -> RunReportSummaryResponse:
-        return await query_service().reports()
+        return await response_cache.get("reports", query_service().reports)
 
     return dashboard

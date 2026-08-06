@@ -755,6 +755,21 @@ details.secondary[open] summary { margin-bottom: 10px; }
 .spark.candle { color: var(--up); }
 .spark-empty { display: grid; place-items: center; color: var(--faint); background: var(--surface-3); border-radius: 6px; }
 
+.lazy-detail {
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  padding: 28px 18px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--surface-2) 72%, transparent);
+  text-align: center;
+}
+
+.lazy-detail strong { color: var(--muted); font-size: 13px; }
+.lazy-detail small { color: var(--faint); font-size: 10.5px; }
+.lazy-detail .history-button { margin-top: 4px; }
+
 .acct-card small { color: var(--faint); font-size: 10.5px; }
 
 .paper-account-detail { margin-top: 20px; }

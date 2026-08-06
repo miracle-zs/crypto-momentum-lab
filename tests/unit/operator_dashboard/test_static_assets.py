@@ -22,8 +22,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert 'data-endpoint="api/overview"' in index
-    assert 'href="static/dashboard.css?v=20260806-paper-strategy-columns"' in index
-    assert 'src="static/dashboard.js?v=20260806-paper-strategy-columns"' in index
+    assert 'href="static/dashboard.css?v=20260806-paper-lazy"' in index
+    assert 'src="static/dashboard.js?v=20260806-paper-lazy"' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
@@ -76,8 +76,13 @@ def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
         "wirePaperAccountTabs",
         "loadPaperAccountHistory",
         "查看全部历史",
+        "paper-accounts/equity",
+        "paperDetailsByRun",
     ):
         assert marker in text
+    assert "SUMMARY FIRST · DETAIL ON DEMAND" in (
+        STATIC / "index.html"
+    ).read_text(encoding="utf-8")
 
 
 def test_account_cards_use_each_account_equity_curve() -> None:

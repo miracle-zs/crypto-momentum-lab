@@ -55,9 +55,36 @@ class StrategyRunResponse(DashboardSchema):
     rejection_summary: dict[str, JsonValue]
 
 
+class PaperAccountSummaryResponse(DashboardSchema):
+    status: OperationalStatus
+    run_id: str | None
+    strategy_name: str | None
+    exit_mode: str | None = None
+    exit_label: str | None = None
+    config_hash: str | None
+    checkpoint_at: datetime | None
+    portfolio_summary: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class PaperAccountEquityResponse(DashboardSchema):
+    run_id: str
+    strategy_name: str
+    exit_mode: str
+    exit_label: str
+    equity_window_start: datetime
+    equity_window_end: datetime
+    equity_sample_interval_seconds: int
+    equity_curve: list[dict[str, JsonValue]] = Field(default_factory=list)
+
+
+class PaperAccountsEquityResponse(DashboardSchema):
+    status: OperationalStatus
+    accounts: list[PaperAccountEquityResponse] = Field(default_factory=list)
+
+
 class PaperAccountsResponse(DashboardSchema):
     status: OperationalStatus
-    accounts: list[StrategyRunResponse] = Field(default_factory=list)
+    accounts: list[PaperAccountSummaryResponse] = Field(default_factory=list)
 
 
 class PaperAccountHistoryResponse(DashboardSchema):

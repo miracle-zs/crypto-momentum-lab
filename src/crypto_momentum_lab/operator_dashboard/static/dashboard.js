@@ -10,6 +10,11 @@ let selectedPaperAccount = 0;
 let lastPollAt = null;
 let pollInFlight = false;
 const paperHistoryByRun = new Map();
+const paperDetailsByRun = new Map();
+const paperDetailRequests = new Map();
+const paperEquityByRun = new Map();
+let paperEquityRequest = null;
+let latestPaperAccounts = [];
 
 const esc = (value) => String(value ?? "—").replace(/[&<>'"]/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"
@@ -475,10 +480,14 @@ function accountCard(account, index) {
   const equity = asNumber(summary.equity);
   const returnSinceStart = equity == null ? null : equity / 1000 - 1;
   const isCandle = account.exit_mode === "candle_15m";
-  const windowDelta = accountWindowDelta(account);
+  const hasEquity = Array.isArray(account.equity_curve);
+  const windowDelta = hasEquity ? accountWindowDelta(account) : null;
   const active = index === selectedPaperAccount;
   const exitMode = account.exit_label || (isCandle ? "15M 收线退出" : "固定 TP / SL");
   const accountNumber = String(index + 1).padStart(2, "0");
+  const sparkline = hasEquity
+    ? standaloneSparkline(account.equity_curve)
+    : '<div class="spark spark-empty">详情按需加载</div>';
   return `<button class="acct-card${active ? " is-active" : ""}" type="button" role="tab"
     aria-selected="${active}" data-account-index="${index}">
     <div class="acct-top"><span>账户 ${accountNumber}</span><span class="acct-mode">${esc(exitMode)}</span>${pill(account.status)}</div>
@@ -486,8 +495,8 @@ function accountCard(account, index) {
     <div class="acct-equity"><strong class="num">${esc(money(summary.equity))}</strong>
       <span class="acct-total"><small>累计收益</small><em class="num ${pnlClass(returnSinceStart)}">${esc(signedPercent(returnSinceStart))}</em></span></div>
     <div class="acct-window"><span>滚动 24H 权益变化</span>
-      <b class="num ${pnlClass(windowDelta)}">${esc(signedMoney(windowDelta))}</b></div>
-    ${standaloneSparkline(account.equity_curve)}
+      <b class="num ${pnlClass(windowDelta)}">${esc(hasEquity ? signedMoney(windowDelta) : "详情加载后显示")}</b></div>
+    ${sparkline}
     <small>${summary.open_position_count || 0} 持仓 · ${summary.closed_trade_count || 0} 已平仓 · 胜率 ${esc(percent(summary.win_rate, 0))}</small>
   </button>`;
 }
@@ -506,6 +515,40 @@ function strategyAccountColumn(accounts, strategyName, index) {
       .map(({ account, accountIndex }) => accountCard(account, accountIndex))
       .join("")}</div>
   </section>`;
+}
+
+function withPaperEquity(account) {
+  if (!account?.run_id) return account;
+  const equity = paperEquityByRun.get(account.run_id);
+  return equity ? { ...account, ...equity } : account;
+}
+
+function paperCards(accounts) {
+  return `<div class="acct-cards" role="tablist" aria-label="模拟盘策略账户">${STRATEGY_ORDER
+    .map((strategyName, index) => strategyAccountColumn(accounts, strategyName, index))
+    .join("")}</div>`;
+}
+
+function paperComparisonBlock(accounts) {
+  const comparisonModels = buildStrategyEquityModels(accounts.map(withPaperEquity));
+  const content = comparisonModels.length
+    ? `<div class="pair-grid">${comparisonModels.map(pairedComparisonPanel).join("")}</div>`
+    : emptyBox("同期权益曲线加载中", "账户摘要已就绪，曲线在后台批量加载");
+  return `<div class="block pair-section" data-paper-comparison>
+    ${blockTitle("同期退出方式对比", "STRATEGY EXIT EQUITY · COMMON START · SHARED AXES",
+      '<span class="muted">每个策略一张图 · 多退出方式叠加</span>')}
+    ${content}
+  </div>`;
+}
+
+function paperDetailPlaceholder(account, index, message = "账户详情按需加载") {
+  return `<div class="paper-account-detail" data-run-id="${esc(account?.run_id || "")}" role="tabpanel">
+    <div class="lazy-detail">
+      <strong>${esc(message)}</strong>
+      <small>首屏只查询账户摘要；曲线、持仓、交易和信号将在选中后加载。</small>
+      <button class="history-button" type="button" data-load-paper-detail>加载账户详情</button>
+    </div>
+  </div>`;
 }
 
 function accountDetail(account, index) {
@@ -585,7 +628,7 @@ function accountDetail(account, index) {
     { label: "买入名义", value: (row) => money(row.requested_notional), align: "right" },
     { label: "触发依据", value: signalEvidence, html: true, cls: "signal-evidence-cell" },
   ], account.latest_signals, { emptyText: "尚无策略信号" });
-  return `<div class="paper-account-detail" role="tabpanel">
+  return `<div class="paper-account-detail" data-run-id="${esc(account.run_id || "")}" role="tabpanel">
     ${detailMeta}
     ${kpis}
     ${chartBlock}
@@ -604,20 +647,18 @@ function accountDetail(account, index) {
 function renderStrategy(data) {
   const accounts = data.accounts || [];
   if (!accounts.length) return [data.status, emptyBox("等待模拟账户启动", "compression_breakout · orderflow_impulse · liquidation_cascade")];
+  latestPaperAccounts = accounts;
   selectedPaperAccount = Math.min(selectedPaperAccount, accounts.length - 1);
-  const comparisonModels = buildStrategyEquityModels(accounts);
-  const cards = `<div class="acct-cards" role="tablist" aria-label="模拟盘策略账户">${STRATEGY_ORDER
-    .map((strategyName, index) => strategyAccountColumn(accounts, strategyName, index))
-    .join("")}</div>`;
-  const comparisons = comparisonModels.length
-    ? `<div class="block pair-section">
-      ${blockTitle("同期退出方式对比", "STRATEGY EXIT EQUITY · COMMON START · SHARED AXES",
-        '<span class="muted">每个策略一张图 · 多退出方式叠加</span>')}
-      <div class="pair-grid">${comparisonModels.map(pairedComparisonPanel).join("")}</div>
-    </div>`
-    : "";
-  const selectedAccount = withPaperHistory(accounts[selectedPaperAccount]);
-  return [data.status, cards + comparisons + accountDetail(selectedAccount, selectedPaperAccount)];
+  const cards = paperCards(accounts.map(withPaperEquity));
+  const selectedSummary = accounts[selectedPaperAccount];
+  const selectedAccount = withPaperHistory({
+    ...selectedSummary,
+    ...paperDetailsByRun.get(selectedSummary.run_id),
+  });
+  const detail = paperDetailsByRun.has(selectedSummary.run_id)
+    ? accountDetail(selectedAccount, selectedPaperAccount)
+    : paperDetailPlaceholder(selectedSummary, selectedPaperAccount);
+  return [data.status, cards + paperComparisonBlock(accounts) + detail];
 }
 
 function renderUniverse(data) {
@@ -787,7 +828,7 @@ function wirePaperAccountTabs(body, data) {
   body.querySelectorAll("[data-account-index]").forEach((tab) => {
     tab.addEventListener("click", () => {
       const next = Number(tab.dataset.accountIndex);
-      const account = withPaperHistory(data.accounts?.[next]);
+      const account = data.accounts?.[next];
       if (!Number.isInteger(next) || !account || next === selectedPaperAccount) return;
       selectedPaperAccount = next;
       body.querySelectorAll("[data-account-index]").forEach((candidate) => {
@@ -795,13 +836,22 @@ function wirePaperAccountTabs(body, data) {
         candidate.classList.toggle("is-active", isSelected);
         candidate.setAttribute("aria-selected", String(isSelected));
       });
-      const detail = body.querySelector(".paper-account-detail");
-      if (detail) detail.outerHTML = accountDetail(account, next);
-      wirePaperHistoryButton(body, account, next);
+      mountPaperDetail(body, account, next);
+      void loadPaperAccountDetail(body, account, next);
     });
   });
-  const account = withPaperHistory(data.accounts?.[selectedPaperAccount]);
-  if (account) wirePaperHistoryButton(body, account, selectedPaperAccount);
+  const account = data.accounts?.[selectedPaperAccount];
+  if (account) {
+    mountPaperDetail(body, account, selectedPaperAccount);
+    void loadPaperAccountDetail(body, account, selectedPaperAccount);
+  }
+  void loadPaperEquityComparison(body);
+}
+
+function withPaperDetail(account) {
+  if (!account?.run_id) return account;
+  const detail = paperDetailsByRun.get(account.run_id);
+  return detail ? { ...account, ...detail } : account;
 }
 
 function withPaperHistory(account) {
@@ -814,6 +864,94 @@ function withPaperHistory(account) {
     trade_events: history.trade_events,
     history_loaded: true,
   };
+}
+
+function currentPaperAccountIs(account) {
+  return latestPaperAccounts[selectedPaperAccount]?.run_id === account?.run_id;
+}
+
+function mountPaperDetail(body, account, index) {
+  const detail = body.querySelector(".paper-account-detail");
+  if (!detail) return;
+  const merged = withPaperHistory(withPaperDetail(account));
+  detail.outerHTML = paperDetailsByRun.has(account.run_id)
+    ? accountDetail(merged, index)
+    : paperDetailPlaceholder(account, index);
+  const mounted = body.querySelector(".paper-account-detail");
+  if (mounted) {
+    wirePaperDetailButton(body, account, index);
+    if (paperDetailsByRun.has(account.run_id)) {
+      wirePaperHistoryButton(body, merged, index);
+    }
+  }
+}
+
+function wirePaperDetailButton(body, account, index) {
+  const button = body.querySelector("[data-load-paper-detail]");
+  if (!button || !account?.run_id) return;
+  button.addEventListener("click", () => void loadPaperAccountDetail(body, account, index));
+}
+
+async function loadPaperAccountDetail(body, account, index) {
+  if (!account?.run_id) return;
+  const existingRequest = paperDetailRequests.get(account.run_id);
+  if (existingRequest) return existingRequest;
+  const button = body.querySelector("[data-load-paper-detail]");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "加载中…";
+  }
+  const request = (async () => {
+    try {
+      const runId = encodeURIComponent(account.run_id);
+      const response = await fetch(`api/paper-accounts/${runId}`, {
+        headers: { "Accept": "application/json" },
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const detail = await response.json();
+      paperDetailsByRun.set(account.run_id, detail);
+      if (currentPaperAccountIs(account)) {
+        mountPaperDetail(body, account, index);
+      }
+    } catch (error) {
+      if (currentPaperAccountIs(account)) {
+        const current = body.querySelector(".paper-account-detail");
+        if (current) current.outerHTML = paperDetailPlaceholder(account, index, `详情加载失败 · ${error.message}`);
+        wirePaperDetailButton(body, account, index);
+      }
+    } finally {
+      paperDetailRequests.delete(account.run_id);
+    }
+  })();
+  paperDetailRequests.set(account.run_id, request);
+  return request;
+}
+
+async function loadPaperEquityComparison(body) {
+  if (paperEquityRequest) return paperEquityRequest;
+  paperEquityRequest = (async () => {
+    try {
+      const response = await fetch("api/paper-accounts/equity", {
+        headers: { "Accept": "application/json" },
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      for (const account of data.accounts || []) paperEquityByRun.set(account.run_id, account);
+      const comparison = body.querySelector("[data-paper-comparison]");
+      if (comparison) comparison.outerHTML = paperComparisonBlock(latestPaperAccounts);
+      const cards = body.querySelector(".acct-cards");
+      if (cards) {
+        cards.outerHTML = paperCards(latestPaperAccounts.map(withPaperEquity));
+        wirePaperAccountTabs(body, { accounts: latestPaperAccounts });
+      }
+    } catch (error) {
+      const comparison = body.querySelector("[data-paper-comparison]");
+      if (comparison) comparison.outerHTML = `<div class="block pair-section" data-paper-comparison>${emptyBox("权益曲线加载失败", error.message)}</div>`;
+    } finally {
+      paperEquityRequest = null;
+    }
+  })();
+  return paperEquityRequest;
 }
 
 function wirePaperHistoryButton(body, account, index) {
@@ -836,7 +974,7 @@ async function loadPaperAccountHistory(body, account, index) {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const history = await response.json();
     paperHistoryByRun.set(account.run_id, history);
-    const merged = withPaperHistory(account);
+    const merged = withPaperHistory(withPaperDetail(account));
     const detail = body.querySelector(".paper-account-detail");
     if (detail) detail.outerHTML = accountDetail(merged, index);
     wirePaperHistoryButton(body, merged, index);

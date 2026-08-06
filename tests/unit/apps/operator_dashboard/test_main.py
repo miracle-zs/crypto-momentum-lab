@@ -6,7 +6,9 @@ from crypto_momentum_lab.operator_dashboard.api import create_dashboard_app
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
     PaperAccountHistoryResponse,
+    PaperAccountsEquityResponse,
     PaperAccountsResponse,
+    PaperAccountSummaryResponse,
     RiskExecutionResponse,
     RunReportSummaryResponse,
     StrategyRunResponse,
@@ -89,8 +91,28 @@ class FakeQueries:
     async def paper_accounts(self) -> PaperAccountsResponse:
         return PaperAccountsResponse(
             status=OperationalStatus.READY,
-            accounts=[await self.strategy_run()],
+            accounts=[
+                PaperAccountSummaryResponse(
+                    status=OperationalStatus.READY,
+                    run_id="paper-account-test",
+                    strategy_name="compression_breakout",
+                    config_hash="config-hash",
+                    checkpoint_at=NOW,
+                    portfolio_summary={"equity": "1000"},
+                )
+            ],
         )
+
+    async def paper_account_equity(self) -> PaperAccountsEquityResponse:
+        return PaperAccountsEquityResponse(
+            status=OperationalStatus.READY,
+            accounts=[],
+        )
+
+    async def paper_account(self, run_id: str) -> StrategyRunResponse:
+        response = await self.strategy_run()
+        response.run_id = run_id
+        return response
 
     async def paper_history(self, run_id: str) -> PaperAccountHistoryResponse:
         return PaperAccountHistoryResponse(

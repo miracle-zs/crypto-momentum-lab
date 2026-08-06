@@ -3,15 +3,18 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.execution import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
+    PaperAccountEquityResponse,
     PaperAccountHistoryResponse,
+    PaperAccountsEquityResponse,
     PaperAccountsResponse,
+    PaperAccountSummaryResponse,
     RiskExecutionResponse,
     RunReportSummaryResponse,
     ServiceStatusResponse,
@@ -227,59 +230,202 @@ class DashboardQueries:
         )
 
     async def paper_accounts(self) -> PaperAccountsResponse:
-        equity_window_end = self._clock()
         async with self._session_factory() as session:
-            runs = (
-                await session.scalars(
-                    select(StrategyRunRow)
-                    .where(StrategyRunRow.run_mode == "paper")
-                    .order_by(StrategyRunRow.created_at.desc())
-                    .limit(50)
-                )
-            ).all()
-            strategy_order = (
-                "compression_breakout",
-                "orderflow_impulse",
-                "liquidation_cascade",
-            )
-            selected_runs: Sequence[StrategyRunRow]
-            if self._paper_run_ids is not None:
-                selected_runs = [
-                    run for run in runs if run.run_id in self._paper_run_ids
-                ]
-            else:
-                current_runs = [
-                    run for run in runs if run.run_id.startswith("paper-account-")
-                ]
-                selected_runs = current_runs or runs
-            accounts = []
-            for strategy_name in strategy_order:
-                strategy_runs = sorted(
-                    (
-                        run
-                        for run in selected_runs
-                        if run.strategy_name == strategy_name
-                    ),
-                    key=lambda run: (run.created_at, run.run_id),
-                )
-                accounts.extend(
-                    [
-                        await self.strategy_run(
-                            run_id=run.run_id,
-                            equity_window_end=equity_window_end,
-                            _session=session,
-                        )
-                        for run in (
-                            strategy_runs
-                            if self._paper_run_ids is not None
-                            else strategy_runs[-2:]
-                        )
-                    ]
-                )
+            selected_runs = await self._selected_paper_runs(session)
+            accounts = await self._paper_account_summaries(session, selected_runs)
         return PaperAccountsResponse(
             status=(OperationalStatus.READY if accounts else OperationalStatus.NO_DATA),
             accounts=accounts,
         )
+
+    async def paper_account_equity(self) -> PaperAccountsEquityResponse:
+        window_end = self._clock()
+        window_start = window_end - _EQUITY_WINDOW
+        async with self._session_factory() as session:
+            selected_runs = await self._selected_paper_runs(session)
+            if not selected_runs:
+                return PaperAccountsEquityResponse(
+                    status=OperationalStatus.NO_DATA,
+                    accounts=[],
+                )
+            run_ids = [run.run_id for run in selected_runs]
+            rows = (
+                await session.scalars(
+                    select(PaperEquitySnapshotRow)
+                    .where(
+                        PaperEquitySnapshotRow.run_id.in_(run_ids),
+                        PaperEquitySnapshotRow.observed_at >= window_start,
+                        PaperEquitySnapshotRow.observed_at <= window_end,
+                    )
+                    .order_by(
+                        PaperEquitySnapshotRow.run_id,
+                        PaperEquitySnapshotRow.observed_at,
+                    )
+                )
+            ).all()
+        rows_by_run: dict[str, list[PaperEquitySnapshotRow]] = {}
+        for row in rows:
+            rows_by_run.setdefault(row.run_id, []).append(row)
+        accounts = []
+        for run in selected_runs:
+            equity = _downsample_equity_snapshots(rows_by_run.get(run.run_id, []))
+            exit_mode, exit_label = _paper_exit_details(run)
+            accounts.append(
+                PaperAccountEquityResponse(
+                    run_id=run.run_id,
+                    strategy_name=run.strategy_name,
+                    exit_mode=exit_mode,
+                    exit_label=exit_label,
+                    equity_window_start=window_start,
+                    equity_window_end=window_end,
+                    equity_sample_interval_seconds=_EQUITY_BUCKET_SECONDS,
+                    equity_curve=[
+                        {
+                            "observed_at": row.observed_at.isoformat(),
+                            "balance": str(row.balance),
+                            "equity": str(row.equity),
+                            "realized_pnl": str(row.realized_pnl),
+                            "unrealized_pnl": str(row.unrealized_pnl),
+                        }
+                        for row in equity
+                    ],
+                )
+            )
+        return PaperAccountsEquityResponse(
+            status=OperationalStatus.READY,
+            accounts=accounts,
+        )
+
+    async def paper_account(self, run_id: str) -> StrategyRunResponse:
+        return await self.strategy_run(run_id=run_id)
+
+    async def _selected_paper_runs(
+        self,
+        session: AsyncSession,
+    ) -> list[StrategyRunRow]:
+        runs = (
+            await session.scalars(
+                select(StrategyRunRow)
+                .where(StrategyRunRow.run_mode == "paper")
+                .order_by(StrategyRunRow.created_at.desc())
+                .limit(50)
+            )
+        ).all()
+        if self._paper_run_ids is not None:
+            selected_runs = [
+                run for run in runs if run.run_id in self._paper_run_ids
+            ]
+        else:
+            current_runs = [
+                run for run in runs if run.run_id.startswith("paper-account-")
+            ]
+            selected_runs = current_runs or list(runs)
+
+        selected: list[StrategyRunRow] = []
+        for strategy_name in (
+            "compression_breakout",
+            "orderflow_impulse",
+            "liquidation_cascade",
+        ):
+            strategy_runs = sorted(
+                (
+                    run
+                    for run in selected_runs
+                    if run.strategy_name == strategy_name
+                ),
+                key=lambda run: (run.created_at, run.run_id),
+            )
+            selected.extend(
+                strategy_runs
+                if self._paper_run_ids is not None
+                else strategy_runs[-2:]
+            )
+        return selected
+
+    async def _paper_account_summaries(
+        self,
+        session: AsyncSession,
+        runs: Sequence[StrategyRunRow],
+    ) -> list[PaperAccountSummaryResponse]:
+        if not runs:
+            return []
+        run_ids = [run.run_id for run in runs]
+        checkpoints = (
+            await session.scalars(
+                select(StrategyRuntimeCheckpointRow).where(
+                    StrategyRuntimeCheckpointRow.run_id.in_(run_ids)
+                )
+            )
+        ).all()
+        open_positions = (
+            await session.scalars(
+                select(PaperPositionRow.run_id).where(
+                    PaperPositionRow.run_id.in_(run_ids),
+                    PaperPositionRow.status == "open",
+                )
+            )
+        ).all()
+        closed_stats = (
+            await session.execute(
+                select(
+                    PaperPositionRow.run_id,
+                    func.count(PaperPositionRow.position_id).label("closed_count"),
+                    func.sum(
+                        case(
+                            (PaperPositionRow.realized_pnl > 0, 1),
+                            else_=0,
+                        )
+                    ).label("winning_count"),
+                )
+                .where(
+                    PaperPositionRow.run_id.in_(run_ids),
+                    PaperPositionRow.status == "closed",
+                )
+                .group_by(PaperPositionRow.run_id)
+            )
+        ).all()
+        latest_equity_times = (
+            select(
+                PaperEquitySnapshotRow.run_id.label("run_id"),
+                func.max(PaperEquitySnapshotRow.observed_at).label("observed_at"),
+            )
+            .where(PaperEquitySnapshotRow.run_id.in_(run_ids))
+            .group_by(PaperEquitySnapshotRow.run_id)
+            .subquery()
+        )
+        latest_equities = (
+            await session.scalars(
+                select(PaperEquitySnapshotRow).join(
+                    latest_equity_times,
+                    and_(
+                        PaperEquitySnapshotRow.run_id
+                        == latest_equity_times.c.run_id,
+                        PaperEquitySnapshotRow.observed_at
+                        == latest_equity_times.c.observed_at,
+                    ),
+                )
+            )
+        ).all()
+        checkpoint_by_run = {row.run_id: row.saved_at for row in checkpoints}
+        open_count_by_run: dict[str, int] = {}
+        for run_id in open_positions:
+            open_count_by_run[run_id] = open_count_by_run.get(run_id, 0) + 1
+        closed_stats_by_run = {
+            row.run_id: (int(row.closed_count), int(row.winning_count or 0))
+            for row in closed_stats
+        }
+        latest_equity_by_run = {row.run_id: row for row in latest_equities}
+        return [
+            _paper_account_summary(
+                run,
+                checkpoint_at=checkpoint_by_run.get(run.run_id),
+                open_position_count=open_count_by_run.get(run.run_id, 0),
+                closed_trade_count=closed_stats_by_run.get(run.run_id, (0, 0))[0],
+                winning_trade_count=closed_stats_by_run.get(run.run_id, (0, 0))[1],
+                latest_equity=latest_equity_by_run.get(run.run_id),
+            )
+            for run in runs
+        ]
 
     async def paper_history(self, run_id: str) -> PaperAccountHistoryResponse:
         async with self._session_factory() as session:
@@ -803,6 +949,60 @@ def _downsample_equity_snapshots(
         latest_by_bucket[bucket] = row
     ordered = [latest_by_bucket[key] for key in sorted(latest_by_bucket)]
     return ordered[-max_points:]
+
+
+def _paper_exit_details(run: StrategyRunRow) -> tuple[str, str]:
+    portfolio_config = run.execution_config.get("portfolio")
+    exit_mode = (
+        str(portfolio_config.get("exit_mode"))
+        if isinstance(portfolio_config, dict)
+        and portfolio_config.get("exit_mode") is not None
+        else "fixed"
+    )
+    return exit_mode, _paper_exit_label(exit_mode, portfolio_config)
+
+
+def _paper_account_summary(
+    run: StrategyRunRow,
+    *,
+    checkpoint_at: datetime | None,
+    open_position_count: int,
+    closed_trade_count: int,
+    winning_trade_count: int,
+    latest_equity: PaperEquitySnapshotRow | None,
+) -> PaperAccountSummaryResponse:
+    exit_mode, exit_label = _paper_exit_details(run)
+    return PaperAccountSummaryResponse(
+        status=OperationalStatus.READY,
+        run_id=run.run_id,
+        strategy_name=run.strategy_name,
+        exit_mode=exit_mode,
+        exit_label=exit_label,
+        config_hash=run.config_hash,
+        checkpoint_at=checkpoint_at,
+        portfolio_summary={
+            "balance": None if latest_equity is None else str(latest_equity.balance),
+            "equity": None if latest_equity is None else str(latest_equity.equity),
+            "realized_pnl": (
+                None if latest_equity is None else str(latest_equity.realized_pnl)
+            ),
+            "unrealized_pnl": (
+                None
+                if latest_equity is None
+                else str(latest_equity.unrealized_pnl)
+            ),
+            "total_fees": (
+                None if latest_equity is None else str(latest_equity.total_fees)
+            ),
+            "open_position_count": open_position_count,
+            "closed_trade_count": closed_trade_count,
+            "win_rate": (
+                None
+                if closed_trade_count == 0
+                else str(winning_trade_count / closed_trade_count)
+            ),
+        },
+    )
 
 
 def _service(
