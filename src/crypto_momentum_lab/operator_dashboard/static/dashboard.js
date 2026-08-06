@@ -226,23 +226,37 @@ function equityBucketMap(account) {
   return { intervalSeconds, buckets };
 }
 
-function pairedEquityModel(strategyName, fixedAccount, candleAccount) {
-  const fixed = equityBucketMap(fixedAccount);
-  const candle = equityBucketMap(candleAccount);
-  const commonBuckets = [...fixed.buckets.keys()]
-    .filter((bucket) => candle.buckets.has(bucket))
+function comparisonSeriesClass(account, index) {
+  if (account.exit_mode !== "candle_15m") return "fixed";
+  return index === 1 ? "candle" : "variant";
+}
+
+function strategyEquityModel(strategyName, accounts) {
+  if (accounts.length < 2) return null;
+  const maps = accounts.map(equityBucketMap);
+  const commonBuckets = [...maps[0].buckets.keys()]
+    .filter((bucket) => maps.every((map) => map.buckets.has(bucket)))
     .sort((left, right) => left - right);
   if (commonBuckets.length < 2) return null;
 
   const firstBucket = commonBuckets[0];
-  const fixedBase = fixed.buckets.get(firstBucket);
-  const candleBase = candle.buckets.get(firstBucket);
-  const points = commonBuckets.map((bucket) => ({
+  const series = accounts.map((account, index) => {
+    const map = maps[index];
+    const base = map.buckets.get(firstBucket);
+    const values = commonBuckets.map((bucket) => map.buckets.get(bucket) - base);
+    return {
+      account,
+      label: account.exit_label || (index === 0 ? "固定 TP / SL" : "15M 收线退出"),
+      colorClass: comparisonSeriesClass(account, index),
+      values,
+      delta: values.at(-1),
+    };
+  });
+  const points = commonBuckets.map((bucket, index) => ({
     at: bucket,
-    fixed: fixed.buckets.get(bucket) - fixedBase,
-    candle: candle.buckets.get(bucket) - candleBase,
+    values: series.map((item) => item.values[index]),
   }));
-  const domainValues = [0, ...points.flatMap((point) => [point.fixed, point.candle])];
+  const domainValues = [0, ...series.flatMap((item) => item.values)];
   let min = Math.min(...domainValues);
   let max = Math.max(...domainValues);
   if (min === max) {
@@ -255,40 +269,28 @@ function pairedEquityModel(strategyName, fixedAccount, candleAccount) {
   }
   return {
     strategyName,
-    fixedAccount,
-    candleAccount,
+    accounts,
+    series,
     points,
     startAt: commonBuckets[0],
     endAt: commonBuckets.at(-1),
     min,
     max,
-    fixedDelta: points.at(-1).fixed,
-    candleDelta: points.at(-1).candle,
-    intervalSeconds: Math.max(fixed.intervalSeconds, candle.intervalSeconds),
+    intervalSeconds: Math.max(...maps.map((map) => map.intervalSeconds)),
   };
 }
 
-function buildPairedEquityModels(accounts) {
-  const pairs = new Map();
-  for (const account of accounts) {
-    if (!account.strategy_name) continue;
-    const pair = pairs.get(account.strategy_name) || {};
-    if (account.exit_mode === "candle_15m") {
-      pair.candles = pair.candles || [];
-      pair.candles.push(account);
-    } else pair.fixed = account;
-    pairs.set(account.strategy_name, pair);
-  }
+function buildStrategyEquityModels(accounts) {
   return STRATEGY_ORDER.flatMap((strategyName) => {
-    const pair = pairs.get(strategyName);
-    if (!pair?.fixed || !pair.candles?.length) return [];
-    return pair.candles.flatMap((candle) => {
-      const model = pairedEquityModel(strategyName, pair.fixed, candle);
-      if (!model) return [];
-      model.candleLabel = candle.exit_label || "15M 收线退出";
-      model.candleRunId = candle.run_id;
-      return [model];
-    });
+    const strategyAccounts = accounts
+      .filter((account) => account.strategy_name === strategyName)
+      .sort((left, right) => {
+        const leftFixed = left.exit_mode === "fixed" ? 0 : 1;
+        const rightFixed = right.exit_mode === "fixed" ? 0 : 1;
+        return leftFixed - rightFixed || String(left.run_id).localeCompare(String(right.run_id));
+      });
+    const model = strategyEquityModel(strategyName, strategyAccounts);
+    return model ? [model] : [];
   });
 }
 
@@ -379,7 +381,7 @@ function equityChart(rows, chartId = "eq", windowStart = null, windowEnd = null)
   </svg></div>`;
 }
 
-function pairedEquityChart(model) {
+function strategyEquityChart(model) {
   const width = 600;
   const height = 230;
   const padL = 58;
@@ -389,8 +391,8 @@ function pairedEquityChart(model) {
   const timeSpan = Math.max(model.endAt - model.startAt, 1);
   const x = (point) => padL + ((point.at - model.startAt) / timeSpan) * (width - padL - padR);
   const y = (value) => padT + ((model.max - value) / (model.max - model.min)) * (height - padT - padB);
-  const line = (key) => model.points
-    .map((point) => `${x(point).toFixed(1)},${y(point[key]).toFixed(1)}`)
+  const line = (series) => model.points
+    .map((point, index) => `${x(point).toFixed(1)},${y(series.values[index]).toFixed(1)}`)
     .join(" ");
   const grid = Array.from({ length: 5 }, (_, index) => {
     const value = model.max - ((model.max - model.min) / 4) * index;
@@ -402,15 +404,16 @@ function pairedEquityChart(model) {
   const timeAxis = axisTimes.map((atMs, index) =>
     `<text x="${(padL + (index / 2) * (width - padL - padR)).toFixed(1)}" y="${height - 8}" class="chart-label"
       text-anchor="${index === 0 ? "start" : index === 2 ? "end" : "middle"}">${esc(timeOnly(atMs))}${index === 2 ? ` ${DISPLAY_TIME_ZONE_LABEL}` : ""}</text>`).join("");
-  const last = model.points.at(-1);
+  const lines = model.series.map((series) =>
+    `<polyline points="${line(series)}" class="pair-line ${series.colorClass}"/>`).join("");
+  const dots = model.series.map((series) =>
+    `<circle cx="${x(model.points.at(-1)).toFixed(1)}" cy="${y(series.delta).toFixed(1)}" r="3" class="pair-dot ${series.colorClass}"/>`).join("");
   return `<div class="pair-chart"><svg viewBox="0 0 ${width} ${height}" role="img"
-    aria-label="${esc(model.strategyName)} 固定止盈止损与 15 分钟收线退出同期权益对比">
+    aria-label="${esc(model.strategyName)} 各退出方式同期权益对比">
     ${grid}
     <line x1="${padL}" y1="${y(0).toFixed(1)}" x2="${width - padR}" y2="${y(0).toFixed(1)}" class="chart-baseline"/>
-    <polyline points="${line("fixed")}" class="pair-line fixed"/>
-    <polyline points="${line("candle")}" class="pair-line candle"/>
-    <circle cx="${x(last).toFixed(1)}" cy="${y(last.fixed).toFixed(1)}" r="3" class="pair-dot fixed"/>
-    <circle cx="${x(last).toFixed(1)}" cy="${y(last.candle).toFixed(1)}" r="3" class="pair-dot candle"/>
+    ${lines}
+    ${dots}
     ${timeAxis}
   </svg></div>`;
 }
@@ -452,19 +455,17 @@ function renderOverview(data) {
 }
 
 function pairedComparisonPanel(model) {
-  const spread = model.candleDelta - model.fixedDelta;
   const bucketMinutes = Math.round(model.intervalSeconds / 60);
+  const legend = model.series.map((series) =>
+    `<span class="${series.colorClass}"><i></i>${esc(series.label)} <b class="num ${pnlClass(series.delta)}">${esc(signedMoney(series.delta))}</b></span>`).join("");
   return `<article class="pair-panel">
     <div class="pair-head">
       <div><strong>${esc(model.strategyName)}</strong>
         <small>${esc(dayTime(model.startAt))} → ${esc(dayTime(model.endAt))} ${DISPLAY_TIME_ZONE_LABEL} · ${model.points.length} 个共同桶</small></div>
-      <div class="pair-spread"><span>退出差值</span><b class="num ${pnlClass(spread)}">${esc(signedMoney(spread))}</b></div>
+      <div class="pair-spread"><span>退出版本</span><b class="num">${model.series.length} 个</b></div>
     </div>
-    <div class="pair-legend">
-      <span class="fixed"><i></i>固定 TP / SL <b class="num ${pnlClass(model.fixedDelta)}">${esc(signedMoney(model.fixedDelta))}</b></span>
-      <span class="candle"><i></i>${esc(model.candleLabel || "15M 收线退出")} <b class="num ${pnlClass(model.candleDelta)}">${esc(signedMoney(model.candleDelta))}</b></span>
-    </div>
-    ${pairedEquityChart(model)}
+    <div class="pair-legend">${legend}</div>
+    ${strategyEquityChart(model)}
     <footer><span>共同起点归零 · ${bucketMinutes} 分钟 UTC 采样</span><b>${esc(elapsedTime(model.startAt, model.endAt))}</b></footer>
   </article>`;
 }
@@ -477,9 +478,10 @@ function accountCard(account, index) {
   const windowDelta = accountWindowDelta(account);
   const active = index === selectedPaperAccount;
   const exitMode = account.exit_label || (isCandle ? "15M 收线退出" : "固定 TP / SL");
+  const accountNumber = String(index + 1).padStart(2, "0");
   return `<button class="acct-card${active ? " is-active" : ""}" type="button" role="tab"
     aria-selected="${active}" data-account-index="${index}">
-    <div class="acct-top"><span>账户 0${index + 1}</span><span class="acct-mode">${esc(exitMode)}</span>${pill(account.status)}</div>
+    <div class="acct-top"><span>账户 ${accountNumber}</span><span class="acct-mode">${esc(exitMode)}</span>${pill(account.status)}</div>
     <b class="acct-name">${esc(account.strategy_name || "未启动")}</b>
     <div class="acct-equity"><strong class="num">${esc(money(summary.equity))}</strong>
       <span class="acct-total"><small>累计收益</small><em class="num ${pnlClass(returnSinceStart)}">${esc(signedPercent(returnSinceStart))}</em></span></div>
@@ -488,6 +490,22 @@ function accountCard(account, index) {
     ${standaloneSparkline(account.equity_curve)}
     <small>${summary.open_position_count || 0} 持仓 · ${summary.closed_trade_count || 0} 已平仓 · 胜率 ${esc(percent(summary.win_rate, 0))}</small>
   </button>`;
+}
+
+function strategyAccountColumn(accounts, strategyName, index) {
+  const entries = accounts
+    .map((account, accountIndex) => ({ account, accountIndex }))
+    .filter(({ account }) => account.strategy_name === strategyName);
+  if (!entries.length) return "";
+  return `<section class="acct-strategy-column" aria-label="${esc(strategyName)} 模拟账户">
+    <header class="acct-strategy-head">
+      <div><span>策略 0${index + 1}</span><strong>${esc(strategyName)}</strong></div>
+      <small>${entries.length} 个退出版本</small>
+    </header>
+    <div class="acct-strategy-cards" role="tablist" aria-label="${esc(strategyName)}退出版本">${entries
+      .map(({ account, accountIndex }) => accountCard(account, accountIndex))
+      .join("")}</div>
+  </section>`;
 }
 
 function accountDetail(account, index) {
@@ -587,15 +605,15 @@ function renderStrategy(data) {
   const accounts = data.accounts || [];
   if (!accounts.length) return [data.status, emptyBox("等待模拟账户启动", "compression_breakout · orderflow_impulse · liquidation_cascade")];
   selectedPaperAccount = Math.min(selectedPaperAccount, accounts.length - 1);
-  const pairModels = buildPairedEquityModels(accounts);
-  const cards = `<div class="acct-cards" role="tablist" aria-label="模拟盘策略账户">${accounts
-    .map((account, index) => accountCard(account, index))
+  const comparisonModels = buildStrategyEquityModels(accounts);
+  const cards = `<div class="acct-cards" role="tablist" aria-label="模拟盘策略账户">${STRATEGY_ORDER
+    .map((strategyName, index) => strategyAccountColumn(accounts, strategyName, index))
     .join("")}</div>`;
-  const comparisons = pairModels.length
+  const comparisons = comparisonModels.length
     ? `<div class="block pair-section">
-      ${blockTitle("同期退出方式对比", "PAIR-MATCHED EQUITY · COMMON START · SHARED AXES",
-        '<span class="muted">固定 TP / SL 对照各 candle 变体</span>')}
-      <div class="pair-grid">${pairModels.map(pairedComparisonPanel).join("")}</div>
+      ${blockTitle("同期退出方式对比", "STRATEGY EXIT EQUITY · COMMON START · SHARED AXES",
+        '<span class="muted">每个策略一张图 · 多退出方式叠加</span>')}
+      <div class="pair-grid">${comparisonModels.map(pairedComparisonPanel).join("")}</div>
     </div>`
     : "";
   const selectedAccount = withPaperHistory(accounts[selectedPaperAccount]);

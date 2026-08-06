@@ -655,9 +655,49 @@ details.secondary[open] summary { margin-bottom: 10px; }
 .acct-cards {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-template-rows: repeat(2, auto);
-  grid-auto-flow: column;
   gap: 12px;
+  align-items: start;
+}
+
+.acct-strategy-column {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(122, 162, 247, .035), var(--surface) 34%);
+}
+
+.acct-strategy-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 42px;
+  padding: 1px 2px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.acct-strategy-head div { min-width: 0; }
+.acct-strategy-head span {
+  display: block;
+  color: var(--faint);
+  font: 9px var(--mono);
+  letter-spacing: .14em;
+}
+.acct-strategy-head strong {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.acct-strategy-head small { color: var(--faint); font-size: 9px; white-space: nowrap; }
+
+.acct-strategy-cards {
+  display: grid;
+  gap: 10px;
+  padding-top: 10px;
 }
 
 .acct-card {
@@ -788,8 +828,10 @@ details.secondary[open] summary { margin-bottom: 10px; }
 .pair-line { fill: none; stroke-width: 1.8; vector-effect: non-scaling-stroke; }
 .pair-line.fixed { stroke: var(--brand); }
 .pair-line.candle { stroke: var(--up); }
+.pair-line.variant { stroke: var(--warn); }
 .pair-dot.fixed { fill: var(--brand); }
 .pair-dot.candle { fill: var(--up); }
+.pair-dot.variant { fill: var(--warn); }
 
 .pair-panel footer {
   display: flex;
@@ -951,6 +993,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 @media (max-width: 1280px) {
   .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .acct-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .pair-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
@@ -995,8 +1038,6 @@ details.secondary[open] summary { margin-bottom: 10px; }
 @media (max-width: 760px) {
   .acct-cards {
     grid-template-columns: 1fr;
-    grid-template-rows: none;
-    grid-auto-flow: row;
   }
   .monitor-target-grid { grid-template-columns: 1fr; }
   .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

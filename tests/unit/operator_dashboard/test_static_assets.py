@@ -22,8 +22,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert 'data-endpoint="api/overview"' in index
-    assert 'href="static/dashboard.css?v=20260806-paper-equity-card"' in index
-    assert 'src="static/dashboard.js?v=20260806-paper-equity-card"' in index
+    assert 'href="static/dashboard.css?v=20260806-paper-strategy-columns"' in index
+    assert 'src="static/dashboard.js?v=20260806-paper-strategy-columns"' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
@@ -66,8 +66,9 @@ def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
     text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
 
     for marker in (
-        "buildPairedEquityModels",
-        "PAIR-MATCHED EQUITY",
+        "buildStrategyEquityModels",
+        "strategyEquityChart",
+        "STRATEGY EXIT EQUITY",
         "COMMON START",
         "SHARED AXES",
         "ROLLING 24H",
@@ -89,6 +90,21 @@ def test_account_cards_use_each_account_equity_curve() -> None:
     assert "standaloneSparkline(account.equity_curve)" in card_code
     assert "滚动 24H 权益变化" in card_code
     assert "comparisonSparkline" not in card_code
+
+
+def test_paper_accounts_group_by_strategy_columns() -> None:
+    javascript = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+
+    for marker in (
+        "strategyAccountColumn",
+        "acct-strategy-column",
+        "acct-strategy-cards",
+    ):
+        assert marker in javascript
+        assert marker in stylesheet or marker == "strategyAccountColumn"
+    assert "每个策略一张图 · 多退出方式叠加" in javascript
+    assert "grid-auto-flow: column" not in stylesheet
 
 
 def test_universe_panel_separates_target_and_retained_symbols() -> None:
@@ -140,13 +156,12 @@ def test_dashboard_formats_display_times_in_fixed_utc_plus_8() -> None:
     assert "UTC DAY" in text
 
 
-def test_paper_account_cards_pair_same_strategy_vertically() -> None:
+def test_paper_account_cards_use_three_strategy_columns() -> None:
     text = (STATIC / "dashboard.css").read_text(encoding="utf-8")
 
-    assert "grid-template-rows: repeat(2, auto)" in text
-    assert "grid-auto-flow: column" in text
-    assert "grid-template-rows: none" in text
-    assert "grid-auto-flow: row" in text
+    assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in text
+    assert ".acct-strategy-column" in text
+    assert "grid-auto-flow: column" not in text
 
 
 def test_reports_panel_does_not_repeat_paper_accounts() -> None:
