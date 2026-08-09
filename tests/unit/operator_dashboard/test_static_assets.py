@@ -23,7 +23,7 @@ def test_static_javascript_uses_relative_api_paths() -> None:
 
     assert 'data-endpoint="api/overview"' in index
     assert 'href="static/dashboard.css?v=20260806-paper-lazy"' in index
-    assert 'src="static/dashboard.js?v=20260806-paper-lazy"' in index
+    assert 'src="static/dashboard.js?v=20260809-refresh-state"' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
@@ -146,6 +146,40 @@ def test_dashboard_polling_preserves_open_strategy_signals() -> None:
 
     assert 'querySelectorAll("details")' in scroll_state_code
     assert "details.open = saved.open" in scroll_state_code
+
+
+def test_paper_detail_replacement_preserves_interaction_state() -> None:
+    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+
+    replacement_start = text.index("function replacePaperDetail")
+    replacement_end = text.index("function mountPaperDetail", replacement_start)
+    replacement_code = text[replacement_start:replacement_end]
+
+    capture = replacement_code.index("captureScrollState(body)")
+    replace = replacement_code.index("detail.outerHTML")
+    restore = replacement_code.index("restoreScrollState(body, scrollState)")
+    assert capture < replace < restore
+
+    mount_start = text.index("function mountPaperDetail")
+    mount_end = text.index("function wirePaperDetailButton", mount_start)
+    assert "replacePaperDetail(body," in text[mount_start:mount_end]
+
+    history_start = text.index("async function loadPaperAccountHistory")
+    history_end = text.index("function captureScrollState", history_start)
+    assert "replacePaperDetail(body," in text[history_start:history_end]
+
+
+def test_scroll_state_restores_layout_before_page_position() -> None:
+    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+
+    restore_start = text.index("function restoreScrollState")
+    restore_end = text.index("async function refreshSection", restore_start)
+    restore_code = text[restore_start:restore_end]
+
+    disclosures = restore_code.index('querySelectorAll("details")')
+    containers = restore_code.index('querySelectorAll(".table-scroll")')
+    page = restore_code.index("window.scrollTo(state.pageX, state.pageY)")
+    assert disclosures < containers < page
 
 
 def test_dashboard_formats_display_times_in_fixed_utc_plus_8() -> None:

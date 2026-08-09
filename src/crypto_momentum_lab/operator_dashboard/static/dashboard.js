@@ -214,7 +214,8 @@ function dataTable(columns, rows, options = {}) {
     ].filter(Boolean).join(" ");
     return `<td class="${classes}">${column.html ? raw : esc(raw)}</td>`;
   }).join("")}</tr>`).join("");
-  return `<div class="table-scroll${options.tall ? " tall" : ""}"><table class="data-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+  const stateKey = options.stateKey ? ` data-state-key="${esc(options.stateKey)}"` : "";
+  return `<div class="table-scroll${options.tall ? " tall" : ""}"${stateKey}><table class="data-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
 function equityBucketMap(account) {
@@ -600,7 +601,7 @@ function accountDetail(account, index) {
     { label: "名义价值", value: (row) => money(row.entry_notional), align: "right" },
     { label: "浮动盈亏", value: (row) => signedMoney(row.unrealized_pnl), align: "right", cls: (row) => pnlClass(row.unrealized_pnl) },
     { label: "收益率", value: (row) => signedPercent(row.upnl_pct), align: "right", cls: (row) => pnlClass(row.upnl_pct) },
-  ], positions, { emptyText: "当前无持仓" });
+  ], positions, { emptyText: "当前无持仓", stateKey: "paper-open-positions" });
   const closedTable = dataTable([
     { label: "币种", key: "symbol", cls: "sym" },
     { label: "方向", value: (row) => sideTag(row.side), html: true },
@@ -609,7 +610,7 @@ function accountDetail(account, index) {
     { label: "净盈亏", value: (row) => signedMoney(row.realized_pnl), align: "right", cls: (row) => pnlClass(row.realized_pnl) },
     { label: "收益率", value: (row) => signedPercent(row.return_pct), align: "right", cls: (row) => pnlClass(row.return_pct) },
     { label: "平仓原因", key: "close_reason", cls: "muted" },
-  ], account.closed_trades, { emptyText: "尚无已平仓交易" });
+  ], account.closed_trades, { emptyText: "尚无已平仓交易", stateKey: "paper-closed-trades" });
   const eventsTable = dataTable([
     { label: "时间", value: (row) => dayTime(row.occurred_at), align: "right", cls: "muted" },
     { label: "币种", key: "symbol", cls: "sym" },
@@ -619,7 +620,7 @@ function accountDetail(account, index) {
     { label: "数量", value: (row) => num(row.quantity, 3), align: "right" },
     { label: "盈亏", value: (row) => row.pnl == null ? "—" : signedMoney(row.pnl), align: "right", cls: (row) => pnlClass(row.pnl) },
     { label: "原因", key: "reason", cls: "muted" },
-  ], account.trade_events, { emptyText: "尚无开平仓流水", tall: true });
+  ], account.trade_events, { emptyText: "尚无开平仓流水", tall: true, stateKey: "paper-trade-events" });
   const signalsTable = dataTable([
     { label: "时间", value: (row) => dayTime(row.detected_at), align: "right", cls: "muted" },
     { label: "币种", key: "symbol", cls: "sym" },
@@ -627,7 +628,7 @@ function accountDetail(account, index) {
     { label: "原因", key: "reason", cls: "muted" },
     { label: "买入名义", value: (row) => money(row.requested_notional), align: "right" },
     { label: "触发依据", value: signalEvidence, html: true, cls: "signal-evidence-cell" },
-  ], account.latest_signals, { emptyText: "尚无策略信号" });
+  ], account.latest_signals, { emptyText: "尚无策略信号", stateKey: "paper-strategy-signals" });
   return `<div class="paper-account-detail" data-run-id="${esc(account.run_id || "")}" role="tabpanel">
     ${detailMeta}
     ${kpis}
@@ -637,7 +638,7 @@ function accountDetail(account, index) {
       <div class="block">${blockTitle("已平仓交易", historyLoaded ? "CLOSED TRADES · FULL HISTORY" : "CLOSED TRADES · LATEST 30", historyAction)}${closedTable}</div>
     </div>
     <div class="block">${blockTitle("开平仓流水", "POSITION LIFECYCLE · BUY / SELL WITH CONTEXT")}${eventsTable}</div>
-    <details class="block secondary">
+    <details class="block secondary" data-state-key="paper-strategy-signals">
       <summary>${blockTitle("策略信号", "RAW SIGNALS · LATEST 20")}</summary>
       ${signalsTable}
     </details>
@@ -842,7 +843,12 @@ function wirePaperAccountTabs(body, data) {
   });
   const account = data.accounts?.[selectedPaperAccount];
   if (account) {
-    mountPaperDetail(body, account, selectedPaperAccount);
+    const mounted = body.querySelector(".paper-account-detail");
+    if (mounted?.dataset.runId !== account.run_id) {
+      mountPaperDetail(body, account, selectedPaperAccount);
+    } else {
+      wirePaperDetailControls(body, account, selectedPaperAccount);
+    }
     void loadPaperAccountDetail(body, account, selectedPaperAccount);
   }
   void loadPaperEquityComparison(body);
@@ -870,25 +876,37 @@ function currentPaperAccountIs(account) {
   return latestPaperAccounts[selectedPaperAccount]?.run_id === account?.run_id;
 }
 
+function replacePaperDetail(body, html, preserveState = true) {
+  const detail = body.querySelector(".paper-account-detail");
+  if (!detail) return null;
+  const scrollState = preserveState ? captureScrollState(body) : null;
+  detail.outerHTML = html;
+  if (scrollState) restoreScrollState(body, scrollState);
+  return body.querySelector(".paper-account-detail");
+}
+
 function mountPaperDetail(body, account, index) {
   const detail = body.querySelector(".paper-account-detail");
   if (!detail) return;
   const merged = withPaperHistory(withPaperDetail(account));
-  detail.outerHTML = paperDetailsByRun.has(account.run_id)
+  const html = paperDetailsByRun.has(account.run_id)
     ? accountDetail(merged, index)
     : paperDetailPlaceholder(account, index);
-  const mounted = body.querySelector(".paper-account-detail");
-  if (mounted) {
-    wirePaperDetailButton(body, account, index);
-    if (paperDetailsByRun.has(account.run_id)) {
-      wirePaperHistoryButton(body, merged, index);
-    }
+  replacePaperDetail(body, html, detail.dataset.runId === account.run_id);
+  wirePaperDetailControls(body, account, index);
+}
+
+function wirePaperDetailControls(body, account, index) {
+  wirePaperDetailButton(body, account, index);
+  if (paperDetailsByRun.has(account.run_id)) {
+    wirePaperHistoryButton(body, withPaperHistory(withPaperDetail(account)), index);
   }
 }
 
 function wirePaperDetailButton(body, account, index) {
   const button = body.querySelector("[data-load-paper-detail]");
-  if (!button || !account?.run_id) return;
+  if (!button || !account?.run_id || button.dataset.wired === "true") return;
+  button.dataset.wired = "true";
   button.addEventListener("click", () => void loadPaperAccountDetail(body, account, index));
 }
 
@@ -915,8 +933,7 @@ async function loadPaperAccountDetail(body, account, index) {
       }
     } catch (error) {
       if (currentPaperAccountIs(account)) {
-        const current = body.querySelector(".paper-account-detail");
-        if (current) current.outerHTML = paperDetailPlaceholder(account, index, `详情加载失败 · ${error.message}`);
+        replacePaperDetail(body, paperDetailPlaceholder(account, index, `详情加载失败 · ${error.message}`));
         wirePaperDetailButton(body, account, index);
       }
     } finally {
@@ -956,7 +973,8 @@ async function loadPaperEquityComparison(body) {
 
 function wirePaperHistoryButton(body, account, index) {
   const button = body.querySelector("[data-load-paper-history]");
-  if (!button || !account?.run_id) return;
+  if (!button || !account?.run_id || button.dataset.wired === "true") return;
+  button.dataset.wired = "true";
   button.addEventListener("click", () => loadPaperAccountHistory(body, account, index));
 }
 
@@ -975,8 +993,7 @@ async function loadPaperAccountHistory(body, account, index) {
     const history = await response.json();
     paperHistoryByRun.set(account.run_id, history);
     const merged = withPaperHistory(withPaperDetail(account));
-    const detail = body.querySelector(".paper-account-detail");
-    if (detail) detail.outerHTML = accountDetail(merged, index);
+    replacePaperDetail(body, accountDetail(merged, index));
     wirePaperHistoryButton(body, merged, index);
   } catch (error) {
     if (button) {
@@ -991,34 +1008,46 @@ function captureScrollState(body) {
     pageX: window.scrollX,
     pageY: window.scrollY,
     containers: Array.from(body.querySelectorAll(".table-scroll")).map((container) => ({
+      key: container.dataset.stateKey || null,
       left: container.scrollLeft,
       top: container.scrollTop,
     })),
     disclosures: Array.from(body.querySelectorAll("details")).map((details) => ({
+      key: details.dataset.stateKey || null,
       open: details.open,
     })),
   };
 }
 
 function restoreScrollState(body, state) {
-  const root = document.documentElement;
-  const previousBehavior = root.style.scrollBehavior;
-  root.style.scrollBehavior = "auto";
-  window.scrollTo(state.pageX, state.pageY);
-  root.style.scrollBehavior = previousBehavior;
+  const disclosureStates = new Map(
+    state.disclosures.filter((saved) => saved.key).map((saved) => [saved.key, saved]),
+  );
+  body.querySelectorAll("details").forEach((details, index) => {
+    const saved = details.dataset.stateKey
+      ? disclosureStates.get(details.dataset.stateKey)
+      : state.disclosures[index];
+    if (!saved) return;
+    details.open = saved.open;
+  });
 
+  const containerStates = new Map(
+    state.containers.filter((saved) => saved.key).map((saved) => [saved.key, saved]),
+  );
   body.querySelectorAll(".table-scroll").forEach((container, index) => {
-    const saved = state.containers[index];
+    const saved = container.dataset.stateKey
+      ? containerStates.get(container.dataset.stateKey)
+      : state.containers[index];
     if (!saved) return;
     container.scrollLeft = saved.left;
     container.scrollTop = saved.top;
   });
 
-  body.querySelectorAll("details").forEach((details, index) => {
-    const saved = state.disclosures[index];
-    if (!saved) return;
-    details.open = saved.open;
-  });
+  const root = document.documentElement;
+  const previousBehavior = root.style.scrollBehavior;
+  root.style.scrollBehavior = "auto";
+  window.scrollTo(state.pageX, state.pageY);
+  root.style.scrollBehavior = previousBehavior;
 }
 
 async function refreshSection(id) {
