@@ -25,6 +25,7 @@ from crypto_momentum_lab.persistence.postgres.session import (
 from crypto_momentum_lab.persistence.postgres.strategy_run_repository import (
     PostgresStrategyRunRepository,
 )
+from crypto_momentum_lab.strategy_runner.daemon import PaperEntryFilterConfig
 from crypto_momentum_lab.strategy_runner.portfolio import (
     PaperExitConfig,
     PaperPositionStatus,
@@ -107,6 +108,7 @@ async def test_live_paper_artifacts_are_idempotent_and_resume_pending_candidates
         report.source_description,
         report.execution_config,
         PaperExitConfig(),
+        PaperEntryFilterConfig(),
     )
     await artifacts.save_decision(decision)
     await artifacts.save_decision(decision)

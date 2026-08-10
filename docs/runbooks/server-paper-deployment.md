@@ -13,26 +13,29 @@ positions require them; one-minute klines are not continuously subscribed or
 archived.
 
 The compression-breakout daemon keeps 15-second states for execution and risk
-monitoring, and evaluates the original 15-second breakout profile:
+monitoring, while entry signals use the frozen one-minute shadow profile:
 
-- 20 15-second buckets, or 5 minutes, in the frozen compression range;
-- maximum range width of 0.5%;
-- minimum breakout distance of 0.1%;
-- one closed 15-second bucket for acceptance;
-- 8 15-second buckets, or 2 minutes, of per-symbol cooldown.
+- 60 one-minute buckets, or 60 minutes, in the frozen compression range;
+- maximum range width of 2.5%;
+- minimum breakout distance of 0.3%;
+- two closed one-minute buckets for acceptance;
+- 60 one-minute buckets, or 60 minutes, of per-symbol cooldown.
 
-The eight virtual accounts are isolated by run ID and each starts with 1,000
-USDT. Every strategy has one fixed-exit account and two independent
-15-minute candle-exit variants:
+The seven virtual accounts are isolated by run ID and each starts with 1,000
+USDT:
 
-- `paper-account-01-compression-original-fixed-v1`: `compression_breakout`, fixed TP/SL;
-- `paper-account-02-compression-original-candle15m-v1`: `compression_breakout`, first adverse 15M close;
+- `paper-account-09-compression-1m60m-candle15m-v1`: one-minute Compression profile, first adverse 15M close;
 - `paper-account-02-orderflow-v1`: `orderflow_impulse`, existing fixed TP/SL account;
 - `paper-account-05-orderflow-candle15m-v1`: `orderflow_impulse`, existing first adverse 15M close account;
 - `paper-account-07-orderflow-candle45m-v1`: `orderflow_impulse`, first adverse 15M close after 45 minutes;
-- `paper-account-03-liquidation-v1`: `liquidation_cascade`, existing fixed TP/SL account;
-- `paper-account-06-liquidation-candle15m-v1`: `liquidation_cascade`, existing first adverse 15M close account;
-- `paper-account-08-liquidation-candle2confirm-v1`: `liquidation_cascade`, two consecutive adverse 15M closes.
+- `paper-account-10-orderflow-b2-long-candle15m-v1`: B2 long-only signals, first adverse 15M close;
+- `paper-account-11-orderflow-c1-long-imbalance07113-candle15m-v1`: C1 long-only signals with `abs(aggressive_imbalance) <= 0.7113`, first adverse 15M close;
+- `paper-account-12-liquidation-trades1000-candle15m-v1`: baseline Liquidation entries with `cluster_trade_count <= 1000`, first adverse 15M close.
+
+The B2 and C1 filters are applied after the shared baseline Orderflow decision.
+Rejected signals still advance the baseline strategy cooldown, so these accounts
+remain strict subsets of the same signal stream used by the historical filter
+study.
 
 ## Deploy
 
@@ -58,14 +61,15 @@ USDT. Every strategy has one fixed-exit account and two independent
 
    For later upgrades, build first and recreate services in stages. Keep the
    old strategy containers running while market data restarts, wait for market
-   data to become healthy, then recreate each strategy pair:
+   data to become healthy, then recreate each strategy service:
 
    ```bash
    docker compose --env-file .env.server -f compose.server.yaml build
    docker compose --env-file .env.server -f compose.server.yaml up -d --no-deps market-data
    docker compose --env-file .env.server -f compose.server.yaml ps market-data
    docker compose --env-file .env.server -f compose.server.yaml up -d --no-deps \
-     paper-compression-pair paper-orderflow-pair paper-liquidation-pair dashboard
+     paper-compression-optimized paper-orderflow-pair \
+     paper-liquidation-optimized dashboard
    ```
 
    Do not run the final command until `market-data` reports `healthy`. Each
@@ -89,7 +93,8 @@ USDT. Every strategy has one fixed-exit account and two independent
 ```bash
 docker compose --env-file .env.server -f compose.server.yaml ps
 docker compose --env-file .env.server -f compose.server.yaml logs --tail=200 \
-  market-data paper-compression-pair paper-orderflow-pair paper-liquidation-pair
+  market-data paper-compression-optimized paper-orderflow-pair \
+  paper-liquidation-optimized
 curl -fsS http://127.0.0.1:8765/api/health
 curl -fsS http://127.0.0.1/momentum/api/health
 ```
@@ -117,7 +122,7 @@ use `SIGKILL` for planned deployments.
 
 The remote console is available at `https://<server>/momentum/`. The
 exchange-account panel remains empty because this stack intentionally has no
-Binance private-account credentials; the eight paper-account panels remain
+Binance private-account credentials; the seven paper-account panels remain
 active.
 
 ## Paper Artifacts
@@ -132,7 +137,7 @@ immediately using that state's executable bid or ask. This matches the live
 order path. It does not remove the inherent 15-second aggregation delay; a
 signal that depends on a bucket is only known when that bucket closes.
 
-The dashboard separates the eight paper accounts by strategy and exit mode into:
+The dashboard separates the seven paper accounts by strategy and exit mode into:
 
 - account equity and balance history;
 - currently open positions with mark price and unrealized PnL;
@@ -144,13 +149,10 @@ use `查看全部历史` to load its complete closed-trade and lifecycle history
 demand.
 
 Each account starts with 1,000 USDT of virtual equity and opens 100 USDT per
-filled entry. A filled entry opens a paper position. The original Compression
-fixed account closes on the first closed 15-second state that reaches one of
-these rules:
-
-- take profit at 2%;
-- stop loss at 1%;
-- maximum holding period of 80 execution buckets, or 20 minutes.
+filled entry. A filled entry opens a paper position. New Compression,
+Liquidation, B2, and C1 accounts all use the first adverse completed 15-minute
+candle as their primary exit, with the existing 24-hour maximum-holding
+safeguard.
 
 PnL includes both entry and exit taker fees. All paper accounts evaluate the
 closed state's trade close, rather than intrabucket high/low.

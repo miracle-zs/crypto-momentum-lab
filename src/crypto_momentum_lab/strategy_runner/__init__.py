@@ -6,6 +6,7 @@ from crypto_momentum_lab.strategy_runner.candle_source import (
 from crypto_momentum_lab.strategy_runner.daemon import (
     PairedPaperLiveAccount,
     PairedPaperLiveDaemonResult,
+    PaperEntryFilterConfig,
     PaperLiveDaemonConfig,
     PaperLiveDaemonRepository,
     PaperLiveDaemonResult,
@@ -71,6 +72,7 @@ __all__ = [
     "PaperLiveDaemonConfig",
     "PaperLiveDaemonRepository",
     "PaperLiveDaemonResult",
+    "PaperEntryFilterConfig",
     "PairedPaperLiveAccount",
     "PairedPaperLiveDaemonResult",
     "PaperExitConfig",

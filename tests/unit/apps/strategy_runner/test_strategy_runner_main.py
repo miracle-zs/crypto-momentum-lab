@@ -529,6 +529,8 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
             "30",
             "--max-market-state-age-seconds",
             "90",
+            "--entry-max-cluster-trade-count",
+            "1000",
             "--max-states",
             "3",
             "--idle-timeout-seconds",
@@ -550,6 +552,7 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
     assert config.checkpoint_every_seconds == 30
     assert config.max_market_state_age_seconds == 90
     assert config.execution.latency_buckets == 0
+    assert config.entry_filter.max_cluster_trade_count == 1000
     assert source_calls[0]["start_at"] == datetime(
         2026, 7, 4, 0, 5, tzinfo=UTC
     )
@@ -557,7 +560,7 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
     assert "Paper live daemon completed: states=3 halt=none" in result.stdout
 
 
-def test_paper_live_pair_builds_three_exit_accounts(monkeypatch) -> None:
+def test_paper_live_pair_builds_five_exit_accounts(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
     repository = object()
 
@@ -565,6 +568,8 @@ def test_paper_live_pair_builds_three_exit_accounts(monkeypatch) -> None:
         calls.append(kwargs)
         return SimpleNamespace(
             account_results=(
+                SimpleNamespace(processed_state_count=3, halt_reason=None),
+                SimpleNamespace(processed_state_count=3, halt_reason=None),
                 SimpleNamespace(processed_state_count=3, halt_reason=None),
                 SimpleNamespace(processed_state_count=3, halt_reason=None),
                 SimpleNamespace(processed_state_count=3, halt_reason=None),
@@ -613,6 +618,14 @@ def test_paper_live_pair_builds_three_exit_accounts(monkeypatch) -> None:
             "third-run",
             "--third-candle-minimum-holding-buckets",
             "180",
+            "--fourth-run-id",
+            "b2-run",
+            "--fourth-entry-long-only",
+            "--fifth-run-id",
+            "c1-run",
+            "--fifth-entry-long-only",
+            "--fifth-entry-max-abs-aggressive-imbalance",
+            "0.7113",
             "--max-states",
             "3",
         ],
@@ -623,20 +636,31 @@ def test_paper_live_pair_builds_three_exit_accounts(monkeypatch) -> None:
     assert calls[0]["strategy"] is not None
     accounts = calls[0]["accounts"]
     assert isinstance(accounts, tuple)
-    assert len(accounts) == 3
+    assert len(accounts) == 5
     assert accounts[0].repository is repository
     assert accounts[1].repository is repository
     assert accounts[2].repository is repository
     assert accounts[0].config.run_id == "fixed-run"
     assert accounts[1].config.run_id == "candle-run"
     assert accounts[2].config.run_id == "third-run"
+    assert accounts[3].config.run_id == "b2-run"
+    assert accounts[4].config.run_id == "c1-run"
     assert accounts[0].config.portfolio.exit_mode.value == "fixed"
     assert accounts[1].config.portfolio.exit_mode.value == "candle_15m"
     assert accounts[2].config.portfolio.exit_mode.value == "candle_15m"
+    assert accounts[3].config.portfolio.exit_mode.value == "candle_15m"
+    assert accounts[4].config.portfolio.exit_mode.value == "candle_15m"
     assert accounts[2].config.portfolio.candle_minimum_holding_buckets == 180
     assert accounts[0].config.execution.latency_buckets == 0
     assert accounts[1].config.execution.latency_buckets == 0
     assert accounts[2].config.execution.latency_buckets == 0
+    assert accounts[3].config.entry_filter.allow_long is True
+    assert accounts[3].config.entry_filter.allow_short is False
+    assert accounts[3].config.entry_filter.max_abs_aggressive_imbalance is None
+    assert accounts[4].config.entry_filter.allow_short is False
+    assert accounts[4].config.entry_filter.max_abs_aggressive_imbalance == Decimal(
+        "0.7113"
+    )
     assert "Paper live pair completed: strategy=orderflow_impulse" in result.stdout
 
 

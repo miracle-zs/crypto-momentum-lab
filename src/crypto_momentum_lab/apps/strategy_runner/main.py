@@ -2,7 +2,7 @@ import asyncio
 import os
 from contextlib import nullcontext
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
@@ -32,6 +32,7 @@ from crypto_momentum_lab.strategy_runner import (
     BinanceRestClosedCandle15mSource,
     InMemoryPaperMarketStateSource,
     PairedPaperLiveAccount,
+    PaperEntryFilterConfig,
     PaperExitConfig,
     PaperExitMode,
     PaperLiveDaemonConfig,
@@ -602,6 +603,28 @@ def paper_live_daemon_command(
         int,
         typer.Option("--max-holding-buckets", min=1),
     ] = 80,
+    entry_long_only: Annotated[
+        bool,
+        typer.Option(
+            "--entry-long-only/--entry-all-sides",
+            help="Accept only long entry signals for this paper account.",
+        ),
+    ] = False,
+    entry_max_abs_aggressive_imbalance: Annotated[
+        str | None,
+        typer.Option(
+            "--entry-max-abs-aggressive-imbalance",
+            help="Optional inclusive absolute aggressive-imbalance ceiling.",
+        ),
+    ] = None,
+    entry_max_cluster_trade_count: Annotated[
+        int | None,
+        typer.Option(
+            "--entry-max-cluster-trade-count",
+            min=1,
+            help="Optional inclusive liquidation-cluster trade-count ceiling.",
+        ),
+    ] = None,
     max_states: Annotated[
         int,
         typer.Option("--max-states", min=1),
@@ -713,6 +736,13 @@ def paper_live_daemon_command(
                     max_holding_buckets=max_holding_buckets,
                     require_executable_quote=require_market_quote,
                 ),
+                entry_filter=_entry_filter_config(
+                    long_only=entry_long_only,
+                    max_abs_aggressive_imbalance=(
+                        entry_max_abs_aggressive_imbalance
+                    ),
+                    max_cluster_trade_count=entry_max_cluster_trade_count,
+                ),
             ),
             clock=clock,
             entry_symbol_loader=source.load_active_symbols_at,
@@ -747,6 +777,20 @@ def paper_live_pair_command(
         typer.Option(
             "--third-run-id",
             help="Optional third candle-exit account sharing the same entries.",
+        ),
+    ] = None,
+    fourth_run_id: Annotated[
+        str | None,
+        typer.Option(
+            "--fourth-run-id",
+            help="Optional fourth 15-minute candle-exit account.",
+        ),
+    ] = None,
+    fifth_run_id: Annotated[
+        str | None,
+        typer.Option(
+            "--fifth-run-id",
+            help="Optional fifth 15-minute candle-exit account.",
         ),
     ] = None,
     database_url: Annotated[
@@ -832,6 +876,34 @@ def paper_live_pair_command(
             help="Opposite 15-minute candles required for the third exit.",
         ),
     ] = 1,
+    fourth_entry_long_only: Annotated[
+        bool,
+        typer.Option(
+            "--fourth-entry-long-only/--fourth-entry-all-sides",
+            help="Accept only long signals in the fourth account.",
+        ),
+    ] = False,
+    fourth_entry_max_abs_aggressive_imbalance: Annotated[
+        str | None,
+        typer.Option(
+            "--fourth-entry-max-abs-aggressive-imbalance",
+            help="Inclusive aggressive-imbalance ceiling for account four.",
+        ),
+    ] = None,
+    fifth_entry_long_only: Annotated[
+        bool,
+        typer.Option(
+            "--fifth-entry-long-only/--fifth-entry-all-sides",
+            help="Accept only long signals in the fifth account.",
+        ),
+    ] = False,
+    fifth_entry_max_abs_aggressive_imbalance: Annotated[
+        str | None,
+        typer.Option(
+            "--fifth-entry-max-abs-aggressive-imbalance",
+            help="Inclusive aggressive-imbalance ceiling for account five.",
+        ),
+    ] = None,
     max_states: Annotated[
         int,
         typer.Option("--max-states", min=1),
@@ -913,6 +985,34 @@ def paper_live_pair_command(
         if third_run_id is None
         else build_runtime_identity_for_cli(
             run_id=third_run_id,
+            strategy_name=strategy_name,
+            generated_at=created_at,
+            source_description=source.description,
+            compression_breakout=compression_breakout,
+            candidate_notional=candidate_notional_decimal,
+            candidate_ttl_buckets=candidate_ttl_buckets,
+            signal_interval_seconds=signal_interval_seconds,
+        )
+    )
+    fourth_identity = (
+        None
+        if fourth_run_id is None
+        else build_runtime_identity_for_cli(
+            run_id=fourth_run_id,
+            strategy_name=strategy_name,
+            generated_at=created_at,
+            source_description=source.description,
+            compression_breakout=compression_breakout,
+            candidate_notional=candidate_notional_decimal,
+            candidate_ttl_buckets=candidate_ttl_buckets,
+            signal_interval_seconds=signal_interval_seconds,
+        )
+    )
+    fifth_identity = (
+        None
+        if fifth_run_id is None
+        else build_runtime_identity_for_cli(
+            run_id=fifth_run_id,
             strategy_name=strategy_name,
             generated_at=created_at,
             source_description=source.description,
@@ -1013,6 +1113,67 @@ def paper_live_pair_command(
                 ),
             )
         )
+    filtered_accounts = (
+        (
+            "fourth",
+            fourth_run_id,
+            fourth_identity,
+            fourth_entry_long_only,
+            fourth_entry_max_abs_aggressive_imbalance,
+        ),
+        (
+            "fifth",
+            fifth_run_id,
+            fifth_identity,
+            fifth_entry_long_only,
+            fifth_entry_max_abs_aggressive_imbalance,
+        ),
+    )
+    for (
+        ordinal,
+        filtered_run_id,
+        filtered_identity,
+        long_only,
+        max_abs_imbalance,
+    ) in filtered_accounts:
+        if filtered_run_id is None:
+            if long_only or max_abs_imbalance is not None:
+                raise typer.BadParameter(
+                    f"--{ordinal}-run-id is required for its entry filters"
+                )
+            continue
+        if filtered_identity is None:
+            raise AssertionError(f"{ordinal} identity must be present")
+        accounts.append(
+            PairedPaperLiveAccount(
+                repository,
+                repository,
+                PaperLiveDaemonConfig(
+                    run_id=filtered_run_id,
+                    strategy_name=strategy_name,
+                    environment=environment,
+                    checkpoint_every_states=checkpoint_every_states,
+                    checkpoint_every_seconds=checkpoint_every_seconds,
+                    max_market_state_age_seconds=max_market_state_age_seconds,
+                    run_identity=filtered_identity,
+                    source_description=source.description,
+                    execution=ReplayExecutionConfig(
+                        latency_buckets=0,
+                        require_market_quote=require_market_quote,
+                    ),
+                    portfolio=PaperExitConfig(
+                        exit_mode=PaperExitMode.CANDLE_15M,
+                        initial_balance=Decimal(paper_initial_balance),
+                        max_holding_buckets=candle_max_holding_buckets,
+                        require_executable_quote=require_market_quote,
+                    ),
+                    entry_filter=_entry_filter_config(
+                        long_only=long_only,
+                        max_abs_aggressive_imbalance=max_abs_imbalance,
+                    ),
+                ),
+            )
+        )
     with BinanceRestClosedCandle15mSource(binance_base_url) as candle_source:
         result = run_paired_paper_live_daemon(
             source=source,
@@ -1096,6 +1257,28 @@ def build_paper_daemon_repository(database_url: str) -> PostgresPaperDaemonRepos
     engine = create_async_database_engine(database_url, pooled=False)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     return PostgresPaperDaemonRepository(factory)
+
+
+def _entry_filter_config(
+    *,
+    long_only: bool,
+    max_abs_aggressive_imbalance: str | None = None,
+    max_cluster_trade_count: int | None = None,
+) -> PaperEntryFilterConfig:
+    try:
+        max_imbalance = (
+            None
+            if max_abs_aggressive_imbalance is None
+            else Decimal(max_abs_aggressive_imbalance)
+        )
+        return PaperEntryFilterConfig(
+            allow_long=True,
+            allow_short=not long_only,
+            max_abs_aggressive_imbalance=max_imbalance,
+            max_cluster_trade_count=max_cluster_trade_count,
+        )
+    except (InvalidOperation, ValueError) as error:
+        raise typer.BadParameter(str(error)) from error
 
 
 def build_runtime_strategy_for_cli(

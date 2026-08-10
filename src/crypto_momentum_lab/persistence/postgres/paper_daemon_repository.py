@@ -32,6 +32,7 @@ from crypto_momentum_lab.persistence.postgres.strategy_run_repository import (
     paper_fill_row,
     strategy_signal_row,
 )
+from crypto_momentum_lab.strategy_runner.daemon import PaperEntryFilterConfig
 from crypto_momentum_lab.strategy_runner.fills import (
     ReplayExecutionConfig,
     SimulatedFill,
@@ -46,6 +47,12 @@ from crypto_momentum_lab.strategy_runner.portfolio import (
 
 _NEW_EXECUTION_FIELDS = {
     "fills": ("require_market_quote",),
+    "entry_filter": (
+        "allow_long",
+        "allow_short",
+        "max_abs_aggressive_imbalance",
+        "max_cluster_trade_count",
+    ),
     "portfolio": (
         "require_executable_quote",
         "candle_minimum_holding_buckets",
@@ -103,6 +110,7 @@ def paper_live_run_row(
     source_description: str,
     execution: ReplayExecutionConfig,
     portfolio: PaperExitConfig,
+    entry_filter: PaperEntryFilterConfig,
 ) -> dict[str, object]:
     return {
         "run_id": identity.run_id,
@@ -118,6 +126,7 @@ def paper_live_run_row(
         "source_description": source_description,
         "execution_config": {
             "fills": _jsonable(asdict(execution)),
+            "entry_filter": _jsonable(asdict(entry_filter)),
             "portfolio": _jsonable(asdict(portfolio)),
         },
         "input_state_count": 0,
@@ -219,12 +228,14 @@ class PostgresPaperDaemonRepository:
         source_description: str,
         execution: ReplayExecutionConfig,
         portfolio: PaperExitConfig,
+        entry_filter: PaperEntryFilterConfig,
     ) -> None:
         values = paper_live_run_row(
             identity=identity,
             source_description=source_description,
             execution=execution,
             portfolio=portfolio,
+            entry_filter=entry_filter,
         )
         async with self._session_factory() as session:
             async with session.begin():
@@ -772,11 +783,13 @@ def _legacy_paper_run_upgrade_values(
     for section, field_names in _NEW_EXECUTION_FIELDS.items():
         actual_section = actual_execution.get(section)
         expected_section = expected_execution.get(section)
-        if not isinstance(actual_section, dict) or not isinstance(
-            expected_section, dict
-        ):
+        if not isinstance(expected_section, dict):
             return None
-        upgraded_section = dict(actual_section)
+        if actual_section is not None and not isinstance(actual_section, dict):
+            return None
+        upgraded_section = (
+            {} if actual_section is None else dict(actual_section)
+        )
         for field_name in field_names:
             if field_name in upgraded_section:
                 continue

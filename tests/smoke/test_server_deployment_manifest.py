@@ -12,18 +12,18 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         "migrate",
         "bootstrap-universe",
         "market-data",
-        "paper-compression-pair",
+        "paper-compression-optimized",
         "paper-orderflow-pair",
-        "paper-liquidation-pair",
+        "paper-liquidation-optimized",
         "dashboard",
     } <= services.keys()
     assert services["dashboard"]["ports"] == ["127.0.0.1:8765:8765"]
     assert manifest["x-app"]["stop_grace_period"] == "60s"
     assert services["market-data"]["healthcheck"]["start_period"] == "15m"
     for service in (
-        "paper-compression-pair",
+        "paper-compression-optimized",
         "paper-orderflow-pair",
-        "paper-liquidation-pair",
+        "paper-liquidation-optimized",
     ):
         assert services[service]["entrypoint"] == ["cml-strategy-runner"]
         assert (
@@ -50,14 +50,13 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         if item.strip()
     }
     assert configured_run_ids == {
-        "paper-account-01-compression-original-fixed-v1",
-        "paper-account-02-compression-original-candle15m-v1",
+        "paper-account-09-compression-1m60m-candle15m-v1",
         "paper-account-02-orderflow-v1",
         "paper-account-05-orderflow-candle15m-v1",
         "paper-account-07-orderflow-candle45m-v1",
-        "paper-account-03-liquidation-v1",
-        "paper-account-06-liquidation-candle15m-v1",
-        "paper-account-08-liquidation-candle2confirm-v1",
+        "paper-account-10-orderflow-b2-long-candle15m-v1",
+        "paper-account-11-orderflow-c1-long-imbalance07113-candle15m-v1",
+        "paper-account-12-liquidation-trades1000-candle15m-v1",
     }
     assert {
         item.strip()
@@ -66,22 +65,20 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         ].split(",")
         if item.strip()
     } == configured_run_ids
-    compression = services["paper-compression-pair"]["command"]
+    compression = services["paper-compression-optimized"]["command"]
     assert _option_value(compression, "--strategy") == "compression_breakout"
-    assert _option_value(compression, "--signal-interval-seconds") == "15"
-    assert _option_value(compression, "--compression-window-buckets") == "20"
-    assert _option_value(compression, "--max-range-width-pct") == "0.005"
-    assert _option_value(compression, "--min-breakout-pct") == "0.001"
-    assert _option_value(compression, "--cooldown-buckets") == "8"
-    assert _option_value(compression, "--fixed-take-profit-pct") == "0.02"
-    assert _option_value(compression, "--fixed-stop-loss-pct") == "0.01"
-    assert _option_value(compression, "--fixed-max-holding-buckets") == "80"
-    assert _option_value(compression, "--fixed-run-id") == (
-        "paper-account-01-compression-original-fixed-v1"
+    assert compression[0] == "paper-live-daemon"
+    assert _option_value(compression, "--run-id") == (
+        "paper-account-09-compression-1m60m-candle15m-v1"
     )
-    assert _option_value(compression, "--candle-run-id") == (
-        "paper-account-02-compression-original-candle15m-v1"
-    )
+    assert _option_value(compression, "--signal-interval-seconds") == "60"
+    assert _option_value(compression, "--compression-window-buckets") == "60"
+    assert _option_value(compression, "--max-range-width-pct") == "0.025"
+    assert _option_value(compression, "--min-breakout-pct") == "0.003"
+    assert _option_value(compression, "--acceptance-buckets") == "2"
+    assert _option_value(compression, "--cooldown-buckets") == "60"
+    assert _option_value(compression, "--exit-mode") == "candle_15m"
+    assert _option_value(compression, "--max-holding-buckets") == "5760"
     assert "--require-market-quote" in compression
     assert (
         _option_value(
@@ -97,25 +94,42 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert _option_value(orderflow, "--third-candle-minimum-holding-buckets") == (
         "180"
     )
+    assert _option_value(orderflow, "--fourth-run-id") == (
+        "paper-account-10-orderflow-b2-long-candle15m-v1"
+    )
+    assert "--fourth-entry-long-only" in orderflow
+    assert _option_value(orderflow, "--fifth-run-id") == (
+        "paper-account-11-orderflow-c1-long-imbalance07113-candle15m-v1"
+    )
+    assert "--fifth-entry-long-only" in orderflow
+    assert _option_value(
+        orderflow,
+        "--fifth-entry-max-abs-aggressive-imbalance",
+    ) == "0.7113"
     assert (
         _option_value(
-            services["paper-liquidation-pair"]["command"],
+            services["paper-liquidation-optimized"]["command"],
             "--strategy",
         )
         == "liquidation_cascade"
     )
-    liquidation = services["paper-liquidation-pair"]["command"]
-    assert _option_value(liquidation, "--third-run-id") == (
-        "paper-account-08-liquidation-candle2confirm-v1"
+    liquidation = services["paper-liquidation-optimized"]["command"]
+    assert liquidation[0] == "paper-live-daemon"
+    assert _option_value(liquidation, "--run-id") == (
+        "paper-account-12-liquidation-trades1000-candle15m-v1"
     )
-    assert _option_value(liquidation, "--third-candle-confirmation-count") == "2"
+    assert _option_value(liquidation, "--exit-mode") == "candle_15m"
+    assert _option_value(
+        liquidation,
+        "--entry-max-cluster-trade-count",
+    ) == "1000"
     assert services["execution-account-live"]["profiles"] == ["live"]
     assert services["live-strategy"]["profiles"] == ["live"]
     assert services["execution-account-live"]["environment"][
         "BINANCE_API_KEY"
     ] == "${BINANCE_API_KEY:-}"
     assert "BINANCE_API_KEY" not in str(services["market-data"])
-    assert "BINANCE_API_KEY" not in str(services["paper-compression-pair"])
+    assert "BINANCE_API_KEY" not in str(services["paper-compression-optimized"])
 
 
 def test_server_paper_capture_only_subscribes_to_strategy_required_streams() -> None:

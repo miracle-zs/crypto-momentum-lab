@@ -2,7 +2,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
@@ -16,6 +16,7 @@ from crypto_momentum_lab.domain.strategy import (
 )
 from crypto_momentum_lab.strategy_runner.daemon import (
     PairedPaperLiveAccount,
+    PaperEntryFilterConfig,
     PaperLiveArtifactRepository,
     PaperLiveDaemonConfig,
     PaperLiveDaemonRepository,
@@ -136,9 +137,17 @@ class FakeStrategy(RuntimeStrategy):
 
 
 class SignalStrategy(FakeStrategy):
-    def __init__(self, identity: StrategyRunIdentity) -> None:
+    def __init__(
+        self,
+        identity: StrategyRunIdentity,
+        *,
+        side: StrategySide = StrategySide.LONG,
+        features: dict[str, JsonValue] | None = None,
+    ) -> None:
         super().__init__()
         self._identity = identity
+        self._side = side
+        self._features = {} if features is None else features
 
     def on_market_state(self, state: MarketState15s) -> StrategyDecision:
         decision = super().on_market_state(state)
@@ -151,11 +160,11 @@ class SignalStrategy(FakeStrategy):
             strategy_version=self._identity.strategy_version,
             config_hash=self._identity.config_hash,
             symbol=state.symbol,
-            side=StrategySide.LONG,
+            side=self._side,
             detected_at=state.bucket_start,
             source_state_at=state.bucket_start,
             reason="compression_breakout",
-            features={},
+            features=self._features,
             reference_prices={"close": str(state.close_price)},
         )
         candidate = OrderIntentCandidate(
@@ -174,7 +183,7 @@ class SignalStrategy(FakeStrategy):
             expires_at=state.bucket_start + timedelta(seconds=60),
             created_at=state.bucket_start,
             reason=signal.reason,
-            features={},
+            features=self._features,
         )
         return StrategyDecision(
             signals=(signal,),
@@ -198,8 +207,9 @@ class FakeArtifactRepository(PaperLiveArtifactRepository):
         source_description: str,
         execution: ReplayExecutionConfig,
         portfolio: PaperExitConfig,
+        entry_filter: PaperEntryFilterConfig,
     ) -> None:
-        del execution, portfolio
+        del execution, portfolio, entry_filter
         self.initialized.append((identity, source_description))
 
     async def load_pending_candidates(
@@ -552,6 +562,127 @@ def test_paired_daemon_calculates_entries_once_and_fans_out_accounts() -> None:
     assert third_artifacts.fills[0].filled_at == states[0].bucket_start
 
 
+def test_paired_entry_filters_preserve_b2_and_c1_subsets() -> None:
+    state = fixture_state("BTCUSDT", 0)
+    baseline_identity = _identity()
+    b2_identity = _identity("run-b2")
+    c1_identity = _identity("run-c1")
+    baseline_artifacts = FakeArtifactRepository()
+    b2_artifacts = FakeArtifactRepository()
+    c1_artifacts = FakeArtifactRepository()
+
+    run_paired_paper_live_daemon(
+        source=(state,),
+        strategy=SignalStrategy(
+            baseline_identity,
+            features={"aggressive_imbalance": "0.80"},
+        ),
+        accounts=(
+            PairedPaperLiveAccount(
+                repository=FakeRepository(),
+                artifact_repository=baseline_artifacts,
+                config=_config(
+                    run_identity=baseline_identity,
+                    execution=ReplayExecutionConfig(latency_buckets=0),
+                ),
+            ),
+            PairedPaperLiveAccount(
+                repository=FakeRepository(),
+                artifact_repository=b2_artifacts,
+                config=_config(
+                    run_id="run-b2",
+                    run_identity=b2_identity,
+                    execution=ReplayExecutionConfig(latency_buckets=0),
+                    entry_filter=PaperEntryFilterConfig(allow_short=False),
+                ),
+            ),
+            PairedPaperLiveAccount(
+                repository=FakeRepository(),
+                artifact_repository=c1_artifacts,
+                config=_config(
+                    run_id="run-c1",
+                    run_identity=c1_identity,
+                    execution=ReplayExecutionConfig(latency_buckets=0),
+                    entry_filter=PaperEntryFilterConfig(
+                        allow_short=False,
+                        max_abs_aggressive_imbalance=Decimal("0.7113"),
+                    ),
+                ),
+            ),
+        ),
+        clock=FakeClock(state.bucket_end + timedelta(seconds=1)),
+    )
+
+    assert len(baseline_artifacts.decisions) == 1
+    assert len(b2_artifacts.decisions) == 1
+    assert c1_artifacts.decisions == []
+    assert len(b2_artifacts.fills) == 1
+    assert c1_artifacts.fills == []
+
+
+def test_paired_long_only_filter_rejects_short_signal() -> None:
+    state = fixture_state("BTCUSDT", 0)
+    baseline_identity = _identity()
+    long_only_identity = _identity("run-long-only")
+    baseline_artifacts = FakeArtifactRepository()
+    long_only_artifacts = FakeArtifactRepository()
+
+    run_paired_paper_live_daemon(
+        source=(state,),
+        strategy=SignalStrategy(
+            baseline_identity,
+            side=StrategySide.SHORT,
+            features={"aggressive_imbalance": "-0.60"},
+        ),
+        accounts=(
+            PairedPaperLiveAccount(
+                repository=FakeRepository(),
+                artifact_repository=baseline_artifacts,
+                config=_config(run_identity=baseline_identity),
+            ),
+            PairedPaperLiveAccount(
+                repository=FakeRepository(),
+                artifact_repository=long_only_artifacts,
+                config=_config(
+                    run_id="run-long-only",
+                    run_identity=long_only_identity,
+                    entry_filter=PaperEntryFilterConfig(allow_short=False),
+                ),
+            ),
+        ),
+        clock=FakeClock(state.bucket_end + timedelta(seconds=1)),
+    )
+
+    assert len(baseline_artifacts.decisions) == 1
+    assert long_only_artifacts.decisions == []
+
+
+def test_single_daemon_filters_liquidation_trade_count() -> None:
+    state = fixture_state("BTCUSDT", 0)
+    identity = _identity()
+    artifacts = FakeArtifactRepository()
+
+    run_paper_live_daemon(
+        source=(state,),
+        strategy=SignalStrategy(
+            identity,
+            features={"cluster_trade_count": 1001},
+        ),
+        repository=FakeRepository(),
+        artifact_repository=artifacts,
+        config=_config(
+            run_identity=identity,
+            entry_filter=PaperEntryFilterConfig(
+                max_cluster_trade_count=1000
+            ),
+        ),
+        clock=FakeClock(state.bucket_end + timedelta(seconds=1)),
+    )
+
+    assert artifacts.decisions == []
+    assert artifacts.fills == []
+
+
 def test_paired_daemon_only_reads_the_latest_closed_candle() -> None:
     state = fixture_state("BTCUSDT", 180)
     checkpoint_at = state.bucket_start - timedelta(seconds=15)
@@ -692,6 +823,7 @@ def _config(
     run_identity: StrategyRunIdentity | None = None,
     execution: ReplayExecutionConfig | None = None,
     portfolio: PaperExitConfig | None = None,
+    entry_filter: PaperEntryFilterConfig | None = None,
 ) -> PaperLiveDaemonConfig:
     return PaperLiveDaemonConfig(
         run_id=run_id,
@@ -704,6 +836,7 @@ def _config(
         source_description="postgres-runtime-states:research",
         execution=execution or ReplayExecutionConfig(),
         portfolio=portfolio or PaperExitConfig(),
+        entry_filter=entry_filter or PaperEntryFilterConfig(),
     )
 
 

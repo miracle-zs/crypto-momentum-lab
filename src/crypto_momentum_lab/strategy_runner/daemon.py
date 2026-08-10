@@ -3,6 +3,7 @@ from collections import deque
 from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
@@ -14,6 +15,7 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyDataRequirement,
     StrategyDecision,
     StrategyRunIdentity,
+    StrategySide,
     StrategySignal,
 )
 from crypto_momentum_lab.strategy_runner.candle_source import (
@@ -75,6 +77,7 @@ class PaperLiveArtifactRepository(Protocol):
         source_description: str,
         execution: ReplayExecutionConfig,
         portfolio: PaperExitConfig,
+        entry_filter: "PaperEntryFilterConfig",
     ) -> None:
         pass
 
@@ -111,6 +114,32 @@ class PaperLiveArtifactRepository(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class PaperEntryFilterConfig:
+    allow_long: bool = True
+    allow_short: bool = True
+    max_abs_aggressive_imbalance: Decimal | None = None
+    max_cluster_trade_count: int | None = None
+
+    def __post_init__(self) -> None:
+        if not self.allow_long and not self.allow_short:
+            raise ValueError("entry filter must allow at least one side")
+        if (
+            self.max_abs_aggressive_imbalance is not None
+            and not Decimal("0")
+            < self.max_abs_aggressive_imbalance
+            <= Decimal("1")
+        ):
+            raise ValueError(
+                "max_abs_aggressive_imbalance must be in (0, 1]"
+            )
+        if (
+            self.max_cluster_trade_count is not None
+            and self.max_cluster_trade_count <= 0
+        ):
+            raise ValueError("max_cluster_trade_count must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class PaperLiveDaemonConfig:
     run_id: str
     strategy_name: str
@@ -125,6 +154,9 @@ class PaperLiveDaemonConfig:
         default_factory=lambda: ReplayExecutionConfig(latency_buckets=0)
     )
     portfolio: PaperExitConfig = field(default_factory=PaperExitConfig)
+    entry_filter: PaperEntryFilterConfig = field(
+        default_factory=PaperEntryFilterConfig
+    )
 
     def __post_init__(self) -> None:
         _require_non_empty(self.run_id, "run_id")
@@ -244,6 +276,7 @@ def run_paired_paper_live_daemon(
                 config.source_description,
                 config.execution,
                 config.portfolio,
+                config.entry_filter,
             )
         )
         pending_by_account.append(
@@ -396,6 +429,7 @@ def run_paired_paper_live_daemon(
             account_decision = _decision_for_account(
                 decision,
                 account.config.run_identity,
+                account.config.entry_filter,
             )
             if entry_allowed and (
                 account_decision.signals or account_decision.candidates
@@ -535,12 +569,16 @@ def _paired_result(
 def _decision_for_account(
     decision: StrategyDecision,
     identity: StrategyRunIdentity | None,
+    entry_filter: PaperEntryFilterConfig,
 ) -> StrategyDecision:
     if identity is None:
         raise ValueError("paired paper account requires run_identity")
+    source_signal_ids = {signal.signal_id for signal in decision.signals}
     signal_ids: dict[str, str] = {}
     signals: list[StrategySignal] = []
     for signal in decision.signals:
+        if not _signal_passes_entry_filter(signal, entry_filter):
+            continue
         signal_id = _paired_record_id(
             prefix="sig",
             run_id=identity.run_id,
@@ -552,6 +590,8 @@ def _decision_for_account(
     for candidate in decision.candidates:
         mapped_signal_id = signal_ids.get(candidate.signal_id)
         if mapped_signal_id is None:
+            if candidate.signal_id in source_signal_ids:
+                continue
             raise ValueError("paired candidate references unknown signal")
         candidates.append(
             replace(
@@ -569,7 +609,78 @@ def _decision_for_account(
         signals=tuple(signals),
         candidates=tuple(candidates),
         rejections=decision.rejections,
+        checkpoint=decision.checkpoint,
     )
+
+
+def _filter_decision(
+    decision: StrategyDecision,
+    entry_filter: PaperEntryFilterConfig,
+) -> StrategyDecision:
+    signals = tuple(
+        signal
+        for signal in decision.signals
+        if _signal_passes_entry_filter(signal, entry_filter)
+    )
+    accepted_signal_ids = {signal.signal_id for signal in signals}
+    candidates = tuple(
+        candidate
+        for candidate in decision.candidates
+        if candidate.signal_id in accepted_signal_ids
+    )
+    return StrategyDecision(
+        signals=signals,
+        candidates=candidates,
+        rejections=decision.rejections,
+        checkpoint=decision.checkpoint,
+    )
+
+
+def _signal_passes_entry_filter(
+    signal: StrategySignal,
+    entry_filter: PaperEntryFilterConfig,
+) -> bool:
+    if signal.side is StrategySide.LONG and not entry_filter.allow_long:
+        return False
+    if signal.side is StrategySide.SHORT and not entry_filter.allow_short:
+        return False
+    max_imbalance = entry_filter.max_abs_aggressive_imbalance
+    if max_imbalance is not None:
+        imbalance = _decimal_feature(signal, "aggressive_imbalance")
+        if imbalance is None or abs(imbalance) > max_imbalance:
+            return False
+    max_trade_count = entry_filter.max_cluster_trade_count
+    if max_trade_count is not None:
+        trade_count = _int_feature(signal, "cluster_trade_count")
+        if trade_count is None or trade_count > max_trade_count:
+            return False
+    return True
+
+
+def _decimal_feature(
+    signal: StrategySignal,
+    field_name: str,
+) -> Decimal | None:
+    value = signal.features.get(field_name)
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _int_feature(signal: StrategySignal, field_name: str) -> int | None:
+    value = signal.features.get(field_name)
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if parsed != parsed.to_integral_value():
+        return None
+    return int(parsed)
 
 
 def _paired_record_id(*, prefix: str, run_id: str, source_id: str) -> str:
@@ -654,6 +765,7 @@ def run_paper_live_daemon(
                 config.source_description,
                 config.execution,
                 config.portfolio,
+                config.entry_filter,
             )
         )
         pending_candidates.extend(
@@ -800,7 +912,10 @@ def run_paper_live_daemon(
                 else:
                     open_positions[position.position_id] = position
 
-        decision = strategy.on_market_state(state)
+        decision = _filter_decision(
+            strategy.on_market_state(state),
+            config.entry_filter,
+        )
         last_processed_at_by_symbol[state.symbol] = state.bucket_start
         if artifact_repository is not None and entry_allowed and (
             decision.signals or decision.candidates
