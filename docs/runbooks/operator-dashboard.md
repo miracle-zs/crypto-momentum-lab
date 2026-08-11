@@ -11,8 +11,8 @@ Open `http://127.0.0.1:8765/`. The dashboard is anonymous unless both
 universe, selected strategy, read-only account state, risk/execution state,
 ambiguous orders, and paper/shadow/live reports.
 
-The paper-account section displays seven accounts: one Compression account,
-five Orderflow accounts, and one Liquidation account. Equity curves use a shared
+The paper-account section displays six accounts: one Compression account and
+five Orderflow accounts. Equity curves use a shared
 rolling 24-hour window and the latest snapshot from each UTC six-minute bucket,
 up to 240 points. Pair charts compare only buckets available to both accounts,
 normalize both accounts to zero at the common start, and use one y-axis. The

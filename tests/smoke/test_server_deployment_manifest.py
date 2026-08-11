@@ -14,16 +14,15 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         "market-data",
         "paper-compression-optimized",
         "paper-orderflow-pair",
-        "paper-liquidation-optimized",
         "dashboard",
     } <= services.keys()
+    assert "paper-liquidation-optimized" not in services
     assert services["dashboard"]["ports"] == ["127.0.0.1:8765:8765"]
     assert manifest["x-app"]["stop_grace_period"] == "60s"
     assert services["market-data"]["healthcheck"]["start_period"] == "15m"
     for service in (
         "paper-compression-optimized",
         "paper-orderflow-pair",
-        "paper-liquidation-optimized",
     ):
         assert services[service]["entrypoint"] == ["cml-strategy-runner"]
         assert (
@@ -56,7 +55,6 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         "paper-account-07-orderflow-candle45m-v1",
         "paper-account-10-orderflow-b2-long-candle15m-v1",
         "paper-account-11-orderflow-c1-long-imbalance07113-candle15m-v1",
-        "paper-account-12-liquidation-trades1000-candle15m-v1",
     }
     assert {
         item.strip()
@@ -106,23 +104,6 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         orderflow,
         "--fifth-entry-max-abs-aggressive-imbalance",
     ) == "0.7113"
-    assert (
-        _option_value(
-            services["paper-liquidation-optimized"]["command"],
-            "--strategy",
-        )
-        == "liquidation_cascade"
-    )
-    liquidation = services["paper-liquidation-optimized"]["command"]
-    assert liquidation[0] == "paper-live-daemon"
-    assert _option_value(liquidation, "--run-id") == (
-        "paper-account-12-liquidation-trades1000-candle15m-v1"
-    )
-    assert _option_value(liquidation, "--exit-mode") == "candle_15m"
-    assert _option_value(
-        liquidation,
-        "--entry-max-cluster-trade-count",
-    ) == "1000"
     assert services["execution-account-live"]["profiles"] == ["live"]
     assert services["live-strategy"]["profiles"] == ["live"]
     assert services["execution-account-live"]["environment"][

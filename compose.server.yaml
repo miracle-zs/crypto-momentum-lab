@@ -88,8 +88,7 @@ services:
         paper-account-05-orderflow-candle15m-v1,
         paper-account-07-orderflow-candle45m-v1,
         paper-account-10-orderflow-b2-long-candle15m-v1,
-        paper-account-11-orderflow-c1-long-imbalance07113-candle15m-v1,
-        paper-account-12-liquidation-trades1000-candle15m-v1
+        paper-account-11-orderflow-c1-long-imbalance07113-candle15m-v1
       CML_LIVE_POSITION_ACCOUNT_LABEL: ${CML_LIVE_ACCOUNT_LABEL:-}
     entrypoint: ["cml-market-data"]
     command: ["run-market-data"]
@@ -219,43 +218,6 @@ services:
       - --require-market-quote
     mem_limit: 256m
 
-  paper-liquidation-optimized:
-    <<: *paper
-    environment:
-      <<: *app-environment
-      CML_HEALTHCHECK_RUN_IDS: paper-account-12-liquidation-trades1000-candle15m-v1
-    command:
-      - paper-live-daemon
-      - --strategy
-      - liquidation_cascade
-      - --environment
-      - research
-      - --run-id
-      - paper-account-12-liquidation-trades1000-candle15m-v1
-      - --candidate-notional
-      - "100"
-      - --paper-initial-balance
-      - "1000"
-      - --exit-mode
-      - candle_15m
-      - --max-holding-buckets
-      - "5760"
-      - --entry-max-cluster-trade-count
-      - "1000"
-      - --max-states
-      - "100000000"
-      - --idle-timeout-seconds
-      - "86400"
-      - --poll-interval-seconds
-      - "1"
-      - --checkpoint-every-states
-      - "1000"
-      - --checkpoint-every-seconds
-      - "60"
-      - --max-market-state-age-seconds
-      - "120"
-      - --require-market-quote
-
   execution-account-live:
     <<: *app
     profiles: ["live"]
@@ -376,8 +338,7 @@ services:
         paper-account-05-orderflow-candle15m-v1,
         paper-account-07-orderflow-candle45m-v1,
         paper-account-10-orderflow-b2-long-candle15m-v1,
-        paper-account-11-orderflow-c1-long-imbalance07113-candle15m-v1,
-        paper-account-12-liquidation-trades1000-candle15m-v1
+        paper-account-11-orderflow-c1-long-imbalance07113-candle15m-v1
     entrypoint: ["cml-operator-dashboard"]
     command: ["--host", "0.0.0.0", "--port", "8765"]
     depends_on:
