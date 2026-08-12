@@ -4,6 +4,7 @@ from pathlib import Path
 
 from crypto_momentum_lab.operator_dashboard.queries import (
     _downsample_equity_snapshots,
+    _paper_exit_label,
 )
 from crypto_momentum_lab.persistence.postgres.models import PaperEquitySnapshotRow
 
@@ -45,6 +46,29 @@ def test_dashboard_uses_latest_checkpoint_without_append_only_events() -> None:
 
     assert "StrategyRuntimeCheckpointRow" in source
     assert "StrategyRuntimeEventRow" not in source
+
+
+def test_candle_exit_label_includes_entry_filter_variants() -> None:
+    portfolio = {
+        "exit_mode": "candle_15m",
+        "candle_confirmation_count": 1,
+        "candle_minimum_holding_buckets": 0,
+    }
+
+    assert _paper_exit_label(
+        "candle_15m",
+        portfolio,
+        {"allow_long": True, "allow_short": False},
+    ) == "15M 收线退出 · 仅多头"
+    assert _paper_exit_label(
+        "candle_15m",
+        portfolio,
+        {
+            "allow_long": True,
+            "allow_short": False,
+            "max_abs_aggressive_imbalance": "0.7113",
+        },
+    ) == "15M 收线退出 · 仅多头 · 主动不平衡 ≤ 71.13%"
 
 
 def _snapshot(

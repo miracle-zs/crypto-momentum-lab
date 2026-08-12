@@ -6,6 +6,16 @@ const STRATEGY_ORDER = [
   "orderflow_impulse",
   "liquidation_cascade",
 ];
+const COMPARISON_SERIES_COLORS = [
+  "var(--series-fixed)",
+  "var(--series-candle)",
+  "var(--series-amber)",
+  "var(--series-violet)",
+  "var(--series-cyan)",
+  "var(--series-coral)",
+  "var(--series-lime)",
+  "var(--series-sky)",
+];
 let selectedPaperAccount = 0;
 let lastPollAt = null;
 let pollInFlight = false;
@@ -237,6 +247,28 @@ function comparisonSeriesClass(account, index) {
   return index === 1 ? "candle" : "variant";
 }
 
+function comparisonSeriesColor(index) {
+  return COMPARISON_SERIES_COLORS[index % COMPARISON_SERIES_COLORS.length];
+}
+
+function comparisonSeriesLabel(account, index, accounts) {
+  const base = account.exit_label || (
+    account.exit_mode === "candle_15m" ? "15M 收线退出" : "固定 TP / SL"
+  );
+  const duplicateCount = accounts.filter((candidate) => (
+    candidate.exit_label || (
+      candidate.exit_mode === "candle_15m" ? "15M 收线退出" : "固定 TP / SL"
+    )
+  ) === base).length;
+  if (duplicateCount < 2) return base;
+  const accountNumber = String(account.run_id || "").match(/^paper-account-(\d+)/)?.[1];
+  return accountNumber ? `${base} · 账户 ${accountNumber}` : `${base} · 版本 ${index + 1}`;
+}
+
+function comparisonSeriesStyle(series) {
+  return `style="--series-color:${series.color}"`;
+}
+
 function strategyEquityModel(strategyName, accounts) {
   if (accounts.length < 2) return null;
   const maps = accounts.map(equityBucketMap);
@@ -252,8 +284,9 @@ function strategyEquityModel(strategyName, accounts) {
     const values = commonBuckets.map((bucket) => map.buckets.get(bucket) - base);
     return {
       account,
-      label: account.exit_label || (index === 0 ? "固定 TP / SL" : "15M 收线退出"),
+      label: comparisonSeriesLabel(account, index, accounts),
       colorClass: comparisonSeriesClass(account, index),
+      color: comparisonSeriesColor(index),
       values,
       delta: values.at(-1),
     };
@@ -411,9 +444,9 @@ function strategyEquityChart(model) {
     `<text x="${(padL + (index / 2) * (width - padL - padR)).toFixed(1)}" y="${height - 8}" class="chart-label"
       text-anchor="${index === 0 ? "start" : index === 2 ? "end" : "middle"}">${esc(timeOnly(atMs))}${index === 2 ? ` ${DISPLAY_TIME_ZONE_LABEL}` : ""}</text>`).join("");
   const lines = model.series.map((series) =>
-    `<polyline points="${line(series)}" class="pair-line ${series.colorClass}"/>`).join("");
+    `<polyline points="${line(series)}" class="pair-line ${series.colorClass}" ${comparisonSeriesStyle(series)}/>`).join("");
   const dots = model.series.map((series) =>
-    `<circle cx="${x(model.points.at(-1)).toFixed(1)}" cy="${y(series.delta).toFixed(1)}" r="3" class="pair-dot ${series.colorClass}"/>`).join("");
+    `<circle cx="${x(model.points.at(-1)).toFixed(1)}" cy="${y(series.delta).toFixed(1)}" r="3" class="pair-dot ${series.colorClass}" ${comparisonSeriesStyle(series)}/>`).join("");
   return `<div class="pair-chart"><svg viewBox="0 0 ${width} ${height}" role="img"
     aria-label="${esc(model.strategyName)} 各退出方式同期权益对比">
     ${grid}
@@ -463,7 +496,7 @@ function renderOverview(data) {
 function pairedComparisonPanel(model) {
   const bucketMinutes = Math.round(model.intervalSeconds / 60);
   const legend = model.series.map((series) =>
-    `<span class="${series.colorClass}"><i></i>${esc(series.label)} <b class="num ${pnlClass(series.delta)}">${esc(signedMoney(series.delta))}</b></span>`).join("");
+    `<span class="${series.colorClass}" ${comparisonSeriesStyle(series)}><i></i><em>${esc(series.label)}</em> <b class="num ${pnlClass(series.delta)}">${esc(signedMoney(series.delta))}</b></span>`).join("");
   return `<article class="pair-panel">
     <div class="pair-head">
       <div><strong>${esc(model.strategyName)}</strong>

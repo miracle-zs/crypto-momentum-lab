@@ -600,14 +600,7 @@ class DashboardQueries:
                 )
             ).all()
         equity = _downsample_equity_snapshots(equity_rows)
-        portfolio_config = run.execution_config.get("portfolio")
-        exit_mode = (
-            str(portfolio_config.get("exit_mode"))
-            if isinstance(portfolio_config, dict)
-            and portfolio_config.get("exit_mode") is not None
-            else "fixed"
-        )
-        exit_label = _paper_exit_label(exit_mode, portfolio_config)
+        exit_mode, exit_label = _paper_exit_details(run)
         total_closed_trades = int(closed_trade_count or 0)
         total_winning_trades = int(winning_trade_count or 0)
         trade_events = sorted(
@@ -959,7 +952,8 @@ def _paper_exit_details(run: StrategyRunRow) -> tuple[str, str]:
         and portfolio_config.get("exit_mode") is not None
         else "fixed"
     )
-    return exit_mode, _paper_exit_label(exit_mode, portfolio_config)
+    entry_filter = run.execution_config.get("entry_filter")
+    return exit_mode, _paper_exit_label(exit_mode, portfolio_config, entry_filter)
 
 
 def _paper_account_summary(
@@ -1105,6 +1099,7 @@ def _position_close_event(row: PaperPositionRow) -> dict[str, JsonValue]:
 def _paper_exit_label(
     exit_mode: str,
     portfolio_config: object,
+    entry_filter: object = None,
 ) -> str:
     if exit_mode != "candle_15m":
         return "固定 TP / SL"
@@ -1118,12 +1113,41 @@ def _paper_exit_label(
         portfolio_config.get("candle_minimum_holding_buckets"),
         default=0,
     )
+    label = "15M 收线退出"
     if confirmation_count > 1:
-        return f"{confirmation_count} 根反向 15M 收线"
-    if minimum_buckets > 0:
+        label = f"{confirmation_count} 根反向 15M 收线"
+    elif minimum_buckets > 0:
         minutes = minimum_buckets * 15 // 60
-        return f"持仓 {minutes} 分钟后反向 15M 收线"
-    return "15M 收线退出"
+        label = f"持仓 {minutes} 分钟后反向 15M 收线"
+    filter_label = _paper_entry_filter_label(entry_filter)
+    return f"{label} · {filter_label}" if filter_label else label
+
+
+def _paper_entry_filter_label(entry_filter: object) -> str:
+    if not isinstance(entry_filter, dict):
+        return ""
+    allow_long = entry_filter.get("allow_long", True)
+    allow_short = entry_filter.get("allow_short", True)
+    parts: list[str] = []
+    if allow_long is True and allow_short is False:
+        parts.append("仅多头")
+    elif allow_long is False and allow_short is True:
+        parts.append("仅空头")
+    elif allow_long is False and allow_short is False:
+        parts.append("无方向")
+
+    max_imbalance = entry_filter.get("max_abs_aggressive_imbalance")
+    if max_imbalance is not None:
+        try:
+            percentage = Decimal(str(max_imbalance)) * 100
+            parts.append(f"主动不平衡 ≤ {percentage:.2f}%")
+        except (ArithmeticError, ValueError):
+            parts.append(f"主动不平衡 ≤ {max_imbalance}")
+
+    max_cluster_trade_count = entry_filter.get("max_cluster_trade_count")
+    if max_cluster_trade_count is not None:
+        parts.append(f"成交簇 ≤ {max_cluster_trade_count} 笔")
+    return " · ".join(parts)
 
 
 def _config_int(value: object, *, default: int) -> int:

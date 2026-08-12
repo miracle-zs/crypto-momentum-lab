@@ -22,8 +22,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert 'data-endpoint="api/overview"' in index
-    assert 'href="static/dashboard.css?v=20260806-paper-lazy"' in index
-    assert 'src="static/dashboard.js?v=20260809-refresh-state"' in index
+    assert 'href="static/dashboard.css?v=20260812-exit-series"' in index
+    assert 'src="static/dashboard.js?v=20260812-exit-series"' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
