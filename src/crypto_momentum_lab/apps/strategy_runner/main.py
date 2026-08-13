@@ -603,6 +603,14 @@ def paper_live_daemon_command(
         int,
         typer.Option("--max-holding-buckets", min=1),
     ] = 80,
+    candle_grace_bars: Annotated[
+        int,
+        typer.Option(
+            "--candle-grace-bars",
+            min=0,
+            help="After the first adverse 15m candle, wait this many bars.",
+        ),
+    ] = 0,
     entry_long_only: Annotated[
         bool,
         typer.Option(
@@ -735,6 +743,7 @@ def paper_live_daemon_command(
                     stop_loss_pct=Decimal(stop_loss_pct),
                     max_holding_buckets=max_holding_buckets,
                     require_executable_quote=require_market_quote,
+                    candle_grace_bars=candle_grace_bars,
                 ),
                 entry_filter=_entry_filter_config(
                     long_only=entry_long_only,
@@ -904,6 +913,50 @@ def paper_live_pair_command(
             help="Inclusive aggressive-imbalance ceiling for account five.",
         ),
     ] = None,
+    sixth_run_id: Annotated[
+        str | None,
+        typer.Option(
+            "--sixth-run-id",
+            help="Optional sixth 15-minute candle-exit account.",
+        ),
+    ] = None,
+    sixth_entry_long_only: Annotated[
+        bool,
+        typer.Option(
+            "--sixth-entry-long-only/--sixth-entry-all-sides",
+            help="Accept only long signals in the sixth account.",
+        ),
+    ] = False,
+    sixth_candle_grace_bars: Annotated[
+        int,
+        typer.Option(
+            "--sixth-candle-grace-bars",
+            min=0,
+            help="Grace bars for the sixth account.",
+        ),
+    ] = 0,
+    seventh_run_id: Annotated[
+        str | None,
+        typer.Option(
+            "--seventh-run-id",
+            help="Optional seventh 15-minute candle-exit account.",
+        ),
+    ] = None,
+    seventh_entry_long_only: Annotated[
+        bool,
+        typer.Option(
+            "--seventh-entry-long-only/--seventh-entry-all-sides",
+            help="Accept only long signals in the seventh account.",
+        ),
+    ] = False,
+    seventh_candle_grace_bars: Annotated[
+        int,
+        typer.Option(
+            "--seventh-candle-grace-bars",
+            min=0,
+            help="Grace bars for the seventh account.",
+        ),
+    ] = 0,
     max_states: Annotated[
         int,
         typer.Option("--max-states", min=1),
@@ -1022,6 +1075,34 @@ def paper_live_pair_command(
             signal_interval_seconds=signal_interval_seconds,
         )
     )
+    sixth_identity = (
+        None
+        if sixth_run_id is None
+        else build_runtime_identity_for_cli(
+            run_id=sixth_run_id,
+            strategy_name=strategy_name,
+            generated_at=created_at,
+            source_description=source.description,
+            compression_breakout=compression_breakout,
+            candidate_notional=candidate_notional_decimal,
+            candidate_ttl_buckets=candidate_ttl_buckets,
+            signal_interval_seconds=signal_interval_seconds,
+        )
+    )
+    seventh_identity = (
+        None
+        if seventh_run_id is None
+        else build_runtime_identity_for_cli(
+            run_id=seventh_run_id,
+            strategy_name=strategy_name,
+            generated_at=created_at,
+            source_description=source.description,
+            compression_breakout=compression_breakout,
+            candidate_notional=candidate_notional_decimal,
+            candidate_ttl_buckets=candidate_ttl_buckets,
+            signal_interval_seconds=signal_interval_seconds,
+        )
+    )
     strategy = build_runtime_strategy_for_cli(
         strategy_name=strategy_name,
         run_id=fixed_run_id,
@@ -1120,6 +1201,7 @@ def paper_live_pair_command(
             fourth_identity,
             fourth_entry_long_only,
             fourth_entry_max_abs_aggressive_imbalance,
+            0,
         ),
         (
             "fifth",
@@ -1127,6 +1209,23 @@ def paper_live_pair_command(
             fifth_identity,
             fifth_entry_long_only,
             fifth_entry_max_abs_aggressive_imbalance,
+            0,
+        ),
+        (
+            "sixth",
+            sixth_run_id,
+            sixth_identity,
+            sixth_entry_long_only,
+            None,
+            sixth_candle_grace_bars,
+        ),
+        (
+            "seventh",
+            seventh_run_id,
+            seventh_identity,
+            seventh_entry_long_only,
+            None,
+            seventh_candle_grace_bars,
         ),
     )
     for (
@@ -1135,9 +1234,10 @@ def paper_live_pair_command(
         filtered_identity,
         long_only,
         max_abs_imbalance,
+        grace_bars,
     ) in filtered_accounts:
         if filtered_run_id is None:
-            if long_only or max_abs_imbalance is not None:
+            if long_only or max_abs_imbalance is not None or grace_bars:
                 raise typer.BadParameter(
                     f"--{ordinal}-run-id is required for its entry filters"
                 )
@@ -1166,6 +1266,7 @@ def paper_live_pair_command(
                         initial_balance=Decimal(paper_initial_balance),
                         max_holding_buckets=candle_max_holding_buckets,
                         require_executable_quote=require_market_quote,
+                        candle_grace_bars=grace_bars,
                     ),
                     entry_filter=_entry_filter_config(
                         long_only=long_only,

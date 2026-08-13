@@ -12,7 +12,6 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         "migrate",
         "bootstrap-universe",
         "market-data",
-        "paper-compression-optimized",
         "paper-orderflow-pair",
         "dashboard",
     } <= services.keys()
@@ -21,7 +20,6 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert manifest["x-app"]["stop_grace_period"] == "60s"
     assert services["market-data"]["healthcheck"]["start_period"] == "15m"
     for service in (
-        "paper-compression-optimized",
         "paper-orderflow-pair",
     ):
         assert services[service]["entrypoint"] == ["cml-strategy-runner"]
@@ -49,12 +47,11 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         if item.strip()
     }
     assert configured_run_ids == {
-        "paper-account-09-compression-1m60m-candle15m-v1",
         "paper-account-02-orderflow-v1",
         "paper-account-05-orderflow-candle15m-v1",
-        "paper-account-07-orderflow-candle45m-v1",
         "paper-account-10-orderflow-b2-long-candle15m-v1",
-        "paper-account-11-orderflow-c1-long-imbalance07113-candle15m-v1",
+        "paper-account-12-orderflow-b1-long-candle15m-v1",
+        "paper-account-13-orderflow-b8-long-candle15m-v1",
     }
     assert {
         item.strip()
@@ -63,21 +60,6 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         ].split(",")
         if item.strip()
     } == configured_run_ids
-    compression = services["paper-compression-optimized"]["command"]
-    assert _option_value(compression, "--strategy") == "compression_breakout"
-    assert compression[0] == "paper-live-daemon"
-    assert _option_value(compression, "--run-id") == (
-        "paper-account-09-compression-1m60m-candle15m-v1"
-    )
-    assert _option_value(compression, "--signal-interval-seconds") == "60"
-    assert _option_value(compression, "--compression-window-buckets") == "60"
-    assert _option_value(compression, "--max-range-width-pct") == "0.025"
-    assert _option_value(compression, "--min-breakout-pct") == "0.003"
-    assert _option_value(compression, "--acceptance-buckets") == "2"
-    assert _option_value(compression, "--cooldown-buckets") == "60"
-    assert _option_value(compression, "--exit-mode") == "candle_15m"
-    assert _option_value(compression, "--max-holding-buckets") == "5760"
-    assert "--require-market-quote" in compression
     assert (
         _option_value(
             services["paper-orderflow-pair"]["command"],
@@ -86,31 +68,27 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         == "orderflow_impulse"
     )
     orderflow = services["paper-orderflow-pair"]["command"]
-    assert _option_value(orderflow, "--third-run-id") == (
-        "paper-account-07-orderflow-candle45m-v1"
-    )
-    assert _option_value(orderflow, "--third-candle-minimum-holding-buckets") == (
-        "180"
-    )
     assert _option_value(orderflow, "--fourth-run-id") == (
         "paper-account-10-orderflow-b2-long-candle15m-v1"
     )
     assert "--fourth-entry-long-only" in orderflow
-    assert _option_value(orderflow, "--fifth-run-id") == (
-        "paper-account-11-orderflow-c1-long-imbalance07113-candle15m-v1"
+    assert _option_value(orderflow, "--sixth-run-id") == (
+        "paper-account-12-orderflow-b1-long-candle15m-v1"
     )
-    assert "--fifth-entry-long-only" in orderflow
-    assert _option_value(
-        orderflow,
-        "--fifth-entry-max-abs-aggressive-imbalance",
-    ) == "0.7113"
+    assert "--sixth-entry-long-only" in orderflow
+    assert _option_value(orderflow, "--sixth-candle-grace-bars") == "1"
+    assert _option_value(orderflow, "--seventh-run-id") == (
+        "paper-account-13-orderflow-b8-long-candle15m-v1"
+    )
+    assert "--seventh-entry-long-only" in orderflow
+    assert _option_value(orderflow, "--seventh-candle-grace-bars") == "8"
     assert services["execution-account-live"]["profiles"] == ["live"]
     assert services["live-strategy"]["profiles"] == ["live"]
     assert services["execution-account-live"]["environment"][
         "BINANCE_API_KEY"
     ] == "${BINANCE_API_KEY:-}"
     assert "BINANCE_API_KEY" not in str(services["market-data"])
-    assert "BINANCE_API_KEY" not in str(services["paper-compression-optimized"])
+    assert "BINANCE_API_KEY" not in str(services["paper-orderflow-pair"])
 
 
 def test_server_paper_capture_only_subscribes_to_strategy_required_streams() -> None:

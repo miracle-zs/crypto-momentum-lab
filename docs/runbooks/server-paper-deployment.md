@@ -22,21 +22,23 @@ monitoring, while entry signals use the frozen one-minute shadow profile:
 - two closed one-minute buckets for acceptance;
 - 60 one-minute buckets, or 60 minutes, of per-symbol cooldown.
 
-The six virtual accounts are isolated by run ID and each starts with 1,000
+The five active virtual accounts are isolated by run ID and each starts with 1,000
 USDT:
 
-- `paper-account-09-compression-1m60m-candle15m-v1`: one-minute Compression profile, first adverse 15M close;
 - `paper-account-02-orderflow-v1`: `orderflow_impulse`, existing fixed TP/SL account;
 - `paper-account-05-orderflow-candle15m-v1`: `orderflow_impulse`, existing first adverse 15M close account;
-- `paper-account-07-orderflow-candle45m-v1`: `orderflow_impulse`, first adverse 15M close after 45 minutes;
 - `paper-account-10-orderflow-b2-long-candle15m-v1`: B2 long-only signals, first adverse 15M close;
-- `paper-account-11-orderflow-c1-long-imbalance07113-candle15m-v1`: C1 long-only signals with `abs(aggressive_imbalance) <= 0.7113`, first adverse 15M close.
+- `paper-account-12-orderflow-b1-long-candle15m-v1`: B1 long-only signals, entry-price limit for one 15M bar after the first adverse close;
+- `paper-account-13-orderflow-b8-long-candle15m-v1`: B8 long-only signals, entry-price limit for eight 15M bars after the first adverse close.
+
+The previously deployed Compression, 45-minute, and C1 imbalance accounts are
+kept in the database for historical analysis but are no longer active runners.
 
 No Liquidation trading account is deployed. The preregistered C0/C1/C2 replay
 found no candidate that passed both train and validation gates; see
 `docs/research/liquidation-entry-replay-study-2026-08-11.md`.
 
-The B2 and C1 filters are applied after the shared baseline Orderflow decision.
+The B1, B2, and B8 filters are applied after the shared baseline Orderflow decision.
 Rejected signals still advance the baseline strategy cooldown, so these accounts
 remain strict subsets of the same signal stream used by the historical filter
 study.
@@ -71,8 +73,8 @@ study.
    docker compose --env-file .env.server -f compose.server.yaml build
    docker compose --env-file .env.server -f compose.server.yaml up -d --no-deps market-data
    docker compose --env-file .env.server -f compose.server.yaml ps market-data
-   docker compose --env-file .env.server -f compose.server.yaml up -d --no-deps \
-     paper-compression-optimized paper-orderflow-pair dashboard
+  docker compose --env-file .env.server -f compose.server.yaml up -d --no-deps \
+     paper-orderflow-pair dashboard
    ```
 
    Do not run the final command until `market-data` reports `healthy`. Each
@@ -96,7 +98,7 @@ study.
 ```bash
 docker compose --env-file .env.server -f compose.server.yaml ps
 docker compose --env-file .env.server -f compose.server.yaml logs --tail=200 \
-  market-data paper-compression-optimized paper-orderflow-pair
+  market-data paper-orderflow-pair
 curl -fsS http://127.0.0.1:8765/api/health
 curl -fsS http://127.0.0.1/momentum/api/health
 ```
@@ -124,8 +126,8 @@ use `SIGKILL` for planned deployments.
 
 The remote console is available at `https://<server>/momentum/`. The
 exchange-account panel remains empty because this stack intentionally has no
-Binance private-account credentials; the six paper-account panels remain
-active.
+Binance private-account credentials; the five active paper-account panels
+remain active.
 
 ## Paper Artifacts
 
@@ -139,7 +141,7 @@ immediately using that state's executable bid or ask. This matches the live
 order path. It does not remove the inherent 15-second aggregation delay; a
 signal that depends on a bucket is only known when that bucket closes.
 
-The dashboard separates the six paper accounts by strategy and exit mode into:
+The dashboard separates the five active paper accounts by strategy and exit mode into:
 
 - account equity and balance history;
 - currently open positions with mark price and unrealized PnL;
@@ -151,9 +153,12 @@ use `查看全部历史` to load its complete closed-trade and lifecycle history
 demand.
 
 Each account starts with 1,000 USDT of virtual equity and opens 100 USDT per
-filled entry. A filled entry opens a paper position. The Compression, B2, and
-C1 accounts use the first adverse completed 15-minute candle as their primary
-exit, with the existing 24-hour maximum-holding safeguard.
+filled entry. A filled entry opens a paper position. The B0 and B2 accounts use
+the first adverse completed 15-minute candle as their primary exit. B1 and B8
+arm a reduce-only entry-price limit at that warning candle; a quote touching
+entry closes the position, and otherwise the account exits at the first
+executable mark on the one-bar or eight-bar timeout. All retain the existing
+24-hour maximum-holding safeguard.
 
 PnL includes both entry and exit taker fees. All paper accounts evaluate the
 closed state's trade close, rather than intrabucket high/low.

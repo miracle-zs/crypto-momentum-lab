@@ -343,6 +343,97 @@ def test_candle_exit_waits_for_minimum_holding_period() -> None:
     )
 
 
+def test_candle_grace_exit_times_out_after_configured_bars() -> None:
+    position = position_from_entry_fill("run-1", _fill())
+    assert position is not None
+    config = PaperExitConfig(
+        exit_mode=PaperExitMode.CANDLE_15M,
+        max_holding_buckets=5760,
+        candle_grace_bars=1,
+    )
+    warning = _candle(open_price="100", close_price="99")
+    pending = mark_positions(
+        positions=(position,),
+        state=_state(
+            close=Decimal("99"),
+            bucket_start=warning.candle_end,
+        ),
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+        closed_candle=warning,
+    )[0]
+
+    assert pending.status is PaperPositionStatus.OPEN
+    assert pending.grace_exit_started_at == warning.candle_end
+    assert pending.grace_exit_deadline == warning.candle_end + timedelta(
+        minutes=15
+    )
+
+    timeout = ClosedCandle15m(
+        symbol="BTCUSDT",
+        candle_start=warning.candle_end,
+        candle_end=warning.candle_end + timedelta(minutes=15),
+        open_price=Decimal("99"),
+        close_price=Decimal("98"),
+    )
+    closed = mark_positions(
+        positions=(pending,),
+        state=_state(
+            close=Decimal("98"),
+            bucket_start=timeout.candle_end,
+        ),
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+        closed_candle=timeout,
+    )[0]
+
+    assert closed.status is PaperPositionStatus.CLOSED
+    assert closed.close_reason == "candle_15m_grace_timeout_1"
+    assert closed.exit_price == Decimal("98")
+
+
+def test_candle_grace_limit_closes_at_entry_price() -> None:
+    position = position_from_entry_fill("run-1", _fill())
+    assert position is not None
+    config = PaperExitConfig(
+        exit_mode=PaperExitMode.CANDLE_15M,
+        max_holding_buckets=5760,
+        candle_grace_bars=8,
+        require_executable_quote=True,
+    )
+    warning = _candle(open_price="100", close_price="99")
+    pending = mark_positions(
+        positions=(position,),
+        state=replace(
+            _state(
+            close=Decimal("99"),
+            bucket_start=warning.candle_end,
+            ),
+            last_bid_price=Decimal("99"),
+        ),
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+        closed_candle=warning,
+    )[0]
+    touched_state = replace(
+        _state(
+            close=Decimal("100"),
+            bucket_start=warning.candle_end + timedelta(seconds=15),
+        ),
+        last_bid_price=Decimal("100"),
+    )
+    closed = mark_positions(
+        positions=(pending,),
+        state=touched_state,
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+    )[0]
+
+    assert closed.status is PaperPositionStatus.CLOSED
+    assert closed.close_reason == "candle_15m_grace_limit_8"
+    assert closed.exit_price == position.entry_price
+
+
 def test_candle_exit_requires_consecutive_adverse_candles() -> None:
     position = position_from_entry_fill("run-1", _fill())
     assert position is not None

@@ -83,12 +83,11 @@ services:
       <<: *app-environment
       CML_ENVIRONMENT_CONFIG: configs/environments/server_paper.yaml
       CML_PAPER_EXIT_RUN_IDS: >-
-        paper-account-09-compression-1m60m-candle15m-v1,
         paper-account-02-orderflow-v1,
         paper-account-05-orderflow-candle15m-v1,
-        paper-account-07-orderflow-candle45m-v1,
         paper-account-10-orderflow-b2-long-candle15m-v1,
-        paper-account-11-orderflow-c1-long-imbalance07113-candle15m-v1
+        paper-account-12-orderflow-b1-long-candle15m-v1,
+        paper-account-13-orderflow-b8-long-candle15m-v1
       CML_LIVE_POSITION_ACCOUNT_LABEL: ${CML_LIVE_ACCOUNT_LABEL:-}
     entrypoint: ["cml-market-data"]
     command: ["run-market-data"]
@@ -113,52 +112,6 @@ services:
       start_period: 15m
     mem_limit: 640m
 
-  paper-compression-optimized:
-    <<: *paper
-    environment:
-      <<: *app-environment
-      CML_HEALTHCHECK_RUN_IDS: paper-account-09-compression-1m60m-candle15m-v1
-    command:
-      - paper-live-daemon
-      - --strategy
-      - compression_breakout
-      - --environment
-      - research
-      - --run-id
-      - paper-account-09-compression-1m60m-candle15m-v1
-      - --signal-interval-seconds
-      - "60"
-      - --compression-window-buckets
-      - "60"
-      - --max-range-width-pct
-      - "0.025"
-      - --min-breakout-pct
-      - "0.003"
-      - --acceptance-buckets
-      - "2"
-      - --cooldown-buckets
-      - "60"
-      - --candidate-notional
-      - "100"
-      - --paper-initial-balance
-      - "1000"
-      - --exit-mode
-      - candle_15m
-      - --max-holding-buckets
-      - "5760"
-      - --max-states
-      - "100000000"
-      - --idle-timeout-seconds
-      - "86400"
-      - --poll-interval-seconds
-      - "1"
-      - --checkpoint-every-states
-      - "1000"
-      - --checkpoint-every-seconds
-      - "60"
-      - --max-market-state-age-seconds
-      - "120"
-      - --require-market-quote
   paper-orderflow-pair:
     <<: *paper
     environment:
@@ -166,9 +119,9 @@ services:
       CML_HEALTHCHECK_RUN_IDS: >-
         paper-account-02-orderflow-v1,
         paper-account-05-orderflow-candle15m-v1,
-        paper-account-07-orderflow-candle45m-v1,
         paper-account-10-orderflow-b2-long-candle15m-v1,
-        paper-account-11-orderflow-c1-long-imbalance07113-candle15m-v1
+        paper-account-12-orderflow-b1-long-candle15m-v1,
+        paper-account-13-orderflow-b8-long-candle15m-v1
     command:
       - paper-live-pair
       - --strategy
@@ -179,18 +132,19 @@ services:
       - paper-account-02-orderflow-v1
       - --candle-run-id
       - paper-account-05-orderflow-candle15m-v1
-      - --third-run-id
-      - paper-account-07-orderflow-candle45m-v1
-      - --third-candle-minimum-holding-buckets
-      - "180"
       - --fourth-run-id
       - paper-account-10-orderflow-b2-long-candle15m-v1
       - --fourth-entry-long-only
-      - --fifth-run-id
-      - paper-account-11-orderflow-c1-long-imbalance07113-candle15m-v1
-      - --fifth-entry-long-only
-      - --fifth-entry-max-abs-aggressive-imbalance
-      - "0.7113"
+      - --sixth-run-id
+      - paper-account-12-orderflow-b1-long-candle15m-v1
+      - --sixth-entry-long-only
+      - --sixth-candle-grace-bars
+      - "1"
+      - --seventh-run-id
+      - paper-account-13-orderflow-b8-long-candle15m-v1
+      - --seventh-entry-long-only
+      - --seventh-candle-grace-bars
+      - "8"
       - --candidate-notional
       - "100"
       - --paper-initial-balance
@@ -333,12 +287,11 @@ services:
     environment:
       <<: *app-environment
       CML_PAPER_ACCOUNT_RUN_IDS: >-
-        paper-account-09-compression-1m60m-candle15m-v1,
         paper-account-02-orderflow-v1,
         paper-account-05-orderflow-candle15m-v1,
-        paper-account-07-orderflow-candle45m-v1,
         paper-account-10-orderflow-b2-long-candle15m-v1,
-        paper-account-11-orderflow-c1-long-imbalance07113-candle15m-v1
+        paper-account-12-orderflow-b1-long-candle15m-v1,
+        paper-account-13-orderflow-b8-long-candle15m-v1
     entrypoint: ["cml-operator-dashboard"]
     command: ["--host", "0.0.0.0", "--port", "8765"]
     depends_on:

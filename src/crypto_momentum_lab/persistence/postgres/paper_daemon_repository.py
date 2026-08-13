@@ -57,6 +57,7 @@ _NEW_EXECUTION_FIELDS = {
         "require_executable_quote",
         "candle_minimum_holding_buckets",
         "candle_confirmation_count",
+        "candle_grace_bars",
     ),
 }
 
@@ -184,6 +185,8 @@ def paper_position_row(position: PaperPosition) -> dict[str, object]:
         "realized_pnl": position.realized_pnl,
         "return_pct": position.return_pct,
         "close_reason": position.close_reason,
+        "grace_exit_started_at": position.grace_exit_started_at,
+        "grace_exit_deadline": position.grace_exit_deadline,
         "updated_at": position.updated_at,
     }
 
@@ -210,6 +213,8 @@ def paper_position_from_row(row: PaperPositionRow) -> PaperPosition:
         realized_pnl=row.realized_pnl,
         return_pct=row.return_pct,
         close_reason=row.close_reason,
+        grace_exit_started_at=row.grace_exit_started_at,
+        grace_exit_deadline=row.grace_exit_deadline,
         updated_at=row.updated_at,
     )
 

@@ -560,7 +560,7 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
     assert "Paper live daemon completed: states=3 halt=none" in result.stdout
 
 
-def test_paper_live_pair_builds_five_exit_accounts(monkeypatch) -> None:
+def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
     repository = object()
 
@@ -626,6 +626,16 @@ def test_paper_live_pair_builds_five_exit_accounts(monkeypatch) -> None:
             "--fifth-entry-long-only",
             "--fifth-entry-max-abs-aggressive-imbalance",
             "0.7113",
+            "--sixth-run-id",
+            "b1-run",
+            "--sixth-entry-long-only",
+            "--sixth-candle-grace-bars",
+            "1",
+            "--seventh-run-id",
+            "b8-run",
+            "--seventh-entry-long-only",
+            "--seventh-candle-grace-bars",
+            "8",
             "--max-states",
             "3",
         ],
@@ -636,7 +646,7 @@ def test_paper_live_pair_builds_five_exit_accounts(monkeypatch) -> None:
     assert calls[0]["strategy"] is not None
     accounts = calls[0]["accounts"]
     assert isinstance(accounts, tuple)
-    assert len(accounts) == 5
+    assert len(accounts) == 7
     assert accounts[0].repository is repository
     assert accounts[1].repository is repository
     assert accounts[2].repository is repository
@@ -661,6 +671,12 @@ def test_paper_live_pair_builds_five_exit_accounts(monkeypatch) -> None:
     assert accounts[4].config.entry_filter.max_abs_aggressive_imbalance == Decimal(
         "0.7113"
     )
+    assert accounts[5].config.run_id == "b1-run"
+    assert accounts[5].config.portfolio.candle_grace_bars == 1
+    assert accounts[5].config.entry_filter.allow_short is False
+    assert accounts[6].config.run_id == "b8-run"
+    assert accounts[6].config.portfolio.candle_grace_bars == 8
+    assert accounts[6].config.entry_filter.allow_short is False
     assert "Paper live pair completed: strategy=orderflow_impulse" in result.stdout
 
 

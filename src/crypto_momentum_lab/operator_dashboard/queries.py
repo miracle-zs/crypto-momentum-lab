@@ -1109,12 +1109,18 @@ def _paper_exit_label(
         portfolio_config.get("candle_confirmation_count"),
         default=1,
     )
+    grace_bars = _config_int(
+        portfolio_config.get("candle_grace_bars"),
+        default=0,
+    )
     minimum_buckets = _config_int(
         portfolio_config.get("candle_minimum_holding_buckets"),
         default=0,
     )
     label = "15M 收线退出"
-    if confirmation_count > 1:
+    if grace_bars > 0:
+        label = f"反向后宽限 {grace_bars} 根 15M"
+    elif confirmation_count > 1:
         label = f"{confirmation_count} 根反向 15M 收线"
     elif minimum_buckets > 0:
         minutes = minimum_buckets * 15 // 60

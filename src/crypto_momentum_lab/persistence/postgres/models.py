@@ -402,6 +402,12 @@ class PaperPositionRow(Base):
     realized_pnl: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
     return_pct: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
     close_reason: Mapped[str | None] = mapped_column(String(64))
+    grace_exit_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    grace_exit_deadline: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
