@@ -140,7 +140,7 @@ def prepare_command(
     max_daily_loss: Annotated[
         str,
         typer.Option("--max-daily-loss"),
-    ] = "25",
+    ] = "unlimited",
     max_open_positions: Annotated[
         str,
         typer.Option("--max-open-positions"),
@@ -170,7 +170,10 @@ def prepare_command(
                 max_gross_notional,
                 "--max-gross-notional",
             ),
-            max_daily_loss=Decimal(max_daily_loss),
+            max_daily_loss=_parse_optional_decimal_limit(
+                max_daily_loss,
+                "--max-daily-loss",
+            ),
             max_open_positions=_parse_optional_integer_limit(
                 max_open_positions,
                 "--max-open-positions",
@@ -194,7 +197,7 @@ def approve_command(
     max_open_positions: Annotated[
         str, typer.Option("--max-open-positions")
     ] = "1",
-    max_daily_loss: Annotated[str, typer.Option("--max-daily-loss")] = "10",
+    max_daily_loss: Annotated[str, typer.Option("--max-daily-loss")] = "unlimited",
     approver: Annotated[str, typer.Option("--approver")] = "",
     confirmation: Annotated[str, typer.Option("--confirmation")] = "",
     expires_in_minutes: Annotated[
@@ -218,7 +221,10 @@ def approve_command(
             max_open_positions,
             "--max-open-positions",
         ),
-        approved_max_daily_loss=Decimal(max_daily_loss),
+        approved_max_daily_loss=_parse_optional_decimal_limit(
+            max_daily_loss,
+            "--max-daily-loss",
+        ),
         approver_name=approver,
         approval_text=confirmation,
         expires_at=_parse_approval_expiration(now, expires_in_minutes),
@@ -1127,7 +1133,7 @@ async def _prepare_live_risk_gates(
     lease_ttl_seconds: int,
     max_order_notional: Decimal | None,
     max_gross_notional: Decimal | None,
-    max_daily_loss: Decimal,
+    max_daily_loss: Decimal | None,
     max_open_positions: int | None,
     state_stale_after_seconds: float,
 ) -> dict[str, str]:

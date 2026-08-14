@@ -34,7 +34,7 @@ class LiveOperatorApproval:
     database_migration_revision: str
     approved_notional_cap: Decimal | None
     approved_max_open_positions: int | None
-    approved_max_daily_loss: Decimal
+    approved_max_daily_loss: Decimal | None
     approver_name: str
     approval_text: str
     expires_at: datetime | None
@@ -53,7 +53,10 @@ class LiveOperatorApproval:
             and self.approved_max_open_positions <= 0
         ):
             raise ValueError("approved_max_open_positions must be positive")
-        if self.approved_max_daily_loss <= 0:
+        if (
+            self.approved_max_daily_loss is not None
+            and self.approved_max_daily_loss <= 0
+        ):
             raise ValueError("approved_max_daily_loss must be positive")
         _require_aware(self.created_at, "created_at")
         if self.expires_at is not None:

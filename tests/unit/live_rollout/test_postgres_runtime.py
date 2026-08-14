@@ -68,7 +68,7 @@ def test_live_limits_preserve_unbounded_capacity() -> None:
         account_label="primary",
         max_order_notional=None,
         max_gross_notional=None,
-        max_daily_loss=Decimal("25"),
+        max_daily_loss=None,
         max_open_positions=None,
         max_market_state_age_seconds=30,
         max_account_state_age_seconds=30,
@@ -82,10 +82,10 @@ def test_live_limits_preserve_unbounded_capacity() -> None:
         strategy_config_hash="a" * 64,
         risk_config_hash=risk_config.config_hash,
         git_commit_hash="abc123",
-        database_migration_revision="20260814_0015",
+        database_migration_revision="20260814_0016",
         approved_notional_cap=None,
         approved_max_open_positions=None,
-        approved_max_daily_loss=Decimal("25"),
+        approved_max_daily_loss=None,
         approver_name="operator",
         approval_text=LIVE_APPROVAL_CONFIRMATION,
         expires_at=None,
@@ -97,7 +97,7 @@ def test_live_limits_preserve_unbounded_capacity() -> None:
         risk_config=risk_config,
     )
 
-    assert limits == (None, None, Decimal("25"), None)
+    assert limits == (None, None, None, None)
 
 
 def _position():

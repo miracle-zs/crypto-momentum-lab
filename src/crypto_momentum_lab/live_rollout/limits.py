@@ -7,7 +7,7 @@ from decimal import Decimal
 class FixedLiveLimits:
     notional_cap: Decimal | None
     max_open_positions: int | None
-    max_daily_loss: Decimal
+    max_daily_loss: Decimal | None
     max_gross_exposure: Decimal | None
     max_spread: Decimal
     cooldown_seconds: int
@@ -68,7 +68,7 @@ def evaluate_fixed_live_limits(
     ):
         return LiveLimitDecision(False, "symbol_cooldown_active", None)
     daily_pnl = context.realized_pnl + context.unrealized_pnl
-    if daily_pnl <= -limits.max_daily_loss:
+    if limits.max_daily_loss is not None and daily_pnl <= -limits.max_daily_loss:
         return LiveLimitDecision(False, "max_daily_loss_reached", None)
     if (
         limits.max_gross_exposure is not None

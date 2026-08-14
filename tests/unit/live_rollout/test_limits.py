@@ -55,6 +55,22 @@ def test_unbounded_capacity_limits_keep_strategy_requested_notional() -> None:
     assert decision.capped_notional == Decimal("100")
 
 
+def test_unbounded_daily_loss_does_not_reject_entry() -> None:
+    decision = evaluate_fixed_live_limits(
+        replace(
+            _limits(),
+            max_daily_loss=None,
+        ),
+        replace(
+            _context(),
+            realized_pnl=Decimal("-100000"),
+            unrealized_pnl=Decimal("-100000"),
+        ),
+    )
+
+    assert decision.allowed is True
+
+
 def _limits() -> FixedLiveLimits:
     return FixedLiveLimits(
         notional_cap=Decimal("25"),

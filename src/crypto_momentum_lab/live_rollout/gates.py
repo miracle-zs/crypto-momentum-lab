@@ -143,8 +143,10 @@ def _check_approval(context: LiveGateContext, reasons: list[str]) -> None:
             "risk_positions_exceed_approval",
         ),
         (
-            context.risk_config.max_daily_loss
-            <= approval.approved_max_daily_loss,
+            _decimal_limit_is_covered(
+                context.risk_config.max_daily_loss,
+                approval.approved_max_daily_loss,
+            ),
             "risk_daily_loss_exceeds_approval",
         ),
     )

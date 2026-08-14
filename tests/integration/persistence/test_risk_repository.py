@@ -1,6 +1,5 @@
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 
 import pytest
 from sqlalchemy import delete, select
@@ -107,7 +106,7 @@ async def test_save_unbounded_risk_config(
         account_label="primary",
         max_order_notional=None,
         max_gross_notional=None,
-        max_daily_loss=Decimal("25"),
+        max_daily_loss=None,
         max_open_positions=None,
         max_market_state_age_seconds=30,
         max_account_state_age_seconds=30,

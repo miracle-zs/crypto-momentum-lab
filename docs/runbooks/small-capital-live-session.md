@@ -62,7 +62,7 @@ $COMPOSE --profile live run --rm --no-deps live-strategy prepare \
   --lease-ttl-seconds 1800 \
   --max-order-notional unlimited \
   --max-gross-notional unlimited \
-  --max-daily-loss 25 \
+  --max-daily-loss unlimited \
   --max-open-positions unlimited \
   --confirmation "PREPARE LIVE RISK GATES"
 ```
@@ -107,7 +107,7 @@ $COMPOSE --profile live run --rm --no-deps live-strategy approve \
   --risk-config-hash "$RISK_CONFIG_HASH" \
   --git-commit-hash "$CML_CODE_COMMIT" \
   --migration-revision "$CML_LIVE_MIGRATION_REVISION" \
-  --notional-cap unlimited --max-open-positions unlimited --max-daily-loss 25 \
+  --notional-cap unlimited --max-open-positions unlimited --max-daily-loss unlimited \
   --approver "$CML_LIVE_OPERATOR" \
   --confirmation "ENABLE SMALL LIVE TRADING"
 

@@ -60,12 +60,14 @@ def test_live_gate_accepts_permanent_unbounded_approval() -> None:
         max_order_notional=None,
         max_gross_notional=None,
         max_open_positions=None,
+        max_daily_loss=None,
     )
     approval = replace(
         _context().approval,
         risk_config_hash=config.config_hash,
         approved_notional_cap=None,
         approved_max_open_positions=None,
+        approved_max_daily_loss=None,
         expires_at=None,
     )
 

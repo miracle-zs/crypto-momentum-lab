@@ -720,7 +720,10 @@ class RiskConfigSnapshotRow(Base):
         Numeric(38, 18),
         nullable=True,
     )
-    max_daily_loss: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    max_daily_loss: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
     max_open_positions: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_market_state_age_seconds: Mapped[Decimal] = mapped_column(Numeric(18, 6))
     max_account_state_age_seconds: Mapped[Decimal] = mapped_column(Numeric(18, 6))
@@ -1030,7 +1033,10 @@ class LiveOperatorApprovalRow(Base):
         Integer,
         nullable=True,
     )
-    approved_max_daily_loss: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    approved_max_daily_loss: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
     approver_name: Mapped[str] = mapped_column(String(128))
     approval_text: Mapped[str] = mapped_column(String(128))
     expires_at: Mapped[datetime | None] = mapped_column(

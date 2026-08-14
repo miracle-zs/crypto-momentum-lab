@@ -72,7 +72,7 @@ class RiskConfigSnapshot:
     account_label: str
     max_order_notional: Decimal | None
     max_gross_notional: Decimal | None
-    max_daily_loss: Decimal
+    max_daily_loss: Decimal | None
     max_open_positions: int | None
     max_market_state_age_seconds: float
     max_account_state_age_seconds: float
@@ -85,7 +85,7 @@ class RiskConfigSnapshot:
             value = getattr(self, field_name)
             if value is not None and value <= 0:
                 raise ValueError(f"{field_name} must be positive")
-        if self.max_daily_loss <= 0:
+        if self.max_daily_loss is not None and self.max_daily_loss <= 0:
             raise ValueError("max_daily_loss must be positive")
         if self.max_open_positions is not None and self.max_open_positions < 0:
             raise ValueError("max_open_positions must be non-negative")

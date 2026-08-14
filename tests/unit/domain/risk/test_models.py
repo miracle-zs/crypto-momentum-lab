@@ -23,7 +23,7 @@ def test_risk_config_allows_unbounded_capacity_limits() -> None:
         account_label="primary",
         max_order_notional=None,
         max_gross_notional=None,
-        max_daily_loss=Decimal("25"),
+        max_daily_loss=None,
         max_open_positions=None,
         max_market_state_age_seconds=30,
         max_account_state_age_seconds=30,
@@ -34,6 +34,7 @@ def test_risk_config_allows_unbounded_capacity_limits() -> None:
     assert config.max_order_notional is None
     assert config.max_gross_notional is None
     assert config.max_open_positions is None
+    assert config.max_daily_loss is None
 
 
 def test_trading_lease_rejects_invalid_state() -> None:

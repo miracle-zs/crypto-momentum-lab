@@ -59,6 +59,7 @@ def test_unlimited_cli_values_map_to_absent_capacity_limits() -> None:
     assert main._parse_optional_integer_limit("unlimited", "--count") is None
     assert main._parse_optional_decimal_limit("100", "--cap") == Decimal("100")
     assert main._parse_optional_integer_limit("3", "--count") == 3
+    assert main._parse_optional_decimal_limit("unlimited", "--daily-loss") is None
 
 
 def test_approval_expiration_defaults_to_permanent() -> None:
