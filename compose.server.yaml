@@ -249,6 +249,8 @@ services:
       - "31536000"
       - --poll-interval-seconds
       - "1"
+      - --cooldown-seconds
+      - ${CML_LIVE_COOLDOWN_SECONDS:-0}
       - --state-stale-after-seconds
       - "30"
       - --checkpoint-every-states

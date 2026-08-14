@@ -334,7 +334,7 @@ def run_command(
     max_spread: Annotated[str, typer.Option("--max-spread")] = "5",
     cooldown_seconds: Annotated[
         int, typer.Option("--cooldown-seconds", min=0)
-    ] = 300,
+    ] = 0,
     hedge_mode: Annotated[
         bool,
         typer.Option("--hedge-mode/--one-way-mode"),

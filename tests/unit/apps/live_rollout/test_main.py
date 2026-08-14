@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from inspect import signature
 from types import SimpleNamespace
 
 from typer.testing import CliRunner
@@ -67,6 +68,10 @@ def test_approval_expiration_defaults_to_permanent() -> None:
 
     assert main._parse_approval_expiration(now, "never") is None
     assert main._parse_approval_expiration(now, "60") == now + timedelta(hours=1)
+
+
+def test_live_run_default_has_no_symbol_cooldown() -> None:
+    assert signature(main.run_command).parameters["cooldown_seconds"].default == 0
 
 
 async def test_live_warmup_ignores_outputs_and_stops_before_fresh_states() -> None:
