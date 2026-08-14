@@ -26,6 +26,7 @@ class StrategySide(StrEnum):
 
 class EntryType(StrEnum):
     MARKET = "market"
+    LIMIT = "limit"
 
 
 class RejectionReason(StrEnum):

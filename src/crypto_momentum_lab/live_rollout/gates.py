@@ -51,12 +51,32 @@ def evaluate_live_gate(context: LiveGateContext) -> LiveGateDecision:
         reasons.append("account_not_ready")
     if context.active_halts:
         reasons.append("active_risk_halt")
-    if any(not state.terminal for state in context.unresolved_order_states):
+    if any(
+        _order_state_is_uncertain(state)
+        for state in context.unresolved_order_states
+    ):
         reasons.append("unresolved_order_uncertainty")
     return LiveGateDecision(
         status=LiveGateStatus.BLOCKED if reasons else LiveGateStatus.APPROVED,
         reasons=tuple(reasons),
     )
+
+
+def _order_state_is_uncertain(state: ExchangeOrderState) -> bool:
+    """Known resting orders are safe; only ambiguous lifecycle states halt.
+
+    ACKNOWLEDGED/PARTIALLY_FILLED orders have a confirmed exchange state and
+    therefore must not trip the global unknown-outcome gate. Submission and
+    cancellation transitions remain fail-closed.
+    """
+    return state in {
+        ExchangeOrderState.INTENT_APPROVED,
+        ExchangeOrderState.CLAIMED,
+        ExchangeOrderState.PLANNED,
+        ExchangeOrderState.SUBMITTING,
+        ExchangeOrderState.CANCELING,
+        ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+    }
 
 
 def _check_lease(context: LiveGateContext, reasons: list[str]) -> None:

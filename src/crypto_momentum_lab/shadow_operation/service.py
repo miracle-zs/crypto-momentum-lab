@@ -20,6 +20,7 @@ from crypto_momentum_lab.domain.risk import (
 from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     StrategyDecision,
+    StrategySide,
 )
 from crypto_momentum_lab.execution_account.orders.quantization import (
     QuantizationRejection,
@@ -82,6 +83,7 @@ class ShadowOperationConfig:
     resize_tolerance: Decimal
     hedge_mode: bool = False
     warm_stale_states: bool = False
+    entry_long_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +175,18 @@ class ShadowOperationService:
                     context.now,
                 )
             for intent in decision.candidates:
+                if (
+                    self._config.entry_long_only
+                    and not intent.reduce_only
+                    and intent.side is not StrategySide.LONG
+                ):
+                    await self._save_metric(
+                        "entry_filter",
+                        state,
+                        "entry_long_only",
+                        context.now,
+                    )
+                    continue
                 evaluation = self._risk_gateway.evaluate(
                     intent,
                     RiskContext(

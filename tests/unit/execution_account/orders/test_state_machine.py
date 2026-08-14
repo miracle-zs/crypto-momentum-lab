@@ -10,6 +10,7 @@ from crypto_momentum_lab.domain.execution import (
     ShadowSuppressionEvent,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
+    ExchangeCancellationUnknownError,
     ExchangeOrderQueryUnknownError,
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
@@ -106,6 +107,39 @@ async def test_reconcile_order_promotes_acknowledged_order_to_filled() -> None:
     assert repository.events[-1].state is ExchangeOrderState.FILLED
 
 
+async def test_cancel_order_persists_cancel_and_returns_partial_fill_quantity() -> None:
+    exchange = CancelExchange(
+        _snapshot(
+            ExchangeOrderState.CANCELED,
+            executed_quantity=Decimal("0.0005"),
+        )
+    )
+    repository = FakeOrderRepository()
+
+    result = await _machine(exchange, repository).cancel_order(_plan())
+
+    assert exchange.calls == ["cancel"]
+    assert result.state is ExchangeOrderState.CANCELED
+    assert result.executed_quantity == Decimal("0.0005")
+    assert [event.state for event in repository.events] == [
+        ExchangeOrderState.CANCELING,
+        ExchangeOrderState.CANCELED,
+    ]
+
+
+async def test_cancel_timeout_is_fail_closed() -> None:
+    exchange = CancelExchange(ExchangeCancellationUnknownError("timed out"))
+    repository = FakeOrderRepository()
+
+    result = await _machine(exchange, repository).cancel_order(_plan())
+
+    assert result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+    assert (
+        repository.events[-1].state
+        is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+    )
+
+
 class FakeExchange:
     def __init__(
         self,
@@ -130,6 +164,26 @@ class FakeExchange:
     ) -> ExchangeOrderSnapshot | None:
         self.calls.append("query")
         return self.query_result
+
+
+class CancelExchange(FakeExchange):
+    def __init__(
+        self,
+        cancel_result: ExchangeOrderSnapshot | Exception,
+    ) -> None:
+        super().__init__(submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED))
+        self.cancel_result = cancel_result
+
+    async def cancel_order_by_client_id(
+        self,
+        symbol: str,
+        client_order_id: str,
+    ) -> ExchangeOrderSnapshot:
+        del symbol, client_order_id
+        self.calls.append("cancel")
+        if isinstance(self.cancel_result, Exception):
+            raise self.cancel_result
+        return self.cancel_result
 
 
 class QueryFailExchange(FakeExchange):
@@ -203,13 +257,20 @@ def _snapshot(
     state: ExchangeOrderState,
     *,
     fills: tuple[ExchangeOrderFill, ...] = (),
+    executed_quantity: Decimal | None = None,
 ) -> ExchangeOrderSnapshot:
     return ExchangeOrderSnapshot(
         client_order_id=_plan().client_order_id,
         exchange_order_id="exchange-1",
         state=state,
         observed_at=NOW,
-        executed_quantity=Decimal("0.003") if fills else Decimal("0"),
+        executed_quantity=(
+            executed_quantity
+            if executed_quantity is not None
+            else Decimal("0.003")
+            if fills
+            else Decimal("0")
+        ),
         average_price=Decimal("30000") if fills else Decimal("0"),
         fills=fills,
     )

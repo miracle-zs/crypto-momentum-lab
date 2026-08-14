@@ -2,9 +2,13 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from crypto_momentum_lab.domain.execution import FuturesPositionSide
-from crypto_momentum_lab.domain.strategy import StrategySide
+from crypto_momentum_lab.domain.execution import (
+    FuturesPositionSide,
+    OrderExecutionPlan,
+)
+from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 from crypto_momentum_lab.live_rollout.exits import (
+    LiveExitCancellationRequest,
     LiveExitConfig,
     LiveExitManager,
     ManagedLivePosition,
@@ -75,6 +79,87 @@ async def test_candle_exit_retries_until_a_close_order_is_observed() -> None:
     assert loader.calls == 2
 
 
+async def test_b1_adverse_candle_places_only_recovery_limit() -> None:
+    candle = ClosedCandle15m(
+        symbol="BTCUSDT",
+        candle_start=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        candle_end=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
+        open_price=Decimal("100"),
+        close_price=Decimal("99"),
+    )
+    manager = LiveExitManager(
+        config=_config(
+            PositionExitMode.CANDLE_15M,
+            candle_grace_bars=1,
+            candle_grace_profit_pct=Decimal("0.0088"),
+        ),
+        candle_loader=FakeCandleLoader((candle,)),
+    )
+    state = replace(
+        _state(),
+        bucket_start=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
+        bucket_end=datetime(2026, 7, 4, 0, 15, 15, tzinfo=UTC),
+        last_bid_price=Decimal("99"),
+        mark_price=Decimal("99"),
+        close_price=Decimal("99"),
+    )
+
+    requests = await manager.requests_for_state(state, (_long_position(),))
+
+    assert len(requests) == 1
+    recovery = requests[0]
+    assert recovery.candidate.entry_type is EntryType.LIMIT
+    assert recovery.candidate.limit_price == Decimal("100.8800")
+    assert recovery.candidate.reason.endswith("grace_limit_1")
+
+
+async def test_b1_grace_timeout_cancels_limit_before_market_close() -> None:
+    recovery_plan = OrderExecutionPlan(
+        intent_id="recovery-intent",
+        run_id="run-1",
+        client_order_id="recovery-client",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("1.25"),
+        price=Decimal("100.88"),
+        reduce_only=True,
+        created_at=datetime(2026, 7, 4, 0, 15, 15, tzinfo=UTC),
+        position_side=FuturesPositionSide.LONG,
+        quantized=True,
+    )
+    manager = LiveExitManager(
+        config=_config(
+            PositionExitMode.CANDLE_15M,
+            candle_grace_bars=1,
+            candle_grace_profit_pct=Decimal("0.0088"),
+        ),
+        candle_loader=FakeCandleLoader(()),
+    )
+    position = replace(
+        _long_position(),
+        recovery_order_client_id=recovery_plan.client_order_id,
+        recovery_order_created_at=recovery_plan.created_at,
+        recovery_order_plan=recovery_plan,
+    )
+    state = replace(
+        _state(),
+        bucket_start=datetime(2026, 7, 4, 0, 30, tzinfo=UTC),
+        bucket_end=datetime(2026, 7, 4, 0, 30, 15, tzinfo=UTC),
+        last_bid_price=Decimal("98"),
+        mark_price=Decimal("98"),
+        close_price=Decimal("98"),
+    )
+
+    requests = await manager.requests_for_state(state, (position,))
+
+    assert len(requests) == 1
+    assert isinstance(requests[0], LiveExitCancellationRequest)
+    assert requests[0].cancel_plan.client_order_id == "recovery-client"
+    assert requests[0].fallback_candidate.entry_type is EntryType.MARKET
+    assert requests[0].fallback_candidate.reason == "candle_15m_grace_timeout_1"
+
+
 class FakeCandleLoader:
     def __init__(self, candles: tuple[ClosedCandle15m, ...]) -> None:
         self._candles = candles
@@ -86,7 +171,12 @@ class FakeCandleLoader:
         return self._candles
 
 
-def _config(mode: PositionExitMode) -> LiveExitConfig:
+def _config(
+    mode: PositionExitMode,
+    *,
+    candle_grace_bars: int = 0,
+    candle_grace_profit_pct: Decimal = Decimal("0"),
+) -> LiveExitConfig:
     return LiveExitConfig(
         run_id="run-1",
         strategy_name="compression_breakout",
@@ -98,6 +188,8 @@ def _config(mode: PositionExitMode) -> LiveExitConfig:
             max_holding_seconds=86400,
             mode=mode,
         ),
+        candle_grace_bars=candle_grace_bars,
+        candle_grace_profit_pct=candle_grace_profit_pct,
     )
 
 

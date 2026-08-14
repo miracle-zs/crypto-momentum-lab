@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
-from crypto_momentum_lab.domain.execution import FuturesPositionSide
+from crypto_momentum_lab.domain.execution import FuturesPositionSide, OrderExecutionPlan
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
@@ -62,6 +62,9 @@ class ManagedLivePosition:
     entry_price: Decimal
     opened_at: datetime
     closing_order_filled: bool = False
+    recovery_order_client_id: str | None = None
+    recovery_order_created_at: datetime | None = None
+    recovery_order_plan: OrderExecutionPlan | None = None
 
     def __post_init__(self) -> None:
         if not self.symbol.strip():
@@ -80,6 +83,13 @@ class ManagedLivePosition:
             raise ValueError("entry_price must be positive")
         if self.opened_at.tzinfo is None or self.opened_at.utcoffset() is None:
             raise ValueError("opened_at must be timezone-aware")
+        for value, field_name in (
+            (self.recovery_order_created_at, "recovery_order_created_at"),
+        ):
+            if value is not None and (
+                value.tzinfo is None or value.utcoffset() is None
+            ):
+                raise ValueError(f"{field_name} must be timezone-aware")
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +100,8 @@ class LiveExitConfig:
     strategy_config_hash: str
     policy: PositionExitPolicy
     candidate_ttl_seconds: int = 60
+    candle_grace_bars: int = 0
+    candle_grace_profit_pct: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
         for value, field_name in (
@@ -102,12 +114,30 @@ class LiveExitConfig:
                 raise ValueError(f"{field_name} must not be empty")
         if self.candidate_ttl_seconds <= 0:
             raise ValueError("candidate_ttl_seconds must be positive")
+        if self.candle_grace_bars < 0:
+            raise ValueError("candle_grace_bars must not be negative")
+        if self.candle_grace_bars > 0 and self.candle_grace_profit_pct <= 0:
+            raise ValueError(
+                "candle_grace_profit_pct must be positive when grace is enabled"
+            )
+        if self.candle_grace_profit_pct < 0 or self.candle_grace_profit_pct >= 1:
+            raise ValueError("candle_grace_profit_pct must be in [0, 1)")
 
 
 @dataclass(frozen=True, slots=True)
 class LiveExitOrderRequest:
     candidate: OrderIntentCandidate
     quantity: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class LiveExitCancellationRequest:
+    cancel_plan: OrderExecutionPlan
+    fallback_candidate: OrderIntentCandidate
+    fallback_quantity: Decimal
+
+
+LiveExitRequest = LiveExitOrderRequest | LiveExitCancellationRequest
 
 
 class LiveExitManager:
@@ -132,14 +162,33 @@ class LiveExitManager:
         self,
         state: MarketState15s,
         positions: tuple[ManagedLivePosition, ...],
-    ) -> tuple[LiveExitOrderRequest, ...]:
-        requests: list[LiveExitOrderRequest] = []
+    ) -> tuple[LiveExitRequest, ...]:
+        requests: list[LiveExitRequest] = []
         for position in positions:
             if (
                 position.symbol != state.symbol
                 or position.closing_order_filled
                 or state.bucket_end <= position.opened_at
             ):
+                continue
+            if (
+                position.recovery_order_client_id is not None
+                and position.recovery_order_created_at is not None
+            ):
+                timeout_at = position.recovery_order_created_at + timedelta(
+                    minutes=15 * self._config.candle_grace_bars
+                )
+                if state.bucket_end >= timeout_at:
+                    requests.append(
+                        self._build_grace_timeout_request(
+                            state=state,
+                            position=position,
+                            reference_price=(
+                                _exit_mark_price(state, position.side)
+                                or position.entry_price
+                            ),
+                        )
+                    )
                 continue
             request = await self._request_for_position(state, position)
             if request is not None:
@@ -213,6 +262,17 @@ class LiveExitManager:
                 closed_candle=candle,
             )
             if reason is not None:
+                if (
+                    self._config.candle_grace_bars > 0
+                    and self._config.candle_grace_profit_pct > 0
+                ):
+                    return self._build_grace_limit_request(
+                        state=state,
+                        position=position,
+                        reason=reason,
+                        trigger_at=candle.candle_end,
+                        reference_price=mark_price,
+                    )
                 return self._build_request(
                     state=state,
                     position=position,
@@ -223,7 +283,7 @@ class LiveExitManager:
             self._checked_until[key] = candle.candle_end
         return None
 
-    def _build_request(
+    def _build_grace_limit_request(
         self,
         *,
         state: MarketState15s,
@@ -231,6 +291,54 @@ class LiveExitManager:
         reason: str,
         trigger_at: datetime,
         reference_price: Decimal,
+    ) -> LiveExitOrderRequest:
+        target_price = _recovery_price(
+            position,
+            self._config.candle_grace_profit_pct,
+        )
+        return self._build_order_request(
+            state=state,
+            position=position,
+            reason=f"{reason}_grace_limit_{self._config.candle_grace_bars}",
+            trigger_at=trigger_at,
+            reference_price=reference_price,
+            entry_type=EntryType.LIMIT,
+            limit_price=target_price,
+        )
+
+    def _build_grace_timeout_request(
+        self,
+        *,
+        state: MarketState15s,
+        position: ManagedLivePosition,
+        reference_price: Decimal,
+    ) -> LiveExitCancellationRequest:
+        recovery_plan = position.recovery_order_plan
+        if recovery_plan is None:
+            raise AssertionError("grace timeout requires a recovery order")
+        fallback = self._build_order_request(
+            state=state,
+            position=position,
+            reason=f"candle_15m_grace_timeout_{self._config.candle_grace_bars}",
+            trigger_at=state.bucket_end,
+            reference_price=reference_price,
+        )
+        return LiveExitCancellationRequest(
+            cancel_plan=recovery_plan,
+            fallback_candidate=fallback.candidate,
+            fallback_quantity=fallback.quantity,
+        )
+
+    def _build_order_request(
+        self,
+        *,
+        state: MarketState15s,
+        position: ManagedLivePosition,
+        reason: str,
+        trigger_at: datetime,
+        reference_price: Decimal,
+        entry_type: EntryType = EntryType.MARKET,
+        limit_price: Decimal | None = None,
     ) -> LiveExitOrderRequest:
         identity = (
             f"{self._config.run_id}:{position.symbol}:"
@@ -250,8 +358,8 @@ class LiveExitManager:
                 config_hash=self._config.strategy_config_hash,
                 symbol=position.symbol,
                 side=position.side,
-                entry_type=EntryType.MARKET,
-                limit_price=None,
+                entry_type=entry_type,
+                limit_price=limit_price,
                 desired_notional=position.quantity * reference_price,
                 reduce_only=True,
                 expires_at=created_at
@@ -265,9 +373,27 @@ class LiveExitManager:
                     "reference_price": str(reference_price),
                     "opened_at": position.opened_at.astimezone(UTC).isoformat(),
                     "trigger_at": trigger_at.astimezone(UTC).isoformat(),
+                    "exit_order_type": entry_type.value,
                 },
             ),
             quantity=position.quantity,
+        )
+
+    def _build_request(
+        self,
+        *,
+        state: MarketState15s,
+        position: ManagedLivePosition,
+        reason: str,
+        trigger_at: datetime,
+        reference_price: Decimal,
+    ) -> LiveExitOrderRequest:
+        return self._build_order_request(
+            state=state,
+            position=position,
+            reason=reason,
+            trigger_at=trigger_at,
+            reference_price=reference_price,
         )
 
 
@@ -277,6 +403,15 @@ def _gross_return(
 ) -> Decimal:
     price_return = (mark_price - position.entry_price) / position.entry_price
     return -price_return if position.side is StrategySide.SHORT else price_return
+
+
+def _recovery_price(
+    position: ManagedLivePosition,
+    profit_pct: Decimal,
+) -> Decimal:
+    if position.side is StrategySide.LONG:
+        return position.entry_price * (Decimal("1") + profit_pct)
+    return position.entry_price * (Decimal("1") - profit_pct)
 
 
 def _exit_mark_price(

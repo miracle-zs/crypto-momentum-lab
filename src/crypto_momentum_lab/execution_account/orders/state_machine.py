@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
@@ -56,6 +57,13 @@ class OrderExchangeClient(Protocol):
     ) -> ExchangeOrderSnapshot | None:
         pass
 
+    async def cancel_order_by_client_id(
+        self,
+        symbol: str,
+        client_order_id: str,
+    ) -> ExchangeOrderSnapshot:
+        pass
+
 
 class OrderStateRepository(Protocol):
     async def save_planned_order(self, plan: OrderExecutionPlan) -> None:
@@ -80,6 +88,8 @@ class OrderExecutionResult:
     state: ExchangeOrderState
     exchange_order_id: str | None
     suppressed: bool = False
+    executed_quantity: Decimal = Decimal("0")
+    average_price: Decimal = Decimal("0")
 
 
 class OrderExecutionStateMachine:
@@ -203,6 +213,48 @@ class OrderExecutionStateMachine:
             )
         return await self._apply_snapshot(plan, snapshot)
 
+    async def cancel_order(
+        self,
+        plan: OrderExecutionPlan,
+    ) -> OrderExecutionResult:
+        """Cancel a known resting order and persist the result.
+
+        Cancellation is a normal part of the B1 grace-timeout flow, so it is
+        intentionally separate from the operator-authorized emergency cancel
+        control exposed by the Binance client.
+        """
+        if not plan.quantized:
+            raise ValueError("order plan must be quantized before cancellation")
+        await self._append_event(plan, ExchangeOrderState.CANCELING)
+        try:
+            snapshot = await self._exchange.cancel_order_by_client_id(
+                plan.symbol,
+                plan.client_order_id,
+            )
+        except ExchangeCancellationUnknownError as exc:
+            await self._append_event(
+                plan,
+                ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                details={"reason": str(exc)},
+            )
+            return OrderExecutionResult(
+                plan.client_order_id,
+                ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                None,
+            )
+        except ExchangeOrderRejectedError as exc:
+            await self._append_event(
+                plan,
+                ExchangeOrderState.REJECTED,
+                details={"reason": str(exc)},
+            )
+            return OrderExecutionResult(
+                plan.client_order_id,
+                ExchangeOrderState.REJECTED,
+                None,
+            )
+        return await self._apply_snapshot(plan, snapshot)
+
     async def _apply_snapshot(
         self,
         plan: OrderExecutionPlan,
@@ -226,6 +278,8 @@ class OrderExecutionStateMachine:
             plan.client_order_id,
             snapshot.state,
             snapshot.exchange_order_id,
+            executed_quantity=snapshot.executed_quantity,
+            average_price=snapshot.average_price,
         )
 
     async def _append_event(

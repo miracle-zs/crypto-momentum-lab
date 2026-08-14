@@ -327,6 +327,46 @@ async def test_trade_client_uses_position_side_for_hedge_mode_close() -> None:
     assert "reduceOnly=" not in captured_body
 
 
+async def test_trade_client_cancels_one_known_order_without_operator_command() -> None:
+    captured_path = ""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_path
+        captured_path = request.url.path
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": "client-1",
+                "orderId": 12345,
+                "status": "CANCELED",
+                "executedQty": "0",
+                "avgPrice": "0",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        snapshot = await client.cancel_order_by_client_id("BTCUSDT", "client-1")
+    finally:
+        await client.aclose()
+
+    assert captured_path == "/fapi/v1/order"
+    assert snapshot.state is ExchangeOrderState.CANCELED
+
+
 async def test_trade_client_treats_server_error_as_unknown_submit_outcome() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(503, request=request, json={"msg": "unknown"})

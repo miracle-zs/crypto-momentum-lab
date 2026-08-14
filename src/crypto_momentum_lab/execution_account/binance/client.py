@@ -386,6 +386,52 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             ) from exc
         return self._order_snapshot(_require_mapping(payload))
 
+    async def cancel_order_by_client_id(
+        self,
+        symbol: str,
+        client_order_id: str,
+    ) -> ExchangeOrderSnapshot:
+        """Cancel one known order for normal executor lifecycle management."""
+        if not self._live_submit_enabled:
+            raise LiveSubmissionDisabledError(
+                "Binance trade client requires explicit live submit enablement"
+            )
+        try:
+            payload = await self._signed_delete(
+                "/fapi/v1/order",
+                {
+                    "symbol": symbol,
+                    "origClientOrderId": client_order_id,
+                },
+            )
+        except httpx.TimeoutException as exc:
+            raise ExchangeCancellationUnknownError(
+                "Binance cancel request timed out; order state must be reconciled"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise ExchangeCancellationUnknownError(
+                "Binance cancel request failed; order state must be reconciled"
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code >= 500:
+                raise ExchangeCancellationUnknownError(
+                    "Binance cancel request returned an unknown server outcome"
+                ) from exc
+            if _exchange_error_code(exc) in {-2011, -2013}:
+                try:
+                    existing = await self.query_order_by_client_id(
+                        symbol,
+                        client_order_id,
+                    )
+                except ExchangeOrderQueryUnknownError as query_error:
+                    raise ExchangeCancellationUnknownError(
+                        "Binance cancel result could not be reconciled"
+                    ) from query_error
+                if existing is not None:
+                    return existing
+            raise ExchangeOrderRejectedError(_exchange_error_message(exc)) from exc
+        return self._order_snapshot(_require_mapping(payload))
+
     async def cancel_order(
         self,
         *,

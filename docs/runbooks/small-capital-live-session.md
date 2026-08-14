@@ -119,10 +119,15 @@ $COMPOSE --profile live run --rm --no-deps live-strategy preflight \
 
 ## 5. Start Live
 
-Select `fixed` or `candle_15m` in `.env.live`. To mirror a fixed paper account,
-also copy that strategy's fixed TP, SL, and maximum holding duration. For the
-15-minute variant, the first adverse official closed candle exits the position;
-the maximum duration remains a final safety exit.
+The checked-in live Compose profile is wired for the B1 long-only variant:
+`orderflow_impulse`, Hedge Mode, one 15-minute grace candle, and a `0.88%`
+recovery LIMIT. On the first adverse official closed candle it places a
+reduce-only LIMIT at `entry * (1 + 0.0088)` for a long; if that order is still
+open at the next 15-minute close, the executor cancels it and market-closes the
+remaining quantity. No protective stop is placed after an entry fill.
+
+The live executor still accepts `fixed` or `candle_15m` for other local runs;
+set the corresponding `CML_LIVE_*` values before using a different profile.
 
 ```bash
 $COMPOSE --profile live up -d live-strategy

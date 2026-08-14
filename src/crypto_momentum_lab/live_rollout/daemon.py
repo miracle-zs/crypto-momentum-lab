@@ -5,7 +5,9 @@ from decimal import Decimal
 from typing import Protocol
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
-from crypto_momentum_lab.domain.execution import ExchangeOrderState
+from crypto_momentum_lab.domain.execution import (
+    ExchangeOrderState,
+)
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import (
     RiskConfigSnapshot,
@@ -26,9 +28,11 @@ from crypto_momentum_lab.execution_account.orders.quantization import (
     quantize_order_plan,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
+    OrderExecutionResult,
     OrderExecutionStateMachine,
 )
 from crypto_momentum_lab.live_rollout.exits import (
+    LiveExitCancellationRequest,
     LiveExitManager,
     ManagedLivePosition,
 )
@@ -37,6 +41,9 @@ from crypto_momentum_lab.live_rollout.limits import (
     FixedLiveLimits,
     LiveLimitContext,
     evaluate_fixed_live_limits,
+)
+from crypto_momentum_lab.persistence.postgres.order_repository import (
+    PersistedExchangeOrder,
 )
 from crypto_momentum_lab.risk.gateway import RiskContext, RiskGateway
 
@@ -69,6 +76,7 @@ class LiveDaemonConfig:
     resize_tolerance: Decimal
     checkpoint_every_states: int
     hedge_mode: bool = False
+    entry_long_only: bool = False
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -100,6 +108,7 @@ class LiveDaemonRuntimeContext:
     last_entry_at_by_symbol: dict[str, datetime]
     managed_positions: tuple[ManagedLivePosition, ...] = ()
     unmanaged_position_symbols: frozenset[str] = frozenset()
+    unresolved_orders: tuple[PersistedExchangeOrder, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +221,19 @@ class LiveStrategyDaemon:
                     f"unmanaged_live_positions:{symbols}",
                     final_state_at,
                 )
+            orphan_cancel_reason = await self._cancel_orphan_exit_orders(context)
+            if orphan_cancel_reason is not None:
+                await self._save_final_checkpoint(
+                    dirty=checkpoint_dirty,
+                    saved_at=last_checkpoint_saved_at,
+                )
+                return LiveDaemonResult(
+                    processed,
+                    approved,
+                    submitted,
+                    orphan_cancel_reason,
+                    final_state_at,
+                )
             exit_requests = (
                 ()
                 if self._exit_manager is None
@@ -225,97 +247,149 @@ class LiveStrategyDaemon:
             final_state_at = state.bucket_start
             checkpoint_dirty = True
             last_checkpoint_saved_at = context.now
-            execution_requests = tuple(
-                (request.candidate, request.quantity)
-                for request in exit_requests
-            ) + tuple((candidate, None) for candidate in decision.candidates)
-            for candidate, requested_quantity in execution_requests:
-                executable_candidate = candidate
-                if not candidate.reduce_only:
-                    if candidate.symbol in (
-                        context.open_position_symbols or frozenset()
+            for request in exit_requests:
+                if isinstance(request, LiveExitCancellationRequest):
+                    cancel_result = await self._state_machine.cancel_order(
+                        request.cancel_plan
+                    )
+                    if (
+                        cancel_result.state
+                        is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
                     ):
+                        await self._save_final_checkpoint(
+                            dirty=checkpoint_dirty,
+                            saved_at=last_checkpoint_saved_at,
+                        )
+                        return LiveDaemonResult(
+                            processed,
+                            approved,
+                            submitted,
+                            "unknown_cancel_pending_reconciliation",
+                            final_state_at,
+                        )
+                    if not cancel_result.state.terminal:
+                        await self._save_final_checkpoint(
+                            dirty=checkpoint_dirty,
+                            saved_at=last_checkpoint_saved_at,
+                        )
+                        return LiveDaemonResult(
+                            processed,
+                            approved,
+                            submitted,
+                            "cancel_not_confirmed",
+                            final_state_at,
+                        )
+                    if cancel_result.state is ExchangeOrderState.REJECTED:
+                        await self._save_final_checkpoint(
+                            dirty=checkpoint_dirty,
+                            saved_at=last_checkpoint_saved_at,
+                        )
+                        return LiveDaemonResult(
+                            processed,
+                            approved,
+                            submitted,
+                            "cancel_rejected",
+                            final_state_at,
+                        )
+                    remaining = max(
+                        Decimal("0"),
+                        request.cancel_plan.quantity
+                        - cancel_result.executed_quantity,
+                    )
+                    if remaining <= 0:
                         continue
-                    limit_decision = evaluate_fixed_live_limits(
-                        self._limits,
-                        LiveLimitContext(
-                            now=context.now,
-                            symbol=candidate.symbol,
-                            requested_notional=candidate.desired_notional,
-                            open_position_symbols=context.open_position_symbols,
-                            last_entry_at=context.last_entry_at_by_symbol.get(
-                                candidate.symbol
-                            ),
-                            realized_pnl=context.realized_pnl,
-                            unrealized_pnl=context.unrealized_pnl,
-                            gross_exposure=context.gross_exposure,
-                            spread=state.spread,
-                            min_notional=_min_notional(
-                                context.trading_rules.get(candidate.symbol)
-                            ),
-                            account_observed_at=context.account_observed_at,
-                            market_observed_at=state.bucket_end,
-                            has_unresolved_order=any(
-                                not item.terminal
-                                for item in context.unresolved_order_states
-                            ),
-                        ),
+                    result = await self._execute_candidate(
+                        request.fallback_candidate,
+                        requested_quantity=min(request.fallback_quantity, remaining),
+                        state=state,
+                        context=context,
                     )
-                    if not limit_decision.allowed:
-                        continue
-                    executable_candidate = replace(
-                        candidate,
-                        desired_notional=limit_decision.capped_notional,
-                    )
-                evaluation = self._risk_gateway.evaluate(
-                    executable_candidate,
-                    RiskContext(
-                        now=context.now,
-                        active_lease=context.active_lease,
-                        latest_market_state=state,
-                        account_state=context.account_state,
-                        open_position_symbols=context.open_position_symbols
-                        or frozenset(),
-                        active_halts=context.active_halts,
-                        risk_config=context.risk_config,
-                        strategy_state=context.strategy_state,
-                    ),
-                )
-                if evaluation.decision is not RiskDecision.APPROVED:
+                    if result is not None:
+                        approved += 1
+                        submitted += int(not result.suppressed)
+                        if (
+                            result.state
+                            is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+                        ):
+                            await self._save_final_checkpoint(
+                                dirty=checkpoint_dirty,
+                                saved_at=last_checkpoint_saved_at,
+                            )
+                            return LiveDaemonResult(
+                                processed,
+                                approved,
+                                submitted,
+                                "unknown_order_pending_reconciliation",
+                                final_state_at,
+                            )
+                        if result.state is ExchangeOrderState.REJECTED:
+                            await self._save_final_checkpoint(
+                                dirty=checkpoint_dirty,
+                                saved_at=last_checkpoint_saved_at,
+                            )
+                            return LiveDaemonResult(
+                                processed,
+                                approved,
+                                submitted,
+                                "grace_timeout_market_close_rejected",
+                                final_state_at,
+                            )
                     continue
-                rules = context.trading_rules.get(candidate.symbol)
-                reference_price = state.mark_price or state.close_price
-                if rules is None or reference_price is None:
-                    continue
-                plan = quantize_order_plan(
-                    executable_candidate,
-                    rules,
-                    reference_price=reference_price,
-                    resize_tolerance=self._config.resize_tolerance,
-                    hedge_mode=self._config.hedge_mode,
-                    requested_quantity=requested_quantity,
+                result = await self._execute_candidate(
+                    request.candidate,
+                    requested_quantity=request.quantity,
+                    state=state,
+                    context=context,
                 )
-                if isinstance(plan, QuantizationRejection):
+                if result is not None:
+                    approved += 1
+                    submitted += int(not result.suppressed)
+                    if (
+                        result.state
+                        is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+                    ):
+                        await self._save_final_checkpoint(
+                            dirty=checkpoint_dirty,
+                            saved_at=last_checkpoint_saved_at,
+                        )
+                        return LiveDaemonResult(
+                            processed,
+                            approved,
+                            submitted,
+                            "unknown_order_pending_reconciliation",
+                            final_state_at,
+                        )
+            for candidate in decision.candidates:
+                if (
+                    self._config.entry_long_only
+                    and not candidate.reduce_only
+                    and getattr(candidate.side, "value", candidate.side) != "long"
+                ):
                     continue
-                await self._repository.save_approved_intent(
-                    executable_candidate,
-                    evaluation,
+                result = await self._execute_candidate(
+                    candidate,
+                    requested_quantity=None,
+                    state=state,
+                    context=context,
                 )
-                approved += 1
-                result = await self._state_machine.execute_approved_intent(plan)
-                submitted += int(not result.suppressed)
-                if result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
-                    await self._save_final_checkpoint(
-                        dirty=checkpoint_dirty,
-                        saved_at=last_checkpoint_saved_at,
-                    )
-                    return LiveDaemonResult(
-                        processed,
-                        approved,
-                        submitted,
-                        "unknown_order_pending_reconciliation",
-                        final_state_at,
-                    )
+                if result is not None:
+                    approved += 1
+                    submitted += int(not result.suppressed)
+                    if (
+                        result.state
+                        is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+                    ):
+                        await self._save_final_checkpoint(
+                            dirty=checkpoint_dirty,
+                            saved_at=last_checkpoint_saved_at,
+                        )
+                        return LiveDaemonResult(
+                            processed,
+                            approved,
+                            submitted,
+                            "unknown_order_pending_reconciliation",
+                            final_state_at,
+                        )
             if processed % self._config.checkpoint_every_states == 0:
                 await self._repository.save_checkpoint(
                     self._config.run_id,
@@ -335,6 +409,99 @@ class LiveStrategyDaemon:
             None,
             final_state_at,
         )
+
+    async def _execute_candidate(
+        self,
+        candidate: OrderIntentCandidate,
+        *,
+        requested_quantity: Decimal | None,
+        state: MarketState15s,
+        context: LiveDaemonRuntimeContext,
+    ) -> OrderExecutionResult | None:
+        executable_candidate = candidate
+        if not candidate.reduce_only:
+            if candidate.symbol in (context.open_position_symbols or frozenset()):
+                return None
+            limit_decision = evaluate_fixed_live_limits(
+                self._limits,
+                LiveLimitContext(
+                    now=context.now,
+                    symbol=candidate.symbol,
+                    requested_notional=candidate.desired_notional,
+                    open_position_symbols=context.open_position_symbols,
+                    last_entry_at=context.last_entry_at_by_symbol.get(
+                        candidate.symbol
+                    ),
+                    realized_pnl=context.realized_pnl,
+                    unrealized_pnl=context.unrealized_pnl,
+                    gross_exposure=context.gross_exposure,
+                    spread=state.spread,
+                    min_notional=_min_notional(context.trading_rules.get(candidate.symbol)),
+                    account_observed_at=context.account_observed_at,
+                    market_observed_at=state.bucket_end,
+                    has_unresolved_order=any(
+                        not item.terminal
+                        for item in context.unresolved_order_states
+                    ),
+                ),
+            )
+            if not limit_decision.allowed:
+                return None
+            executable_candidate = replace(
+                candidate,
+                desired_notional=limit_decision.capped_notional,
+            )
+        evaluation = self._risk_gateway.evaluate(
+            executable_candidate,
+            RiskContext(
+                now=context.now,
+                active_lease=context.active_lease,
+                latest_market_state=state,
+                account_state=context.account_state,
+                open_position_symbols=context.open_position_symbols or frozenset(),
+                active_halts=context.active_halts,
+                risk_config=context.risk_config,
+                strategy_state=context.strategy_state,
+            ),
+        )
+        if evaluation.decision is not RiskDecision.APPROVED:
+            return None
+        rules = context.trading_rules.get(candidate.symbol)
+        reference_price = state.mark_price or state.close_price
+        if rules is None or reference_price is None:
+            return None
+        plan = quantize_order_plan(
+            executable_candidate,
+            rules,
+            reference_price=reference_price,
+            resize_tolerance=self._config.resize_tolerance,
+            hedge_mode=self._config.hedge_mode,
+            requested_quantity=requested_quantity,
+        )
+        if isinstance(plan, QuantizationRejection):
+            return None
+        await self._repository.save_approved_intent(executable_candidate, evaluation)
+        return await self._state_machine.execute_approved_intent(plan)
+
+    async def _cancel_orphan_exit_orders(
+        self,
+        context: LiveDaemonRuntimeContext,
+    ) -> str | None:
+        open_symbols = context.open_position_symbols or frozenset()
+        for item in context.unresolved_orders:
+            plan = getattr(item, "plan", None)
+            if plan is None or not plan.reduce_only:
+                continue
+            if plan.order_type != "LIMIT":
+                continue
+            if plan.symbol in open_symbols:
+                continue
+            result = await self._state_machine.cancel_order(plan)
+            if result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
+                return "unknown_orphan_cancel_pending_reconciliation"
+            if not result.state.terminal:
+                return "orphan_cancel_not_confirmed"
+        return None
 
     async def _save_final_checkpoint(
         self,

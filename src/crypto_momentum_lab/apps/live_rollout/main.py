@@ -113,7 +113,7 @@ def live_rollout_app() -> None:
 
 @app.command("strategy-config-hash")
 def strategy_config_hash_command(
-    strategy: Annotated[str, typer.Option("--strategy")] = "compression_breakout",
+    strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
 ) -> None:
     typer.echo(_live_strategy_config_hash(strategy))
 
@@ -122,7 +122,7 @@ def strategy_config_hash_command(
 def prepare_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
-    strategy: Annotated[str, typer.Option("--strategy")] = "compression_breakout",
+    strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
     lease_owner: Annotated[str, typer.Option("--lease-owner")] = "live-worker",
     lease_ttl_seconds: Annotated[
         int,
@@ -175,7 +175,7 @@ def prepare_command(
 def approve_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
-    strategy: Annotated[str, typer.Option("--strategy")] = "compression_breakout",
+    strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
     strategy_config_hash: Annotated[str, typer.Option("--strategy-config-hash")] = "",
     risk_config_hash: Annotated[str, typer.Option("--risk-config-hash")] = "",
     git_commit_hash: Annotated[str, typer.Option("--git-commit-hash")] = "",
@@ -216,7 +216,7 @@ def approve_command(
 def preflight_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
-    strategy: Annotated[str, typer.Option("--strategy")] = "compression_breakout",
+    strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
 ) -> None:
     payload = asyncio.run(
         _preflight_summary(_database_url(database_url), account_label, strategy)
@@ -286,7 +286,7 @@ def submit_plan_command(
 def run_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
-    strategy: Annotated[str, typer.Option("--strategy")] = "compression_breakout",
+    strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
     market_environment: Annotated[
         str,
         typer.Option("--market-environment"),
@@ -320,7 +320,7 @@ def run_command(
     exit_mode: Annotated[
         PositionExitMode,
         typer.Option("--exit-mode"),
-    ] = PositionExitMode.FIXED,
+    ] = PositionExitMode.CANDLE_15M,
     take_profit_pct: Annotated[
         str,
         typer.Option("--take-profit-pct"),
@@ -329,6 +329,18 @@ def run_command(
         str,
         typer.Option("--stop-loss-pct"),
     ] = "0.01",
+    entry_long_only: Annotated[
+        bool,
+        typer.Option("--entry-long-only/--entry-all-sides"),
+    ] = True,
+    candle_grace_bars: Annotated[
+        int,
+        typer.Option("--candle-grace-bars", min=0),
+    ] = 1,
+    candle_grace_profit_pct: Annotated[
+        str,
+        typer.Option("--candle-grace-profit-pct"),
+    ] = "0.0088",
     max_holding_seconds: Annotated[
         int,
         typer.Option("--max-holding-seconds", min=1),
@@ -376,6 +388,9 @@ def run_command(
             take_profit_pct=Decimal(take_profit_pct),
             stop_loss_pct=Decimal(stop_loss_pct),
             max_holding_seconds=max_holding_seconds,
+            entry_long_only=entry_long_only,
+            candle_grace_bars=candle_grace_bars,
+            candle_grace_profit_pct=Decimal(candle_grace_profit_pct),
             base_url=base_url,
             api_key=api_key,
             api_secret=api_secret,
@@ -587,6 +602,9 @@ async def _run_live_daemon(
     take_profit_pct: Decimal,
     stop_loss_pct: Decimal,
     max_holding_seconds: int,
+    entry_long_only: bool,
+    candle_grace_bars: int,
+    candle_grace_profit_pct: Decimal,
     base_url: str,
     api_key: str,
     api_secret: str,
@@ -776,6 +794,7 @@ async def _run_live_daemon(
                 resize_tolerance=Decimal("0.10"),
                 checkpoint_every_states=checkpoint_every_states,
                 hedge_mode=hedge_mode,
+                entry_long_only=entry_long_only,
             ),
             exit_manager=LiveExitManager(
                 config=LiveExitConfig(
@@ -789,6 +808,8 @@ async def _run_live_daemon(
                         max_holding_seconds=max_holding_seconds,
                         mode=exit_mode,
                     ),
+                    candle_grace_bars=candle_grace_bars,
+                    candle_grace_profit_pct=candle_grace_profit_pct,
                 ),
                 candle_loader=candle_loader,
             ),

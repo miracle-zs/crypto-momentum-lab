@@ -109,6 +109,10 @@ def run_command(
         bool,
         typer.Option("--hedge-mode/--one-way-mode"),
     ] = True,
+    entry_long_only: Annotated[
+        bool,
+        typer.Option("--entry-long-only/--entry-all-sides"),
+    ] = True,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     del checkpoint_every_states
@@ -124,6 +128,7 @@ def run_command(
             state_stale_after_seconds=state_stale_after_seconds,
             lease_owner=require_lease_owner,
             hedge_mode=hedge_mode,
+            entry_long_only=entry_long_only,
         )
     )
     payload = asdict(result)
@@ -164,6 +169,7 @@ async def _run_from_database(
     state_stale_after_seconds: float,
     lease_owner: str,
     hedge_mode: bool,
+    entry_long_only: bool,
 ) -> ShadowOperationResult:
     now = datetime.now(tz=UTC)
     engine = create_async_database_engine(database_url)
@@ -235,6 +241,7 @@ async def _run_from_database(
                 max_market_state_age_seconds=state_stale_after_seconds,
                 resize_tolerance=Decimal("0.10"),
                 hedge_mode=hedge_mode,
+                entry_long_only=entry_long_only,
                 warm_stale_states=True,
             ),
         )
@@ -290,6 +297,13 @@ class _WriteRejectingExchange:
         client_order_id: str,
     ) -> ExchangeOrderSnapshot | None:
         raise AssertionError("Binance order query reached in shadow mode")
+
+    async def cancel_order_by_client_id(
+        self,
+        symbol: str,
+        client_order_id: str,
+    ) -> ExchangeOrderSnapshot:
+        raise AssertionError("Binance order cancellation reached in shadow mode")
 
 
 async def _latest_account_state(

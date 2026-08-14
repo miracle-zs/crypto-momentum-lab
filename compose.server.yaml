@@ -141,14 +141,14 @@ services:
       - --sixth-candle-grace-bars
       - "1"
       - --sixth-candle-grace-profit-pct
-      - "0.0058"
+      - "0.0088"
       - --seventh-run-id
       - paper-account-13-orderflow-b8-long-candle15m-v1
       - --seventh-entry-long-only
       - --seventh-candle-grace-bars
       - "8"
       - --seventh-candle-grace-profit-pct
-      - "0.0058"
+      - "0.0088"
       - --candidate-notional
       - "100"
       - --paper-initial-balance
@@ -230,7 +230,7 @@ services:
       - --account-label
       - ${CML_LIVE_ACCOUNT_LABEL:-primary}
       - --strategy
-      - ${CML_LIVE_STRATEGY:-compression_breakout}
+      - ${CML_LIVE_STRATEGY:-orderflow_impulse}
       - --market-environment
       - research
       - --session-id
@@ -244,7 +244,7 @@ services:
       - --git-commit-hash
       - ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
       - --migration-revision
-      - ${CML_LIVE_MIGRATION_REVISION:-20260804_0013}
+      - ${CML_LIVE_MIGRATION_REVISION:-20260813_0014}
       - --max-runtime-seconds
       - "31536000"
       - --poll-interval-seconds
@@ -254,6 +254,7 @@ services:
       - --checkpoint-every-states
       - "100"
       - --hedge-mode
+      - --entry-long-only
       - --entry-leverage
       - ${CML_LIVE_ENTRY_LEVERAGE:-1}
       - --exit-mode
@@ -262,6 +263,10 @@ services:
       - ${CML_LIVE_TAKE_PROFIT_PCT:-0.02}
       - --stop-loss-pct
       - ${CML_LIVE_STOP_LOSS_PCT:-0.01}
+      - --candle-grace-bars
+      - ${CML_LIVE_CANDLE_GRACE_BARS:-1}
+      - --candle-grace-profit-pct
+      - ${CML_LIVE_CANDLE_GRACE_PROFIT_PCT:-0.0088}
       - --max-holding-seconds
       - ${CML_LIVE_MAX_HOLDING_SECONDS:-86400}
       - --i-understand-this-places-real-orders

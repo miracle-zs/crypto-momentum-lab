@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
+from crypto_momentum_lab.domain.execution import ExchangeOrderState
 from crypto_momentum_lab.domain.live_rollout import (
     LIVE_APPROVAL_CONFIRMATION,
     LiveGateStatus,
@@ -51,6 +52,29 @@ def test_live_gate_accepts_complete_preflight_context() -> None:
 
     assert decision.status is LiveGateStatus.APPROVED
     assert decision.reasons == ()
+
+
+def test_live_gate_allows_confirmed_resting_exit_order() -> None:
+    decision = evaluate_live_gate(
+        replace(
+            _context(),
+            unresolved_order_states=(ExchangeOrderState.ACKNOWLEDGED,),
+        )
+    )
+
+    assert decision.status is LiveGateStatus.APPROVED
+
+
+def test_live_gate_blocks_cancel_in_flight() -> None:
+    decision = evaluate_live_gate(
+        replace(
+            _context(),
+            unresolved_order_states=(ExchangeOrderState.CANCELING,),
+        )
+    )
+
+    assert decision.status is LiveGateStatus.BLOCKED
+    assert "unresolved_order_uncertainty" in decision.reasons
 
 
 def _context() -> LiveGateContext:

@@ -65,6 +65,12 @@ def quantize_order_plan(
         return QuantizationRejection("missing_desired_notional", {})
     if requested_quantity is not None and requested_quantity <= 0:
         raise ValueError("requested_quantity must be positive")
+    if intent.entry_type is EntryType.LIMIT and intent.limit_price is None:
+        return QuantizationRejection("missing_limit_price", {})
+    if intent.entry_type is EntryType.LIMIT and intent.limit_price is not None and (
+        intent.limit_price <= 0
+    ):
+        return QuantizationRejection("invalid_limit_price", {})
 
     price = _quantized_price(intent, rules, reference_price)
     sizing_price = reference_price if price is None else price

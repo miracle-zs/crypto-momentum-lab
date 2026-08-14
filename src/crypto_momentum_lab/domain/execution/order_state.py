@@ -11,6 +11,7 @@ class ExchangeOrderState(StrEnum):
     CLAIMED = "claimed"
     PLANNED = "planned"
     SUBMITTING = "submitting"
+    CANCELING = "canceling"
     SUBMITTED = "submitted"
     ACKNOWLEDGED = "acknowledged"
     PARTIALLY_FILLED = "partially_filled"

@@ -36,6 +36,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     LiveSessionTransitionRow,
 )
 from crypto_momentum_lab.persistence.postgres.order_repository import (
+    PersistedExchangeOrder,
     PostgresOrderRepository,
 )
 from crypto_momentum_lab.persistence.postgres.risk_repository import (
@@ -131,7 +132,7 @@ class PostgresLiveContextProvider:
             gross,
             managed_positions,
             unmanaged_symbols,
-        ) = await self._account_position_view()
+        ) = await self._account_position_view(unresolved)
         realized = await self._daily_realized_pnl(now)
         rules = await _load_trading_rules(self._sessions, {state.symbol})
         last_entries = await self._last_entry_times()
@@ -172,10 +173,12 @@ class PostgresLiveContextProvider:
             last_entry_at_by_symbol=last_entries,
             managed_positions=managed_positions,
             unmanaged_position_symbols=unmanaged_symbols,
+            unresolved_orders=unresolved,
         )
 
     async def _account_position_view(
         self,
+        unresolved: tuple[PersistedExchangeOrder, ...],
     ) -> tuple[
         datetime | None,
         frozenset[str],
@@ -243,7 +246,11 @@ class PostgresLiveContextProvider:
                 ).all()
             )
         active = [row for row in rows if row.position_amt != 0]
-        managed, unmanaged = _classify_live_positions(active, orders)
+        managed, unmanaged = _classify_live_positions(
+            active,
+            orders,
+            unresolved,
+        )
         return (
             process_at,
             frozenset(row.symbol for row in active),
@@ -309,6 +316,7 @@ class PostgresLiveContextProvider:
 def _classify_live_positions(
     positions: list[AccountPositionSnapshotRow],
     orders: list[ExchangeOrderRow],
+    unresolved: tuple[PersistedExchangeOrder, ...] = (),
 ) -> tuple[tuple[ManagedLivePosition, ...], frozenset[str]]:
     filled_orders = [
         row for row in orders if row.state == ExchangeOrderState.FILLED.value
@@ -343,6 +351,30 @@ def _classify_live_positions(
             and order.updated_at >= opening.updated_at
             for order in filled_orders
         )
+        active_market_exit = any(
+            item.plan.symbol == position.symbol
+            and item.plan.reduce_only
+            and item.plan.position_side is position_side
+            and item.plan.order_type == "MARKET"
+            and not item.state.terminal
+            for item in unresolved
+        )
+        active_exit_orders = [
+            item
+            for item in unresolved
+            if item.plan.symbol == position.symbol
+            and item.plan.reduce_only
+            and item.plan.position_side is position_side
+            and not item.state.terminal
+        ]
+        recovery_order = next(
+            (
+                item
+                for item in active_exit_orders
+                if item.plan.order_type == "LIMIT"
+            ),
+            None,
+        )
         managed.append(
             ManagedLivePosition(
                 symbol=position.symbol,
@@ -351,7 +383,20 @@ def _classify_live_positions(
                 quantity=abs(position.position_amt),
                 entry_price=position.entry_price,
                 opened_at=opening.updated_at,
-                closing_order_filled=closing_filled,
+                closing_order_filled=closing_filled or active_market_exit,
+                recovery_order_client_id=(
+                    None
+                    if recovery_order is None
+                    else recovery_order.plan.client_order_id
+                ),
+                recovery_order_created_at=(
+                    None
+                    if recovery_order is None
+                    else recovery_order.plan.created_at
+                ),
+                recovery_order_plan=(
+                    None if recovery_order is None else recovery_order.plan
+                ),
             )
         )
     return (
