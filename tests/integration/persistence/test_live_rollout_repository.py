@@ -71,3 +71,33 @@ async def test_save_and_load_matching_live_approval(
         now=NOW,
     )
     assert loaded == approval
+
+
+async def test_save_and_load_permanent_unbounded_live_approval(
+    live_repository: PostgresLiveRolloutRepository,
+) -> None:
+    approval = LiveOperatorApproval(
+        approval_id="approval-permanent",
+        account_label="primary",
+        strategy_name="orderflow_impulse",
+        strategy_config_hash="a" * 64,
+        risk_config_hash="b" * 64,
+        git_commit_hash="abc123",
+        database_migration_revision="20260814_0015",
+        approved_notional_cap=None,
+        approved_max_open_positions=None,
+        approved_max_daily_loss=Decimal("25"),
+        approver_name="operator",
+        approval_text=LIVE_APPROVAL_CONFIRMATION,
+        expires_at=None,
+        created_at=NOW,
+    )
+
+    await live_repository.save_approval(approval)
+
+    loaded = await live_repository.load_active_approval(
+        account_label="primary",
+        strategy_name="orderflow_impulse",
+        now=NOW + timedelta(days=3650),
+    )
+    assert loaded == approval

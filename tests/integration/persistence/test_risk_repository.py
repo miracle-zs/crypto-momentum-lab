@@ -1,11 +1,13 @@
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.domain.risk import (
+    RiskConfigSnapshot,
     RiskDecision,
     RiskEvaluation,
     RiskHalt,
@@ -94,6 +96,33 @@ async def test_save_risk_evaluation_preserves_rejection_reason(
     assert stored.details["desired_notional"] == "125.50"
     assert rejection is not None
     assert rejection.reason == "max_order_notional_exceeded"
+
+
+async def test_save_unbounded_risk_config(
+    risk_repository: tuple[PostgresRiskRepository, async_sessionmaker],
+) -> None:
+    repository, factory = risk_repository
+    config = RiskConfigSnapshot(
+        environment="live",
+        account_label="primary",
+        max_order_notional=None,
+        max_gross_notional=None,
+        max_daily_loss=Decimal("25"),
+        max_open_positions=None,
+        max_market_state_age_seconds=30,
+        max_account_state_age_seconds=30,
+        allow_reduce_only_while_draining=True,
+        created_at=NOW,
+    )
+
+    await repository.save_risk_config(config)
+
+    async with factory() as session:
+        stored = await session.get(RiskConfigSnapshotRow, config.config_hash)
+    assert stored is not None
+    assert stored.max_order_notional is None
+    assert stored.max_gross_notional is None
+    assert stored.max_open_positions is None
 
 
 async def test_load_active_halt_returns_account_halt(

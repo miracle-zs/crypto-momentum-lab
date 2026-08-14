@@ -60,10 +60,10 @@ $COMPOSE --profile live run --rm --no-deps live-strategy prepare \
   --strategy "$CML_LIVE_STRATEGY" \
   --lease-owner "$CML_LIVE_LEASE_OWNER" \
   --lease-ttl-seconds 1800 \
-  --max-order-notional 100 \
-  --max-gross-notional 300 \
+  --max-order-notional unlimited \
+  --max-gross-notional unlimited \
   --max-daily-loss 25 \
-  --max-open-positions 3 \
+  --max-open-positions unlimited \
   --confirmation "PREPARE LIVE RISK GATES"
 ```
 
@@ -107,9 +107,8 @@ $COMPOSE --profile live run --rm --no-deps live-strategy approve \
   --risk-config-hash "$RISK_CONFIG_HASH" \
   --git-commit-hash "$CML_CODE_COMMIT" \
   --migration-revision "$CML_LIVE_MIGRATION_REVISION" \
-  --notional-cap 100 --max-open-positions 3 --max-daily-loss 25 \
+  --notional-cap unlimited --max-open-positions unlimited --max-daily-loss 25 \
   --approver "$CML_LIVE_OPERATOR" \
-  --expires-in-minutes 1440 \
   --confirmation "ENABLE SMALL LIVE TRADING"
 
 $COMPOSE --profile live run --rm --no-deps live-strategy preflight \
@@ -125,6 +124,12 @@ recovery LIMIT. On the first adverse official closed candle it places a
 reduce-only LIMIT at `entry * (1 + 0.0088)` for a long; if that order is still
 open at the next 15-minute close, the executor cancels it and market-closes the
 remaining quantity. No protective stop is placed after an entry fill.
+
+Omitting `--expires-in-minutes` records a non-expiring approval. It remains
+bound to the exact strategy config, risk config, Git commit, and migration
+revision, so any of those changes require a new approval. `unlimited` removes
+the execution-layer order, gross-notional, and open-position-count caps; the
+B1 strategy still emits a fixed 100 USDT desired notional for each entry.
 
 The live executor still accepts `fixed` or `candle_15m` for other local runs;
 set the corresponding `CML_LIVE_*` values before using a different profile.

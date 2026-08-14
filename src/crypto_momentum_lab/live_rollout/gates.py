@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.execution import ExchangeOrderState
@@ -104,7 +105,10 @@ def _check_approval(context: LiveGateContext, reasons: list[str]) -> None:
             approval.approval_text == LIVE_APPROVAL_CONFIRMATION,
             "approval_text_mismatch",
         ),
-        (approval.expires_at > context.now, "approval_expired"),
+        (
+            approval.expires_at is None or approval.expires_at > context.now,
+            "approval_expired",
+        ),
         (approval.account_label == context.account_label, "approval_account_mismatch"),
         (approval.strategy_name == context.strategy_name, "approval_strategy_mismatch"),
         (
@@ -125,13 +129,17 @@ def _check_approval(context: LiveGateContext, reasons: list[str]) -> None:
             "approval_migration_mismatch",
         ),
         (
-            context.risk_config.max_order_notional
-            <= approval.approved_notional_cap,
+            _decimal_limit_is_covered(
+                context.risk_config.max_order_notional,
+                approval.approved_notional_cap,
+            ),
             "risk_notional_exceeds_approval",
         ),
         (
-            context.risk_config.max_open_positions
-            <= approval.approved_max_open_positions,
+            _integer_limit_is_covered(
+                context.risk_config.max_open_positions,
+                approval.approved_max_open_positions,
+            ),
             "risk_positions_exceed_approval",
         ),
         (
@@ -141,3 +149,21 @@ def _check_approval(context: LiveGateContext, reasons: list[str]) -> None:
         ),
     )
     reasons.extend(reason for passed, reason in checks if not passed)
+
+
+def _decimal_limit_is_covered(
+    required: Decimal | None,
+    approved: Decimal | None,
+) -> bool:
+    if approved is None:
+        return True
+    return required is not None and required <= approved
+
+
+def _integer_limit_is_covered(
+    required: int | None,
+    approved: int | None,
+) -> bool:
+    if approved is None:
+        return True
+    return required is not None and required <= approved

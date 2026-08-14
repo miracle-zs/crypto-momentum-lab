@@ -54,6 +54,48 @@ def test_live_gate_accepts_complete_preflight_context() -> None:
     assert decision.reasons == ()
 
 
+def test_live_gate_accepts_permanent_unbounded_approval() -> None:
+    config = replace(
+        _risk_config(),
+        max_order_notional=None,
+        max_gross_notional=None,
+        max_open_positions=None,
+    )
+    approval = replace(
+        _context().approval,
+        risk_config_hash=config.config_hash,
+        approved_notional_cap=None,
+        approved_max_open_positions=None,
+        expires_at=None,
+    )
+
+    decision = evaluate_live_gate(
+        replace(_context(), risk_config=config, approval=approval)
+    )
+
+    assert decision.status is LiveGateStatus.APPROVED
+    assert decision.reasons == ()
+
+
+def test_live_gate_rejects_finite_approval_for_unbounded_risk_config() -> None:
+    config = replace(
+        _risk_config(),
+        max_order_notional=None,
+        max_open_positions=None,
+    )
+    approval = replace(
+        _context().approval,
+        risk_config_hash=config.config_hash,
+    )
+
+    decision = evaluate_live_gate(
+        replace(_context(), risk_config=config, approval=approval)
+    )
+
+    assert "risk_notional_exceeds_approval" in decision.reasons
+    assert "risk_positions_exceed_approval" in decision.reasons
+
+
 def test_live_gate_allows_confirmed_resting_exit_order() -> None:
     decision = evaluate_live_gate(
         replace(

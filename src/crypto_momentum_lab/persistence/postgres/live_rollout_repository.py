@@ -2,7 +2,7 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -43,7 +43,10 @@ class PostgresLiveRolloutRepository:
                 .where(
                     LiveOperatorApprovalRow.account_label == account_label,
                     LiveOperatorApprovalRow.strategy_name == strategy_name,
-                    LiveOperatorApprovalRow.expires_at > now,
+                    or_(
+                        LiveOperatorApprovalRow.expires_at.is_(None),
+                        LiveOperatorApprovalRow.expires_at > now,
+                    ),
                 )
                 .order_by(LiveOperatorApprovalRow.created_at.desc())
                 .limit(1)

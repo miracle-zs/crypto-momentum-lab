@@ -5,10 +5,10 @@ from decimal import Decimal
 
 @dataclass(frozen=True, slots=True)
 class FixedLiveLimits:
-    notional_cap: Decimal
-    max_open_positions: int
+    notional_cap: Decimal | None
+    max_open_positions: int | None
     max_daily_loss: Decimal
-    max_gross_exposure: Decimal
+    max_gross_exposure: Decimal | None
     max_spread: Decimal
     cooldown_seconds: int
     max_account_age_seconds: float
@@ -58,7 +58,8 @@ def evaluate_fixed_live_limits(
     if context.has_unresolved_order:
         return LiveLimitDecision(False, "unresolved_order_uncertainty", None)
     if (
-        len(context.open_position_symbols) >= limits.max_open_positions
+        limits.max_open_positions is not None
+        and len(context.open_position_symbols) >= limits.max_open_positions
         and context.symbol not in context.open_position_symbols
     ):
         return LiveLimitDecision(False, "max_open_positions_exceeded", None)
@@ -69,7 +70,10 @@ def evaluate_fixed_live_limits(
     daily_pnl = context.realized_pnl + context.unrealized_pnl
     if daily_pnl <= -limits.max_daily_loss:
         return LiveLimitDecision(False, "max_daily_loss_reached", None)
-    if context.gross_exposure >= limits.max_gross_exposure:
+    if (
+        limits.max_gross_exposure is not None
+        and context.gross_exposure >= limits.max_gross_exposure
+    ):
         return LiveLimitDecision(False, "max_gross_exposure_reached", None)
     if context.spread > limits.max_spread:
         return LiveLimitDecision(False, "spread_too_wide", None)
@@ -77,9 +81,12 @@ def evaluate_fixed_live_limits(
         return LiveLimitDecision(False, "stale_account_state", None)
     if _age(context.now, context.market_observed_at) > limits.max_market_age_seconds:
         return LiveLimitDecision(False, "stale_market_state", None)
-    capped = min(context.requested_notional, limits.notional_cap)
-    remaining_exposure = limits.max_gross_exposure - context.gross_exposure
-    capped = min(capped, remaining_exposure)
+    capped = context.requested_notional
+    if limits.notional_cap is not None:
+        capped = min(capped, limits.notional_cap)
+    if limits.max_gross_exposure is not None:
+        remaining_exposure = limits.max_gross_exposure - context.gross_exposure
+        capped = min(capped, remaining_exposure)
     if capped < context.min_notional:
         return LiveLimitDecision(False, "below_min_notional", None)
     return LiveLimitDecision(True, "approved", capped)

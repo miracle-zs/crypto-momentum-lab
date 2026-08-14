@@ -70,10 +70,10 @@ class TradingLease:
 class RiskConfigSnapshot:
     environment: str
     account_label: str
-    max_order_notional: Decimal
-    max_gross_notional: Decimal
+    max_order_notional: Decimal | None
+    max_gross_notional: Decimal | None
     max_daily_loss: Decimal
-    max_open_positions: int
+    max_open_positions: int | None
     max_market_state_age_seconds: float
     max_account_state_age_seconds: float
     allow_reduce_only_while_draining: bool
@@ -81,14 +81,13 @@ class RiskConfigSnapshot:
 
     def __post_init__(self) -> None:
         _require_common(self.environment, self.account_label)
-        for field_name in (
-            "max_order_notional",
-            "max_gross_notional",
-            "max_daily_loss",
-        ):
-            if getattr(self, field_name) <= 0:
+        for field_name in ("max_order_notional", "max_gross_notional"):
+            value = getattr(self, field_name)
+            if value is not None and value <= 0:
                 raise ValueError(f"{field_name} must be positive")
-        if self.max_open_positions < 0:
+        if self.max_daily_loss <= 0:
+            raise ValueError("max_daily_loss must be positive")
+        if self.max_open_positions is not None and self.max_open_positions < 0:
             raise ValueError("max_open_positions must be non-negative")
         if self.max_market_state_age_seconds <= 0:
             raise ValueError("max_market_state_age_seconds must be positive")

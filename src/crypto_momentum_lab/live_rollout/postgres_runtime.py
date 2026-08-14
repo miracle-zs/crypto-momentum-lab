@@ -501,10 +501,38 @@ def live_limits_from_approval(
     *,
     approval: LiveOperatorApproval,
     risk_config: RiskConfigSnapshot,
-) -> tuple[Decimal, int, Decimal, Decimal]:
+) -> tuple[Decimal | None, int | None, Decimal, Decimal | None]:
     return (
-        min(approval.approved_notional_cap, risk_config.max_order_notional),
-        min(approval.approved_max_open_positions, risk_config.max_open_positions),
+        _minimum_optional_decimal_limit(
+            approval.approved_notional_cap,
+            risk_config.max_order_notional,
+        ),
+        _minimum_optional_integer_limit(
+            approval.approved_max_open_positions,
+            risk_config.max_open_positions,
+        ),
         min(approval.approved_max_daily_loss, risk_config.max_daily_loss),
         risk_config.max_gross_notional,
     )
+
+
+def _minimum_optional_decimal_limit(
+    left: Decimal | None,
+    right: Decimal | None,
+) -> Decimal | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return min(left, right)
+
+
+def _minimum_optional_integer_limit(
+    left: int | None,
+    right: int | None,
+) -> int | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return min(left, right)

@@ -712,10 +712,16 @@ class RiskConfigSnapshotRow(Base):
     config_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     environment: Mapped[str] = mapped_column(String(32))
     account_label: Mapped[str] = mapped_column(String(64))
-    max_order_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
-    max_gross_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    max_order_notional: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
+    max_gross_notional: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
     max_daily_loss: Mapped[Decimal] = mapped_column(Numeric(38, 18))
-    max_open_positions: Mapped[int] = mapped_column(Integer)
+    max_open_positions: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_market_state_age_seconds: Mapped[Decimal] = mapped_column(Numeric(18, 6))
     max_account_state_age_seconds: Mapped[Decimal] = mapped_column(Numeric(18, 6))
     allow_reduce_only_while_draining: Mapped[bool] = mapped_column(Boolean)
@@ -1016,12 +1022,21 @@ class LiveOperatorApprovalRow(Base):
     risk_config_hash: Mapped[str] = mapped_column(String(64))
     git_commit_hash: Mapped[str] = mapped_column(String(64))
     database_migration_revision: Mapped[str] = mapped_column(String(32))
-    approved_notional_cap: Mapped[Decimal] = mapped_column(Numeric(38, 18))
-    approved_max_open_positions: Mapped[int] = mapped_column(Integer)
+    approved_notional_cap: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
+    approved_max_open_positions: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
     approved_max_daily_loss: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     approver_name: Mapped[str] = mapped_column(String(128))
     approval_text: Mapped[str] = mapped_column(String(128))
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (

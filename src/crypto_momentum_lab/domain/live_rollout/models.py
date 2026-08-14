@@ -32,27 +32,34 @@ class LiveOperatorApproval:
     risk_config_hash: str
     git_commit_hash: str
     database_migration_revision: str
-    approved_notional_cap: Decimal
-    approved_max_open_positions: int
+    approved_notional_cap: Decimal | None
+    approved_max_open_positions: int | None
     approved_max_daily_loss: Decimal
     approver_name: str
     approval_text: str
-    expires_at: datetime
+    expires_at: datetime | None
     created_at: datetime
 
     def __post_init__(self) -> None:
         if self.approval_text != LIVE_APPROVAL_CONFIRMATION:
             raise ValueError("approval_text does not match confirmation phrase")
-        if self.approved_notional_cap <= 0:
+        if (
+            self.approved_notional_cap is not None
+            and self.approved_notional_cap <= 0
+        ):
             raise ValueError("approved_notional_cap must be positive")
-        if self.approved_max_open_positions <= 0:
+        if (
+            self.approved_max_open_positions is not None
+            and self.approved_max_open_positions <= 0
+        ):
             raise ValueError("approved_max_open_positions must be positive")
         if self.approved_max_daily_loss <= 0:
             raise ValueError("approved_max_daily_loss must be positive")
         _require_aware(self.created_at, "created_at")
-        _require_aware(self.expires_at, "expires_at")
-        if self.expires_at <= self.created_at:
-            raise ValueError("approval expiration must be after creation")
+        if self.expires_at is not None:
+            _require_aware(self.expires_at, "expires_at")
+            if self.expires_at <= self.created_at:
+                raise ValueError("approval expiration must be after creation")
 
 
 @dataclass(frozen=True, slots=True)

@@ -17,6 +17,25 @@ def test_risk_config_hash_is_deterministic() -> None:
     assert first.config_hash == second.config_hash
 
 
+def test_risk_config_allows_unbounded_capacity_limits() -> None:
+    config = RiskConfigSnapshot(
+        environment="live",
+        account_label="primary",
+        max_order_notional=None,
+        max_gross_notional=None,
+        max_daily_loss=Decimal("25"),
+        max_open_positions=None,
+        max_market_state_age_seconds=30,
+        max_account_state_age_seconds=30,
+        allow_reduce_only_while_draining=True,
+        created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    assert config.max_order_notional is None
+    assert config.max_gross_notional is None
+    assert config.max_open_positions is None
+
+
 def test_trading_lease_rejects_invalid_state() -> None:
     with pytest.raises(ValueError, match="state must be a TradingLeaseState"):
         TradingLease(
@@ -45,7 +64,7 @@ def test_trading_lease_requires_expiration_after_acquisition() -> None:
         )
 
 
-def _risk_config(max_order_notional: Decimal) -> RiskConfigSnapshot:
+def _risk_config(max_order_notional: Decimal | None) -> RiskConfigSnapshot:
     return RiskConfigSnapshot(
         environment="live",
         account_label="primary",

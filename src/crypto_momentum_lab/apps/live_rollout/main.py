@@ -3,7 +3,7 @@ import json
 import os
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
@@ -142,9 +142,9 @@ def prepare_command(
         typer.Option("--max-daily-loss"),
     ] = "25",
     max_open_positions: Annotated[
-        int,
-        typer.Option("--max-open-positions", min=1),
-    ] = 3,
+        str,
+        typer.Option("--max-open-positions"),
+    ] = "3",
     state_stale_after_seconds: Annotated[
         float,
         typer.Option("--state-stale-after-seconds", min=1),
@@ -162,10 +162,19 @@ def prepare_command(
             strategy_name=strategy,
             lease_owner=lease_owner,
             lease_ttl_seconds=lease_ttl_seconds,
-            max_order_notional=Decimal(max_order_notional),
-            max_gross_notional=Decimal(max_gross_notional),
+            max_order_notional=_parse_optional_decimal_limit(
+                max_order_notional,
+                "--max-order-notional",
+            ),
+            max_gross_notional=_parse_optional_decimal_limit(
+                max_gross_notional,
+                "--max-gross-notional",
+            ),
             max_daily_loss=Decimal(max_daily_loss),
-            max_open_positions=max_open_positions,
+            max_open_positions=_parse_optional_integer_limit(
+                max_open_positions,
+                "--max-open-positions",
+            ),
             state_stale_after_seconds=state_stale_after_seconds,
         )
     )
@@ -183,14 +192,14 @@ def approve_command(
     migration_revision: Annotated[str, typer.Option("--migration-revision")] = "",
     notional_cap: Annotated[str, typer.Option("--notional-cap")] = "25",
     max_open_positions: Annotated[
-        int, typer.Option("--max-open-positions", min=1)
-    ] = 1,
+        str, typer.Option("--max-open-positions")
+    ] = "1",
     max_daily_loss: Annotated[str, typer.Option("--max-daily-loss")] = "10",
     approver: Annotated[str, typer.Option("--approver")] = "",
     confirmation: Annotated[str, typer.Option("--confirmation")] = "",
     expires_in_minutes: Annotated[
-        int, typer.Option("--expires-in-minutes", min=1)
-    ] = 60,
+        str, typer.Option("--expires-in-minutes")
+    ] = "never",
 ) -> None:
     now = datetime.now(tz=UTC)
     approval = LiveOperatorApproval(
@@ -201,12 +210,18 @@ def approve_command(
         risk_config_hash=risk_config_hash,
         git_commit_hash=git_commit_hash,
         database_migration_revision=migration_revision,
-        approved_notional_cap=Decimal(notional_cap),
-        approved_max_open_positions=max_open_positions,
+        approved_notional_cap=_parse_optional_decimal_limit(
+            notional_cap,
+            "--notional-cap",
+        ),
+        approved_max_open_positions=_parse_optional_integer_limit(
+            max_open_positions,
+            "--max-open-positions",
+        ),
         approved_max_daily_loss=Decimal(max_daily_loss),
         approver_name=approver,
         approval_text=confirmation,
-        expires_at=now + timedelta(minutes=expires_in_minutes),
+        expires_at=_parse_approval_expiration(now, expires_in_minutes),
         created_at=now,
     )
     asyncio.run(_save_approval(_database_url(database_url), approval))
@@ -516,9 +531,15 @@ async def _run_live_plan(
         desired_notional = await _approved_intent_notional(factory, plan.intent_id)
         if desired_notional is None:
             raise RuntimeError("live plan has no persisted approved intent notional")
-        if desired_notional > risk_config.max_order_notional:
+        if (
+            risk_config.max_order_notional is not None
+            and desired_notional > risk_config.max_order_notional
+        ):
             raise RuntimeError("live plan exceeds current risk notional cap")
-        if approval is None or desired_notional > approval.approved_notional_cap:
+        if approval is None or (
+            approval.approved_notional_cap is not None
+            and desired_notional > approval.approved_notional_cap
+        ):
             raise RuntimeError("live plan exceeds operator-approved notional cap")
         client = BinanceUsdMTradeClient(
             api_key=api_key,
@@ -1104,10 +1125,10 @@ async def _prepare_live_risk_gates(
     strategy_name: str,
     lease_owner: str,
     lease_ttl_seconds: int,
-    max_order_notional: Decimal,
-    max_gross_notional: Decimal,
+    max_order_notional: Decimal | None,
+    max_gross_notional: Decimal | None,
     max_daily_loss: Decimal,
-    max_open_positions: int,
+    max_open_positions: int | None,
     state_stale_after_seconds: float,
 ) -> dict[str, str]:
     now = datetime.now(tz=UTC)
@@ -1162,6 +1183,69 @@ async def _save_approval(
         await repository.save_approval(approval)
     finally:
         await engine.dispose()
+
+
+_UNLIMITED_VALUES = frozenset({"none", "unlimited"})
+
+
+def _parse_optional_decimal_limit(
+    raw_value: str,
+    option_name: str,
+) -> Decimal | None:
+    normalized = raw_value.strip().lower()
+    if normalized in _UNLIMITED_VALUES:
+        return None
+    try:
+        value = Decimal(normalized)
+    except InvalidOperation as error:
+        raise typer.BadParameter(
+            f"{option_name} must be positive or 'unlimited'"
+        ) from error
+    if not value.is_finite() or value <= 0:
+        raise typer.BadParameter(
+            f"{option_name} must be positive or 'unlimited'"
+        )
+    return value
+
+
+def _parse_optional_integer_limit(
+    raw_value: str,
+    option_name: str,
+) -> int | None:
+    normalized = raw_value.strip().lower()
+    if normalized in _UNLIMITED_VALUES:
+        return None
+    try:
+        value = int(normalized)
+    except ValueError as error:
+        raise typer.BadParameter(
+            f"{option_name} must be a positive integer or 'unlimited'"
+        ) from error
+    if value <= 0:
+        raise typer.BadParameter(
+            f"{option_name} must be a positive integer or 'unlimited'"
+        )
+    return value
+
+
+def _parse_approval_expiration(
+    now: datetime,
+    expires_in_minutes: str,
+) -> datetime | None:
+    normalized = expires_in_minutes.strip().lower()
+    if normalized in {"never", *_UNLIMITED_VALUES}:
+        return None
+    try:
+        minutes = int(normalized)
+    except ValueError as error:
+        raise typer.BadParameter(
+            "--expires-in-minutes must be a positive integer or 'never'"
+        ) from error
+    if minutes <= 0:
+        raise typer.BadParameter(
+            "--expires-in-minutes must be a positive integer or 'never'"
+        )
+    return now + timedelta(minutes=minutes)
 
 
 async def _preflight_summary(

@@ -36,6 +36,25 @@ def test_unresolved_order_halts_new_entries() -> None:
     assert decision.reason == "unresolved_order_uncertainty"
 
 
+def test_unbounded_capacity_limits_keep_strategy_requested_notional() -> None:
+    decision = evaluate_fixed_live_limits(
+        replace(
+            _limits(),
+            notional_cap=None,
+            max_open_positions=None,
+            max_gross_exposure=None,
+        ),
+        replace(
+            _context(),
+            open_position_symbols=frozenset({"ETHUSDT", "SOLUSDT"}),
+            gross_exposure=Decimal("10000"),
+        ),
+    )
+
+    assert decision.allowed is True
+    assert decision.capped_notional == Decimal("100")
+
+
 def _limits() -> FixedLiveLimits:
     return FixedLiveLimits(
         notional_cap=Decimal("25"),

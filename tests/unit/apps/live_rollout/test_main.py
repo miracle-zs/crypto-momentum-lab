@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 
 from typer.testing import CliRunner
@@ -51,6 +52,20 @@ def test_strategy_config_hash_is_stable_for_selected_strategy() -> None:
     assert first.exit_code == 0
     assert first.stdout == second.stdout
     assert len(first.stdout.strip()) == 64
+
+
+def test_unlimited_cli_values_map_to_absent_capacity_limits() -> None:
+    assert main._parse_optional_decimal_limit("unlimited", "--cap") is None
+    assert main._parse_optional_integer_limit("unlimited", "--count") is None
+    assert main._parse_optional_decimal_limit("100", "--cap") == Decimal("100")
+    assert main._parse_optional_integer_limit("3", "--count") == 3
+
+
+def test_approval_expiration_defaults_to_permanent() -> None:
+    now = datetime(2026, 8, 14, 0, 0, tzinfo=UTC)
+
+    assert main._parse_approval_expiration(now, "never") is None
+    assert main._parse_approval_expiration(now, "60") == now + timedelta(hours=1)
 
 
 async def test_live_warmup_ignores_outputs_and_stops_before_fresh_states() -> None:

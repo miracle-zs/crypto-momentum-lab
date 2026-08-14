@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -49,6 +50,26 @@ def test_gateway_rejects_account_not_ready() -> None:
 
 def test_gateway_approves_small_entry_when_all_limits_pass() -> None:
     evaluation = RiskGateway().evaluate(_intent(), _context())
+
+    assert evaluation.decision is RiskDecision.APPROVED
+    assert evaluation.reason == "approved"
+
+
+def test_gateway_approves_entry_with_unbounded_capacity_limits() -> None:
+    context = replace(
+        _context(),
+        open_position_symbols=frozenset({"ETHUSDT", "SOLUSDT"}),
+        risk_config=replace(
+            _risk_config(max_order_notional=None),
+            max_gross_notional=None,
+            max_open_positions=None,
+        ),
+    )
+
+    evaluation = RiskGateway().evaluate(
+        _intent(desired_notional=Decimal("100")),
+        context,
+    )
 
     assert evaluation.decision is RiskDecision.APPROVED
     assert evaluation.reason == "approved"

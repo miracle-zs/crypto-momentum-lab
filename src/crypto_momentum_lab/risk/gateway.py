@@ -111,7 +111,10 @@ class RiskGateway:
                 RiskDecision.APPROVED,
                 "reduce_only",
             )
-        if desired_notional > context.risk_config.max_order_notional:
+        if (
+            context.risk_config.max_order_notional is not None
+            and desired_notional > context.risk_config.max_order_notional
+        ):
             return _evaluation(
                 intent,
                 context,
@@ -119,7 +122,9 @@ class RiskGateway:
                 "max_order_notional_exceeded",
             )
         if (
-            len(context.open_position_symbols) >= context.risk_config.max_open_positions
+            context.risk_config.max_open_positions is not None
+            and len(context.open_position_symbols)
+            >= context.risk_config.max_open_positions
             and intent.symbol not in context.open_position_symbols
         ):
             return _evaluation(
