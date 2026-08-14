@@ -289,7 +289,7 @@ services:
       timeout: 10s
       retries: 6
       start_period: 2m
-    mem_limit: 512m
+    mem_limit: 1g
 
   dashboard:
     <<: *app
