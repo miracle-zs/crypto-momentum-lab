@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Annotated
 
 import typer
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
@@ -358,11 +358,27 @@ async def _load_trading_rules(
     symbols: set[str] | None,
 ) -> dict[str, SymbolTradingRules]:
     async with factory() as session:
-        statement = select(ContractMetadataRow).order_by(
-            ContractMetadataRow.effective_at.desc()
-        )
+        latest_query = select(
+            ContractMetadataRow.symbol,
+            func.max(ContractMetadataRow.effective_at).label("effective_at"),
+        ).group_by(ContractMetadataRow.symbol)
         if symbols is not None:
-            statement = statement.where(ContractMetadataRow.symbol.in_(symbols))
+            latest_query = latest_query.where(
+                ContractMetadataRow.symbol.in_(symbols)
+            )
+        latest_effective_at = latest_query.subquery()
+        statement = (
+            select(ContractMetadataRow)
+            .join(
+                latest_effective_at,
+                and_(
+                    ContractMetadataRow.symbol == latest_effective_at.c.symbol,
+                    ContractMetadataRow.effective_at
+                    == latest_effective_at.c.effective_at,
+                ),
+            )
+            .order_by(ContractMetadataRow.symbol)
+        )
         rows = (await session.scalars(statement)).all()
     rules: dict[str, SymbolTradingRules] = {}
     for row in rows:
