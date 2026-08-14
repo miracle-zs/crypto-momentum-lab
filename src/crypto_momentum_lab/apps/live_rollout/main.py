@@ -102,7 +102,7 @@ from crypto_momentum_lab.strategy_runner.registry import (
 
 app = typer.Typer(no_args_is_help=True)
 _PREPARE_CONFIRMATION = "PREPARE LIVE RISK GATES"
-_LIVE_MIN_WARMUP_SECONDS = 900
+_LIVE_MIN_WARMUP_SECONDS = 60
 _LIVE_WARMUP_STATE_LIMIT = 100_000
 _LIVE_WARMUP_BATCH_SIZE = 1_000
 
@@ -995,7 +995,7 @@ async def _warm_live_strategy(
 
 
 def _live_warmup_seconds(strategy: LiveRuntimeStrategy) -> int:
-    """Return a bounded history window sufficient for strategy buffers."""
+    """Return the minimum history window sufficient for strategy buffers."""
     required_data = getattr(strategy, "required_data", None)
     warmup_buckets = 0
     if callable(required_data):
