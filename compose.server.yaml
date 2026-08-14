@@ -140,11 +140,15 @@ services:
       - --sixth-entry-long-only
       - --sixth-candle-grace-bars
       - "1"
+      - --sixth-candle-grace-profit-pct
+      - "0.0058"
       - --seventh-run-id
       - paper-account-13-orderflow-b8-long-candle15m-v1
       - --seventh-entry-long-only
       - --seventh-candle-grace-bars
       - "8"
+      - --seventh-candle-grace-profit-pct
+      - "0.0058"
       - --candidate-notional
       - "100"
       - --paper-initial-balance

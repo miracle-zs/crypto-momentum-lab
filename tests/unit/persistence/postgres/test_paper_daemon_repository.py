@@ -133,6 +133,7 @@ def test_legacy_unknown_commit_run_can_upgrade_new_execution_flags() -> None:
                 "candle_minimum_holding_buckets": 0,
                 "candle_confirmation_count": 1,
                 "candle_grace_bars": 0,
+                "candle_grace_profit_pct": "0",
             },
         },
     }
@@ -202,6 +203,7 @@ def test_known_commit_paper_run_can_upgrade_candle_exit_fields() -> None:
                 "candle_minimum_holding_buckets": 0,
                 "candle_confirmation_count": 1,
                 "candle_grace_bars": 0,
+                "candle_grace_profit_pct": "0",
             },
         },
     }

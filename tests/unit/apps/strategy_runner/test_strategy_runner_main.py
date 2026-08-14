@@ -631,11 +631,15 @@ def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
             "--sixth-entry-long-only",
             "--sixth-candle-grace-bars",
             "1",
+            "--sixth-candle-grace-profit-pct",
+            "0.0058",
             "--seventh-run-id",
             "b8-run",
             "--seventh-entry-long-only",
             "--seventh-candle-grace-bars",
             "8",
+            "--seventh-candle-grace-profit-pct",
+            "0.0058",
             "--max-states",
             "3",
         ],
@@ -673,9 +677,15 @@ def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
     )
     assert accounts[5].config.run_id == "b1-run"
     assert accounts[5].config.portfolio.candle_grace_bars == 1
+    assert accounts[5].config.portfolio.candle_grace_profit_pct == Decimal(
+        "0.0058"
+    )
     assert accounts[5].config.entry_filter.allow_short is False
     assert accounts[6].config.run_id == "b8-run"
     assert accounts[6].config.portfolio.candle_grace_bars == 8
+    assert accounts[6].config.portfolio.candle_grace_profit_pct == Decimal(
+        "0.0058"
+    )
     assert accounts[6].config.entry_filter.allow_short is False
     assert "Paper live pair completed: strategy=orderflow_impulse" in result.stdout
 

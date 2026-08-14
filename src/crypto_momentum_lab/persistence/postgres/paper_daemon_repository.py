@@ -58,6 +58,7 @@ _NEW_EXECUTION_FIELDS = {
         "candle_minimum_holding_buckets",
         "candle_confirmation_count",
         "candle_grace_bars",
+        "candle_grace_profit_pct",
     ),
 }
 

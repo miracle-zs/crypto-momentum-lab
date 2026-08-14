@@ -71,6 +71,16 @@ def test_candle_exit_label_includes_entry_filter_variants() -> None:
     ) == "15M 收线退出 · 仅多头 · 主动不平衡 ≤ 71.13%"
 
 
+def test_candle_exit_label_includes_grace_recovery_threshold() -> None:
+    assert _paper_exit_label(
+        "candle_15m",
+        {
+            "candle_grace_bars": 8,
+            "candle_grace_profit_pct": "0.0058",
+        },
+    ) == "反向后宽限 8 根 15M · 回收 +0.58%"
+
+
 def _snapshot(
     snapshot_id: str,
     observed_at: datetime,

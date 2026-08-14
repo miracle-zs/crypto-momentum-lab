@@ -1113,6 +1113,10 @@ def _paper_exit_label(
         portfolio_config.get("candle_grace_bars"),
         default=0,
     )
+    grace_profit_pct = _config_decimal(
+        portfolio_config.get("candle_grace_profit_pct"),
+        default=Decimal("0"),
+    )
     minimum_buckets = _config_int(
         portfolio_config.get("candle_minimum_holding_buckets"),
         default=0,
@@ -1120,6 +1124,9 @@ def _paper_exit_label(
     label = "15M 收线退出"
     if grace_bars > 0:
         label = f"反向后宽限 {grace_bars} 根 15M"
+        if grace_profit_pct > 0:
+            percentage = (grace_profit_pct * 100).normalize()
+            label += f" · 回收 +{percentage:f}%"
     elif confirmation_count > 1:
         label = f"{confirmation_count} 根反向 15M 收线"
     elif minimum_buckets > 0:
@@ -1162,6 +1169,15 @@ def _config_int(value: object, *, default: int) -> int:
             return int(value)
         return default
     except (TypeError, ValueError):
+        return default
+
+
+def _config_decimal(value: object, *, default: Decimal) -> Decimal:
+    try:
+        if isinstance(value, Decimal | int | float | str):
+            return Decimal(str(value))
+        return default
+    except (ArithmeticError, TypeError, ValueError):
         return default
 
 

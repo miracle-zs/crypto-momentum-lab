@@ -40,6 +40,7 @@ class PaperExitConfig:
     candle_minimum_holding_buckets: int = 0
     candle_confirmation_count: int = 1
     candle_grace_bars: int = 0
+    candle_grace_profit_pct: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
         if not isinstance(self.exit_mode, PaperExitMode):
@@ -62,6 +63,10 @@ class PaperExitConfig:
             raise ValueError("candle_confirmation_count must be positive")
         if self.candle_grace_bars < 0:
             raise ValueError("candle_grace_bars must not be negative")
+        if not Decimal("0") <= self.candle_grace_profit_pct < Decimal("1"):
+            raise ValueError(
+                "candle_grace_profit_pct must be in the range [0, 1)"
+            )
 
 
 @dataclass(slots=True)
@@ -359,10 +364,11 @@ def _apply_candle_grace_exit(
     """Apply the profitable-close or grace path after the first adverse candle.
 
     A zero grace value keeps the original B0 behavior.  For B1/B8, an adverse
-    candle only arms an entry-price limit when neither the official candle
-    close nor the current executable mark can realize a net profit.  A quote
-    touch closes at the executable mark; if the configured number of
-    subsequent candles elapses first, the position is closed at that mark.
+    candle only arms a recovery limit when neither the official candle close
+    nor the current executable mark can realize a net profit.  A quote touch
+    closes at the executable mark once the configured recovery threshold is
+    reached; if the configured number of subsequent candles elapses first,
+    the position is closed at that mark.
     """
 
     started_at = position.grace_exit_started_at
@@ -403,7 +409,11 @@ def _apply_candle_grace_exit(
             taker_fee_rate=taker_fee_rate,
         )
 
-    if _entry_limit_touched(position.side, mark_price, position.entry_price):
+    recovery_limit = _grace_recovery_limit_price(
+        position=position,
+        profit_pct=config.candle_grace_profit_pct,
+    )
+    if _entry_limit_touched(position.side, mark_price, recovery_limit):
         return _close_at_price(
             position=position,
             closed_at=state.bucket_start,
@@ -499,11 +509,24 @@ def _is_adverse_candle(
 def _entry_limit_touched(
     side: StrategySide,
     mark_price: Decimal,
-    entry_price: Decimal,
+    limit_price: Decimal,
 ) -> bool:
     if side is StrategySide.LONG:
-        return mark_price >= entry_price
-    return mark_price <= entry_price
+        return mark_price >= limit_price
+    return mark_price <= limit_price
+
+
+def _grace_recovery_limit_price(
+    *,
+    position: PaperPosition,
+    profit_pct: Decimal,
+) -> Decimal:
+    multiplier = (
+        Decimal("1") + profit_pct
+        if position.side is StrategySide.LONG
+        else Decimal("1") - profit_pct
+    )
+    return position.entry_price * multiplier
 
 
 def _realized_pnl_at_price(

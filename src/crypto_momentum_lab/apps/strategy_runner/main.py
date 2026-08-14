@@ -611,6 +611,13 @@ def paper_live_daemon_command(
             help="After the first adverse 15m candle, wait this many bars.",
         ),
     ] = 0,
+    candle_grace_profit_pct: Annotated[
+        str,
+        typer.Option(
+            "--candle-grace-profit-pct",
+            help="Recovery limit as a price move from entry, e.g. 0.0058.",
+        ),
+    ] = "0",
     entry_long_only: Annotated[
         bool,
         typer.Option(
@@ -744,6 +751,7 @@ def paper_live_daemon_command(
                     max_holding_buckets=max_holding_buckets,
                     require_executable_quote=require_market_quote,
                     candle_grace_bars=candle_grace_bars,
+                    candle_grace_profit_pct=Decimal(candle_grace_profit_pct),
                 ),
                 entry_filter=_entry_filter_config(
                     long_only=entry_long_only,
@@ -935,6 +943,13 @@ def paper_live_pair_command(
             help="Grace bars for the sixth account.",
         ),
     ] = 0,
+    sixth_candle_grace_profit_pct: Annotated[
+        str,
+        typer.Option(
+            "--sixth-candle-grace-profit-pct",
+            help="Recovery limit for the sixth account, e.g. 0.0058.",
+        ),
+    ] = "0",
     seventh_run_id: Annotated[
         str | None,
         typer.Option(
@@ -957,6 +972,13 @@ def paper_live_pair_command(
             help="Grace bars for the seventh account.",
         ),
     ] = 0,
+    seventh_candle_grace_profit_pct: Annotated[
+        str,
+        typer.Option(
+            "--seventh-candle-grace-profit-pct",
+            help="Recovery limit for the seventh account, e.g. 0.0058.",
+        ),
+    ] = "0",
     max_states: Annotated[
         int,
         typer.Option("--max-states", min=1),
@@ -1202,6 +1224,7 @@ def paper_live_pair_command(
             fourth_entry_long_only,
             fourth_entry_max_abs_aggressive_imbalance,
             0,
+            "0",
         ),
         (
             "fifth",
@@ -1210,6 +1233,7 @@ def paper_live_pair_command(
             fifth_entry_long_only,
             fifth_entry_max_abs_aggressive_imbalance,
             0,
+            "0",
         ),
         (
             "sixth",
@@ -1218,6 +1242,7 @@ def paper_live_pair_command(
             sixth_entry_long_only,
             None,
             sixth_candle_grace_bars,
+            sixth_candle_grace_profit_pct,
         ),
         (
             "seventh",
@@ -1226,6 +1251,7 @@ def paper_live_pair_command(
             seventh_entry_long_only,
             None,
             seventh_candle_grace_bars,
+            seventh_candle_grace_profit_pct,
         ),
     )
     for (
@@ -1235,6 +1261,7 @@ def paper_live_pair_command(
         long_only,
         max_abs_imbalance,
         grace_bars,
+        grace_profit_pct,
     ) in filtered_accounts:
         if filtered_run_id is None:
             if long_only or max_abs_imbalance is not None or grace_bars:
@@ -1267,6 +1294,7 @@ def paper_live_pair_command(
                         max_holding_buckets=candle_max_holding_buckets,
                         require_executable_quote=require_market_quote,
                         candle_grace_bars=grace_bars,
+                        candle_grace_profit_pct=Decimal(grace_profit_pct),
                     ),
                     entry_filter=_entry_filter_config(
                         long_only=long_only,

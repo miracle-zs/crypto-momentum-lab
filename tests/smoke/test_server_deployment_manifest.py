@@ -77,11 +77,13 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     )
     assert "--sixth-entry-long-only" in orderflow
     assert _option_value(orderflow, "--sixth-candle-grace-bars") == "1"
+    assert _option_value(orderflow, "--sixth-candle-grace-profit-pct") == "0.0058"
     assert _option_value(orderflow, "--seventh-run-id") == (
         "paper-account-13-orderflow-b8-long-candle15m-v1"
     )
     assert "--seventh-entry-long-only" in orderflow
     assert _option_value(orderflow, "--seventh-candle-grace-bars") == "8"
+    assert _option_value(orderflow, "--seventh-candle-grace-profit-pct") == "0.0058"
     assert services["execution-account-live"]["profiles"] == ["live"]
     assert services["live-strategy"]["profiles"] == ["live"]
     assert services["execution-account-live"]["environment"][

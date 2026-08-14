@@ -464,6 +464,7 @@ def test_candle_grace_limit_closes_at_executable_mark() -> None:
         exit_mode=PaperExitMode.CANDLE_15M,
         max_holding_buckets=5760,
         candle_grace_bars=8,
+        candle_grace_profit_pct=Decimal("0.0058"),
         require_executable_quote=True,
     )
     warning = _candle(open_price="100", close_price="99")
@@ -480,15 +481,31 @@ def test_candle_grace_limit_closes_at_executable_mark() -> None:
         taker_fee_rate=Decimal("0.0004"),
         closed_candle=warning,
     )[0]
+    below_limit = mark_positions(
+        positions=(pending,),
+        state=replace(
+            _state(
+                close=Decimal("100"),
+                bucket_start=warning.candle_end + timedelta(seconds=15),
+            ),
+            last_bid_price=Decimal("100.579"),
+        ),
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+    )[0]
+
+    assert below_limit.status is PaperPositionStatus.OPEN
+    assert below_limit.grace_exit_started_at == warning.candle_end
+
     touched_state = replace(
         _state(
             close=Decimal("100"),
-            bucket_start=warning.candle_end + timedelta(seconds=15),
+            bucket_start=warning.candle_end + timedelta(seconds=30),
         ),
-        last_bid_price=Decimal("101"),
+        last_bid_price=Decimal("100.58"),
     )
     closed = mark_positions(
-        positions=(pending,),
+        positions=(below_limit,),
         state=touched_state,
         config=config,
         taker_fee_rate=Decimal("0.0004"),
@@ -496,8 +513,8 @@ def test_candle_grace_limit_closes_at_executable_mark() -> None:
 
     assert closed.status is PaperPositionStatus.CLOSED
     assert closed.close_reason == "candle_15m_grace_limit_8"
-    assert closed.exit_price == Decimal("101")
-    assert closed.realized_pnl == Decimal("0.9196")
+    assert closed.exit_price == Decimal("100.58")
+    assert closed.realized_pnl == Decimal("0.499768")
 
 
 def test_candle_exit_requires_consecutive_adverse_candles() -> None:
