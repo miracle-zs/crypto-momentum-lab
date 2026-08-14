@@ -392,7 +392,72 @@ def test_candle_grace_exit_times_out_after_configured_bars() -> None:
     assert closed.exit_price == Decimal("98")
 
 
-def test_candle_grace_limit_closes_at_entry_price() -> None:
+def test_candle_grace_exits_profitably_on_first_adverse_candle() -> None:
+    position = position_from_entry_fill("run-1", _fill())
+    assert position is not None
+    config = PaperExitConfig(
+        exit_mode=PaperExitMode.CANDLE_15M,
+        max_holding_buckets=5760,
+        candle_grace_bars=1,
+        require_executable_quote=True,
+    )
+    warning = _candle(open_price="105", close_price="102")
+    state = replace(
+        _state(
+            close=Decimal("99"),
+            bucket_start=warning.candle_end,
+        ),
+        last_bid_price=Decimal("99"),
+    )
+
+    closed = mark_positions(
+        positions=(position,),
+        state=state,
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+        closed_candle=warning,
+    )[0]
+
+    assert closed.status is PaperPositionStatus.CLOSED
+    assert closed.close_reason == "candle_15m_bearish"
+    assert closed.exit_price == Decimal("102")
+    assert closed.realized_pnl == Decimal("1.9192")
+    assert closed.grace_exit_started_at is None
+
+
+def test_candle_grace_exits_at_recovered_executable_mark() -> None:
+    position = position_from_entry_fill("run-1", _fill())
+    assert position is not None
+    config = PaperExitConfig(
+        exit_mode=PaperExitMode.CANDLE_15M,
+        max_holding_buckets=5760,
+        candle_grace_bars=1,
+        require_executable_quote=True,
+    )
+    warning = _candle(open_price="105", close_price="99")
+    state = replace(
+        _state(
+            close=Decimal("101"),
+            bucket_start=warning.candle_end,
+        ),
+        last_bid_price=Decimal("101"),
+    )
+
+    closed = mark_positions(
+        positions=(position,),
+        state=state,
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+        closed_candle=warning,
+    )[0]
+
+    assert closed.status is PaperPositionStatus.CLOSED
+    assert closed.close_reason == "candle_15m_bearish"
+    assert closed.exit_price == Decimal("101")
+    assert closed.realized_pnl == Decimal("0.9196")
+
+
+def test_candle_grace_limit_closes_at_executable_mark() -> None:
     position = position_from_entry_fill("run-1", _fill())
     assert position is not None
     config = PaperExitConfig(
@@ -406,8 +471,8 @@ def test_candle_grace_limit_closes_at_entry_price() -> None:
         positions=(position,),
         state=replace(
             _state(
-            close=Decimal("99"),
-            bucket_start=warning.candle_end,
+                close=Decimal("99"),
+                bucket_start=warning.candle_end,
             ),
             last_bid_price=Decimal("99"),
         ),
@@ -420,7 +485,7 @@ def test_candle_grace_limit_closes_at_entry_price() -> None:
             close=Decimal("100"),
             bucket_start=warning.candle_end + timedelta(seconds=15),
         ),
-        last_bid_price=Decimal("100"),
+        last_bid_price=Decimal("101"),
     )
     closed = mark_positions(
         positions=(pending,),
@@ -431,7 +496,8 @@ def test_candle_grace_limit_closes_at_entry_price() -> None:
 
     assert closed.status is PaperPositionStatus.CLOSED
     assert closed.close_reason == "candle_15m_grace_limit_8"
-    assert closed.exit_price == position.entry_price
+    assert closed.exit_price == Decimal("101")
+    assert closed.realized_pnl == Decimal("0.9196")
 
 
 def test_candle_exit_requires_consecutive_adverse_candles() -> None:

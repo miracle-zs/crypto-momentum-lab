@@ -155,10 +155,12 @@ demand.
 Each account starts with 1,000 USDT of virtual equity and opens 100 USDT per
 filled entry. A filled entry opens a paper position. The B0 and B2 accounts use
 the first adverse completed 15-minute candle as their primary exit. B1 and B8
-arm a reduce-only entry-price limit at that warning candle; a quote touching
-entry closes the position, and otherwise the account exits at the first
-executable mark on the one-bar or eight-bar timeout. All retain the existing
-24-hour maximum-holding safeguard.
+first close profitably at the warning candle's official close (or the current
+executable mark if it has recovered into net profit). Only a net-losing warning
+arms a reduce-only entry-price limit; a quote touching that limit closes at the
+executable quote, and otherwise the account exits at the first executable mark
+on the one-bar or eight-bar timeout. All retain the existing 24-hour
+maximum-holding safeguard.
 
 PnL includes both entry and exit taker fees. All paper accounts evaluate the
 closed state's trade close, rather than intrabucket high/low.

@@ -356,12 +356,13 @@ def _apply_candle_grace_exit(
     config: PaperExitConfig,
     taker_fee_rate: Decimal,
 ) -> PaperPosition | None:
-    """Track a reduce-only entry-price limit after the first adverse candle.
+    """Apply the profitable-close or grace path after the first adverse candle.
 
-    A zero grace value keeps the original B0 behavior.  For B1/B8, the first
-    adverse completed candle arms an entry-price limit.  A quote touch closes
-    at entry; if the configured number of subsequent candles elapses first,
-    the position is closed at the current executable mark.
+    A zero grace value keeps the original B0 behavior.  For B1/B8, an adverse
+    candle only arms an entry-price limit when neither the official candle
+    close nor the current executable mark can realize a net profit.  A quote
+    touch closes at the executable mark; if the configured number of
+    subsequent candles elapses first, the position is closed at that mark.
     """
 
     started_at = position.grace_exit_started_at
@@ -369,6 +370,21 @@ def _apply_candle_grace_exit(
     if started_at is None:
         if not _is_adverse_candle(position, closed_candle):
             return None
+        assert closed_candle is not None
+        profitable_exit_price = _first_adverse_profit_exit_price(
+            position=position,
+            mark_price=mark_price,
+            closed_candle=closed_candle,
+            taker_fee_rate=taker_fee_rate,
+        )
+        if profitable_exit_price is not None:
+            return _close_at_price(
+                position=position,
+                closed_at=closed_candle.candle_end,
+                exit_price=profitable_exit_price,
+                close_reason=_adverse_candle_reason(position),
+                taker_fee_rate=taker_fee_rate,
+            )
         started_at = closed_candle.candle_end
         deadline = started_at + timedelta(
             minutes=15 * config.candle_grace_bars
@@ -391,7 +407,7 @@ def _apply_candle_grace_exit(
         return _close_at_price(
             position=position,
             closed_at=state.bucket_start,
-            exit_price=position.entry_price,
+            exit_price=mark_price,
             close_reason=(
                 f"candle_15m_grace_limit_{config.candle_grace_bars}"
             ),
@@ -423,6 +439,50 @@ def _apply_candle_grace_exit(
     )
 
 
+def _first_adverse_profit_exit_price(
+    *,
+    position: PaperPosition,
+    mark_price: Decimal,
+    closed_candle: ClosedCandle15m,
+    taker_fee_rate: Decimal,
+) -> Decimal | None:
+    """Return the first adverse-candle price that is net profitable.
+
+    B0 prices candle exits from the official 15m close.  Prefer that same
+    close for a profitable first warning so the paired accounts share the
+    warning decision.  If the official close is not profitable but the
+    current executable mark has recovered into profit, exit at the mark.
+    """
+
+    if (
+        _realized_pnl_at_price(
+            position=position,
+            exit_price=closed_candle.close_price,
+            taker_fee_rate=taker_fee_rate,
+        )
+        > 0
+    ):
+        return closed_candle.close_price
+    if (
+        _realized_pnl_at_price(
+            position=position,
+            exit_price=mark_price,
+            taker_fee_rate=taker_fee_rate,
+        )
+        > 0
+    ):
+        return mark_price
+    return None
+
+
+def _adverse_candle_reason(position: PaperPosition) -> str:
+    return (
+        "candle_15m_bearish"
+        if position.side is StrategySide.LONG
+        else "candle_15m_bullish"
+    )
+
+
 def _is_adverse_candle(
     position: PaperPosition,
     candle: ClosedCandle15m | None,
@@ -446,6 +506,16 @@ def _entry_limit_touched(
     return mark_price <= entry_price
 
 
+def _realized_pnl_at_price(
+    *,
+    position: PaperPosition,
+    exit_price: Decimal,
+    taker_fee_rate: Decimal,
+) -> Decimal:
+    exit_fee = position.quantity * exit_price * taker_fee_rate
+    return _gross_pnl(position, exit_price) - position.entry_fee - exit_fee
+
+
 def _close_at_price(
     *,
     position: PaperPosition,
@@ -454,10 +524,13 @@ def _close_at_price(
     close_reason: str,
     taker_fee_rate: Decimal,
 ) -> PaperPosition:
-    gross_pnl = _gross_pnl(position, exit_price)
     exit_notional = position.quantity * exit_price
     exit_fee = exit_notional * taker_fee_rate
-    realized_pnl = gross_pnl - position.entry_fee - exit_fee
+    realized_pnl = _realized_pnl_at_price(
+        position=position,
+        exit_price=exit_price,
+        taker_fee_rate=taker_fee_rate,
+    )
     return replace(
         position,
         status=PaperPositionStatus.CLOSED,
