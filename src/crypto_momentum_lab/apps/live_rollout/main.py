@@ -102,7 +102,7 @@ from crypto_momentum_lab.strategy_runner.registry import (
 
 app = typer.Typer(no_args_is_help=True)
 _PREPARE_CONFIRMATION = "PREPARE LIVE RISK GATES"
-_LIVE_WARMUP_SECONDS = 7200
+_LIVE_MIN_WARMUP_SECONDS = 900
 _LIVE_WARMUP_STATE_LIMIT = 100_000
 _LIVE_WARMUP_BATCH_SIZE = 1_000
 
@@ -960,8 +960,9 @@ async def _warm_live_strategy(
     now: datetime,
     stale_after_seconds: float,
 ) -> RuntimeStateCursor:
+    warmup_seconds = _live_warmup_seconds(strategy)
     cursor = RuntimeStateCursor(
-        bucket_start=now - timedelta(seconds=_LIVE_WARMUP_SECONDS),
+        bucket_start=now - timedelta(seconds=warmup_seconds),
         symbol="",
     )
     fresh_after = now - timedelta(seconds=stale_after_seconds)
@@ -991,6 +992,16 @@ async def _warm_live_strategy(
         if reached_fresh or len(batch) < _LIVE_WARMUP_BATCH_SIZE:
             break
     return cursor
+
+
+def _live_warmup_seconds(strategy: LiveRuntimeStrategy) -> int:
+    """Return a bounded history window sufficient for strategy buffers."""
+    required_data = getattr(strategy, "required_data", None)
+    warmup_buckets = 0
+    if callable(required_data):
+        warmup_buckets = int(getattr(required_data(), "warmup_buckets", 0))
+    buffer_seconds = (warmup_buckets + 16) * 15
+    return max(_LIVE_MIN_WARMUP_SECONDS, buffer_seconds)
 
 
 async def _warm_live_strategy_then_start_fresh(
