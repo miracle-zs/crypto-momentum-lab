@@ -195,6 +195,9 @@ async def _run_from_database(
         strategy_config: dict[str, object] = {
             "candidate_notional": Decimal("100"),
             "candidate_ttl_buckets": 4,
+            # Keep the shadow preflight identical to the live B1 strategy:
+            # same-symbol signals are not suppressed by a hidden cooldown.
+            "cooldown_buckets": 0,
         }
         config_hash = deterministic_config_hash(
             build_runtime_config(strategy_name, config=strategy_config)
