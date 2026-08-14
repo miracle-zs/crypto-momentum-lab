@@ -740,7 +740,7 @@ async def _run_live_daemon(
         market_cursor = (
             RuntimeStateCursor(bucket_start=now, symbol="")
             if checkpoint is not None
-            else await _warm_live_strategy(
+            else await _warm_live_strategy_then_start_fresh(
                 strategy=strategy,
                 repository=state_repository,
                 environment=market_environment,
@@ -977,6 +977,34 @@ async def _warm_live_strategy(
             symbol=state.symbol,
         )
     return cursor
+
+
+async def _warm_live_strategy_then_start_fresh(
+    *,
+    strategy: LiveRuntimeStrategy,
+    repository: PostgresRuntimeMarketStateRepository,
+    environment: str,
+    now: datetime,
+    stale_after_seconds: float,
+) -> RuntimeStateCursor:
+    """Warm historical state, then wait for a state produced after warmup.
+
+    Warmup can take longer than the stale-data budget on a cold container.  A
+    cursor at the last historical row would therefore replay a row that is
+    already stale by the time the daemon starts and cause an immediate halt.
+    Historical rows older than the cutoff are still applied to the strategy;
+    rows at or after the cutoff are intentionally left for the live stream.
+    Starting the poll cursor at the post-warmup wall clock avoids replaying
+    that moving boundary while retaining the daemon's stale-data safety gate.
+    """
+    await _warm_live_strategy(
+        strategy=strategy,
+        repository=repository,
+        environment=environment,
+        now=now,
+        stale_after_seconds=stale_after_seconds,
+    )
+    return RuntimeStateCursor(bucket_start=datetime.now(tz=UTC), symbol="")
 
 
 async def _record_transition(
