@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.execution import (
@@ -80,6 +80,31 @@ async def test_live_daemon_blocks_before_submit_when_gate_changes() -> None:
     assert result.halt_reason is not None
     assert result.halt_reason.startswith("live_gate:")
     assert exchange.calls == []
+
+
+async def test_live_daemon_waits_through_stale_startup_state() -> None:
+    exchange = PlanAwareExchange()
+    stale = replace(
+        _state(),
+        bucket_start=NOW - timedelta(minutes=2),
+        bucket_end=NOW - timedelta(minutes=2) + timedelta(seconds=15),
+    )
+
+    async def states() -> AsyncIterator:
+        yield stale
+        yield _state()
+
+    daemon = _daemon(
+        exchange=exchange,
+        skip_stale_until_fresh=True,
+    )
+
+    result = await daemon.run(states())
+
+    assert result.processed_state_count == 1
+    assert result.approved_intent_count == 1
+    assert result.halt_reason is None
+    assert exchange.calls == ["submit"]
 
 
 async def test_live_daemon_saves_final_checkpoint_before_normal_exit() -> None:
@@ -186,6 +211,7 @@ def _daemon(
     checkpoint_every_states: int = 1,
     exit_manager: LiveExitManager | None = None,
     hedge_mode: bool = False,
+    skip_stale_until_fresh: bool = False,
 ) -> LiveStrategyDaemon:
     order_repository = FakeOrderRepository()
     machine = OrderExecutionStateMachine(
@@ -222,6 +248,7 @@ def _daemon(
             resize_tolerance=Decimal("0.20"),
             checkpoint_every_states=checkpoint_every_states,
             hedge_mode=hedge_mode,
+            skip_stale_until_fresh=skip_stale_until_fresh,
         ),
         exit_manager=exit_manager,
     )

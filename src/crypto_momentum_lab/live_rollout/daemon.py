@@ -77,6 +77,7 @@ class LiveDaemonConfig:
     checkpoint_every_states: int
     hedge_mode: bool = False
     entry_long_only: bool = False
+    skip_stale_until_fresh: bool = False
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -152,6 +153,7 @@ class LiveStrategyDaemon:
         states: AsyncIterable[MarketState15s],
     ) -> LiveDaemonResult:
         processed = approved = submitted = 0
+        awaiting_fresh_market_state = self._config.skip_stale_until_fresh
         final_state_at: datetime | None = None
         checkpoint_dirty = False
         last_checkpoint_saved_at: datetime | None = None
@@ -197,6 +199,8 @@ class LiveStrategyDaemon:
             if _market_age_seconds(context.now, state) > (
                 self._config.max_market_state_age_seconds
             ):
+                if awaiting_fresh_market_state:
+                    continue
                 await self._save_final_checkpoint(
                     dirty=checkpoint_dirty,
                     saved_at=last_checkpoint_saved_at,
@@ -208,6 +212,7 @@ class LiveStrategyDaemon:
                     "stale_market_state",
                     final_state_at,
                 )
+            awaiting_fresh_market_state = False
             if context.unmanaged_position_symbols:
                 await self._save_final_checkpoint(
                     dirty=checkpoint_dirty,

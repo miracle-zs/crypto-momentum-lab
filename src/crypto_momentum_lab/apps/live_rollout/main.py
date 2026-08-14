@@ -795,6 +795,7 @@ async def _run_live_daemon(
                 checkpoint_every_states=checkpoint_every_states,
                 hedge_mode=hedge_mode,
                 entry_long_only=entry_long_only,
+                skip_stale_until_fresh=True,
             ),
             exit_manager=LiveExitManager(
                 config=LiveExitConfig(
