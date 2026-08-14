@@ -159,7 +159,7 @@ class PostgresLiveContextProvider:
             unmanaged_symbols,
         ) = await self._account_position_view(unresolved)
         realized = await self._daily_realized_pnl(now)
-        rules = await _load_trading_rules(self._sessions, {state.symbol})
+        rules = await _load_trading_rules(self._sessions, None)
         last_entries = await self._last_entry_times()
         strategy_state = await self._strategy_live_state()
         unresolved_states = tuple(item.state for item in unresolved)

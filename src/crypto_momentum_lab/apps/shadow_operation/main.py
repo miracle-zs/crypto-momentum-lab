@@ -355,16 +355,15 @@ async def _latest_risk_config(
 
 async def _load_trading_rules(
     factory: async_sessionmaker[AsyncSession],
-    symbols: set[str],
+    symbols: set[str] | None,
 ) -> dict[str, SymbolTradingRules]:
     async with factory() as session:
-        rows = (
-            await session.scalars(
-                select(ContractMetadataRow)
-                .where(ContractMetadataRow.symbol.in_(symbols))
-                .order_by(ContractMetadataRow.effective_at.desc())
-            )
-        ).all()
+        statement = select(ContractMetadataRow).order_by(
+            ContractMetadataRow.effective_at.desc()
+        )
+        if symbols is not None:
+            statement = statement.where(ContractMetadataRow.symbol.in_(symbols))
+        rows = (await session.scalars(statement)).all()
     rules: dict[str, SymbolTradingRules] = {}
     for row in rows:
         if row.symbol in rules:
