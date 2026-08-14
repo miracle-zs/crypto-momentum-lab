@@ -70,11 +70,18 @@ def test_approval_expiration_defaults_to_permanent() -> None:
     assert main._parse_approval_expiration(now, "60") == now + timedelta(hours=1)
 
 
-def test_live_run_default_has_no_symbol_cooldown() -> None:
-    assert signature(main.run_command).parameters["cooldown_seconds"].default == 0
+def test_live_run_does_not_expose_removed_safety_limits() -> None:
+    parameters = signature(main.run_command).parameters
+    for removed in (
+        "cooldown_seconds",
+        "max_spread",
+        "state_stale_after_seconds",
+        "max_holding_seconds",
+    ):
+        assert removed not in parameters
 
 
-async def test_live_warmup_ignores_outputs_and_stops_before_fresh_states() -> None:
+async def test_live_warmup_applies_all_states_and_continues_from_boundary() -> None:
     now = datetime(2026, 8, 4, 0, 0, tzinfo=UTC)
     stale = SimpleNamespace(
         symbol="BTCUSDT",
@@ -106,9 +113,8 @@ async def test_live_warmup_ignores_outputs_and_stops_before_fresh_states() -> No
         repository=Repository(),
         environment="research",
         now=now,
-        stale_after_seconds=30,
     )
 
-    assert strategy.seen == [stale]
-    assert cursor.bucket_start == stale.bucket_start
+    assert strategy.seen == [stale, fresh]
+    assert cursor.bucket_start == fresh.bucket_start
     assert cursor.symbol == "BTCUSDT"

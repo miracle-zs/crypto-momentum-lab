@@ -14,7 +14,7 @@ Create one HMAC API key pair and store it only in an untracked server file or a
 secret manager. Enable Futures read/trade, disable withdrawals, and restrict the
 key to the server's public IP. Set USD-M Futures to Hedge Mode and make the
 account flat before the first session. One key pair is enough for one account.
-New entry symbols are explicitly set to the configured leverage, default 1x,
+New entry symbols are explicitly set to the configured leverage, default 5x,
 before an order is submitted; a failed leverage confirmation blocks the order.
 
 Create `/opt/crypto-momentum-lab/.env.live` with mode `0600`, using
@@ -91,7 +91,8 @@ $COMPOSE --profile live run --rm --no-deps \
 
 Review the report and record all three drills from
 `docs/runbooks/shadow-operation-session.md`. A completed matching shadow session
-must be less than 24 hours old.
+must be less than 24 hours old; this is only a preflight evidence window, not
+an order holding-time limit.
 
 ## 4. Approve And Preflight
 
@@ -125,6 +126,15 @@ reduce-only LIMIT at `entry * (1 + 0.0088)` for a long; if that order is still
 open at the next 15-minute close, the executor cancels it and market-closes the
 remaining quantity. No protective stop is placed after an entry fill.
 
+The following execution protections are intentionally absent from the live
+path: maximum holding time (including the old 24-hour fallback), spread
+threshold, same-symbol execution cooldown, and market/account data-age gates.
+The B1 strategy also sets its event cooldown to zero, so a same-symbol signal
+is not suppressed by a hidden two-bucket strategy cooldown. Exchange quantity
+and price precision, Hedge Mode/leverage confirmation, the lease/approval
+binding, account readiness, the existing-symbol duplicate-position guard, and
+the fail-closed ambiguous-order guard remain explicit operational controls.
+
 Omitting `--expires-in-minutes` records a non-expiring approval. It remains
 bound to the exact strategy config, risk config, Git commit, and migration
 revision, so any of those changes require a new approval. `unlimited` removes
@@ -144,13 +154,14 @@ The profile includes the mandatory
 `--i-understand-this-places-real-orders` flag. Any manual `run` invocation must
 also provide that exact flag; omission fails before credentials are used.
 
-The daemon rejects unowned/manual positions, suppresses duplicate symbol
-entries, restores its checkpoint by stable session ID, reconciles non-terminal
-orders by Binance client order ID, and warms a new session from two hours of
-historical states without submitting those historical signals. Active live
-position symbols remain in the 15-second market-data subscription even after
-leaving the momentum pool. The daemon stops if account state, market data,
-approval, lease, migration, commit, or risk state no longer matches.
+The daemon rejects unowned/manual positions, suppresses duplicate entries while
+the same symbol is already held, restores its checkpoint by stable session ID,
+reconciles non-terminal orders by Binance client order ID, and warms a new
+session from two hours of historical states without submitting those historical
+signals. Active live position symbols remain in the 15-second market-data
+subscription even after leaving the momentum pool. Approval, lease, migration,
+commit, account readiness, and explicit risk-halt mismatches still stop new
+entries; a confirmed resting order does not.
 
 ## Drain And Stop
 

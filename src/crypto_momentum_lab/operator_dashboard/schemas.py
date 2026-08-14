@@ -102,6 +102,11 @@ class AccountOverviewResponse(DashboardSchema):
     positions: list[dict[str, JsonValue]]
     open_orders: list[dict[str, JsonValue]]
     fills: list[dict[str, JsonValue]]
+    environment: str | None = None
+    account_label: str | None = None
+    account_config: dict[str, JsonValue] = Field(default_factory=dict)
+    reconciliation: dict[str, JsonValue] = Field(default_factory=dict)
+    summary: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class RiskExecutionResponse(DashboardSchema):

@@ -160,7 +160,6 @@ class PostgresLiveContextProvider:
         ) = await self._account_position_view(unresolved)
         realized = await self._daily_realized_pnl(now)
         rules = await _load_trading_rules(self._sessions, None)
-        last_entries = await self._last_entry_times()
         strategy_state = await self._strategy_live_state()
         unresolved_states = tuple(item.state for item in unresolved)
         gate_context = LiveGateContext(
@@ -195,7 +194,6 @@ class PostgresLiveContextProvider:
             risk_config=risk_config,
             strategy_state=strategy_state,
             trading_rules=rules,
-            last_entry_at_by_symbol=last_entries,
             managed_positions=managed_positions,
             unmanaged_position_symbols=unmanaged_symbols,
             unresolved_orders=unresolved,
@@ -308,25 +306,6 @@ class PostgresLiveContextProvider:
                 )
             ).all()
         return sum((row.realized_pnl for row in rows), start=Decimal("0"))
-
-    async def _last_entry_times(self) -> dict[str, datetime]:
-        async with self._sessions() as session:
-            rows = (
-                await session.scalars(
-                    select(ExchangeOrderRow)
-                    .where(
-                        ExchangeOrderRow.run_id == self._run_id,
-                        ExchangeOrderRow.state == ExchangeOrderState.FILLED.value,
-                    )
-                    .order_by(ExchangeOrderRow.updated_at.desc())
-                    .limit(500)
-                )
-            ).all()
-        entries: dict[str, datetime] = {}
-        for row in rows:
-            if not row.reduce_only:
-                entries.setdefault(row.symbol, row.updated_at)
-        return entries
 
     async def _strategy_live_state(self) -> StrategyLiveState:
         async with self._sessions() as session:

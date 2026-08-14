@@ -28,6 +28,7 @@ from crypto_momentum_lab.operator_dashboard.status import (
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountBalanceSnapshotRow,
+    AccountConfigSnapshotRow,
     AccountFillEventRow,
     AccountOpenOrderRow,
     AccountPositionSnapshotRow,
@@ -37,6 +38,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     LiveSessionTransitionRow,
     MonitoringMembershipRow,
     OrderIntentCandidateRow,
+    OrderIntentExecutionRow,
     PaperEquitySnapshotRow,
     PaperFillRow,
     PaperPositionRow,
@@ -704,19 +706,33 @@ class DashboardQueries:
         )
 
     async def account(self) -> AccountOverviewResponse:
+        process: ExecutionAccountProcessStateRow | None = None
+        reconciliation: AccountReconciliationRunRow | None = None
+        account_config: AccountConfigSnapshotRow | None = None
+        balances: Sequence[AccountBalanceSnapshotRow] = ()
+        positions: Sequence[AccountPositionSnapshotRow] = ()
+        orders: Sequence[AccountOpenOrderRow] = ()
+        fills: Sequence[AccountFillEventRow] = ()
+        execution_orders: Sequence[ExchangeOrderRow] = ()
+        intent_rows: Sequence[OrderIntentExecutionRow] = ()
         async with self._session_factory() as session:
             process = await session.scalar(
                 select(ExecutionAccountProcessStateRow)
                 .order_by(ExecutionAccountProcessStateRow.occurred_at.desc())
                 .limit(1)
             )
-            balances: Sequence[AccountBalanceSnapshotRow] = ()
-            positions: Sequence[AccountPositionSnapshotRow] = ()
-            orders: Sequence[AccountOpenOrderRow] = ()
-            fills: Sequence[AccountFillEventRow] = ()
             if process is not None:
                 environment = process.environment
                 account_label = process.account_label
+                account_config = await session.scalar(
+                    select(AccountConfigSnapshotRow)
+                    .where(
+                        AccountConfigSnapshotRow.environment == environment,
+                        AccountConfigSnapshotRow.account_label == account_label,
+                    )
+                    .order_by(AccountConfigSnapshotRow.observed_at.desc())
+                    .limit(1)
+                )
                 reconciliation = await session.scalar(
                     select(AccountReconciliationRunRow)
                     .where(
@@ -789,6 +805,75 @@ class DashboardQueries:
                         .limit(20)
                     )
                 ).all()
+                execution_orders = (
+                    await session.scalars(
+                        select(ExchangeOrderRow)
+                        .order_by(ExchangeOrderRow.updated_at.desc())
+                        .limit(200)
+                    )
+                ).all()
+                intent_ids = {row.intent_id for row in execution_orders}
+                if intent_ids:
+                    intent_rows = (
+                        await session.scalars(
+                            select(OrderIntentExecutionRow).where(
+                                OrderIntentExecutionRow.intent_id.in_(intent_ids)
+                            )
+                        )
+                    ).all()
+
+        execution_by_client = {
+            row.client_order_id: row for row in execution_orders
+        }
+        execution_by_exchange = {
+            row.exchange_order_id: row
+            for row in execution_orders
+            if row.exchange_order_id is not None
+        }
+        intent_by_id = {row.intent_id: row for row in intent_rows}
+        strategy_by_symbol: dict[str, str] = {}
+        for order in execution_orders:
+            intent = intent_by_id.get(order.intent_id)
+            if (
+                intent is not None
+                and order.state == ExchangeOrderState.FILLED.value
+                and not order.reduce_only
+            ):
+                strategy_by_symbol.setdefault(order.symbol, intent.strategy_name)
+
+        reconciliation_payload: dict[str, JsonValue] = (
+            {}
+            if reconciliation is None
+            else {
+                "status": reconciliation.status,
+                "observed_at": reconciliation.observed_at.isoformat(),
+                "balance_count": reconciliation.balance_count,
+                "position_count": reconciliation.position_count,
+                "open_order_count": reconciliation.open_order_count,
+                "fill_count": reconciliation.fill_count,
+                "mismatch_count": reconciliation.mismatch_count,
+            }
+        )
+        account_config_payload: dict[str, JsonValue] = (
+            {}
+            if account_config is None
+            else {
+                "multi_assets_mode": account_config.multi_assets_mode,
+                "hedge_mode": account_config.hedge_mode,
+                "can_trade": account_config.can_trade,
+                "fee_tier": account_config.fee_tier,
+                "observed_at": account_config.observed_at.isoformat(),
+            }
+        )
+        usdt = next((row for row in balances if row.asset == "USDT"), None)
+        total_unrealized = sum(
+            (row.unrealized_pnl for row in balances),
+            start=Decimal("0"),
+        )
+        total_notional = sum(
+            (abs(row.notional) for row in positions),
+            start=Decimal("0"),
+        )
         observed_at = None if process is None else process.occurred_at
         return AccountOverviewResponse(
             status=OperationalStatus.UNKNOWN
@@ -797,6 +882,23 @@ class DashboardQueries:
             if process.state == "ready_readonly"
             else OperationalStatus.HALTED,
             observed_at=observed_at,
+            environment=None if process is None else process.environment,
+            account_label=None if process is None else process.account_label,
+            account_config=account_config_payload,
+            reconciliation=reconciliation_payload,
+            summary={
+                "usdt_wallet_balance": (
+                    None if usdt is None else str(usdt.wallet_balance)
+                ),
+                "usdt_available_balance": (
+                    None if usdt is None else str(usdt.available_balance)
+                ),
+                "total_unrealized_pnl": str(total_unrealized),
+                "gross_position_notional": str(total_notional),
+                "position_count": len(positions),
+                "open_order_count": len(orders),
+                "recent_fill_count": len(fills),
+            },
             balances=[
                 {
                     "asset": row.asset,
@@ -815,6 +917,12 @@ class DashboardQueries:
                     "notional": str(row.notional),
                     "unrealized_pnl": str(row.unrealized_pnl),
                     "leverage": row.leverage,
+                    "mark_price": str(row.mark_price),
+                    "margin_type": row.margin_type,
+                    "strategy_name": strategy_by_symbol.get(row.symbol),
+                    "entry_notional": str(
+                        abs(row.position_amt * row.entry_price)
+                    ),
                 }
                 for row in positions
             ],
@@ -823,8 +931,26 @@ class DashboardQueries:
                     "symbol": row.symbol,
                     "client_order_id": row.client_order_id,
                     "side": row.side,
+                    "order_type": row.order_type,
+                    "price": str(row.price),
+                    "original_quantity": str(row.original_quantity),
+                    "executed_quantity": str(row.executed_quantity),
+                    "remaining_quantity": str(
+                        max(
+                            Decimal("0"),
+                            row.original_quantity - row.executed_quantity,
+                        )
+                    ),
                     "status": row.status,
                     "reduce_only": row.reduce_only,
+                    "observed_at": row.observed_at.isoformat(),
+                    "strategy_name": (
+                        None
+                        if (internal := execution_by_client.get(row.client_order_id))
+                        is None
+                        or (intent := intent_by_id.get(internal.intent_id)) is None
+                        else intent.strategy_name
+                    ),
                 }
                 for row in orders
             ],
@@ -836,6 +962,17 @@ class DashboardQueries:
                     "quantity": str(row.quantity),
                     "realized_pnl": str(row.realized_pnl),
                     "fee": str(row.fee),
+                    "fee_asset": row.fee_asset,
+                    "side": row.side,
+                    "trade_at": row.trade_at.isoformat(),
+                    "order_id": row.order_id,
+                    "strategy_name": (
+                        None
+                        if (internal := execution_by_exchange.get(row.order_id))
+                        is None
+                        or (intent := intent_by_id.get(internal.intent_id)) is None
+                        else intent.strategy_name
+                    ),
                 }
                 for row in fills
             ],

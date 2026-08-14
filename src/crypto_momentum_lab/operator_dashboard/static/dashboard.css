@@ -782,6 +782,69 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .paper-account-detail { margin-top: 20px; }
 
+/* ============ live exchange account ============ */
+
+.account-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 16px 18px;
+  border: 1px solid color-mix(in srgb, var(--live) 28%, var(--line));
+  border-radius: 13px;
+  background:
+    radial-gradient(480px 140px at 0% 0%, rgba(248, 113, 113, .09), transparent 70%),
+    var(--surface-2);
+}
+
+.account-eyebrow {
+  color: var(--live);
+  font: 9px var(--mono);
+  letter-spacing: .15em;
+}
+
+.account-hero h3 { margin: 6px 0 3px; font-size: 18px; }
+.account-hero p { margin: 0; color: var(--muted); font-size: 10.5px; }
+
+.account-hero-meta {
+  display: grid;
+  justify-items: end;
+  gap: 5px;
+  color: var(--faint);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.account-hero-meta b { color: var(--muted); font-weight: 500; }
+.account-hero-meta small { color: var(--faint); }
+
+.account-kpi-grid { margin-top: 12px; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+
+.account-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--line);
+}
+
+.account-facts div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 40px;
+  padding: 8px 11px;
+  background: var(--surface-2);
+}
+
+.account-facts span { color: var(--faint); font-size: 10px; }
+.account-facts b { color: var(--muted); font: 500 10.5px var(--mono); text-align: right; }
+.account-strategy { color: var(--brand); font: 10px var(--mono); }
+.account-overview-grid .block { margin-top: 18px; }
+
 /* ============ paired equity comparison ============ */
 
 .pair-grid {
@@ -1018,6 +1081,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 @media (max-width: 1280px) {
   .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .account-kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .acct-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .pair-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
@@ -1066,6 +1130,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
   }
   .monitor-target-grid { grid-template-columns: 1fr; }
   .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .account-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .service-row { grid-template-columns: minmax(0, 1fr) auto; }
   .service-meter { display: none; }
   .service-age { display: none; }
@@ -1079,6 +1144,9 @@ details.secondary[open] summary { margin-bottom: 10px; }
 @media (max-width: 520px) {
   .card { padding: 16px 14px 18px; }
   .kpi-grid, .action-grid { grid-template-columns: 1fr; }
+  .account-kpi-grid { grid-template-columns: 1fr; }
+  .account-hero { display: grid; }
+  .account-hero-meta { justify-items: start; }
   .clock strong { font-size: 15px; }
 }
 

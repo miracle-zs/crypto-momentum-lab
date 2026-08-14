@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 from typing import Protocol
 
@@ -96,6 +97,15 @@ def build_runtime_config(
             event_config = _default_order_flow_config()
         if not isinstance(event_config, OrderFlowImpulseConfig):
             raise StrategyRegistryError("orderflow_impulse config is invalid")
+        if "cooldown_buckets" in config:
+            event_config = replace(
+                event_config,
+                cooldown_buckets=_int_value(
+                    config["cooldown_buckets"],
+                    default=event_config.cooldown_buckets,
+                    field_name="cooldown_buckets",
+                ),
+            )
         return OrderFlowImpulseRuntimeConfig(
             event_config=event_config,
             candidate_notional=candidate_notional,

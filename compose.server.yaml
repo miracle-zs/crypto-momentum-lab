@@ -206,10 +206,11 @@ services:
         - crypto_momentum_lab.apps.healthcheck
         - --service
         - execution-account
+        # Live account readiness is process state only; live execution does
+        # not apply a hidden account-data age cutoff.
+        - --ignore-age
         - --account-label
         - ${CML_LIVE_ACCOUNT_LABEL:-primary}
-        - --max-age-seconds
-        - "30"
       interval: 10s
       timeout: 5s
       retries: 12
@@ -249,16 +250,12 @@ services:
       - "31536000"
       - --poll-interval-seconds
       - "1"
-      - --cooldown-seconds
-      - ${CML_LIVE_COOLDOWN_SECONDS:-0}
-      - --state-stale-after-seconds
-      - "30"
       - --checkpoint-every-states
       - "100"
       - --hedge-mode
       - --entry-long-only
       - --entry-leverage
-      - ${CML_LIVE_ENTRY_LEVERAGE:-1}
+      - ${CML_LIVE_ENTRY_LEVERAGE:-5}
       - --exit-mode
       - ${CML_LIVE_EXIT_MODE:-candle_15m}
       - --take-profit-pct
@@ -269,12 +266,11 @@ services:
       - ${CML_LIVE_CANDLE_GRACE_BARS:-1}
       - --candle-grace-profit-pct
       - ${CML_LIVE_CANDLE_GRACE_PROFIT_PCT:-0.0088}
-      - --max-holding-seconds
-      - ${CML_LIVE_MAX_HOLDING_SECONDS:-86400}
       - --i-understand-this-places-real-orders
     depends_on:
       market-data:
-        condition: service_healthy
+        # Live starts with the feed process; no hidden freshness gate.
+        condition: service_started
       execution-account-live:
         condition: service_healthy
     healthcheck:
@@ -285,8 +281,8 @@ services:
         - crypto_momentum_lab.apps.healthcheck
         - --service
         - paper
-        - --max-age-seconds
-        - "180"
+        # The live worker healthcheck only verifies a checkpoint exists.
+        - --ignore-age
       interval: 30s
       timeout: 10s
       retries: 6

@@ -76,18 +76,14 @@ class LiveDaemonRepository(Protocol):
 @dataclass(frozen=True, slots=True)
 class LiveDaemonConfig:
     run_id: str
-    max_market_state_age_seconds: float
     resize_tolerance: Decimal
     checkpoint_every_states: int
     hedge_mode: bool = False
     entry_long_only: bool = False
-    skip_stale_until_fresh: bool = False
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
             raise ValueError("run_id must not be empty")
-        if self.max_market_state_age_seconds <= 0:
-            raise ValueError("max_market_state_age_seconds must be positive")
         if self.resize_tolerance < 0 or self.resize_tolerance >= 1:
             raise ValueError("resize_tolerance must be in [0, 1)")
         if self.checkpoint_every_states <= 0:
@@ -110,7 +106,6 @@ class LiveDaemonRuntimeContext:
     risk_config: RiskConfigSnapshot
     strategy_state: StrategyLiveState
     trading_rules: dict[str, SymbolTradingRules]
-    last_entry_at_by_symbol: dict[str, datetime]
     managed_positions: tuple[ManagedLivePosition, ...] = ()
     unmanaged_position_symbols: frozenset[str] = frozenset()
     unresolved_orders: tuple[PersistedExchangeOrder, ...] = ()
@@ -162,7 +157,6 @@ class LiveStrategyDaemon:
         states: AsyncIterable[MarketState15s],
     ) -> LiveDaemonResult:
         processed = approved = submitted = 0
-        awaiting_fresh_market_state = self._config.skip_stale_until_fresh
         final_state_at: datetime | None = None
         checkpoint_dirty = False
         last_checkpoint_saved_at: datetime | None = None
@@ -205,23 +199,6 @@ class LiveStrategyDaemon:
                     f"live_gate:{','.join(gate.reasons)}",
                     final_state_at,
                 )
-            if _market_age_seconds(context.now, state) > (
-                self._config.max_market_state_age_seconds
-            ):
-                if awaiting_fresh_market_state:
-                    continue
-                await self._save_final_checkpoint(
-                    dirty=checkpoint_dirty,
-                    saved_at=last_checkpoint_saved_at,
-                )
-                return LiveDaemonResult(
-                    processed,
-                    approved,
-                    submitted,
-                    "stale_market_state",
-                    final_state_at,
-                )
-            awaiting_fresh_market_state = False
             if context.unmanaged_position_symbols:
                 await self._save_final_checkpoint(
                     dirty=checkpoint_dirty,
@@ -443,20 +420,13 @@ class LiveStrategyDaemon:
             limit_decision = evaluate_fixed_live_limits(
                 self._limits,
                 LiveLimitContext(
-                    now=context.now,
                     symbol=candidate.symbol,
                     requested_notional=candidate.desired_notional,
                     open_position_symbols=context.open_position_symbols,
-                    last_entry_at=context.last_entry_at_by_symbol.get(
-                        candidate.symbol
-                    ),
                     realized_pnl=context.realized_pnl,
                     unrealized_pnl=context.unrealized_pnl,
                     gross_exposure=context.gross_exposure,
-                    spread=state.spread,
                     min_notional=_min_notional(context.trading_rules.get(candidate.symbol)),
-                    account_observed_at=context.account_observed_at,
-                    market_observed_at=state.bucket_end,
                     has_unresolved_order=any(
                         order_state_is_uncertain(item)
                         for item in context.unresolved_order_states
@@ -480,6 +450,7 @@ class LiveStrategyDaemon:
                 active_halts=context.active_halts,
                 risk_config=context.risk_config,
                 strategy_state=context.strategy_state,
+                enforce_market_state_age=False,
             ),
         )
         if evaluation.decision is not RiskDecision.APPROVED:
@@ -534,10 +505,6 @@ class LiveStrategyDaemon:
             self._strategy.checkpoint(),
             saved_at,
         )
-
-
-def _market_age_seconds(now: datetime, state: MarketState15s) -> float:
-    return (now - state.bucket_end).total_seconds()
 
 
 def _min_notional(rules: SymbolTradingRules | None) -> Decimal | None:

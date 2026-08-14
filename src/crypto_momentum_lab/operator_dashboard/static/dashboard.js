@@ -780,33 +780,93 @@ function renderRisk(data) {
 }
 
 function renderAccount(data) {
+  const summary = data.summary || {};
+  const config = data.account_config || {};
+  const reconciliation = data.reconciliation || {};
+  const yesNo = (value) => value == null ? "—" : value ? "是" : "否";
+  const strategy = (value) => value
+    ? `<span class="account-strategy">${esc(value)}</span>`
+    : `<span class="muted">未关联</span>`;
+  const hero = `<div class="account-hero">
+    <div>
+      <div class="account-eyebrow">${esc(data.environment || "LIVE")} · READ-ONLY ACCOUNT SYNC</div>
+      <h3>${esc(data.account_label || "交易所账户")}</h3>
+      <p>权限与仓位来自最近一次 Binance 对账；策略订单会按客户端订单号回链。</p>
+    </div>
+    <div class="account-hero-meta">
+      ${pill(data.status)}
+      <span>同步 <b class="num">${esc(dayTime(data.observed_at))}</b></span>
+      <small>${esc(relToNow(data.observed_at))}</small>
+    </div>
+  </div>`;
+  const kpis = `<div class="tile-grid account-kpi-grid">
+    ${tile("USDT 钱包余额", money(summary.usdt_wallet_balance), "账户钱包余额", "hero")}
+    ${tile("USDT 可用余额", money(summary.usdt_available_balance), "可用于开仓/保证金")}
+    ${tile("总未实现盈亏", signedMoney(summary.total_unrealized_pnl), `${summary.position_count || 0} 个交易所持仓`, pnlClass(summary.total_unrealized_pnl))}
+    ${tile("持仓名义价值", money(summary.gross_position_notional), "当前交易所总暴露")}
+    ${tile("挂单 / 成交", `${summary.open_order_count || 0} / ${summary.recent_fill_count || 0}`, "最近同步 / 最近 20 笔")}
+  </div>`;
+  const accountFacts = `<div class="account-facts">
+    <div><span>可交易</span><b>${esc(yesNo(config.can_trade))}</b></div>
+    <div><span>Hedge Mode</span><b>${esc(yesNo(config.hedge_mode))}</b></div>
+    <div><span>Multi-Assets</span><b>${esc(yesNo(config.multi_assets_mode))}</b></div>
+    <div><span>手续费等级</span><b>${esc(config.fee_tier == null ? "—" : `VIP ${config.fee_tier}`)}</b></div>
+    <div><span>对账状态</span><b>${esc(reconciliation.status || "—")}</b></div>
+    <div><span>对账差异</span><b class="${asNumber(reconciliation.mismatch_count) > 0 ? "neg" : "pos"}">${esc(reconciliation.mismatch_count == null ? "—" : reconciliation.mismatch_count)}</b></div>
+    <div><span>对账资产 / 持仓</span><b>${esc(`${reconciliation.balance_count ?? "—"} / ${reconciliation.position_count ?? "—"}`)}</b></div>
+    <div><span>对账挂单 / 成交</span><b>${esc(`${reconciliation.open_order_count ?? "—"} / ${reconciliation.fill_count ?? "—"}`)}</b></div>
+  </div>`;
   const balancesTable = dataTable([
     { label: "资产", key: "asset", cls: "sym" },
     { label: "钱包余额", value: (row) => num(row.wallet_balance, 4), align: "right" },
     { label: "可用余额", value: (row) => num(row.available_balance, 4), align: "right" },
     { label: "未实现盈亏", value: (row) => signedMoney(row.unrealized_pnl), align: "right", cls: (row) => pnlClass(row.unrealized_pnl) },
-  ], data.balances, { emptyText: "尚无余额快照" });
+  ], data.balances, { emptyText: "尚无余额快照", tall: true });
+  const positionRows = (data.positions || []).map((row) => ({
+    ...row,
+    roi: asNumber(row.entry_notional) ? asNumber(row.unrealized_pnl) / asNumber(row.entry_notional) : null,
+  }));
   const positionsTable = dataTable([
     { label: "币种", key: "symbol", cls: "sym" },
     { label: "方向", value: (row) => pill(row.position_side || "BOTH"), html: true },
-    { label: "持仓量", value: (row) => num(row.position_amt, 4), align: "right", cls: (row) => pnlClass(row.position_amt) },
+    { label: "策略", value: (row) => strategy(row.strategy_name), html: true },
+    { label: "持仓量", value: (row) => num(row.position_amt, 4), align: "right" },
+    { label: "开仓 / 标记", value: (row) => `${price(row.entry_price)} / ${price(row.mark_price)}`, align: "right" },
     { label: "杠杆", value: (row) => row.leverage ? `${esc(row.leverage)}x` : "—", align: "right", cls: "muted" },
+    { label: "保证金", value: (row) => row.margin_type || "—", cls: "muted" },
     { label: "名义价值", value: (row) => money(row.notional), align: "right" },
     { label: "未实现盈亏", value: (row) => signedMoney(row.unrealized_pnl), align: "right", cls: (row) => pnlClass(row.unrealized_pnl) },
-  ], data.positions, { emptyText: "交易所无持仓" });
+    { label: "ROI", value: (row) => signedPercent(row.roi), align: "right", cls: (row) => pnlClass(row.roi) },
+  ], positionRows, { emptyText: "交易所无持仓", tall: true });
   const ordersTable = dataTable([
     { label: "币种", key: "symbol", cls: "sym" },
-    { label: "客户端订单号", key: "client_order_id", cls: "num cut" },
+    { label: "策略", value: (row) => strategy(row.strategy_name), html: true },
     { label: "方向", key: "side", cls: (row) => row.side === "BUY" ? "pos" : "neg" },
+    { label: "类型 / 价格", value: (row) => `${row.order_type || "—"} / ${price(row.price)}`, align: "right" },
+    { label: "数量", value: (row) => `${num(row.executed_quantity, 4)} / ${num(row.original_quantity, 4)}`, align: "right" },
     { label: "状态", value: (row) => pill(row.status), html: true },
     { label: "只减仓", value: (row) => row.reduce_only ? "是" : "否", cls: "muted" },
-  ], data.open_orders, { emptyText: "无挂单" });
+    { label: "更新时间", value: (row) => dayTime(row.observed_at), align: "right", cls: "muted" },
+  ], data.open_orders, { emptyText: "无挂单", tall: true });
+  const fillsTable = dataTable([
+    { label: "时间", value: (row) => dayTime(row.trade_at), align: "right", cls: "muted" },
+    { label: "币种", key: "symbol", cls: "sym" },
+    { label: "策略", value: (row) => strategy(row.strategy_name), html: true },
+    { label: "方向", key: "side", cls: (row) => row.side === "BUY" ? "pos" : "neg" },
+    { label: "价格", value: (row) => price(row.price), align: "right" },
+    { label: "数量", value: (row) => num(row.quantity, 4), align: "right" },
+    { label: "已实现盈亏", value: (row) => signedMoney(row.realized_pnl), align: "right", cls: (row) => pnlClass(row.realized_pnl) },
+    { label: "手续费", value: (row) => `${num(row.fee, 4)} ${row.fee_asset || ""}`, align: "right" },
+  ], data.fills, { emptyText: "尚无成交记录", tall: true });
   const body = `<div class="detail-meta"><span>同步时间 <b class="num">${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</b></span><span>${esc(relToNow(data.observed_at))}</span></div>
-    <div class="block-split">
-      <div class="block">${blockTitle("资产余额", "BALANCES")}${balancesTable}</div>
-      <div class="block">${blockTitle("交易所持仓", "EXCHANGE POSITIONS")}${positionsTable}</div>
+    ${hero}${kpis}
+    <div class="block-split account-overview-grid">
+      <div class="block">${blockTitle("账户权限与对账", "ACCOUNT CONFIG / RECONCILIATION")}${accountFacts}</div>
+      <div class="block">${blockTitle("资产余额", "BALANCES · ALL ASSETS")}${balancesTable}</div>
     </div>
-    <div class="block">${blockTitle("当前挂单", "OPEN ORDERS", `<strong class="num">${(data.open_orders || []).length}</strong>`)}${ordersTable}</div>`;
+    <div class="block">${blockTitle("交易所持仓", "EXCHANGE POSITIONS · STRATEGY ATTRIBUTION", `<strong class="num">${(data.positions || []).length}</strong>`)}${positionsTable}</div>
+    <div class="block">${blockTitle("当前挂单", "OPEN ORDERS · EXCHANGE SOURCE OF TRUTH", `<strong class="num">${(data.open_orders || []).length}</strong>`)}${ordersTable}</div>
+    <div class="block">${blockTitle("最近成交", "RECENT FILLS · FEES / REALIZED PNL", `<strong class="num">${(data.fills || []).length}</strong>`)}${fillsTable}</div>`;
   return [data.status, body];
 }
 

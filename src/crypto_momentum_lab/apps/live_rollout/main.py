@@ -102,6 +102,11 @@ from crypto_momentum_lab.strategy_runner.registry import (
 
 app = typer.Typer(no_args_is_help=True)
 _PREPARE_CONFIRMATION = "PREPARE LIVE RISK GATES"
+# These two columns are retained by the existing risk-config schema for paper
+# and shadow sessions. Live execution no longer enforces state-age limits; the
+# large compatibility value makes that explicit without a destructive schema
+# migration.
+_LIVE_UNENFORCED_STATE_AGE_SECONDS = 1_000_000_000.0
 _LIVE_MIN_WARMUP_SECONDS = 60
 _LIVE_WARMUP_STATE_LIMIT = 100_000
 _LIVE_WARMUP_BATCH_SIZE = 100
@@ -145,10 +150,6 @@ def prepare_command(
         str,
         typer.Option("--max-open-positions"),
     ] = "unlimited",
-    state_stale_after_seconds: Annotated[
-        float,
-        typer.Option("--state-stale-after-seconds", min=1),
-    ] = 30.0,
     confirmation: Annotated[str, typer.Option("--confirmation")] = "",
 ) -> None:
     if confirmation != _PREPARE_CONFIRMATION:
@@ -178,7 +179,6 @@ def prepare_command(
                 max_open_positions,
                 "--max-open-positions",
             ),
-            state_stale_after_seconds=state_stale_after_seconds,
         )
     )
     typer.echo(json.dumps(payload, sort_keys=True))
@@ -325,16 +325,9 @@ def run_command(
     poll_interval_seconds: Annotated[
         float, typer.Option("--poll-interval-seconds", min=0.1)
     ] = 1.0,
-    state_stale_after_seconds: Annotated[
-        float, typer.Option("--state-stale-after-seconds", min=1)
-    ] = 30.0,
     checkpoint_every_states: Annotated[
         int, typer.Option("--checkpoint-every-states", min=1)
     ] = 100,
-    max_spread: Annotated[str, typer.Option("--max-spread")] = "5",
-    cooldown_seconds: Annotated[
-        int, typer.Option("--cooldown-seconds", min=0)
-    ] = 0,
     hedge_mode: Annotated[
         bool,
         typer.Option("--hedge-mode/--one-way-mode"),
@@ -363,10 +356,6 @@ def run_command(
         str,
         typer.Option("--candle-grace-profit-pct"),
     ] = "0.0088",
-    max_holding_seconds: Annotated[
-        int,
-        typer.Option("--max-holding-seconds", min=1),
-    ] = 1200,
     base_url: Annotated[str, typer.Option("--base-url")] = "https://fapi.binance.com",
     api_key_env: Annotated[str, typer.Option("--api-key-env")] = "BINANCE_API_KEY",
     api_secret_env: Annotated[
@@ -401,15 +390,11 @@ def run_command(
             migration_revision=migration_revision,
             max_runtime_seconds=max_runtime_seconds,
             poll_interval_seconds=poll_interval_seconds,
-            state_stale_after_seconds=state_stale_after_seconds,
             checkpoint_every_states=checkpoint_every_states,
-            max_spread=Decimal(max_spread),
-            cooldown_seconds=cooldown_seconds,
             hedge_mode=hedge_mode,
             exit_mode=exit_mode,
             take_profit_pct=Decimal(take_profit_pct),
             stop_loss_pct=Decimal(stop_loss_pct),
-            max_holding_seconds=max_holding_seconds,
             entry_long_only=entry_long_only,
             candle_grace_bars=candle_grace_bars,
             candle_grace_profit_pct=Decimal(candle_grace_profit_pct),
@@ -621,15 +606,11 @@ async def _run_live_daemon(
     migration_revision: str,
     max_runtime_seconds: int,
     poll_interval_seconds: float,
-    state_stale_after_seconds: float,
     checkpoint_every_states: int,
-    max_spread: Decimal,
-    cooldown_seconds: int,
     hedge_mode: bool,
     exit_mode: PositionExitMode,
     take_profit_pct: Decimal,
     stop_loss_pct: Decimal,
-    max_holding_seconds: int,
     entry_long_only: bool,
     candle_grace_bars: int,
     candle_grace_profit_pct: Decimal,
@@ -773,7 +754,6 @@ async def _run_live_daemon(
                 repository=state_repository,
                 environment=market_environment,
                 now=now,
-                stale_after_seconds=state_stale_after_seconds,
             )
         )
 
@@ -795,10 +775,6 @@ async def _run_live_daemon(
                 max_open_positions=max_positions,
                 max_daily_loss=max_loss,
                 max_gross_exposure=max_gross,
-                max_spread=max_spread,
-                cooldown_seconds=cooldown_seconds,
-                max_account_age_seconds=state_stale_after_seconds,
-                max_market_age_seconds=state_stale_after_seconds,
             ),
             repository=_LiveDaemonRepositoryAdapter(
                 order_repository,
@@ -818,12 +794,10 @@ async def _run_live_daemon(
             ),
             config=LiveDaemonConfig(
                 run_id=session_id,
-                max_market_state_age_seconds=state_stale_after_seconds,
                 resize_tolerance=Decimal("0.10"),
                 checkpoint_every_states=checkpoint_every_states,
                 hedge_mode=hedge_mode,
                 entry_long_only=entry_long_only,
-                skip_stale_until_fresh=True,
             ),
             exit_manager=LiveExitManager(
                 config=LiveExitConfig(
@@ -834,7 +808,7 @@ async def _run_live_daemon(
                     policy=PositionExitPolicy(
                         take_profit_pct=take_profit_pct,
                         stop_loss_pct=stop_loss_pct,
-                        max_holding_seconds=max_holding_seconds,
+                        max_holding_seconds=None,
                         mode=exit_mode,
                     ),
                     candle_grace_bars=candle_grace_bars,
@@ -985,14 +959,12 @@ async def _warm_live_strategy(
     repository: PostgresRuntimeMarketStateRepository,
     environment: str,
     now: datetime,
-    stale_after_seconds: float,
 ) -> RuntimeStateCursor:
     warmup_seconds = _live_warmup_seconds(strategy)
     cursor = RuntimeStateCursor(
         bucket_start=now - timedelta(seconds=warmup_seconds),
         symbol="",
     )
-    fresh_after = now - timedelta(seconds=stale_after_seconds)
     warmed_state_count = 0
     while warmed_state_count < _LIVE_WARMUP_STATE_LIMIT:
         batch = await repository.load_after(
@@ -1005,18 +977,14 @@ async def _warm_live_strategy(
         )
         if not batch:
             break
-        reached_fresh = False
         for state in batch:
-            if state.bucket_end >= fresh_after:
-                reached_fresh = True
-                break
             strategy.on_market_state(state)
             cursor = RuntimeStateCursor(
                 bucket_start=state.bucket_start,
                 symbol=state.symbol,
             )
             warmed_state_count += 1
-        if reached_fresh or len(batch) < _LIVE_WARMUP_BATCH_SIZE:
+        if len(batch) < _LIVE_WARMUP_BATCH_SIZE:
             break
     return cursor
 
@@ -1037,24 +1005,13 @@ async def _warm_live_strategy_then_start_fresh(
     repository: PostgresRuntimeMarketStateRepository,
     environment: str,
     now: datetime,
-    stale_after_seconds: float,
 ) -> RuntimeStateCursor:
-    """Warm historical state, then wait for a state produced after warmup.
-
-    Warmup can take longer than the stale-data budget on a cold container.  A
-    cursor at the last historical row would therefore replay a row that is
-    already stale by the time the daemon starts and cause an immediate halt.
-    Historical rows older than the cutoff are still applied to the strategy;
-    rows at or after the cutoff are intentionally left for the live stream.
-    Starting the poll cursor at the post-warmup wall clock avoids replaying
-    that moving boundary while retaining the daemon's stale-data safety gate.
-    """
+    """Warm historical state, then continue from the current live boundary."""
     await _warm_live_strategy(
         strategy=strategy,
         repository=repository,
         environment=environment,
         now=now,
-        stale_after_seconds=stale_after_seconds,
     )
     return RuntimeStateCursor(bucket_start=datetime.now(tz=UTC), symbol="")
 
@@ -1112,6 +1069,8 @@ def _live_strategy_config() -> dict[str, object]:
     return {
         "candidate_notional": Decimal("100"),
         "candidate_ttl_buckets": 4,
+        # B1 must not suppress a same-symbol signal for two 15-second buckets.
+        "cooldown_buckets": 0,
     }
 
 
@@ -1135,7 +1094,6 @@ async def _prepare_live_risk_gates(
     max_gross_notional: Decimal | None,
     max_daily_loss: Decimal | None,
     max_open_positions: int | None,
-    state_stale_after_seconds: float,
 ) -> dict[str, str]:
     now = datetime.now(tz=UTC)
     risk_config = RiskConfigSnapshot(
@@ -1145,8 +1103,8 @@ async def _prepare_live_risk_gates(
         max_gross_notional=max_gross_notional,
         max_daily_loss=max_daily_loss,
         max_open_positions=max_open_positions,
-        max_market_state_age_seconds=state_stale_after_seconds,
-        max_account_state_age_seconds=state_stale_after_seconds,
+        max_market_state_age_seconds=_LIVE_UNENFORCED_STATE_AGE_SECONDS,
+        max_account_state_age_seconds=_LIVE_UNENFORCED_STATE_AGE_SECONDS,
         allow_reduce_only_while_draining=True,
         created_at=now,
     )

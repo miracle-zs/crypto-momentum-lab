@@ -22,8 +22,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert 'data-endpoint="api/overview"' in index
-    assert 'href="static/dashboard.css?v=20260812-exit-series"' in index
-    assert 'src="static/dashboard.js?v=20260812-exit-series"' in index
+    assert 'href="static/dashboard.css?v=20260815-live-account"' in index
+    assert 'src="static/dashboard.js?v=20260815-live-account"' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
@@ -95,6 +95,22 @@ def test_account_cards_use_each_account_equity_curve() -> None:
     assert "standaloneSparkline(account.equity_curve)" in card_code
     assert "滚动 24H 权益变化" in card_code
     assert "comparisonSparkline" not in card_code
+
+
+def test_exchange_account_panel_exposes_reconciliation_and_execution_detail() -> None:
+    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+
+    for marker in (
+        "账户权限与对账",
+        "对账状态",
+        "可用余额",
+        "未实现盈亏",
+        "当前挂单",
+        "最近成交",
+        "strategy_name",
+        "reconciliation",
+    ):
+        assert marker in text
 
 
 def test_paper_accounts_group_by_strategy_columns() -> None:

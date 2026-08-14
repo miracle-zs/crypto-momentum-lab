@@ -48,6 +48,15 @@ def test_registry_uses_two_to_one_liquidation_imbalance_threshold() -> None:
     assert runtime_config.event_config.min_aggressive_imbalance == Decimal("0.33")
 
 
+def test_registry_allows_live_orderflow_cooldown_override() -> None:
+    runtime_config = build_runtime_config(
+        "orderflow_impulse",
+        config={"cooldown_buckets": 0},
+    )
+
+    assert runtime_config.event_config.cooldown_buckets == 0
+
+
 def _identity(strategy_name: str) -> StrategyRunIdentity:
     return StrategyRunIdentity(
         run_id="run-1",

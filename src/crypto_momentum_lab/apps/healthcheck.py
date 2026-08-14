@@ -24,11 +24,19 @@ def main() -> int:
         type=float,
         default=_DEFAULT_MAX_AGE_SECONDS,
     )
+    parser.add_argument(
+        "--ignore-age",
+        action="store_true",
+        help="only require a ready heartbeat; do not apply an age cutoff",
+    )
     parser.add_argument("--account-label", default="primary")
     args = parser.parse_args()
     database_url = os.environ.get("CML_DATABASE_URL")
-    if not database_url or args.max_age_seconds <= 0:
+    if not database_url or (
+        not args.ignore_age and args.max_age_seconds <= 0
+    ):
         return 1
+    max_age_seconds = None if args.ignore_age else args.max_age_seconds
 
     engine = create_engine(_sync_database_url(database_url), pool_pre_ping=True)
     try:
@@ -36,14 +44,14 @@ def main() -> int:
             if args.service == "market-data":
                 return 0 if _market_data_ready(
                     connection,
-                    max_age_seconds=args.max_age_seconds,
+                    max_age_seconds=max_age_seconds,
                     not_before=_process_started_at(),
                 ) else 1
             if args.service == "execution-account":
                 return 0 if _execution_account_ready(
                     connection,
                     account_label=args.account_label,
-                    max_age_seconds=args.max_age_seconds,
+                    max_age_seconds=max_age_seconds,
                 ) else 1
             configured_run_ids = os.environ.get("CML_HEALTHCHECK_RUN_IDS")
             if configured_run_ids:
@@ -61,7 +69,7 @@ def main() -> int:
                 _paper_ready(
                     connection,
                     run_id=run_id,
-                    max_age_seconds=args.max_age_seconds,
+                    max_age_seconds=max_age_seconds,
                 )
                 for run_id in run_ids
             ) else 1
@@ -74,7 +82,7 @@ def main() -> int:
 def _market_data_ready(
     connection: Connection,
     *,
-    max_age_seconds: float,
+    max_age_seconds: float | None,
     not_before: datetime | None = None,
 ) -> bool:
     process = connection.execute(
@@ -106,7 +114,7 @@ def _paper_ready(
     connection: Connection,
     *,
     run_id: str,
-    max_age_seconds: float,
+    max_age_seconds: float | None,
 ) -> bool:
     checkpoint_at = connection.execute(
         text(
@@ -122,7 +130,7 @@ def _execution_account_ready(
     connection: Connection,
     *,
     account_label: str,
-    max_age_seconds: float,
+    max_age_seconds: float | None,
 ) -> bool:
     process = connection.execute(
         text(
@@ -140,9 +148,11 @@ def _execution_account_ready(
     )
 
 
-def _fresh(observed_at: datetime | None, *, max_age_seconds: float) -> bool:
+def _fresh(observed_at: datetime | None, *, max_age_seconds: float | None) -> bool:
     if observed_at is None:
         return False
+    if max_age_seconds is None:
+        return True
     age_seconds = (datetime.now(UTC) - _as_utc(observed_at)).total_seconds()
     return age_seconds <= max_age_seconds
 

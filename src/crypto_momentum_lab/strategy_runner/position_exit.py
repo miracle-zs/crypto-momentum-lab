@@ -15,7 +15,7 @@ class PositionExitMode(StrEnum):
 class PositionExitPolicy:
     take_profit_pct: Decimal = Decimal("0.02")
     stop_loss_pct: Decimal = Decimal("0.01")
-    max_holding_seconds: int = 1200
+    max_holding_seconds: int | None = 1200
     mode: PositionExitMode = PositionExitMode.FIXED
     minimum_holding_seconds: int = 0
     candle_confirmation_count: int = 1
@@ -27,7 +27,7 @@ class PositionExitPolicy:
             raise ValueError("take_profit_pct must be positive")
         if self.stop_loss_pct <= 0:
             raise ValueError("stop_loss_pct must be positive")
-        if self.max_holding_seconds <= 0:
+        if self.max_holding_seconds is not None and self.max_holding_seconds <= 0:
             raise ValueError("max_holding_seconds must be positive")
         if self.minimum_holding_seconds < 0:
             raise ValueError("minimum_holding_seconds must not be negative")
@@ -72,7 +72,10 @@ def position_exit_reason(
             return "take_profit"
         if gross_return <= -policy.stop_loss_pct:
             return "stop_loss"
-    if held_until >= opened_at + timedelta(seconds=policy.max_holding_seconds):
+    if (
+        policy.max_holding_seconds is not None
+        and held_until >= opened_at + timedelta(seconds=policy.max_holding_seconds)
+    ):
         return "max_holding_period"
     return None
 

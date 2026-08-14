@@ -112,7 +112,7 @@ async def test_live_daemon_blocks_before_submit_when_gate_changes() -> None:
     assert exchange.calls == []
 
 
-async def test_live_daemon_waits_through_stale_startup_state() -> None:
+async def test_live_daemon_processes_delayed_startup_state_without_age_gate() -> None:
     exchange = PlanAwareExchange()
     stale = replace(
         _state(),
@@ -126,15 +126,14 @@ async def test_live_daemon_waits_through_stale_startup_state() -> None:
 
     daemon = _daemon(
         exchange=exchange,
-        skip_stale_until_fresh=True,
     )
 
     result = await daemon.run(states())
 
-    assert result.processed_state_count == 1
-    assert result.approved_intent_count == 1
+    assert result.processed_state_count == 2
+    assert result.approved_intent_count == 2
     assert result.halt_reason is None
-    assert exchange.calls == ["submit"]
+    assert exchange.calls == ["submit", "submit"]
 
 
 async def test_live_daemon_saves_final_checkpoint_before_normal_exit() -> None:
@@ -241,7 +240,6 @@ def _daemon(
     checkpoint_every_states: int = 1,
     exit_manager: LiveExitManager | None = None,
     hedge_mode: bool = False,
-    skip_stale_until_fresh: bool = False,
 ) -> LiveStrategyDaemon:
     order_repository = FakeOrderRepository()
     machine = OrderExecutionStateMachine(
@@ -264,21 +262,15 @@ def _daemon(
             max_open_positions=1,
             max_daily_loss=Decimal("10"),
             max_gross_exposure=Decimal("25"),
-            max_spread=Decimal("5"),
-            cooldown_seconds=300,
-            max_account_age_seconds=30,
-            max_market_age_seconds=30,
         ),
         repository=repository or FakeLiveRepository(),
         state_machine=machine,
         context_provider=context_provider or default_context,
         config=LiveDaemonConfig(
             run_id="run-1",
-            max_market_state_age_seconds=30,
             resize_tolerance=Decimal("0.20"),
             checkpoint_every_states=checkpoint_every_states,
             hedge_mode=hedge_mode,
-            skip_stale_until_fresh=skip_stale_until_fresh,
         ),
         exit_manager=exit_manager,
     )
@@ -337,7 +329,6 @@ def _runtime_context() -> LiveDaemonRuntimeContext:
                 min_notional=Decimal("5"),
             )
         },
-        last_entry_at_by_symbol={},
     )
 
 

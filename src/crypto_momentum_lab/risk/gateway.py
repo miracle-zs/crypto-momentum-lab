@@ -26,6 +26,7 @@ class RiskContext:
     active_halts: tuple[RiskHalt, ...]
     risk_config: RiskConfigSnapshot
     strategy_state: StrategyLiveState
+    enforce_market_state_age: bool = True
 
 
 class RiskGateway:
@@ -49,7 +50,7 @@ class RiskGateway:
             return _evaluation(intent, context, RiskDecision.REJECTED, "lease_inactive")
         if context.active_lease.expires_at <= context.now:
             return _evaluation(intent, context, RiskDecision.REJECTED, "lease_expired")
-        if _market_age_seconds(context) > (
+        if context.enforce_market_state_age and _market_age_seconds(context) > (
             context.risk_config.max_market_state_age_seconds
         ):
             return _evaluation(

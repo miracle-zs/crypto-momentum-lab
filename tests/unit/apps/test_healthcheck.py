@@ -67,3 +67,13 @@ def test_execution_account_readiness_requires_fresh_ready_state() -> None:
         account_label="primary",
         max_age_seconds=30,
     )
+
+
+def test_execution_account_readiness_can_skip_age_cutoff() -> None:
+    old = datetime(2020, 1, 1, tzinfo=UTC)
+
+    assert healthcheck._execution_account_ready(
+        _Connection({"state": "ready_readonly", "occurred_at": old}),
+        account_label="primary",
+        max_age_seconds=None,
+    )
