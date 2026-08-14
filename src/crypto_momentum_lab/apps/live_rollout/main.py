@@ -104,6 +104,7 @@ app = typer.Typer(no_args_is_help=True)
 _PREPARE_CONFIRMATION = "PREPARE LIVE RISK GATES"
 _LIVE_WARMUP_SECONDS = 7200
 _LIVE_WARMUP_STATE_LIMIT = 100_000
+_LIVE_WARMUP_BATCH_SIZE = 1_000
 
 
 @app.callback()
@@ -963,20 +964,32 @@ async def _warm_live_strategy(
         bucket_start=now - timedelta(seconds=_LIVE_WARMUP_SECONDS),
         symbol="",
     )
-    states = await repository.load_after(
-        environment=environment,
-        cursor=cursor,
-        limit=_LIVE_WARMUP_STATE_LIMIT,
-    )
     fresh_after = now - timedelta(seconds=stale_after_seconds)
-    for state in states:
-        if state.bucket_end >= fresh_after:
-            break
-        strategy.on_market_state(state)
-        cursor = RuntimeStateCursor(
-            bucket_start=state.bucket_start,
-            symbol=state.symbol,
+    warmed_state_count = 0
+    while warmed_state_count < _LIVE_WARMUP_STATE_LIMIT:
+        batch = await repository.load_after(
+            environment=environment,
+            cursor=cursor,
+            limit=min(
+                _LIVE_WARMUP_BATCH_SIZE,
+                _LIVE_WARMUP_STATE_LIMIT - warmed_state_count,
+            ),
         )
+        if not batch:
+            break
+        reached_fresh = False
+        for state in batch:
+            if state.bucket_end >= fresh_after:
+                reached_fresh = True
+                break
+            strategy.on_market_state(state)
+            cursor = RuntimeStateCursor(
+                bucket_start=state.bucket_start,
+                symbol=state.symbol,
+            )
+            warmed_state_count += 1
+        if reached_fresh or len(batch) < _LIVE_WARMUP_BATCH_SIZE:
+            break
     return cursor
 
 
