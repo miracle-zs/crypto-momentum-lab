@@ -36,7 +36,11 @@ from crypto_momentum_lab.live_rollout.exits import (
     LiveExitManager,
     ManagedLivePosition,
 )
-from crypto_momentum_lab.live_rollout.gates import LiveGateContext, evaluate_live_gate
+from crypto_momentum_lab.live_rollout.gates import (
+    LiveGateContext,
+    evaluate_live_gate,
+    order_state_is_uncertain,
+)
 from crypto_momentum_lab.live_rollout.limits import (
     FixedLiveLimits,
     LiveLimitContext,
@@ -454,7 +458,7 @@ class LiveStrategyDaemon:
                     account_observed_at=context.account_observed_at,
                     market_observed_at=state.bucket_end,
                     has_unresolved_order=any(
-                        not item.terminal
+                        order_state_is_uncertain(item)
                         for item in context.unresolved_order_states
                     ),
                 ),

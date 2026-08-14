@@ -53,7 +53,7 @@ def evaluate_live_gate(context: LiveGateContext) -> LiveGateDecision:
     if context.active_halts:
         reasons.append("active_risk_halt")
     if any(
-        _order_state_is_uncertain(state)
+        order_state_is_uncertain(state)
         for state in context.unresolved_order_states
     ):
         reasons.append("unresolved_order_uncertainty")
@@ -63,7 +63,7 @@ def evaluate_live_gate(context: LiveGateContext) -> LiveGateDecision:
     )
 
 
-def _order_state_is_uncertain(state: ExchangeOrderState) -> bool:
+def order_state_is_uncertain(state: ExchangeOrderState) -> bool:
     """Known resting orders are safe; only ambiguous lifecycle states halt.
 
     ACKNOWLEDGED/PARTIALLY_FILLED orders have a confirmed exchange state and
@@ -78,6 +78,11 @@ def _order_state_is_uncertain(state: ExchangeOrderState) -> bool:
         ExchangeOrderState.CANCELING,
         ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
     }
+
+
+def _order_state_is_uncertain(state: ExchangeOrderState) -> bool:
+    """Backward-compatible private alias for the shared uncertainty rule."""
+    return order_state_is_uncertain(state)
 
 
 def _check_lease(context: LiveGateContext, reasons: list[str]) -> None:

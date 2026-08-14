@@ -64,6 +64,36 @@ async def test_live_daemon_submits_strategy_candidate_after_all_gates() -> None:
     assert exchange.calls == ["submit"]
 
 
+async def test_live_daemon_allows_entry_with_confirmed_resting_order() -> None:
+    exchange = PlanAwareExchange()
+
+    async def context_with_resting_order(
+        state: object,
+    ) -> LiveDaemonRuntimeContext:
+        del state
+        resting_order = ExchangeOrderState.ACKNOWLEDGED
+        return replace(
+            _runtime_context(),
+            gate_context=replace(
+                gate_context(),
+                unresolved_order_states=(resting_order,),
+            ),
+            unresolved_order_states=(resting_order,),
+        )
+
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=context_with_resting_order,
+    )
+
+    result = await daemon.run(_states())
+
+    assert result.approved_intent_count == 1
+    assert result.submitted_order_count == 1
+    assert result.halt_reason is None
+    assert exchange.calls == ["submit"]
+
+
 async def test_live_daemon_blocks_before_submit_when_gate_changes() -> None:
     exchange = FakeExchange(
         submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED)
