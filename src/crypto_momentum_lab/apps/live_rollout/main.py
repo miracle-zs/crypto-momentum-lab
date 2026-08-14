@@ -132,11 +132,11 @@ def prepare_command(
     max_order_notional: Annotated[
         str,
         typer.Option("--max-order-notional"),
-    ] = "100",
+    ] = "unlimited",
     max_gross_notional: Annotated[
         str,
         typer.Option("--max-gross-notional"),
-    ] = "300",
+    ] = "unlimited",
     max_daily_loss: Annotated[
         str,
         typer.Option("--max-daily-loss"),
@@ -144,7 +144,7 @@ def prepare_command(
     max_open_positions: Annotated[
         str,
         typer.Option("--max-open-positions"),
-    ] = "3",
+    ] = "unlimited",
     state_stale_after_seconds: Annotated[
         float,
         typer.Option("--state-stale-after-seconds", min=1),
@@ -193,10 +193,10 @@ def approve_command(
     risk_config_hash: Annotated[str, typer.Option("--risk-config-hash")] = "",
     git_commit_hash: Annotated[str, typer.Option("--git-commit-hash")] = "",
     migration_revision: Annotated[str, typer.Option("--migration-revision")] = "",
-    notional_cap: Annotated[str, typer.Option("--notional-cap")] = "25",
+    notional_cap: Annotated[str, typer.Option("--notional-cap")] = "unlimited",
     max_open_positions: Annotated[
         str, typer.Option("--max-open-positions")
-    ] = "1",
+    ] = "unlimited",
     max_daily_loss: Annotated[str, typer.Option("--max-daily-loss")] = "unlimited",
     approver: Annotated[str, typer.Option("--approver")] = "",
     confirmation: Annotated[str, typer.Option("--confirmation")] = "",
