@@ -148,6 +148,11 @@ class LiveStrategyDaemon:
         self._exit_manager = exit_manager
         self._reconcile_orders = reconcile_orders
 
+    def _invalidate_context_cache(self) -> None:
+        invalidate = getattr(self._context_provider, "invalidate_cache", None)
+        if callable(invalidate):
+            invalidate()
+
     async def run(
         self,
         states: AsyncIterable[MarketState15s],
@@ -257,6 +262,7 @@ class LiveStrategyDaemon:
                     cancel_result = await self._state_machine.cancel_order(
                         request.cancel_plan
                     )
+                    self._invalidate_context_cache()
                     if (
                         cancel_result.state
                         is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
@@ -310,6 +316,7 @@ class LiveStrategyDaemon:
                         context=context,
                     )
                     if result is not None:
+                        self._invalidate_context_cache()
                         approved += 1
                         submitted += int(not result.suppressed)
                         if (
@@ -347,6 +354,7 @@ class LiveStrategyDaemon:
                     context=context,
                 )
                 if result is not None:
+                    self._invalidate_context_cache()
                     approved += 1
                     submitted += int(not result.suppressed)
                     if (
@@ -378,6 +386,7 @@ class LiveStrategyDaemon:
                     context=context,
                 )
                 if result is not None:
+                    self._invalidate_context_cache()
                     approved += 1
                     submitted += int(not result.suppressed)
                     if (

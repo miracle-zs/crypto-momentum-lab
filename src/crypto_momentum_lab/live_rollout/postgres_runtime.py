@@ -1,6 +1,7 @@
 import asyncio
 import time
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -20,6 +21,9 @@ from crypto_momentum_lab.domain.live_rollout import LiveOperatorApproval
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import RiskConfigSnapshot, StrategyLiveState
 from crypto_momentum_lab.domain.strategy import StrategySide
+from crypto_momentum_lab.execution_account.orders.quantization import (
+    SymbolTradingRules,
+)
 from crypto_momentum_lab.execution_account.orders.state_machine import SubmitPolicy
 from crypto_momentum_lab.live_rollout.daemon import LiveDaemonRuntimeContext
 from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
@@ -84,9 +88,30 @@ class PostgresLiveContextProvider:
         self._risk_repository = PostgresRiskRepository(session_factory)
         self._live_repository = PostgresLiveRolloutRepository(session_factory)
         self._order_repository = PostgresOrderRepository(session_factory)
+        self._cached_bucket_start: datetime | None = None
+        self._cached_context: LiveDaemonRuntimeContext | None = None
+        self._cached_rules: dict[str, SymbolTradingRules] = {}
 
     async def __call__(self, state: MarketState15s) -> LiveDaemonRuntimeContext:
         now = datetime.now(tz=UTC)
+        if (
+            self._cached_bucket_start == state.bucket_start
+            and self._cached_context is not None
+        ):
+            symbol_rules = self._cached_rules.get(state.symbol)
+            if symbol_rules is None:
+                loaded_rules = await _load_trading_rules(
+                    self._sessions,
+                    {state.symbol},
+                )
+                symbol_rules = loaded_rules[state.symbol]
+                self._cached_rules[state.symbol] = symbol_rules
+            return replace(
+                self._cached_context,
+                now=now,
+                gate_context=replace(self._cached_context.gate_context, now=now),
+                trading_rules={state.symbol: symbol_rules},
+            )
         approval = await self._live_repository.load_active_approval(
             account_label=self._account_label,
             strategy_name=self._strategy_name,
@@ -155,7 +180,7 @@ class PostgresLiveContextProvider:
             active_halts=halts,
             unresolved_order_states=unresolved_states,
         )
-        return LiveDaemonRuntimeContext(
+        context = LiveDaemonRuntimeContext(
             now=now,
             gate_context=gate_context,
             active_lease=lease,
@@ -175,6 +200,16 @@ class PostgresLiveContextProvider:
             unmanaged_position_symbols=unmanaged_symbols,
             unresolved_orders=unresolved,
         )
+        self._cached_bucket_start = state.bucket_start
+        self._cached_context = context
+        self._cached_rules[state.symbol] = rules[state.symbol]
+        return context
+
+    def invalidate_cache(self) -> None:
+        """Force the next state to reload account and risk state."""
+        self._cached_bucket_start = None
+        self._cached_context = None
+        self._cached_rules.clear()
 
     async def _account_position_view(
         self,
