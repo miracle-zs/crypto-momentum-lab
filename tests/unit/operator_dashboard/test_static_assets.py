@@ -22,8 +22,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert 'data-endpoint="api/overview"' in index
-    assert 'href="static/dashboard.css?v=20260815-live-account"' in index
-    assert 'src="static/dashboard.js?v=20260815-live-account"' in index
+    assert 'href="static/dashboard.css?v=20260815-mobile-heartbeat"' in index
+    assert 'src="static/dashboard.js?v=20260815-mobile-heartbeat"' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
@@ -209,6 +209,39 @@ def test_dashboard_formats_display_times_in_fixed_utc_plus_8() -> None:
     assert "UTC+8" in text
     assert "<small>UTC+8</small>" in index
     assert "UTC DAY" in text
+
+
+def test_dashboard_separates_live_status_from_heartbeat() -> None:
+    javascript = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    index = (STATIC / "index.html").read_text(encoding="utf-8")
+
+    assert "实盘状态：UNKNOWN · 等待数据" in index
+    assert "实盘心跳：等待数据" in index
+    for marker in (
+        "latestLiveService",
+        "liveHeartbeatAge",
+        "liveHeartbeatStatus",
+        "started_at",
+        "实盘状态：${mode} · ${duration}",
+        "实盘心跳：${relAge(age)} · ${freshness}",
+    ):
+        assert marker in javascript
+
+
+def test_mobile_account_cards_wrap_without_horizontal_overflow() -> None:
+    stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+
+    for marker in (
+        "overflow-x: hidden",
+        ".acct-top .acct-mode",
+        "overflow-wrap: anywhere",
+        ".runtime-line {",
+        "viewport-fit=cover",
+        "env(safe-area-inset-bottom)",
+    ):
+        assert marker in stylesheet or marker in (
+            STATIC / "index.html"
+        ).read_text(encoding="utf-8")
 
 
 def test_paper_account_cards_use_three_strategy_columns() -> None:

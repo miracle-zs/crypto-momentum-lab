@@ -127,6 +127,26 @@ class DashboardQueries:
                 .order_by(LiveSessionTransitionRow.occurred_at.desc())
                 .limit(1)
             )
+            live_heartbeat_at = None
+            live_started_at = None
+            if live is not None:
+                # A transition records the lifecycle state, not a process
+                # heartbeat.  The live daemon's runtime checkpoint is the
+                # freshest durable signal that its loop is still progressing.
+                live_heartbeat_at = await session.scalar(
+                    select(StrategyRuntimeCheckpointRow.saved_at).where(
+                        StrategyRuntimeCheckpointRow.run_id == live.session_id
+                    )
+                )
+                live_started_at = await session.scalar(
+                    select(LiveSessionTransitionRow.occurred_at)
+                    .where(
+                        LiveSessionTransitionRow.session_id == live.session_id,
+                        LiveSessionTransitionRow.state == "live_enabled",
+                    )
+                    .order_by(LiveSessionTransitionRow.occurred_at.desc())
+                    .limit(1)
+                )
         account_at = None if account is None else account.occurred_at
         strategy_at = (
             None if strategy_checkpoint is None else strategy_checkpoint.saved_at
@@ -150,13 +170,25 @@ class DashboardQueries:
                 if live.state == "halted"
                 else OperationalStatus.SHADOW
             )
+            live_observed_at = live_heartbeat_at or live.occurred_at
+            live_details: dict[str, JsonValue] = {
+                "state": live.state,
+                "session_id": live.session_id,
+                "heartbeat_source": (
+                    "runtime_checkpoint"
+                    if live_heartbeat_at is not None
+                    else "state_transition"
+                ),
+            }
+            if live_started_at is not None:
+                live_details["started_at"] = live_started_at.isoformat()
             services.append(
                 ServiceStatusResponse(
                     name="live-rollout",
                     status=live_status,
-                    observed_at=live.occurred_at,
-                    age_seconds=_age(now, live.occurred_at),
-                    details={"state": live.state, "session_id": live.session_id},
+                    observed_at=live_observed_at,
+                    age_seconds=_age(now, live_observed_at),
+                    details=live_details,
                 )
             )
         return SystemOverviewResponse(

@@ -17,8 +17,9 @@ const COMPARISON_SERIES_COLORS = [
   "var(--series-sky)",
 ];
 let selectedPaperAccount = 0;
-let lastPollAt = null;
 let pollInFlight = false;
+let latestLiveService = null;
+let latestLiveMode = "UNKNOWN";
 const paperHistoryByRun = new Map();
 const paperDetailsByRun = new Map();
 const paperDetailRequests = new Map();
@@ -146,6 +147,49 @@ const relToNow = (value) => {
   const delta = (Date.now() - parsed.getTime()) / 1000;
   return delta >= 0 ? relAge(delta) : `${Math.round(-delta / 60)} 分后`;
 };
+
+const liveHeartbeatAge = (service) => {
+  if (!service) return null;
+  const observedAt = new Date(service.observed_at || "").getTime();
+  if (Number.isFinite(observedAt)) {
+    return Math.max(0, (Date.now() - observedAt) / 1000);
+  }
+  return asNumber(service.age_seconds);
+};
+
+const liveHeartbeatStatus = (age) => {
+  if (age == null) return "UNKNOWN";
+  return age <= 120 ? "FRESH" : "STALE";
+};
+
+function renderLiveRuntime() {
+  const stamp = document.getElementById("global-mode");
+  const heartbeat = document.getElementById("last-cycle");
+  const heartbeatRow = heartbeat?.closest(".poll-state");
+  if (!stamp || !heartbeat) return;
+
+  const mode = latestLiveMode || "UNKNOWN";
+  const startedAt = latestLiveService?.details?.started_at;
+  let duration = "等待数据";
+  if (mode === "LIVE") {
+    duration = startedAt
+      ? `已运行 ${elapsedTime(startedAt, new Date())}`
+      : "运行时间未知";
+  } else if (mode === "HALTED") {
+    duration = "已停止";
+  } else if (mode === "SHADOW") {
+    duration = "未启用";
+  }
+  stamp.className = `mode-badge runtime-line ${statusClass(mode)}`;
+  stamp.textContent = `实盘状态：${mode} · ${duration}`;
+
+  const age = liveHeartbeatAge(latestLiveService);
+  const freshness = liveHeartbeatStatus(age);
+  heartbeat.textContent = age == null
+    ? "实盘心跳：暂无数据 · UNKNOWN"
+    : `实盘心跳：${relAge(age)} · ${freshness}`;
+  if (heartbeatRow) heartbeatRow.className = `poll-state ${statusClass(freshness)}`;
+}
 
 const shortHash = (value) => {
   const hash = String(value || "").trim();
@@ -910,12 +954,18 @@ function setSectionStatus(id, status) {
 }
 
 function updateGlobalMode(data) {
-  const live = data.services?.find((service) => service.status === "LIVE");
+  const live = data.services?.find((service) => service.name === "live-rollout");
   const halted = (data.active_halt_count || 0) > 0;
-  const mode = halted ? "HALTED" : live ? "LIVE" : "SHADOW";
-  const stamp = document.getElementById("global-mode");
-  stamp.className = `mode-badge ${statusClass(mode)}`;
-  stamp.textContent = mode;
+  const mode = halted
+    ? "HALTED"
+    : live?.status === "LIVE"
+      ? "LIVE"
+      : live?.status === "HALTED"
+        ? "HALTED"
+        : "SHADOW";
+  latestLiveService = live || null;
+  latestLiveMode = mode;
+  renderLiveRuntime();
 }
 
 function wirePaperAccountTabs(body, data) {
@@ -1174,7 +1224,6 @@ async function poll() {
   pollInFlight = true;
   try {
     await Promise.allSettled(SECTIONS.map(refreshSection));
-    lastPollAt = new Date();
     const pollbar = document.getElementById("pollbar");
     pollbar.classList.remove("run");
     void pollbar.offsetWidth;
@@ -1187,10 +1236,7 @@ async function poll() {
 }
 
 function renderPollState() {
-  const label = document.getElementById("last-cycle");
-  if (!lastPollAt) return;
-  const delta = Math.max(0, Math.round((Date.now() - lastPollAt.getTime()) / 1000));
-  label.textContent = `上次轮询 ${timeOnly(lastPollAt)} ${DISPLAY_TIME_ZONE_LABEL} · ${delta}s 前`;
+  renderLiveRuntime();
 }
 
 function tick() {

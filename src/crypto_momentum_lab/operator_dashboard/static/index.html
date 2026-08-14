@@ -2,9 +2,9 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>CML · Execution Control Room</title>
-    <link rel="stylesheet" href="static/dashboard.css?v=20260815-live-account">
+    <link rel="stylesheet" href="static/dashboard.css?v=20260815-mobile-heartbeat">
 </head>
 <body>
   <div class="shell">
@@ -45,8 +45,8 @@
       <header class="topbar">
         <p class="crumb">CRYPTO MOMENTUM LAB <span>/</span> LOCAL READ-ONLY TERMINAL</p>
         <div class="topbar-meta">
-          <div class="poll-state"><span class="pulse" aria-hidden="true"></span><span id="last-cycle">等待首次轮询…</span></div>
-          <div id="global-mode" class="mode-badge status-UNKNOWN">UNKNOWN</div>
+          <div id="global-mode" class="mode-badge runtime-line status-UNKNOWN" aria-live="polite">实盘状态：UNKNOWN · 等待数据</div>
+          <div class="poll-state"><span class="pulse" aria-hidden="true"></span><span id="last-cycle" aria-live="polite">实盘心跳：等待数据</span></div>
           <div class="clock"><small>UTC+8</small><strong id="utc-clock">--:--:--</strong></div>
         </div>
         <div class="pollbar" id="pollbar" aria-hidden="true"></div>
@@ -135,6 +135,6 @@
       </footer>
     </div>
   </div>
-    <script src="static/dashboard.js?v=20260815-live-account" defer></script>
+    <script src="static/dashboard.js?v=20260815-mobile-heartbeat" defer></script>
 </body>
 </html>
