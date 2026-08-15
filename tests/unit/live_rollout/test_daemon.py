@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderSnapshot,
@@ -9,10 +10,12 @@ from crypto_momentum_lab.domain.execution import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import RiskEvaluation
 from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     StrategyCheckpoint,
+    StrategyDecision,
 )
 from crypto_momentum_lab.execution_account.orders.quantization import (
     SymbolTradingRules,
@@ -159,6 +162,28 @@ async def test_live_daemon_processes_delayed_startup_state_without_age_gate() ->
     assert exchange.calls == ["submit", "submit"]
 
 
+async def test_live_daemon_resets_strategy_after_market_state_gap() -> None:
+    exchange = PlanAwareExchange()
+    strategy = GapAwareFakeStrategy()
+
+    async def states() -> AsyncIterator:
+        first = _state()
+        yield first
+        yield replace(
+            first,
+            bucket_start=first.bucket_start + timedelta(minutes=5),
+            bucket_end=first.bucket_end + timedelta(minutes=5),
+        )
+
+    daemon = _daemon(exchange=exchange, strategy=strategy)
+
+    result = await daemon.run(states())
+
+    assert result.halt_reason is None
+    assert strategy.reset_symbols == ["BTCUSDT"]
+    assert strategy.reset_counts_at_decision == [0, 1]
+
+
 async def test_live_daemon_saves_final_checkpoint_before_normal_exit() -> None:
     exchange = PlanAwareExchange()
     repository = FakeLiveRepository()
@@ -259,6 +284,7 @@ class FakeLiveRepository:
 def _daemon(
     *,
     exchange,
+    strategy=None,
     context_provider=None,
     repository: FakeLiveRepository | None = None,
     checkpoint_every_states: int = 1,
@@ -279,7 +305,7 @@ def _daemon(
         return _runtime_context()
 
     return LiveStrategyDaemon(
-        strategy=FakeStrategy(),
+        strategy=strategy or FakeStrategy(),
         risk_gateway=RiskGateway(),
         limits=FixedLiveLimits(
             notional_cap=Decimal("25"),
@@ -324,6 +350,22 @@ class PlanAwareExchange:
     ) -> ExchangeOrderSnapshot | None:
         self.calls.append("query")
         return None
+
+
+class GapAwareFakeStrategy(FakeStrategy):
+    def __init__(self) -> None:
+        self.reset_symbols: list[str] = []
+        self.reset_counts_at_decision: list[int] = []
+
+    def required_data(self):
+        return SimpleNamespace(max_gap_seconds=30)
+
+    def reset_symbol(self, symbol: str) -> None:
+        self.reset_symbols.append(symbol)
+
+    def on_market_state(self, state: MarketState15s) -> StrategyDecision:
+        self.reset_counts_at_decision.append(len(self.reset_symbols))
+        return super().on_market_state(state)
 
 
 def _runtime_context() -> LiveDaemonRuntimeContext:

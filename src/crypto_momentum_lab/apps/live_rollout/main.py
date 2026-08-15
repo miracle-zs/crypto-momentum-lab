@@ -324,7 +324,7 @@ def run_command(
     ] = 3600,
     poll_interval_seconds: Annotated[
         float, typer.Option("--poll-interval-seconds", min=0.1)
-    ] = 1.0,
+    ] = 0.25,
     checkpoint_every_states: Annotated[
         int, typer.Option("--checkpoint-every-states", min=1)
     ] = 100,

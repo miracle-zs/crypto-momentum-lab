@@ -1,8 +1,9 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import cast
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -10,6 +11,9 @@ from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.persistence.postgres.models import (
     RuntimeMarketState15sRow,
 )
+
+_MAX_RUNTIME_STATE_INSERT_ROWS = 500
+type _RuntimeStateKey = tuple[str, str, datetime]
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,18 +155,20 @@ class PostgresRuntimeMarketStateRepository:
         validate_closed_states(states)
         _require_aware(source_watermark_at, "source_watermark_at")
         _validate_sequence_range(sequence_range)
+        if not states:
+            return
+        values = [
+            runtime_state_row(
+                state,
+                source_watermark_at=source_watermark_at,
+                input_sequence_min=sequence_range.minimum,
+                input_sequence_max=sequence_range.maximum,
+            )
+            for state in states
+        ]
         async with self._session_factory() as session:
             async with session.begin():
-                for state in states:
-                    await _insert_idempotent(
-                        session,
-                        runtime_state_row(
-                            state,
-                            source_watermark_at=source_watermark_at,
-                            input_sequence_min=sequence_range.minimum,
-                            input_sequence_max=sequence_range.maximum,
-                        ),
-                    )
+                await _insert_many_idempotent(session, values)
 
     async def load_after(
         self,
@@ -216,40 +222,72 @@ class PostgresRuntimeMarketStateRepository:
             )
         return latest
 
-async def _insert_idempotent(
+
+async def _insert_many_idempotent(
     session: AsyncSession,
-    values: dict[str, object],
+    values: list[dict[str, object]],
 ) -> None:
-    inserted = await session.scalar(
+    for start in range(0, len(values), _MAX_RUNTIME_STATE_INSERT_ROWS):
+        await _insert_batch_idempotent(
+            session,
+            values[start : start + _MAX_RUNTIME_STATE_INSERT_ROWS],
+        )
+
+
+async def _insert_batch_idempotent(
+    session: AsyncSession,
+    values: list[dict[str, object]],
+) -> None:
+    inserted_rows = await session.execute(
         insert(RuntimeMarketState15sRow)
         .values(values)
         .on_conflict_do_nothing()
-        .returning(RuntimeMarketState15sRow.environment)
+        .returning(
+            RuntimeMarketState15sRow.environment,
+            RuntimeMarketState15sRow.symbol,
+            RuntimeMarketState15sRow.bucket_start,
+        )
     )
-    if inserted is not None:
+    inserted_keys: set[_RuntimeStateKey] = {
+        cast(_RuntimeStateKey, tuple(row)) for row in inserted_rows.all()
+    }
+    keys: set[_RuntimeStateKey] = {
+        _runtime_state_key(item) for item in values
+    }
+    missing_keys = keys - inserted_keys
+    if not missing_keys:
         return
 
-    existing = await session.scalar(
-        select(RuntimeMarketState15sRow).where(
-            RuntimeMarketState15sRow.environment == values["environment"],
-            RuntimeMarketState15sRow.symbol == values["symbol"],
-            RuntimeMarketState15sRow.bucket_start == values["bucket_start"],
+    existing_rows = (
+        await session.scalars(
+            select(RuntimeMarketState15sRow).where(
+                tuple_(
+                    RuntimeMarketState15sRow.environment,
+                    RuntimeMarketState15sRow.symbol,
+                    RuntimeMarketState15sRow.bucket_start,
+                ).in_(missing_keys)
+            )
         )
-    )
-    if existing is not None:
+    ).all()
+    existing_by_key = {
+        (row.environment, row.symbol, row.bucket_start): row for row in existing_rows
+    }
+    values_by_key = {_runtime_state_key(item): item for item in values}
+    for key in missing_keys:
+        existing = existing_by_key.get(key)
+        if existing is None:
+            raise RuntimeError(
+                "runtime market state insert conflicted but the existing row "
+                "was not found"
+            )
+        item = values_by_key[key]
         compare_keys = tuple(
-            key for key in values if key not in {"created_at", "updated_at"}
+            name for name in item if name not in {"created_at", "updated_at"}
         )
-        existing_values = {
-            key: getattr(existing, key) for key in compare_keys
-        }
-        new_values = {key: values[key] for key in compare_keys}
+        existing_values = {name: getattr(existing, name) for name in compare_keys}
+        new_values = {name: item[name] for name in compare_keys}
         if not _core_fields_match(existing_values, new_values):
             raise ValueError("runtime market state conflict")
-        return
-    raise RuntimeError(
-        "runtime market state insert conflicted but the existing row was not found"
-    )
 
 
 def _validate_sequence_range(sequence_range: RuntimeStateSequenceRange) -> None:
@@ -259,6 +297,14 @@ def _validate_sequence_range(sequence_range: RuntimeStateSequenceRange) -> None:
         and sequence_range.minimum > sequence_range.maximum
     ):
         raise ValueError("sequence minimum must be <= maximum")
+
+
+def _runtime_state_key(values: dict[str, object]) -> _RuntimeStateKey:
+    return (
+        cast(str, values["environment"]),
+        cast(str, values["symbol"]),
+        cast(datetime, values["bucket_start"]),
+    )
 
 
 def _core_fields_match(
@@ -286,4 +332,3 @@ def _normalize_for_compare(value: object) -> object:
 def _require_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
-

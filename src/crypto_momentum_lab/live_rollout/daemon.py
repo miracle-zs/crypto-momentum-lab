@@ -160,6 +160,10 @@ class LiveStrategyDaemon:
         final_state_at: datetime | None = None
         checkpoint_dirty = False
         last_checkpoint_saved_at: datetime | None = None
+        last_processed_at_by_symbol = dict(
+            self._strategy.checkpoint().last_processed_at_by_symbol
+        )
+        max_gap_seconds = _strategy_max_gap_seconds(self._strategy)
         async for state in states:
             if self._reconcile_orders is not None:
                 try:
@@ -176,6 +180,13 @@ class LiveStrategyDaemon:
                         f"order_reconciliation_failed:{type(error).__name__}",
                         final_state_at,
                     )
+            _reset_strategy_for_gap(
+                strategy=self._strategy,
+                symbol=state.symbol,
+                current_at=state.bucket_start,
+                last_processed_at=last_processed_at_by_symbol.get(state.symbol),
+                max_gap_seconds=max_gap_seconds,
+            )
             context = await self._context_provider(state)
             gate = evaluate_live_gate(
                 replace(
@@ -236,6 +247,7 @@ class LiveStrategyDaemon:
             decision = self._strategy.on_market_state(state)
             processed += 1
             final_state_at = state.bucket_start
+            last_processed_at_by_symbol[state.symbol] = state.bucket_start
             checkpoint_dirty = True
             last_checkpoint_saved_at = context.now
             for request in exit_requests:
@@ -507,3 +519,29 @@ class LiveStrategyDaemon:
 
 def _min_notional(rules: SymbolTradingRules | None) -> Decimal | None:
     return None if rules is None else rules.min_notional
+
+
+def _strategy_max_gap_seconds(strategy: LiveRuntimeStrategy) -> int | None:
+    required_data = getattr(strategy, "required_data", None)
+    if not callable(required_data):
+        return None
+    requirement = required_data()
+    value = getattr(requirement, "max_gap_seconds", None)
+    return None if value is None else int(value)
+
+
+def _reset_strategy_for_gap(
+    *,
+    strategy: LiveRuntimeStrategy,
+    symbol: str,
+    current_at: datetime,
+    last_processed_at: datetime | None,
+    max_gap_seconds: int | None,
+) -> None:
+    if last_processed_at is None or max_gap_seconds is None:
+        return
+    if (current_at - last_processed_at).total_seconds() <= max_gap_seconds:
+        return
+    reset = getattr(strategy, "reset_symbol", None)
+    if callable(reset):
+        reset(symbol)

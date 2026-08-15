@@ -53,6 +53,8 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
 
 
 class PostgresLiveContextProvider:
+    _TRADING_RULE_CACHE_SECONDS = 300
+
     def __init__(
         self,
         *,
@@ -91,6 +93,7 @@ class PostgresLiveContextProvider:
         self._cached_bucket_start: datetime | None = None
         self._cached_context: LiveDaemonRuntimeContext | None = None
         self._cached_rules: dict[str, SymbolTradingRules] = {}
+        self._cached_rules_at: dict[str, datetime] = {}
 
     async def __call__(self, state: MarketState15s) -> LiveDaemonRuntimeContext:
         now = datetime.now(tz=UTC)
@@ -98,36 +101,75 @@ class PostgresLiveContextProvider:
             self._cached_bucket_start == state.bucket_start
             and self._cached_context is not None
         ):
-            symbol_rules = self._cached_rules.get(state.symbol)
-            if symbol_rules is None:
-                loaded_rules = await _load_trading_rules(
-                    self._sessions,
-                    {state.symbol},
-                )
-                symbol_rules = loaded_rules[state.symbol]
-                self._cached_rules[state.symbol] = symbol_rules
+            symbol_rules = await self._load_symbol_rules(state.symbol, now)
             return replace(
                 self._cached_context,
                 now=now,
                 gate_context=replace(self._cached_context.gate_context, now=now),
                 trading_rules={state.symbol: symbol_rules},
             )
-        approval = await self._live_repository.load_active_approval(
-            account_label=self._account_label,
-            strategy_name=self._strategy_name,
-            now=now,
+        approval_task = asyncio.create_task(
+            self._live_repository.load_active_approval(
+                account_label=self._account_label,
+                strategy_name=self._strategy_name,
+                now=now,
+            )
         )
+        risk_config_task = asyncio.create_task(
+            _latest_risk_config(
+                self._sessions,
+                self._account_label,
+            )
+        )
+        lease_task = asyncio.create_task(
+            self._risk_repository.load_active_lease(
+                "live",
+                self._account_label,
+                now,
+            )
+        )
+        halts_task = asyncio.create_task(
+            self._risk_repository.load_active_halts(
+                "live",
+                self._account_label,
+            )
+        )
+        unresolved_and_positions_task = asyncio.create_task(
+            self._load_unresolved_and_position_view()
+        )
+        account_state_task = asyncio.create_task(
+            _latest_account_state(
+                self._sessions,
+                self._account_label,
+            )
+        )
+        realized_task = asyncio.create_task(self._daily_realized_pnl(now))
+        symbol_rules_task = asyncio.create_task(
+            self._load_symbol_rules(state.symbol, now)
+        )
+        strategy_state_task = asyncio.create_task(self._strategy_live_state())
+        await asyncio.gather(
+            approval_task,
+            risk_config_task,
+            lease_task,
+            halts_task,
+            unresolved_and_positions_task,
+            account_state_task,
+            realized_task,
+            symbol_rules_task,
+            strategy_state_task,
+        )
+        approval = approval_task.result()
+        risk_config = risk_config_task.result()
+        lease = lease_task.result()
+        halts = halts_task.result()
+        unresolved_and_positions = unresolved_and_positions_task.result()
+        account_state = account_state_task.result()
+        realized = realized_task.result()
+        symbol_rules = symbol_rules_task.result()
+        strategy_state = strategy_state_task.result()
         if approval is not None and approval.approval_id != self._approval_id:
             approval = None
-        risk_config = await _latest_risk_config(
-            self._sessions,
-            self._account_label,
-        )
-        lease = await self._risk_repository.load_active_lease(
-            "live",
-            self._account_label,
-            now,
-        )
         if (
             lease is not None
             and lease.owner == self._lease_owner
@@ -139,17 +181,6 @@ class PostgresLiveContextProvider:
                 self._lease_owner,
                 now + timedelta(seconds=self._lease_ttl_seconds),
             )
-        halts = await self._risk_repository.load_active_halts(
-            "live",
-            self._account_label,
-        )
-        unresolved = await self._order_repository.load_unresolved_orders(
-            self._run_id
-        )
-        account_state = await _latest_account_state(
-            self._sessions,
-            self._account_label,
-        )
         (
             account_observed_at,
             position_symbols,
@@ -157,10 +188,9 @@ class PostgresLiveContextProvider:
             gross,
             managed_positions,
             unmanaged_symbols,
-        ) = await self._account_position_view(unresolved)
-        realized = await self._daily_realized_pnl(now)
-        rules = await _load_trading_rules(self._sessions, None)
-        strategy_state = await self._strategy_live_state()
+        ) = unresolved_and_positions[1]
+        unresolved = unresolved_and_positions[0]
+        rules = {state.symbol: symbol_rules}
         unresolved_states = tuple(item.state for item in unresolved)
         gate_context = LiveGateContext(
             now=now,
@@ -200,7 +230,6 @@ class PostgresLiveContextProvider:
         )
         self._cached_bucket_start = state.bucket_start
         self._cached_context = context
-        self._cached_rules[state.symbol] = rules[state.symbol]
         return context
 
     def invalidate_cache(self) -> None:
@@ -208,6 +237,45 @@ class PostgresLiveContextProvider:
         self._cached_bucket_start = None
         self._cached_context = None
         self._cached_rules.clear()
+        self._cached_rules_at.clear()
+
+    async def _load_symbol_rules(
+        self,
+        symbol: str,
+        now: datetime,
+    ) -> SymbolTradingRules:
+        cached = self._cached_rules.get(symbol)
+        cached_at = self._cached_rules_at.get(symbol)
+        if (
+            cached is not None
+            and cached_at is not None
+            and (now - cached_at).total_seconds()
+            < self._TRADING_RULE_CACHE_SECONDS
+        ):
+            return cached
+        loaded_rules = await _load_trading_rules(self._sessions, {symbol})
+        symbol_rules = loaded_rules[symbol]
+        self._cached_rules[symbol] = symbol_rules
+        self._cached_rules_at[symbol] = now
+        return symbol_rules
+
+    async def _load_unresolved_and_position_view(
+        self,
+    ) -> tuple[
+        tuple[PersistedExchangeOrder, ...],
+        tuple[
+            datetime | None,
+            frozenset[str],
+            Decimal,
+            Decimal,
+            tuple[ManagedLivePosition, ...],
+            frozenset[str],
+        ],
+    ]:
+        unresolved = await self._order_repository.load_unresolved_orders(
+            self._run_id
+        )
+        return unresolved, await self._account_position_view(unresolved)
 
     async def _account_position_view(
         self,
@@ -296,16 +364,19 @@ class PostgresLiveContextProvider:
     async def _daily_realized_pnl(self, now: datetime) -> Decimal:
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         async with self._sessions() as session:
-            rows = (
-                await session.scalars(
-                    select(AccountFillEventRow).where(
-                        AccountFillEventRow.environment == "live",
-                        AccountFillEventRow.account_label == self._account_label,
-                        AccountFillEventRow.trade_at >= day_start,
+            realized = await session.scalar(
+                select(
+                    func.coalesce(
+                        func.sum(AccountFillEventRow.realized_pnl),
+                        Decimal("0"),
                     )
+                ).where(
+                    AccountFillEventRow.environment == "live",
+                    AccountFillEventRow.account_label == self._account_label,
+                    AccountFillEventRow.trade_at >= day_start,
                 )
-            ).all()
-        return sum((row.realized_pnl for row in rows), start=Decimal("0"))
+            )
+        return Decimal("0") if realized is None else realized
 
     async def _strategy_live_state(self) -> StrategyLiveState:
         async with self._sessions() as session:

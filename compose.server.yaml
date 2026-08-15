@@ -166,7 +166,7 @@ services:
       - --idle-timeout-seconds
       - "86400"
       - --poll-interval-seconds
-      - "1"
+      - "0.25"
       - --checkpoint-every-states
       - "1000"
       - --checkpoint-every-seconds
@@ -249,7 +249,7 @@ services:
       - --max-runtime-seconds
       - "31536000"
       - --poll-interval-seconds
-      - "1"
+      - "0.25"
       - --checkpoint-every-states
       - "100"
       - --hedge-mode
