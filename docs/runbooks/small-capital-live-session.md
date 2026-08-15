@@ -132,8 +132,9 @@ threshold, same-symbol execution cooldown, and market/account data-age gates.
 The B1 strategy also sets its event cooldown to zero, so a same-symbol signal
 is not suppressed by a hidden two-bucket strategy cooldown. Exchange quantity
 and price precision, Hedge Mode/leverage confirmation, the lease/approval
-binding, account readiness, the existing-symbol duplicate-position guard, and
-the fail-closed ambiguous-order guard remain explicit operational controls.
+binding, account readiness, and the fail-closed ambiguous-order guard remain
+explicit operational controls. Multiple entries for a symbol are allowed when
+the strategy emits them; Hedge Mode keeps each position side explicit.
 
 Omitting `--expires-in-minutes` records a non-expiring approval. It remains
 bound to the exact strategy config, risk config, Git commit, and migration
@@ -154,7 +155,7 @@ The profile includes the mandatory
 `--i-understand-this-places-real-orders` flag. Any manual `run` invocation must
 also provide that exact flag; omission fails before credentials are used.
 
-The daemon rejects unowned/manual positions, suppresses duplicate entries while
+The daemon rejects unowned/manual positions, allows another strategy entry while
 the same symbol is already held, restores its checkpoint by stable session ID,
 reconciles non-terminal orders by Binance client order ID, and warms a new
 session from two hours of historical states without submitting those historical

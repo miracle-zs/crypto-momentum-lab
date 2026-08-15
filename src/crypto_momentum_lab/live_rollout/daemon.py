@@ -415,8 +415,6 @@ class LiveStrategyDaemon:
     ) -> OrderExecutionResult | None:
         executable_candidate = candidate
         if not candidate.reduce_only:
-            if candidate.symbol in (context.open_position_symbols or frozenset()):
-                return None
             limit_decision = evaluate_fixed_live_limits(
                 self._limits,
                 LiveLimitContext(

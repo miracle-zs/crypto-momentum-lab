@@ -64,6 +64,29 @@ async def test_live_daemon_submits_strategy_candidate_after_all_gates() -> None:
     assert exchange.calls == ["submit"]
 
 
+async def test_live_daemon_allows_entry_when_same_symbol_is_already_open() -> None:
+    exchange = PlanAwareExchange()
+
+    async def position_context(state: object) -> LiveDaemonRuntimeContext:
+        del state
+        return replace(
+            _runtime_context(),
+            open_position_symbols=frozenset({"BTCUSDT"}),
+        )
+
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=position_context,
+    )
+
+    result = await daemon.run(_states())
+
+    assert result.approved_intent_count == 1
+    assert result.submitted_order_count == 1
+    assert result.halt_reason is None
+    assert exchange.calls == ["submit"]
+
+
 async def test_live_daemon_allows_entry_with_confirmed_resting_order() -> None:
     exchange = PlanAwareExchange()
 
@@ -186,11 +209,12 @@ async def test_live_daemon_submits_hedge_mode_reduce_only_exit() -> None:
 
     result = await daemon.run(_states())
 
-    assert result.approved_intent_count == 1
-    assert len(exchange.plans) == 1
+    assert result.approved_intent_count == 2
+    assert len(exchange.plans) == 2
     assert exchange.plans[0].reduce_only is True
     assert exchange.plans[0].side == "SELL"
     assert exchange.plans[0].position_side is FuturesPositionSide.LONG
+    assert exchange.plans[1].reduce_only is False
 
 
 async def test_live_daemon_halts_on_unmanaged_account_position() -> None:
