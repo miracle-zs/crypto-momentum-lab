@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>CML · Execution Control Room</title>
-    <link rel="stylesheet" href="static/dashboard.css?v=20260815-mobile-heartbeat">
+  <link rel="stylesheet" href="static/dashboard.css?v=20260815-control-room-v2-mobile-nav">
 </head>
 <body>
   <div class="shell">
@@ -18,13 +18,22 @@
       </div>
 
       <nav class="nav" aria-label="控制台分区">
-        <a href="#overview" data-nav="overview"><i>01</i><span>系统总览<small>System Overview</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="overview"></em></a>
-        <a href="#strategy" data-nav="strategy"><i>02</i><span>模拟盘账户<small>Paper Accounts</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="strategy"></em></a>
-        <a href="#universe" data-nav="universe"><i>03</i><span>UTC 动量池<small>Momentum Field</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="universe"></em></a>
-        <a href="#risk" data-nav="risk"><i>04</i><span>风控与执行<small>Risk / Execution</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="risk"></em></a>
-        <a href="#account" data-nav="account"><i>05</i><span>交易所账户<small>Execution Account</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="account"></em></a>
-        <a href="#reports" data-nav="reports"><i>06</i><span>运行台账<small>Run Ledger</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="reports"></em></a>
-        <a href="#actions" data-nav="actions"><i>07</i><span>受控操作<small>Controlled Actions</small></span><em class="nav-dot is-locked"></em></a>
+        <div class="nav-group">
+          <span class="nav-group-label">OPERATIONS · 运行</span>
+          <a href="#overview" data-nav="overview"><i>01</i><span>系统总览<small>System Overview</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="overview"></em></a>
+          <a href="#risk" data-nav="risk"><i>02</i><span>风控与执行<small>Risk / Execution</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="risk"></em></a>
+          <a href="#account" data-nav="account"><i>03</i><span>交易所账户<small>Execution Account</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="account"></em></a>
+          <a href="#strategy" data-nav="strategy"><i>04</i><span>模拟盘账户<small>Paper Accounts</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="strategy"></em></a>
+        </div>
+        <div class="nav-group">
+          <span class="nav-group-label">ANALYSIS · 分析</span>
+          <a href="#universe" data-nav="universe"><i>05</i><span>UTC 动量池<small>Momentum Field</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="universe"></em></a>
+          <a href="#reports" data-nav="reports"><i>06</i><span>运行台账<small>Run Ledger</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="reports"></em></a>
+        </div>
+        <div class="nav-group">
+          <span class="nav-group-label">COMMANDS · 命令</span>
+          <a href="#actions" data-nav="actions"><i>07</i><span>受控操作<small>Controlled Actions</small></span><em class="nav-dot is-locked"></em></a>
+        </div>
       </nav>
 
       <div class="sidebar-foot">
@@ -43,11 +52,27 @@
 
     <div class="frame">
       <header class="topbar">
-        <p class="crumb">CRYPTO MOMENTUM LAB <span>/</span> LOCAL READ-ONLY TERMINAL</p>
+        <div class="topbar-primary">
+          <p class="crumb">CRYPTO MOMENTUM LAB <span>/</span> LOCAL READ-ONLY TERMINAL</p>
+          <span class="topbar-scope">OPERATOR VIEW <i>·</i> 只读</span>
+        </div>
         <div class="topbar-meta">
           <div id="global-mode" class="mode-badge runtime-line status-UNKNOWN" aria-live="polite">实盘状态：UNKNOWN · 等待数据</div>
           <div class="poll-state"><span class="pulse" aria-hidden="true"></span><span id="last-cycle" aria-live="polite">实盘心跳：等待数据</span></div>
           <div class="clock"><small>UTC+8</small><strong id="utc-clock">--:--:--</strong></div>
+        </div>
+        <div id="readiness-strip" class="readiness-strip status-UNKNOWN" aria-live="polite">
+          <div class="readiness-lead">
+            <span class="readiness-kicker">OPERATING READINESS</span>
+            <strong id="global-readiness">UNKNOWN</strong>
+            <span id="global-readiness-detail">等待关键服务数据</span>
+          </div>
+          <div class="readiness-metrics" aria-label="全局运行摘要">
+            <span class="readiness-metric"><b id="global-uncertain">—</b><small>异常读数</small></span>
+            <span class="readiness-metric"><b id="global-halts">—</b><small>活跃停机</small></span>
+            <span class="readiness-metric"><b id="global-ambiguous">—</b><small>未决订单</small></span>
+            <span class="readiness-metric"><b id="global-reconciliation">—</b><small>账户对账</small></span>
+          </div>
         </div>
         <div class="pollbar" id="pollbar" aria-hidden="true"></div>
       </header>
@@ -63,29 +88,9 @@
           </div>
         </section>
 
-        <section id="strategy" class="card" data-endpoint="api/paper-accounts">
-          <header class="card-head">
-            <div class="card-title"><i>02</i><div><h2>模拟盘账户</h2><small>SUMMARY FIRST · DETAIL ON DEMAND</small></div></div>
-            <span class="section-state status-UNKNOWN">UNKNOWN</span>
-          </header>
-          <div class="panel-body loading" aria-busy="true">
-            <div class="skeleton"><s style="width:31%"></s><s style="width:88%"></s><s style="width:88%"></s><s style="width:64%"></s><s style="width:79%"></s></div>
-          </div>
-        </section>
-
-        <section id="universe" class="card" data-endpoint="api/universe">
-          <header class="card-head">
-          <div class="card-title"><i>03</i><div><h2>UTC 动量池</h2><small>TOP GAINERS / LOSERS · TARGET 40 + RETAINED</small></div></div>
-            <span class="section-state status-UNKNOWN">UNKNOWN</span>
-          </header>
-          <div class="panel-body loading" aria-busy="true">
-            <div class="skeleton"><s style="width:42%"></s><s style="width:85%"></s><s style="width:85%"></s><s style="width:58%"></s></div>
-          </div>
-        </section>
-
         <section id="risk" class="card card-risk" data-endpoint="api/risk-execution">
           <header class="card-head">
-            <div class="card-title"><i>04</i><div><h2>风控与执行</h2><small>HALTS · AMBIGUOUS ORDERS · DECISIONS</small></div></div>
+            <div class="card-title"><i>02</i><div><h2>风控与执行</h2><small>RISK GATES · UNRESOLVED ORDERS FIRST</small></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -95,11 +100,31 @@
 
         <section id="account" class="card" data-endpoint="api/account">
           <header class="card-head">
-            <div class="card-title"><i>05</i><div><h2>交易所账户</h2><small>READ-ONLY ACCOUNT SYNC</small></div></div>
+            <div class="card-title"><i>03</i><div><h2>交易所账户</h2><small>ACCOUNT SYNC · RECONCILIATION / EXPOSURE</small></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
             <div class="skeleton"><s style="width:35%"></s><s style="width:82%"></s><s style="width:69%"></s></div>
+          </div>
+        </section>
+
+        <section id="strategy" class="card" data-endpoint="api/paper-accounts">
+          <header class="card-head">
+            <div class="card-title"><i>04</i><div><h2>模拟盘账户</h2><small>SUMMARY FIRST · DETAIL ON DEMAND</small></div></div>
+            <span class="section-state status-UNKNOWN">UNKNOWN</span>
+          </header>
+          <div class="panel-body loading" aria-busy="true">
+            <div class="skeleton"><s style="width:31%"></s><s style="width:88%"></s><s style="width:88%"></s><s style="width:64%"></s><s style="width:79%"></s></div>
+          </div>
+        </section>
+
+        <section id="universe" class="card" data-endpoint="api/universe">
+          <header class="card-head">
+            <div class="card-title"><i>05</i><div><h2>UTC 动量池</h2><small>TOP GAINERS / LOSERS · TARGET 40 + RETAINED</small></div></div>
+            <span class="section-state status-UNKNOWN">UNKNOWN</span>
+          </header>
+          <div class="panel-body loading" aria-busy="true">
+            <div class="skeleton"><s style="width:42%"></s><s style="width:85%"></s><s style="width:85%"></s><s style="width:58%"></s></div>
           </div>
         </section>
 
@@ -135,6 +160,6 @@
       </footer>
     </div>
   </div>
-    <script src="static/dashboard.js?v=20260815-mobile-heartbeat" defer></script>
+  <script src="static/dashboard.js?v=20260815-control-room-v2-mobile-nav" defer></script>
 </body>
 </html>

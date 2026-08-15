@@ -22,8 +22,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert 'data-endpoint="api/overview"' in index
-    assert 'href="static/dashboard.css?v=20260815-mobile-heartbeat"' in index
-    assert 'src="static/dashboard.js?v=20260815-mobile-heartbeat"' in index
+    assert 'href="static/dashboard.css?v=20260815-control-room-v2-mobile-nav"' in index
+    assert 'src="static/dashboard.js?v=20260815-control-room-v2-mobile-nav"' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
@@ -34,6 +34,30 @@ def test_degraded_status_labels_are_visible() -> None:
 
     for label in ("UNKNOWN", "STALE", "HALTED", "LIVE"):
         assert label in text
+
+
+def test_v2_control_room_prioritizes_safety_and_exposes_global_readiness() -> None:
+    index = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+
+    assert index.index('id="overview"') < index.index('id="risk"')
+    assert index.index('id="risk"') < index.index('id="account"')
+    assert index.index('id="account"') < index.index('id="strategy"')
+    for marker in (
+        "readiness-strip",
+        "global-uncertain",
+        "global-halts",
+        "global-ambiguous",
+        "global-reconciliation",
+    ):
+        assert marker in index
+    for marker in (
+        "globalReadinessModel",
+        "updateGlobalState",
+        "SAFETY_SECTIONS",
+        'live?.status === "SHADOW"',
+    ):
+        assert marker in javascript
 
 
 def test_strategy_panel_renders_portfolio_and_position_lifecycle() -> None:

@@ -1,4 +1,4 @@
-const SECTIONS = ["overview", "strategy", "universe", "risk", "account", "reports"];
+const SECTIONS = ["overview", "risk", "account", "strategy", "universe", "reports"];
 const POLL_MS = 5000;
 const DEFAULT_EQUITY_BUCKET_SECONDS = 6 * 60;
 const STRATEGY_ORDER = [
@@ -26,6 +26,7 @@ const paperDetailRequests = new Map();
 const paperEquityByRun = new Map();
 let paperEquityRequest = null;
 let latestPaperAccounts = [];
+const latestSectionData = new Map();
 
 const esc = (value) => String(value ?? "—").replace(/[&<>'"]/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"
@@ -33,6 +34,9 @@ const esc = (value) => String(value ?? "—").replace(/[&<>'"]/g, (char) => ({
 
 const statusSlug = (status) => String(status || "UNKNOWN").trim().replace(/[^A-Za-z]+/g, "-").toUpperCase();
 const statusClass = (status) => `status-${statusSlug(status)}`;
+const normalizedStatus = (status) => String(status || "").trim().toUpperCase();
+const UNCERTAIN_STATUSES = new Set(["UNKNOWN", "STALE", "DOWN", "NO DATA", "NO-DATA"]);
+const SAFETY_SECTIONS = new Set(["overview", "risk", "account", "strategy", "universe"]);
 
 /* ---------- formatting ---------- */
 
@@ -189,6 +193,105 @@ function renderLiveRuntime() {
     ? "实盘心跳：暂无数据 · UNKNOWN"
     : `实盘心跳：${relAge(age)} · ${freshness}`;
   if (heartbeatRow) heartbeatRow.className = `poll-state ${statusClass(freshness)}`;
+}
+
+const hasUncertainStatus = (status) => UNCERTAIN_STATUSES.has(normalizedStatus(status));
+
+function updateGlobalState(id, data) {
+  latestSectionData.set(id, data);
+  renderGlobalReadiness();
+}
+
+function globalReadinessModel() {
+  const overview = latestSectionData.get("overview");
+  const risk = latestSectionData.get("risk");
+  const account = latestSectionData.get("account");
+  const snapshots = [...latestSectionData.values()].filter(Boolean);
+  if (!snapshots.length) {
+    return {
+      status: "UNKNOWN",
+      detail: "等待关键服务数据",
+      uncertain: "—",
+      halts: "—",
+      ambiguous: "—",
+      reconciliation: "—",
+    };
+  }
+
+  const services = overview?.services || [];
+  const uncertainSections = [...latestSectionData.entries()]
+    .filter(([id, data]) => SAFETY_SECTIONS.has(id) && hasUncertainStatus(data.status))
+    .length;
+  const uncertainServices = services.filter((service) => hasUncertainStatus(service.status)).length;
+  const uncertain = uncertainSections + uncertainServices;
+  const activeHalts = Math.max(
+    asNumber(overview?.active_halt_count) || 0,
+    risk?.active_halts?.length || 0,
+  );
+  const ambiguous = risk?.ambiguous_orders?.length || 0;
+  const mismatch = asNumber(account?.reconciliation?.mismatch_count);
+  const accountStatus = normalizedStatus(account?.status);
+  let reconciliation = "—";
+  if (account) {
+    reconciliation = hasUncertainStatus(accountStatus)
+      ? "UNKNOWN"
+      : mismatch != null && mismatch > 0
+        ? `${mismatch} 差异`
+        : String(account.reconciliation?.status || "READY").toUpperCase();
+  }
+
+  let status = "READY";
+  let detail = "关键读数正常";
+  if (!overview) {
+    status = "UNKNOWN";
+    detail = "等待系统总览数据";
+  } else if (activeHalts > 0) {
+    status = "HALTED";
+    detail = "存在活跃停机 · 新入场已被阻断";
+  } else if (ambiguous > 0) {
+    status = "DEGRADED";
+    detail = "存在未决订单 · 需要交易所对账";
+  } else if (mismatch != null && mismatch > 0) {
+    status = "DEGRADED";
+    detail = "账户对账存在差异 · 暂不视为安全";
+  } else if (uncertain > 0) {
+    status = "UNKNOWN";
+    detail = `${uncertain} 个关键读数需要确认`;
+  } else if (latestLiveMode === "LIVE") {
+    detail = "实盘链路运行中 · 关键读数正常";
+  } else if (latestLiveMode === "SHADOW") {
+    detail = "影子路径运行中 · 关键读数正常";
+  } else {
+    detail = "无实盘会话 · 只读安全";
+  }
+
+  return {
+    status,
+    detail,
+    uncertain: String(uncertain),
+    halts: String(activeHalts),
+    ambiguous: String(ambiguous),
+    reconciliation,
+  };
+}
+
+function renderGlobalReadiness() {
+  const strip = document.getElementById("readiness-strip");
+  if (!strip) return;
+  const model = globalReadinessModel();
+  strip.className = `readiness-strip ${statusClass(model.status)}`;
+  const values = {
+    "global-readiness": model.status,
+    "global-readiness-detail": model.detail,
+    "global-uncertain": model.uncertain,
+    "global-halts": model.halts,
+    "global-ambiguous": model.ambiguous,
+    "global-reconciliation": model.reconciliation,
+  };
+  Object.entries(values).forEach(([id, value]) => {
+    const element = document.getElementById(id);
+    if (element) element.textContent = value;
+  });
 }
 
 const shortHash = (value) => {
@@ -962,10 +1065,13 @@ function updateGlobalMode(data) {
       ? "LIVE"
       : live?.status === "HALTED"
         ? "HALTED"
-        : "SHADOW";
+        : live?.status === "SHADOW"
+          ? "SHADOW"
+          : "UNKNOWN";
   latestLiveService = live || null;
   latestLiveMode = mode;
   renderLiveRuntime();
+  renderGlobalReadiness();
 }
 
 function wirePaperAccountTabs(body, data) {
@@ -1209,6 +1315,7 @@ async function refreshSection(id) {
     body.removeAttribute("aria-busy");
     if (id === "strategy") wirePaperAccountTabs(body, data);
     if (id === "overview") updateGlobalMode(data);
+    updateGlobalState(id, data);
   } catch (error) {
     setSectionStatus(id, "UNKNOWN");
     const body = section.querySelector(".panel-body");
@@ -1216,6 +1323,7 @@ async function refreshSection(id) {
     body.classList.remove("loading");
     body.innerHTML = emptyBox("接口不可达", `${section.dataset.endpoint} · ${error.message}`);
     restoreScrollState(body, scrollState);
+    updateGlobalState(id, { status: "UNKNOWN", error: true });
   }
 }
 
