@@ -74,6 +74,8 @@ class PaperAccountEquityResponse(DashboardSchema):
     equity_window_start: datetime
     equity_window_end: datetime
     equity_sample_interval_seconds: int
+    source: str = "paper"
+    account_label: str | None = None
     equity_curve: list[dict[str, JsonValue]] = Field(default_factory=list)
 
 

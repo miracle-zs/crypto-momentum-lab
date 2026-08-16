@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from crypto_momentum_lab.operator_dashboard.queries import (
     _aggregate_account_fills,
     _downsample_equity_snapshots,
+    _is_dashboard_paper_run,
+    _live_account_equity_point,
     _paper_exit_label,
 )
 from crypto_momentum_lab.persistence.postgres.models import PaperEquitySnapshotRow
@@ -81,6 +83,29 @@ def test_candle_exit_label_includes_grace_recovery_threshold() -> None:
             "candle_grace_profit_pct": "0.0058",
         },
     ) == "反向后宽限 8 根 15M · 回收 +0.58%"
+
+
+def test_dashboard_excludes_fixed_exit_paper_accounts() -> None:
+    assert not _is_dashboard_paper_run(
+        SimpleNamespace(execution_config={"portfolio": {"exit_mode": "fixed"}})
+    )
+    assert _is_dashboard_paper_run(
+        SimpleNamespace(execution_config={"portfolio": {"exit_mode": "candle_15m"}})
+    )
+
+
+def test_live_account_balance_becomes_equity_point() -> None:
+    point = _live_account_equity_point(
+        SimpleNamespace(
+            observed_at=datetime(2026, 8, 16, 2, 0, tzinfo=UTC),
+            wallet_balance=Decimal("282.28"),
+            unrealized_pnl=Decimal("-5.48"),
+        )
+    )
+
+    assert point["equity"] == "276.80"
+    assert point["balance"] == "282.28"
+    assert point["unrealized_pnl"] == "-5.48"
 
 
 def test_account_fills_are_aggregated_to_one_row_per_order() -> None:

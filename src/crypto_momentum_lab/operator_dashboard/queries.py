@@ -47,6 +47,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     RiskHaltRow,
     RuntimeMarketState15sRow,
     ShadowSessionRow,
+    StrategyLiveStateRow,
     StrategyRunRow,
     StrategyRuntimeCheckpointRow,
     StrategySignalRow,
@@ -353,14 +354,15 @@ class DashboardQueries:
     async def paper_account_equity(self) -> PaperAccountsEquityResponse:
         window_end = self._clock()
         window_start = window_end - _EQUITY_WINDOW
+        live_process: ExecutionAccountProcessStateRow | None = None
+        live_balance_rows: Sequence[AccountBalanceSnapshotRow] = ()
+        live_strategy_name: str | None = None
         async with self._session_factory() as session:
             selected_runs = await self._selected_paper_runs(session)
             if not selected_runs:
-                return PaperAccountsEquityResponse(
-                    status=OperationalStatus.NO_DATA,
-                    accounts=[],
-                )
-            run_ids = [run.run_id for run in selected_runs]
+                run_ids: list[str] = []
+            else:
+                run_ids = [run.run_id for run in selected_runs]
             rows = (
                 await session.scalars(
                     select(PaperEquitySnapshotRow)
@@ -375,6 +377,49 @@ class DashboardQueries:
                     )
                 )
             ).all()
+            live_process = await session.scalar(
+                select(ExecutionAccountProcessStateRow)
+                .where(ExecutionAccountProcessStateRow.environment == "live")
+                .order_by(ExecutionAccountProcessStateRow.occurred_at.desc())
+                .limit(1)
+            )
+            if live_process is not None:
+                live_strategy_name = await session.scalar(
+                    select(StrategyLiveStateRow.strategy_name)
+                    .where(
+                        StrategyLiveStateRow.environment == "live",
+                        StrategyLiveStateRow.account_label
+                        == live_process.account_label,
+                    )
+                    .order_by(StrategyLiveStateRow.changed_at.desc())
+                    .limit(1)
+                )
+                live_equity_bucket = func.floor(
+                    func.extract(
+                        "epoch",
+                        AccountBalanceSnapshotRow.observed_at,
+                    )
+                    / _EQUITY_BUCKET_SECONDS
+                )
+                live_balance_rows = (
+                    await session.scalars(
+                        select(AccountBalanceSnapshotRow)
+                        .where(
+                            AccountBalanceSnapshotRow.environment == "live",
+                            AccountBalanceSnapshotRow.account_label
+                            == live_process.account_label,
+                            AccountBalanceSnapshotRow.asset == "USDT",
+                            AccountBalanceSnapshotRow.observed_at >= window_start,
+                            AccountBalanceSnapshotRow.observed_at <= window_end,
+                        )
+                        .distinct(live_equity_bucket)
+                        .order_by(
+                            live_equity_bucket.desc(),
+                            AccountBalanceSnapshotRow.observed_at.desc(),
+                        )
+                        .limit(_EQUITY_MAX_POINTS)
+                    )
+                ).all()
         rows_by_run: dict[str, list[PaperEquitySnapshotRow]] = {}
         for row in rows:
             rows_by_run.setdefault(row.run_id, []).append(row)
@@ -403,8 +448,36 @@ class DashboardQueries:
                     ],
                 )
             )
+        if live_process is not None and len(live_balance_rows) >= 2:
+            live_account_label = live_process.account_label or "primary"
+            accounts.append(
+                PaperAccountEquityResponse(
+                    run_id=f"live-{live_account_label}-b1",
+                    strategy_name=live_strategy_name or "orderflow_impulse",
+                    exit_mode="candle_15m",
+                    exit_label=(
+                        "实盘 B1 · 反向后宽限 1 根 15M · 回收 +0.88%"
+                    ),
+                    equity_window_start=window_start,
+                    equity_window_end=window_end,
+                    equity_sample_interval_seconds=_EQUITY_BUCKET_SECONDS,
+                    source="live",
+                    account_label=live_account_label,
+                    equity_curve=[
+                        _live_account_equity_point(row)
+                        for row in sorted(
+                            live_balance_rows,
+                            key=lambda row: row.observed_at,
+                        )
+                    ],
+                )
+            )
         return PaperAccountsEquityResponse(
-            status=OperationalStatus.READY,
+            status=(
+                OperationalStatus.READY
+                if accounts
+                else OperationalStatus.NO_DATA
+            ),
             accounts=accounts,
         )
 
@@ -433,6 +506,8 @@ class DashboardQueries:
             ]
             selected_runs = current_runs or list(runs)
 
+        selected_runs = [run for run in selected_runs if _is_dashboard_paper_run(run)]
+
         selected: list[StrategyRunRow] = []
         for strategy_name in (
             "compression_breakout",
@@ -447,11 +522,7 @@ class DashboardQueries:
                 ),
                 key=lambda run: (run.created_at, run.run_id),
             )
-            selected.extend(
-                strategy_runs
-                if self._paper_run_ids is not None
-                else strategy_runs[-2:]
-            )
+            selected.extend(strategy_runs)
         return selected
 
     async def _paper_account_summaries(
@@ -1177,6 +1248,19 @@ def _downsample_equity_snapshots(
     return ordered[-max_points:]
 
 
+def _live_account_equity_point(
+    row: AccountBalanceSnapshotRow,
+) -> dict[str, JsonValue]:
+    equity = row.wallet_balance + row.unrealized_pnl
+    return {
+        "observed_at": row.observed_at.isoformat(),
+        "balance": str(row.wallet_balance),
+        "equity": str(equity),
+        "realized_pnl": None,
+        "unrealized_pnl": str(row.unrealized_pnl),
+    }
+
+
 def _paper_exit_details(run: StrategyRunRow) -> tuple[str, str]:
     portfolio_config = run.execution_config.get("portfolio")
     exit_mode = (
@@ -1187,6 +1271,10 @@ def _paper_exit_details(run: StrategyRunRow) -> tuple[str, str]:
     )
     entry_filter = run.execution_config.get("entry_filter")
     return exit_mode, _paper_exit_label(exit_mode, portfolio_config, entry_filter)
+
+
+def _is_dashboard_paper_run(run: StrategyRunRow) -> bool:
+    return _paper_exit_details(run)[0] != "fixed"
 
 
 def _paper_account_summary(

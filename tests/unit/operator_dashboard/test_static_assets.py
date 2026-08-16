@@ -22,8 +22,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert 'data-endpoint="api/overview"' in index
-    assert 'href="static/dashboard.css?v=20260816-control-room-v3-live-account"' in index
-    assert 'src="static/dashboard.js?v=20260816-control-room-v3-live-account"' in index
+    assert 'href="static/dashboard.css?v=20260816-control-room-v4-paper-b1"' in index
+    assert 'src="static/dashboard.js?v=20260816-control-room-v4-paper-b1"' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
@@ -95,6 +95,9 @@ def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
         "STRATEGY EXIT EQUITY",
         "COMMON START",
         "SHARED AXES",
+        "实盘 B1",
+        "source === \"live\"",
+        "模拟盘版本 + 实盘 B1",
         "ROLLING 24H",
         "CLOSED TRADES · LATEST 30",
         "wirePaperAccountTabs",
@@ -152,21 +155,6 @@ def test_live_status_uses_active_green_semantics() -> None:
     assert "--live: #34d399;" in stylesheet
     assert ".status-LIVE, .status-LIVE-ENABLED { --s: var(--live); }" in stylesheet
     assert "rgba(248, 113, 113" not in stylesheet
-
-
-def test_paper_accounts_group_by_strategy_columns() -> None:
-    javascript = (STATIC / "dashboard.js").read_text(encoding="utf-8")
-    stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
-
-    for marker in (
-        "strategyAccountColumn",
-        "acct-strategy-column",
-        "acct-strategy-cards",
-    ):
-        assert marker in javascript
-        assert marker in stylesheet or marker == "strategyAccountColumn"
-    assert "每个策略一张图 · 多退出方式叠加" in javascript
-    assert "grid-auto-flow: column" not in stylesheet
 
 
 def test_universe_panel_separates_target_and_retained_symbols() -> None:
@@ -285,12 +273,27 @@ def test_mobile_account_cards_wrap_without_horizontal_overflow() -> None:
         ).read_text(encoding="utf-8")
 
 
-def test_paper_account_cards_use_three_strategy_columns() -> None:
+def test_paper_account_cards_use_responsive_variant_grid() -> None:
     text = (STATIC / "dashboard.css").read_text(encoding="utf-8")
 
-    assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in text
+    card_styles = text[text.index(".acct-cards"):text.index(".acct-strategy-column")]
+    variant_styles = text[
+        text.index(".acct-strategy-cards"):text.index(".acct-card {")
+    ]
+    assert "grid-template-columns: minmax(0, 1fr)" in card_styles
+    assert (
+        "grid-template-columns: repeat(auto-fit, minmax(250px, 1fr))"
+        in variant_styles
+    )
     assert ".acct-strategy-column" in text
     assert "grid-auto-flow: column" not in text
+
+
+def test_fixed_tp_sl_accounts_are_not_rendered() -> None:
+    javascript = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+
+    assert 'account.exit_mode !== "fixed"' in javascript
+    assert "固定 TP / SL" not in javascript
 
 
 def test_reports_panel_does_not_repeat_paper_accounts() -> None:

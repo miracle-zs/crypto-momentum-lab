@@ -390,22 +390,20 @@ function equityBucketMap(account) {
 }
 
 function comparisonSeriesClass(account, index) {
-  if (account.exit_mode !== "candle_15m") return "fixed";
-  return index === 1 ? "candle" : "variant";
+  if (account.source === "live") return "live";
+  return account.exit_mode === "candle_15m" ? "candle" : "variant";
 }
 
-function comparisonSeriesColor(index) {
+function comparisonSeriesColor(account, index) {
+  if (account.source === "live") return "var(--series-live)";
   return COMPARISON_SERIES_COLORS[index % COMPARISON_SERIES_COLORS.length];
 }
 
 function comparisonSeriesLabel(account, index, accounts) {
-  const base = account.exit_label || (
-    account.exit_mode === "candle_15m" ? "15M 收线退出" : "固定 TP / SL"
-  );
+  if (account.source === "live") return account.exit_label || "实盘 B1";
+  const base = account.exit_label || "15M 收线退出";
   const duplicateCount = accounts.filter((candidate) => (
-    candidate.exit_label || (
-      candidate.exit_mode === "candle_15m" ? "15M 收线退出" : "固定 TP / SL"
-    )
+    candidate.exit_label || "15M 收线退出"
   ) === base).length;
   if (duplicateCount < 2) return base;
   const accountNumber = String(account.run_id || "").match(/^paper-account-(\d+)/)?.[1];
@@ -433,7 +431,7 @@ function strategyEquityModel(strategyName, accounts) {
       account,
       label: comparisonSeriesLabel(account, index, accounts),
       colorClass: comparisonSeriesClass(account, index),
-      color: comparisonSeriesColor(index),
+      color: comparisonSeriesColor(account, index),
       values,
       delta: values.at(-1),
     };
@@ -471,9 +469,9 @@ function buildStrategyEquityModels(accounts) {
     const strategyAccounts = accounts
       .filter((account) => account.strategy_name === strategyName)
       .sort((left, right) => {
-        const leftFixed = left.exit_mode === "fixed" ? 0 : 1;
-        const rightFixed = right.exit_mode === "fixed" ? 0 : 1;
-        return leftFixed - rightFixed || String(left.run_id).localeCompare(String(right.run_id));
+        const leftLive = left.source === "live" ? 1 : 0;
+        const rightLive = right.source === "live" ? 1 : 0;
+        return leftLive - rightLive || String(left.run_id).localeCompare(String(right.run_id));
       });
     const model = strategyEquityModel(strategyName, strategyAccounts);
     return model ? [model] : [];
@@ -664,7 +662,7 @@ function accountCard(account, index) {
   const hasEquity = Array.isArray(account.equity_curve);
   const windowDelta = hasEquity ? accountWindowDelta(account) : null;
   const active = index === selectedPaperAccount;
-  const exitMode = account.exit_label || (isCandle ? "15M 收线退出" : "固定 TP / SL");
+  const exitMode = account.exit_label || (isCandle ? "15M 收线退出" : "退出方式未标注");
   const accountNumber = String(index + 1).padStart(2, "0");
   const sparkline = hasEquity
     ? standaloneSparkline(account.equity_curve)
@@ -690,7 +688,7 @@ function strategyAccountColumn(accounts, strategyName, index) {
   return `<section class="acct-strategy-column" aria-label="${esc(strategyName)} 模拟账户">
     <header class="acct-strategy-head">
       <div><span>策略 0${index + 1}</span><strong>${esc(strategyName)}</strong></div>
-      <small>${entries.length} 个退出版本</small>
+      <small>${entries.length} 个账户</small>
     </header>
     <div class="acct-strategy-cards" role="tablist" aria-label="${esc(strategyName)}退出版本">${entries
       .map(({ account, accountIndex }) => accountCard(account, accountIndex))
@@ -711,13 +709,20 @@ function paperCards(accounts) {
 }
 
 function paperComparisonBlock(accounts) {
-  const comparisonModels = buildStrategyEquityModels(accounts.map(withPaperEquity));
+  const paperAccounts = accounts.map(withPaperEquity);
+  const liveAccounts = [...paperEquityByRun.values()].filter(
+    (account) => account.source === "live",
+  );
+  const comparisonModels = buildStrategyEquityModels([
+    ...paperAccounts,
+    ...liveAccounts,
+  ]);
   const content = comparisonModels.length
     ? `<div class="pair-grid">${comparisonModels.map(pairedComparisonPanel).join("")}</div>`
     : emptyBox("同期权益曲线加载中", "账户摘要已就绪，曲线在后台批量加载");
   return `<div class="block pair-section" data-paper-comparison>
     ${blockTitle("同期退出方式对比", "STRATEGY EXIT EQUITY · COMMON START · SHARED AXES",
-      '<span class="muted">每个策略一张图 · 多退出方式叠加</span>')}
+      '<span class="muted">模拟盘版本 + 实盘 B1 · 同期叠加</span>')}
     ${content}
   </div>`;
 }
@@ -826,7 +831,7 @@ function accountDetail(account, index) {
 }
 
 function renderStrategy(data) {
-  const accounts = data.accounts || [];
+  const accounts = (data.accounts || []).filter((account) => account.exit_mode !== "fixed");
   if (!accounts.length) return [data.status, emptyBox("等待模拟账户启动", "compression_breakout · orderflow_impulse · liquidation_cascade")];
   latestPaperAccounts = accounts;
   selectedPaperAccount = Math.min(selectedPaperAccount, accounts.length - 1);
@@ -1214,6 +1219,7 @@ async function loadPaperEquityComparison(body) {
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
+      paperEquityByRun.clear();
       for (const account of data.accounts || []) paperEquityByRun.set(account.run_id, account);
       const comparison = body.querySelector("[data-paper-comparison]");
       if (comparison) comparison.outerHTML = paperComparisonBlock(latestPaperAccounts);

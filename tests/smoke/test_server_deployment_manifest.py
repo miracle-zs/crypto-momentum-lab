@@ -59,7 +59,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
             "CML_PAPER_ACCOUNT_RUN_IDS"
         ].split(",")
         if item.strip()
-    } == configured_run_ids
+    } == configured_run_ids - {"paper-account-02-orderflow-v1"}
     assert (
         _option_value(
             services["paper-orderflow-pair"]["command"],

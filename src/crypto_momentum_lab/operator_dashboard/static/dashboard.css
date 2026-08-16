@@ -20,6 +20,7 @@
   --live: #34d399;
   --series-fixed: #7aa2f7;
   --series-candle: #34d399;
+  --series-live: #f8fafc;
   --series-amber: #f5b755;
   --series-violet: #c084fc;
   --series-cyan: #22d3ee;
@@ -782,7 +783,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .acct-cards {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   align-items: start;
 }
@@ -824,6 +825,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .acct-strategy-cards {
   display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
   gap: 10px;
   padding-top: 10px;
 }
@@ -1048,6 +1050,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 .pair-legend .fixed i { background: var(--series-color, var(--brand)); }
 .pair-legend .candle i { background: var(--series-color, var(--up)); }
 .pair-legend .variant i { background: var(--series-color, var(--warn)); }
+.pair-legend .live i { background: var(--series-color, var(--series-live)); height: 3px; }
 .pair-legend b { margin-left: 2px; font-size: 9.5px; font-weight: 500; }
 
 .pair-chart { margin: 3px -2px 0; }
@@ -1057,9 +1060,11 @@ details.secondary[open] summary { margin-bottom: 10px; }
 .pair-line.fixed { stroke: var(--series-color, var(--brand)); }
 .pair-line.candle { stroke: var(--series-color, var(--up)); }
 .pair-line.variant { stroke: var(--series-color, var(--warn)); }
+.pair-line.live { stroke: var(--series-color, var(--series-live)); stroke-width: 2.5; stroke-dasharray: 8 4; }
 .pair-dot.fixed { fill: var(--series-color, var(--brand)); }
 .pair-dot.candle { fill: var(--series-color, var(--up)); }
 .pair-dot.variant { fill: var(--series-color, var(--warn)); }
+.pair-dot.live { fill: var(--series-color, var(--series-live)); }
 
 .pair-panel footer {
   display: flex;
@@ -1222,7 +1227,6 @@ details.secondary[open] summary { margin-bottom: 10px; }
 @media (max-width: 1280px) {
   .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .account-kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .acct-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .pair-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
