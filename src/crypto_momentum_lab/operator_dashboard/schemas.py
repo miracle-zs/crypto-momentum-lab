@@ -109,6 +109,10 @@ class AccountOverviewResponse(DashboardSchema):
     account_config: dict[str, JsonValue] = Field(default_factory=dict)
     reconciliation: dict[str, JsonValue] = Field(default_factory=dict)
     summary: dict[str, JsonValue] = Field(default_factory=dict)
+    equity_window_start: datetime | None = None
+    equity_window_end: datetime | None = None
+    equity_sample_interval_seconds: int | None = None
+    equity_curve: list[dict[str, JsonValue]] = Field(default_factory=list)
 
 
 class RiskExecutionResponse(DashboardSchema):

@@ -147,10 +147,40 @@ def test_account_fills_are_aggregated_to_one_row_per_order() -> None:
     assert aggregated[0]["fee_asset"] == "BNB / USDT"
     assert aggregated[0]["fill_count"] == 2
     assert aggregated[0]["strategy_name"] == "orderflow_impulse"
+    assert aggregated[0]["reduce_only"] is False
+    assert aggregated[0]["close_reason"] is None
     assert (
         Decimal(str(aggregated[0]["price"])).quantize(Decimal("0.00001"))
         == Decimal("0.03158")
     )
+
+
+def test_account_fills_preserve_live_exit_reason_metadata() -> None:
+    row = SimpleNamespace(
+        order_id="exit-order-1",
+        symbol="ONUSDT",
+        side="SELL",
+        fee_asset="USDT",
+        price=Decimal("0.05000"),
+        quantity=Decimal("10"),
+        realized_pnl=Decimal("1.20"),
+        fee=Decimal("0.001"),
+        trade_at=datetime(2026, 8, 16, 2, 0, tzinfo=UTC),
+    )
+
+    aggregated = _aggregate_account_fills(
+        [row],
+        {"exit-order-1": "orderflow_impulse"},
+        {
+            "exit-order-1": {
+                "reduce_only": True,
+                "close_reason": "candle_15m_grace_timeout_1",
+            }
+        },
+    )
+
+    assert aggregated[0]["reduce_only"] is True
+    assert aggregated[0]["close_reason"] == "candle_15m_grace_timeout_1"
 
 
 def _snapshot(

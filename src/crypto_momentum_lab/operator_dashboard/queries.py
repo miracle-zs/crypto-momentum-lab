@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -74,11 +74,14 @@ class _AccountFillAggregate:
     trade_at: datetime | None = None
     fill_count: int = 0
     fee_assets: set[str] = field(default_factory=set)
+    reduce_only: bool = False
+    close_reason: str | None = None
 
 
 def _aggregate_account_fills(
     rows: Sequence[AccountFillEventRow],
     strategy_by_order: dict[str, str],
+    order_metadata_by_order: Mapping[str, Mapping[str, JsonValue]] | None = None,
     *,
     limit: int = 20,
 ) -> list[dict[str, JsonValue]]:
@@ -88,11 +91,17 @@ def _aggregate_account_fills(
         key = (row.order_id, row.symbol, row.side)
         aggregate = grouped.get(key)
         if aggregate is None:
+            metadata = (order_metadata_by_order or {}).get(row.order_id, {})
+            close_reason = metadata.get("close_reason")
             aggregate = _AccountFillAggregate(
                 symbol=row.symbol,
                 order_id=row.order_id,
                 side=row.side,
                 strategy_name=strategy_by_order.get(row.order_id),
+                reduce_only=bool(metadata.get("reduce_only", False)),
+                close_reason=(
+                    close_reason if isinstance(close_reason, str) else None
+                ),
             )
             grouped[key] = aggregate
         aggregate.fee_assets.add(row.fee_asset)
@@ -133,6 +142,8 @@ def _aggregate_account_fills(
             ),
             "fill_count": aggregate.fill_count,
             "strategy_name": aggregate.strategy_name,
+            "reduce_only": aggregate.reduce_only,
+            "close_reason": aggregate.close_reason,
         }
         for aggregate in ordered
     ]
@@ -887,10 +898,13 @@ class DashboardQueries:
         )
 
     async def account(self) -> AccountOverviewResponse:
+        equity_window_end = self._clock()
+        equity_window_start = equity_window_end - _EQUITY_WINDOW
         process: ExecutionAccountProcessStateRow | None = None
         reconciliation: AccountReconciliationRunRow | None = None
         account_config: AccountConfigSnapshotRow | None = None
         balances: Sequence[AccountBalanceSnapshotRow] = ()
+        equity_rows: Sequence[AccountBalanceSnapshotRow] = ()
         positions: Sequence[AccountPositionSnapshotRow] = ()
         orders: Sequence[AccountOpenOrderRow] = ()
         fills: Sequence[AccountFillEventRow] = ()
@@ -905,6 +919,33 @@ class DashboardQueries:
             if process is not None:
                 environment = process.environment
                 account_label = process.account_label
+                equity_bucket = func.floor(
+                    func.extract(
+                        "epoch",
+                        AccountBalanceSnapshotRow.observed_at,
+                    )
+                    / _EQUITY_BUCKET_SECONDS
+                )
+                equity_rows = (
+                    await session.scalars(
+                        select(AccountBalanceSnapshotRow)
+                        .where(
+                            AccountBalanceSnapshotRow.environment == environment,
+                            AccountBalanceSnapshotRow.account_label
+                            == account_label,
+                            AccountBalanceSnapshotRow.asset == "USDT",
+                            AccountBalanceSnapshotRow.observed_at
+                            >= equity_window_start,
+                            AccountBalanceSnapshotRow.observed_at <= equity_window_end,
+                        )
+                        .distinct(equity_bucket)
+                        .order_by(
+                            equity_bucket.desc(),
+                            AccountBalanceSnapshotRow.observed_at.desc(),
+                        )
+                        .limit(_EQUITY_MAX_POINTS)
+                    )
+                ).all()
                 account_config = await session.scalar(
                     select(AccountConfigSnapshotRow)
                     .where(
@@ -1013,6 +1054,18 @@ class DashboardQueries:
             if row.exchange_order_id is not None
             and row.intent_id in intent_by_id
         }
+        order_metadata_by_order = {
+            row.exchange_order_id: {
+                "reduce_only": row.reduce_only,
+                "close_reason": (
+                    _order_intent_reason(intent_by_id[row.intent_id].details)
+                    if row.reduce_only
+                    else None
+                ),
+            }
+            for row in execution_orders
+            if row.exchange_order_id is not None and row.intent_id in intent_by_id
+        }
         strategy_by_symbol: dict[str, str] = {}
         for order in execution_orders:
             intent = intent_by_id.get(order.intent_id)
@@ -1026,6 +1079,7 @@ class DashboardQueries:
         recent_trades = _aggregate_account_fills(
             fills,
             strategy_by_order,
+            order_metadata_by_order,
         )
 
         reconciliation_payload: dict[str, JsonValue] = (
@@ -1073,6 +1127,16 @@ class DashboardQueries:
             account_label=None if process is None else process.account_label,
             account_config=account_config_payload,
             reconciliation=reconciliation_payload,
+            equity_window_start=equity_window_start,
+            equity_window_end=equity_window_end,
+            equity_sample_interval_seconds=_EQUITY_BUCKET_SECONDS,
+            equity_curve=[
+                _live_account_equity_point(row)
+                for row in sorted(
+                    equity_rows,
+                    key=lambda row: row.observed_at,
+                )
+            ],
             summary={
                 "usdt_wallet_balance": (
                     None if usdt is None else str(usdt.wallet_balance)
@@ -1340,6 +1404,13 @@ def _service(
 
 def _age(now: datetime, observed_at: datetime) -> float:
     return max(0.0, (now - observed_at).total_seconds())
+
+
+def _order_intent_reason(details: object) -> str | None:
+    if not isinstance(details, dict):
+        return None
+    reason = details.get("reason")
+    return reason if isinstance(reason, str) and reason else None
 
 
 def _universe_entry(row: UniverseEntryRow, side: str) -> dict[str, JsonValue]:

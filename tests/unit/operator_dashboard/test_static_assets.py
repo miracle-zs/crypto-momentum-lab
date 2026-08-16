@@ -22,8 +22,14 @@ def test_static_javascript_uses_relative_api_paths() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert 'data-endpoint="api/overview"' in index
-    assert 'href="static/dashboard.css?v=20260816-control-room-v5-live-solid"' in index
-    assert 'src="static/dashboard.js?v=20260816-control-room-v5-live-solid"' in index
+    assert (
+        'href="static/dashboard.css?v=20260816-control-room-v8-live-account"'
+        in index
+    )
+    assert (
+        'src="static/dashboard.js?v=20260816-control-room-v8-live-account"'
+        in index
+    )
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
@@ -149,6 +155,18 @@ def test_exchange_account_panel_exposes_reconciliation_and_execution_detail() ->
         assert marker in text
 
 
+def test_live_account_panel_renders_equity_and_close_reasons() -> None:
+    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    render_start = text.index("function renderAccount")
+    render_end = text.index("function renderReports", render_start)
+    render_code = text[render_start:render_end]
+
+    assert "data.equity_curve" in render_code
+    assert "live-account-equity" in render_code
+    assert 'label: "平仓原因"' in render_code
+    assert "row.close_reason" in render_code
+
+
 def test_live_status_uses_active_green_semantics() -> None:
     stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
 
@@ -160,8 +178,12 @@ def test_live_status_uses_active_green_semantics() -> None:
 def test_live_b1_equity_series_uses_distinct_solid_accent() -> None:
     stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
 
-    assert "--series-live: #e879f9;" in stylesheet
-    assert ".pair-line.live { stroke: var(--series-color, var(--series-live)); stroke-width: 2.5; }" in stylesheet
+    assert "--series-live: #67e8f9;" in stylesheet
+    assert (
+        ".pair-line.live { stroke: var(--series-color, var(--series-live)); "
+        "stroke-width: 2.5; }"
+        in stylesheet
+    )
 
 
 def test_universe_panel_separates_target_and_retained_symbols() -> None:

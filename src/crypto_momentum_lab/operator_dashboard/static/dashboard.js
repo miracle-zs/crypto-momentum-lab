@@ -935,6 +935,12 @@ function renderAccount(data) {
   const summary = data.summary || {};
   const config = data.account_config || {};
   const reconciliation = data.reconciliation || {};
+  const accountEquity = data.equity_curve || [];
+  const accountSampleMinutes = Math.round(
+    (asNumber(data.equity_sample_interval_seconds) || DEFAULT_EQUITY_BUCKET_SECONDS) / 60,
+  );
+  const accountEquityDelta = accountWindowDelta({ equity_curve: accountEquity });
+  const latestAccountEquity = accountEquity.at(-1)?.equity;
   const permission = (value) => value == null ? "未知" : value ? "是 · API 已授权" : "否 · API 返回";
   const permissionClass = (value) => value == null ? "muted" : value ? "pos" : "warn";
   const modeLabel = (value, yesLabel, noLabel) => value == null ? "—" : value ? yesLabel : noLabel;
@@ -964,6 +970,11 @@ function renderAccount(data) {
     ${tile("总未实现盈亏", signedMoney(summary.total_unrealized_pnl), `${summary.position_count || 0} 个交易所持仓`, pnlClass(summary.total_unrealized_pnl))}
     ${tile("持仓名义价值", money(summary.gross_position_notional), "当前交易所总暴露")}
     ${tile("挂单 / 最近成交", `${summary.open_order_count ?? 0} / ${summary.recent_trade_count ?? summary.recent_fill_count ?? 0}`, "当前挂单 / 最近 20 笔订单")}
+  </div>`;
+  const equityChartBlock = `<div class="block account-equity-block">
+    ${blockTitle("实盘账户权益", `LIVE USDT ACCOUNT EQUITY · ROLLING 24H · ${accountSampleMinutes} MIN BUCKETS`, `<strong class="num ${pnlClass(accountEquityDelta)}">${esc(money(latestAccountEquity))}</strong>`)}
+    <div class="chart-context"><span>${esc(`${dayTime(data.equity_window_start)} → ${dayTime(data.equity_window_end)} ${DISPLAY_TIME_ZONE_LABEL}`)}</span><b class="num">${accountEquity.length} / 240 桶</b></div>
+    ${equityChart(accountEquity, "live-account-equity", data.equity_window_start, data.equity_window_end)}
   </div>`;
   const accountFacts = `<div class="account-facts">
     <div><span>实盘下单通道</span><b class="pos">live-strategy</b></div>
@@ -1021,9 +1032,10 @@ function renderAccount(data) {
     { label: "成交片数", value: (row) => `${row.fill_count || 1} 片`, align: "right", cls: "muted" },
     { label: "已实现盈亏", value: (row) => signedMoney(row.realized_pnl), align: "right", cls: (row) => pnlClass(row.realized_pnl) },
     { label: "手续费", value: (row) => `${num(row.fee, 4)} ${row.fee_asset || ""}`, align: "right" },
+    { label: "平仓原因", value: (row) => row.reduce_only ? (row.close_reason || "原因未记录") : "开仓", cls: "muted" },
   ], data.fills, { emptyText: "尚无成交记录", tall: true });
   const body = `<div class="detail-meta"><span>同步时间 <b class="num">${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</b></span><span>${esc(relToNow(data.observed_at))}</span></div>
-    ${hero}${kpis}
+    ${hero}${kpis}${equityChartBlock}
     <div class="block-split account-overview-grid">
       <div class="block">${blockTitle("账户权限与对账", "EXECUTION CHANNEL / RECONCILIATION")}${accountFacts}</div>
       <div class="block">${blockTitle("USDT 资产余额", "USDT BALANCE · ACCOUNT COLLATERAL")}${balancesTable}</div>
