@@ -27,7 +27,7 @@ def test_static_javascript_uses_relative_api_paths() -> None:
         in index
     )
     assert (
-        'src="static/dashboard.js?v=20260816-control-room-v8-live-account"'
+        'src="static/dashboard.js?v=20260816-control-room-v9-interaction-cache"'
         in index
     )
     assert 'data-endpoint="/api/' not in index
@@ -116,6 +116,38 @@ def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
     assert "SUMMARY FIRST · DETAIL ON DEMAND" in (
         STATIC / "index.html"
     ).read_text(encoding="utf-8")
+
+
+def test_paper_detail_and_equity_requests_are_cache_throttled() -> None:
+    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+
+    assert "PAPER_DETAIL_CACHE_MS = 30 * 1000" in text
+    assert "PAPER_EQUITY_CACHE_MS = 30 * 1000" in text
+    assert "paperDetailLoadedAt" in text
+    assert "paperEquityLoadedAt" in text
+    assert "paperEquityCacheKey" in text
+    assert "Date.now() - loadedAt < PAPER_DETAIL_CACHE_MS" in text
+    assert "Date.now() - paperEquityLoadedAt < PAPER_EQUITY_CACHE_MS" in text
+    assert "paperDetailLoadedAt.set(account.run_id, Date.now())" in text
+    assert "paperEquityLoadedAt = Date.now()" in text
+
+
+def test_paper_account_tabs_have_keyboard_and_panel_semantics() -> None:
+    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+
+    for marker in (
+        'role="tablist" aria-orientation="horizontal"',
+        'role="tab"',
+        'aria-controls="${paperAccountPanelId()}"',
+        'role="tabpanel" aria-labelledby="${paperAccountTabId(index)}"',
+        'tabindex="${active ? "0" : "-1"}"',
+        'event.key === "ArrowRight"',
+        'event.key === "ArrowLeft"',
+        'event.key === "Home"',
+        'event.key === "End"',
+    ):
+        assert marker in text
+    assert 'class="acct-strategy-cards" role="tablist"' not in text
 
 
 def test_account_cards_use_each_account_equity_curve() -> None:

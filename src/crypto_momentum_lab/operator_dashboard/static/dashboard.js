@@ -1,6 +1,8 @@
 const SECTIONS = ["overview", "risk", "account", "strategy", "universe", "reports"];
 const POLL_MS = 5000;
 const DEFAULT_EQUITY_BUCKET_SECONDS = 6 * 60;
+const PAPER_DETAIL_CACHE_MS = 30 * 1000;
+const PAPER_EQUITY_CACHE_MS = 30 * 1000;
 const STRATEGY_ORDER = [
   "compression_breakout",
   "orderflow_impulse",
@@ -22,9 +24,12 @@ let latestLiveService = null;
 let latestLiveMode = "UNKNOWN";
 const paperHistoryByRun = new Map();
 const paperDetailsByRun = new Map();
+const paperDetailLoadedAt = new Map();
 const paperDetailRequests = new Map();
 const paperEquityByRun = new Map();
 let paperEquityRequest = null;
+let paperEquityLoadedAt = 0;
+let paperEquityCacheKey = "";
 let latestPaperAccounts = [];
 const latestSectionData = new Map();
 
@@ -654,6 +659,9 @@ function pairedComparisonPanel(model) {
   </article>`;
 }
 
+const paperAccountTabId = (index) => `paper-account-tab-${index}`;
+const paperAccountPanelId = () => "paper-account-panel";
+
 function accountCard(account, index) {
   const summary = account.portfolio_summary || {};
   const equity = asNumber(summary.equity);
@@ -668,7 +676,8 @@ function accountCard(account, index) {
     ? standaloneSparkline(account.equity_curve)
     : '<div class="spark spark-empty">详情按需加载</div>';
   return `<button class="acct-card${active ? " is-active" : ""}" type="button" role="tab"
-    aria-selected="${active}" data-account-index="${index}">
+    id="${paperAccountTabId(index)}" aria-controls="${paperAccountPanelId()}"
+    aria-selected="${active}" tabindex="${active ? "0" : "-1"}" data-account-index="${index}">
     <div class="acct-top"><span>账户 ${accountNumber}</span><span class="acct-mode">${esc(exitMode)}</span>${pill(account.status)}</div>
     <b class="acct-name">${esc(account.strategy_name || "未启动")}</b>
     <div class="acct-equity"><strong class="num">${esc(money(summary.equity))}</strong>
@@ -690,7 +699,7 @@ function strategyAccountColumn(accounts, strategyName, index) {
       <div><span>策略 0${index + 1}</span><strong>${esc(strategyName)}</strong></div>
       <small>${entries.length} 个账户</small>
     </header>
-    <div class="acct-strategy-cards" role="tablist" aria-label="${esc(strategyName)}退出版本">${entries
+    <div class="acct-strategy-cards" role="group" aria-label="${esc(strategyName)}退出版本">${entries
       .map(({ account, accountIndex }) => accountCard(account, accountIndex))
       .join("")}</div>
   </section>`;
@@ -703,7 +712,7 @@ function withPaperEquity(account) {
 }
 
 function paperCards(accounts) {
-  return `<div class="acct-cards" role="tablist" aria-label="模拟盘策略账户">${STRATEGY_ORDER
+  return `<div class="acct-cards" role="tablist" aria-orientation="horizontal" aria-label="模拟盘策略账户">${STRATEGY_ORDER
     .map((strategyName, index) => strategyAccountColumn(accounts, strategyName, index))
     .join("")}</div>`;
 }
@@ -728,7 +737,7 @@ function paperComparisonBlock(accounts) {
 }
 
 function paperDetailPlaceholder(account, index, message = "账户详情按需加载") {
-  return `<div class="paper-account-detail" data-run-id="${esc(account?.run_id || "")}" role="tabpanel">
+  return `<div class="paper-account-detail" id="${paperAccountPanelId()}" data-run-id="${esc(account?.run_id || "")}" role="tabpanel" aria-labelledby="${paperAccountTabId(index)}">
     <div class="lazy-detail">
       <strong>${esc(message)}</strong>
       <small>首屏只查询账户摘要；曲线、持仓、交易和信号将在选中后加载。</small>
@@ -814,7 +823,7 @@ function accountDetail(account, index) {
     { label: "买入名义", value: (row) => money(row.requested_notional), align: "right" },
     { label: "触发依据", value: signalEvidence, html: true, cls: "signal-evidence-cell" },
   ], account.latest_signals, { emptyText: "尚无策略信号", stateKey: "paper-strategy-signals" });
-  return `<div class="paper-account-detail" data-run-id="${esc(account.run_id || "")}" role="tabpanel">
+  return `<div class="paper-account-detail" id="${paperAccountPanelId()}" data-run-id="${esc(account.run_id || "")}" role="tabpanel" aria-labelledby="${paperAccountTabId(index)}">
     ${detailMeta}
     ${kpis}
     ${chartBlock}
@@ -1103,22 +1112,55 @@ function updateGlobalMode(data) {
   renderGlobalReadiness();
 }
 
+function setPaperAccountTabState(body, selectedIndex) {
+  body.querySelectorAll("[data-account-index]").forEach((candidate) => {
+    const isSelected = Number(candidate.dataset.accountIndex) === selectedIndex;
+    candidate.classList.toggle("is-active", isSelected);
+    candidate.setAttribute("aria-selected", String(isSelected));
+    candidate.setAttribute("tabindex", isSelected ? "0" : "-1");
+  });
+}
+
+function selectPaperAccount(body, data, next) {
+  const account = data.accounts?.[next];
+  if (!Number.isInteger(next) || !account || next === selectedPaperAccount) return;
+  selectedPaperAccount = next;
+  setPaperAccountTabState(body, next);
+  mountPaperDetail(body, account, next);
+  void loadPaperAccountDetail(body, account, next);
+}
+
 function wirePaperAccountTabs(body, data) {
+  const tabs = () => Array.from(body.querySelectorAll("[data-account-index]"));
   body.querySelectorAll("[data-account-index]").forEach((tab) => {
     tab.addEventListener("click", () => {
-      const next = Number(tab.dataset.accountIndex);
-      const account = data.accounts?.[next];
-      if (!Number.isInteger(next) || !account || next === selectedPaperAccount) return;
-      selectedPaperAccount = next;
-      body.querySelectorAll("[data-account-index]").forEach((candidate) => {
-        const isSelected = candidate === tab;
-        candidate.classList.toggle("is-active", isSelected);
-        candidate.setAttribute("aria-selected", String(isSelected));
-      });
-      mountPaperDetail(body, account, next);
-      void loadPaperAccountDetail(body, account, next);
+      selectPaperAccount(body, data, Number(tab.dataset.accountIndex));
+    });
+    tab.addEventListener("keydown", (event) => {
+      const currentPosition = tabs().indexOf(tab);
+      if (currentPosition < 0) return;
+      let nextPosition = null;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        nextPosition = (currentPosition + 1) % tabs().length;
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        nextPosition = (currentPosition - 1 + tabs().length) % tabs().length;
+      } else if (event.key === "Home") {
+        nextPosition = 0;
+      } else if (event.key === "End") {
+        nextPosition = tabs().length - 1;
+      } else if (event.key === "Enter" || event.key === " ") {
+        selectPaperAccount(body, data, Number(tab.dataset.accountIndex));
+        event.preventDefault();
+        return;
+      }
+      if (nextPosition == null) return;
+      const nextTab = tabs()[nextPosition];
+      nextTab.focus();
+      selectPaperAccount(body, data, Number(nextTab.dataset.accountIndex));
+      event.preventDefault();
     });
   });
+  setPaperAccountTabState(body, selectedPaperAccount);
   const account = data.accounts?.[selectedPaperAccount];
   if (account) {
     const mounted = body.querySelector(".paper-account-detail");
@@ -1190,6 +1232,10 @@ function wirePaperDetailButton(body, account, index) {
 
 async function loadPaperAccountDetail(body, account, index) {
   if (!account?.run_id) return;
+  const loadedAt = paperDetailLoadedAt.get(account.run_id) || 0;
+  if (paperDetailsByRun.has(account.run_id) && Date.now() - loadedAt < PAPER_DETAIL_CACHE_MS) {
+    return paperDetailsByRun.get(account.run_id);
+  }
   const existingRequest = paperDetailRequests.get(account.run_id);
   if (existingRequest) return existingRequest;
   const button = body.querySelector("[data-load-paper-detail]");
@@ -1206,6 +1252,7 @@ async function loadPaperAccountDetail(body, account, index) {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const detail = await response.json();
       paperDetailsByRun.set(account.run_id, detail);
+      paperDetailLoadedAt.set(account.run_id, Date.now());
       if (currentPaperAccountIs(account)) {
         mountPaperDetail(body, account, index);
       }
@@ -1224,6 +1271,18 @@ async function loadPaperAccountDetail(body, account, index) {
 
 async function loadPaperEquityComparison(body) {
   if (paperEquityRequest) return paperEquityRequest;
+  const cacheKey = latestPaperAccounts
+    .map((account) => account.run_id)
+    .filter(Boolean)
+    .sort()
+    .join("|");
+  if (
+    cacheKey === paperEquityCacheKey
+    && paperEquityLoadedAt
+    && Date.now() - paperEquityLoadedAt < PAPER_EQUITY_CACHE_MS
+  ) {
+    return null;
+  }
   paperEquityRequest = (async () => {
     try {
       const response = await fetch("api/paper-accounts/equity", {
@@ -1233,6 +1292,8 @@ async function loadPaperEquityComparison(body) {
       const data = await response.json();
       paperEquityByRun.clear();
       for (const account of data.accounts || []) paperEquityByRun.set(account.run_id, account);
+      paperEquityCacheKey = cacheKey;
+      paperEquityLoadedAt = Date.now();
       const comparison = body.querySelector("[data-paper-comparison]");
       if (comparison) comparison.outerHTML = paperComparisonBlock(latestPaperAccounts);
       const cards = body.querySelector(".acct-cards");
