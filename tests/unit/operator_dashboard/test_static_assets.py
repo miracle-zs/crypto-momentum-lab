@@ -22,8 +22,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert 'data-endpoint="api/overview"' in index
-    assert 'href="static/dashboard.css?v=20260815-control-room-v2-mobile-nav"' in index
-    assert 'src="static/dashboard.js?v=20260815-control-room-v2-mobile-nav"' in index
+    assert 'href="static/dashboard.css?v=20260816-control-room-v3-live-account"' in index
+    assert 'src="static/dashboard.js?v=20260816-control-room-v3-live-account"' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
@@ -126,15 +126,32 @@ def test_exchange_account_panel_exposes_reconciliation_and_execution_detail() ->
 
     for marker in (
         "账户权限与对账",
+        "EXECUTION ACCOUNT",
+        "live-strategy",
+        "账户 API 交易权限",
+        "canTrade",
+        "怎么读",
         "对账状态",
         "可用余额",
         "未实现盈亏",
+        "USDT BALANCE · ACCOUNT COLLATERAL",
         "当前挂单",
-        "最近成交",
+        "最近成交订单",
+        "ONE ORDER PER ROW",
+        "recent_trade_count",
+        "fill_count",
         "strategy_name",
         "reconciliation",
     ):
         assert marker in text
+
+
+def test_live_status_uses_active_green_semantics() -> None:
+    stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+
+    assert "--live: #34d399;" in stylesheet
+    assert ".status-LIVE, .status-LIVE-ENABLED { --s: var(--live); }" in stylesheet
+    assert "rgba(248, 113, 113" not in stylesheet
 
 
 def test_paper_accounts_group_by_strategy_columns() -> None:

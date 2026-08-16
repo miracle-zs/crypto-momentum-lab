@@ -1,8 +1,10 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 from crypto_momentum_lab.operator_dashboard.queries import (
+    _aggregate_account_fills,
     _downsample_equity_snapshots,
     _paper_exit_label,
 )
@@ -79,6 +81,51 @@ def test_candle_exit_label_includes_grace_recovery_threshold() -> None:
             "candle_grace_profit_pct": "0.0058",
         },
     ) == "反向后宽限 8 根 15M · 回收 +0.58%"
+
+
+def test_account_fills_are_aggregated_to_one_row_per_order() -> None:
+    rows = [
+        SimpleNamespace(
+            order_id="order-1",
+            symbol="TUTUSDT",
+            side="SELL",
+            fee_asset="BNB",
+            price=Decimal("0.03158"),
+            quantity=Decimal("736"),
+            realized_pnl=Decimal("-1.27"),
+            fee=Decimal("0.0116"),
+            trade_at=datetime(2026, 8, 16, 1, 40, 13, tzinfo=UTC),
+        ),
+        SimpleNamespace(
+            order_id="order-1",
+            symbol="TUTUSDT",
+            side="SELL",
+            fee_asset="USDT",
+            price=Decimal("0.03159"),
+            quantity=Decimal("163"),
+            realized_pnl=Decimal("-0.28"),
+            fee=Decimal("0.0026"),
+            trade_at=datetime(2026, 8, 16, 1, 40, 13, tzinfo=UTC),
+        ),
+    ]
+
+    aggregated = _aggregate_account_fills(
+        rows,
+        {"order-1": "orderflow_impulse"},
+    )
+
+    assert len(aggregated) == 1
+    assert aggregated[0]["order_id"] == "order-1"
+    assert aggregated[0]["quantity"] == "899"
+    assert aggregated[0]["realized_pnl"] == "-1.55"
+    assert aggregated[0]["fee"] == "0.0142"
+    assert aggregated[0]["fee_asset"] == "BNB / USDT"
+    assert aggregated[0]["fill_count"] == 2
+    assert aggregated[0]["strategy_name"] == "orderflow_impulse"
+    assert (
+        Decimal(str(aggregated[0]["price"])).quantize(Decimal("0.00001"))
+        == Decimal("0.03158")
+    )
 
 
 def _snapshot(

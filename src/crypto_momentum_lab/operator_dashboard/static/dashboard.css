@@ -17,7 +17,7 @@
   --down: #fb7185;
   --warn: #f5b755;
   --info: #8ab4ff;
-  --live: #f87171;
+  --live: #34d399;
   --series-fixed: #7aa2f7;
   --series-candle: #34d399;
   --series-amber: #f5b755;
@@ -315,8 +315,8 @@ body {
 }
 
 @keyframes live-glow {
-  from { box-shadow: 0 0 4px rgba(248, 113, 113, .25); }
-  to { box-shadow: 0 0 16px rgba(248, 113, 113, .55); }
+  from { box-shadow: 0 0 4px rgba(52, 211, 153, .22); }
+  to { box-shadow: 0 0 16px rgba(52, 211, 153, .48); }
 }
 
 .clock { display: flex; align-items: baseline; gap: 8px; }
@@ -922,7 +922,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
   border: 1px solid color-mix(in srgb, var(--live) 28%, var(--line));
   border-radius: 13px;
   background:
-    radial-gradient(480px 140px at 0% 0%, rgba(248, 113, 113, .09), transparent 70%),
+    radial-gradient(480px 140px at 0% 0%, rgba(52, 211, 153, .08), transparent 70%),
     var(--surface-2);
 }
 
@@ -972,6 +972,17 @@ details.secondary[open] summary { margin-bottom: 10px; }
 .account-facts span { color: var(--faint); font-size: 10px; }
 .account-facts b { color: var(--muted); font: 500 10.5px var(--mono); text-align: right; }
 .account-strategy { color: var(--brand); font: 10px var(--mono); }
+.account-facts-note {
+  margin: 9px 2px 0;
+  padding: 9px 11px;
+  border-left: 2px solid var(--brand);
+  background: color-mix(in srgb, var(--brand) 7%, transparent);
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.65;
+}
+.account-facts-note b { color: var(--text); font-weight: 600; }
+.account-facts-note code { color: var(--brand); font-family: var(--mono); }
 .account-overview-grid .block { margin-top: 18px; }
 
 /* ============ paired equity comparison ============ */

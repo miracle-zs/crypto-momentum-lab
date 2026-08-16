@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -57,6 +58,83 @@ from crypto_momentum_lab.persistence.postgres.models import (
 _EQUITY_WINDOW = timedelta(hours=24)
 _EQUITY_BUCKET_SECONDS = 6 * 60
 _EQUITY_MAX_POINTS = 240
+
+
+@dataclass(slots=True)
+class _AccountFillAggregate:
+    symbol: str
+    order_id: str
+    side: str
+    strategy_name: str | None
+    quantity: Decimal = Decimal("0")
+    notional: Decimal = Decimal("0")
+    realized_pnl: Decimal = Decimal("0")
+    fee: Decimal = Decimal("0")
+    trade_at: datetime | None = None
+    fill_count: int = 0
+    fee_assets: set[str] = field(default_factory=set)
+
+
+def _aggregate_account_fills(
+    rows: Sequence[AccountFillEventRow],
+    strategy_by_order: dict[str, str],
+    *,
+    limit: int = 20,
+) -> list[dict[str, JsonValue]]:
+    """Collapse exchange partial fills into one order-level dashboard row."""
+    grouped: dict[tuple[str, str, str], _AccountFillAggregate] = {}
+    for row in rows:
+        key = (row.order_id, row.symbol, row.side)
+        aggregate = grouped.get(key)
+        if aggregate is None:
+            aggregate = _AccountFillAggregate(
+                symbol=row.symbol,
+                order_id=row.order_id,
+                side=row.side,
+                strategy_name=strategy_by_order.get(row.order_id),
+            )
+            grouped[key] = aggregate
+        aggregate.fee_assets.add(row.fee_asset)
+        aggregate.quantity += row.quantity
+        aggregate.notional += row.price * row.quantity
+        aggregate.realized_pnl += row.realized_pnl
+        aggregate.fee += row.fee
+        aggregate.trade_at = (
+            row.trade_at
+            if aggregate.trade_at is None
+            else max(aggregate.trade_at, row.trade_at)
+        )
+        aggregate.fill_count += 1
+
+    ordered = sorted(
+        grouped.values(),
+        key=lambda aggregate: aggregate.trade_at or datetime.min.replace(tzinfo=UTC),
+        reverse=True,
+    )[:limit]
+    return [
+        {
+            "symbol": aggregate.symbol,
+            "order_id": aggregate.order_id,
+            "side": aggregate.side,
+            "price": str(
+                aggregate.notional / aggregate.quantity
+                if aggregate.quantity
+                else Decimal("0")
+            ),
+            "quantity": str(aggregate.quantity),
+            "realized_pnl": str(aggregate.realized_pnl),
+            "fee": str(aggregate.fee),
+            "fee_asset": " / ".join(sorted(aggregate.fee_assets)),
+            "trade_at": (
+                None
+                if aggregate.trade_at is None
+                else aggregate.trade_at.isoformat()
+            ),
+            "fill_count": aggregate.fill_count,
+            "strategy_name": aggregate.strategy_name,
+        }
+        for aggregate in ordered
+    ]
 
 
 @asynccontextmanager
@@ -834,7 +912,7 @@ class DashboardQueries:
                             AccountFillEventRow.account_label == account_label,
                         )
                         .order_by(AccountFillEventRow.trade_at.desc())
-                        .limit(20)
+                        .limit(200)
                     )
                 ).all()
                 execution_orders = (
@@ -857,12 +935,13 @@ class DashboardQueries:
         execution_by_client = {
             row.client_order_id: row for row in execution_orders
         }
-        execution_by_exchange = {
-            row.exchange_order_id: row
+        intent_by_id = {row.intent_id: row for row in intent_rows}
+        strategy_by_order = {
+            row.exchange_order_id: intent_by_id[row.intent_id].strategy_name
             for row in execution_orders
             if row.exchange_order_id is not None
+            and row.intent_id in intent_by_id
         }
-        intent_by_id = {row.intent_id: row for row in intent_rows}
         strategy_by_symbol: dict[str, str] = {}
         for order in execution_orders:
             intent = intent_by_id.get(order.intent_id)
@@ -872,6 +951,11 @@ class DashboardQueries:
                 and not order.reduce_only
             ):
                 strategy_by_symbol.setdefault(order.symbol, intent.strategy_name)
+
+        recent_trades = _aggregate_account_fills(
+            fills,
+            strategy_by_order,
+        )
 
         reconciliation_payload: dict[str, JsonValue] = (
             {}
@@ -929,6 +1013,7 @@ class DashboardQueries:
                 "gross_position_notional": str(total_notional),
                 "position_count": len(positions),
                 "open_order_count": len(orders),
+                "recent_trade_count": len(recent_trades),
                 "recent_fill_count": len(fills),
             },
             balances=[
@@ -986,28 +1071,7 @@ class DashboardQueries:
                 }
                 for row in orders
             ],
-            fills=[
-                {
-                    "symbol": row.symbol,
-                    "trade_id": row.trade_id,
-                    "price": str(row.price),
-                    "quantity": str(row.quantity),
-                    "realized_pnl": str(row.realized_pnl),
-                    "fee": str(row.fee),
-                    "fee_asset": row.fee_asset,
-                    "side": row.side,
-                    "trade_at": row.trade_at.isoformat(),
-                    "order_id": row.order_id,
-                    "strategy_name": (
-                        None
-                        if (internal := execution_by_exchange.get(row.order_id))
-                        is None
-                        or (intent := intent_by_id.get(internal.intent_id)) is None
-                        else intent.strategy_name
-                    ),
-                }
-                for row in fills
-            ],
+            fills=recent_trades,
         )
 
     async def risk_execution(self) -> RiskExecutionResponse:
