@@ -118,3 +118,37 @@ async def test_live_warmup_applies_all_states_and_continues_from_boundary() -> N
     assert strategy.seen == [stale, fresh]
     assert cursor.bucket_start == fresh.bucket_start
     assert cursor.symbol == "BTCUSDT"
+
+
+async def test_shadow_preflight_accepts_an_old_matching_session() -> None:
+    class FakeSession:
+        def __init__(self) -> None:
+            self.statement = None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def scalar(self, statement):
+            self.statement = statement
+            return "shadow-old"
+
+    class FakeFactory:
+        def __init__(self, session: FakeSession) -> None:
+            self.session = session
+
+        def __call__(self):
+            return self.session
+
+    session = FakeSession()
+    factory = FakeFactory(session)
+
+    assert await main._has_matching_shadow_session(
+        factory,
+        strategy_name="orderflow_impulse",
+        strategy_config_hash="a" * 64,
+    )
+    assert session.statement is not None
+    assert "ended_at >=" not in str(session.statement)

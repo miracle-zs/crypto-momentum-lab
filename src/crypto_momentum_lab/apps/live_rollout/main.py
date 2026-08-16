@@ -565,21 +565,11 @@ async def _run_live_plan(
         )
 
         async def shadow_preflight() -> bool:
-            async with factory() as database_session:
-                completed_shadow = await database_session.scalar(
-                    select(ShadowSessionRow.run_id)
-                    .where(
-                        ShadowSessionRow.strategy_name == strategy_name,
-                        ShadowSessionRow.strategy_config_hash
-                        == strategy_config_hash,
-                        ShadowSessionRow.state == "completed",
-                        ShadowSessionRow.ended_at
-                        >= now - timedelta(hours=24),
-                    )
-                    .order_by(ShadowSessionRow.ended_at.desc())
-                    .limit(1)
-                )
-            return completed_shadow is not None
+            return await _has_matching_shadow_session(
+                factory,
+                strategy_name=strategy_name,
+                strategy_config_hash=strategy_config_hash,
+            )
 
         return await session.run_one(
             gate_context=context,
@@ -720,11 +710,10 @@ async def _run_live_daemon(
                 risk_config_hash=risk_config_hash,
                 state=LiveSessionState.SHADOW_PREFLIGHT,
             )
-        if not await _has_recent_shadow_session(
+        if not await _has_matching_shadow_session(
             factory,
             strategy_name=strategy_name,
             strategy_config_hash=strategy_config_hash,
-            now=now,
         ):
             raise RuntimeError("shadow preflight failed")
 
@@ -909,12 +898,11 @@ async def _reconcile_run_orders(
         await state_machine.reconcile_order(order.plan)
 
 
-async def _has_recent_shadow_session(
+async def _has_matching_shadow_session(
     factory: async_sessionmaker[AsyncSession],
     *,
     strategy_name: str,
     strategy_config_hash: str,
-    now: datetime,
 ) -> bool:
     async with factory() as database_session:
         completed_shadow = await database_session.scalar(
@@ -923,7 +911,6 @@ async def _has_recent_shadow_session(
                 ShadowSessionRow.strategy_name == strategy_name,
                 ShadowSessionRow.strategy_config_hash == strategy_config_hash,
                 ShadowSessionRow.state == "completed",
-                ShadowSessionRow.ended_at >= now - timedelta(hours=24),
             )
             .order_by(ShadowSessionRow.ended_at.desc())
             .limit(1)

@@ -91,8 +91,9 @@ $COMPOSE --profile live run --rm --no-deps \
 
 Review the report and record all three drills from
 `docs/runbooks/shadow-operation-session.md`. A completed matching shadow session
-must be less than 24 hours old; this is only a preflight evidence window, not
-an order holding-time limit.
+is retained as preflight evidence, but its age is not a runtime gate; restarting
+the live worker does not stop trading merely because the shadow session is more
+than 24 hours old.
 
 ## 4. Approve And Preflight
 
