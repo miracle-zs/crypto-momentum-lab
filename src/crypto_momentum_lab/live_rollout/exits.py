@@ -266,6 +266,18 @@ class LiveExitManager:
                     self._config.candle_grace_bars > 0
                     and self._config.candle_grace_profit_pct > 0
                 ):
+                    if _recovery_target_touched(
+                        position=position,
+                        mark_price=mark_price,
+                        profit_pct=self._config.candle_grace_profit_pct,
+                    ):
+                        return self._build_request(
+                            state=state,
+                            position=position,
+                            reason=reason,
+                            trigger_at=candle.candle_end,
+                            reference_price=mark_price,
+                        )
                     return self._build_grace_limit_request(
                         state=state,
                         position=position,
@@ -412,6 +424,18 @@ def _recovery_price(
     if position.side is StrategySide.LONG:
         return position.entry_price * (Decimal("1") + profit_pct)
     return position.entry_price * (Decimal("1") - profit_pct)
+
+
+def _recovery_target_touched(
+    *,
+    position: ManagedLivePosition,
+    mark_price: Decimal,
+    profit_pct: Decimal,
+) -> bool:
+    target_price = _recovery_price(position, profit_pct)
+    if position.side is StrategySide.LONG:
+        return mark_price >= target_price
+    return mark_price <= target_price
 
 
 def _exit_mark_price(
