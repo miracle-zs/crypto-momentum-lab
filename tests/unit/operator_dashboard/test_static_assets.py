@@ -27,12 +27,39 @@ def test_static_javascript_uses_relative_api_paths() -> None:
         in index
     )
     assert (
-        'src="static/dashboard.js?v=20260816-control-room-v9-interaction-cache"'
+        'type="module" src="static/dashboard.js?v=20260816-control-room-'
+        'v12-dom-charts"'
         in index
     )
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
+
+
+def test_dashboard_loads_stable_frontend_modules() -> None:
+    javascript = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    index = (STATIC / "index.html").read_text(encoding="utf-8")
+
+    assert 'type="module"' in index
+    for module in (
+        'from "./dashboard-config.js"',
+        'from "./dashboard-formatters.js"',
+        'from "./dashboard-dom.js"',
+        'from "./sections/overview.js"',
+        'from "./sections/universe.js"',
+        'from "./sections/risk.js"',
+        'from "./sections/account.js"',
+        'from "./sections/reports.js"',
+        'from "./sections/strategy.js"',
+    ):
+        assert module in javascript
+    assert (STATIC / "dashboard-config.js").exists()
+    assert (STATIC / "dashboard-formatters.js").exists()
+    assert (STATIC / "dashboard-dom.js").exists()
+    assert (STATIC / "dashboard-charts.js").exists()
+    assert (STATIC / "dashboard-ui.js").exists()
+    for section in ("overview", "universe", "risk", "account", "reports", "strategy"):
+        assert (STATIC / "sections" / f"{section}.js").exists()
 
 
 def test_degraded_status_labels_are_visible() -> None:
@@ -67,7 +94,9 @@ def test_v2_control_room_prioritizes_safety_and_exposes_global_readiness() -> No
 
 
 def test_strategy_panel_renders_portfolio_and_position_lifecycle() -> None:
-    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    text = (STATIC / "sections" / "strategy.js").read_text(encoding="utf-8")
+    ui = (STATIC / "dashboard-ui.js").read_text(encoding="utf-8")
+    text_with_ui = f"{text}\n{ui}"
 
     for label in (
         "资产权益走势",
@@ -89,11 +118,13 @@ def test_strategy_panel_renders_portfolio_and_position_lifecycle() -> None:
         "liquidation_notional",
         "shortHash",
     ):
-        assert field in text
+        assert field in text_with_ui
 
 
 def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
-    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    text = (STATIC / "sections" / "strategy.js").read_text(encoding="utf-8")
+    charts = (STATIC / "dashboard-charts.js").read_text(encoding="utf-8")
+    text_with_charts = f"{text}\n{charts}"
 
     for marker in (
         "buildStrategyEquityModels",
@@ -112,17 +143,18 @@ def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
         "paper-accounts/equity",
         "paperDetailsByRun",
     ):
-        assert marker in text
+        assert marker in text_with_charts
     assert "SUMMARY FIRST · DETAIL ON DEMAND" in (
         STATIC / "index.html"
     ).read_text(encoding="utf-8")
 
 
 def test_paper_detail_and_equity_requests_are_cache_throttled() -> None:
-    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    text = (STATIC / "sections" / "strategy.js").read_text(encoding="utf-8")
+    config = (STATIC / "dashboard-config.js").read_text(encoding="utf-8")
 
-    assert "PAPER_DETAIL_CACHE_MS = 30 * 1000" in text
-    assert "PAPER_EQUITY_CACHE_MS = 30 * 1000" in text
+    assert "PAPER_DETAIL_CACHE_MS = 30 * 1000" in config
+    assert "PAPER_EQUITY_CACHE_MS = 30 * 1000" in config
     assert "paperDetailLoadedAt" in text
     assert "paperEquityLoadedAt" in text
     assert "paperEquityCacheKey" in text
@@ -133,7 +165,7 @@ def test_paper_detail_and_equity_requests_are_cache_throttled() -> None:
 
 
 def test_paper_account_tabs_have_keyboard_and_panel_semantics() -> None:
-    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    text = (STATIC / "sections" / "strategy.js").read_text(encoding="utf-8")
 
     for marker in (
         'role="tablist" aria-orientation="horizontal"',
@@ -151,19 +183,20 @@ def test_paper_account_tabs_have_keyboard_and_panel_semantics() -> None:
 
 
 def test_account_cards_use_each_account_equity_curve() -> None:
-    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    text = (STATIC / "sections" / "strategy.js").read_text(encoding="utf-8")
+    charts = (STATIC / "dashboard-charts.js").read_text(encoding="utf-8")
     card_start = text.index("function accountCard")
     card_end = text.index("function accountDetail", card_start)
     card_code = text[card_start:card_end]
 
-    assert "function accountWindowDelta(account)" in text
+    assert "function accountWindowDelta(account)" in charts
     assert "standaloneSparkline(account.equity_curve)" in card_code
     assert "滚动 24H 权益变化" in card_code
     assert "comparisonSparkline" not in card_code
 
 
 def test_exchange_account_panel_exposes_reconciliation_and_execution_detail() -> None:
-    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    text = (STATIC / "sections" / "account.js").read_text(encoding="utf-8")
 
     for marker in (
         "账户权限与对账",
@@ -188,15 +221,39 @@ def test_exchange_account_panel_exposes_reconciliation_and_execution_detail() ->
 
 
 def test_live_account_panel_renders_equity_and_close_reasons() -> None:
-    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
-    render_start = text.index("function renderAccount")
-    render_end = text.index("function renderReports", render_start)
-    render_code = text[render_start:render_end]
+    render_code = (STATIC / "sections" / "account.js").read_text(encoding="utf-8")
 
     assert "data.equity_curve" in render_code
     assert "live-account-equity" in render_code
     assert 'label: "平仓原因"' in render_code
     assert "row.close_reason" in render_code
+
+
+def test_dashboard_skips_unchanged_section_replacements() -> None:
+    javascript = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    overview = (STATIC / "sections" / "overview.js").read_text(encoding="utf-8")
+
+    for marker in (
+        "sectionRenderKeys",
+        "function sectionRenderKey",
+        "const shouldRender = sectionRenderKeys.get(id) !== renderKey",
+        "if (shouldRender)",
+        "replaceChildrenFromHtml",
+        "updateOverviewDynamic",
+    ):
+        assert marker in javascript
+    assert "body.innerHTML" not in javascript
+    assert 'data-service-age="${esc(service.name)}"' in overview
+
+
+def test_equity_charts_expose_hoverable_point_readouts() -> None:
+    charts = (STATIC / "dashboard-charts.js").read_text(encoding="utf-8")
+    stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+
+    assert "function chartPointTitle" in charts
+    assert 'class="chart-point' in charts
+    assert 'class="pair-point' in charts
+    assert ".chart-point:hover, .pair-point:hover" in stylesheet
 
 
 def test_live_status_uses_active_green_semantics() -> None:
@@ -219,7 +276,7 @@ def test_live_b1_equity_series_uses_distinct_solid_accent() -> None:
 
 
 def test_universe_panel_separates_target_and_retained_symbols() -> None:
-    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    text = (STATIC / "sections" / "universe.js").read_text(encoding="utf-8")
 
     for marker in (
         "目标池 · 涨幅 Top 20",
@@ -232,38 +289,34 @@ def test_universe_panel_separates_target_and_retained_symbols() -> None:
 
 
 def test_dashboard_polling_preserves_scroll_positions() -> None:
-    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    text = (STATIC / "dashboard-dom.js").read_text(encoding="utf-8")
 
     for marker in (
-        "captureScrollState",
-        "restoreScrollState",
-        "window.scrollTo(state.pageX, state.pageY)",
+        "captureViewState",
+        "restoreViewState",
+        "view.scrollTo(state.pageX, state.pageY)",
         'querySelectorAll(".table-scroll")',
     ):
         assert marker in text
 
 
 def test_dashboard_polling_preserves_open_strategy_signals() -> None:
-    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    text = (STATIC / "dashboard-dom.js").read_text(encoding="utf-8")
 
-    capture_start = text.index("function captureScrollState")
-    refresh_start = text.index("async function refreshSection")
-    scroll_state_code = text[capture_start:refresh_start]
-
-    assert 'querySelectorAll("details")' in scroll_state_code
-    assert "details.open = saved.open" in scroll_state_code
+    assert 'querySelectorAll("details")' in text
+    assert "details.open = saved.open" in text
 
 
 def test_paper_detail_replacement_preserves_interaction_state() -> None:
-    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    text = (STATIC / "sections" / "strategy.js").read_text(encoding="utf-8")
 
     replacement_start = text.index("function replacePaperDetail")
     replacement_end = text.index("function mountPaperDetail", replacement_start)
     replacement_code = text[replacement_start:replacement_end]
 
-    capture = replacement_code.index("captureScrollState(body)")
-    replace = replacement_code.index("detail.outerHTML")
-    restore = replacement_code.index("restoreScrollState(body, scrollState)")
+    capture = replacement_code.index("captureViewState(body)")
+    replace = replacement_code.index("replaceElementFromHtml(detail, html)")
+    restore = replacement_code.index("restoreViewState(body, viewState)")
     assert capture < replace < restore
 
     mount_start = text.index("function mountPaperDetail")
@@ -271,34 +324,37 @@ def test_paper_detail_replacement_preserves_interaction_state() -> None:
     assert "replacePaperDetail(body," in text[mount_start:mount_end]
 
     history_start = text.index("async function loadPaperAccountHistory")
-    history_end = text.index("function captureScrollState", history_start)
-    assert "replacePaperDetail(body," in text[history_start:history_end]
+    assert "replacePaperDetail(body," in text[history_start:]
 
 
 def test_scroll_state_restores_layout_before_page_position() -> None:
-    text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
-
-    restore_start = text.index("function restoreScrollState")
-    restore_end = text.index("async function refreshSection", restore_start)
+    text = (STATIC / "dashboard-dom.js").read_text(encoding="utf-8")
+    restore_start = text.index("export function restoreViewState")
+    restore_end = text.index("export function replaceChildrenFromHtml", restore_start)
     restore_code = text[restore_start:restore_end]
 
     disclosures = restore_code.index('querySelectorAll("details")')
     containers = restore_code.index('querySelectorAll(".table-scroll")')
-    page = restore_code.index("window.scrollTo(state.pageX, state.pageY)")
+    page = restore_code.index("view.scrollTo(state.pageX, state.pageY)")
     assert disclosures < containers < page
 
 
 def test_dashboard_formats_display_times_in_fixed_utc_plus_8() -> None:
     text = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    config = (STATIC / "dashboard-config.js").read_text(encoding="utf-8")
+    formatters = (STATIC / "dashboard-formatters.js").read_text(encoding="utf-8")
+    universe = (STATIC / "sections" / "universe.js").read_text(encoding="utf-8")
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
-    assert 'const DISPLAY_TIME_ZONE = "Asia/Shanghai"' in text
-    assert 'timeZone: DISPLAY_TIME_ZONE' in text
-    assert "DISPLAY_TIME_FORMATTER.formatToParts" in text
+    assert 'const DISPLAY_TIME_ZONE = "Asia/Shanghai"' in (
+        STATIC / "dashboard-config.js"
+    ).read_text(encoding="utf-8")
+    assert 'timeZone: DISPLAY_TIME_ZONE' in formatters
+    assert "DISPLAY_TIME_FORMATTER.formatToParts" in formatters
     assert "toISOString().slice" not in text
-    assert "UTC+8" in text
+    assert "UTC+8" in config
     assert "<small>UTC+8</small>" in index
-    assert "UTC DAY" in text
+    assert "UTC DAY" in universe
 
 
 def test_dashboard_separates_live_status_from_heartbeat() -> None:
@@ -351,7 +407,7 @@ def test_paper_account_cards_use_responsive_variant_grid() -> None:
 
 
 def test_fixed_tp_sl_accounts_are_not_rendered() -> None:
-    javascript = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    javascript = (STATIC / "sections" / "strategy.js").read_text(encoding="utf-8")
 
     assert 'account.exit_mode !== "fixed"' in javascript
     assert "固定 TP / SL" not in javascript

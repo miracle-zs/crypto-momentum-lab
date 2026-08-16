@@ -1095,6 +1095,17 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .equity-chart { width: 100%; }
 .equity-chart svg { display: block; width: 100%; height: auto; }
+.chart-point, .pair-point {
+  fill: transparent;
+  stroke: transparent;
+  stroke-width: 10;
+  pointer-events: all;
+  cursor: crosshair;
+}
+.chart-point.pos, .pair-point.pos { color: var(--up); }
+.chart-point.neg, .pair-point.neg { color: var(--down); }
+.pair-point { color: var(--series-color, var(--series-live)); }
+.chart-point:hover, .pair-point:hover { fill: currentColor; stroke: currentColor; stroke-width: 1; opacity: .7; }
 
 .chart-grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 6; }
 .chart-label { fill: var(--faint); font: 10px var(--mono); }
