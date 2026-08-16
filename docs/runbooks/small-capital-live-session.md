@@ -90,10 +90,10 @@ $COMPOSE --profile live run --rm --no-deps \
 ```
 
 Review the report and record all three drills from
-`docs/runbooks/shadow-operation-session.md`. A completed matching shadow session
-is retained as preflight evidence, but its age is not a runtime gate; restarting
-the live worker does not stop trading merely because the shadow session is more
-than 24 hours old.
+`docs/runbooks/shadow-operation-session.md`. The live worker records an
+advisory warning when no completed matching shadow session exists, but this
+check does not block startup. A completed matching shadow session remains useful
+as preflight evidence, and its age is not a runtime gate.
 
 ## 4. Approve And Preflight
 

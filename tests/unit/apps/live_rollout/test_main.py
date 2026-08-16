@@ -152,3 +152,49 @@ async def test_shadow_preflight_accepts_an_old_matching_session() -> None:
     )
     assert session.statement is not None
     assert "ended_at >=" not in str(session.statement)
+
+
+async def test_missing_shadow_preflight_only_logs_a_warning(
+    monkeypatch,
+) -> None:
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def scalar(self, _statement):
+            return None
+
+    class FakeFactory:
+        def __call__(self):
+            return FakeSession()
+
+    warnings = []
+
+    class FakeLogger:
+        def warning(self, event, **kwargs):
+            warnings.append((event, kwargs))
+
+    monkeypatch.setattr(main, "log", FakeLogger())
+
+    await main._warn_if_shadow_preflight_missing(
+        FakeFactory(),
+        strategy_name="orderflow_impulse",
+        strategy_config_hash="a" * 64,
+        account_label="primary",
+        session_id="live-1",
+    )
+
+    assert warnings == [
+        (
+            "live_shadow_preflight_missing",
+            {
+                "account_label": "primary",
+                "session_id": "live-1",
+                "strategy_name": "orderflow_impulse",
+                "strategy_config_hash": "a" * 64,
+            },
+        )
+    ]

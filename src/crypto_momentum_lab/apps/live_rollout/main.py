@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
 
+import structlog
 import typer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -101,6 +102,7 @@ from crypto_momentum_lab.strategy_runner.registry import (
 )
 
 app = typer.Typer(no_args_is_help=True)
+log = structlog.get_logger()
 _PREPARE_CONFIRMATION = "PREPARE LIVE RISK GATES"
 # These two columns are retained by the existing risk-config schema for paper
 # and shadow sessions. Live execution no longer enforces state-age limits; the
@@ -565,11 +567,14 @@ async def _run_live_plan(
         )
 
         async def shadow_preflight() -> bool:
-            return await _has_matching_shadow_session(
+            await _warn_if_shadow_preflight_missing(
                 factory,
                 strategy_name=strategy_name,
                 strategy_config_hash=strategy_config_hash,
+                account_label=account_label,
+                session_id=session_id,
             )
+            return True
 
         return await session.run_one(
             gate_context=context,
@@ -710,12 +715,13 @@ async def _run_live_daemon(
                 risk_config_hash=risk_config_hash,
                 state=LiveSessionState.SHADOW_PREFLIGHT,
             )
-        if not await _has_matching_shadow_session(
+        await _warn_if_shadow_preflight_missing(
             factory,
             strategy_name=strategy_name,
             strategy_config_hash=strategy_config_hash,
-        ):
-            raise RuntimeError("shadow preflight failed")
+            account_label=account_label,
+            session_id=session_id,
+        )
 
         strategy = build_runtime_strategy(
             strategy_name,
@@ -916,6 +922,29 @@ async def _has_matching_shadow_session(
             .limit(1)
         )
     return completed_shadow is not None
+
+
+async def _warn_if_shadow_preflight_missing(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    strategy_name: str,
+    strategy_config_hash: str,
+    account_label: str,
+    session_id: str,
+) -> None:
+    if await _has_matching_shadow_session(
+        factory,
+        strategy_name=strategy_name,
+        strategy_config_hash=strategy_config_hash,
+    ):
+        return
+    log.warning(
+        "live_shadow_preflight_missing",
+        account_label=account_label,
+        session_id=session_id,
+        strategy_name=strategy_name,
+        strategy_config_hash=strategy_config_hash,
+    )
 
 
 async def _session_is_draining(
