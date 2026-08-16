@@ -20,7 +20,7 @@
   --live: #34d399;
   --series-fixed: #7aa2f7;
   --series-candle: #34d399;
-  --series-live: #f8fafc;
+  --series-live: #e879f9;
   --series-amber: #f5b755;
   --series-violet: #c084fc;
   --series-cyan: #22d3ee;
@@ -1060,7 +1060,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 .pair-line.fixed { stroke: var(--series-color, var(--brand)); }
 .pair-line.candle { stroke: var(--series-color, var(--up)); }
 .pair-line.variant { stroke: var(--series-color, var(--warn)); }
-.pair-line.live { stroke: var(--series-color, var(--series-live)); stroke-width: 2.5; stroke-dasharray: 8 4; }
+.pair-line.live { stroke: var(--series-color, var(--series-live)); stroke-width: 2.5; }
 .pair-dot.fixed { fill: var(--series-color, var(--brand)); }
 .pair-dot.candle { fill: var(--series-color, var(--up)); }
 .pair-dot.variant { fill: var(--series-color, var(--warn)); }

@@ -22,8 +22,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert 'data-endpoint="api/overview"' in index
-    assert 'href="static/dashboard.css?v=20260816-control-room-v4-paper-b1"' in index
-    assert 'src="static/dashboard.js?v=20260816-control-room-v4-paper-b1"' in index
+    assert 'href="static/dashboard.css?v=20260816-control-room-v5-live-solid"' in index
+    assert 'src="static/dashboard.js?v=20260816-control-room-v5-live-solid"' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(section.dataset.endpoint" in text
     assert "binance.com" not in text.lower()
@@ -155,6 +155,13 @@ def test_live_status_uses_active_green_semantics() -> None:
     assert "--live: #34d399;" in stylesheet
     assert ".status-LIVE, .status-LIVE-ENABLED { --s: var(--live); }" in stylesheet
     assert "rgba(248, 113, 113" not in stylesheet
+
+
+def test_live_b1_equity_series_uses_distinct_solid_accent() -> None:
+    stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+
+    assert "--series-live: #e879f9;" in stylesheet
+    assert ".pair-line.live { stroke: var(--series-color, var(--series-live)); stroke-width: 2.5; }" in stylesheet
 
 
 def test_universe_panel_separates_target_and_retained_symbols() -> None:
