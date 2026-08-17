@@ -9,6 +9,7 @@ from crypto_momentum_lab.operator_dashboard.queries import (
     _is_dashboard_paper_run,
     _live_account_equity_point,
     _paper_exit_label,
+    _split_exchange_orders,
 )
 from crypto_momentum_lab.persistence.postgres.models import PaperEquitySnapshotRow
 
@@ -50,6 +51,24 @@ def test_dashboard_uses_latest_checkpoint_without_append_only_events() -> None:
 
     assert "StrategyRuntimeCheckpointRow" in source
     assert "StrategyRuntimeEventRow" not in source
+
+
+def test_dashboard_separates_confirmed_open_orders_from_uncertain_orders() -> None:
+    rows = [
+        SimpleNamespace(state="acknowledged"),
+        SimpleNamespace(state="partially_filled"),
+        SimpleNamespace(state="submitting"),
+        SimpleNamespace(state="mystery"),
+        SimpleNamespace(state="filled"),
+    ]
+
+    pending, ambiguous = _split_exchange_orders(rows)
+
+    assert [row.state for row in pending] == [
+        "acknowledged",
+        "partially_filled",
+    ]
+    assert [row.state for row in ambiguous] == ["submitting", "mystery"]
 
 
 def test_candle_exit_label_includes_entry_filter_variants() -> None:

@@ -120,6 +120,7 @@ class RiskExecutionResponse(DashboardSchema):
     active_halts: list[dict[str, JsonValue]]
     latest_risk_decisions: list[dict[str, JsonValue]]
     exchange_orders: list[dict[str, JsonValue]]
+    pending_orders: list[dict[str, JsonValue]] = Field(default_factory=list)
     ambiguous_orders: list[dict[str, JsonValue]]
 
 

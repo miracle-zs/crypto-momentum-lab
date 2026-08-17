@@ -59,6 +59,32 @@ from crypto_momentum_lab.persistence.postgres.models import (
 _EQUITY_WINDOW = timedelta(hours=24)
 _EQUITY_BUCKET_SECONDS = 6 * 60
 _EQUITY_MAX_POINTS = 240
+_CONFIRMED_OPEN_ORDER_STATES = frozenset(
+    {
+        ExchangeOrderState.ACKNOWLEDGED.value,
+        ExchangeOrderState.PARTIALLY_FILLED.value,
+    }
+)
+
+
+def _split_exchange_orders(
+    rows: Sequence[ExchangeOrderRow],
+) -> tuple[list[ExchangeOrderRow], list[ExchangeOrderRow]]:
+    """Separate confirmed resting orders from genuinely uncertain orders."""
+    terminal_states = {
+        state.value for state in ExchangeOrderState if state.terminal
+    }
+    pending: list[ExchangeOrderRow] = []
+    ambiguous: list[ExchangeOrderRow] = []
+    for row in rows:
+        if row.state in terminal_states:
+            continue
+        if row.state in _CONFIRMED_OPEN_ORDER_STATES:
+            pending.append(row)
+        else:
+            # Unknown/non-terminal states must remain fail-closed.
+            ambiguous.append(row)
+    return pending, ambiguous
 
 
 @dataclass(slots=True)
@@ -1210,7 +1236,6 @@ class DashboardQueries:
         )
 
     async def risk_execution(self) -> RiskExecutionResponse:
-        terminal = tuple(state.value for state in ExchangeOrderState if state.terminal)
         async with self._session_factory() as session:
             halts = (
                 await session.scalars(
@@ -1233,7 +1258,7 @@ class DashboardQueries:
                     .limit(30)
                 )
             ).all()
-        ambiguous = [row for row in orders if row.state not in terminal]
+        pending, ambiguous = _split_exchange_orders(orders)
         return RiskExecutionResponse(
             status=OperationalStatus.HALTED
             if halts or ambiguous
@@ -1252,6 +1277,7 @@ class DashboardQueries:
                 for row in decisions
             ],
             exchange_orders=[_exchange_order(row) for row in orders],
+            pending_orders=[_exchange_order(row) for row in pending],
             ambiguous_orders=[_exchange_order(row) for row in ambiguous],
         )
 

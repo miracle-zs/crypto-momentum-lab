@@ -139,6 +139,7 @@ class FakeQueries:
             active_halts=[],
             latest_risk_decisions=[],
             exchange_orders=[],
+            pending_orders=[],
             ambiguous_orders=[],
         )
 

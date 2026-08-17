@@ -13,6 +13,7 @@ import {
   strategyEquityChart,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-charts.js";
 import { renderOverview } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/overview.js";
+import { renderRisk } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/risk.js";
 import { createStrategySection } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/strategy.js";
 
 test("operator formatters keep status and money output stable", () => {
@@ -73,6 +74,27 @@ test("overview renderer exposes local heartbeat update hooks", () => {
   assert.equal(status, "READY");
   assert.match(html, /data-service-age="live-rollout"/);
   assert.match(html, /data-service-meter="live-rollout"/);
+});
+
+test("risk renderer separates confirmed pending orders from uncertain orders", () => {
+  const [status, html] = renderRisk({
+    status: "READY",
+    active_halts: [],
+    latest_risk_decisions: [],
+    pending_orders: [{
+      symbol: "龙虾USDT",
+      client_order_id: "cml-order",
+      side: "SELL",
+      state: "acknowledged",
+      updated_at: "2026-08-16T16:33:04Z",
+    }],
+    ambiguous_orders: [],
+  });
+  assert.equal(status, "READY");
+  assert.match(html, /待完成订单/);
+  assert.match(html, /RESTING \/ PARTIALLY FILLED/);
+  assert.match(html, /龙虾USDT/);
+  assert.match(html, /无不确定订单/);
 });
 
 test("strategy section owns paper-account rendering state", () => {
