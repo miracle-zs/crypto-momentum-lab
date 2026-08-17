@@ -23,12 +23,12 @@ def test_static_javascript_uses_relative_api_paths() -> None:
 
     assert 'data-endpoint="api/overview"' in index
     assert (
-        'href="static/dashboard.css?v=20260816-control-room-v8-live-account"'
+        'href="static/dashboard.css?v=20260817-control-room-v9-chart-account-semantics"'
         in index
     )
     assert (
         'type="module" src="static/dashboard.js?v=20260817-control-room-'
-        'v13-readiness-memory"'
+        'v14-chart-account-semantics"'
         in index
     )
     assert 'data-endpoint="/api/' not in index
@@ -46,6 +46,7 @@ def test_dashboard_loads_stable_frontend_modules() -> None:
         'from "./dashboard-formatters.js"',
         'from "./dashboard-dom.js"',
         'from "./dashboard-readiness.js"',
+        'from "./dashboard-chart-interactions.js"',
         'from "./sections/overview.js"',
         'from "./sections/universe.js"',
         'from "./sections/risk.js"',
@@ -58,6 +59,7 @@ def test_dashboard_loads_stable_frontend_modules() -> None:
     assert (STATIC / "dashboard-formatters.js").exists()
     assert (STATIC / "dashboard-dom.js").exists()
     assert (STATIC / "dashboard-readiness.js").exists()
+    assert (STATIC / "dashboard-chart-interactions.js").exists()
     assert (STATIC / "dashboard-charts.js").exists()
     assert (STATIC / "dashboard-ui.js").exists()
     for section in ("overview", "universe", "risk", "account", "reports", "strategy"):
@@ -204,6 +206,9 @@ def test_exchange_account_panel_exposes_reconciliation_and_execution_detail() ->
         "账户权限与对账",
         "EXECUTION ACCOUNT",
         "live-strategy",
+        "execution-account · 只读同步",
+        "交易所权限",
+        "数据新鲜度",
         "账户 API 交易权限",
         "canTrade",
         "怎么读",
@@ -253,6 +258,9 @@ def test_equity_charts_expose_hoverable_point_readouts() -> None:
     stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
 
     assert "function chartPointTitle" in charts
+    assert "data-chart-tooltip" in charts
+    assert "data-chart-crosshair" in charts
+    assert "equityWindowMetrics" in charts
     assert 'class="chart-point' in charts
     assert 'class="pair-point' in charts
     assert ".chart-point:hover, .pair-point:hover" in stylesheet

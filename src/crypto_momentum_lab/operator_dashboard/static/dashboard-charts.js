@@ -54,8 +54,46 @@ export function comparisonSeriesStyle(series) {
   return `style="--series-color:${series.color}"`;
 }
 
-function chartPointTitle(at, value, label = "权益") {
-  return `<title>${esc(`${label} · ${dayTime(at)} ${DISPLAY_TIME_ZONE_LABEL} · ${money(value)}`)}</title>`;
+function chartPointReadout(at, value, label = "权益", formatter = money) {
+  return `${label} · ${dayTime(at)} ${DISPLAY_TIME_ZONE_LABEL} · ${formatter(value)}`;
+}
+
+function chartPointTitle(at, value, label = "权益", formatter = money) {
+  return `<title>${esc(chartPointReadout(at, value, label, formatter))}</title>`;
+}
+
+function chartPointData(x, y, readout) {
+  return `data-chart-point data-chart-x="${x.toFixed(1)}" data-chart-y="${y.toFixed(1)}" data-chart-readout="${esc(readout)}"`;
+}
+
+function equityValues(rows) {
+  return (rows || [])
+    .map((row) => asNumber(typeof row === "object" && row !== null ? row.equity : row))
+    .filter((value) => value != null);
+}
+
+export function maxDrawdown(rows) {
+  const values = equityValues(rows);
+  if (!values.length) return null;
+  let peak = values[0];
+  let drawdown = 0;
+  for (const value of values) {
+    peak = Math.max(peak, value);
+    drawdown = Math.min(drawdown, value - peak);
+  }
+  return drawdown;
+}
+
+export function equityWindowMetrics(rows) {
+  const values = equityValues(rows);
+  const baseline = values[0] ?? null;
+  const latest = values.at(-1) ?? null;
+  return {
+    baseline,
+    latest,
+    delta: baseline == null || latest == null ? null : latest - baseline,
+    maxDrawdown: maxDrawdown(values),
+  };
 }
 
 function strategyEquityModel(strategyName, accounts) {
@@ -176,6 +214,7 @@ export function equityChart(rows, chartId = "eq", windowStart = null, windowEnd 
   const y = (value) => padT + ((max - value) / (max - min)) * (height - padT - padB);
   const lastValue = values.at(-1);
   const lastUp = lastValue >= values[0];
+  const windowMetrics = equityWindowMetrics(values);
   const line = points
     .map((point) => `${x(point.atMs).toFixed(1)},${y(point.equity).toFixed(1)}`)
     .join(" ");
@@ -183,7 +222,11 @@ export function equityChart(rows, chartId = "eq", windowStart = null, windowEnd 
     `${x(points.at(-1).atMs).toFixed(1)},${(height - padB).toFixed(1)}`;
   const pointMarkers = points.map((point) => `<circle
     cx="${x(point.atMs).toFixed(1)}" cy="${y(point.equity).toFixed(1)}" r="7"
-    class="chart-point ${lastUp ? "pos" : "neg"}" aria-hidden="true">
+    class="chart-point ${lastUp ? "pos" : "neg"}" aria-hidden="true" ${chartPointData(
+      x(point.atMs),
+      y(point.equity),
+      chartPointReadout(point.at, point.equity),
+    )}>
     ${chartPointTitle(point.at, point.equity)}
   </circle>`).join("");
   const gridSteps = 4;
@@ -193,13 +236,22 @@ export function equityChart(rows, chartId = "eq", windowStart = null, windowEnd 
     return `<line x1="${padL}" y1="${gy}" x2="${width - padR}" y2="${gy}" class="chart-grid"/>` +
       `<text x="${padL - 10}" y="${gy}" class="chart-label" text-anchor="end" dominant-baseline="middle">${esc(money(value))}</text>`;
   }).join("");
-  const baseline = 1000 >= min && 1000 <= max
-    ? `<line x1="${padL}" y1="${y(1000).toFixed(1)}" x2="${width - padR}" y2="${y(1000).toFixed(1)}" class="chart-baseline"/>`
-    : "";
+  const baseline = `<line x1="${padL}" y1="${y(windowMetrics.baseline).toFixed(1)}" x2="${width - padR}" y2="${y(windowMetrics.baseline).toFixed(1)}" class="chart-baseline"/>`;
   const axisTimes = [domainStart, domainStart + timeSpan / 2, domainEnd];
   const timeAxis = axisTimes.map((atMs, i) =>
     `<text x="${x(atMs).toFixed(1)}" y="${height - 8}" class="chart-label" text-anchor="${i === 0 ? "start" : i === 2 ? "end" : "middle"}">${esc(i === 1 ? timeOnly(atMs) : dayTime(atMs))}${i === 2 ? ` ${DISPLAY_TIME_ZONE_LABEL}` : ""}</text>`).join("");
-  return `<div class="equity-chart"><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="账户权益曲线">
+  const changeClass = windowMetrics.delta == null || windowMetrics.delta === 0
+    ? ""
+    : windowMetrics.delta > 0 ? "pos" : "neg";
+  const drawdownClass = windowMetrics.maxDrawdown < 0 ? "neg" : "";
+  const chartMetrics = `<div class="chart-metrics" aria-label="权益窗口指标">
+    <span><small>窗口基线</small><b class="num">${esc(money(windowMetrics.baseline))}</b></span>
+    <span><small>窗口变化</small><b class="num ${changeClass}">${esc(signedMoney(windowMetrics.delta))}</b></span>
+    <span><small>最大回撤</small><b class="num ${drawdownClass}">${esc(signedMoney(windowMetrics.maxDrawdown))}</b></span>
+  </div>`;
+  return `<div class="equity-chart" data-chart-interactive data-chart-width="${width}" data-chart-height="${height}" tabindex="0" role="group" aria-label="账户权益曲线；使用左右方向键查看数据点">
+    ${chartMetrics}
+    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="账户权益曲线">
     <defs><linearGradient id="${esc(chartId)}" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="${lastUp ? "var(--up)" : "var(--down)"}" stop-opacity=".22"/>
       <stop offset="1" stop-color="${lastUp ? "var(--up)" : "var(--down)"}" stop-opacity="0"/>
@@ -208,9 +260,10 @@ export function equityChart(rows, chartId = "eq", windowStart = null, windowEnd 
     <polygon points="${area}" fill="url(#${esc(chartId)})"/>
     <polyline points="${line}" class="equity-line ${lastUp ? "pos" : "neg"}"/>
     ${pointMarkers}
+    <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${height - padB}" class="chart-crosshair" data-chart-crosshair hidden/>
     <circle cx="${x(points.at(-1).atMs).toFixed(1)}" cy="${y(lastValue).toFixed(1)}" r="4" class="equity-dot ${lastUp ? "pos" : "neg"}"/>
     ${timeAxis}
-  </svg></div>`;
+  </svg><div class="chart-tooltip" data-chart-tooltip hidden role="status" aria-live="polite"></div></div>`;
 }
 
 export function strategyEquityChart(model) {
@@ -240,20 +293,25 @@ export function strategyEquityChart(model) {
     `<polyline points="${line(series)}" class="pair-line ${series.colorClass}" ${comparisonSeriesStyle(series)}/>`).join("");
   const pointMarkers = model.series.flatMap((series) => model.points.map((point, index) =>
     `<circle cx="${x(point).toFixed(1)}" cy="${y(series.values[index]).toFixed(1)}" r="6"
-      class="pair-point ${series.colorClass}" ${comparisonSeriesStyle(series)} aria-hidden="true">
-      ${chartPointTitle(point.at, series.values[index], series.label)}
+      class="pair-point ${series.colorClass}" ${comparisonSeriesStyle(series)} aria-hidden="true" ${chartPointData(
+        x(point),
+        y(series.values[index]),
+        chartPointReadout(point.at, series.values[index], series.label, signedMoney),
+      )}>
+      ${chartPointTitle(point.at, series.values[index], series.label, signedMoney)}
     </circle>`)).join("");
   const dots = model.series.map((series) =>
     `<circle cx="${x(model.points.at(-1)).toFixed(1)}" cy="${y(series.delta).toFixed(1)}" r="3" class="pair-dot ${series.colorClass}" ${comparisonSeriesStyle(series)}/>`).join("");
-  return `<div class="pair-chart"><svg viewBox="0 0 ${width} ${height}" role="img"
+  return `<div class="pair-chart" data-chart-interactive data-chart-width="${width}" data-chart-height="${height}" tabindex="0" role="group" aria-label="${esc(model.strategyName)} 各退出方式同期权益对比；使用左右方向键查看数据点"><svg viewBox="0 0 ${width} ${height}" role="img"
     aria-label="${esc(model.strategyName)} 各退出方式同期权益对比">
     ${grid}
     <line x1="${padL}" y1="${y(0).toFixed(1)}" x2="${width - padR}" y2="${y(0).toFixed(1)}" class="chart-baseline"/>
     ${lines}
     ${pointMarkers}
+    <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${height - padB}" class="chart-crosshair" data-chart-crosshair hidden/>
     ${dots}
     ${timeAxis}
-  </svg></div>`;
+  </svg><div class="chart-tooltip" data-chart-tooltip hidden role="status" aria-live="polite"></div></div>`;
 }
 
 export function returnBar(value, maxAbs) {

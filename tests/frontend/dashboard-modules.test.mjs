@@ -9,12 +9,15 @@ import {
 import {
   buildStrategyEquityModels,
   equityChart,
+  equityWindowMetrics,
+  maxDrawdown,
   standaloneSparkline,
   strategyEquityChart,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-charts.js";
 import { readinessStatusForSection } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-readiness.js";
 import { renderOverview } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/overview.js";
 import { renderRisk } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/risk.js";
+import { renderAccount } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/account.js";
 import { createStrategySection } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/strategy.js";
 
 test("operator formatters keep status and money output stable", () => {
@@ -152,6 +155,19 @@ test("equity charts expose native point readouts", () => {
   ];
   assert.match(equityChart(rows), /class="chart-point pos"/);
   assert.match(equityChart(rows), /权益 · 08-16 08:00:00 UTC\+8/);
+  assert.match(equityChart(rows), /data-chart-interactive/);
+  assert.match(equityChart(rows), /data-chart-tooltip/);
+  assert.match(equityChart(rows), /data-chart-crosshair/);
+  assert.match(equityChart(rows), /窗口基线/);
+  assert.match(equityChart(rows), /窗口变化/);
+  assert.match(equityChart(rows), /最大回撤/);
+  assert.deepEqual(equityWindowMetrics(rows), {
+    baseline: 1000,
+    latest: 1002,
+    delta: 2,
+    maxDrawdown: 0,
+  });
+  assert.equal(maxDrawdown([{ equity: 1000 }, { equity: 992 }, { equity: 995 }]), -8);
 
   const [model] = buildStrategyEquityModels([
     {
@@ -172,4 +188,53 @@ test("equity charts expose native point readouts", () => {
   ]);
   assert.match(strategyEquityChart(model), /class="pair-point candle"/);
   assert.match(strategyEquityChart(model), /class="pair-point live"/);
+  assert.match(strategyEquityChart(model), /data-chart-interactive/);
+  assert.match(strategyEquityChart(model), /data-chart-tooltip/);
+});
+
+test("live account renderer separates sync service from account permission", () => {
+  const [status, html] = renderAccount({
+    status: "READY",
+    observed_at: new Date().toISOString(),
+    environment: "live",
+    account_label: "primary",
+    account_config: { can_trade: true, hedge_mode: false, multi_assets_mode: false, fee_tier: 0 },
+    reconciliation: {
+      status: "ready",
+      mismatch_count: 0,
+      balance_count: 1,
+      position_count: 0,
+      open_order_count: 0,
+      fill_count: 0,
+    },
+    summary: {
+      usdt_wallet_balance: "282.28",
+      usdt_available_balance: "257.84",
+      total_unrealized_pnl: "0",
+      gross_position_notional: "0",
+      position_count: 0,
+      open_order_count: 0,
+      recent_trade_count: 0,
+    },
+    balances: [{ asset: "USDT", wallet_balance: "282.28", available_balance: "257.84", unrealized_pnl: "0" }],
+    equity_curve: [
+      { observed_at: "2026-08-16T00:00:00Z", equity: "280" },
+      { observed_at: "2026-08-16T00:06:00Z", equity: "282" },
+    ],
+    equity_window_start: "2026-08-15T00:00:00Z",
+    equity_window_end: "2026-08-16T00:00:00Z",
+    equity_sample_interval_seconds: 360,
+    positions: [],
+    open_orders: [],
+    fills: [],
+  });
+  assert.equal(status, "READY");
+  assert.match(html, /execution-account · 只读同步/);
+  assert.match(html, /不代表账户不可交易/);
+  assert.match(html, /交易所权限/);
+  assert.match(html, /可交易/);
+  assert.match(html, /live-strategy/);
+  assert.match(html, /对账一致/);
+  assert.match(html, /数据新鲜度/);
+  assert.doesNotMatch(html, /READ-ONLY ACCOUNT SYNC/);
 });

@@ -948,6 +948,49 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .account-hero-meta b { color: var(--muted); font-weight: 500; }
 .account-hero-meta small { color: var(--faint); }
+.account-hero-status { display: flex; align-items: center; gap: 8px; }
+.account-hero-status > small { font: 9px var(--mono); letter-spacing: .08em; }
+
+.account-state-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.account-state-card {
+  min-width: 0;
+  min-height: 82px;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--s, var(--line-strong));
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.account-state-card > span,
+.account-state-card > small {
+  display: block;
+  color: var(--faint);
+  font-size: 9px;
+}
+
+.account-state-card strong {
+  display: block;
+  margin: 5px 0 3px;
+  overflow: hidden;
+  color: var(--muted);
+  font: 600 11.5px var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-state-card.status-READY strong,
+.account-state-card.status-FRESH strong,
+.account-state-card.status-LIVE strong { color: var(--s); }
+.account-state-card.status-SHADOW strong { color: var(--info); }
+.account-state-card.status-ATTENTION strong { color: var(--warn); }
+.account-state-card.status-HALTED strong { color: var(--down); }
 
 .account-kpi-grid { margin-top: 12px; grid-template-columns: repeat(5, minmax(0, 1fr)); }
 
@@ -973,6 +1016,9 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .account-facts span { color: var(--faint); font-size: 10px; }
 .account-facts b { color: var(--muted); font: 500 10.5px var(--mono); text-align: right; }
+.account-facts b.status-READY { color: var(--up); }
+.account-facts b.status-ATTENTION { color: var(--warn); }
+.account-facts b.status-UNKNOWN { color: var(--faint); }
 .account-strategy { color: var(--brand); font: 10px var(--mono); }
 .account-facts-note {
   margin: 9px 2px 0;
@@ -1053,7 +1099,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 .pair-legend .live i { background: var(--series-color, var(--series-live)); height: 3px; }
 .pair-legend b { margin-left: 2px; font-size: 9.5px; font-weight: 500; }
 
-.pair-chart { margin: 3px -2px 0; }
+.pair-chart { position: relative; margin: 3px -2px 0; }
 .pair-chart svg { display: block; width: 100%; height: auto; }
 
 .pair-line { fill: none; stroke-width: 1.8; vector-effect: non-scaling-stroke; }
@@ -1093,8 +1139,72 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .chart-context b { color: var(--muted); font-size: 9px; font-weight: 500; white-space: nowrap; }
 
-.equity-chart { width: 100%; }
+.equity-chart { position: relative; width: 100%; }
 .equity-chart svg { display: block; width: 100%; height: auto; }
+.equity-chart[data-chart-interactive],
+.pair-chart[data-chart-interactive] { outline: none; }
+.equity-chart[data-chart-interactive]:focus-visible,
+.pair-chart[data-chart-interactive]:focus-visible {
+  outline: 1px solid var(--brand);
+  outline-offset: 4px;
+  border-radius: 8px;
+}
+
+.chart-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 18px;
+  margin: 2px 0 2px;
+}
+
+.chart-metrics span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.chart-metrics small {
+  color: var(--faint);
+  font-size: 9px;
+}
+
+.chart-metrics b {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.chart-metrics b.pos { color: var(--up); }
+.chart-metrics b.neg { color: var(--down); }
+
+.chart-tooltip {
+  position: absolute;
+  z-index: 4;
+  max-width: min(280px, calc(100% - 12px));
+  padding: 5px 8px;
+  transform: translate(-50%, -100%);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface-3) 94%, #000);
+  box-shadow: 0 7px 22px rgba(0, 0, 0, .28);
+  color: var(--text);
+  font: 9.5px var(--mono);
+  line-height: 1.35;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.chart-tooltip[hidden] { display: none; }
+
+.chart-crosshair {
+  stroke: var(--brand);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+  vector-effect: non-scaling-stroke;
+  opacity: .72;
+  pointer-events: none;
+}
+
 .chart-point, .pair-point {
   fill: transparent;
   stroke: transparent;
@@ -1238,6 +1348,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 @media (max-width: 1280px) {
   .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .account-kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .account-state-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .pair-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
@@ -1290,6 +1401,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
   .monitor-target-grid { grid-template-columns: 1fr; }
   .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .account-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .account-state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .service-row { grid-template-columns: minmax(0, 1fr) auto; }
   .service-meter { display: none; }
   .service-age { display: none; }
@@ -1329,6 +1441,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
   .card { padding: 16px 14px 18px; }
   .kpi-grid, .action-grid { grid-template-columns: 1fr; }
   .account-kpi-grid { grid-template-columns: 1fr; }
+  .account-state-grid { grid-template-columns: 1fr; }
   .account-hero { display: grid; }
   .account-hero-meta { justify-items: start; }
   .clock strong { font-size: 15px; }

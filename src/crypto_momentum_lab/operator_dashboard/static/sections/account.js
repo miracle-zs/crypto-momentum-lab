@@ -28,28 +28,80 @@ export function renderAccount(data) {
   );
   const accountEquityDelta = accountWindowDelta({ equity_curve: accountEquity });
   const latestAccountEquity = accountEquity.at(-1)?.equity;
-  const permission = (value) => value == null ? "未知" : value ? "是 · API 已授权" : "否 · API 返回";
-  const permissionClass = (value) => value == null ? "muted" : value ? "pos" : "warn";
+  const normalized = (value) => String(value || "").trim().toLowerCase();
+  const permission = (value) => value == null
+    ? "未知"
+    : value ? "可交易" : "交易所快照：否";
+  const permissionDetail = (value) => value == null
+    ? "等待 Binance canTrade 快照"
+    : value ? "Binance canTrade = true"
+      : "仅代表账户快照字段，不代表页面只读";
+  const permissionClass = (value) => value == null
+    ? "status-UNKNOWN"
+    : value ? "status-READY" : "status-ATTENTION";
   const modeLabel = (value, yesLabel, noLabel) => value == null ? "—" : value ? yesLabel : noLabel;
   const reconciliationLabel = (value) => ({
     ready: "已完成",
     halted: "已中止",
     degraded: "降级",
   }[String(value || "").toLowerCase()] || value || "—");
+  const mismatchCount = asNumber(reconciliation.mismatch_count);
+  const syncStatus = normalized(data.status);
+  const syncState = syncStatus === "ready"
+    ? { className: "status-READY", label: "同步正常", detail: "execution-account · 只读同步" }
+    : syncStatus === "halted"
+      ? { className: "status-HALTED", label: "同步已停止", detail: "execution-account · 需要检查" }
+      : { className: "status-UNKNOWN", label: "等待同步", detail: "execution-account · 暂无可靠状态" };
+  const permissionState = {
+    className: permissionClass(config.can_trade),
+    label: permission(config.can_trade),
+    detail: permissionDetail(config.can_trade),
+  };
+  const reconciliationState = mismatchCount != null && mismatchCount > 0
+    ? { className: "status-ATTENTION", label: `${mismatchCount} 项差异`, detail: "余额、持仓或订单快照需要核对" }
+    : normalized(reconciliation.status) === "ready"
+      ? { className: "status-READY", label: "对账一致", detail: "快照已完成 · 0 项差异" }
+      : { className: "status-UNKNOWN", label: reconciliationLabel(reconciliation.status), detail: "等待本次对账结果" };
+  const observedAtMs = new Date(data.observed_at || "").getTime();
+  const freshnessSeconds = Number.isFinite(observedAtMs)
+    ? Math.max(0, (Date.now() - observedAtMs) / 1000)
+    : null;
+  const freshnessState = freshnessSeconds == null
+    ? { className: "status-UNKNOWN", label: "未知", detail: "没有可用同步时间" }
+    : freshnessSeconds <= 120
+      ? { className: "status-FRESH", label: "数据新鲜", detail: `${relToNow(data.observed_at)} · 最近一次同步` }
+      : { className: "status-STALE", label: "数据过期", detail: `${relToNow(data.observed_at)} · 请检查同步服务` };
+  const executionState = {
+    className: "status-SHADOW",
+    label: "live-strategy",
+    detail: "实盘下单通道 · 状态见全局实盘状态与风控",
+  };
+  const stateCard = (label, state) => `<div class="account-state-card ${state.className}">
+    <span>${esc(label)}</span>
+    <strong>${esc(state.label)}</strong>
+    <small>${esc(state.detail)}</small>
+  </div>`;
   const strategy = (value) => value
     ? `<span class="account-strategy">${esc(value)}</span>`
     : `<span class="muted">未关联</span>`;
   const hero = `<div class="account-hero">
-    <div>
+      <div>
       <div class="account-eyebrow">${esc(String(data.environment || "LIVE").toUpperCase())} · EXECUTION ACCOUNT</div>
       <h3>${esc(data.account_label || "交易所账户")}</h3>
-      <p>账户状态由 execution-account 同步；实盘订单由 live-strategy 执行并按客户端订单号回链。</p>
+      <p>execution-account 负责只读同步，不代表账户不可交易；实盘订单由 live-strategy 执行并按客户端订单号回链。</p>
     </div>
     <div class="account-hero-meta">
-      ${pill(data.status)}
+      <div class="account-hero-status"><small>同步状态</small>${pill(data.status)}</div>
       <span>同步 <b class="num">${esc(dayTime(data.observed_at))}</b></span>
       <small>${esc(relToNow(data.observed_at))}</small>
     </div>
+  </div>`;
+  const stateGrid = `<div class="account-state-grid" aria-label="实盘账户状态">
+    ${stateCard("同步服务", syncState)}
+    ${stateCard("交易所权限", permissionState)}
+    ${stateCard("实盘执行", executionState)}
+    ${stateCard("对账状态", reconciliationState)}
+    ${stateCard("数据新鲜度", freshnessState)}
   </div>`;
   const kpis = `<div class="tile-grid account-kpi-grid">
     ${tile("USDT 钱包余额", money(summary.usdt_wallet_balance), "账户钱包余额", "hero")}
@@ -65,16 +117,17 @@ export function renderAccount(data) {
   </div>`;
   const accountFacts = `<div class="account-facts">
     <div><span>实盘下单通道</span><b class="pos">live-strategy</b></div>
-    <div><span>账户 API 交易权限</span><b class="${permissionClass(config.can_trade)}" title="Binance 账户快照 canTrade 字段">${esc(permission(config.can_trade))}</b></div>
+    <div><span>账户 API 交易权限快照</span><b class="${permissionClass(config.can_trade)}" title="Binance 账户快照 canTrade 字段">${esc(permission(config.can_trade))}</b></div>
+    <div><span>同步服务模式</span><b class="muted">只读同步 · 不下单</b></div>
     <div><span>持仓模式</span><b>${esc(modeLabel(config.hedge_mode, "Hedge · 双向", "One-way · 单向"))}</b></div>
     <div><span>保证金模式</span><b>${esc(modeLabel(config.multi_assets_mode, "Multi-Assets · 多资产", "Single-Asset · 单资产"))}</b></div>
     <div><span>手续费等级</span><b>${esc(config.fee_tier == null ? "—" : `VIP ${config.fee_tier}`)}</b></div>
     <div><span>对账状态</span><b>${esc(reconciliationLabel(reconciliation.status))}</b></div>
-    <div><span>对账差异项</span><b class="${asNumber(reconciliation.mismatch_count) > 0 ? "neg" : "pos"}">${esc(reconciliation.mismatch_count == null ? "—" : `${reconciliation.mismatch_count} 项`)}</b></div>
+    <div><span>对账差异项</span><b class="${mismatchCount > 0 ? "neg" : "pos"}">${esc(reconciliation.mismatch_count == null ? "—" : `${reconciliation.mismatch_count} 项`)}</b></div>
     <div><span>对账快照 资产 / 持仓</span><b>${esc(`${reconciliation.balance_count ?? "—"} / ${reconciliation.position_count ?? "—"}`)}</b></div>
     <div><span>对账快照 挂单 / 成交</span><b>${esc(`${reconciliation.open_order_count ?? "—"} / ${reconciliation.fill_count ?? "—"}`)}</b></div>
   </div>
-  <p class="account-facts-note"><b>怎么读：</b>账户 API 交易权限只表示 Binance 账户快照的 <code>canTrade</code>；实盘是否提交订单由 <code>live-strategy</code> 的下单开关与风控闸门决定。对账是把余额、持仓、挂单和成交快照写入数据库并检查差异，<code>已完成 / 0 项</code> 表示本次对账成功且没有发现不一致。</p>`;
+  <p class="account-facts-note"><b>怎么读：</b><code>只读同步</code>描述的是 execution-account 服务本身不会下单，不是交易所账户权限。账户 API 交易权限只显示 Binance 快照中的 <code>canTrade</code>；实盘是否提交订单由 <code>live-strategy</code> 的下单开关与风控闸门决定。对账会把余额、持仓、挂单和成交快照写入数据库并检查差异，<code>对账一致 / 0 项</code> 表示本次快照没有发现不一致。</p>`;
   const usdtBalances = (data.balances || []).filter((row) => String(row.asset || "").toUpperCase() === "USDT");
   const balancesTable = dataTable([
     { label: "资产", key: "asset", cls: "sym" },
@@ -122,7 +175,7 @@ export function renderAccount(data) {
     { label: "平仓原因", value: (row) => row.reduce_only ? (row.close_reason || "原因未记录") : "开仓", cls: "muted" },
   ], data.fills, { emptyText: "尚无成交记录", tall: true });
   const body = `<div class="detail-meta"><span>同步时间 <b class="num">${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</b></span><span>${esc(relToNow(data.observed_at))}</span></div>
-    ${hero}${kpis}${equityChartBlock}
+    ${hero}${stateGrid}${kpis}${equityChartBlock}
     <div class="block-split account-overview-grid">
       <div class="block">${blockTitle("账户权限与对账", "EXECUTION CHANNEL / RECONCILIATION")}${accountFacts}</div>
       <div class="block">${blockTitle("USDT 资产余额", "USDT BALANCE · ACCOUNT COLLATERAL")}${balancesTable}</div>
