@@ -27,8 +27,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
         in index
     )
     assert (
-        'type="module" src="static/dashboard.js?v=20260816-control-room-'
-        'v12-dom-charts"'
+        'type="module" src="static/dashboard.js?v=20260817-control-room-'
+        'v13-readiness-memory"'
         in index
     )
     assert 'data-endpoint="/api/' not in index
@@ -45,6 +45,7 @@ def test_dashboard_loads_stable_frontend_modules() -> None:
         'from "./dashboard-config.js"',
         'from "./dashboard-formatters.js"',
         'from "./dashboard-dom.js"',
+        'from "./dashboard-readiness.js"',
         'from "./sections/overview.js"',
         'from "./sections/universe.js"',
         'from "./sections/risk.js"',
@@ -56,6 +57,7 @@ def test_dashboard_loads_stable_frontend_modules() -> None:
     assert (STATIC / "dashboard-config.js").exists()
     assert (STATIC / "dashboard-formatters.js").exists()
     assert (STATIC / "dashboard-dom.js").exists()
+    assert (STATIC / "dashboard-readiness.js").exists()
     assert (STATIC / "dashboard-charts.js").exists()
     assert (STATIC / "dashboard-ui.js").exists()
     for section in ("overview", "universe", "risk", "account", "reports", "strategy"):

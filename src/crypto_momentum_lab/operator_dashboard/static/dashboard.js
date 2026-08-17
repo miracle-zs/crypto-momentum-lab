@@ -14,6 +14,7 @@ import {
   liveHeartbeatStatus,
 } from "./dashboard-formatters.js";
 import { replaceChildrenFromHtml } from "./dashboard-dom.js";
+import { readinessStatusForSection } from "./dashboard-readiness.js";
 import { emptyBox } from "./dashboard-ui.js";
 import { renderOverview, updateOverviewDynamic } from "./sections/overview.js";
 import { renderUniverse } from "./sections/universe.js";
@@ -80,7 +81,10 @@ function globalReadinessModel() {
 
   const services = overview?.services || [];
   const uncertainSections = [...latestSectionData.entries()]
-    .filter(([id, data]) => SAFETY_SECTIONS.has(id) && hasUncertainStatus(data.status))
+    .filter(([id, data]) => (
+      SAFETY_SECTIONS.has(id)
+      && hasUncertainStatus(readinessStatusForSection(id, data))
+    ))
     .length;
   const uncertainServices = services.filter((service) => hasUncertainStatus(service.status)).length;
   const uncertain = uncertainSections + uncertainServices;

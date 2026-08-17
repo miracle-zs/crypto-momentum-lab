@@ -12,6 +12,7 @@ import {
   standaloneSparkline,
   strategyEquityChart,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-charts.js";
+import { readinessStatusForSection } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-readiness.js";
 import { renderOverview } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/overview.js";
 import { renderRisk } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/risk.js";
 import { createStrategySection } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/strategy.js";
@@ -20,6 +21,17 @@ test("operator formatters keep status and money output stable", () => {
   assert.equal(esc('<live status="READY">'), "&lt;live status=&quot;READY&quot;&gt;");
   assert.equal(statusClass("live"), "status-LIVE");
   assert.equal(money(12.5), "$12.50");
+});
+
+test("global readiness uses database status for the overview section", () => {
+  assert.equal(
+    readinessStatusForSection("overview", { database_status: "READY" }),
+    "READY",
+  );
+  assert.equal(
+    readinessStatusForSection("risk", { status: "HALTED" }),
+    "HALTED",
+  );
 });
 
 test("strategy equity models align paper and live B1 on common buckets", () => {

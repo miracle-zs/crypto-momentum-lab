@@ -19,6 +19,11 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert services["dashboard"]["ports"] == ["127.0.0.1:8765:8765"]
     assert manifest["x-app"]["stop_grace_period"] == "60s"
     assert services["market-data"]["healthcheck"]["start_period"] == "15m"
+    assert services["postgres"]["mem_limit"] == "512m"
+    assert services["postgres"]["memswap_limit"] == "768m"
+    assert services["execution-account-live"]["mem_limit"] == "160m"
+    assert services["live-strategy"]["mem_limit"] == "512m"
+    assert services["dashboard"]["mem_limit"] == "320m"
     for service in (
         "paper-orderflow-pair",
     ):
