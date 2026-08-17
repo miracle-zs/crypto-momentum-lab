@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from urllib.parse import parse_qs
 
 import httpx
 import pytest
@@ -16,6 +17,7 @@ from crypto_momentum_lab.execution_account.binance.client import (
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeOrderQueryUnknownError,
+    ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
     LiveSubmissionDisabledError,
 )
@@ -435,6 +437,104 @@ async def test_trade_client_confirms_entry_leverage_before_order() -> None:
         await client.aclose()
 
     assert requested_paths == ["/fapi/v1/leverage", "/fapi/v1/order"]
+
+
+async def test_trade_client_falls_back_two_leverage_levels() -> None:
+    requested_paths: list[str] = []
+    requested_leverages: list[int] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/fapi/v1/leverage":
+            leverage = int(parse_qs(request.content.decode())["leverage"][0])
+            requested_leverages.append(leverage)
+            if leverage > 3:
+                return httpx.Response(
+                    400,
+                    request=request,
+                    json={"code": -4028, "msg": "Leverage is not valid"},
+                )
+            return httpx.Response(
+                200,
+                json={"symbol": "BTCUSDT", "leverage": leverage},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": _order_plan().client_order_id,
+                "orderId": 12345,
+                "status": "FILLED",
+                "executedQty": "0.003",
+                "avgPrice": "30000",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        entry_leverage=5,
+    )
+
+    try:
+        snapshot = await client.submit_order(_order_plan())
+    finally:
+        await client.aclose()
+
+    assert requested_leverages == [5, 4, 3]
+    assert requested_paths == [
+        "/fapi/v1/leverage",
+        "/fapi/v1/leverage",
+        "/fapi/v1/leverage",
+        "/fapi/v1/order",
+    ]
+    assert snapshot.entry_leverage == 3
+
+
+async def test_trade_client_does_not_fallback_for_non_leverage_error() -> None:
+    requested_leverages: list[int] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/fapi/v1/leverage"
+        requested_leverages.append(
+            int(parse_qs(request.content.decode())["leverage"][0])
+        )
+        return httpx.Response(
+            400,
+            request=request,
+            json={"code": -2015, "msg": "Invalid API-key, IP, or permissions"},
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        entry_leverage=5,
+    )
+
+    try:
+        with pytest.raises(ExchangeOrderRejectedError, match="Invalid API-key"):
+            await client.submit_order(_order_plan())
+    finally:
+        await client.aclose()
+
+    assert requested_leverages == [5]
 
 
 def _order_plan() -> OrderExecutionPlan:

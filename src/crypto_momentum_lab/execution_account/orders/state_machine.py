@@ -271,6 +271,7 @@ class OrderExecutionStateMachine:
             details={
                 "executed_quantity": str(snapshot.executed_quantity),
                 "average_price": str(snapshot.average_price),
+                "entry_leverage": snapshot.entry_leverage,
             },
             occurred_at=snapshot.observed_at,
         )

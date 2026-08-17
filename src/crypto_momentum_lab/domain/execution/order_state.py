@@ -132,6 +132,7 @@ class ExchangeOrderSnapshot:
     executed_quantity: Decimal
     average_price: Decimal
     fills: tuple[ExchangeOrderFill, ...] = ()
+    entry_leverage: int | None = None
 
     def __post_init__(self) -> None:
         _require_non_empty(self.client_order_id, "client_order_id")
@@ -142,6 +143,8 @@ class ExchangeOrderSnapshot:
             raise ValueError("executed_quantity must be non-negative")
         if self.average_price < 0:
             raise ValueError("average_price must be non-negative")
+        if self.entry_leverage is not None and self.entry_leverage < 1:
+            raise ValueError("entry_leverage must be positive")
         _require_aware(self.observed_at, "observed_at")
 
 
