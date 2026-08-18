@@ -1,18 +1,18 @@
 import {
+  COMPARISON_ANCHOR_HOUR,
   COMPARISON_SERIES_COLORS,
   DEFAULT_EQUITY_BUCKET_SECONDS,
-  DISPLAY_TIME_ZONE_LABEL,
+  DISPLAY_TIME_ZONE,
   STRATEGY_ORDER,
 } from "./dashboard-config.js";
 import {
   asNumber,
-  dayTime,
   esc,
   money,
   signedMoney,
   signedPercent,
-  timeOnly,
 } from "./dashboard-formatters.js";
+import { registerChartPayload } from "./dashboard-chart-engine.js";
 import { emptyBox } from "./dashboard-ui.js";
 
 function equityBucketMap(account) {
@@ -54,18 +54,6 @@ export function comparisonSeriesStyle(series) {
   return `style="--series-color:${series.color}"`;
 }
 
-function chartPointReadout(at, value, label = "权益", formatter = money) {
-  return `${label} · ${dayTime(at)} ${DISPLAY_TIME_ZONE_LABEL} · ${formatter(value)}`;
-}
-
-function chartPointTitle(at, value, label = "权益", formatter = money) {
-  return `<title>${esc(chartPointReadout(at, value, label, formatter))}</title>`;
-}
-
-function chartPointData(x, y, readout) {
-  return `data-chart-point data-chart-x="${x.toFixed(1)}" data-chart-y="${y.toFixed(1)}" data-chart-readout="${esc(readout)}"`;
-}
-
 function equityValues(rows) {
   return (rows || [])
     .map((row) => asNumber(typeof row === "object" && row !== null ? row.equity : row))
@@ -96,6 +84,69 @@ export function equityWindowMetrics(rows) {
   };
 }
 
+const COMPARISON_TIME_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+  timeZone: DISPLAY_TIME_ZONE,
+  calendar: "gregory",
+  numberingSystem: "latn",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+});
+
+function comparisonReferenceMs(accounts) {
+  const windowEnds = accounts
+    .map((account) => new Date(account.equity_window_end || "").getTime())
+    .filter((value) => Number.isFinite(value));
+  if (windowEnds.length) return Math.max(...windowEnds);
+  const curveEnds = accounts.flatMap((account) => (account.equity_curve || [])
+    .map((row) => new Date(row.observed_at || "").getTime())
+    .filter((value) => Number.isFinite(value)));
+  return curveEnds.length ? Math.max(...curveEnds) : Date.now();
+}
+
+function comparisonDailyAnchor(referenceMs) {
+  const parts = Object.fromEntries(
+    COMPARISON_TIME_FORMATTER.formatToParts(new Date(referenceMs))
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, Number(part.value)]),
+  );
+  const observedWallMs = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second,
+  );
+  const referenceSecondMs = Math.floor(referenceMs / 1000) * 1000;
+  const offsetMs = observedWallMs - referenceSecondMs;
+  const anchorWallMs = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    COMPARISON_ANCHOR_HOUR,
+  );
+  return anchorWallMs - offsetMs;
+}
+
+function comparisonStart(commonBuckets, anchorAt) {
+  const anchoredBucket = commonBuckets.find((bucket) => bucket >= anchorAt);
+  if (anchoredBucket != null) {
+    return {
+      at: anchoredBucket,
+      mode: anchoredBucket === anchorAt ? "daily-anchor" : "after-anchor",
+    };
+  }
+  return {
+    at: commonBuckets[0],
+    mode: "common-start-fallback",
+  };
+}
+
 function strategyEquityModel(strategyName, accounts) {
   if (accounts.length < 2) return null;
   const maps = accounts.map(equityBucketMap);
@@ -104,11 +155,14 @@ function strategyEquityModel(strategyName, accounts) {
     .sort((left, right) => left - right);
   if (commonBuckets.length < 2) return null;
 
-  const firstBucket = commonBuckets[0];
+  const anchorAt = comparisonDailyAnchor(comparisonReferenceMs(accounts));
+  const start = comparisonStart(commonBuckets, anchorAt);
+  const comparisonBuckets = commonBuckets.filter((bucket) => bucket >= start.at);
+  if (comparisonBuckets.length < 2) return null;
   const series = accounts.map((account, index) => {
     const map = maps[index];
-    const base = map.buckets.get(firstBucket);
-    const values = commonBuckets.map((bucket) => map.buckets.get(bucket) - base);
+    const base = map.buckets.get(start.at);
+    const values = comparisonBuckets.map((bucket) => map.buckets.get(bucket) - base);
     return {
       account,
       label: comparisonSeriesLabel(account, index, accounts),
@@ -118,7 +172,7 @@ function strategyEquityModel(strategyName, accounts) {
       delta: values.at(-1),
     };
   });
-  const points = commonBuckets.map((bucket, index) => ({
+  const points = comparisonBuckets.map((bucket, index) => ({
     at: bucket,
     values: series.map((item) => item.values[index]),
   }));
@@ -138,8 +192,10 @@ function strategyEquityModel(strategyName, accounts) {
     accounts,
     series,
     points,
-    startAt: commonBuckets[0],
-    endAt: commonBuckets.at(-1),
+    startAt: start.at,
+    endAt: comparisonBuckets.at(-1),
+    anchorAt,
+    anchorMode: start.mode,
     min,
     max,
     intervalSeconds: Math.max(...maps.map((map) => map.intervalSeconds)),
@@ -198,48 +254,14 @@ export function equityChart(rows, chartId = "eq", windowStart = null, windowEnd 
   const span = Math.max(max - min, 0.01);
   min -= span * 0.08;
   max += span * 0.08;
-  const width = 1000;
-  const height = 280;
-  const padL = 68;
-  const padR = 26;
-  const padT = 16;
-  const padB = 32;
   const requestedStart = windowStart ? new Date(windowStart).getTime() : Number.NaN;
   const requestedEnd = windowEnd ? new Date(windowEnd).getTime() : Number.NaN;
   const domainStart = Number.isFinite(requestedStart) ? requestedStart : points[0].atMs;
   const domainEnd = Number.isFinite(requestedEnd) && requestedEnd > domainStart
     ? requestedEnd : points.at(-1).atMs;
-  const timeSpan = Math.max(domainEnd - domainStart, 1);
-  const x = (atMs) => padL + ((atMs - domainStart) / timeSpan) * (width - padL - padR);
-  const y = (value) => padT + ((max - value) / (max - min)) * (height - padT - padB);
   const lastValue = values.at(-1);
   const lastUp = lastValue >= values[0];
   const windowMetrics = equityWindowMetrics(values);
-  const line = points
-    .map((point) => `${x(point.atMs).toFixed(1)},${y(point.equity).toFixed(1)}`)
-    .join(" ");
-  const area = `${x(points[0].atMs).toFixed(1)},${(height - padB).toFixed(1)} ${line} ` +
-    `${x(points.at(-1).atMs).toFixed(1)},${(height - padB).toFixed(1)}`;
-  const pointMarkers = points.map((point) => `<circle
-    cx="${x(point.atMs).toFixed(1)}" cy="${y(point.equity).toFixed(1)}" r="7"
-    class="chart-point ${lastUp ? "pos" : "neg"}" aria-hidden="true" ${chartPointData(
-      x(point.atMs),
-      y(point.equity),
-      chartPointReadout(point.at, point.equity),
-    )}>
-    ${chartPointTitle(point.at, point.equity)}
-  </circle>`).join("");
-  const gridSteps = 4;
-  const grid = Array.from({ length: gridSteps + 1 }, (_, i) => {
-    const value = max - ((max - min) / gridSteps) * i;
-    const gy = y(value).toFixed(1);
-    return `<line x1="${padL}" y1="${gy}" x2="${width - padR}" y2="${gy}" class="chart-grid"/>` +
-      `<text x="${padL - 10}" y="${gy}" class="chart-label" text-anchor="end" dominant-baseline="middle">${esc(money(value))}</text>`;
-  }).join("");
-  const baseline = `<line x1="${padL}" y1="${y(windowMetrics.baseline).toFixed(1)}" x2="${width - padR}" y2="${y(windowMetrics.baseline).toFixed(1)}" class="chart-baseline"/>`;
-  const axisTimes = [domainStart, domainStart + timeSpan / 2, domainEnd];
-  const timeAxis = axisTimes.map((atMs, i) =>
-    `<text x="${x(atMs).toFixed(1)}" y="${height - 8}" class="chart-label" text-anchor="${i === 0 ? "start" : i === 2 ? "end" : "middle"}">${esc(i === 1 ? timeOnly(atMs) : dayTime(atMs))}${i === 2 ? ` ${DISPLAY_TIME_ZONE_LABEL}` : ""}</text>`).join("");
   const changeClass = windowMetrics.delta == null || windowMetrics.delta === 0
     ? ""
     : windowMetrics.delta > 0 ? "pos" : "neg";
@@ -249,69 +271,51 @@ export function equityChart(rows, chartId = "eq", windowStart = null, windowEnd 
     <span><small>窗口变化</small><b class="num ${changeClass}">${esc(signedMoney(windowMetrics.delta))}</b></span>
     <span><small>最大回撤</small><b class="num ${drawdownClass}">${esc(signedMoney(windowMetrics.maxDrawdown))}</b></span>
   </div>`;
-  return `<div class="equity-chart" data-chart-interactive data-chart-width="${width}" data-chart-height="${height}" tabindex="0" role="group" aria-label="账户权益曲线；使用左右方向键查看数据点">
+  registerChartPayload(chartId, {
+    kind: "equity",
+    title: "账户权益",
+    points,
+    domainStart,
+    domainEnd,
+    min,
+    max,
+    baseline: windowMetrics.baseline,
+    delta: windowMetrics.delta,
+    maxDrawdown: windowMetrics.maxDrawdown,
+    lastUp,
+  });
+  return `<div class="equity-chart echart-shell" data-echart-chart data-echart-kind="equity" data-echart-id="${esc(chartId)}" tabindex="0" role="group" aria-label="账户权益曲线；使用左右方向键查看数据点">
     ${chartMetrics}
-    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="账户权益曲线">
-    <defs><linearGradient id="${esc(chartId)}" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="${lastUp ? "var(--up)" : "var(--down)"}" stop-opacity=".22"/>
-      <stop offset="1" stop-color="${lastUp ? "var(--up)" : "var(--down)"}" stop-opacity="0"/>
-    </linearGradient></defs>
-    ${grid}${baseline}
-    <polygon points="${area}" fill="url(#${esc(chartId)})"/>
-    <polyline points="${line}" class="equity-line ${lastUp ? "pos" : "neg"}"/>
-    ${pointMarkers}
-    <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${height - padB}" class="chart-crosshair" data-chart-crosshair hidden/>
-    <circle cx="${x(points.at(-1).atMs).toFixed(1)}" cy="${y(lastValue).toFixed(1)}" r="4" class="equity-dot ${lastUp ? "pos" : "neg"}"/>
-    ${timeAxis}
-  </svg><div class="chart-tooltip" data-chart-tooltip hidden role="status" aria-live="polite"></div></div>`;
+    <div class="echart-surface" aria-hidden="true"></div>
+  </div>`;
 }
 
 export function strategyEquityChart(model) {
-  const width = 600;
-  const height = 230;
-  const padL = 58;
-  const padR = 18;
-  const padT = 14;
-  const padB = 30;
-  const timeSpan = Math.max(model.endAt - model.startAt, 1);
-  const x = (point) => padL + ((point.at - model.startAt) / timeSpan) * (width - padL - padR);
-  const y = (value) => padT + ((model.max - value) / (model.max - model.min)) * (height - padT - padB);
-  const line = (series) => model.points
-    .map((point, index) => `${x(point).toFixed(1)},${y(series.values[index]).toFixed(1)}`)
-    .join(" ");
-  const grid = Array.from({ length: 5 }, (_, index) => {
-    const value = model.max - ((model.max - model.min) / 4) * index;
-    const gy = y(value).toFixed(1);
-    return `<line x1="${padL}" y1="${gy}" x2="${width - padR}" y2="${gy}" class="chart-grid"/>` +
-      `<text x="${padL - 8}" y="${gy}" class="chart-label" text-anchor="end" dominant-baseline="middle">${esc(signedMoney(value))}</text>`;
-  }).join("");
-  const axisTimes = [model.startAt, model.startAt + timeSpan / 2, model.endAt];
-  const timeAxis = axisTimes.map((atMs, index) =>
-    `<text x="${(padL + (index / 2) * (width - padL - padR)).toFixed(1)}" y="${height - 8}" class="chart-label"
-      text-anchor="${index === 0 ? "start" : index === 2 ? "end" : "middle"}">${esc(timeOnly(atMs))}${index === 2 ? ` ${DISPLAY_TIME_ZONE_LABEL}` : ""}</text>`).join("");
-  const lines = model.series.map((series) =>
-    `<polyline points="${line(series)}" class="pair-line ${series.colorClass}" ${comparisonSeriesStyle(series)}/>`).join("");
-  const pointMarkers = model.series.flatMap((series) => model.points.map((point, index) =>
-    `<circle cx="${x(point).toFixed(1)}" cy="${y(series.values[index]).toFixed(1)}" r="6"
-      class="pair-point ${series.colorClass}" ${comparisonSeriesStyle(series)} aria-hidden="true" ${chartPointData(
-        x(point),
-        y(series.values[index]),
-        chartPointReadout(point.at, series.values[index], series.label, signedMoney),
-      )}>
-      ${chartPointTitle(point.at, series.values[index], series.label, signedMoney)}
-    </circle>`)).join("");
-  const dots = model.series.map((series) =>
-    `<circle cx="${x(model.points.at(-1)).toFixed(1)}" cy="${y(series.delta).toFixed(1)}" r="3" class="pair-dot ${series.colorClass}" ${comparisonSeriesStyle(series)}/>`).join("");
-  return `<div class="pair-chart" data-chart-interactive data-chart-width="${width}" data-chart-height="${height}" tabindex="0" role="group" aria-label="${esc(model.strategyName)} 各退出方式同期权益对比；使用左右方向键查看数据点"><svg viewBox="0 0 ${width} ${height}" role="img"
-    aria-label="${esc(model.strategyName)} 各退出方式同期权益对比">
-    ${grid}
-    <line x1="${padL}" y1="${y(0).toFixed(1)}" x2="${width - padR}" y2="${y(0).toFixed(1)}" class="chart-baseline"/>
-    ${lines}
-    ${pointMarkers}
-    <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${height - padB}" class="chart-crosshair" data-chart-crosshair hidden/>
-    ${dots}
-    ${timeAxis}
-  </svg><div class="chart-tooltip" data-chart-tooltip hidden role="status" aria-live="polite"></div></div>`;
+  const chartId = `comparison-${String(model.strategyName || "strategy")
+    .replace(/[^A-Za-z0-9_-]+/g, "-")}`;
+  registerChartPayload(chartId, {
+    kind: "comparison",
+    title: `${model.strategyName} 各退出方式同期权益对比`,
+    strategyName: model.strategyName,
+    startAt: model.startAt,
+    endAt: model.endAt,
+    anchorAt: model.anchorAt,
+    anchorMode: model.anchorMode,
+    min: model.min,
+    max: model.max,
+    points: model.points,
+    series: model.series.map((series) => ({
+      label: series.label,
+      color: series.color,
+      colorClass: series.colorClass,
+      values: series.values,
+      delta: series.delta,
+      isLive: series.account?.source === "live",
+    })),
+  });
+  return `<div class="pair-chart echart-shell" data-echart-chart data-echart-kind="comparison" data-echart-id="${esc(chartId)}" tabindex="0" role="group" aria-label="${esc(model.strategyName)} 各退出方式同期权益对比；使用左右方向键查看数据点">
+    <div class="echart-surface" aria-hidden="true"></div>
+  </div>`;
 }
 
 export function returnBar(value, maxAbs) {

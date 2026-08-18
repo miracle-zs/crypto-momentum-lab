@@ -15,7 +15,7 @@ import {
 } from "./dashboard-formatters.js";
 import { replaceChildrenFromHtml } from "./dashboard-dom.js";
 import { readinessStatusForSection } from "./dashboard-readiness.js";
-import { wireChartInteractions } from "./dashboard-chart-interactions.js";
+import { wireEcharts } from "./dashboard-chart-engine.js";
 import { emptyBox } from "./dashboard-ui.js";
 import { renderOverview, updateOverviewDynamic } from "./sections/overview.js";
 import { renderUniverse } from "./sections/universe.js";
@@ -301,7 +301,7 @@ window.addEventListener("scroll", () => {
 window.addEventListener("resize", updateSpy, { passive: true });
 updateSpy();
 
-wireChartInteractions(document);
+wireEcharts(document);
 
 tick();
 poll();

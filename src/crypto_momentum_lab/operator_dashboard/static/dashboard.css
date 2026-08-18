@@ -1100,17 +1100,6 @@ details.secondary[open] summary { margin-bottom: 10px; }
 .pair-legend b { margin-left: 2px; font-size: 9.5px; font-weight: 500; }
 
 .pair-chart { position: relative; margin: 3px -2px 0; }
-.pair-chart svg { display: block; width: 100%; height: auto; }
-
-.pair-line { fill: none; stroke-width: 1.8; vector-effect: non-scaling-stroke; }
-.pair-line.fixed { stroke: var(--series-color, var(--brand)); }
-.pair-line.candle { stroke: var(--series-color, var(--up)); }
-.pair-line.variant { stroke: var(--series-color, var(--warn)); }
-.pair-line.live { stroke: var(--series-color, var(--series-live)); stroke-width: 2.5; }
-.pair-dot.fixed { fill: var(--series-color, var(--brand)); }
-.pair-dot.candle { fill: var(--series-color, var(--up)); }
-.pair-dot.variant { fill: var(--series-color, var(--warn)); }
-.pair-dot.live { fill: var(--series-color, var(--series-live)); }
 
 .pair-panel footer {
   display: flex;
@@ -1139,12 +1128,11 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .chart-context b { color: var(--muted); font-size: 9px; font-weight: 500; white-space: nowrap; }
 
-.equity-chart { position: relative; width: 100%; }
-.equity-chart svg { display: block; width: 100%; height: auto; }
-.equity-chart[data-chart-interactive],
-.pair-chart[data-chart-interactive] { outline: none; }
-.equity-chart[data-chart-interactive]:focus-visible,
-.pair-chart[data-chart-interactive]:focus-visible {
+.echart-shell { position: relative; width: 100%; outline: none; }
+.echart-surface { width: 100%; height: 280px; }
+.pair-chart .echart-surface { height: 230px; }
+.echart-surface svg { display: block; width: 100%; height: 100%; }
+.echart-shell:focus-visible {
   outline: 1px solid var(--brand);
   outline-offset: 4px;
   border-radius: 8px;
@@ -1177,56 +1165,15 @@ details.secondary[open] summary { margin-bottom: 10px; }
 .chart-metrics b.pos { color: var(--up); }
 .chart-metrics b.neg { color: var(--down); }
 
-.chart-tooltip {
+.echarts-tooltip {
   position: absolute;
   z-index: 4;
   max-width: min(280px, calc(100% - 12px));
-  padding: 5px 8px;
-  transform: translate(-50%, -100%);
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--surface-3) 94%, #000);
-  box-shadow: 0 7px 22px rgba(0, 0, 0, .28);
   color: var(--text);
   font: 9.5px var(--mono);
-  line-height: 1.35;
-  pointer-events: none;
-  white-space: nowrap;
-}
-
-.chart-tooltip[hidden] { display: none; }
-
-.chart-crosshair {
-  stroke: var(--brand);
-  stroke-width: 1;
-  stroke-dasharray: 3 4;
-  vector-effect: non-scaling-stroke;
-  opacity: .72;
+  line-height: 1.45;
   pointer-events: none;
 }
-
-.chart-point, .pair-point {
-  fill: transparent;
-  stroke: transparent;
-  stroke-width: 10;
-  pointer-events: all;
-  cursor: crosshair;
-}
-.chart-point.pos, .pair-point.pos { color: var(--up); }
-.chart-point.neg, .pair-point.neg { color: var(--down); }
-.pair-point { color: var(--series-color, var(--series-live)); }
-.chart-point:hover, .pair-point:hover { fill: currentColor; stroke: currentColor; stroke-width: 1; opacity: .7; }
-
-.chart-grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 6; }
-.chart-label { fill: var(--faint); font: 10px var(--mono); }
-.chart-baseline { stroke: var(--faint); stroke-width: 1; stroke-dasharray: 6 5; opacity: .55; }
-
-.equity-line { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; }
-.equity-line.pos { stroke: var(--up); filter: drop-shadow(0 0 6px rgba(52, 211, 153, .3)); }
-.equity-line.neg { stroke: var(--down); filter: drop-shadow(0 0 6px rgba(251, 113, 133, .3)); }
-
-.equity-dot.pos { fill: var(--up); }
-.equity-dot.neg { fill: var(--down); }
 
 /* ============ universe ============ */
 

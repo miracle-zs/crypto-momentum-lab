@@ -1,6 +1,7 @@
 export const SECTIONS = ["overview", "risk", "account", "strategy", "universe", "reports"];
 export const POLL_MS = 5000;
 export const DEFAULT_EQUITY_BUCKET_SECONDS = 6 * 60;
+export const COMPARISON_ANCHOR_HOUR = 8;
 export const PAPER_DETAIL_CACHE_MS = 30 * 1000;
 export const PAPER_EQUITY_CACHE_MS = 30 * 1000;
 

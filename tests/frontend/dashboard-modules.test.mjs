@@ -14,6 +14,10 @@ import {
   standaloneSparkline,
   strategyEquityChart,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-charts.js";
+import {
+  buildChartOption,
+  getChartPayload,
+} from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-chart-engine.js";
 import { readinessStatusForSection } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-readiness.js";
 import { renderOverview } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/overview.js";
 import { renderRisk } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/risk.js";
@@ -64,6 +68,37 @@ test("strategy equity models align paper and live B1 on common buckets", () => {
   assert.deepEqual(model.series.map((series) => series.label), ["固定 TP / SL", "实盘 B1"]);
   assert.deepEqual(model.series.map((series) => series.values), [[0, 2, 5], [0, -1, 3]]);
   assert.equal(model.series[1].colorClass, "live");
+  assert.equal(model.anchorAt, Date.parse("2026-08-16T00:00:00Z"));
+  assert.equal(model.startAt, Date.parse("2026-08-16T00:00:00Z"));
+  assert.equal(model.anchorMode, "daily-anchor");
+});
+
+test("strategy equity comparison starts at the first common bucket after 08:00", () => {
+  const equityCurve = (values) => values.map((equity, index) => ({
+    observed_at: `2026-08-16T00:${String((index + 1) * 6).padStart(2, "0")}:00Z`,
+    equity,
+  }));
+  const [model] = buildStrategyEquityModels([
+    {
+      run_id: "paper-account-1",
+      strategy_name: "orderflow_impulse",
+      source: "paper",
+      exit_label: "15M 收线退出",
+      equity_curve: equityCurve([1000, 1002, 1005]),
+    },
+    {
+      run_id: "live-primary",
+      strategy_name: "orderflow_impulse",
+      source: "live",
+      exit_label: "实盘 B1",
+      equity_curve: equityCurve([1000, 999, 1003]),
+    },
+  ]);
+
+  assert.equal(model.anchorAt, Date.parse("2026-08-16T00:00:00Z"));
+  assert.equal(model.startAt, Date.parse("2026-08-16T00:06:00Z"));
+  assert.equal(model.anchorMode, "after-anchor");
+  assert.deepEqual(model.series.map((series) => series.values), [[0, 2, 5], [0, -1, 3]]);
 });
 
 test("sparklines render an empty state without a browser DOM", () => {
@@ -148,19 +183,39 @@ test("strategy section hides fixed TP/SL accounts consistently", () => {
   assert.match(html, /15M 收线退出/);
 });
 
-test("equity charts expose native point readouts", () => {
+test("equity charts register an ECharts payload with native metrics", () => {
   const rows = [
     { observed_at: "2026-08-16T00:00:00Z", equity: 1000 },
     { observed_at: "2026-08-16T00:06:00Z", equity: 1002 },
   ];
-  assert.match(equityChart(rows), /class="chart-point pos"/);
-  assert.match(equityChart(rows), /权益 · 08-16 08:00:00 UTC\+8/);
-  assert.match(equityChart(rows), /data-chart-interactive/);
-  assert.match(equityChart(rows), /data-chart-tooltip/);
-  assert.match(equityChart(rows), /data-chart-crosshair/);
-  assert.match(equityChart(rows), /窗口基线/);
-  assert.match(equityChart(rows), /窗口变化/);
-  assert.match(equityChart(rows), /最大回撤/);
+  const html = equityChart(rows, "test-equity");
+  const payload = getChartPayload("test-equity");
+  assert.match(html, /data-echart-chart/);
+  assert.match(html, /data-echart-kind="equity"/);
+  assert.match(html, /data-echart-id="test-equity"/);
+  assert.match(html, /窗口基线/);
+  assert.match(html, /窗口变化/);
+  assert.match(html, /最大回撤/);
+  assert.equal(payload.kind, "equity");
+  assert.equal(payload.points.length, 2);
+  assert.equal(payload.baseline, 1000);
+  assert.equal(payload.delta, 2);
+  assert.equal(payload.maxDrawdown, 0);
+  const option = buildChartOption(payload, {
+    up: "#34d399",
+    down: "#fb7185",
+    brand: "#7aa2f7",
+    faint: "#738099",
+    surface: "#1d2431",
+    line: "#273043",
+    lineStrong: "#3a4960",
+    text: "#e9edf4",
+    muted: "#a5b0c3",
+    live: "#67e8f9",
+  });
+  assert.equal(option.xAxis.type, "time");
+  assert.equal(option.series[0].type, "line");
+  assert.equal(option.series[0].data.length, 2);
   assert.deepEqual(equityWindowMetrics(rows), {
     baseline: 1000,
     latest: 1002,
@@ -186,10 +241,14 @@ test("equity charts expose native point readouts", () => {
       equity_curve: [{ ...rows[0], equity: 1000 }, { ...rows[1], equity: 999 }],
     },
   ]);
-  assert.match(strategyEquityChart(model), /class="pair-point candle"/);
-  assert.match(strategyEquityChart(model), /class="pair-point live"/);
-  assert.match(strategyEquityChart(model), /data-chart-interactive/);
-  assert.match(strategyEquityChart(model), /data-chart-tooltip/);
+  const comparisonHtml = strategyEquityChart(model);
+  const comparisonPayload = getChartPayload("comparison-orderflow_impulse");
+  assert.match(comparisonHtml, /data-echart-chart/);
+  assert.match(comparisonHtml, /data-echart-kind="comparison"/);
+  assert.match(comparisonHtml, /data-echart-id="comparison-orderflow_impulse"/);
+  assert.deepEqual(comparisonPayload.series.map((series) => series.label), ["15M 收线退出", "实盘 B1"]);
+  assert.equal(comparisonPayload.series[1].isLive, true);
+  assert.equal(comparisonPayload.points.length, 2);
 });
 
 test("live account renderer separates sync service from account permission", () => {

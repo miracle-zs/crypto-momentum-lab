@@ -23,12 +23,13 @@ def test_static_javascript_uses_relative_api_paths() -> None:
 
     assert 'data-endpoint="api/overview"' in index
     assert (
-        'href="static/dashboard.css?v=20260817-control-room-v9-chart-account-semantics"'
+        'href="static/dashboard.css?v=20260817-control-room-v10-echarts"'
         in index
     )
+    assert 'src="static/vendor/echarts.min.js?v=20260817-echarts-6.1.0"' in index
     assert (
-        'type="module" src="static/dashboard.js?v=20260817-control-room-'
-        'v14-chart-account-semantics"'
+        'type="module" src="static/dashboard.js?v=20260818-control-room-'
+        'v16-daily-anchor"'
         in index
     )
     assert 'data-endpoint="/api/' not in index
@@ -46,7 +47,7 @@ def test_dashboard_loads_stable_frontend_modules() -> None:
         'from "./dashboard-formatters.js"',
         'from "./dashboard-dom.js"',
         'from "./dashboard-readiness.js"',
-        'from "./dashboard-chart-interactions.js"',
+        'from "./dashboard-chart-engine.js"',
         'from "./sections/overview.js"',
         'from "./sections/universe.js"',
         'from "./sections/risk.js"',
@@ -59,9 +60,11 @@ def test_dashboard_loads_stable_frontend_modules() -> None:
     assert (STATIC / "dashboard-formatters.js").exists()
     assert (STATIC / "dashboard-dom.js").exists()
     assert (STATIC / "dashboard-readiness.js").exists()
-    assert (STATIC / "dashboard-chart-interactions.js").exists()
+    assert (STATIC / "dashboard-chart-engine.js").exists()
     assert (STATIC / "dashboard-charts.js").exists()
     assert (STATIC / "dashboard-ui.js").exists()
+    assert (STATIC / "vendor" / "echarts.min.js").exists()
+    assert (STATIC / "package.json").exists()
     for section in ("overview", "universe", "risk", "account", "reports", "strategy"):
         assert (STATIC / "sections" / f"{section}.js").exists()
 
@@ -134,9 +137,11 @@ def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
         "buildStrategyEquityModels",
         "strategyEquityChart",
         "STRATEGY EXIT EQUITY",
-        "COMMON START",
+        "DAILY 08:00 ANCHOR",
         "SHARED AXES",
         "实盘 B1",
+        "每日 08:00 UTC+8 起算",
+        "comparisonAnchorText",
         "source === \"live\"",
         "模拟盘版本 + 实盘 B1",
         "ROLLING 24H",
@@ -253,17 +258,19 @@ def test_dashboard_skips_unchanged_section_replacements() -> None:
     assert 'data-service-age="${esc(service.name)}"' in overview
 
 
-def test_equity_charts_expose_hoverable_point_readouts() -> None:
+def test_equity_charts_use_the_local_echarts_adapter() -> None:
     charts = (STATIC / "dashboard-charts.js").read_text(encoding="utf-8")
+    engine = (STATIC / "dashboard-chart-engine.js").read_text(encoding="utf-8")
     stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
 
-    assert "function chartPointTitle" in charts
-    assert "data-chart-tooltip" in charts
-    assert "data-chart-crosshair" in charts
+    assert "registerChartPayload" in charts
+    assert "data-echart-chart" in charts
+    assert "wireEcharts" in engine
+    assert 'renderer: "svg"' in engine
+    assert "data-chart-tooltip" not in charts
     assert "equityWindowMetrics" in charts
-    assert 'class="chart-point' in charts
-    assert 'class="pair-point' in charts
-    assert ".chart-point:hover, .pair-point:hover" in stylesheet
+    assert ".echart-surface" in stylesheet
+    assert ".echart-shell:focus-visible" in stylesheet
 
 
 def test_live_status_uses_active_green_semantics() -> None:
@@ -276,13 +283,12 @@ def test_live_status_uses_active_green_semantics() -> None:
 
 def test_live_b1_equity_series_uses_distinct_solid_accent() -> None:
     stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+    engine = (STATIC / "dashboard-chart-engine.js").read_text(encoding="utf-8")
 
     assert "--series-live: #67e8f9;" in stylesheet
-    assert (
-        ".pair-line.live { stroke: var(--series-color, var(--series-live)); "
-        "stroke-width: 2.5; }"
-        in stylesheet
-    )
+    assert ".pair-legend .live i" in stylesheet
+    assert "series.isLive ? 2.5 : 1.8" in engine
+    assert "series-live" in engine or "series.color" in engine
 
 
 def test_universe_panel_separates_target_and_retained_symbols() -> None:

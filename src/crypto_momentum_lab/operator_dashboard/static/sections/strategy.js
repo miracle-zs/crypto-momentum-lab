@@ -63,9 +63,15 @@ export function createStrategySection({ requestJson = defaultRequestJson } = {})
   let paperEquityCacheKey = "";
   let latestPaperAccounts = [];
 
-  function visiblePaperAccounts(data) {
-    return (data.accounts || []).filter((account) => account.exit_mode !== "fixed");
-  }
+function visiblePaperAccounts(data) {
+  return (data.accounts || []).filter((account) => account.exit_mode !== "fixed");
+}
+
+function comparisonAnchorText(model) {
+  if (model.anchorMode === "daily-anchor") return "每日 08:00 UTC+8 起点归零";
+  if (model.anchorMode === "after-anchor") return "08:00 后首个共同快照起算";
+  return "无 08:00 共同快照 · 已回退共同起点";
+}
 
 function pairedComparisonPanel(model) {
   const bucketMinutes = Math.round(model.intervalSeconds / 60);
@@ -79,7 +85,7 @@ function pairedComparisonPanel(model) {
     </div>
     <div class="pair-legend">${legend}</div>
     ${strategyEquityChart(model)}
-    <footer><span>共同起点归零 · ${bucketMinutes} 分钟 UTC 采样</span><b>${esc(elapsedTime(model.startAt, model.endAt))}</b></footer>
+    <footer><span>${esc(comparisonAnchorText(model))} · ${bucketMinutes} 分钟 UTC 采样</span><b>${esc(elapsedTime(model.startAt, model.endAt))}</b></footer>
   </article>`;
 }
 
@@ -154,8 +160,8 @@ function paperComparisonBlock(accounts) {
     ? `<div class="pair-grid">${comparisonModels.map(pairedComparisonPanel).join("")}</div>`
     : emptyBox("同期权益曲线加载中", "账户摘要已就绪，曲线在后台批量加载");
   return `<div class="block pair-section" data-paper-comparison>
-    ${blockTitle("同期退出方式对比", "STRATEGY EXIT EQUITY · COMMON START · SHARED AXES",
-      '<span class="muted">模拟盘版本 + 实盘 B1 · 同期叠加</span>')}
+    ${blockTitle("同期退出方式对比", "STRATEGY EXIT EQUITY · DAILY 08:00 ANCHOR · SHARED AXES",
+      '<span class="muted">模拟盘版本 + 实盘 B1 · 每日 08:00 UTC+8 起算</span>')}
     ${content}
   </div>`;
 }
