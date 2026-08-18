@@ -23,6 +23,7 @@ import { renderOverview } from "../../src/crypto_momentum_lab/operator_dashboard
 import { renderRisk } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/risk.js";
 import { renderAccount } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/account.js";
 import { createStrategySection } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/strategy.js";
+import { renderUniverse } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/universe.js";
 
 test("operator formatters keep status and money output stable", () => {
   assert.equal(esc('<live status="READY">'), "&lt;live status=&quot;READY&quot;&gt;");
@@ -124,6 +125,18 @@ test("overview renderer exposes local heartbeat update hooks", () => {
   assert.equal(status, "READY");
   assert.match(html, /data-service-age="live-rollout"/);
   assert.match(html, /data-service-meter="live-rollout"/);
+});
+
+test("universe renderer includes relative snapshot age", () => {
+  const [status, html] = renderUniverse({
+    status: "READY",
+    observed_at: "2026-08-18T04:51:00Z",
+    gainers: [],
+    losers: [],
+    monitored_symbols: [],
+  });
+  assert.equal(status, "READY");
+  assert.match(html, /快照时间/);
 });
 
 test("risk renderer separates confirmed pending orders from uncertain orders", () => {
