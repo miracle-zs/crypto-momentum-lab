@@ -44,6 +44,22 @@ class ClosedCandle15m:
     close_price: Decimal
 
 
+def first_candle_start_after_entry(opened_at: datetime) -> datetime:
+    """Return the first 15m candle eligible for a position's exit rule.
+
+    The candle containing the entry is intentionally observation-only.  Even
+    if the order filled before that candle closed, its direction must not
+    trigger an exit; evaluation starts with the next complete 15m candle.
+    """
+
+    candle_start = opened_at.replace(
+        minute=opened_at.minute - opened_at.minute % 15,
+        second=0,
+        microsecond=0,
+    )
+    return candle_start + timedelta(minutes=15)
+
+
 def position_exit_reason(
     *,
     gross_return: Decimal,
@@ -100,12 +116,14 @@ def _candle_exit_reason(
     minimum_end = opened_at + timedelta(
         seconds=policy.minimum_holding_seconds
     )
+    first_eligible_start = first_candle_start_after_entry(opened_at)
     eligible = [
         candle
         for candle in candles
         if (
             candle.symbol == symbol
-            and opened_at < candle.candle_end <= held_until
+            and candle.candle_start >= first_eligible_start
+            and candle.candle_end <= held_until
             and candle.candle_end >= minimum_end
         )
     ]

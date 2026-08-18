@@ -14,6 +14,7 @@ from crypto_momentum_lab.strategy_runner.position_exit import (
     ClosedCandle15m,
     PositionExitMode,
     PositionExitPolicy,
+    first_candle_start_after_entry,
     position_exit_reason,
 )
 
@@ -499,7 +500,7 @@ def _is_adverse_candle(
 ) -> bool:
     if candle is None or candle.symbol != position.symbol:
         return False
-    if candle.candle_end <= position.opened_at:
+    if candle.candle_start < first_candle_start_after_entry(position.opened_at):
         return False
     if position.side is StrategySide.LONG:
         return candle.close_price < candle.open_price

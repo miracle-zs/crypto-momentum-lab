@@ -45,8 +45,8 @@ async def test_fixed_exit_closes_exact_position_quantity() -> None:
 async def test_candle_exit_retries_until_a_close_order_is_observed() -> None:
     candle = ClosedCandle15m(
         symbol="BTCUSDT",
-        candle_start=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
-        candle_end=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
+        candle_start=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
+        candle_end=datetime(2026, 7, 4, 0, 30, tzinfo=UTC),
         open_price=Decimal("100"),
         close_price=Decimal("101"),
     )
@@ -57,8 +57,8 @@ async def test_candle_exit_retries_until_a_close_order_is_observed() -> None:
     )
     state = replace(
         _state(),
-        bucket_start=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
-        bucket_end=datetime(2026, 7, 4, 0, 15, 15, tzinfo=UTC),
+        bucket_start=datetime(2026, 7, 4, 0, 30, tzinfo=UTC),
+        bucket_end=datetime(2026, 7, 4, 0, 30, 15, tzinfo=UTC),
         last_ask_price=Decimal("101"),
         mark_price=Decimal("101"),
         close_price=Decimal("101"),
@@ -79,11 +79,37 @@ async def test_candle_exit_retries_until_a_close_order_is_observed() -> None:
     assert loader.calls == 2
 
 
-async def test_b1_adverse_candle_places_only_recovery_limit() -> None:
-    candle = ClosedCandle15m(
+async def test_live_candle_exit_ignores_the_entry_candle() -> None:
+    entry_candle = ClosedCandle15m(
         symbol="BTCUSDT",
         candle_start=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
         candle_end=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
+        open_price=Decimal("100"),
+        close_price=Decimal("99"),
+    )
+    manager = LiveExitManager(
+        config=_config(PositionExitMode.CANDLE_15M),
+        candle_loader=FakeCandleLoader((entry_candle,)),
+    )
+    state = replace(
+        _state(),
+        bucket_start=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
+        bucket_end=datetime(2026, 7, 4, 0, 15, 15, tzinfo=UTC),
+        last_bid_price=Decimal("99"),
+        mark_price=Decimal("99"),
+        close_price=Decimal("99"),
+    )
+
+    requests = await manager.requests_for_state(state, (_long_position(),))
+
+    assert requests == ()
+
+
+async def test_b1_adverse_candle_places_only_recovery_limit() -> None:
+    candle = ClosedCandle15m(
+        symbol="BTCUSDT",
+        candle_start=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
+        candle_end=datetime(2026, 7, 4, 0, 30, tzinfo=UTC),
         open_price=Decimal("100"),
         close_price=Decimal("99"),
     )
@@ -97,8 +123,8 @@ async def test_b1_adverse_candle_places_only_recovery_limit() -> None:
     )
     state = replace(
         _state(),
-        bucket_start=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
-        bucket_end=datetime(2026, 7, 4, 0, 15, 15, tzinfo=UTC),
+        bucket_start=datetime(2026, 7, 4, 0, 30, tzinfo=UTC),
+        bucket_end=datetime(2026, 7, 4, 0, 30, 15, tzinfo=UTC),
         last_bid_price=Decimal("99"),
         mark_price=Decimal("99"),
         close_price=Decimal("99"),
@@ -116,8 +142,8 @@ async def test_b1_adverse_candle_places_only_recovery_limit() -> None:
 async def test_b1_adverse_candle_uses_direct_market_close_at_target() -> None:
     candle = ClosedCandle15m(
         symbol="BTCUSDT",
-        candle_start=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
-        candle_end=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
+        candle_start=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
+        candle_end=datetime(2026, 7, 4, 0, 30, tzinfo=UTC),
         open_price=Decimal("105"),
         close_price=Decimal("102"),
     )
@@ -131,8 +157,8 @@ async def test_b1_adverse_candle_uses_direct_market_close_at_target() -> None:
     )
     state = replace(
         _state(),
-        bucket_start=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
-        bucket_end=datetime(2026, 7, 4, 0, 15, 15, tzinfo=UTC),
+        bucket_start=datetime(2026, 7, 4, 0, 30, tzinfo=UTC),
+        bucket_end=datetime(2026, 7, 4, 0, 30, 15, tzinfo=UTC),
         last_bid_price=Decimal("101"),
         mark_price=Decimal("101"),
         close_price=Decimal("101"),

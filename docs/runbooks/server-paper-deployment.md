@@ -31,6 +31,9 @@ USDT:
 - `paper-account-12-orderflow-b1-long-candle15m-v1`: B1 long-only signals, entry-price limit for one 15M bar after the first adverse close;
 - `paper-account-13-orderflow-b8-long-candle15m-v1`: B8 long-only signals, entry-price limit for eight 15M bars after the first adverse close.
 
+For all `candle_15m` exits, the candle containing the entry is observation-only;
+the first eligible exit candle is the next complete 15-minute candle.
+
 The previously deployed Compression, 45-minute, and C1 imbalance accounts are
 kept in the database for historical analysis but are no longer active runners.
 

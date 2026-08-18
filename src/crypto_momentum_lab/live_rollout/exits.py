@@ -17,6 +17,7 @@ from crypto_momentum_lab.strategy_runner.position_exit import (
     ClosedCandle15m,
     PositionExitMode,
     PositionExitPolicy,
+    first_candle_start_after_entry,
     position_exit_reason,
 )
 
@@ -248,8 +249,9 @@ class LiveExitManager:
             start=start,
             end=closed_boundary,
         )
+        first_eligible_start = first_candle_start_after_entry(position.opened_at)
         for candle in candles:
-            if candle.candle_end <= position.opened_at:
+            if candle.candle_start < first_eligible_start:
                 self._checked_until[key] = candle.candle_end
                 continue
             reason = position_exit_reason(

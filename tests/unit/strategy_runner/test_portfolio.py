@@ -189,9 +189,36 @@ def test_candle_exit_closes_on_first_opposite_candle() -> None:
         positions=(position,),
         state=_state(
             close=Decimal("99"),
-            bucket_start=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+            bucket_start=datetime(2026, 7, 26, 0, 30, tzinfo=UTC),
         ),
         config=config,
+        taker_fee_rate=Decimal("0.0004"),
+        closed_candle=ClosedCandle15m(
+            symbol="BTCUSDT",
+            candle_start=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+            candle_end=datetime(2026, 7, 26, 0, 30, tzinfo=UTC),
+            open_price=Decimal("100"),
+            close_price=Decimal("99"),
+        ),
+    )[0]
+
+    assert closed.status is PaperPositionStatus.CLOSED
+    assert closed.close_reason == "candle_15m_bearish"
+
+
+def test_candle_exit_ignores_the_entry_candle() -> None:
+    position = position_from_entry_fill("run-1", _fill())
+    assert position is not None
+    open_after_entry_candle = mark_positions(
+        positions=(position,),
+        state=_state(
+            close=Decimal("99"),
+            bucket_start=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+        ),
+        config=PaperExitConfig(
+            exit_mode=PaperExitMode.CANDLE_15M,
+            max_holding_buckets=5760,
+        ),
         taker_fee_rate=Decimal("0.0004"),
         closed_candle=ClosedCandle15m(
             symbol="BTCUSDT",
@@ -202,8 +229,7 @@ def test_candle_exit_closes_on_first_opposite_candle() -> None:
         ),
     )[0]
 
-    assert closed.status is PaperPositionStatus.CLOSED
-    assert closed.close_reason == "candle_15m_bearish"
+    assert open_after_entry_candle.status is PaperPositionStatus.OPEN
 
 
 def test_candle_exit_holds_aligned_and_doji_candles_and_reverses_short() -> None:
@@ -223,7 +249,7 @@ def test_candle_exit_holds_aligned_and_doji_candles_and_reverses_short() -> None
         positions=(long_position,),
         state=_state(
             close=Decimal("105"),
-            bucket_start=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+            bucket_start=datetime(2026, 7, 26, 0, 30, tzinfo=UTC),
         ),
         config=config,
         taker_fee_rate=Decimal("0.0004"),
@@ -233,7 +259,7 @@ def test_candle_exit_holds_aligned_and_doji_candles_and_reverses_short() -> None
         positions=(long_position,),
         state=_state(
             close=Decimal("100"),
-            bucket_start=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+            bucket_start=datetime(2026, 7, 26, 0, 30, tzinfo=UTC),
         ),
         config=config,
         taker_fee_rate=Decimal("0.0004"),
@@ -243,7 +269,7 @@ def test_candle_exit_holds_aligned_and_doji_candles_and_reverses_short() -> None
         positions=(short_position,),
         state=_state(
             close=Decimal("101"),
-            bucket_start=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+            bucket_start=datetime(2026, 7, 26, 0, 30, tzinfo=UTC),
         ),
         config=config,
         taker_fee_rate=Decimal("0.0004"),
@@ -527,15 +553,15 @@ def test_candle_exit_requires_consecutive_adverse_candles() -> None:
     )
     first_adverse = ClosedCandle15m(
         symbol="BTCUSDT",
-        candle_start=datetime(2026, 7, 26, 0, 0, tzinfo=UTC),
-        candle_end=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+        candle_start=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+        candle_end=datetime(2026, 7, 26, 0, 30, tzinfo=UTC),
         open_price=Decimal("100"),
         close_price=Decimal("99"),
     )
     second_adverse = ClosedCandle15m(
         symbol="BTCUSDT",
-        candle_start=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
-        candle_end=datetime(2026, 7, 26, 0, 30, tzinfo=UTC),
+        candle_start=datetime(2026, 7, 26, 0, 30, tzinfo=UTC),
+        candle_end=datetime(2026, 7, 26, 0, 45, tzinfo=UTC),
         open_price=Decimal("99"),
         close_price=Decimal("98"),
     )
@@ -544,7 +570,7 @@ def test_candle_exit_requires_consecutive_adverse_candles() -> None:
         positions=(position,),
         state=_state(
             close=Decimal("99"),
-            bucket_start=datetime(2026, 7, 26, 0, 15, tzinfo=UTC),
+            bucket_start=datetime(2026, 7, 26, 0, 30, tzinfo=UTC),
         ),
         config=config,
         taker_fee_rate=Decimal("0.0004"),
@@ -555,7 +581,7 @@ def test_candle_exit_requires_consecutive_adverse_candles() -> None:
         positions=(position,),
         state=_state(
             close=Decimal("98"),
-            bucket_start=datetime(2026, 7, 26, 0, 30, tzinfo=UTC),
+            bucket_start=datetime(2026, 7, 26, 0, 45, tzinfo=UTC),
         ),
         config=config,
         taker_fee_rate=Decimal("0.0004"),
@@ -673,7 +699,7 @@ def _state_with_closed_1m(
 
 
 def _candle(*, open_price: str, close_price: str) -> ClosedCandle15m:
-    candle_start = datetime(2026, 7, 26, 0, 0, tzinfo=UTC)
+    candle_start = datetime(2026, 7, 26, 0, 15, tzinfo=UTC)
     return ClosedCandle15m(
         symbol="BTCUSDT",
         candle_start=candle_start,

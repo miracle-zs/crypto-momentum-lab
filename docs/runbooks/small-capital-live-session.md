@@ -127,7 +127,9 @@ current executable bid has already reached `entry * (1 + 0.0088)` is closed
 directly with a reduce-only MARKET order. Otherwise the executor places a
 reduce-only LIMIT at that recovery target; if it is still open at the next
 15-minute close, the executor cancels it and market-closes the remaining
-quantity. No protective stop is placed after an entry fill.
+quantity. The 15-minute candle containing the entry is observation-only and is
+not eligible to trigger this logic; evaluation starts with the next complete
+15-minute candle. No protective stop is placed after an entry fill.
 
 The following execution protections are intentionally absent from the live
 path: maximum holding time (including the old 24-hour fallback), spread
