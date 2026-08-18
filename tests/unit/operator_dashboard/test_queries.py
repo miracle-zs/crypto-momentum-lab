@@ -10,6 +10,7 @@ from crypto_momentum_lab.operator_dashboard.queries import (
     _live_account_equity_point,
     _paper_exit_label,
     _split_exchange_orders,
+    _universe_membership,
 )
 from crypto_momentum_lab.persistence.postgres.models import PaperEquitySnapshotRow
 
@@ -69,6 +70,33 @@ def test_dashboard_separates_confirmed_open_orders_from_uncertain_orders() -> No
         "partially_filled",
     ]
     assert [row.state for row in ambiguous] == ["submitting", "mystery"]
+
+
+def test_universe_membership_carries_rank_and_market_fields() -> None:
+    membership = SimpleNamespace(
+        symbol="AAAUSDT",
+        status="retained",
+        side="gainer",
+        left_target_at=datetime(2026, 8, 18, 4, 0, tzinfo=UTC),
+    )
+    entry = SimpleNamespace(
+        symbol="AAAUSDT",
+        gainer_rank=25,
+        loser_rank=None,
+        utc_day_return=Decimal("0.0123"),
+        current_price=Decimal("10.50"),
+    )
+
+    result = _universe_membership(membership, entry)
+
+    assert result == {
+        "symbol": "AAAUSDT",
+        "status": "retained",
+        "side": "gainer",
+        "rank": 25,
+        "utc_day_return": "0.0123",
+        "current_price": "10.50",
+    }
 
 
 def test_candle_exit_label_includes_entry_filter_variants() -> None:

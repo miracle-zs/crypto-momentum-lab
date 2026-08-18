@@ -139,6 +139,55 @@ test("universe renderer includes relative snapshot age", () => {
   assert.match(html, /快照时间/);
 });
 
+test("universe renderer keeps ranking and monitoring views distinct", () => {
+  const [status, html] = renderUniverse({
+    status: "FRESH",
+    observed_at: "2026-08-18T04:51:00Z",
+    gainers: [{
+      symbol: "AAAUSDT",
+      rank: 1,
+      current_price: "10",
+      utc_day_return: "0.12",
+    }],
+    losers: [{
+      symbol: "BBBUSD",
+      rank: 1,
+      current_price: "3",
+      utc_day_return: "-0.08",
+    }],
+    monitored_symbols: [
+      {
+        symbol: "AAAUSDT",
+        status: "target",
+        side: "gainer",
+        rank: 1,
+        current_price: "10",
+        utc_day_return: "0.12",
+      },
+      {
+        symbol: "CCCUSDT",
+        status: "retained",
+        side: "loser",
+        rank: 25,
+        current_price: "2",
+        utc_day_return: "-0.02",
+      },
+    ],
+  });
+  assert.equal(status, "FRESH");
+  assert.match(html, /监控池 2/);
+  assert.match(html, /补充监控 1/);
+  assert.match(html, /MONITORING ADDITIONS/);
+  assert.match(html, /榜单中的目标标的已计入监控池/);
+  assert.match(html, /监控状态/);
+  assert.match(html, /保留/);
+  assert.equal(html.match(/AAAUSDT/g)?.length, 1);
+  assert.equal(html.match(/CCCUSDT/g)?.length, 1);
+  assert.doesNotMatch(html, /目标池 · 涨幅 Top 20/);
+  assert.doesNotMatch(html, /目标池 · 跌幅 Top 20/);
+  assert.doesNotMatch(html, /class="chip/);
+});
+
 test("risk renderer separates confirmed pending orders from uncertain orders", () => {
   const [status, html] = renderRisk({
     status: "READY",

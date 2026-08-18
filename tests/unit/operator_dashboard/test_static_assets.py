@@ -291,17 +291,23 @@ def test_live_b1_equity_series_uses_distinct_solid_accent() -> None:
     assert "series-live" in engine or "series.color" in engine
 
 
-def test_universe_panel_separates_target_and_retained_symbols() -> None:
+def test_universe_panel_uses_one_monitoring_table_without_duplicate_chips() -> None:
     text = (STATIC / "sections" / "universe.js").read_text(encoding="utf-8")
 
     for marker in (
-        "目标池 · 涨幅 Top 20",
-        "目标池 · 跌幅 Top 20",
-        "保留与持仓保护",
-        "RETAINED / POSITION PROTECTION",
         "监控池 ${monitored.length}",
+        "补充监控",
+        "MONITORING ADDITIONS",
+        "榜单中的目标标的已计入监控池",
+        "监控状态",
+        "rank",
+        "utc_day_return",
+        "current_price",
     ):
         assert marker in text
+    assert "目标池 · 涨幅 Top 20" not in text
+    assert "目标池 · 跌幅 Top 20" not in text
+    assert 'class="chip' not in text
 
 
 def test_dashboard_polling_preserves_scroll_positions() -> None:

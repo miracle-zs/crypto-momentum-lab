@@ -352,6 +352,7 @@ class DashboardQueries:
                     )
                 )
             ).all()
+            entries_by_symbol = {entry.symbol: entry for entry in entries}
         gainers = sorted(
             (entry for entry in entries if entry.gainer_rank is not None),
             key=lambda item: item.gainer_rank or 999,
@@ -370,12 +371,18 @@ class DashboardQueries:
             gainers=[_universe_entry(row, "gainer") for row in gainers],
             losers=[_universe_entry(row, "loser") for row in losers],
             monitored_symbols=[
-                {
-                    "symbol": row.symbol,
-                    "status": row.status,
-                    "side": row.side,
-                }
-                for row in memberships
+                _universe_membership(row, entries_by_symbol.get(row.symbol))
+                for row in sorted(
+                    memberships,
+                    key=lambda row: (
+                        {"target": 0, "retained": 1, "forced": 2}.get(
+                            row.status,
+                            99,
+                        ),
+                        {"gainer": 0, "loser": 1}.get(row.side, 2),
+                        row.symbol,
+                    ),
+                )
             ],
         )
 
@@ -1448,6 +1455,39 @@ def _universe_entry(row: UniverseEntryRow, side: str) -> dict[str, JsonValue]:
         if row.utc_day_return is None
         else str(row.utc_day_return),
         "current_price": None if row.current_price is None else str(row.current_price),
+    }
+
+
+def _universe_membership(
+    row: MonitoringMembershipRow,
+    entry: UniverseEntryRow | None,
+) -> dict[str, JsonValue]:
+    rank = None
+    utc_day_return = None
+    current_price = None
+    if entry is not None:
+        rank = (
+            entry.gainer_rank
+            if row.side == "gainer"
+            else entry.loser_rank
+            if row.side == "loser"
+            else None
+        )
+        utc_day_return = (
+            None
+            if entry.utc_day_return is None
+            else str(entry.utc_day_return)
+        )
+        current_price = (
+            None if entry.current_price is None else str(entry.current_price)
+        )
+    return {
+        "symbol": row.symbol,
+        "status": row.status,
+        "side": row.side,
+        "rank": rank,
+        "utc_day_return": utc_day_return,
+        "current_price": current_price,
     }
 
 

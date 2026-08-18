@@ -1184,46 +1184,41 @@ details.secondary[open] summary { margin-bottom: 10px; }
 .ret-track i.pos { background: var(--up); }
 .ret-track i.neg { background: var(--down); }
 
-.chip-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
-  gap: 7px;
-}
-
-.chip {
-  display: flex;
+.membership-status {
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
-  min-height: 40px;
-  padding: 7px 10px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: var(--surface-2);
-  font-size: 11px;
+  gap: 5px;
+  padding: 3px 7px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 650;
+  line-height: 1;
 }
 
-.chip-main { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
-.chip b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
-.chip small { flex: none; font-size: 9px; color: var(--faint); }
-.chip-return, .chip-side { flex: none; font: 10px var(--mono); font-variant-numeric: tabular-nums; }
-.chip-side { color: var(--faint); font-size: 9px; }
-.chip.pos { box-shadow: inset 2px 0 0 rgba(52, 211, 153, .55); }
-.chip.neg { box-shadow: inset 2px 0 0 rgba(251, 113, 133, .55); }
-.chip.retained { border-style: dashed; background: color-mix(in srgb, var(--surface-2) 72%, var(--bg)); }
-
-.monitor-target-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.monitor-group, .monitor-secondary {
-  min-width: 0;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  background: color-mix(in srgb, var(--surface-2) 62%, transparent);
+.membership-status::before {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
 }
-.monitor-group .block-title, .monitor-secondary .block-title { margin: 0 0 9px; }
-.monitor-group .block-title b, .monitor-secondary .block-title b { font-size: 12px; }
-.monitor-secondary { margin-top: 12px; }
+
+.membership-status.target { color: var(--info); background: rgba(138, 180, 255, .1); }
+.membership-status.retained { color: var(--warn); background: rgba(245, 183, 85, .1); }
+.membership-status.forced { color: var(--live); background: rgba(103, 232, 249, .1); }
+.membership-status.unknown { color: var(--faint); background: rgba(115, 128, 153, .1); }
+
+.monitor-note {
+  margin: 0 0 12px;
+  padding: 9px 11px;
+  border-left: 2px solid var(--info);
+  background: rgba(138, 180, 255, .06);
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
 .monitor-summary { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; white-space: nowrap; }
 .monitor-summary b { color: var(--text); font: 600 10px var(--mono); }
 
@@ -1345,7 +1340,6 @@ details.secondary[open] summary { margin-bottom: 10px; }
   .acct-cards {
     grid-template-columns: 1fr;
   }
-  .monitor-target-grid { grid-template-columns: 1fr; }
   .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .account-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .account-state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
