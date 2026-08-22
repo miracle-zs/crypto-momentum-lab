@@ -361,7 +361,7 @@ services:
       - --git-commit-hash
       - ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
       - --migration-revision
-      - ${CML_LIVE_MIGRATION_REVISION:-20260814_0016}
+      - ${CML_LIVE_MIGRATION_REVISION:-20260822_0018}
       - --max-runtime-seconds
       - "31536000"
       - --poll-interval-seconds
