@@ -1,10 +1,10 @@
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, TypeVar
 from uuid import NAMESPACE_URL, uuid5
 
 from crypto_momentum_lab.domain.execution import (
@@ -83,6 +83,17 @@ class OrderStateRepository(Protocol):
         pass
 
 
+OrderEventCallback = Callable[
+    [OrderExecutionPlan, ExchangeOrderEvent],
+    Awaitable[None],
+]
+ExchangeBoundaryCallback = Callable[
+    [OrderExecutionPlan, str, datetime],
+    Awaitable[None],
+]
+ExchangeCallResult = TypeVar("ExchangeCallResult")
+
+
 @dataclass(frozen=True, slots=True)
 class OrderExecutionResult:
     client_order_id: str
@@ -91,6 +102,22 @@ class OrderExecutionResult:
     suppressed: bool = False
     executed_quantity: Decimal = Decimal("0")
     average_price: Decimal = Decimal("0")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedOrderSubmission:
+    """Durable write-ahead journal returned by an atomic order preparation."""
+
+    plan: OrderExecutionPlan
+    submitting_event: ExchangeOrderEvent
+
+    def __post_init__(self) -> None:
+        if self.submitting_event.state is not ExchangeOrderState.SUBMITTING:
+            raise ValueError("prepared submission must contain a SUBMITTING event")
+        if self.submitting_event.client_order_id != self.plan.client_order_id:
+            raise ValueError(
+                "prepared submission event must reference the order plan"
+            )
 
 
 class OrderExecutionStateMachine:
@@ -102,24 +129,43 @@ class OrderExecutionStateMachine:
         submit_policy: SubmitPolicy,
         live_submit_enabled: bool,
         clock: Callable[[], datetime] | None = None,
+        on_event: OrderEventCallback | None = None,
+        on_exchange_request: ExchangeBoundaryCallback | None = None,
+        on_exchange_response: ExchangeBoundaryCallback | None = None,
+        serialize_commands: bool = True,
     ) -> None:
         self._exchange = exchange
         self._repository = repository
         self._submit_policy = submit_policy
         self._live_submit_enabled = live_submit_enabled
         self._clock = clock or (lambda: datetime.now(tz=UTC))
-        self._lock = asyncio.Lock()
+        self._on_event = on_event
+        self._on_exchange_request = on_exchange_request
+        self._on_exchange_response = on_exchange_response
+        self._lock = asyncio.Lock() if serialize_commands else None
 
     async def execute_approved_intent(
         self,
         plan: OrderExecutionPlan,
+        *,
+        prepared_submission: PreparedOrderSubmission | None = None,
     ) -> OrderExecutionResult:
+        if self._lock is None:
+            return await self._execute_approved_intent(
+                plan,
+                prepared_submission=prepared_submission,
+            )
         async with self._lock:
-            return await self._execute_approved_intent(plan)
+            return await self._execute_approved_intent(
+                plan,
+                prepared_submission=prepared_submission,
+            )
 
     async def _execute_approved_intent(
         self,
         plan: OrderExecutionPlan,
+        *,
+        prepared_submission: PreparedOrderSubmission | None = None,
     ) -> OrderExecutionResult:
         if not plan.quantized:
             raise ValueError("order plan must be quantized before execution")
@@ -130,7 +176,15 @@ class OrderExecutionStateMachine:
             raise LiveSubmissionDisabledError(
                 "live_submit policy requires explicit live_submit_enabled"
             )
-        await self._repository.save_planned_order(plan)
+        if prepared_submission is not None:
+            if prepared_submission.plan != plan:
+                raise ValueError("prepared submission does not match order plan")
+            if self._submit_policy is SubmitPolicy.SHADOW_SUPPRESS:
+                raise ValueError(
+                    "shadow submit cannot use a prepared live submission"
+                )
+        else:
+            await self._repository.save_planned_order(plan)
         if self._submit_policy is SubmitPolicy.SHADOW_SUPPRESS:
             await self._repository.save_shadow_suppression(
                 ShadowSuppressionEvent(
@@ -156,9 +210,19 @@ class OrderExecutionStateMachine:
                 suppressed=True,
             )
 
-        await self._append_event(plan, ExchangeOrderState.SUBMITTING)
+        if prepared_submission is None:
+            await self._append_event(plan, ExchangeOrderState.SUBMITTING)
+        else:
+            await self._notify_event(
+                prepared_submission.plan,
+                prepared_submission.submitting_event,
+            )
         try:
-            snapshot = await self._exchange.submit_order(plan)
+            snapshot = await self._exchange_call(
+                plan,
+                operation="submit",
+                call=lambda: self._exchange.submit_order(plan),
+            )
         except ExchangeOrderRejectedError as exc:
             await self._append_event(
                 plan,
@@ -172,9 +236,13 @@ class OrderExecutionStateMachine:
             )
         except ExchangeSubmissionTimeoutError:
             try:
-                queried_snapshot = await self._exchange.query_order_by_client_id(
-                    plan.symbol,
-                    plan.client_order_id,
+                queried_snapshot = await self._exchange_call(
+                    plan,
+                    operation="query",
+                    call=lambda: self._exchange.query_order_by_client_id(
+                        plan.symbol,
+                        plan.client_order_id,
+                    ),
                 )
             except ExchangeOrderQueryUnknownError as exc:
                 await self._append_event(
@@ -205,6 +273,8 @@ class OrderExecutionStateMachine:
         self,
         plan: OrderExecutionPlan,
     ) -> OrderExecutionResult:
+        if self._lock is None:
+            return await self._reconcile_order(plan)
         async with self._lock:
             return await self._reconcile_order(plan)
 
@@ -212,9 +282,13 @@ class OrderExecutionStateMachine:
         self,
         plan: OrderExecutionPlan,
     ) -> OrderExecutionResult:
-        snapshot = await self._exchange.query_order_by_client_id(
-            plan.symbol,
-            plan.client_order_id,
+        snapshot = await self._exchange_call(
+            plan,
+            operation="query",
+            call=lambda: self._exchange.query_order_by_client_id(
+                plan.symbol,
+                plan.client_order_id,
+            ),
         )
         if snapshot is None:
             await self._append_event(
@@ -239,6 +313,8 @@ class OrderExecutionStateMachine:
         intentionally separate from the operator-authorized emergency cancel
         control exposed by the Binance client.
         """
+        if self._lock is None:
+            return await self._cancel_order(plan)
         async with self._lock:
             return await self._cancel_order(plan)
 
@@ -250,9 +326,13 @@ class OrderExecutionStateMachine:
             raise ValueError("order plan must be quantized before cancellation")
         await self._append_event(plan, ExchangeOrderState.CANCELING)
         try:
-            snapshot = await self._exchange.cancel_order_by_client_id(
-                plan.symbol,
-                plan.client_order_id,
+            snapshot = await self._exchange_call(
+                plan,
+                operation="cancel",
+                call=lambda: self._exchange.cancel_order_by_client_id(
+                    plan.symbol,
+                    plan.client_order_id,
+                ),
             )
         except ExchangeCancellationUnknownError as exc:
             await self._append_event(
@@ -323,16 +403,62 @@ class OrderExecutionStateMachine:
                 f"{event_at.isoformat()}",
             )
         )
-        await self._repository.append_order_event(
-            ExchangeOrderEvent(
-                event_id=event_id,
-                client_order_id=plan.client_order_id,
-                state=state,
-                occurred_at=event_at,
-                exchange_order_id=exchange_order_id,
-                details=details or {},
-            )
+        event = ExchangeOrderEvent(
+            event_id=event_id,
+            client_order_id=plan.client_order_id,
+            state=state,
+            occurred_at=event_at,
+            exchange_order_id=exchange_order_id,
+            details=details or {},
         )
+        await self._repository.append_order_event(event)
+        await self._notify_event(plan, event)
+
+    async def _notify_event(
+        self,
+        plan: OrderExecutionPlan,
+        event: ExchangeOrderEvent,
+    ) -> None:
+        if self._on_event is not None:
+            await self._on_event(plan, event)
+
+    async def _exchange_call(
+        self,
+        plan: OrderExecutionPlan,
+        *,
+        operation: str,
+        call: Callable[[], Awaitable[ExchangeCallResult]],
+    ) -> ExchangeCallResult:
+        await self._notify_exchange_boundary(
+            plan,
+            f"{operation}_request_started",
+        )
+        try:
+            return await call()
+        finally:
+            await self._notify_exchange_boundary(
+                plan,
+                f"{operation}_response_received",
+            )
+
+    async def _notify_exchange_boundary(
+        self,
+        plan: OrderExecutionPlan,
+        phase: str,
+    ) -> None:
+        callback = (
+            self._on_exchange_request
+            if phase.endswith("request_started")
+            else self._on_exchange_response
+        )
+        if callback is None:
+            return
+        try:
+            await callback(plan, phase, self._now())
+        except Exception:
+            # Telemetry is deliberately not allowed to block an exchange
+            # command or change its failure semantics.
+            return
 
     def _now(self) -> datetime:
         now = self._clock()

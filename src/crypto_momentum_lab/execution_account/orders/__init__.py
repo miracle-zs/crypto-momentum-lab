@@ -1,3 +1,8 @@
+from crypto_momentum_lab.execution_account.orders.coordinator import (
+    OrderExecutionCoordinator,
+    OrderExecutionKey,
+    OrderExecutionPort,
+)
 from crypto_momentum_lab.execution_account.orders.ids import (
     BINANCE_CLIENT_ORDER_ID_MAX_LENGTH,
     deterministic_client_order_id,
@@ -15,6 +20,7 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     LiveSubmissionDisabledError,
     OrderExecutionResult,
     OrderExecutionStateMachine,
+    PreparedOrderSubmission,
     SubmitPolicy,
 )
 
@@ -24,6 +30,9 @@ __all__ = [
     "QuantizationRejection",
     "SymbolTradingRules",
     "quantize_order_plan",
+    "OrderExecutionCoordinator",
+    "OrderExecutionPort",
+    "OrderExecutionKey",
     "ExchangeOrderRejectedError",
     "ExchangeCancellationUnknownError",
     "ExchangeOrderQueryUnknownError",
@@ -31,5 +40,6 @@ __all__ = [
     "LiveSubmissionDisabledError",
     "OrderExecutionResult",
     "OrderExecutionStateMachine",
+    "PreparedOrderSubmission",
     "SubmitPolicy",
 ]

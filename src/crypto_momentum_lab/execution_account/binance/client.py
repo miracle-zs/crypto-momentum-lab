@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import cast
@@ -89,6 +89,7 @@ class BinanceUsdMPrivateReadClient:
         clock: Callable[[], datetime] | None = None,
         recv_window_ms: int = 5000,
         request_interval_seconds: float = 0.2,
+        command_request_interval_seconds: float | None = None,
     ) -> None:
         if not api_key.strip():
             raise ValueError("api_key must not be empty")
@@ -102,13 +103,24 @@ class BinanceUsdMPrivateReadClient:
             raise ValueError("recv_window_ms must be positive")
         if request_interval_seconds < 0:
             raise ValueError("request_interval_seconds must not be negative")
+        if command_request_interval_seconds is not None and (
+            command_request_interval_seconds < 0
+        ):
+            raise ValueError(
+                "command_request_interval_seconds must not be negative"
+            )
         self._api_key = api_key
         self._api_secret = api_secret
         self._environment = environment
         self._account_label = account_label
         self._clock = clock or (lambda: datetime.now(tz=UTC))
         self._recv_window_ms = recv_window_ms
-        self._request_pacer = _AsyncRequestPacer(request_interval_seconds)
+        self._read_request_pacer = _AsyncRequestPacer(request_interval_seconds)
+        self._command_request_pacer = _AsyncRequestPacer(
+            request_interval_seconds
+            if command_request_interval_seconds is None
+            else command_request_interval_seconds
+        )
         self._client = http_client or httpx.AsyncClient(
             base_url=base_url,
             trust_env=False,
@@ -273,7 +285,7 @@ class BinanceUsdMPrivateReadClient:
         params: dict[str, str | int | float | bool | None] | None = None,
     ) -> object:
         signed_params = self._signed_params(params or {})
-        await self._request_pacer.wait()
+        await self._read_request_pacer.wait()
         response = await self._client.get(
             path,
             params=signed_params,
@@ -288,7 +300,7 @@ class BinanceUsdMPrivateReadClient:
         params: dict[str, str | int | float | bool | None],
     ) -> object:
         signed_params = self._signed_params(params)
-        await self._request_pacer.wait()
+        await self._command_request_pacer.wait()
         response = await self._client.post(
             path,
             data=signed_params,
@@ -303,7 +315,7 @@ class BinanceUsdMPrivateReadClient:
         params: dict[str, str | int | float | bool | None],
     ) -> object:
         signed_params = self._signed_params(params)
-        await self._request_pacer.wait()
+        await self._command_request_pacer.wait()
         response = await self._client.delete(
             path,
             params=signed_params,
@@ -320,7 +332,7 @@ class BinanceUsdMPrivateReadClient:
         data: dict[str, str] | None = None,
     ) -> object:
         """Call an unsigned listen-key endpoint authenticated by API key."""
-        await self._request_pacer.wait()
+        await self._command_request_pacer.wait()
         response = await self._client.request(
             method,
             path,
@@ -374,6 +386,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         clock: Callable[[], datetime] | None = None,
         recv_window_ms: int = 5000,
         request_interval_seconds: float = 0.2,
+        command_request_interval_seconds: float | None = None,
         entry_leverage: int | None = None,
     ) -> None:
         if entry_leverage is not None and not 1 <= entry_leverage <= 125:
@@ -388,10 +401,23 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             clock=clock,
             recv_window_ms=recv_window_ms,
             request_interval_seconds=request_interval_seconds,
+            command_request_interval_seconds=command_request_interval_seconds,
         )
         self._live_submit_enabled = live_submit_enabled
         self._entry_leverage = entry_leverage
         self._configured_leverage_by_symbol: dict[str, int] = {}
+
+    async def warm_entry_leverage(self, symbols: Iterable[str]) -> None:
+        """Confirm entry leverage before the live market loop can submit."""
+
+        if not self._live_submit_enabled:
+            raise LiveSubmissionDisabledError(
+                "Binance trade client requires explicit live submit enablement"
+            )
+        if self._entry_leverage is None:
+            return
+        for symbol in _normalize_symbols(symbols):
+            await self._ensure_entry_leverage(symbol)
 
     async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
         if not self._live_submit_enabled:
@@ -634,7 +660,7 @@ def _optional_str(value: object) -> str | None:
     return text if text else None
 
 
-def _normalize_symbols(symbols: tuple[str, ...]) -> tuple[str, ...]:
+def _normalize_symbols(symbols: Iterable[str]) -> tuple[str, ...]:
     normalized = tuple(sorted({symbol.strip().upper() for symbol in symbols}))
     if any(not symbol for symbol in normalized):
         raise ValueError("fill symbols must not be empty")

@@ -106,6 +106,54 @@ async def test_save_exchange_order_event_is_idempotent(
     assert count == 1
 
 
+async def test_prepare_submission_journals_intent_order_and_event_together(
+    order_repository: tuple[
+        PostgresOrderRepository,
+        async_sessionmaker[AsyncSession],
+    ],
+) -> None:
+    repository, factory = order_repository
+    prepared = await repository.prepare_submission(
+        intent=_intent(),
+        evaluation=RiskEvaluation(
+            evaluation_id="evaluation-1",
+            candidate_id="candidate-1",
+            decision=RiskDecision.APPROVED,
+            reason="approved",
+            evaluated_at=NOW,
+            details={},
+        ),
+        plan=_plan(),
+        prepared_at=NOW + timedelta(milliseconds=2),
+    )
+
+    async with factory() as session:
+        intent_state = await session.scalar(
+            select(OrderIntentExecutionRow.state).where(
+                OrderIntentExecutionRow.intent_id == "candidate-1"
+            )
+        )
+        order_state = await session.scalar(
+            select(ExchangeOrderRow.state).where(
+                ExchangeOrderRow.client_order_id
+                == "cml_12345678901234567890123456789012"
+            )
+        )
+        event_states = (
+            await session.scalars(
+                select(ExchangeOrderEventRow.state).where(
+                    ExchangeOrderEventRow.client_order_id
+                    == "cml_12345678901234567890123456789012"
+                )
+            )
+        ).all()
+
+    assert prepared.submitting_event.state is ExchangeOrderState.SUBMITTING
+    assert intent_state == ExchangeOrderState.SUBMITTING.value
+    assert order_state == ExchangeOrderState.SUBMITTING.value
+    assert event_states == [ExchangeOrderState.SUBMITTING.value]
+
+
 async def test_load_unresolved_orders_returns_unknown_state(
     order_repository: tuple[
         PostgresOrderRepository,

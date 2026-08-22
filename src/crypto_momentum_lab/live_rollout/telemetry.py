@@ -1,0 +1,755 @@
+"""Low-overhead phase telemetry for the live strategy lanes.
+
+The recorder keeps the trading path independent from the database writer.  A
+phase is recorded in memory immediately, while a bounded queue forwards the
+same event to ``strategy_runtime_events`` when a persistence sink is present.
+This makes latency measurement useful during a database incident without
+turning telemetry into another reason to stop submitting or closing orders.
+"""
+
+import asyncio
+from collections import defaultdict, deque
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Protocol
+from uuid import NAMESPACE_URL, uuid5
+
+import structlog
+
+from crypto_momentum_lab.domain.execution import (
+    ExchangeOrderEvent,
+    ExchangeOrderState,
+    OrderExecutionPlan,
+)
+from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
+from crypto_momentum_lab.execution_account.hub import AccountEvent
+
+log = structlog.get_logger()
+
+LIVE_LANE_ENTRY = "entry"
+LIVE_LANE_EXIT = "exit"
+LIVE_LANE_UNKNOWN = "unknown"
+
+MARKET_STATE_RECEIVED = "market_state_received"
+STRATEGY_DECISION = "strategy_decision"
+CANDIDATE_ACCEPTED = "candidate_accepted"
+RISK_APPROVED = "risk_approved"
+INTENT_SAVED = "intent_saved"
+SUBMITTING = "submitting"
+EXCHANGE_REQUEST_STARTED = "exchange_request_started"
+EXCHANGE_RESPONSE_RECEIVED = "exchange_response_received"
+EXCHANGE_FILLED = "exchange_filled"
+ACCOUNT_FILL = "account_fill"
+
+_PHASE_ORDER = (
+    MARKET_STATE_RECEIVED,
+    STRATEGY_DECISION,
+    CANDIDATE_ACCEPTED,
+    RISK_APPROVED,
+    INTENT_SAVED,
+    SUBMITTING,
+    EXCHANGE_REQUEST_STARTED,
+    EXCHANGE_RESPONSE_RECEIVED,
+    EXCHANGE_FILLED,
+    ACCOUNT_FILL,
+)
+_REPEATABLE_PHASES = frozenset({ACCOUNT_FILL})
+_MAX_EVENT_BATCH = 128
+_PERSIST_BATCH_TIMEOUT_SECONDS = 0.25
+
+
+class LiveTelemetrySink(Protocol):
+    async def market_state_received(
+        self,
+        state: MarketState15s,
+        *,
+        occurred_at: datetime,
+        lane: str = LIVE_LANE_ENTRY,
+    ) -> None: ...
+
+    async def strategy_decision(
+        self,
+        state: MarketState15s,
+        *,
+        occurred_at: datetime,
+        signal_count: int,
+        candidate_count: int,
+    ) -> None: ...
+
+    async def candidate_accepted(
+        self,
+        candidate: object,
+        *,
+        state: MarketState15s,
+        occurred_at: datetime,
+        lane: str,
+    ) -> None: ...
+
+    async def risk_approved(
+        self,
+        candidate: object,
+        *,
+        state: MarketState15s,
+        occurred_at: datetime,
+        lane: str,
+        evaluation_id: str,
+    ) -> None: ...
+
+    async def intent_saved(
+        self,
+        candidate: object,
+        *,
+        state: MarketState15s,
+        occurred_at: datetime,
+        lane: str,
+    ) -> None: ...
+
+    async def order_event(
+        self,
+        plan: OrderExecutionPlan,
+        event: ExchangeOrderEvent,
+    ) -> None: ...
+
+    async def exchange_request_started(
+        self,
+        plan: OrderExecutionPlan,
+        phase: str,
+        occurred_at: datetime,
+    ) -> None: ...
+
+    async def exchange_response_received(
+        self,
+        plan: OrderExecutionPlan,
+        phase: str,
+        occurred_at: datetime,
+    ) -> None: ...
+
+    async def account_fill(
+        self,
+        event: AccountEvent,
+        *,
+        occurred_at: datetime,
+    ) -> None: ...
+
+
+RuntimeEventBatchSink = Callable[
+    [tuple[Mapping[str, object], ...]],
+    Awaitable[None],
+]
+
+
+@dataclass(frozen=True, slots=True)
+class LiveRuntimeEvent:
+    event_id: str
+    run_id: str
+    event_type: str
+    occurred_at: datetime
+    symbol: str | None
+    bucket_start: datetime | None
+    details: dict[str, JsonValue]
+
+    def row(self) -> dict[str, object]:
+        return {
+            "event_id": self.event_id,
+            "run_id": self.run_id,
+            "event_type": self.event_type,
+            "occurred_at": self.occurred_at,
+            "symbol": self.symbol,
+            "bucket_start": self.bucket_start,
+            "details": self.details,
+        }
+
+
+@dataclass(slots=True)
+class _Trace:
+    lane: str
+    symbol: str | None
+    bucket_start: datetime | None
+    phase_at: dict[str, datetime] = field(default_factory=dict)
+
+
+def state_trace_id(state: MarketState15s, lane: str) -> str:
+    """Return the stable trace key for one symbol/bucket/lane."""
+
+    return f"{lane}:{state.symbol}:{state.bucket_start.isoformat()}"
+
+
+class LiveRuntimeTelemetry:
+    """Record live lifecycle phases and calculate latency percentiles.
+
+    The persistence sink receives batches on a background task.  ``record``
+    methods still update phase timestamps synchronously before yielding, so a
+    slow or unavailable database cannot hide the latency of the live lanes.
+    """
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        persist: RuntimeEventBatchSink | None = None,
+        queue_size: int = 4096,
+        max_trace_count: int = 8192,
+        max_samples_per_metric: int = 4096,
+    ) -> None:
+        if not run_id.strip():
+            raise ValueError("run_id must not be empty")
+        if queue_size <= 0:
+            raise ValueError("queue_size must be positive")
+        if max_trace_count <= 0:
+            raise ValueError("max_trace_count must be positive")
+        if max_samples_per_metric <= 0:
+            raise ValueError("max_samples_per_metric must be positive")
+        self._run_id = run_id
+        self._persist = persist
+        self._queue_size = queue_size
+        self._max_trace_count = max_trace_count
+        self._max_samples_per_metric = max_samples_per_metric
+        self._queue: asyncio.Queue[LiveRuntimeEvent | None] | None = None
+        self._writer_task: asyncio.Task[None] | None = None
+        self._traces: dict[str, _Trace] = {}
+        self._order_trace_by_client: dict[str, str] = {}
+        self._order_lane_by_client: dict[str, str] = {}
+        self._order_clients: deque[str] = deque()
+        self._samples: dict[tuple[str, str, str], deque[float]] = defaultdict(
+            lambda: deque(maxlen=self._max_samples_per_metric)
+        )
+        self._recent_events: deque[LiveRuntimeEvent] = deque(maxlen=queue_size)
+        self._recorded_event_count = 0
+        self._dropped_event_count = 0
+        self._persist_failure_count = 0
+
+    @property
+    def recorded_event_count(self) -> int:
+        return self._recorded_event_count
+
+    @property
+    def dropped_event_count(self) -> int:
+        return self._dropped_event_count
+
+    @property
+    def persist_failure_count(self) -> int:
+        return self._persist_failure_count
+
+    @property
+    def recent_events(self) -> tuple[LiveRuntimeEvent, ...]:
+        return tuple(self._recent_events)
+
+    async def start(self) -> None:
+        if self._persist is None or self._writer_task is not None:
+            return
+        self._queue = asyncio.Queue(maxsize=self._queue_size)
+        self._writer_task = asyncio.create_task(
+            self._write_events(),
+            name="live-runtime-telemetry-writer",
+        )
+
+    async def stop(self) -> None:
+        writer_task = self._writer_task
+        queue = self._queue
+        if writer_task is None or queue is None:
+            return
+        await queue.put(None)
+        await writer_task
+        self._writer_task = None
+        self._queue = None
+        log.info(
+            "live_latency_telemetry_stopped",
+            run_id=self._run_id,
+            recorded_event_count=self._recorded_event_count,
+            dropped_event_count=self._dropped_event_count,
+            persist_failure_count=self._persist_failure_count,
+            latency_summary=self.latency_summary(),
+        )
+
+    async def market_state_received(
+        self,
+        state: MarketState15s,
+        *,
+        occurred_at: datetime,
+        lane: str = LIVE_LANE_ENTRY,
+    ) -> None:
+        await self._record_phase(
+            phase=MARKET_STATE_RECEIVED,
+            trace_id=state_trace_id(state, lane),
+            lane=lane,
+            symbol=state.symbol,
+            bucket_start=state.bucket_start,
+            occurred_at=occurred_at,
+            details={
+                "source_first_received_at": _optional_iso(state.first_received_at),
+                "source_last_received_at": _optional_iso(state.last_received_at),
+                "source_event_count": state.source_event_count,
+            },
+        )
+
+    async def strategy_decision(
+        self,
+        state: MarketState15s,
+        *,
+        occurred_at: datetime,
+        signal_count: int,
+        candidate_count: int,
+    ) -> None:
+        await self._record_phase(
+            phase=STRATEGY_DECISION,
+            trace_id=state_trace_id(state, LIVE_LANE_ENTRY),
+            lane=LIVE_LANE_ENTRY,
+            symbol=state.symbol,
+            bucket_start=state.bucket_start,
+            occurred_at=occurred_at,
+            details={
+                "signal_count": signal_count,
+                "candidate_count": candidate_count,
+            },
+        )
+
+    async def candidate_accepted(
+        self,
+        candidate: object,
+        *,
+        state: MarketState15s,
+        occurred_at: datetime,
+        lane: str,
+    ) -> None:
+        candidate_id = _required_text(candidate, "candidate_id")
+        await self._record_phase(
+            phase=CANDIDATE_ACCEPTED,
+            trace_id=candidate_id,
+            parent_trace_id=state_trace_id(state, lane),
+            lane=lane,
+            symbol=state.symbol,
+            bucket_start=state.bucket_start,
+            occurred_at=occurred_at,
+            details={
+                "candidate_id": candidate_id,
+                "signal_id": _optional_text(candidate, "signal_id"),
+                "reduce_only": bool(getattr(candidate, "reduce_only", False)),
+            },
+        )
+
+    async def risk_approved(
+        self,
+        candidate: object,
+        *,
+        state: MarketState15s,
+        occurred_at: datetime,
+        lane: str,
+        evaluation_id: str,
+    ) -> None:
+        candidate_id = _required_text(candidate, "candidate_id")
+        await self._record_phase(
+            phase=RISK_APPROVED,
+            trace_id=candidate_id,
+            lane=lane,
+            symbol=state.symbol,
+            bucket_start=state.bucket_start,
+            occurred_at=occurred_at,
+            details={
+                "candidate_id": candidate_id,
+                "evaluation_id": evaluation_id,
+            },
+        )
+
+    async def intent_saved(
+        self,
+        candidate: object,
+        *,
+        state: MarketState15s,
+        occurred_at: datetime,
+        lane: str,
+    ) -> None:
+        candidate_id = _required_text(candidate, "candidate_id")
+        await self._record_phase(
+            phase=INTENT_SAVED,
+            trace_id=candidate_id,
+            lane=lane,
+            symbol=state.symbol,
+            bucket_start=state.bucket_start,
+            occurred_at=occurred_at,
+            details={"candidate_id": candidate_id},
+        )
+
+    async def order_event(
+        self,
+        plan: OrderExecutionPlan,
+        event: ExchangeOrderEvent,
+    ) -> None:
+        lane = LIVE_LANE_EXIT if plan.reduce_only else LIVE_LANE_ENTRY
+        if plan.client_order_id not in self._order_trace_by_client:
+            self._order_clients.append(plan.client_order_id)
+        self._order_trace_by_client[plan.client_order_id] = plan.intent_id
+        self._order_lane_by_client[plan.client_order_id] = lane
+        while len(self._order_trace_by_client) > self._max_trace_count:
+            oldest_client_order_id = self._order_clients.popleft()
+            self._order_trace_by_client.pop(oldest_client_order_id, None)
+            self._order_lane_by_client.pop(oldest_client_order_id, None)
+        if event.state is ExchangeOrderState.SUBMITTING:
+            phase = SUBMITTING
+        elif event.state is ExchangeOrderState.FILLED:
+            phase = EXCHANGE_FILLED
+        else:
+            return
+        await self._record_phase(
+            phase=phase,
+            trace_id=plan.intent_id,
+            lane=lane,
+            symbol=plan.symbol,
+            bucket_start=self._trace_bucket_start(plan.intent_id),
+            occurred_at=event.occurred_at,
+            details={
+                "client_order_id": plan.client_order_id,
+                "intent_id": plan.intent_id,
+                "exchange_order_id": event.exchange_order_id,
+                "order_state": event.state.value,
+                "reduce_only": plan.reduce_only,
+                **event.details,
+            },
+        )
+
+    async def exchange_request_started(
+        self,
+        plan: OrderExecutionPlan,
+        phase: str,
+        occurred_at: datetime,
+    ) -> None:
+        await self._record_exchange_boundary(plan, phase, occurred_at)
+
+    async def exchange_response_received(
+        self,
+        plan: OrderExecutionPlan,
+        phase: str,
+        occurred_at: datetime,
+    ) -> None:
+        await self._record_exchange_boundary(plan, phase, occurred_at)
+
+    async def _record_exchange_boundary(
+        self,
+        plan: OrderExecutionPlan,
+        phase: str,
+        occurred_at: datetime,
+    ) -> None:
+        lane = LIVE_LANE_EXIT if plan.reduce_only else LIVE_LANE_ENTRY
+        await self._record_phase(
+            phase=(
+                EXCHANGE_REQUEST_STARTED
+                if phase.endswith("request_started")
+                else EXCHANGE_RESPONSE_RECEIVED
+            ),
+            trace_id=plan.intent_id,
+            lane=lane,
+            symbol=plan.symbol,
+            bucket_start=self._trace_bucket_start(plan.intent_id),
+            occurred_at=occurred_at,
+            details={
+                "client_order_id": plan.client_order_id,
+                "intent_id": plan.intent_id,
+                "operation": phase.removesuffix("_request_started").removesuffix(
+                    "_response_received"
+                ),
+                "reduce_only": plan.reduce_only,
+            },
+        )
+
+    async def account_fill(
+        self,
+        event: AccountEvent,
+        *,
+        occurred_at: datetime,
+    ) -> None:
+        if not event.has_fill:
+            return
+        client_order_id = event.client_order_id
+        trace_id = (
+            self._order_trace_by_client.get(client_order_id or "")
+            or client_order_id
+            or event.event_id
+        )
+        trace = self._traces.get(trace_id)
+        lane = self._order_lane_by_client.get(
+            client_order_id or "",
+            trace.lane if trace is not None else LIVE_LANE_UNKNOWN,
+        )
+        symbol = event.symbol or (trace.symbol if trace is not None else None)
+        bucket_start = trace.bucket_start if trace is not None else None
+        await self._record_phase(
+            phase=ACCOUNT_FILL,
+            trace_id=trace_id,
+            lane=lane,
+            symbol=symbol,
+            bucket_start=bucket_start,
+            occurred_at=occurred_at,
+            details={
+                "account_event_id": event.event_id,
+                "client_order_id": client_order_id,
+                "trade_id": event.trade_id,
+                "order_status": event.order_status,
+                "source_event_at": event.event_at.isoformat(),
+                "source_received_at": event.received_at.isoformat(),
+            },
+        )
+
+    def latency_summary(
+        self,
+    ) -> dict[str, dict[str, dict[str, dict[str, float | int]]]]:
+        summary: dict[
+            str,
+            dict[str, dict[str, dict[str, float | int]]],
+        ] = {}
+        for (symbol, lane, transition), values in sorted(self._samples.items()):
+            symbol_summary = summary.setdefault(symbol, {})
+            lane_summary = symbol_summary.setdefault(lane, {})
+            sorted_values = sorted(values)
+            lane_summary[transition] = {
+                "count": len(sorted_values),
+                "p50_ms": _percentile(sorted_values, 0.50),
+                "p95_ms": _percentile(sorted_values, 0.95),
+                "max_ms": sorted_values[-1],
+            }
+        return summary
+
+    async def _record_phase(
+        self,
+        *,
+        phase: str,
+        trace_id: str,
+        lane: str,
+        symbol: str | None,
+        bucket_start: datetime | None,
+        occurred_at: datetime,
+        details: Mapping[str, JsonValue],
+        parent_trace_id: str | None = None,
+    ) -> None:
+        _require_aware(occurred_at, "occurred_at")
+        trace = self._ensure_trace(
+            trace_id=trace_id,
+            parent_trace_id=parent_trace_id,
+            lane=lane,
+            symbol=symbol,
+            bucket_start=bucket_start,
+        )
+        event_details: dict[str, JsonValue] = {
+            key: _json_value(value) for key, value in details.items()
+        }
+        event_details.update(
+            {
+                "phase": phase,
+                "lane": lane,
+                "trace_id": trace_id,
+            }
+        )
+        previous_phase = _previous_phase(phase, trace.phase_at)
+        if previous_phase is not None:
+            previous_at = trace.phase_at[previous_phase]
+            delta_ms = (occurred_at - previous_at).total_seconds() * 1000
+            event_details["previous_phase"] = previous_phase
+            event_details["latency_ms_from_previous"] = delta_ms
+            if delta_ms >= 0 and (
+                phase not in trace.phase_at or phase in _REPEATABLE_PHASES
+            ):
+                self._add_sample(
+                    symbol=symbol or trace.symbol or "UNKNOWN",
+                    lane=lane,
+                    transition=f"{previous_phase}->{phase}",
+                    value=delta_ms,
+                )
+        if (
+            MARKET_STATE_RECEIVED in trace.phase_at
+            and phase != MARKET_STATE_RECEIVED
+            and (phase not in trace.phase_at or phase in _REPEATABLE_PHASES)
+        ):
+            origin_delta_ms = (
+                occurred_at - trace.phase_at[MARKET_STATE_RECEIVED]
+            ).total_seconds() * 1000
+            event_details["latency_ms_from_market_state"] = origin_delta_ms
+            if origin_delta_ms >= 0:
+                self._add_sample(
+                    symbol=symbol or trace.symbol or "UNKNOWN",
+                    lane=lane,
+                    transition=f"{MARKET_STATE_RECEIVED}->{phase}",
+                    value=origin_delta_ms,
+                )
+        if phase not in trace.phase_at or phase in _REPEATABLE_PHASES:
+            trace.phase_at[phase] = occurred_at
+        event = LiveRuntimeEvent(
+            event_id=str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"live-runtime:{self._run_id}:{phase}:{trace_id}:"
+                    f"{occurred_at.isoformat()}",
+                )
+            ),
+            run_id=self._run_id,
+            event_type=phase,
+            occurred_at=occurred_at,
+            symbol=symbol or trace.symbol,
+            bucket_start=bucket_start or trace.bucket_start,
+            details=event_details,
+        )
+        self._recorded_event_count += 1
+        self._recent_events.append(event)
+        self._enqueue(event)
+
+    def _ensure_trace(
+        self,
+        *,
+        trace_id: str,
+        parent_trace_id: str | None,
+        lane: str,
+        symbol: str | None,
+        bucket_start: datetime | None,
+    ) -> _Trace:
+        trace = self._traces.get(trace_id)
+        if trace is None:
+            parent = self._traces.get(parent_trace_id or "")
+            trace = _Trace(
+                lane=lane,
+                symbol=symbol or (parent.symbol if parent is not None else None),
+                bucket_start=(
+                    bucket_start
+                    or (parent.bucket_start if parent is not None else None)
+                ),
+                phase_at=(dict(parent.phase_at) if parent is not None else {}),
+            )
+            self._traces[trace_id] = trace
+            self._trim_traces()
+        return trace
+
+    def _trace_bucket_start(self, trace_id: str) -> datetime | None:
+        trace = self._traces.get(trace_id)
+        return None if trace is None else trace.bucket_start
+
+    def _trim_traces(self) -> None:
+        while len(self._traces) > self._max_trace_count:
+            oldest = next(iter(self._traces))
+            self._traces.pop(oldest, None)
+
+    def _add_sample(
+        self,
+        *,
+        symbol: str,
+        lane: str,
+        transition: str,
+        value: float,
+    ) -> None:
+        self._samples[(symbol, lane, transition)].append(value)
+
+    def _enqueue(self, event: LiveRuntimeEvent) -> None:
+        if self._queue is None:
+            return
+        try:
+            self._queue.put_nowait(event)
+        except asyncio.QueueFull:
+            self._dropped_event_count += 1
+
+    async def _write_events(self) -> None:
+        if self._queue is None or self._persist is None:
+            return
+        while True:
+            first = await self._queue.get()
+            if first is None:
+                return
+            batch = [first]
+            stop_after_batch = False
+            for _ in range(_MAX_EVENT_BATCH - 1):
+                try:
+                    next_event = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if next_event is None:
+                    stop_after_batch = True
+                    break
+                batch.append(next_event)
+            try:
+                await asyncio.wait_for(
+                    self._persist(tuple(event.row() for event in batch)),
+                    timeout=_PERSIST_BATCH_TIMEOUT_SECONDS,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._persist_failure_count += len(batch)
+                log.warning(
+                    "live_runtime_telemetry_persist_failed",
+                    run_id=self._run_id,
+                    event_count=len(batch),
+                    error_type=type(error).__name__,
+                )
+            if stop_after_batch:
+                return
+
+
+def _previous_phase(phase: str, phase_at: Mapping[str, datetime]) -> str | None:
+    try:
+        phase_index = _PHASE_ORDER.index(phase)
+    except ValueError:
+        return None
+    for previous in reversed(_PHASE_ORDER[:phase_index]):
+        if previous in phase_at:
+            return previous
+    return None
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    position = (len(values) - 1) * percentile
+    lower_index = int(position)
+    upper_index = min(lower_index + 1, len(values) - 1)
+    weight = position - lower_index
+    return values[lower_index] + (
+        values[upper_index] - values[lower_index]
+    ) * weight
+
+
+def _required_text(value: object, field_name: str) -> str:
+    result = _optional_text(value, field_name)
+    if result is None:
+        raise ValueError(f"{field_name} must be non-empty")
+    return result
+
+
+def _optional_text(value: object, field_name: str) -> str | None:
+    result = getattr(value, field_name, None)
+    if result is None:
+        return None
+    text = str(result).strip()
+    return text or None
+
+
+def _optional_iso(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat()
+
+
+def _json_value(value: object) -> JsonValue:
+    if isinstance(value, str | int | float | bool) or value is None:
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_value(item) for item in value]
+    return str(value)
+
+
+def _require_aware(value: datetime, field_name: str) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+
+
+__all__ = [
+    "ACCOUNT_FILL",
+    "CANDIDATE_ACCEPTED",
+    "EXCHANGE_FILLED",
+    "INTENT_SAVED",
+    "LIVE_LANE_ENTRY",
+    "LIVE_LANE_EXIT",
+    "LIVE_LANE_UNKNOWN",
+    "LiveRuntimeEvent",
+    "LiveRuntimeTelemetry",
+    "LiveTelemetrySink",
+    "MARKET_STATE_RECEIVED",
+    "RISK_APPROVED",
+    "STRATEGY_DECISION",
+    "SUBMITTING",
+    "state_trace_id",
+]

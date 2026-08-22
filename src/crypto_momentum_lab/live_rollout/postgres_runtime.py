@@ -86,22 +86,34 @@ class PostgresLiveContextProvider:
         self._order_repository = PostgresOrderRepository(session_factory)
         self._cached_bucket_start: datetime | None = None
         self._cached_context: LiveDaemonRuntimeContext | None = None
+        self._cache_epoch = 0
         self._cached_rules: dict[str, SymbolTradingRules] = {}
         self._cached_rules_at: dict[str, datetime] = {}
 
     async def __call__(self, state: MarketState15s) -> LiveDaemonRuntimeContext:
         now = datetime.now(tz=UTC)
+        cached_context = self._cached_context
         if (
             self._cached_bucket_start == state.bucket_start
-            and self._cached_context is not None
+            and cached_context is not None
         ):
             symbol_rules = await self._load_symbol_rules(state.symbol, now)
-            return replace(
-                self._cached_context,
-                now=now,
-                gate_context=replace(self._cached_context.gate_context, now=now),
-                trading_rules={state.symbol: symbol_rules},
-            )
+            current_context = self._cached_context
+            if (
+                self._cached_bucket_start == state.bucket_start
+                and current_context is not None
+            ):
+                return replace(
+                    current_context,
+                    now=now,
+                    gate_context=replace(current_context.gate_context, now=now),
+                    trading_rules={state.symbol: symbol_rules},
+                )
+            # An account event may invalidate the cache while symbol rules are
+            # loading. Fall through and reload the full account/risk context;
+            # returning the captured context here could make an entry decision
+            # from stale positions or gate state.
+        cache_epoch = getattr(self, "_cache_epoch", 0)
         approval_task = asyncio.create_task(
             self._live_repository.load_active_approval(
                 account_label=self._account_label,
@@ -211,8 +223,15 @@ class PostgresLiveContextProvider:
             unmanaged_position_symbols=unmanaged_symbols,
             unresolved_orders=unresolved,
         )
-        self._cached_bucket_start = state.bucket_start
-        self._cached_context = context
+        if (
+            self._cache_epoch == cache_epoch
+            and (
+                self._cached_bucket_start is None
+                or state.bucket_start >= self._cached_bucket_start
+            )
+        ):
+            self._cached_bucket_start = state.bucket_start
+            self._cached_context = context
         return context
 
     def update_lease(self, lease: TradingLease) -> None:
@@ -236,6 +255,7 @@ class PostgresLiveContextProvider:
 
     def invalidate_cache(self) -> None:
         """Force the next state to reload account and risk state."""
+        self._cache_epoch = getattr(self, "_cache_epoch", 0) + 1
         self._cached_bucket_start = None
         self._cached_context = None
         self._cached_rules.clear()

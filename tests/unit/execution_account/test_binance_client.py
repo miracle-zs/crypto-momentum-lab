@@ -12,6 +12,7 @@ from crypto_momentum_lab.domain.execution import (
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.execution_account.binance.client import (
+    BinanceRateLimitError,
     BinanceUsdMPrivateReadClient,
     BinanceUsdMTradeClient,
 )
@@ -90,6 +91,36 @@ async def test_client_fetches_account_snapshot() -> None:
     assert balances[0].wallet_balance == Decimal("100.5")
     assert balances[0].available_balance == Decimal("80.25")
     assert balances[0].unrealized_pnl == Decimal("1.5")
+
+
+async def test_client_exposes_binance_rate_limit_retry_after() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "17"},
+            json={"code": -1003, "msg": "Too many requests"},
+        )
+
+    client = BinanceUsdMPrivateReadClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        with pytest.raises(BinanceRateLimitError) as error:
+            await client.fetch_balances()
+    finally:
+        await client.aclose()
+
+    assert error.value.retry_after_seconds == 17.0
 
 
 async def test_client_fetches_account_and_position_modes() -> None:
@@ -181,6 +212,50 @@ async def test_client_fetches_recent_user_trades() -> None:
     assert fills[0].price == Decimal("30000.5")
     assert fills[0].realized_pnl == Decimal("-0.25")
     assert fills[0].fee == Decimal("0.12")
+
+
+async def test_client_manages_user_data_listen_key_without_signature() -> None:
+    requests: list[tuple[str, str, str]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(
+            (
+                request.method,
+                request.url.path,
+                request.content.decode(),
+            )
+        )
+        assert request.headers["X-MBX-APIKEY"] == "key"
+        if request.method == "POST":
+            return httpx.Response(200, json={"listenKey": "listen-key-1"})
+        return httpx.Response(200, json={})
+
+    client = BinanceUsdMPrivateReadClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        base_url="https://fapi.binance.com",
+        request_interval_seconds=0,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+    )
+
+    try:
+        listen_key = await client.start_user_data_stream()
+        await client.keepalive_user_data_stream(listen_key)
+        await client.close_user_data_stream(listen_key)
+    finally:
+        await client.aclose()
+
+    assert listen_key == "listen-key-1"
+    assert requests == [
+        ("POST", "/fapi/v1/listenKey", ""),
+        ("PUT", "/fapi/v1/listenKey", "listenKey=listen-key-1"),
+        ("DELETE", "/fapi/v1/listenKey", "listenKey=listen-key-1"),
+    ]
 
 
 async def test_order_lookup_timeout_becomes_reconciliation_error() -> None:
@@ -432,6 +507,52 @@ async def test_trade_client_confirms_entry_leverage_before_order() -> None:
     )
 
     try:
+        await client.submit_order(_order_plan())
+    finally:
+        await client.aclose()
+
+    assert requested_paths == ["/fapi/v1/leverage", "/fapi/v1/order"]
+
+
+async def test_trade_client_warm_entry_leverage_removes_first_order_round_trip(
+) -> None:
+    requested_paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/fapi/v1/leverage":
+            return httpx.Response(
+                200,
+                json={"symbol": "BTCUSDT", "leverage": 1},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": _order_plan().client_order_id,
+                "orderId": 12345,
+                "status": "FILLED",
+                "executedQty": "0.003",
+                "avgPrice": "30000",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        entry_leverage=1,
+    )
+
+    try:
+        await client.warm_entry_leverage(("BTCUSDT",))
         await client.submit_order(_order_plan())
     finally:
         await client.aclose()

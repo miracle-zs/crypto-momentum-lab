@@ -11,9 +11,11 @@ from crypto_momentum_lab.domain.live_rollout import (
     LiveSessionState,
     LiveSessionTransition,
 )
+from crypto_momentum_lab.execution_account.orders.coordinator import (
+    OrderExecutionPort,
+)
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
-    OrderExecutionStateMachine,
 )
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext, evaluate_live_gate
 
@@ -43,7 +45,7 @@ class LiveRolloutSession:
         self,
         *,
         repository: LiveTransitionRepository,
-        state_machine: OrderExecutionStateMachine,
+        state_machine: OrderExecutionPort,
         config: LiveSessionConfig,
         clock: Callable[[], datetime],
     ) -> None:

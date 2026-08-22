@@ -15,10 +15,59 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
     OrderExecutionStateMachine,
+    PreparedOrderSubmission,
     SubmitPolicy,
 )
 
 NOW = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+
+
+async def test_prepared_submission_does_not_duplicate_write_ahead_journal() -> None:
+    exchange = FakeExchange(
+        submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED),
+    )
+    repository = FakeOrderRepository()
+    callback_events: list[ExchangeOrderEvent] = []
+
+    async def on_event(_plan: OrderExecutionPlan, event: ExchangeOrderEvent) -> None:
+        callback_events.append(event)
+
+    plan = _plan()
+    prepared_event = ExchangeOrderEvent(
+        event_id="submitting-1",
+        client_order_id=plan.client_order_id,
+        state=ExchangeOrderState.SUBMITTING,
+        occurred_at=NOW,
+        exchange_order_id=None,
+        details={},
+    )
+    machine = OrderExecutionStateMachine(
+        exchange=exchange,
+        repository=repository,
+        submit_policy=SubmitPolicy.LIVE_SUBMIT,
+        live_submit_enabled=True,
+        clock=lambda: NOW,
+        on_event=on_event,
+        serialize_commands=False,
+    )
+
+    result = await machine.execute_approved_intent(
+        plan,
+        prepared_submission=PreparedOrderSubmission(
+            plan=plan,
+            submitting_event=prepared_event,
+        ),
+    )
+
+    assert result.state is ExchangeOrderState.ACKNOWLEDGED
+    assert repository.plans == []
+    assert [event.state for event in repository.events] == [
+        ExchangeOrderState.ACKNOWLEDGED
+    ]
+    assert [event.state for event in callback_events] == [
+        ExchangeOrderState.SUBMITTING,
+        ExchangeOrderState.ACKNOWLEDGED,
+    ]
 
 
 async def test_timeout_queries_by_client_order_id_before_retry() -> None:

@@ -12,7 +12,8 @@ from uuid import uuid4
 import structlog
 import typer
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.apps.shadow_operation.main import (
     _latest_account_state,
@@ -46,8 +47,13 @@ from crypto_momentum_lab.execution_account.hub import (
     AccountEvent,
     WebSocketAccountEventSource,
 )
+from crypto_momentum_lab.execution_account.orders.coordinator import (
+    OrderExecutionCoordinator,
+    OrderExecutionPort,
+)
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
+    PreparedOrderSubmission,
     SubmitPolicy,
 )
 from crypto_momentum_lab.live_rollout.daemon import (
@@ -81,6 +87,10 @@ from crypto_momentum_lab.live_rollout.session import (
     LiveRolloutSession,
     LiveSessionConfig,
     LiveSessionResult,
+)
+from crypto_momentum_lab.live_rollout.telemetry import (
+    LiveRuntimeTelemetry,
+    LiveTelemetrySink,
 )
 from crypto_momentum_lab.market_data.hub import (
     MarketStateHubError,
@@ -584,6 +594,7 @@ async def _run_live_plan(
     now = datetime.now(tz=UTC)
     engine = create_async_database_engine(database_url)
     client: BinanceUsdMTradeClient | None = None
+    execution_coordinator: OrderExecutionCoordinator | None = None
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         live_repository = PostgresLiveRolloutRepository(factory)
@@ -650,10 +661,15 @@ async def _run_live_plan(
             submit_policy=SubmitPolicy.LIVE_SUBMIT,
             live_submit_enabled=True,
             clock=lambda: datetime.now(tz=UTC),
+            serialize_commands=False,
+        )
+        execution_coordinator = OrderExecutionCoordinator(
+            backend=machine,
+            account_label=account_label,
         )
         session = LiveRolloutSession(
             repository=live_repository,
-            state_machine=machine,
+            state_machine=execution_coordinator,
             config=LiveSessionConfig(
                 session_id=session_id,
                 operator=operator,
@@ -679,6 +695,8 @@ async def _run_live_plan(
             plan=plan,
         )
     finally:
+        if execution_coordinator is not None:
+            await execution_coordinator.aclose()
         if client is not None:
             await client.aclose()
         await engine.dispose()
@@ -734,15 +752,21 @@ async def _session_was_live_enabled(
     session_id: str,
 ) -> bool:
     async with factory() as database_session:
-        transition_id = await database_session.scalar(
-            select(LiveSessionTransitionRow.transition_id)
+        latest_state = await database_session.scalar(
+            select(LiveSessionTransitionRow.state)
             .where(
                 LiveSessionTransitionRow.session_id == session_id,
-                LiveSessionTransitionRow.state == LiveSessionState.LIVE_ENABLED.value,
+                LiveSessionTransitionRow.state.not_in(
+                    (
+                        LiveSessionState.PREFLIGHT.value,
+                        LiveSessionState.SHADOW_PREFLIGHT.value,
+                    )
+                ),
             )
+            .order_by(LiveSessionTransitionRow.occurred_at.desc())
             .limit(1)
         )
-    return transition_id is not None
+    return latest_state == LiveSessionState.LIVE_ENABLED.value
 
 
 async def _maybe_auto_reacquire_live_lease(
@@ -849,20 +873,43 @@ async def _run_live_daemon(
         raise ValueError("account_event_hub_url must not be empty")
     now = datetime.now(tz=UTC)
     engine = create_async_database_engine(database_url)
+    heartbeat_engine: AsyncEngine | None = None
     client: BinanceUsdMTradeClient | None = None
+    execution_coordinator: OrderExecutionCoordinator | None = None
     candle_source: BinanceRestClosedCandle15mSource | None = None
     ema_candle_source: BinanceRestClosedCandle15mSource | None = None
     entry_filter_cache: LiveEntryFilterCache | None = None
     entry_filter_cache_task: asyncio.Task[None] | None = None
     live_repository: PostgresLiveRolloutRepository | None = None
+    telemetry: LiveRuntimeTelemetry | None = None
     risk_config_hash = ""
     startup_phase = True
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         live_repository = PostgresLiveRolloutRepository(factory)
         risk_repository = PostgresRiskRepository(factory)
+        # Lease liveness is a control-plane concern.  Give it one isolated
+        # connection with a short driver timeout so a slow market/reconcile
+        # query cannot consume the pool needed by the heartbeat.
+        heartbeat_engine = create_async_database_engine(
+            database_url,
+            pool_size=1,
+            max_overflow=0,
+            pool_timeout_seconds=3,
+            command_timeout_seconds=5,
+        )
+        heartbeat_factory = async_sessionmaker(
+            heartbeat_engine,
+            expire_on_commit=False,
+        )
+        heartbeat_risk_repository = PostgresRiskRepository(heartbeat_factory)
         order_repository = PostgresOrderRepository(factory)
         checkpoint_repository = PostgresPaperDaemonRepository(factory)
+        telemetry = LiveRuntimeTelemetry(
+            run_id=session_id,
+            persist=checkpoint_repository.save_runtime_events,
+        )
+        await telemetry.start()
         risk_config = await _latest_risk_config(factory, account_label)
         risk_config_hash = risk_config.config_hash
         client = BinanceUsdMTradeClient(
@@ -887,10 +934,18 @@ async def _run_live_daemon(
             submit_policy=SubmitPolicy.LIVE_SUBMIT,
             live_submit_enabled=True,
             clock=lambda: datetime.now(tz=UTC),
+            on_event=telemetry.order_event,
+            on_exchange_request=telemetry.exchange_request_started,
+            on_exchange_response=telemetry.exchange_response_received,
+            serialize_commands=False,
+        )
+        execution_coordinator = OrderExecutionCoordinator(
+            backend=state_machine,
+            account_label=account_label,
         )
         await _reconcile_run_orders(
             order_repository=order_repository,
-            state_machine=state_machine,
+            state_machine=execution_coordinator,
             run_id=session_id,
         )
         draining = await _session_is_draining(factory, session_id)
@@ -1037,6 +1092,26 @@ async def _run_live_daemon(
                 )
 
             entry_symbol_loader = load_entry_symbols_from_database
+        if entry_symbol_loader is not None and entry_leverage is not None:
+            assert client is not None
+            try:
+                initial_entry_symbols = await entry_symbol_loader(now)
+                await client.warm_entry_leverage(initial_entry_symbols)
+                log.info(
+                    "live_entry_leverage_warmed",
+                    symbol_count=len(initial_entry_symbols),
+                    leverage=entry_leverage,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                # A failed warmup keeps the existing per-symbol confirmation
+                # fallback in place. It must be visible, but it must not make
+                # exits unavailable during startup.
+                log.warning(
+                    "live_entry_leverage_warmup_failed",
+                    error_type=type(error).__name__,
+                )
         entry_filter_cache_required = (
             ema_provider is not None and entry_symbol_loader is not None
         )
@@ -1106,8 +1181,47 @@ async def _run_live_daemon(
             lease_owner=lease_owner,
             approval_id=approval.approval_id,
         )
+        heartbeat_context_provider = PostgresLiveContextProvider(
+            session_factory=heartbeat_factory,
+            account_label=account_label,
+            run_id=session_id,
+            strategy_name=strategy_name,
+            strategy_config_hash=strategy_config_hash,
+            git_commit_hash=git_commit_hash,
+            migration_revision=migration_revision,
+            lease_owner=lease_owner,
+            approval_id=approval.approval_id,
+        )
+        latest_market_states = _LatestMarketStateCache()
+
+        async def recover_live_lease() -> TradingLease | None:
+            states = latest_market_states.for_symbols(())
+            if not states:
+                return None
+            latest_state = states[-1]
+            heartbeat_context_provider.invalidate_cache()
+            recovery_context = await heartbeat_context_provider(latest_state)
+            return await _maybe_auto_reacquire_live_lease(
+                factory=heartbeat_factory,
+                risk_repository=heartbeat_risk_repository,
+                gate_context=recovery_context.gate_context,
+                session_id=session_id,
+                draining=await _session_is_draining(
+                    heartbeat_factory,
+                    session_id,
+                ),
+            )
+        def on_lease_renewed(lease: TradingLease) -> None:
+            context_provider.update_lease(lease)
+            log.info(
+                "live_lease_renewed",
+                session_id=session_id,
+                lease_id=lease.lease_id,
+                lease_expires_at=lease.expires_at.isoformat(),
+            )
+
         lease_heartbeat = LiveLeaseHeartbeat(
-            repository=risk_repository,
+            repository=heartbeat_risk_repository,
             lease=active_lease,
             owner=lease_owner,
             config=LeaseHeartbeatConfig(
@@ -1115,12 +1229,13 @@ async def _run_live_daemon(
                 renew_before_seconds=_LIVE_LEASE_RENEW_BEFORE_SECONDS,
                 poll_interval_seconds=_LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS,
             ),
-            on_renewed=context_provider.update_lease,
+            on_renewed=on_lease_renewed,
             on_error=lambda error: log.warning(
                 "live_lease_renewal_failed",
                 session_id=session_id,
                 error_type=type(error).__name__,
             ),
+            recover=recover_live_lease,
         )
         daemon = LiveStrategyDaemon(
             strategy=strategy,
@@ -1135,8 +1250,9 @@ async def _run_live_daemon(
                 order_repository,
                 checkpoint_repository,
             ),
-            state_machine=state_machine,
+            state_machine=execution_coordinator,
             context_provider=context_provider,
+            telemetry=telemetry,
             config=LiveDaemonConfig(
                 run_id=session_id,
                 resize_tolerance=Decimal("0.10"),
@@ -1245,7 +1361,6 @@ async def _run_live_daemon(
                 poll_interval_seconds=poll_interval_seconds,
                 cursor=market_cursor,
             )
-        latest_market_states = _LatestMarketStateCache()
         account_source = WebSocketAccountEventSource(
             url=account_event_hub_url,
             environment="live",
@@ -1261,8 +1376,9 @@ async def _run_live_daemon(
                 daemon=daemon,
                 latest_market_states=latest_market_states,
                 order_repository=order_repository,
-                state_machine=state_machine,
+                state_machine=execution_coordinator,
                 run_id=session_id,
+                telemetry=telemetry,
             )
         )
         if entry_filter_cache is not None:
@@ -1273,7 +1389,7 @@ async def _run_live_daemon(
         reconcile_task = asyncio.create_task(
             _periodic_reconcile_run_orders(
                 order_repository=order_repository,
-                state_machine=state_machine,
+                state_machine=execution_coordinator,
                 run_id=session_id,
             )
         )
@@ -1363,13 +1479,19 @@ async def _run_live_daemon(
             )
         raise
     finally:
+        if execution_coordinator is not None:
+            await execution_coordinator.aclose()
         if client is not None:
             await client.aclose()
         if candle_source is not None:
             candle_source.close()
         if ema_candle_source is not None:
             ema_candle_source.close()
+        if telemetry is not None:
+            await telemetry.stop()
         await engine.dispose()
+        if heartbeat_engine is not None:
+            await heartbeat_engine.dispose()
 
 
 class _LatestMarketStateCache:
@@ -1442,28 +1564,49 @@ async def _run_account_event_channel(
     daemon: LiveStrategyDaemon,
     latest_market_states: _LatestMarketStateCache,
     order_repository: PostgresOrderRepository,
-    state_machine: OrderExecutionStateMachine,
+    state_machine: OrderExecutionPort,
     run_id: str,
+    telemetry: LiveTelemetrySink | None = None,
 ) -> None:
     async for event in source:
-        if event.event_type == "ORDER_TRADE_UPDATE" and event.client_order_id:
-            await _reconcile_account_event_order(
-                event=event,
-                order_repository=order_repository,
-                state_machine=state_machine,
+        try:
+            if telemetry is not None and event.has_fill:
+                await telemetry.account_fill(
+                    event,
+                    occurred_at=event.received_at,
+                )
+            if event.event_type == "ORDER_TRADE_UPDATE" and event.client_order_id:
+                await _reconcile_account_event_order(
+                    event=event,
+                    order_repository=order_repository,
+                    state_machine=state_machine,
+                    run_id=run_id,
+                )
+            for state in latest_market_states.for_symbols(event.symbols):
+                failure = await daemon.process_account_event(state)
+                if failure is not None:
+                    raise RuntimeError(f"account_event_exit_failed:{failure}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            if not _is_transient_live_runtime_error(error):
+                raise
+            # The account stream itself is still healthy.  Do not kill the
+            # process because persistence is briefly unavailable; periodic
+            # reconciliation and the next market state provide retry paths.
+            log.warning(
+                "live_account_event_processing_degraded",
                 run_id=run_id,
+                event_type=event.event_type,
+                error_type=type(error).__name__,
             )
-        for state in latest_market_states.for_symbols(event.symbols):
-            failure = await daemon.process_account_event(state)
-            if failure is not None:
-                raise RuntimeError(f"account_event_exit_failed:{failure}")
 
 
 async def _reconcile_account_event_order(
     *,
     event: AccountEvent,
     order_repository: PostgresOrderRepository,
-    state_machine: OrderExecutionStateMachine,
+    state_machine: OrderExecutionPort,
     run_id: str,
 ) -> None:
     unresolved = await order_repository.load_unresolved_orders(run_id)
@@ -1471,6 +1614,13 @@ async def _reconcile_account_event_order(
         if order.plan.client_order_id == event.client_order_id:
             await state_machine.reconcile_order(order.plan)
             return
+
+
+def _is_transient_live_runtime_error(error: Exception) -> bool:
+    return isinstance(
+        error,
+        (SQLAlchemyError, TimeoutError, ConnectionError, OSError),
+    )
 
 
 class _LiveDaemonRepositoryAdapter:
@@ -1489,6 +1639,21 @@ class _LiveDaemonRepositoryAdapter:
     ) -> None:
         await self._orders.save_approved_intent(intent, evaluation)
 
+    async def prepare_submission(
+        self,
+        *,
+        intent: OrderIntentCandidate,
+        evaluation: RiskEvaluation,
+        plan: OrderExecutionPlan,
+        prepared_at: datetime,
+    ) -> PreparedOrderSubmission:
+        return await self._orders.prepare_submission(
+            intent=intent,
+            evaluation=evaluation,
+            plan=plan,
+            prepared_at=prepared_at,
+        )
+
     async def save_checkpoint(
         self,
         run_id: str,
@@ -1501,7 +1666,7 @@ class _LiveDaemonRepositoryAdapter:
 async def _reconcile_run_orders(
     *,
     order_repository: PostgresOrderRepository,
-    state_machine: OrderExecutionStateMachine,
+    state_machine: OrderExecutionPort,
     run_id: str,
 ) -> None:
     for order in await order_repository.load_unresolved_orders(run_id):
@@ -1511,7 +1676,7 @@ async def _reconcile_run_orders(
 async def _periodic_reconcile_run_orders(
     *,
     order_repository: PostgresOrderRepository,
-    state_machine: OrderExecutionStateMachine,
+    state_machine: OrderExecutionPort,
     run_id: str,
     interval_seconds: float = _LIVE_RECONCILE_INTERVAL_SECONDS,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -1593,21 +1758,21 @@ async def _session_is_draining(
     session_id: str,
 ) -> bool:
     async with factory() as database_session:
-        control_state = await database_session.scalar(
+        latest_state = await database_session.scalar(
             select(LiveSessionTransitionRow.state)
             .where(
                 LiveSessionTransitionRow.session_id == session_id,
-                LiveSessionTransitionRow.state.in_(
+                LiveSessionTransitionRow.state.not_in(
                     (
-                        LiveSessionState.LIVE_ENABLED.value,
-                        LiveSessionState.DRAINING.value,
+                        LiveSessionState.PREFLIGHT.value,
+                        LiveSessionState.SHADOW_PREFLIGHT.value,
                     )
                 ),
             )
             .order_by(LiveSessionTransitionRow.occurred_at.desc())
             .limit(1)
         )
-    return control_state == LiveSessionState.DRAINING.value
+    return latest_state == LiveSessionState.DRAINING.value
 
 
 async def _warm_live_strategy(

@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -19,6 +20,9 @@ from crypto_momentum_lab.domain.execution import (
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
 from crypto_momentum_lab.domain.strategy import OrderIntentCandidate
+from crypto_momentum_lab.execution_account.orders.state_machine import (
+    PreparedOrderSubmission,
+)
 from crypto_momentum_lab.persistence.postgres.models import (
     ExchangeFillRow,
     ExchangeOrderEventRow,
@@ -73,6 +77,101 @@ class PostgresOrderRepository:
                     .values(values)
                     .on_conflict_do_nothing()
                 )
+
+    async def prepare_submission(
+        self,
+        *,
+        intent: OrderIntentCandidate,
+        evaluation: RiskEvaluation,
+        plan: OrderExecutionPlan,
+        prepared_at: datetime,
+    ) -> PreparedOrderSubmission:
+        """Atomically journal intent, plan, and SUBMITTING before the REST call."""
+
+        if evaluation.decision is not RiskDecision.APPROVED:
+            raise ValueError("risk evaluation must approve the intent")
+        if evaluation.candidate_id != intent.candidate_id:
+            raise ValueError("risk evaluation must reference the intent")
+        if plan.intent_id != intent.candidate_id:
+            raise ValueError("order plan must reference the approved intent")
+        if prepared_at.tzinfo is None or prepared_at.utcoffset() is None:
+            raise ValueError("prepared_at must be timezone-aware")
+
+        intent_values = {
+            "intent_id": intent.candidate_id,
+            "candidate_id": intent.candidate_id,
+            "run_id": intent.run_id,
+            "risk_evaluation_id": evaluation.evaluation_id,
+            "strategy_name": intent.strategy_name,
+            "symbol": intent.symbol,
+            "state": ExchangeOrderState.SUBMITTING.value,
+            "approved_at": evaluation.evaluated_at,
+            "details": _jsonable(asdict(intent)),
+        }
+        order_values = {
+            "client_order_id": plan.client_order_id,
+            "intent_id": plan.intent_id,
+            "run_id": plan.run_id,
+            "exchange_order_id": None,
+            "symbol": plan.symbol,
+            "side": plan.side,
+            "order_type": plan.order_type,
+            "quantity": plan.quantity,
+            "price": plan.price,
+            "reduce_only": plan.reduce_only,
+            "position_side": plan.position_side.value,
+            "state": ExchangeOrderState.SUBMITTING.value,
+            "created_at": plan.created_at,
+            "updated_at": prepared_at,
+        }
+        submitting_event = ExchangeOrderEvent(
+            event_id=_order_event_id(
+                plan.client_order_id,
+                ExchangeOrderState.SUBMITTING,
+                prepared_at,
+            ),
+            client_order_id=plan.client_order_id,
+            state=ExchangeOrderState.SUBMITTING,
+            occurred_at=prepared_at,
+            exchange_order_id=None,
+            details={},
+        )
+        event_values = {
+            "event_id": submitting_event.event_id,
+            "client_order_id": submitting_event.client_order_id,
+            "state": submitting_event.state.value,
+            "occurred_at": submitting_event.occurred_at,
+            "exchange_order_id": submitting_event.exchange_order_id,
+            "details": _jsonable(submitting_event.details),
+        }
+        async with self._session_factory() as session:
+            async with session.begin():
+                await session.execute(
+                    insert(OrderIntentExecutionRow)
+                    .values(intent_values)
+                    .on_conflict_do_nothing()
+                )
+                await session.execute(
+                    insert(ExchangeOrderRow)
+                    .values(order_values)
+                    .on_conflict_do_nothing()
+                )
+                await session.execute(
+                    insert(ExchangeOrderEventRow)
+                    .values(event_values)
+                    .on_conflict_do_nothing()
+                )
+                await session.execute(
+                    update(OrderIntentExecutionRow)
+                    .where(
+                        OrderIntentExecutionRow.intent_id == plan.intent_id
+                    )
+                    .values(state=ExchangeOrderState.SUBMITTING.value)
+                )
+        return PreparedOrderSubmission(
+            plan=plan,
+            submitting_event=submitting_event,
+        )
 
     async def claim_intent(
         self,
@@ -319,6 +418,19 @@ def _persisted_order(row: ExchangeOrderRow) -> PersistedExchangeOrder:
         state=ExchangeOrderState(row.state),
         exchange_order_id=row.exchange_order_id,
         updated_at=row.updated_at,
+    )
+
+
+def _order_event_id(
+    client_order_id: str,
+    state: ExchangeOrderState,
+    occurred_at: datetime,
+) -> str:
+    return str(
+        uuid5(
+            NAMESPACE_URL,
+            f"order-event:{client_order_id}:{state.value}:{occurred_at.isoformat()}",
+        )
     )
 
 
