@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -107,8 +108,16 @@ class OrderExecutionStateMachine:
         self._submit_policy = submit_policy
         self._live_submit_enabled = live_submit_enabled
         self._clock = clock or (lambda: datetime.now(tz=UTC))
+        self._lock = asyncio.Lock()
 
     async def execute_approved_intent(
+        self,
+        plan: OrderExecutionPlan,
+    ) -> OrderExecutionResult:
+        async with self._lock:
+            return await self._execute_approved_intent(plan)
+
+    async def _execute_approved_intent(
         self,
         plan: OrderExecutionPlan,
     ) -> OrderExecutionResult:
@@ -196,6 +205,13 @@ class OrderExecutionStateMachine:
         self,
         plan: OrderExecutionPlan,
     ) -> OrderExecutionResult:
+        async with self._lock:
+            return await self._reconcile_order(plan)
+
+    async def _reconcile_order(
+        self,
+        plan: OrderExecutionPlan,
+    ) -> OrderExecutionResult:
         snapshot = await self._exchange.query_order_by_client_id(
             plan.symbol,
             plan.client_order_id,
@@ -223,6 +239,13 @@ class OrderExecutionStateMachine:
         intentionally separate from the operator-authorized emergency cancel
         control exposed by the Binance client.
         """
+        async with self._lock:
+            return await self._cancel_order(plan)
+
+    async def _cancel_order(
+        self,
+        plan: OrderExecutionPlan,
+    ) -> OrderExecutionResult:
         if not plan.quantized:
             raise ValueError("order plan must be quantized before cancellation")
         await self._append_event(plan, ExchangeOrderState.CANCELING)

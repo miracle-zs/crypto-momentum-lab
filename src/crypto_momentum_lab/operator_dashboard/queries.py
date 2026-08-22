@@ -246,9 +246,10 @@ class DashboardQueries:
             live_heartbeat_at = None
             live_started_at = None
             if live is not None:
-                # A transition records the lifecycle state, not a process
-                # heartbeat.  The live daemon's runtime checkpoint is the
-                # freshest durable signal that its loop is still progressing.
+                # A runtime checkpoint is meaningful for the current session
+                # only after the daemon has entered live_enabled. During
+                # preflight retries, an older checkpoint would make a healthy
+                # retry loop look dead in the dashboard.
                 live_heartbeat_at = await session.scalar(
                     select(StrategyRuntimeCheckpointRow.saved_at).where(
                         StrategyRuntimeCheckpointRow.run_id == live.session_id
@@ -286,15 +287,15 @@ class DashboardQueries:
                 if live.state == "halted"
                 else OperationalStatus.SHADOW
             )
-            live_observed_at = live_heartbeat_at or live.occurred_at
+            live_observed_at, heartbeat_source = _live_observation(
+                state=live.state,
+                runtime_checkpoint_at=live_heartbeat_at,
+                transition_at=live.occurred_at,
+            )
             live_details: dict[str, JsonValue] = {
                 "state": live.state,
                 "session_id": live.session_id,
-                "heartbeat_source": (
-                    "runtime_checkpoint"
-                    if live_heartbeat_at is not None
-                    else "state_transition"
-                ),
+                "heartbeat_source": heartbeat_source,
             }
             if live_started_at is not None:
                 live_details["started_at"] = live_started_at.isoformat()
@@ -576,6 +577,7 @@ class DashboardQueries:
     ) -> list[PaperAccountSummaryResponse]:
         if not runs:
             return []
+        now = self._clock()
         run_ids = [run.run_id for run in runs]
         checkpoints = (
             await session.scalars(
@@ -645,6 +647,8 @@ class DashboardQueries:
         return [
             _paper_account_summary(
                 run,
+                now=now,
+                stale_after_seconds=self._stale_after_seconds,
                 checkpoint_at=checkpoint_by_run.get(run.run_id),
                 open_position_count=open_count_by_run.get(run.run_id, 0),
                 closed_trade_count=closed_stats_by_run.get(run.run_id, (0, 0))[0],
@@ -1377,6 +1381,8 @@ def _is_dashboard_paper_run(run: StrategyRunRow) -> bool:
 def _paper_account_summary(
     run: StrategyRunRow,
     *,
+    now: datetime,
+    stale_after_seconds: float,
     checkpoint_at: datetime | None,
     open_position_count: int,
     closed_trade_count: int,
@@ -1385,7 +1391,11 @@ def _paper_account_summary(
 ) -> PaperAccountSummaryResponse:
     exit_mode, exit_label = _paper_exit_details(run)
     return PaperAccountSummaryResponse(
-        status=OperationalStatus.READY,
+        status=freshness_status(
+            now=now,
+            observed_at=checkpoint_at,
+            stale_after_seconds=stale_after_seconds,
+        ),
         run_id=run.run_id,
         strategy_name=run.strategy_name,
         exit_mode=exit_mode,
@@ -1433,6 +1443,18 @@ def _service(
         observed_at=observed_at,
         age_seconds=None if observed_at is None else _age(now, observed_at),
     )
+
+
+def _live_observation(
+    *,
+    state: str,
+    runtime_checkpoint_at: datetime | None,
+    transition_at: datetime,
+) -> tuple[datetime, str]:
+    """Choose a heartbeat that belongs to the live session's current state."""
+    if state == "live_enabled" and runtime_checkpoint_at is not None:
+        return runtime_checkpoint_at, "runtime_checkpoint"
+    return transition_at, "state_transition"
 
 
 def _age(now: datetime, observed_at: datetime) -> float:
@@ -1618,6 +1640,10 @@ def _paper_entry_filter_label(entry_filter: object) -> str:
     max_cluster_trade_count = entry_filter.get("max_cluster_trade_count")
     if max_cluster_trade_count is not None:
         parts.append(f"成交簇 ≤ {max_cluster_trade_count} 笔")
+    if entry_filter.get("require_price_above_ema5") is True:
+        parts.append("价格 > 15M EMA5")
+    if entry_filter.get("require_price_above_ema10") is True:
+        parts.append("价格 > 15M EMA10")
     return " · ".join(parts)
 
 

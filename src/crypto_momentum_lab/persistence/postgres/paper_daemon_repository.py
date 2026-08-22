@@ -52,6 +52,8 @@ _NEW_EXECUTION_FIELDS = {
         "allow_short",
         "max_abs_aggressive_imbalance",
         "max_cluster_trade_count",
+        "require_price_above_ema5",
+        "require_price_above_ema10",
     ),
     "portfolio": (
         "require_executable_quote",

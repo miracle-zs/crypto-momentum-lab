@@ -1,5 +1,7 @@
+import asyncio
 import hashlib
 import hmac
+import math
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -40,6 +42,40 @@ from crypto_momentum_lab.live_rollout.commands import (
 # /fapi/v1/openOrders, /fapi/v1/userTrades.
 
 
+class BinanceRateLimitError(httpx.HTTPStatusError):
+    """A Binance REST rate-limit response that callers should back off from."""
+
+    def __init__(self, response: httpx.Response) -> None:
+        super().__init__(
+            f"Binance REST request rate limited with HTTP {response.status_code}",
+            request=response.request,
+            response=response,
+        )
+        self.retry_after_seconds = _retry_after_seconds(response)
+
+
+class _AsyncRequestPacer:
+    def __init__(self, min_interval_seconds: float) -> None:
+        if min_interval_seconds < 0:
+            raise ValueError("min_interval_seconds must not be negative")
+        self._min_interval_seconds = min_interval_seconds
+        self._lock = asyncio.Lock()
+        self._next_allowed_at = 0.0
+
+    async def wait(self) -> None:
+        if self._min_interval_seconds == 0:
+            return
+        loop = asyncio.get_running_loop()
+        async with self._lock:
+            now = loop.time()
+            delay = max(0.0, self._next_allowed_at - now)
+            self._next_allowed_at = (
+                max(now, self._next_allowed_at) + self._min_interval_seconds
+            )
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+
 class BinanceUsdMPrivateReadClient:
     def __init__(
         self,
@@ -52,6 +88,7 @@ class BinanceUsdMPrivateReadClient:
         http_client: httpx.AsyncClient | None = None,
         clock: Callable[[], datetime] | None = None,
         recv_window_ms: int = 5000,
+        request_interval_seconds: float = 0.2,
     ) -> None:
         if not api_key.strip():
             raise ValueError("api_key must not be empty")
@@ -63,12 +100,15 @@ class BinanceUsdMPrivateReadClient:
             raise ValueError("account_label must not be empty")
         if recv_window_ms <= 0:
             raise ValueError("recv_window_ms must be positive")
+        if request_interval_seconds < 0:
+            raise ValueError("request_interval_seconds must not be negative")
         self._api_key = api_key
         self._api_secret = api_secret
         self._environment = environment
         self._account_label = account_label
         self._clock = clock or (lambda: datetime.now(tz=UTC))
         self._recv_window_ms = recv_window_ms
+        self._request_pacer = _AsyncRequestPacer(request_interval_seconds)
         self._client = http_client or httpx.AsyncClient(
             base_url=base_url,
             trust_env=False,
@@ -197,6 +237,33 @@ class BinanceUsdMPrivateReadClient:
             )
         )
 
+    async def start_user_data_stream(self) -> str:
+        """Create a Binance USD-M Futures listen key for account events."""
+        payload = await self._user_data_request("POST", "/fapi/v1/listenKey")
+        data = _require_mapping(payload)
+        listen_key = str(data.get("listenKey", "")).strip()
+        if not listen_key:
+            raise ValueError("Binance listen-key response did not contain listenKey")
+        return listen_key
+
+    async def keepalive_user_data_stream(self, listen_key: str) -> None:
+        if not listen_key.strip():
+            raise ValueError("listen_key must not be empty")
+        await self._user_data_request(
+            "PUT",
+            "/fapi/v1/listenKey",
+            data={"listenKey": listen_key},
+        )
+
+    async def close_user_data_stream(self, listen_key: str) -> None:
+        if not listen_key.strip():
+            raise ValueError("listen_key must not be empty")
+        await self._user_data_request(
+            "DELETE",
+            "/fapi/v1/listenKey",
+            data={"listenKey": listen_key},
+        )
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
@@ -206,12 +273,13 @@ class BinanceUsdMPrivateReadClient:
         params: dict[str, str | int | float | bool | None] | None = None,
     ) -> object:
         signed_params = self._signed_params(params or {})
+        await self._request_pacer.wait()
         response = await self._client.get(
             path,
             params=signed_params,
             headers={"X-MBX-APIKEY": self._api_key},
         )
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     async def _signed_post(
@@ -220,12 +288,13 @@ class BinanceUsdMPrivateReadClient:
         params: dict[str, str | int | float | bool | None],
     ) -> object:
         signed_params = self._signed_params(params)
+        await self._request_pacer.wait()
         response = await self._client.post(
             path,
             data=signed_params,
             headers={"X-MBX-APIKEY": self._api_key},
         )
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     async def _signed_delete(
@@ -234,13 +303,34 @@ class BinanceUsdMPrivateReadClient:
         params: dict[str, str | int | float | bool | None],
     ) -> object:
         signed_params = self._signed_params(params)
+        await self._request_pacer.wait()
         response = await self._client.delete(
             path,
             params=signed_params,
             headers={"X-MBX-APIKEY": self._api_key},
         )
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
+
+    async def _user_data_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        data: dict[str, str] | None = None,
+    ) -> object:
+        """Call an unsigned listen-key endpoint authenticated by API key."""
+        await self._request_pacer.wait()
+        response = await self._client.request(
+            method,
+            path,
+            data=data,
+            headers={"X-MBX-APIKEY": self._api_key},
+        )
+        _raise_for_status(response)
+        if response.content:
+            return response.json()
+        return {}
 
     def _signed_params(
         self,
@@ -283,6 +373,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         http_client: httpx.AsyncClient | None = None,
         clock: Callable[[], datetime] | None = None,
         recv_window_ms: int = 5000,
+        request_interval_seconds: float = 0.2,
         entry_leverage: int | None = None,
     ) -> None:
         if entry_leverage is not None and not 1 <= entry_leverage <= 125:
@@ -296,6 +387,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             http_client=http_client,
             clock=clock,
             recv_window_ms=recv_window_ms,
+            request_interval_seconds=request_interval_seconds,
         )
         self._live_submit_enabled = live_submit_enabled
         self._entry_leverage = entry_leverage
@@ -605,6 +697,25 @@ def _exchange_error_code(exc: httpx.HTTPStatusError) -> int | None:
         return None
     code = payload.get("code")
     return int(code) if code is not None else None
+
+
+def _raise_for_status(response: httpx.Response) -> None:
+    if response.status_code in {418, 429}:
+        raise BinanceRateLimitError(response)
+    response.raise_for_status()
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    raw_value = response.headers.get("Retry-After")
+    if raw_value is None:
+        return None
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
 
 
 def _is_invalid_leverage_rejection(exc: httpx.HTTPStatusError) -> bool:

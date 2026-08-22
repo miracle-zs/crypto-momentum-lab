@@ -67,6 +67,9 @@ class CaptureMetricsSnapshot:
     pending_manifests: int
     oldest_pending_manifest_seconds: float | None
     disk_free_bytes: int
+    queue_coalesced_replacements: int = 0
+    queue_dropped_events: int = 0
+    queue_pending_coalesced_events: int = 0
 
 
 class CaptureStateRepository(Protocol):
@@ -197,6 +200,11 @@ class MarketDataCaptureService:
             received_bytes=self._received_bytes,
             queue_events=self._queue.size,
             queue_bytes=self._queue.current_bytes,
+            queue_coalesced_replacements=self._queue.coalesced_replacements,
+            queue_dropped_events=self._queue.dropped_events,
+            queue_pending_coalesced_events=(
+                self._queue.pending_coalesced_events
+            ),
             archived_rows=self._archived_rows,
             archived_bytes=self._archived_bytes,
             open_writers=self._open_writers,

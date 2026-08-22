@@ -33,6 +33,8 @@ from crypto_momentum_lab.persistence.postgres.session import (
 STATIC_DIR = Path(__file__).with_name("static")
 _BASIC_AUTH = HTTPBasic(auto_error=False)
 _PAPER_CACHE_TTL_SECONDS = 5.0
+_OVERVIEW_CACHE_TTL_SECONDS = 15.0
+_OVERVIEW_QUERY_TIMEOUT_SECONDS = 10.0
 _T = TypeVar("_T")
 
 
@@ -46,6 +48,8 @@ class _ResponseCache:
         self,
         key: str,
         loader: Callable[[], Awaitable[_T]],
+        *,
+        ttl_seconds: float | None = None,
     ) -> _T:
         now = time.monotonic()
         entry = self._entries.get(key)
@@ -58,7 +62,8 @@ class _ResponseCache:
             if entry is not None and entry[0] > now:
                 return cast(_T, entry[1])
             value = await loader()
-            self._entries[key] = (time.monotonic() + self._ttl_seconds, value)
+            ttl = self._ttl_seconds if ttl_seconds is None else ttl_seconds
+            self._entries[key] = (time.monotonic() + ttl, value)
             return value
 
 
@@ -93,6 +98,8 @@ def create_dashboard_app(
     auth_username: str | None = None,
     auth_password: str | None = None,
     paper_run_ids: frozenset[str] | None = None,
+    overview_cache_ttl_seconds: float = _OVERVIEW_CACHE_TTL_SECONDS,
+    overview_query_timeout_seconds: float = _OVERVIEW_QUERY_TIMEOUT_SECONDS,
 ) -> FastAPI:
     resolved_auth_username = auth_username or os.environ.get(
         "CML_DASHBOARD_USERNAME"
@@ -190,7 +197,20 @@ def create_dashboard_app(
         dependencies=[Depends(require_dashboard_auth)],
     )
     async def overview() -> SystemOverviewResponse:
-        return await response_cache.get("overview", query_service().overview)
+        try:
+            return await asyncio.wait_for(
+                response_cache.get(
+                    "overview",
+                    query_service().overview,
+                    ttl_seconds=overview_cache_ttl_seconds,
+                ),
+                timeout=overview_query_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=504,
+                detail="dashboard overview query timed out",
+            ) from exc
 
     @dashboard.get(
         "/api/universe",

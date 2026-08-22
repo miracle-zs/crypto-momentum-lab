@@ -1,7 +1,7 @@
 import asyncio
 import os
 import signal
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -40,6 +40,13 @@ from crypto_momentum_lab.market_data.capture.service import (
 )
 from crypto_momentum_lab.market_data.capture.subscriptions import (
     SubscriptionGroup,
+)
+from crypto_momentum_lab.market_data.hub import (
+    MarketStateHub,
+    MarketStateHubConfig,
+)
+from crypto_momentum_lab.market_data.observability import (
+    monitor_market_data_health,
 )
 from crypto_momentum_lab.market_data.quality.tracker import StreamQualityTracker
 from crypto_momentum_lab.market_data.runtime_states import (
@@ -85,6 +92,20 @@ _CAPTURE_STOP_TIMEOUT_SECONDS = 55.0
 _PAPER_EXIT_RECONCILE_SECONDS = 15.0
 _PAPER_EXIT_RUN_IDS_ENV = "CML_PAPER_EXIT_RUN_IDS"
 _LIVE_POSITION_ACCOUNT_LABEL_ENV = "CML_LIVE_POSITION_ACCOUNT_LABEL"
+_MARKET_STATE_HUB_HOST_ENV = "CML_MARKET_STATE_HUB_HOST"
+_MARKET_STATE_HUB_PORT_ENV = "CML_MARKET_STATE_HUB_PORT"
+_MARKET_STATE_HUB_DEFAULT_HOST = "0.0.0.0"
+_MARKET_STATE_HUB_DEFAULT_PORT = 8766
+
+
+def _run_market_data(coroutine: Coroutine[object, object, None]) -> None:
+    """Run the high-throughput capture loop on uvloop when available."""
+    try:
+        import uvloop
+    except ImportError:
+        asyncio.run(coroutine)
+    else:
+        uvloop.run(coroutine)
 
 
 class MarketDataStaleError(RuntimeError):
@@ -132,6 +153,21 @@ def parse_live_position_account_label(value: str | None = None) -> str | None:
     )
     normalized = raw_value.strip()
     return normalized or None
+
+
+def parse_market_state_hub_port(value: str | None = None) -> int:
+    raw_value = (
+        os.environ.get(_MARKET_STATE_HUB_PORT_ENV, str(_MARKET_STATE_HUB_DEFAULT_PORT))
+        if value is None
+        else value
+    )
+    try:
+        port = int(raw_value)
+    except ValueError as error:
+        raise ValueError("market-state hub port must be an integer") from error
+    if not 0 <= port <= 65535:
+        raise ValueError("market-state hub port must be between 0 and 65535")
+    return port
 
 
 @asynccontextmanager
@@ -413,6 +449,7 @@ async def run_raw_archive_retention_loop(
 @dataclass(frozen=True, slots=True)
 class MarketDataRuntime:
     capture: MarketDataCaptureService
+    connection_pool: BinanceConnectionPool
     capture_repository: PostgresCaptureRepository
     archive_root: Path
     archive_retention_days: int
@@ -420,6 +457,7 @@ class MarketDataRuntime:
     universe: UniverseRefreshService
     subscription_observer: CaptureUniverseObserver
     runtime_state_publisher: ClosedMarketStatePublisher
+    state_hub: MarketStateHub
     universe_activation_minute: int
     universe_refresh_interval_minutes: int
     enabled_streams: tuple[CaptureStream, ...]
@@ -438,11 +476,21 @@ async def build_market_data_runtime(
     paper_repository = PostgresPaperDaemonRepository(sessions)
     account_repository = PostgresAccountRepository(sessions)
     runtime_state_repository = PostgresRuntimeMarketStateRepository(sessions)
+    state_hub = MarketStateHub(
+        MarketStateHubConfig(
+            host=os.environ.get(
+                _MARKET_STATE_HUB_HOST_ENV,
+                _MARKET_STATE_HUB_DEFAULT_HOST,
+            ),
+            port=parse_market_state_hub_port(),
+        )
+    )
     runtime_state_publisher = ClosedMarketStatePublisher(
         repository=runtime_state_repository,
         config=ClosedMarketStatePublisherConfig(
             closure_delay_seconds=runtime.capture.closure_delay_seconds
         ),
+        realtime_state_sink=state_hub.publish,
     )
     protected_run_ids = parse_paper_exit_run_ids()
     live_position_account_label = parse_live_position_account_label()
@@ -474,9 +522,27 @@ async def build_market_data_runtime(
     quality = StreamQualityTracker(
         silence_timeout_seconds=runtime.capture.silence_timeout_seconds
     )
+    archive_streams = (
+        None
+        if archive_config.streams is None
+        else frozenset(
+            CaptureStream(item) for item in archive_config.streams
+        )
+    )
     queue = BoundedEnvelopeQueue(
         max_events=runtime.capture.queue_max_events,
         max_bytes=runtime.capture.queue_max_bytes,
+        coalescing_streams=(
+            frozenset({CaptureStream.BOOK_TICKER})
+            if (
+                archive_streams is not None
+                and CaptureStream.BOOK_TICKER not in archive_streams
+            )
+            else frozenset()
+        ),
+        coalescing_interval_seconds=(
+            runtime.capture.book_ticker_coalescing_interval_seconds
+        ),
     )
 
     async def save_manifest(manifest: ArchiveManifest) -> None:
@@ -523,13 +589,7 @@ async def build_market_data_runtime(
         repository=capture_repository,
         acknowledgement_sink=None,
         realtime_envelope_sink=runtime_state_publisher.observe,
-        archive_streams=(
-            None
-            if archive_config.streams is None
-            else frozenset(
-                CaptureStream(item) for item in archive_config.streams
-            )
-        ),
+        archive_streams=archive_streams,
     )
 
     def connection_factory(group: SubscriptionGroup) -> BinanceWebSocketConnection:
@@ -540,6 +600,7 @@ async def build_market_data_runtime(
         )
         return BinanceWebSocketConnection(
             base_url=base_url,
+            group_id=group.group_id,
             route=group.route,
             environment=runtime.environment,
             desired_names=tuple(
@@ -556,6 +617,9 @@ async def build_market_data_runtime(
             ping_interval_seconds=runtime.capture.ping_interval_seconds,
             ping_timeout_seconds=runtime.capture.ping_timeout_seconds,
             silence_timeout_seconds=runtime.capture.silence_timeout_seconds,
+            control_ack_timeout_seconds=(
+                runtime.capture.control_ack_timeout_seconds
+            ),
             control_messages_per_second=(
                 runtime.capture.control_messages_per_second
             ),
@@ -568,6 +632,18 @@ async def build_market_data_runtime(
         ),
         control_messages_per_second=(
             runtime.capture.control_messages_per_second
+        ),
+        max_subscriptions_per_connection_by_stream=(
+            {
+                CaptureStream.BOOK_TICKER: (
+                    runtime.capture.book_ticker_max_subscriptions_per_connection
+                )
+            }
+            if (
+                runtime.capture.book_ticker_max_subscriptions_per_connection
+                is not None
+            )
+            else None
         ),
     )
     capture = MarketDataCaptureService(
@@ -598,6 +674,7 @@ async def build_market_data_runtime(
     try:
         yield MarketDataRuntime(
             capture=capture,
+            connection_pool=connection_pool,
             capture_repository=capture_repository,
             archive_root=archive_config.root,
             archive_retention_days=archive_config.retention_days,
@@ -607,6 +684,7 @@ async def build_market_data_runtime(
             universe=universe,
             subscription_observer=observer,
             runtime_state_publisher=runtime_state_publisher,
+            state_hub=state_hub,
             universe_activation_minute=runtime.universe.activation_minute,
             universe_refresh_interval_minutes=(
                 runtime.universe.refresh_interval_minutes
@@ -659,15 +737,17 @@ async def run_market_data(
     stop_requested: asyncio.Event | None = None,
 ) -> None:
     async with build_market_data_runtime(config_path) as runtime:
-        await runtime.capture.start(
-            symbols=runtime.initial_symbols,
-            streams=runtime.enabled_streams,
-            generation=1,
-        )
         capture_task: asyncio.Task[None] | None = None
         auxiliary_tasks: tuple[asyncio.Task[None], ...] = ()
         stop_task: asyncio.Task[bool] | None = None
         try:
+            await runtime.state_hub.start()
+            await runtime.runtime_state_publisher.start()
+            await runtime.capture.start(
+                symbols=runtime.initial_symbols,
+                streams=runtime.enabled_streams,
+                generation=1,
+            )
             startup_observed_at = datetime.now(UTC).replace(
                 second=0,
                 microsecond=0,
@@ -697,6 +777,14 @@ async def run_market_data(
                         latest_observed_at=lambda: (
                             runtime.runtime_state_publisher.metrics.latest_watermark_at
                         )
+                    )
+                ),
+                asyncio.create_task(
+                    monitor_market_data_health(
+                        capture_metrics=runtime.capture.metrics_snapshot,
+                        connection_metrics=(
+                            runtime.connection_pool.metrics_snapshot
+                        ),
                     )
                 ),
                 asyncio.create_task(
@@ -755,6 +843,8 @@ async def run_market_data(
                     capture_task.cancel()
             if capture_task is not None:
                 await asyncio.gather(capture_task, return_exceptions=True)
+            await runtime.runtime_state_publisher.stop()
+            await runtime.state_hub.stop()
 
 
 async def run_market_data_until_stopped(
@@ -796,57 +886,81 @@ async def run_market_data_with_signal_handlers(config_path: Path) -> None:
 
 async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
     async with build_market_data_runtime(config_path) as runtime:
-        await runtime.capture.start(
-            symbols=runtime.initial_symbols,
-            streams=runtime.enabled_streams,
-            generation=1,
-        )
-        startup_observed_at = datetime.now(UTC).replace(
-            second=0,
-            microsecond=0,
-        )
-        await runtime.universe.refresh(observed_at=startup_observed_at)
-        capture_task = asyncio.create_task(runtime.capture.run())
-        scheduler_task = asyncio.create_task(
-            run_scheduler_loop(
-                LoggingRefreshService(runtime.universe),
-                activation_minute=runtime.universe_activation_minute,
-                refresh_interval_minutes=(
-                    runtime.universe_refresh_interval_minutes
-                ),
-            )
-        )
-        subscription_task = asyncio.create_task(
-            reconcile_paper_exit_subscriptions(
-                runtime.subscription_observer
-            )
-        )
-        retention_task = asyncio.create_task(
-            run_raw_archive_retention_loop(
-                runtime.capture_repository,
-                runtime.archive_root,
-                retention_days=runtime.archive_retention_days,
-                interval_seconds=runtime.archive_retention_interval_seconds,
-            )
-        )
+        capture_task: asyncio.Task[None] | None = None
+        scheduler_task: asyncio.Task[None] | None = None
+        subscription_task: asyncio.Task[None] | None = None
+        retention_task: asyncio.Task[None] | None = None
+        health_task: asyncio.Task[None] | None = None
         try:
+            await runtime.state_hub.start()
+            await runtime.runtime_state_publisher.start()
+            await runtime.capture.start(
+                symbols=runtime.initial_symbols,
+                streams=runtime.enabled_streams,
+                generation=1,
+            )
+            startup_observed_at = datetime.now(UTC).replace(
+                second=0,
+                microsecond=0,
+            )
+            await runtime.universe.refresh(observed_at=startup_observed_at)
+            capture_task = asyncio.create_task(runtime.capture.run())
+            scheduler_task = asyncio.create_task(
+                run_scheduler_loop(
+                    LoggingRefreshService(runtime.universe),
+                    activation_minute=runtime.universe_activation_minute,
+                    refresh_interval_minutes=(
+                        runtime.universe_refresh_interval_minutes
+                    ),
+                )
+            )
+            subscription_task = asyncio.create_task(
+                reconcile_paper_exit_subscriptions(
+                    runtime.subscription_observer
+                )
+            )
+            retention_task = asyncio.create_task(
+                run_raw_archive_retention_loop(
+                    runtime.capture_repository,
+                    runtime.archive_root,
+                    retention_days=runtime.archive_retention_days,
+                    interval_seconds=runtime.archive_retention_interval_seconds,
+                )
+            )
+            health_task = asyncio.create_task(
+                monitor_market_data_health(
+                    capture_metrics=runtime.capture.metrics_snapshot,
+                    connection_metrics=runtime.connection_pool.metrics_snapshot,
+                )
+            )
             await asyncio.sleep(seconds)
         finally:
             await runtime.capture.stop()
+            if capture_task is not None:
+                capture_task.cancel()
             for task in (
-                capture_task,
                 scheduler_task,
                 subscription_task,
                 retention_task,
+                health_task,
             ):
-                task.cancel()
-            await asyncio.gather(
-                capture_task,
-                scheduler_task,
-                subscription_task,
-                retention_task,
-                return_exceptions=True,
+                if task is not None:
+                    task.cancel()
+            tasks = tuple(
+                task
+                for task in (
+                    capture_task,
+                    scheduler_task,
+                    subscription_task,
+                    retention_task,
+                    health_task,
+                )
+                if task is not None
             )
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            await runtime.runtime_state_publisher.stop()
+            await runtime.state_hub.stop()
 
 
 @app.command()
@@ -864,7 +978,7 @@ def run_market_data_command(
     config: Path | None = typer.Option(None, "--config"),
 ) -> None:
     try:
-        asyncio.run(
+        _run_market_data(
             run_market_data_with_signal_handlers(resolve_config_path(config))
         )
     except KeyboardInterrupt:

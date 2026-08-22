@@ -29,6 +29,32 @@ function equityBucketMap(account) {
   return { intervalSeconds, buckets };
 }
 
+function synchronizedComparisonAccounts(accounts) {
+  if (accounts.length < 2) {
+    return { accounts, omittedAccounts: [] };
+  }
+  const maps = accounts.map(equityBucketMap);
+  const latestBuckets = maps.map((map) => Math.max(...map.buckets.keys(), -Infinity));
+  const referenceBucket = Math.max(...latestBuckets);
+  if (!Number.isFinite(referenceBucket)) {
+    return { accounts, omittedAccounts: [] };
+  }
+  const intervalMs = Math.max(...maps.map((map) => map.intervalSeconds)) * 1000;
+  const freshnessWindowMs = intervalMs * 2;
+  const currentAccounts = accounts.filter((_, index) => (
+    latestBuckets[index] >= referenceBucket - freshnessWindowMs
+  ));
+  if (currentAccounts.length < 2 || currentAccounts.length === accounts.length) {
+    return { accounts, omittedAccounts: [] };
+  }
+  return {
+    accounts: currentAccounts,
+    omittedAccounts: accounts.filter((_, index) => (
+      latestBuckets[index] < referenceBucket - freshnessWindowMs
+    )),
+  };
+}
+
 function comparisonSeriesClass(account) {
   if (account.source === "live") return "live";
   return account.exit_mode === "candle_15m" ? "candle" : "variant";
@@ -147,7 +173,7 @@ function comparisonStart(commonBuckets, anchorAt) {
   };
 }
 
-function strategyEquityModel(strategyName, accounts) {
+function strategyEquityModel(strategyName, accounts, omittedAccounts = []) {
   if (accounts.length < 2) return null;
   const maps = accounts.map(equityBucketMap);
   const commonBuckets = [...maps[0].buckets.keys()]
@@ -190,6 +216,7 @@ function strategyEquityModel(strategyName, accounts) {
   return {
     strategyName,
     accounts,
+    omittedAccounts,
     series,
     points,
     startAt: start.at,
@@ -211,7 +238,12 @@ export function buildStrategyEquityModels(accounts) {
         const rightLive = right.source === "live" ? 1 : 0;
         return leftLive - rightLive || String(left.run_id).localeCompare(String(right.run_id));
       });
-    const model = strategyEquityModel(strategyName, strategyAccounts);
+    const synchronized = synchronizedComparisonAccounts(strategyAccounts);
+    const model = strategyEquityModel(
+      strategyName,
+      synchronized.accounts,
+      synchronized.omittedAccounts,
+    );
     return model ? [model] : [];
   });
 }

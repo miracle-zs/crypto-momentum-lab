@@ -36,7 +36,10 @@ def build_monitoring_memberships(
     observed_at: datetime,
     retention_rank: int,
     retention_duration: timedelta,
+    extended_gainer_count: int = 0,
 ) -> dict[str, TrackedMembership]:
+    if extended_gainer_count < 0:
+        raise ValueError("extended_gainer_count must be non-negative")
     memberships: dict[str, TrackedMembership] = {}
 
     for symbol in sorted(result.target_symbols):
@@ -62,6 +65,19 @@ def build_monitoring_memberships(
                 status=MembershipStatus.RETAINED,
                 side=old.side,
                 left_target_at=left_target_at,
+            )
+
+    for entry in result.gainers:
+        if (
+            entry.rank <= extended_gainer_count
+            and entry.utc_day_return > 0
+            and entry.symbol not in memberships
+        ):
+            memberships[entry.symbol] = TrackedMembership(
+                symbol=entry.symbol,
+                status=MembershipStatus.EXTENDED,
+                side=RankingSide.GAINER,
+                left_target_at=None,
             )
 
     for symbol in sorted(forced_symbols):

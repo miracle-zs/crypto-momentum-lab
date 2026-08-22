@@ -233,6 +233,11 @@ class RuntimeMarketState15sRow(Base):
             "environment",
             "created_at",
         ),
+        Index(
+            "ix_runtime_market_states_15s_latest_bucket",
+            "bucket_start",
+            postgresql_include=("bucket_end",),
+        ),
     )
 
 
@@ -505,6 +510,8 @@ class StrategyRuntimeCheckpointRow(Base):
     payload: Mapped[dict[str, object]] = mapped_column(JSONB)
     saved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
+    __table_args__ = (Index("ix_strategy_runtime_checkpoints_latest", "saved_at"),)
+
 
 class AccountBalanceSnapshotRow(Base):
     __tablename__ = "account_balance_snapshots"
@@ -674,6 +681,7 @@ class ExecutionAccountProcessStateRow(Base):
             "account_label",
             "occurred_at",
         ),
+        Index("ix_execution_account_process_states_latest", "occurred_at"),
     )
 
 
@@ -702,6 +710,11 @@ class TradingLeaseRow(Base):
             "environment",
             "account_label",
             "expires_at",
+        ),
+        Index(
+            "ix_trading_leases_active_expiry",
+            "expires_at",
+            postgresql_where=(state == "active"),
         ),
     )
 
@@ -1074,6 +1087,7 @@ class LiveSessionTransitionRow(Base):
             "session_id",
             "occurred_at",
         ),
+        Index("ix_live_session_transitions_latest", "occurred_at"),
     )
 
 

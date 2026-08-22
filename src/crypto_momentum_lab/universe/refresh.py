@@ -90,7 +90,7 @@ class UniverseRefreshService:
         ranking = rank_utc_day_returns(
             candidates,
             top_count=self._config.top_count,
-            ranking_depth=self._config.retention_rank,
+            ranking_depth=self._config.ranking_depth,
         )
         activated = observed_at.hour != 0
         memberships: tuple[TrackedMembership, ...] = ()
@@ -107,6 +107,7 @@ class UniverseRefreshService:
                     retention_duration=timedelta(
                         hours=self._config.retention_hours
                     ),
+                    extended_gainer_count=self._config.extended_gainer_count,
                 ).values()
             )
 

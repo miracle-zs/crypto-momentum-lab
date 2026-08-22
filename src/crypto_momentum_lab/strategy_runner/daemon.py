@@ -119,6 +119,8 @@ class PaperEntryFilterConfig:
     allow_short: bool = True
     max_abs_aggressive_imbalance: Decimal | None = None
     max_cluster_trade_count: int | None = None
+    require_price_above_ema5: bool = False
+    require_price_above_ema10: bool = False
 
     def __post_init__(self) -> None:
         if not self.allow_long and not self.allow_short:
@@ -137,6 +139,13 @@ class PaperEntryFilterConfig:
             and self.max_cluster_trade_count <= 0
         ):
             raise ValueError("max_cluster_trade_count must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class PaperEntryFilterContext:
+    entry_price: Decimal | None
+    ema5: Decimal | None = None
+    ema10: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -616,11 +625,17 @@ def _decision_for_account(
 def _filter_decision(
     decision: StrategyDecision,
     entry_filter: PaperEntryFilterConfig,
+    *,
+    entry_filter_context: PaperEntryFilterContext | None = None,
 ) -> StrategyDecision:
     signals = tuple(
         signal
         for signal in decision.signals
-        if _signal_passes_entry_filter(signal, entry_filter)
+        if _signal_passes_entry_filter(
+            signal,
+            entry_filter,
+            context=entry_filter_context,
+        )
     )
     accepted_signal_ids = {signal.signal_id for signal in signals}
     candidates = tuple(
@@ -639,6 +654,8 @@ def _filter_decision(
 def _signal_passes_entry_filter(
     signal: StrategySignal,
     entry_filter: PaperEntryFilterConfig,
+    *,
+    context: PaperEntryFilterContext | None = None,
 ) -> bool:
     if signal.side is StrategySide.LONG and not entry_filter.allow_long:
         return False
@@ -653,6 +670,22 @@ def _signal_passes_entry_filter(
     if max_trade_count is not None:
         trade_count = _int_feature(signal, "cluster_trade_count")
         if trade_count is None or trade_count > max_trade_count:
+            return False
+    if entry_filter.require_price_above_ema5:
+        if (
+            context is None
+            or context.entry_price is None
+            or context.ema5 is None
+            or context.entry_price <= context.ema5
+        ):
+            return False
+    if entry_filter.require_price_above_ema10:
+        if (
+            context is None
+            or context.entry_price is None
+            or context.ema10 is None
+            or context.entry_price <= context.ema10
+        ):
             return False
     return True
 
@@ -749,6 +782,9 @@ def run_paper_live_daemon(
     clock: Clock,
     entry_symbol_loader: Callable[[datetime], frozenset[str]] | None = None,
     candle_source: ClosedCandle15mSource | None = None,
+    entry_filter_context_loader: (
+        Callable[[MarketState15s], PaperEntryFilterContext | None] | None
+    ) = None,
 ) -> PaperLiveDaemonResult:
     checkpoint = _run_async(repository.load_checkpoint(config.run_id))
     if checkpoint is not None:
@@ -912,9 +948,18 @@ def run_paper_live_daemon(
                 else:
                     open_positions[position.position_id] = position
 
+        raw_decision = strategy.on_market_state(state)
+        entry_filter_context = None
+        if raw_decision.signals and (
+            config.entry_filter.require_price_above_ema5
+            or config.entry_filter.require_price_above_ema10
+        ):
+            if entry_filter_context_loader is not None:
+                entry_filter_context = entry_filter_context_loader(state)
         decision = _filter_decision(
-            strategy.on_market_state(state),
+            raw_decision,
             config.entry_filter,
+            entry_filter_context=entry_filter_context,
         )
         last_processed_at_by_symbol[state.symbol] = state.bucket_start
         if artifact_repository is not None and entry_allowed and (

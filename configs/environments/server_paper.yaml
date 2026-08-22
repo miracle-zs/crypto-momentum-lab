@@ -1,4 +1,4 @@
 environment: research
 binance_base_url: https://fapi.binance.com
-universe_config: configs/universe/utc_day_top_bottom.yaml
+universe_config: configs/universe/server_paper_top100_gainer.yaml
 capture_config: configs/capture/server_paper.yaml

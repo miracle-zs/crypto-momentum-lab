@@ -86,12 +86,17 @@ services:
       <<: *app-environment
       CML_ENVIRONMENT_CONFIG: configs/environments/server_paper.yaml
       CML_PAPER_EXIT_RUN_IDS: >-
-        paper-account-02-orderflow-v1,
         paper-account-05-orderflow-candle15m-v1,
         paper-account-10-orderflow-b2-long-candle15m-v1,
         paper-account-12-orderflow-b1-long-candle15m-v1,
-        paper-account-13-orderflow-b8-long-candle15m-v1
-      CML_LIVE_POSITION_ACCOUNT_LABEL: ${CML_LIVE_ACCOUNT_LABEL:-}
+        paper-account-13-orderflow-b8-long-candle15m-v1,
+        paper-account-14-orderflow-b1-gainer100-v1,
+        paper-account-15-orderflow-b1-gainer100-ema-v1
+      # Market-data must protect the same live account used by the live
+      # strategy and execution-account services. Fail closed if it is absent.
+      CML_LIVE_POSITION_ACCOUNT_LABEL: ${CML_LIVE_ACCOUNT_LABEL:?set CML_LIVE_ACCOUNT_LABEL}
+      CML_MARKET_STATE_HUB_HOST: 0.0.0.0
+      CML_MARKET_STATE_HUB_PORT: "8766"
     entrypoint: ["cml-market-data"]
     command: ["run-market-data"]
     depends_on:
@@ -120,7 +125,6 @@ services:
     environment:
       <<: *app-environment
       CML_HEALTHCHECK_RUN_IDS: >-
-        paper-account-02-orderflow-v1,
         paper-account-05-orderflow-candle15m-v1,
         paper-account-10-orderflow-b2-long-candle15m-v1,
         paper-account-12-orderflow-b1-long-candle15m-v1,
@@ -131,8 +135,6 @@ services:
       - orderflow_impulse
       - --environment
       - research
-      - --fixed-run-id
-      - paper-account-02-orderflow-v1
       - --candle-run-id
       - paper-account-05-orderflow-candle15m-v1
       - --fourth-run-id
@@ -179,6 +181,92 @@ services:
       - --require-market-quote
     mem_limit: 256m
 
+  paper-b1-gainer100:
+    <<: *paper
+    environment:
+      <<: *app-environment
+      CML_HEALTHCHECK_RUN_ID: paper-account-14-orderflow-b1-gainer100-v1
+    command:
+      - paper-live-daemon
+      - --strategy
+      - orderflow_impulse
+      - --environment
+      - research
+      - --run-id
+      - paper-account-14-orderflow-b1-gainer100-v1
+      - --entry-long-only
+      - --entry-positive-gainer-top-count
+      - "100"
+      - --candidate-notional
+      - "100"
+      - --paper-initial-balance
+      - "1000"
+      - --exit-mode
+      - candle_15m
+      - --max-holding-buckets
+      - "5760"
+      - --candle-grace-bars
+      - "1"
+      - --candle-grace-profit-pct
+      - "0.0088"
+      - --max-states
+      - "100000000"
+      - --idle-timeout-seconds
+      - "86400"
+      - --poll-interval-seconds
+      - "0.25"
+      - --checkpoint-every-states
+      - "1000"
+      - --checkpoint-every-seconds
+      - "60"
+      - --max-market-state-age-seconds
+      - "120"
+      - --require-market-quote
+
+  paper-b1-gainer100-ema:
+    <<: *paper
+    environment:
+      <<: *app-environment
+      CML_HEALTHCHECK_RUN_ID: paper-account-15-orderflow-b1-gainer100-ema-v1
+    command:
+      - paper-live-daemon
+      - --strategy
+      - orderflow_impulse
+      - --environment
+      - research
+      - --run-id
+      - paper-account-15-orderflow-b1-gainer100-ema-v1
+      - --entry-long-only
+      - --entry-positive-gainer-top-count
+      - "100"
+      - --entry-price-above-ema5
+      - --entry-price-above-ema10
+      - --candidate-notional
+      - "100"
+      - --paper-initial-balance
+      - "1000"
+      - --exit-mode
+      - candle_15m
+      - --max-holding-buckets
+      - "5760"
+      - --candle-grace-bars
+      - "1"
+      - --candle-grace-profit-pct
+      - "0.0088"
+      - --max-states
+      - "100000000"
+      - --idle-timeout-seconds
+      - "86400"
+      - --poll-interval-seconds
+      - "0.25"
+      - --checkpoint-every-states
+      - "1000"
+      - --checkpoint-every-seconds
+      - "60"
+      - --max-market-state-age-seconds
+      - "120"
+      - --require-market-quote
+
   execution-account-live:
     <<: *app
     profiles: ["live"]
@@ -186,6 +274,8 @@ services:
       <<: *app-environment
       BINANCE_API_KEY: ${BINANCE_API_KEY:-}
       BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
+      CML_ACCOUNT_EVENT_HUB_HOST: ${CML_ACCOUNT_EVENT_HUB_HOST:-0.0.0.0}
+      CML_ACCOUNT_EVENT_HUB_PORT: ${CML_ACCOUNT_EVENT_HUB_PORT:-8767}
     entrypoint: ["cml-execution-account"]
     command:
       - sync
@@ -195,9 +285,15 @@ services:
       - ${CML_LIVE_ACCOUNT_LABEL:-primary}
       - --hedge-mode
       - --interval-seconds
-      - "5"
+      - "15"
       - --fill-interval-seconds
-      - "60"
+      - "300"
+      - --rest-reconciliation-interval-seconds
+      - "300"
+      - --account-event-hub-host
+      - ${CML_ACCOUNT_EVENT_HUB_HOST:-0.0.0.0}
+      - --account-event-hub-port
+      - ${CML_ACCOUNT_EVENT_HUB_PORT:-8767}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -229,6 +325,8 @@ services:
       BINANCE_API_KEY: ${BINANCE_API_KEY:-}
       BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
       CML_HEALTHCHECK_RUN_ID: ${CML_LIVE_SESSION_ID:-live-primary-v1}
+      CML_MARKET_STATE_HUB_URL: ${CML_MARKET_STATE_HUB_URL:-ws://market-data:8766}
+      CML_ACCOUNT_EVENT_HUB_URL: ${CML_ACCOUNT_EVENT_HUB_URL:-ws://execution-account-live:8767}
     entrypoint: ["cml-live-rollout"]
     command:
       - run
@@ -238,6 +336,12 @@ services:
       - ${CML_LIVE_STRATEGY:-orderflow_impulse}
       - --market-environment
       - research
+      - --market-state-source
+      - hub
+      - --market-state-hub-url
+      - ${CML_MARKET_STATE_HUB_URL:-ws://market-data:8766}
+      - --account-event-hub-url
+      - ${CML_ACCOUNT_EVENT_HUB_URL:-ws://execution-account-live:8767}
       - --session-id
       - ${CML_LIVE_SESSION_ID:-live-primary-v1}
       - --operator
@@ -258,6 +362,10 @@ services:
       - "100"
       - --hedge-mode
       - --entry-long-only
+      - --entry-positive-gainer-top-count
+      - ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-100}
+      - --entry-price-above-ema5
+      - --entry-price-above-ema10
       - --entry-leverage
       - ${CML_LIVE_ENTRY_LEVERAGE:-5}
       - --exit-mode
@@ -284,9 +392,13 @@ services:
         - -m
         - crypto_momentum_lab.apps.healthcheck
         - --service
-        - paper
-        # The live worker healthcheck only verifies a checkpoint exists.
-        - --ignore-age
+        - live
+        - --account-label
+        - ${CML_LIVE_ACCOUNT_LABEL:-primary}
+        - --session-id
+        - ${CML_LIVE_SESSION_ID:-live-primary-v1}
+        - --lease-owner
+        - ${CML_LIVE_LEASE_OWNER:-live-worker}
       interval: 30s
       timeout: 10s
       retries: 6
@@ -303,7 +415,9 @@ services:
         paper-account-05-orderflow-candle15m-v1,
         paper-account-10-orderflow-b2-long-candle15m-v1,
         paper-account-12-orderflow-b1-long-candle15m-v1,
-        paper-account-13-orderflow-b8-long-candle15m-v1
+        paper-account-13-orderflow-b8-long-candle15m-v1,
+        paper-account-14-orderflow-b1-gainer100-v1,
+        paper-account-15-orderflow-b1-gainer100-ema-v1
     entrypoint: ["cml-operator-dashboard"]
     command: ["--host", "0.0.0.0", "--port", "8765"]
     depends_on:

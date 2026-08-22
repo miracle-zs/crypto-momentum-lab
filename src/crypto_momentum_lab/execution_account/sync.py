@@ -14,6 +14,9 @@ from crypto_momentum_lab.domain.account import (
     ExecutionAccountStatus,
 )
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.execution_account.binance.user_data import (
+    BinanceUserDataEvent,
+)
 
 
 class ReadOnlyAccountClient(Protocol):
@@ -92,10 +95,19 @@ class ExecutionAccountSyncConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class AccountSnapshot:
+    config: AccountConfigSnapshot
+    balances: tuple[AccountBalanceSnapshot, ...]
+    positions: tuple[AccountPositionSnapshot, ...]
+    open_orders: tuple[AccountOpenOrderSnapshot, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionAccountSyncResult:
     status: ExecutionAccountStatus
     reconciliation_id: str
     mismatch_count: int
+    snapshot: AccountSnapshot | None = None
 
 
 class ExecutionAccountSyncService:
@@ -220,6 +232,12 @@ class ExecutionAccountSyncService:
                 status=ExecutionAccountStatus.READY_READONLY,
                 reconciliation_id=reconciliation_id,
                 mismatch_count=0,
+                snapshot=AccountSnapshot(
+                    config=account_config,
+                    balances=balances,
+                    positions=active_positions,
+                    open_orders=open_orders,
+                ),
             )
         except Exception as error:
             try:
@@ -231,6 +249,74 @@ class ExecutionAccountSyncService:
             except Exception:
                 pass
             raise
+
+    async def persist_user_data_event(
+        self,
+        *,
+        snapshot: AccountSnapshot,
+        event: BinanceUserDataEvent,
+        fills: tuple[AccountFillEvent, ...] = (),
+    ) -> ExecutionAccountSyncResult:
+        """Persist a fully merged WebSocket account observation atomically."""
+        if snapshot.config.environment != self._config.environment:
+            raise ValueError("account snapshot environment does not match sync config")
+        if snapshot.config.account_label != self._config.account_label:
+            raise ValueError(
+                "account snapshot account label does not match sync config"
+            )
+        config = replace(self._config, observed_at=event.received_at)
+        active_positions = tuple(
+            position for position in snapshot.positions if position.position_amt != 0
+        )
+        reconciliation_id = _user_data_reconciliation_id(
+            config,
+            event.event_id,
+        )
+        await self._repository.save_reconciliation_snapshot(
+            config=replace(snapshot.config, observed_at=event.received_at),
+            balances=snapshot.balances,
+            positions=snapshot.positions,
+            open_orders=snapshot.open_orders,
+            fills=fills,
+            run=_reconciliation_run(
+                config,
+                reconciliation_id=reconciliation_id,
+                status="ready",
+                mismatch_count=0,
+                details={
+                    "source": "user_data_stream",
+                    "event_id": event.event_id,
+                    "event_type": event.event_type,
+                    "event_at": event.event_at.isoformat(),
+                },
+                balance_count=len(snapshot.balances),
+                position_count=len(active_positions),
+                open_order_count=len(snapshot.open_orders),
+                fill_count=len(fills),
+            ),
+        )
+        await self._save_state(
+            ExecutionAccountStatus.READY_READONLY,
+            config=config,
+        )
+        return ExecutionAccountSyncResult(
+            status=ExecutionAccountStatus.READY_READONLY,
+            reconciliation_id=reconciliation_id,
+            mismatch_count=0,
+            snapshot=snapshot,
+        )
+
+    async def publish_user_data_heartbeat(
+        self,
+        *,
+        observed_at: datetime,
+    ) -> None:
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            raise ValueError("observed_at must be timezone-aware")
+        await self._save_state(
+            ExecutionAccountStatus.READY_READONLY,
+            config=replace(self._config, observed_at=observed_at),
+        )
 
     async def _save_state(
         self,
@@ -258,6 +344,19 @@ def _reconciliation_id(config: ExecutionAccountSyncConfig) -> str:
             "account-reconciliation:"
             f"{config.environment}:{config.account_label}:"
             f"{config.observed_at.isoformat()}",
+        )
+    )
+
+
+def _user_data_reconciliation_id(
+    config: ExecutionAccountSyncConfig,
+    event_id: str,
+) -> str:
+    return str(
+        uuid5(
+            NAMESPACE_URL,
+            "account-user-data-event:"
+            f"{config.environment}:{config.account_label}:{event_id}",
         )
     )
 

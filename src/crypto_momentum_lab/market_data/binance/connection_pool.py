@@ -1,8 +1,12 @@
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Protocol
 
 from crypto_momentum_lab.domain.market.models import CaptureStream
+from crypto_momentum_lab.market_data.binance.websocket import (
+    BinanceWebSocketMetricsSnapshot,
+)
 from crypto_momentum_lab.market_data.capture.subscriptions import (
     Subscription,
     SubscriptionChangePlan,
@@ -10,6 +14,18 @@ from crypto_momentum_lab.market_data.capture.subscriptions import (
     build_subscription_groups,
     plan_subscription_change,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class BinanceConnectionPoolMetricsSnapshot:
+    active_connections: int
+    ready_connections: int
+    desired_subscriptions: int
+    reconnect_count: int
+    ack_mismatch_count: int
+    control_commands_sent: int
+    received_messages: int
+    connection_snapshots: tuple[BinanceWebSocketMetricsSnapshot, ...] = ()
 
 
 class PoolConnection(Protocol):
@@ -31,6 +47,8 @@ class PoolConnection(Protocol):
 
     async def stop(self) -> None: ...
 
+    def metrics_snapshot(self) -> BinanceWebSocketMetricsSnapshot: ...
+
 
 class BinanceConnectionPool:
     def __init__(
@@ -39,9 +57,15 @@ class BinanceConnectionPool:
         connection_factory: Callable[[SubscriptionGroup], PoolConnection],
         max_subscriptions_per_connection: int,
         control_messages_per_second: float,
+        max_subscriptions_per_connection_by_stream: Mapping[
+            CaptureStream, int
+        ] | None = None,
     ) -> None:
         self._connection_factory = connection_factory
         self._max_subscriptions_per_connection = max_subscriptions_per_connection
+        self._max_subscriptions_per_connection_by_stream = dict(
+            max_subscriptions_per_connection_by_stream or {}
+        )
         self._control_messages_per_second = control_messages_per_second
         self._active_subscriptions: frozenset[Subscription] = frozenset()
         self._connections: dict[str, PoolConnection] = {}
@@ -65,6 +89,9 @@ class BinanceConnectionPool:
         groups = build_subscription_groups(
             desired,
             max_per_connection=self._max_subscriptions_per_connection,
+            max_per_connection_by_stream=(
+                self._max_subscriptions_per_connection_by_stream
+            ),
         )
         desired_groups = {group.group_id: group for group in groups}
         desired_owners = {
@@ -123,6 +150,30 @@ class BinanceConnectionPool:
         for result in results:
             if isinstance(result, BaseException):
                 raise result
+
+    def metrics_snapshot(self) -> BinanceConnectionPoolMetricsSnapshot:
+        snapshots = tuple(
+            connection.metrics_snapshot()
+            for connection in self._connections.values()
+        )
+        return BinanceConnectionPoolMetricsSnapshot(
+            active_connections=len(self._connections),
+            ready_connections=sum(snapshot.ready for snapshot in snapshots),
+            desired_subscriptions=len(self._active_subscriptions),
+            reconnect_count=sum(
+                snapshot.reconnect_count for snapshot in snapshots
+            ),
+            ack_mismatch_count=sum(
+                snapshot.ack_mismatch_count for snapshot in snapshots
+            ),
+            control_commands_sent=sum(
+                snapshot.control_commands_sent for snapshot in snapshots
+            ),
+            received_messages=sum(
+                snapshot.received_messages for snapshot in snapshots
+            ),
+            connection_snapshots=snapshots,
+        )
 
     async def _ensure_connections(
         self,

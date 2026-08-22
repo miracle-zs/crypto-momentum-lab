@@ -27,6 +27,13 @@ class RuntimeStateLoader(Protocol):
 
     def load_active_symbols_at(self, observed_at: datetime) -> frozenset[str]: ...
 
+    def load_positive_gainer_symbols_at(
+        self,
+        observed_at: datetime,
+        *,
+        top_count: int,
+    ) -> frozenset[str]: ...
+
     def close(self) -> None: ...
 
 
@@ -68,6 +75,17 @@ class PostgresPaperMarketStateSource:
 
     def load_active_symbols_at(self, observed_at: datetime) -> frozenset[str]:
         return self.loader.load_active_symbols_at(observed_at)
+
+    def load_positive_gainer_symbols_at(
+        self,
+        observed_at: datetime,
+        *,
+        top_count: int,
+    ) -> frozenset[str]:
+        return self.loader.load_positive_gainer_symbols_at(
+            observed_at,
+            top_count=top_count,
+        )
 
     def __iter__(self) -> Iterator[MarketState15s]:
         start_at = self.config.start_at
@@ -143,6 +161,13 @@ class AsyncPostgresRuntimeStateLoader:
     def load_active_symbols(self) -> frozenset[str]:
         if self.universe_repository is None:
             return frozenset()
+        loader = getattr(
+            self.universe_repository,
+            "load_active_entry_symbols_at",
+            None,
+        )
+        if callable(loader):
+            return self._event_loop.run_until_complete(loader(None))
         memberships = self._event_loop.run_until_complete(
             self.universe_repository.load_active_memberships()
         )
@@ -151,10 +176,36 @@ class AsyncPostgresRuntimeStateLoader:
     def load_active_symbols_at(self, observed_at: datetime) -> frozenset[str]:
         if self.universe_repository is None:
             return frozenset()
+        loader = getattr(
+            self.universe_repository,
+            "load_active_entry_symbols_at",
+            None,
+        )
+        if callable(loader):
+            return self._event_loop.run_until_complete(loader(observed_at))
         memberships = self._event_loop.run_until_complete(
             self.universe_repository.load_active_memberships_at(observed_at)
         )
         return frozenset(memberships)
+
+    def load_positive_gainer_symbols_at(
+        self,
+        observed_at: datetime,
+        *,
+        top_count: int,
+    ) -> frozenset[str]:
+        if self.universe_repository is None:
+            return frozenset()
+        loader = getattr(
+            self.universe_repository,
+            "load_positive_gainer_symbols_at",
+            None,
+        )
+        if not callable(loader):
+            return frozenset()
+        return self._event_loop.run_until_complete(
+            loader(observed_at, top_count=top_count)
+        )
 
     def close(self) -> None:
         if self._event_loop.is_closed():

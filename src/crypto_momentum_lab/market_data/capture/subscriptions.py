@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from crypto_momentum_lab.domain.market.models import (
@@ -62,9 +63,13 @@ def build_subscription_groups(
     subscriptions: frozenset[Subscription],
     *,
     max_per_connection: int,
+    max_per_connection_by_stream: Mapping[CaptureStream, int] | None = None,
 ) -> tuple[SubscriptionGroup, ...]:
     if max_per_connection <= 0:
         raise ValueError("max_per_connection must be positive")
+    stream_limits = dict(max_per_connection_by_stream or {})
+    if any(limit <= 0 for limit in stream_limits.values()):
+        raise ValueError("stream subscription limits must be positive")
 
     buckets: dict[
         tuple[CaptureRoute, CaptureStream],
@@ -78,10 +83,11 @@ def build_subscription_groups(
         buckets.items(),
         key=lambda item: (item[0][0].value, item[0][1].value),
     ):
+        stream_limit = stream_limits.get(stream, max_per_connection)
         for chunk_index, offset in enumerate(
-            range(0, len(items), max_per_connection)
+            range(0, len(items), stream_limit)
         ):
-            chunk = tuple(items[offset : offset + max_per_connection])
+            chunk = tuple(items[offset : offset + stream_limit])
             groups.append(
                 SubscriptionGroup(
                     group_id=(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol, Self
@@ -16,6 +17,54 @@ _MAX_KLINES_PER_REQUEST = 1500
 
 class ClosedCandleSourceError(RuntimeError):
     """The exchange did not provide a complete immutable candle range."""
+
+
+@dataclass(frozen=True, slots=True)
+class ClosedCandleEmaSnapshot:
+    ema5: Decimal | None
+    ema10: Decimal | None
+
+
+class ClosedCandleEmaProvider:
+    """Calculate entry-time EMAs from immutable, already-closed candles."""
+
+    def __init__(
+        self,
+        source: ClosedCandle15mSource,
+        *,
+        lookback_candles: int = 200,
+    ) -> None:
+        if lookback_candles < 10:
+            raise ValueError("lookback_candles must be at least 10")
+        self._source = source
+        self._lookback_candles = lookback_candles
+        self._cache: dict[tuple[str, datetime], ClosedCandleEmaSnapshot] = {}
+
+    def load(
+        self,
+        *,
+        symbol: str,
+        observed_at: datetime,
+    ) -> ClosedCandleEmaSnapshot:
+        candle_end = _candle_start_15m(observed_at)
+        normalized_symbol = symbol.strip().upper()
+        cache_key = (normalized_symbol, candle_end)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+        candle_start = candle_end - self._lookback_candles * _CANDLE_INTERVAL
+        candles = self._source.load_closed_candles(
+            symbol=normalized_symbol,
+            start=candle_start,
+            end=candle_end,
+        )
+        closes = [candle.close_price for candle in candles]
+        snapshot = ClosedCandleEmaSnapshot(
+            ema5=_ema(closes, 5),
+            ema10=_ema(closes, 10),
+        )
+        self._cache[cache_key] = snapshot
+        return snapshot
 
 
 class ClosedCandle15mSource(Protocol):
@@ -262,6 +311,16 @@ def _parse_kline(
         open_price=Decimal(str(row[1])),
         close_price=Decimal(str(row[4])),
     )
+
+
+def _ema(values: list[Decimal], period: int) -> Decimal | None:
+    if len(values) < period:
+        return None
+    current = sum(values[:period], Decimal("0")) / Decimal(period)
+    alpha = Decimal("2") / Decimal(period + 1)
+    for value in values[period:]:
+        current = value * alpha + current * (Decimal("1") - alpha)
+    return current
 
 
 def _candle_start_15m(value: datetime) -> datetime:

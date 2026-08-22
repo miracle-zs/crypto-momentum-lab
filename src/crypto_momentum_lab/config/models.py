@@ -16,6 +16,8 @@ class UniverseConfig(BaseModel):
 
     top_count: int = Field(gt=0)
     retention_rank: int = Field(gt=0)
+    ranking_depth: int = Field(default=30, gt=0)
+    extended_gainer_count: int = Field(default=0, ge=0)
     retention_hours: int = Field(gt=0)
     activation_minute: int = Field(ge=0, le=59)
     refresh_interval_minutes: int = Field(default=60, gt=0, le=60)
@@ -24,6 +26,15 @@ class UniverseConfig(BaseModel):
     def validate_retention_rank(self) -> "UniverseConfig":
         if self.retention_rank < self.top_count:
             raise ValueError("retention_rank must be >= top_count")
+        if self.ranking_depth < max(
+            self.top_count,
+            self.retention_rank,
+            self.extended_gainer_count,
+        ):
+            raise ValueError(
+                "ranking_depth must be >= top_count, retention_rank, "
+                "and extended_gainer_count"
+            )
         return self
 
 
@@ -65,7 +76,18 @@ class CaptureConfig(BaseModel):
     public_websocket_url: AnyUrl
     enabled_streams: tuple[str, ...]
     max_subscriptions_per_connection: int = Field(gt=0, le=100)
+    book_ticker_max_subscriptions_per_connection: int | None = Field(
+        default=None,
+        gt=0,
+        le=100,
+    )
+    book_ticker_coalescing_interval_seconds: float = Field(
+        default=1.0,
+        gt=0,
+        le=15,
+    )
     control_messages_per_second: float = Field(gt=0, le=5)
+    control_ack_timeout_seconds: float = Field(default=10.0, gt=0)
     connection_lifetime_seconds: float = Field(gt=0, lt=86400)
     open_timeout_seconds: float = Field(gt=0)
     ping_interval_seconds: float = Field(gt=0)

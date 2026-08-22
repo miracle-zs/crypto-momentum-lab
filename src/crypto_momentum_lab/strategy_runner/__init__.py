@@ -1,12 +1,15 @@
 from crypto_momentum_lab.strategy_runner.candle_source import (
     BinanceRestClosedCandle15mSource,
     ClosedCandle15mSource,
+    ClosedCandleEmaProvider,
+    ClosedCandleEmaSnapshot,
     ClosedCandleSourceError,
 )
 from crypto_momentum_lab.strategy_runner.daemon import (
     PairedPaperLiveAccount,
     PairedPaperLiveDaemonResult,
     PaperEntryFilterConfig,
+    PaperEntryFilterContext,
     PaperLiveDaemonConfig,
     PaperLiveDaemonRepository,
     PaperLiveDaemonResult,
@@ -63,6 +66,8 @@ __all__ = [
     "ReplayExecutionConfig",
     "AsyncPostgresRuntimeStateLoader",
     "BinanceRestClosedCandle15mSource",
+    "ClosedCandleEmaProvider",
+    "ClosedCandleEmaSnapshot",
     "ClosedCandleSourceError",
     "ClosedCandle15mSource",
     "SimulatedFill",
@@ -73,6 +78,7 @@ __all__ = [
     "PaperLiveDaemonRepository",
     "PaperLiveDaemonResult",
     "PaperEntryFilterConfig",
+    "PaperEntryFilterContext",
     "PairedPaperLiveAccount",
     "PairedPaperLiveDaemonResult",
     "PaperExitConfig",

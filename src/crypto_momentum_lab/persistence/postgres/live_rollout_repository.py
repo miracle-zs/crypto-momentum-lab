@@ -19,6 +19,8 @@ from crypto_momentum_lab.persistence.postgres.models import (
     LiveSessionTransitionRow,
 )
 
+_LIVE_SESSION_REASON_MAX_LENGTH = 128
+
 
 class PostgresLiveRolloutRepository:
     def __init__(
@@ -71,8 +73,7 @@ class PostgresLiveRolloutRepository:
         )
 
     async def save_transition(self, transition: LiveSessionTransition) -> None:
-        values = asdict(transition)
-        values["state"] = transition.state.value
+        values = _prepare_transition_values(transition)
         await self._insert(LiveSessionTransitionRow, values)
 
     async def load_latest_transition(
@@ -117,3 +118,20 @@ class PostgresLiveRolloutRepository:
                 await session.execute(
                     insert(model).values(values).on_conflict_do_nothing()
                 )
+
+
+def _prepare_transition_values(
+    transition: LiveSessionTransition,
+) -> dict[str, object]:
+    values = asdict(transition)
+    values["state"] = transition.state.value
+    reason = values.get("reason")
+    if isinstance(reason, str) and len(reason) > _LIVE_SESSION_REASON_MAX_LENGTH:
+        details = values.get("details")
+        normalized_details = dict(details) if isinstance(details, dict) else {}
+        normalized_details.setdefault("full_reason", reason)
+        values["details"] = normalized_details
+        values["reason"] = (
+            reason[: _LIVE_SESSION_REASON_MAX_LENGTH - 3] + "..."
+        )
+    return values

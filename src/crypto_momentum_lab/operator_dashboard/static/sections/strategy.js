@@ -75,6 +75,9 @@ function comparisonAnchorText(model) {
 
 function pairedComparisonPanel(model) {
   const bucketMinutes = Math.round(model.intervalSeconds / 60);
+  const omittedNote = model.omittedAccounts?.length
+    ? `<small class="muted">暂不纳入 ${model.omittedAccounts.length} 个滞后账户，待其产生新的共同快照</small>`
+    : "";
   const legend = model.series.map((series) =>
     `<span class="${series.colorClass}" ${comparisonSeriesStyle(series)}><i></i><em>${esc(series.label)}</em> <b class="num ${pnlClass(series.delta)}">${esc(signedMoney(series.delta))}</b></span>`).join("");
   return `<article class="pair-panel">
@@ -83,6 +86,7 @@ function pairedComparisonPanel(model) {
         <small>${esc(dayTime(model.startAt))} → ${esc(dayTime(model.endAt))} ${DISPLAY_TIME_ZONE_LABEL} · ${model.points.length} 个共同桶</small></div>
       <div class="pair-spread"><span>退出版本</span><b class="num">${model.series.length} 个</b></div>
     </div>
+    ${omittedNote}
     <div class="pair-legend">${legend}</div>
     ${strategyEquityChart(model)}
     <footer><span>${esc(comparisonAnchorText(model))} · ${bucketMinutes} 分钟 UTC 采样</span><b>${esc(elapsedTime(model.startAt, model.endAt))}</b></footer>

@@ -182,6 +182,45 @@ class PostgresUniverseRepository:
                 for row in rows
             }
 
+    async def load_active_entry_symbols_at(
+        self,
+        observed_at: datetime | None,
+    ) -> frozenset[str]:
+        memberships = await self.load_active_memberships_at(observed_at)
+        return frozenset(
+            symbol
+            for symbol, membership in memberships.items()
+            if membership.status is not MembershipStatus.EXTENDED
+        )
+
+    async def load_positive_gainer_symbols_at(
+        self,
+        observed_at: datetime,
+        *,
+        top_count: int,
+    ) -> frozenset[str]:
+        if top_count <= 0:
+            raise ValueError("top_count must be positive")
+        async with self._session_factory() as session:
+            snapshot_statement = (
+                select(UniverseSnapshotRow.snapshot_id)
+                .where(UniverseSnapshotRow.activated.is_(True))
+                .where(UniverseSnapshotRow.observed_at <= observed_at)
+                .order_by(UniverseSnapshotRow.observed_at.desc())
+                .limit(1)
+            )
+            snapshot_id = await session.scalar(snapshot_statement)
+            if snapshot_id is None:
+                return frozenset()
+            symbols = await session.scalars(
+                select(UniverseEntryRow.symbol).where(
+                    UniverseEntryRow.snapshot_id == snapshot_id,
+                    UniverseEntryRow.gainer_rank <= top_count,
+                    UniverseEntryRow.utc_day_return > Decimal("0"),
+                )
+            )
+            return frozenset(symbols)
+
     async def save_snapshot(self, snapshot: UniverseSnapshot) -> None:
         returns = _return_by_symbol(snapshot)
         gainer_ranks = _rank_by_symbol(snapshot.ranking.gainers)

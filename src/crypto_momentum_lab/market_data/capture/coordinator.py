@@ -100,8 +100,13 @@ class CaptureCoordinator:
             tasks = tuple(
                 asyncio.create_task(self._process_envelope(envelope))
                 for envelope in batch
+                if self._requires_side_effect_processing(envelope)
             )
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            results = (
+                await asyncio.gather(*tasks, return_exceptions=True)
+                if tasks
+                else ()
+            )
 
             failures = tuple(
                 result for result in results if isinstance(result, Exception)
@@ -135,6 +140,18 @@ class CaptureCoordinator:
             if inspect.isawaitable(result):
                 await result
 
+    def _requires_side_effect_processing(self, envelope: RawEnvelope) -> bool:
+        # bookTicker is a realtime-only latest-value stream in the server
+        # profile. It has no durable archive and no useful sequence-gap
+        # invariant for the strategy, so don't create a task or serialize a
+        # quality payload for every quote. The realtime publisher has already
+        # consumed the coalesced envelope above.
+        return not (
+            envelope.stream is CaptureStream.BOOK_TICKER
+            and self._archive_streams is not None
+            and envelope.stream not in self._archive_streams
+        )
+
     async def _publish_batch(
         self,
         sink: EnvelopeSink | None,
@@ -149,6 +166,7 @@ class CaptureCoordinator:
 
     async def stop(self) -> None:
         self._stopping = True
+        await self._queue.close()
         await self._queue.join()
         await self._archive.close()
 

@@ -16,7 +16,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--service",
-        choices=("market-data", "paper", "execution-account"),
+        choices=("market-data", "paper", "execution-account", "live"),
         required=True,
     )
     parser.add_argument(
@@ -29,7 +29,10 @@ def main() -> int:
         action="store_true",
         help="only require a ready heartbeat; do not apply an age cutoff",
     )
+    parser.add_argument("--market-environment", default="research")
     parser.add_argument("--account-label", default="primary")
+    parser.add_argument("--session-id", default="")
+    parser.add_argument("--lease-owner", default="live-worker")
     args = parser.parse_args()
     database_url = os.environ.get("CML_DATABASE_URL")
     if not database_url or (
@@ -46,11 +49,25 @@ def main() -> int:
                     connection,
                     max_age_seconds=max_age_seconds,
                     not_before=_process_started_at(),
+                    environment=args.market_environment,
                 ) else 1
             if args.service == "execution-account":
                 return 0 if _execution_account_ready(
                     connection,
                     account_label=args.account_label,
+                    max_age_seconds=max_age_seconds,
+                ) else 1
+            if args.service == "live":
+                session_id = args.session_id or os.environ.get(
+                    "CML_HEALTHCHECK_RUN_ID", ""
+                )
+                if not session_id.strip():
+                    return 1
+                return 0 if _live_ready(
+                    connection,
+                    account_label=args.account_label,
+                    session_id=session_id,
+                    lease_owner=args.lease_owner,
                     max_age_seconds=max_age_seconds,
                 ) else 1
             configured_run_ids = os.environ.get("CML_HEALTHCHECK_RUN_IDS")
@@ -84,6 +101,7 @@ def _market_data_ready(
     *,
     max_age_seconds: float | None,
     not_before: datetime | None = None,
+    environment: str = "research",
 ) -> bool:
     process = connection.execute(
         text(
@@ -104,8 +122,10 @@ def _market_data_ready(
         text(
             "SELECT bucket_end "
             "FROM runtime_market_states_15s "
+            "WHERE environment = :environment "
             "ORDER BY bucket_start DESC LIMIT 1"
-        )
+        ),
+        {"environment": environment},
     ).scalar_one_or_none()
     return _fresh(latest_state_at, max_age_seconds=max_age_seconds)
 
@@ -122,6 +142,52 @@ def _paper_ready(
             "WHERE run_id = :run_id"
         ),
         {"run_id": run_id},
+    ).scalar_one_or_none()
+    return _fresh(checkpoint_at, max_age_seconds=max_age_seconds)
+
+
+def _live_ready(
+    connection: Connection,
+    *,
+    account_label: str,
+    session_id: str,
+    lease_owner: str,
+    max_age_seconds: float | None,
+) -> bool:
+    transition = connection.execute(
+        text(
+            "SELECT state FROM live_session_transitions "
+            "WHERE session_id = :session_id "
+            "ORDER BY occurred_at DESC LIMIT 1"
+        ),
+        {"session_id": session_id},
+    ).mappings().first()
+    if transition is None or transition["state"] not in {"live_enabled", "draining"}:
+        return False
+    lease = connection.execute(
+        text(
+            "SELECT lease_id FROM trading_leases "
+            "WHERE environment = 'live' "
+            "AND account_label = :account_label "
+            "AND owner = :lease_owner "
+            "AND state = 'active' "
+            "AND expires_at > :now "
+            "ORDER BY expires_at DESC LIMIT 1"
+        ),
+        {
+            "account_label": account_label,
+            "lease_owner": lease_owner,
+            "now": datetime.now(UTC),
+        },
+    ).mappings().first()
+    if lease is None:
+        return False
+    checkpoint_at = connection.execute(
+        text(
+            "SELECT saved_at FROM strategy_runtime_checkpoints "
+            "WHERE run_id = :run_id"
+        ),
+        {"run_id": session_id},
     ).scalar_one_or_none()
     return _fresh(checkpoint_at, max_age_seconds=max_age_seconds)
 

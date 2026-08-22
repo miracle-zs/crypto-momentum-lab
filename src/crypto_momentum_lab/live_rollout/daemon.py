@@ -1,8 +1,11 @@
+import asyncio
 from collections.abc import AsyncIterable, Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
+
+import structlog
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.execution import (
@@ -34,6 +37,7 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitCancellationRequest,
     LiveExitManager,
+    LiveExitRequest,
     ManagedLivePosition,
 )
 from crypto_momentum_lab.live_rollout.gates import (
@@ -50,6 +54,8 @@ from crypto_momentum_lab.persistence.postgres.order_repository import (
     PersistedExchangeOrder,
 )
 from crypto_momentum_lab.risk.gateway import RiskContext, RiskGateway
+
+log = structlog.get_logger()
 
 
 class LiveRuntimeStrategy(Protocol):
@@ -78,8 +84,16 @@ class LiveDaemonConfig:
     run_id: str
     resize_tolerance: Decimal
     checkpoint_every_states: int
+    reconcile_once_per_bucket: bool = True
     hedge_mode: bool = False
     entry_long_only: bool = False
+    entry_symbol_refresh_seconds: float = 15.0
+    entry_symbol_loader: Callable[[datetime], Awaitable[frozenset[str]]] | None = None
+    require_price_above_ema5: bool = False
+    require_price_above_ema10: bool = False
+    entry_filter_context_loader: (
+        Callable[[MarketState15s], Awaitable["LiveEntryFilterContext | None"]] | None
+    ) = None
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -88,6 +102,17 @@ class LiveDaemonConfig:
             raise ValueError("resize_tolerance must be in [0, 1)")
         if self.checkpoint_every_states <= 0:
             raise ValueError("checkpoint_every_states must be positive")
+        if not isinstance(self.reconcile_once_per_bucket, bool):
+            raise TypeError("reconcile_once_per_bucket must be a bool")
+        if self.entry_symbol_refresh_seconds <= 0:
+            raise ValueError("entry_symbol_refresh_seconds must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class LiveEntryFilterContext:
+    entry_price: Decimal | None
+    ema5: Decimal | None = None
+    ema10: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,11 +171,83 @@ class LiveStrategyDaemon:
         self._config = config
         self._exit_manager = exit_manager
         self._reconcile_orders = reconcile_orders
+        self._exit_lock = asyncio.Lock()
+        self._entry_enabled = True
+        self._exit_enabled = True
 
     def _invalidate_context_cache(self) -> None:
         invalidate = getattr(self._context_provider, "invalidate_cache", None)
         if callable(invalidate):
             invalidate()
+
+    @property
+    def entry_enabled(self) -> bool:
+        return self._entry_enabled
+
+    @property
+    def exit_enabled(self) -> bool:
+        return self._exit_enabled
+
+    def set_entry_enabled(self, enabled: bool, *, reason: str) -> None:
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be a bool")
+        if self._entry_enabled == enabled:
+            return
+        self._entry_enabled = enabled
+        log.warning(
+            "live_entry_lane_state_changed",
+            enabled=enabled,
+            reason=reason,
+            run_id=self._config.run_id,
+        )
+
+    def set_exit_enabled(self, enabled: bool, *, reason: str) -> None:
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be a bool")
+        if self._exit_enabled == enabled:
+            return
+        self._exit_enabled = enabled
+        log.warning(
+            "live_exit_lane_state_changed",
+            enabled=enabled,
+            reason=reason,
+            run_id=self._config.run_id,
+        )
+
+    async def process_account_event(self, state: MarketState15s) -> str | None:
+        """Run the exit lane from the latest account event.
+
+        The entry lane remains driven by market buckets.  This method is a
+        separate seam for account/order events: it refreshes the account view
+        and evaluates only reduce-only requests against the newest market
+        state already held in memory.  It never calls the strategy entry
+        function and therefore cannot create a new position.
+        """
+        if self._exit_manager is None or not self._exit_enabled:
+            return None
+        self._invalidate_context_cache()
+        context = await self._context_provider(state)
+        if context.unmanaged_position_symbols:
+            symbols = ",".join(sorted(context.unmanaged_position_symbols))
+            return f"unmanaged_live_positions:{symbols}"
+        async with self._exit_lock:
+            requests = await self._exit_manager.requests_for_state(
+                state,
+                context.managed_positions,
+            )
+            _, _, failure = await self._process_exit_requests(
+                requests,
+                state=state,
+                context=context,
+            )
+        self._invalidate_context_cache()
+        if failure is not None:
+            log.error(
+                "live_account_event_exit_failed",
+                symbol=state.symbol,
+                reason=failure,
+            )
+        return failure
 
     async def run(
         self,
@@ -160,14 +257,21 @@ class LiveStrategyDaemon:
         final_state_at: datetime | None = None
         checkpoint_dirty = False
         last_checkpoint_saved_at: datetime | None = None
+        last_reconciled_bucket: datetime | None = None
         last_processed_at_by_symbol = dict(
             self._strategy.checkpoint().last_processed_at_by_symbol
         )
         max_gap_seconds = _strategy_max_gap_seconds(self._strategy)
+        entry_symbols: frozenset[str] | None = None
+        entry_symbols_loaded_at: datetime | None = None
         async for state in states:
-            if self._reconcile_orders is not None:
+            if self._reconcile_orders is not None and (
+                not self._config.reconcile_once_per_bucket
+                or last_reconciled_bucket != state.bucket_start
+            ):
                 try:
                     await self._reconcile_orders()
+                    last_reconciled_bucket = state.bucket_start
                 except Exception as error:
                     await self._save_final_checkpoint(
                         dirty=checkpoint_dirty,
@@ -236,140 +340,93 @@ class LiveStrategyDaemon:
                     orphan_cancel_reason,
                     final_state_at,
                 )
-            exit_requests = (
-                ()
-                if self._exit_manager is None
-                else await self._exit_manager.requests_for_state(
-                    state,
-                    context.managed_positions,
+            async with self._exit_lock:
+                exit_requests = (
+                    ()
+                    if self._exit_manager is None or not self._exit_enabled
+                    else await self._exit_manager.requests_for_state(
+                        state,
+                        context.managed_positions,
+                    )
                 )
-            )
+                exit_approved, exit_submitted, exit_failure = (
+                    await self._process_exit_requests(
+                        exit_requests,
+                        state=state,
+                        context=context,
+                    )
+                )
+            approved += exit_approved
+            submitted += exit_submitted
+            if exit_failure is not None:
+                await self._save_final_checkpoint(
+                    dirty=checkpoint_dirty,
+                    saved_at=last_checkpoint_saved_at,
+                )
+                return LiveDaemonResult(
+                    processed,
+                    approved,
+                    submitted,
+                    exit_failure,
+                    final_state_at,
+                )
             decision = self._strategy.on_market_state(state)
+            has_entry_candidates = self._entry_enabled and any(
+                not candidate.reduce_only for candidate in decision.candidates
+            )
+            if has_entry_candidates and self._config.entry_symbol_loader is not None:
+                if (
+                    entry_symbols_loaded_at is None
+                    or (state.bucket_start - entry_symbols_loaded_at).total_seconds()
+                    >= self._config.entry_symbol_refresh_seconds
+                ):
+                    try:
+                        entry_symbols = await self._config.entry_symbol_loader(
+                            state.bucket_start
+                        )
+                    except Exception:
+                        # Entry-pool lookup is fail-closed. Exit handling above
+                        # still runs, so an outage cannot strand an open position.
+                        entry_symbols = frozenset()
+                    entry_symbols_loaded_at = state.bucket_start
+            entry_filter_context = None
+            if (
+                has_entry_candidates
+                and (
+                    self._config.require_price_above_ema5
+                    or self._config.require_price_above_ema10
+                )
+                and self._config.entry_filter_context_loader is not None
+            ):
+                try:
+                    entry_filter_context = (
+                        await self._config.entry_filter_context_loader(state)
+                    )
+                except Exception:
+                    # Missing or stale EMA data must not authorize a live entry.
+                    entry_filter_context = None
             processed += 1
             final_state_at = state.bucket_start
             last_processed_at_by_symbol[state.symbol] = state.bucket_start
             checkpoint_dirty = True
             last_checkpoint_saved_at = context.now
-            for request in exit_requests:
-                if isinstance(request, LiveExitCancellationRequest):
-                    cancel_result = await self._state_machine.cancel_order(
-                        request.cancel_plan
-                    )
-                    self._invalidate_context_cache()
-                    if (
-                        cancel_result.state
-                        is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
-                    ):
-                        await self._save_final_checkpoint(
-                            dirty=checkpoint_dirty,
-                            saved_at=last_checkpoint_saved_at,
-                        )
-                        return LiveDaemonResult(
-                            processed,
-                            approved,
-                            submitted,
-                            "unknown_cancel_pending_reconciliation",
-                            final_state_at,
-                        )
-                    if not cancel_result.state.terminal:
-                        await self._save_final_checkpoint(
-                            dirty=checkpoint_dirty,
-                            saved_at=last_checkpoint_saved_at,
-                        )
-                        return LiveDaemonResult(
-                            processed,
-                            approved,
-                            submitted,
-                            "cancel_not_confirmed",
-                            final_state_at,
-                        )
-                    if cancel_result.state is ExchangeOrderState.REJECTED:
-                        await self._save_final_checkpoint(
-                            dirty=checkpoint_dirty,
-                            saved_at=last_checkpoint_saved_at,
-                        )
-                        return LiveDaemonResult(
-                            processed,
-                            approved,
-                            submitted,
-                            "cancel_rejected",
-                            final_state_at,
-                        )
-                    remaining = max(
-                        Decimal("0"),
-                        request.cancel_plan.quantity
-                        - cancel_result.executed_quantity,
-                    )
-                    if remaining <= 0:
-                        continue
-                    result = await self._execute_candidate(
-                        request.fallback_candidate,
-                        requested_quantity=min(request.fallback_quantity, remaining),
-                        state=state,
-                        context=context,
-                    )
-                    if result is not None:
-                        self._invalidate_context_cache()
-                        approved += 1
-                        submitted += int(not result.suppressed)
-                        if (
-                            result.state
-                            is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
-                        ):
-                            await self._save_final_checkpoint(
-                                dirty=checkpoint_dirty,
-                                saved_at=last_checkpoint_saved_at,
-                            )
-                            return LiveDaemonResult(
-                                processed,
-                                approved,
-                                submitted,
-                                "unknown_order_pending_reconciliation",
-                                final_state_at,
-                            )
-                        if result.state is ExchangeOrderState.REJECTED:
-                            await self._save_final_checkpoint(
-                                dirty=checkpoint_dirty,
-                                saved_at=last_checkpoint_saved_at,
-                            )
-                            return LiveDaemonResult(
-                                processed,
-                                approved,
-                                submitted,
-                                "grace_timeout_market_close_rejected",
-                                final_state_at,
-                            )
-                    continue
-                result = await self._execute_candidate(
-                    request.candidate,
-                    requested_quantity=request.quantity,
-                    state=state,
-                    context=context,
-                )
-                if result is not None:
-                    self._invalidate_context_cache()
-                    approved += 1
-                    submitted += int(not result.suppressed)
-                    if (
-                        result.state
-                        is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
-                    ):
-                        await self._save_final_checkpoint(
-                            dirty=checkpoint_dirty,
-                            saved_at=last_checkpoint_saved_at,
-                        )
-                        return LiveDaemonResult(
-                            processed,
-                            approved,
-                            submitted,
-                            "unknown_order_pending_reconciliation",
-                            final_state_at,
-                        )
             for candidate in decision.candidates:
+                if not candidate.reduce_only and not self._entry_enabled:
+                    continue
                 if (
                     self._config.entry_long_only
                     and not candidate.reduce_only
                     and getattr(candidate.side, "value", candidate.side) != "long"
+                ):
+                    continue
+                if not candidate.reduce_only and entry_symbols is not None:
+                    if candidate.symbol not in entry_symbols:
+                        continue
+                if not candidate.reduce_only and not _live_entry_candidate_passes(
+                    candidate,
+                    context=entry_filter_context,
+                    require_price_above_ema5=self._config.require_price_above_ema5,
+                    require_price_above_ema10=self._config.require_price_above_ema10,
                 ):
                     continue
                 result = await self._execute_candidate(
@@ -417,6 +474,70 @@ class LiveStrategyDaemon:
             final_state_at,
         )
 
+    async def _process_exit_requests(
+        self,
+        requests: tuple[LiveExitRequest, ...],
+        *,
+        state: MarketState15s,
+        context: LiveDaemonRuntimeContext,
+    ) -> tuple[int, int, str | None]:
+        approved = 0
+        submitted = 0
+        for request in requests:
+            if isinstance(request, LiveExitCancellationRequest):
+                cancel_result = await self._state_machine.cancel_order(
+                    request.cancel_plan
+                )
+                self._invalidate_context_cache()
+                if (
+                    cancel_result.state
+                    is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+                ):
+                    return approved, submitted, "unknown_cancel_pending_reconciliation"
+                if not cancel_result.state.terminal:
+                    return approved, submitted, "cancel_not_confirmed"
+                if cancel_result.state is ExchangeOrderState.REJECTED:
+                    return approved, submitted, "cancel_rejected"
+                remaining = max(
+                    Decimal("0"),
+                    request.cancel_plan.quantity - cancel_result.executed_quantity,
+                )
+                if remaining <= 0:
+                    continue
+                result = await self._execute_candidate(
+                    request.fallback_candidate,
+                    requested_quantity=min(request.fallback_quantity, remaining),
+                    state=state,
+                    context=context,
+                )
+                if result is None:
+                    continue
+                self._invalidate_context_cache()
+                approved += 1
+                submitted += int(not result.suppressed)
+                if (
+                    result.state
+                    is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+                ):
+                    return approved, submitted, "unknown_order_pending_reconciliation"
+                if result.state is ExchangeOrderState.REJECTED:
+                    return approved, submitted, "grace_timeout_market_close_rejected"
+                continue
+            result = await self._execute_candidate(
+                request.candidate,
+                requested_quantity=request.quantity,
+                state=state,
+                context=context,
+            )
+            if result is None:
+                continue
+            self._invalidate_context_cache()
+            approved += 1
+            submitted += int(not result.suppressed)
+            if result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
+                return approved, submitted, "unknown_order_pending_reconciliation"
+        return approved, submitted, None
+
     async def _execute_candidate(
         self,
         candidate: OrderIntentCandidate,
@@ -436,7 +557,9 @@ class LiveStrategyDaemon:
                     realized_pnl=context.realized_pnl,
                     unrealized_pnl=context.unrealized_pnl,
                     gross_exposure=context.gross_exposure,
-                    min_notional=_min_notional(context.trading_rules.get(candidate.symbol)),
+                    min_notional=_min_notional(
+                        context.trading_rules.get(candidate.symbol)
+                    ),
                     has_unresolved_order=any(
                         order_state_is_uncertain(item)
                         for item in context.unresolved_order_states
@@ -519,6 +642,30 @@ class LiveStrategyDaemon:
 
 def _min_notional(rules: SymbolTradingRules | None) -> Decimal | None:
     return None if rules is None else rules.min_notional
+
+
+def _live_entry_candidate_passes(
+    candidate: OrderIntentCandidate,
+    *,
+    context: LiveEntryFilterContext | None,
+    require_price_above_ema5: bool,
+    require_price_above_ema10: bool,
+) -> bool:
+    if candidate.reduce_only:
+        return True
+    if not require_price_above_ema5 and not require_price_above_ema10:
+        return True
+    if context is None or context.entry_price is None:
+        return False
+    if require_price_above_ema5 and (
+        context.ema5 is None or context.entry_price <= context.ema5
+    ):
+        return False
+    if require_price_above_ema10 and (
+        context.ema10 is None or context.entry_price <= context.ema10
+    ):
+        return False
+    return True
 
 
 def _strategy_max_gap_seconds(strategy: LiveRuntimeStrategy) -> int | None:

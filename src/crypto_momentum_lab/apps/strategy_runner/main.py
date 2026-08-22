@@ -11,6 +11,7 @@ import typer
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.build_info import resolve_code_commit
+from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     RunMode,
     StrategyRunIdentity,
@@ -30,9 +31,11 @@ from crypto_momentum_lab.strategies.compression_breakout import (
 from crypto_momentum_lab.strategy_runner import (
     AsyncPostgresRuntimeStateLoader,
     BinanceRestClosedCandle15mSource,
+    ClosedCandleEmaProvider,
     InMemoryPaperMarketStateSource,
     PairedPaperLiveAccount,
     PaperEntryFilterConfig,
+    PaperEntryFilterContext,
     PaperExitConfig,
     PaperExitMode,
     PaperLiveDaemonConfig,
@@ -640,6 +643,28 @@ def paper_live_daemon_command(
             help="Optional inclusive liquidation-cluster trade-count ceiling.",
         ),
     ] = None,
+    entry_positive_gainer_top_count: Annotated[
+        int | None,
+        typer.Option(
+            "--entry-positive-gainer-top-count",
+            min=1,
+            help="Use only positive UTC-day gainers within this ranking depth.",
+        ),
+    ] = None,
+    entry_price_above_ema5: Annotated[
+        bool,
+        typer.Option(
+            "--entry-price-above-ema5/--no-entry-price-above-ema5",
+            help="Require the entry price to be strictly above the closed 15m EMA5.",
+        ),
+    ] = False,
+    entry_price_above_ema10: Annotated[
+        bool,
+        typer.Option(
+            "--entry-price-above-ema10/--no-entry-price-above-ema10",
+            help="Require the entry price to be strictly above the closed 15m EMA10.",
+        ),
+    ] = False,
     max_states: Annotated[
         int,
         typer.Option("--max-states", min=1),
@@ -719,12 +744,69 @@ def paper_live_daemon_command(
     )
     repository = build_paper_daemon_repository(resolved_database_url)
     resolved_exit_mode = PaperExitMode(exit_mode)
+    if entry_positive_gainer_top_count is None:
+        entry_symbol_loader = source.load_active_symbols_at
+    else:
+        def entry_symbol_loader(observed_at: datetime) -> frozenset[str]:
+            return source.load_positive_gainer_symbols_at(
+                observed_at,
+                top_count=entry_positive_gainer_top_count,
+            )
+
+    entry_filter = _entry_filter_config(
+        long_only=entry_long_only,
+        max_abs_aggressive_imbalance=entry_max_abs_aggressive_imbalance,
+        max_cluster_trade_count=entry_max_cluster_trade_count,
+        require_price_above_ema5=entry_price_above_ema5,
+        require_price_above_ema10=entry_price_above_ema10,
+    )
     candle_source_context = (
         BinanceRestClosedCandle15mSource(binance_base_url)
-        if resolved_exit_mode is PaperExitMode.CANDLE_15M
+        if (
+            resolved_exit_mode is PaperExitMode.CANDLE_15M
+            or entry_price_above_ema5
+            or entry_price_above_ema10
+        )
         else nullcontext(None)
     )
     with candle_source_context as candle_source:
+        if entry_price_above_ema5 or entry_price_above_ema10:
+            if candle_source is None:
+                raise RuntimeError(
+                    "EMA entry filters require a 15m candle source"
+                )
+            ema_provider: ClosedCandleEmaProvider | None = (
+                ClosedCandleEmaProvider(candle_source)
+            )
+        else:
+            ema_provider = None
+
+        def load_entry_filter_context(
+            state: MarketState15s,
+        ) -> PaperEntryFilterContext | None:
+            if ema_provider is None:
+                return None
+            entry_price = (
+                state.last_ask_price
+                or state.midpoint
+                or state.close_price
+                or state.mark_price
+            )
+            if entry_price is None:
+                return None
+            try:
+                ema_snapshot = ema_provider.load(
+                    symbol=state.symbol,
+                    observed_at=state.bucket_start,
+                )
+            except Exception:
+                return None
+            return PaperEntryFilterContext(
+                entry_price=entry_price,
+                ema5=ema_snapshot.ema5,
+                ema10=ema_snapshot.ema10,
+            )
+
         result = run_paper_live_daemon(
             source=source,
             strategy=strategy,
@@ -753,17 +835,16 @@ def paper_live_daemon_command(
                     candle_grace_bars=candle_grace_bars,
                     candle_grace_profit_pct=Decimal(candle_grace_profit_pct),
                 ),
-                entry_filter=_entry_filter_config(
-                    long_only=entry_long_only,
-                    max_abs_aggressive_imbalance=(
-                        entry_max_abs_aggressive_imbalance
-                    ),
-                    max_cluster_trade_count=entry_max_cluster_trade_count,
-                ),
+                entry_filter=entry_filter,
             ),
             clock=clock,
-            entry_symbol_loader=source.load_active_symbols_at,
+            entry_symbol_loader=entry_symbol_loader,
             candle_source=candle_source,
+            entry_filter_context_loader=(
+                load_entry_filter_context
+                if ema_provider is not None
+                else None
+            ),
         )
     typer.echo(
         "Paper live daemon completed: "
@@ -779,16 +860,19 @@ def paper_live_pair_command(
         typer.Option("--strategy", help="Strategy name."),
     ],
     fixed_run_id: Annotated[
-        str,
-        typer.Option("--fixed-run-id", help="Run ID for the fixed-exit account."),
-    ],
+        str | None,
+        typer.Option(
+            "--fixed-run-id",
+            help="Optional run ID for the fixed-exit account.",
+        ),
+    ] = None,
     candle_run_id: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--candle-run-id",
             help="Run ID for the 15-minute candle-exit account.",
         ),
-    ],
+    ] = None,
     third_run_id: Annotated[
         str | None,
         typer.Option(
@@ -1012,6 +1096,8 @@ def paper_live_pair_command(
         typer.Option("--require-market-quote/--allow-close-fallback"),
     ] = False,
 ) -> None:
+    if candle_run_id is None:
+        raise typer.BadParameter("--candle-run-id is required")
     resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
     if not resolved_database_url:
         raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
@@ -1035,15 +1121,19 @@ def paper_live_pair_command(
         forward_horizon_buckets=(1,),
     )
     candidate_notional_decimal = Decimal(candidate_notional)
-    fixed_identity = build_runtime_identity_for_cli(
-        run_id=fixed_run_id,
-        strategy_name=strategy_name,
-        generated_at=created_at,
-        source_description=source.description,
-        compression_breakout=compression_breakout,
-        candidate_notional=candidate_notional_decimal,
-        candidate_ttl_buckets=candidate_ttl_buckets,
-        signal_interval_seconds=signal_interval_seconds,
+    fixed_identity = (
+        None
+        if fixed_run_id is None
+        else build_runtime_identity_for_cli(
+            run_id=fixed_run_id,
+            strategy_name=strategy_name,
+            generated_at=created_at,
+            source_description=source.description,
+            compression_breakout=compression_breakout,
+            candidate_notional=candidate_notional_decimal,
+            candidate_ttl_buckets=candidate_ttl_buckets,
+            signal_interval_seconds=signal_interval_seconds,
+        )
     )
     candle_identity = build_runtime_identity_for_cli(
         run_id=candle_run_id,
@@ -1127,38 +1217,16 @@ def paper_live_pair_command(
     )
     strategy = build_runtime_strategy_for_cli(
         strategy_name=strategy_name,
-        run_id=fixed_run_id,
+        run_id=fixed_run_id or candle_run_id,
         generated_at=created_at,
         source_description=source.description,
         compression_breakout=compression_breakout,
         candidate_notional=candidate_notional_decimal,
         candidate_ttl_buckets=candidate_ttl_buckets,
         signal_interval_seconds=signal_interval_seconds,
-        identity=fixed_identity,
+        identity=fixed_identity or candle_identity,
     )
     repository = build_paper_daemon_repository(resolved_database_url)
-    fixed_config = PaperLiveDaemonConfig(
-        run_id=fixed_run_id,
-        strategy_name=strategy_name,
-        environment=environment,
-        checkpoint_every_states=checkpoint_every_states,
-        checkpoint_every_seconds=checkpoint_every_seconds,
-        max_market_state_age_seconds=max_market_state_age_seconds,
-        run_identity=fixed_identity,
-        source_description=source.description,
-        execution=ReplayExecutionConfig(
-            latency_buckets=0,
-            require_market_quote=require_market_quote,
-        ),
-        portfolio=PaperExitConfig(
-            exit_mode=PaperExitMode.FIXED,
-            initial_balance=Decimal(paper_initial_balance),
-            take_profit_pct=Decimal(fixed_take_profit_pct),
-            stop_loss_pct=Decimal(fixed_stop_loss_pct),
-            max_holding_buckets=fixed_max_holding_buckets,
-            require_executable_quote=require_market_quote,
-        ),
-    )
     candle_config = PaperLiveDaemonConfig(
         run_id=candle_run_id,
         strategy_name=strategy_name,
@@ -1179,10 +1247,39 @@ def paper_live_pair_command(
             require_executable_quote=require_market_quote,
         ),
     )
-    accounts = [
-        PairedPaperLiveAccount(repository, repository, fixed_config),
-        PairedPaperLiveAccount(repository, repository, candle_config),
-    ]
+    accounts = []
+    if fixed_run_id is not None:
+        if fixed_identity is None:
+            raise AssertionError("fixed identity must be present")
+        accounts.append(
+            PairedPaperLiveAccount(
+                repository,
+                repository,
+                PaperLiveDaemonConfig(
+                    run_id=fixed_run_id,
+                    strategy_name=strategy_name,
+                    environment=environment,
+                    checkpoint_every_states=checkpoint_every_states,
+                    checkpoint_every_seconds=checkpoint_every_seconds,
+                    max_market_state_age_seconds=max_market_state_age_seconds,
+                    run_identity=fixed_identity,
+                    source_description=source.description,
+                    execution=ReplayExecutionConfig(
+                        latency_buckets=0,
+                        require_market_quote=require_market_quote,
+                    ),
+                    portfolio=PaperExitConfig(
+                        exit_mode=PaperExitMode.FIXED,
+                        initial_balance=Decimal(paper_initial_balance),
+                        take_profit_pct=Decimal(fixed_take_profit_pct),
+                        stop_loss_pct=Decimal(fixed_stop_loss_pct),
+                        max_holding_buckets=fixed_max_holding_buckets,
+                        require_executable_quote=require_market_quote,
+                    ),
+                ),
+            )
+        )
+    accounts.append(PairedPaperLiveAccount(repository, repository, candle_config))
     if third_run_id is not None:
         if third_identity is None:
             raise AssertionError("third identity must be present")
@@ -1393,6 +1490,8 @@ def _entry_filter_config(
     long_only: bool,
     max_abs_aggressive_imbalance: str | None = None,
     max_cluster_trade_count: int | None = None,
+    require_price_above_ema5: bool = False,
+    require_price_above_ema10: bool = False,
 ) -> PaperEntryFilterConfig:
     try:
         max_imbalance = (
@@ -1405,6 +1504,8 @@ def _entry_filter_config(
             allow_short=not long_only,
             max_abs_aggressive_imbalance=max_imbalance,
             max_cluster_trade_count=max_cluster_trade_count,
+            require_price_above_ema5=require_price_above_ema5,
+            require_price_above_ema10=require_price_above_ema10,
         )
     except (InvalidOperation, ValueError) as error:
         raise typer.BadParameter(str(error)) from error

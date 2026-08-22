@@ -1,7 +1,8 @@
 import asyncio
 import json
 import os
-from dataclasses import asdict
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -23,6 +24,7 @@ from crypto_momentum_lab.domain.live_rollout import (
     LiveSessionState,
     LiveSessionTransition,
 )
+from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import (
     RiskConfigSnapshot,
     RiskEvaluation,
@@ -36,7 +38,14 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyRunIdentity,
     deterministic_config_hash,
 )
-from crypto_momentum_lab.execution_account.binance import BinanceUsdMTradeClient
+from crypto_momentum_lab.execution_account.binance import (
+    BinanceRateLimitError,
+    BinanceUsdMTradeClient,
+)
+from crypto_momentum_lab.execution_account.hub import (
+    AccountEvent,
+    WebSocketAccountEventSource,
+)
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
     SubmitPolicy,
@@ -44,8 +53,13 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 from crypto_momentum_lab.live_rollout.daemon import (
     LiveDaemonConfig,
     LiveDaemonResult,
+    LiveEntryFilterContext,
     LiveRuntimeStrategy,
     LiveStrategyDaemon,
+)
+from crypto_momentum_lab.live_rollout.entry_cache import (
+    EntryFilterCacheConfig,
+    LiveEntryFilterCache,
 )
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitConfig,
@@ -53,6 +67,10 @@ from crypto_momentum_lab.live_rollout.exits import (
     ThreadedClosedCandle15mLoader,
 )
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext, evaluate_live_gate
+from crypto_momentum_lab.live_rollout.lease import (
+    LeaseHeartbeatConfig,
+    LiveLeaseHeartbeat,
+)
 from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
 from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,
@@ -63,6 +81,10 @@ from crypto_momentum_lab.live_rollout.session import (
     LiveRolloutSession,
     LiveSessionConfig,
     LiveSessionResult,
+)
+from crypto_momentum_lab.market_data.hub import (
+    MarketStateHubError,
+    WebSocketMarketStateSource,
 )
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
@@ -78,6 +100,9 @@ from crypto_momentum_lab.persistence.postgres.order_repository import (
 from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     PostgresPaperDaemonRepository,
 )
+from crypto_momentum_lab.persistence.postgres.repository import (
+    PostgresUniverseRepository,
+)
 from crypto_momentum_lab.persistence.postgres.risk_repository import (
     PostgresRiskRepository,
 )
@@ -91,6 +116,7 @@ from crypto_momentum_lab.persistence.postgres.session import (
 from crypto_momentum_lab.risk.gateway import RiskGateway
 from crypto_momentum_lab.strategy_runner.candle_source import (
     BinanceRestClosedCandle15mSource,
+    ClosedCandleEmaProvider,
 )
 from crypto_momentum_lab.strategy_runner.position_exit import (
     PositionExitMode,
@@ -112,6 +138,22 @@ _LIVE_UNENFORCED_STATE_AGE_SECONDS = 1_000_000_000.0
 _LIVE_MIN_WARMUP_SECONDS = 60
 _LIVE_WARMUP_STATE_LIMIT = 100_000
 _LIVE_WARMUP_BATCH_SIZE = 100
+_LIVE_STARTUP_RETRY_INITIAL_SECONDS = 15
+_LIVE_STARTUP_RETRY_MAX_SECONDS = 300
+_LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS = 300
+_LIVE_LEASE_RENEW_BEFORE_SECONDS = 120
+_LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS = 15.0
+_LIVE_RECONCILE_INTERVAL_SECONDS = 60.0
+_LIVE_ENTRY_FILTER_PREFETCH_CONCURRENCY = 4
+_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT = 100
+_LIVE_ENTRY_PRICE_ABOVE_EMA5 = True
+_LIVE_ENTRY_PRICE_ABOVE_EMA10 = True
+
+
+class _LiveStartupRetryableError(RuntimeError):
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.retry_after_seconds = getattr(cause, "retry_after_seconds", None)
 
 
 @app.callback()
@@ -122,8 +164,27 @@ def live_rollout_app() -> None:
 @app.command("strategy-config-hash")
 def strategy_config_hash_command(
     strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    entry_positive_gainer_top_count: Annotated[
+        int,
+        typer.Option("--entry-positive-gainer-top-count", min=1),
+    ] = _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT,
+    entry_price_above_ema5: Annotated[
+        bool,
+        typer.Option("--entry-price-above-ema5/--no-entry-price-above-ema5"),
+    ] = _LIVE_ENTRY_PRICE_ABOVE_EMA5,
+    entry_price_above_ema10: Annotated[
+        bool,
+        typer.Option("--entry-price-above-ema10/--no-entry-price-above-ema10"),
+    ] = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
 ) -> None:
-    typer.echo(_live_strategy_config_hash(strategy))
+    typer.echo(
+        _live_strategy_config_hash(
+            strategy,
+            entry_positive_gainer_top_count=entry_positive_gainer_top_count,
+            require_price_above_ema5=entry_price_above_ema5,
+            require_price_above_ema10=entry_price_above_ema10,
+        )
+    )
 
 
 @app.command("prepare")
@@ -152,12 +213,22 @@ def prepare_command(
         str,
         typer.Option("--max-open-positions"),
     ] = "unlimited",
+    entry_positive_gainer_top_count: Annotated[
+        int,
+        typer.Option("--entry-positive-gainer-top-count", min=1),
+    ] = _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT,
+    entry_price_above_ema5: Annotated[
+        bool,
+        typer.Option("--entry-price-above-ema5/--no-entry-price-above-ema5"),
+    ] = _LIVE_ENTRY_PRICE_ABOVE_EMA5,
+    entry_price_above_ema10: Annotated[
+        bool,
+        typer.Option("--entry-price-above-ema10/--no-entry-price-above-ema10"),
+    ] = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
     confirmation: Annotated[str, typer.Option("--confirmation")] = "",
 ) -> None:
     if confirmation != _PREPARE_CONFIRMATION:
-        raise typer.BadParameter(
-            f"--confirmation must equal '{_PREPARE_CONFIRMATION}'"
-        )
+        raise typer.BadParameter(f"--confirmation must equal '{_PREPARE_CONFIRMATION}'")
     payload = asyncio.run(
         _prepare_live_risk_gates(
             database_url=_database_url(database_url),
@@ -181,6 +252,9 @@ def prepare_command(
                 max_open_positions,
                 "--max-open-positions",
             ),
+            entry_positive_gainer_top_count=entry_positive_gainer_top_count,
+            require_price_above_ema5=entry_price_above_ema5,
+            require_price_above_ema10=entry_price_above_ema10,
         )
     )
     typer.echo(json.dumps(payload, sort_keys=True))
@@ -202,9 +276,7 @@ def approve_command(
     max_daily_loss: Annotated[str, typer.Option("--max-daily-loss")] = "unlimited",
     approver: Annotated[str, typer.Option("--approver")] = "",
     confirmation: Annotated[str, typer.Option("--confirmation")] = "",
-    expires_in_minutes: Annotated[
-        str, typer.Option("--expires-in-minutes")
-    ] = "never",
+    expires_in_minutes: Annotated[str, typer.Option("--expires-in-minutes")] = "never",
 ) -> None:
     now = datetime.now(tz=UTC)
     approval = LiveOperatorApproval(
@@ -275,9 +347,7 @@ def submit_plan_command(
     ] = False,
 ) -> None:
     if not confirmation:
-        raise typer.BadParameter(
-            "--i-understand-this-places-real-orders is required"
-        )
+        raise typer.BadParameter("--i-understand-this-places-real-orders is required")
     if order_plan_json is None:
         raise typer.BadParameter("--order-plan-json is required")
     api_key = os.environ.get(api_key_env)
@@ -315,6 +385,21 @@ def run_command(
         str,
         typer.Option("--market-environment"),
     ] = "research",
+    market_state_source: Annotated[
+        str,
+        typer.Option(
+            "--market-state-source",
+            help="Realtime source: hub (default) or postgres (explicit recovery mode).",
+        ),
+    ] = "hub",
+    market_state_hub_url: Annotated[
+        str,
+        typer.Option("--market-state-hub-url"),
+    ] = "ws://market-data:8766",
+    account_event_hub_url: Annotated[
+        str,
+        typer.Option("--account-event-hub-url"),
+    ] = "ws://execution-account-live:8767",
     session_id: Annotated[str, typer.Option("--session-id")] = "live-manual",
     operator: Annotated[str, typer.Option("--operator")] = "",
     lease_owner: Annotated[str, typer.Option("--lease-owner")] = "live-worker",
@@ -350,6 +435,18 @@ def run_command(
         bool,
         typer.Option("--entry-long-only/--entry-all-sides"),
     ] = True,
+    entry_positive_gainer_top_count: Annotated[
+        int,
+        typer.Option("--entry-positive-gainer-top-count", min=1),
+    ] = _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT,
+    entry_price_above_ema5: Annotated[
+        bool,
+        typer.Option("--entry-price-above-ema5/--no-entry-price-above-ema5"),
+    ] = _LIVE_ENTRY_PRICE_ABOVE_EMA5,
+    entry_price_above_ema10: Annotated[
+        bool,
+        typer.Option("--entry-price-above-ema10/--no-entry-price-above-ema10"),
+    ] = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
     candle_grace_bars: Annotated[
         int,
         typer.Option("--candle-grace-bars", min=0),
@@ -371,19 +468,21 @@ def run_command(
     ] = False,
 ) -> None:
     if not confirmation:
-        raise typer.BadParameter(
-            "--i-understand-this-places-real-orders is required"
-        )
+        raise typer.BadParameter("--i-understand-this-places-real-orders is required")
     api_key = os.environ.get(api_key_env)
     api_secret = os.environ.get(api_secret_env)
     if not api_key or not api_secret:
         raise typer.BadParameter(f"{api_key_env} and {api_secret_env} are required")
-    result = asyncio.run(
-        _run_live_daemon(
+
+    async def run_once() -> LiveDaemonResult:
+        return await _run_live_daemon(
             database_url=_database_url(database_url),
             account_label=account_label,
             strategy_name=strategy,
             market_environment=market_environment,
+            market_state_source=market_state_source,
+            market_state_hub_url=market_state_hub_url,
+            account_event_hub_url=account_event_hub_url,
             session_id=session_id,
             operator=operator,
             lease_owner=lease_owner,
@@ -398,6 +497,9 @@ def run_command(
             take_profit_pct=Decimal(take_profit_pct),
             stop_loss_pct=Decimal(stop_loss_pct),
             entry_long_only=entry_long_only,
+            entry_positive_gainer_top_count=entry_positive_gainer_top_count,
+            require_price_above_ema5=entry_price_above_ema5,
+            require_price_above_ema10=entry_price_above_ema10,
             candle_grace_bars=candle_grace_bars,
             candle_grace_profit_pct=Decimal(candle_grace_profit_pct),
             base_url=base_url,
@@ -405,7 +507,8 @@ def run_command(
             api_secret=api_secret,
             entry_leverage=entry_leverage,
         )
-    )
+
+    result = asyncio.run(_run_with_live_startup_backoff(run_once))
     typer.echo(json.dumps(asdict(result), default=str, sort_keys=True))
 
 
@@ -414,9 +517,7 @@ def status_command(
     session_id: Annotated[str, typer.Option("--session-id")],
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
 ) -> None:
-    transition = asyncio.run(
-        _load_transition(_database_url(database_url), session_id)
-    )
+    transition = asyncio.run(_load_transition(_database_url(database_url), session_id))
     typer.echo(
         json.dumps(
             None if transition is None else asdict(transition),
@@ -452,9 +553,7 @@ def report_command(
     session_id: Annotated[str, typer.Option("--session-id")],
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
 ) -> None:
-    transition = asyncio.run(
-        _load_transition(_database_url(database_url), session_id)
-    )
+    transition = asyncio.run(_load_transition(_database_url(database_url), session_id))
     typer.echo(
         json.dumps(
             None if transition is None else asdict(transition),
@@ -513,9 +612,7 @@ async def _run_live_plan(
             risk_config=risk_config,
             approval=approval,
             account_state=await _latest_account_state(factory, account_label),
-            active_halts=await risk_repository.load_active_halts(
-                "live", account_label
-            ),
+            active_halts=await risk_repository.load_active_halts("live", account_label),
             unresolved_order_states=tuple(item.state for item in unresolved),
         )
         gate = evaluate_live_gate(context)
@@ -587,12 +684,139 @@ async def _run_live_plan(
         await engine.dispose()
 
 
+async def _run_with_live_startup_backoff(
+    run_once: Callable[[], Awaitable[LiveDaemonResult]],
+) -> LiveDaemonResult:
+    consecutive_failures = 0
+    while True:
+        try:
+            return await run_once()
+        except _LiveStartupRetryableError as error:
+            consecutive_failures += 1
+            delay = _live_startup_retry_delay(
+                consecutive_failures,
+                retry_after_seconds=error.retry_after_seconds,
+            )
+            log.warning(
+                "live_startup_retry_scheduled",
+                attempt=consecutive_failures,
+                delay_seconds=delay,
+                error_type=type(error.__cause__ or error).__name__,
+                error=str(error),
+            )
+            await asyncio.sleep(delay)
+
+
+def _is_retryable_live_startup_error(error: Exception) -> bool:
+    return isinstance(error, BinanceRateLimitError) or (
+        isinstance(error, RuntimeError) and str(error).startswith("live gate blocked:")
+    )
+
+
+def _should_auto_reacquire_live_lease(
+    *,
+    lease_present: bool,
+    session_was_live_enabled: bool,
+    draining: bool,
+    gate_reasons: tuple[str, ...],
+) -> bool:
+    """Allow recovery only for an already-enabled, non-draining session."""
+    return (
+        not lease_present
+        and session_was_live_enabled
+        and not draining
+        and gate_reasons == ("missing_active_lease",)
+    )
+
+
+async def _session_was_live_enabled(
+    factory: async_sessionmaker[AsyncSession],
+    session_id: str,
+) -> bool:
+    async with factory() as database_session:
+        transition_id = await database_session.scalar(
+            select(LiveSessionTransitionRow.transition_id)
+            .where(
+                LiveSessionTransitionRow.session_id == session_id,
+                LiveSessionTransitionRow.state == LiveSessionState.LIVE_ENABLED.value,
+            )
+            .limit(1)
+        )
+    return transition_id is not None
+
+
+async def _maybe_auto_reacquire_live_lease(
+    *,
+    factory: async_sessionmaker[AsyncSession],
+    risk_repository: PostgresRiskRepository,
+    gate_context: LiveGateContext,
+    session_id: str,
+    draining: bool,
+) -> TradingLease | None:
+    """Recover a lease lost during a worker/feed restart without bypassing gates."""
+    gate = evaluate_live_gate(gate_context)
+    if gate.approved or gate_context.active_lease is not None:
+        return gate_context.active_lease
+    if not await _session_was_live_enabled(factory, session_id):
+        return None
+    if not _should_auto_reacquire_live_lease(
+        lease_present=False,
+        session_was_live_enabled=True,
+        draining=draining,
+        gate_reasons=gate.reasons,
+    ):
+        return None
+    now = gate_context.now
+    lease = TradingLease(
+        lease_id=f"lease-{uuid4()}",
+        environment="live",
+        account_label=gate_context.account_label,
+        strategy_name=gate_context.strategy_name,
+        owner=gate_context.required_lease_owner,
+        state=TradingLeaseState.ACTIVE,
+        acquired_at=now,
+        expires_at=now + timedelta(seconds=_LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS),
+    )
+    await risk_repository.acquire_lease(lease)
+    log.info(
+        "live_lease_auto_reacquired",
+        account_label=lease.account_label,
+        session_id=session_id,
+        lease_id=lease.lease_id,
+        lease_expires_at=lease.expires_at.isoformat(),
+    )
+    return lease
+
+
+def _live_startup_retry_delay(
+    attempt: int,
+    *,
+    retry_after_seconds: object,
+) -> float:
+    if attempt <= 0:
+        raise ValueError("attempt must be positive")
+    exponent = min(attempt - 1, 30)
+    delay = min(
+        _LIVE_STARTUP_RETRY_INITIAL_SECONDS * (2**exponent),
+        _LIVE_STARTUP_RETRY_MAX_SECONDS,
+    )
+    if isinstance(retry_after_seconds, int | float) and not isinstance(
+        retry_after_seconds, bool
+    ):
+        if retry_after_seconds >= 0:
+            delay = max(delay, float(retry_after_seconds))
+    return float(min(delay, _LIVE_STARTUP_RETRY_MAX_SECONDS))
+
+
 async def _run_live_daemon(
     *,
     database_url: str,
     account_label: str,
     strategy_name: str,
     market_environment: str,
+    market_state_source: str,
+    market_state_hub_url: str,
+    account_event_hub_url: str,
     session_id: str,
     operator: str,
     lease_owner: str,
@@ -607,6 +831,9 @@ async def _run_live_daemon(
     take_profit_pct: Decimal,
     stop_loss_pct: Decimal,
     entry_long_only: bool,
+    entry_positive_gainer_top_count: int | None,
+    require_price_above_ema5: bool,
+    require_price_above_ema10: bool,
     candle_grace_bars: int,
     candle_grace_profit_pct: Decimal,
     base_url: str,
@@ -614,12 +841,22 @@ async def _run_live_daemon(
     api_secret: str,
     entry_leverage: int,
 ) -> LiveDaemonResult:
+    if market_state_source not in {"hub", "postgres"}:
+        raise ValueError("market_state_source must be 'hub' or 'postgres'")
+    if market_state_source == "hub" and not market_state_hub_url.strip():
+        raise ValueError("market_state_hub_url must not be empty in hub mode")
+    if not account_event_hub_url.strip():
+        raise ValueError("account_event_hub_url must not be empty")
     now = datetime.now(tz=UTC)
     engine = create_async_database_engine(database_url)
     client: BinanceUsdMTradeClient | None = None
     candle_source: BinanceRestClosedCandle15mSource | None = None
+    ema_candle_source: BinanceRestClosedCandle15mSource | None = None
+    entry_filter_cache: LiveEntryFilterCache | None = None
+    entry_filter_cache_task: asyncio.Task[None] | None = None
     live_repository: PostgresLiveRolloutRepository | None = None
     risk_config_hash = ""
+    startup_phase = True
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         live_repository = PostgresLiveRolloutRepository(factory)
@@ -672,6 +909,9 @@ async def _run_live_daemon(
             now=now,
         )
         unresolved = await order_repository.load_unresolved_orders(session_id)
+        active_lease = await risk_repository.load_active_lease(
+            "live", account_label, now
+        )
         gate_context = LiveGateContext(
             now=now,
             live_submit_enabled=True,
@@ -682,26 +922,36 @@ async def _run_live_daemon(
             database_migration_revision=migration_revision,
             required_lease_owner=lease_owner,
             requested_submit_policy=SubmitPolicy.LIVE_SUBMIT,
-            active_lease=await risk_repository.load_active_lease(
-                "live", account_label, now
-            ),
+            active_lease=active_lease,
             risk_config=risk_config,
             approval=approval,
             account_state=await _latest_account_state(factory, account_label),
-            active_halts=await risk_repository.load_active_halts(
-                "live", account_label
-            ),
+            active_halts=await risk_repository.load_active_halts("live", account_label),
             unresolved_order_states=tuple(item.state for item in unresolved),
         )
+        active_lease = await _maybe_auto_reacquire_live_lease(
+            factory=factory,
+            risk_repository=risk_repository,
+            gate_context=gate_context,
+            session_id=session_id,
+            draining=draining,
+        )
+        gate_context = replace(gate_context, active_lease=active_lease)
         gate = evaluate_live_gate(gate_context)
         if not gate.approved:
             raise RuntimeError(f"live gate blocked: {','.join(gate.reasons)}")
         if approval is None:
             raise RuntimeError("live approval is required")
+        if active_lease is None:
+            raise RuntimeError("live lease is required")
 
         strategy_config = _live_strategy_config()
-        runtime_config = build_runtime_config(strategy_name, config=strategy_config)
-        computed_hash = deterministic_config_hash(runtime_config)
+        computed_hash = _live_strategy_config_hash(
+            strategy_name,
+            entry_positive_gainer_top_count=entry_positive_gainer_top_count,
+            require_price_above_ema5=require_price_above_ema5,
+            require_price_above_ema10=require_price_above_ema10,
+        )
         if computed_hash != strategy_config_hash:
             raise RuntimeError(
                 "strategy config hash does not match the live runtime configuration"
@@ -734,34 +984,144 @@ async def _run_live_daemon(
                 run_mode=RunMode.LIVE,
                 code_commit=git_commit_hash,
                 created_at=now,
-                source_paths=(f"postgres-runtime-states:{market_environment}",),
+                source_paths=(f"{market_state_source}:{market_environment}",),
             ),
         )
         checkpoint = await checkpoint_repository.load_checkpoint(session_id)
         if checkpoint is not None:
             strategy.restore_checkpoint(checkpoint)
         state_repository = PostgresRuntimeMarketStateRepository(factory)
-        market_cursor = (
-            RuntimeStateCursor(bucket_start=now, symbol="")
-            if checkpoint is not None
-            else await _warm_live_strategy_then_start_fresh(
+        market_cursor: RuntimeStateCursor | None = None
+        if checkpoint is not None:
+            market_cursor = RuntimeStateCursor(bucket_start=now, symbol="")
+        elif market_state_source == "postgres":
+            market_cursor = await _warm_live_strategy_then_start_fresh(
                 strategy=strategy,
                 repository=state_repository,
                 environment=market_environment,
                 now=now,
             )
-        )
-
-        notional_cap, max_positions, max_loss, max_gross = (
-            live_limits_from_approval(
-                approval=approval,
-                risk_config=risk_config,
+        else:
+            await _warm_live_strategy(
+                strategy=strategy,
+                repository=state_repository,
+                environment=market_environment,
+                now=now,
             )
+
+        notional_cap, max_positions, max_loss, max_gross = live_limits_from_approval(
+            approval=approval,
+            risk_config=risk_config,
         )
         candle_loader = None
+        ema_provider: ClosedCandleEmaProvider | None = None
         if exit_mode is PositionExitMode.CANDLE_15M:
             candle_source = BinanceRestClosedCandle15mSource(base_url)
             candle_loader = ThreadedClosedCandle15mLoader(candle_source)
+        if require_price_above_ema5 or require_price_above_ema10:
+            ema_candle_source = BinanceRestClosedCandle15mSource(base_url)
+            ema_provider = ClosedCandleEmaProvider(ema_candle_source)
+
+        entry_symbol_loader: Callable[[datetime], Awaitable[frozenset[str]]] | None = (
+            None
+        )
+        if entry_positive_gainer_top_count is not None:
+            universe_repository = PostgresUniverseRepository(factory)
+
+            async def load_entry_symbols_from_database(
+                observed_at: datetime,
+            ) -> frozenset[str]:
+                return await universe_repository.load_positive_gainer_symbols_at(
+                    observed_at,
+                    top_count=entry_positive_gainer_top_count,
+                )
+
+            entry_symbol_loader = load_entry_symbols_from_database
+        entry_filter_cache_required = (
+            ema_provider is not None and entry_symbol_loader is not None
+        )
+        daemon_entry_symbol_loader = entry_symbol_loader
+        if entry_filter_cache_required:
+
+            async def load_entry_symbols_from_cache(
+                observed_at: datetime,
+            ) -> frozenset[str]:
+                if entry_filter_cache is None:
+                    return frozenset()
+                return entry_filter_cache.symbols_for(observed_at)
+
+            daemon_entry_symbol_loader = load_entry_symbols_from_cache
+
+        entry_filter_context_loader: (
+            Callable[
+                [MarketState15s],
+                Awaitable[LiveEntryFilterContext | None],
+            ]
+            | None
+        ) = None
+        if ema_provider is not None:
+
+            async def load_entry_filter_context(
+                state: MarketState15s,
+            ) -> LiveEntryFilterContext | None:
+                entry_price = (
+                    state.last_ask_price
+                    or state.midpoint
+                    or state.close_price
+                    or state.mark_price
+                )
+                if entry_price is None:
+                    return None
+                if entry_filter_cache is not None:
+                    snapshot = entry_filter_cache.snapshot_for(
+                        symbol=state.symbol,
+                        observed_at=state.bucket_start,
+                    )
+                else:
+                    # Explicit no-pool configurations retain the old
+                    # behaviour. The production Top100 path always uses the
+                    # background cache above.
+                    snapshot = await asyncio.to_thread(
+                        ema_provider.load,
+                        symbol=state.symbol,
+                        observed_at=state.bucket_start,
+                    )
+                if snapshot is None:
+                    return None
+                return LiveEntryFilterContext(
+                    entry_price=entry_price,
+                    ema5=snapshot.ema5,
+                    ema10=snapshot.ema10,
+                )
+
+            entry_filter_context_loader = load_entry_filter_context
+        context_provider = PostgresLiveContextProvider(
+            session_factory=factory,
+            account_label=account_label,
+            run_id=session_id,
+            strategy_name=strategy_name,
+            strategy_config_hash=strategy_config_hash,
+            git_commit_hash=git_commit_hash,
+            migration_revision=migration_revision,
+            lease_owner=lease_owner,
+            approval_id=approval.approval_id,
+        )
+        lease_heartbeat = LiveLeaseHeartbeat(
+            repository=risk_repository,
+            lease=active_lease,
+            owner=lease_owner,
+            config=LeaseHeartbeatConfig(
+                lease_ttl_seconds=_LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS,
+                renew_before_seconds=_LIVE_LEASE_RENEW_BEFORE_SECONDS,
+                poll_interval_seconds=_LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS,
+            ),
+            on_renewed=context_provider.update_lease,
+            on_error=lambda error: log.warning(
+                "live_lease_renewal_failed",
+                session_id=session_id,
+                error_type=type(error).__name__,
+            ),
+        )
         daemon = LiveStrategyDaemon(
             strategy=strategy,
             risk_gateway=RiskGateway(),
@@ -776,23 +1136,17 @@ async def _run_live_daemon(
                 checkpoint_repository,
             ),
             state_machine=state_machine,
-            context_provider=PostgresLiveContextProvider(
-                session_factory=factory,
-                account_label=account_label,
-                run_id=session_id,
-                strategy_name=strategy_name,
-                strategy_config_hash=strategy_config_hash,
-                git_commit_hash=git_commit_hash,
-                migration_revision=migration_revision,
-                lease_owner=lease_owner,
-                approval_id=approval.approval_id,
-            ),
+            context_provider=context_provider,
             config=LiveDaemonConfig(
                 run_id=session_id,
                 resize_tolerance=Decimal("0.10"),
                 checkpoint_every_states=checkpoint_every_states,
                 hedge_mode=hedge_mode,
                 entry_long_only=entry_long_only,
+                entry_symbol_loader=daemon_entry_symbol_loader,
+                require_price_above_ema5=require_price_above_ema5,
+                require_price_above_ema10=require_price_above_ema10,
+                entry_filter_context_loader=entry_filter_context_loader,
             ),
             exit_manager=LiveExitManager(
                 config=LiveExitConfig(
@@ -811,12 +1165,49 @@ async def _run_live_daemon(
                 ),
                 candle_loader=candle_loader,
             ),
-            reconcile_orders=lambda: _reconcile_run_orders(
-                order_repository=order_repository,
-                state_machine=state_machine,
-                run_id=session_id,
-            ),
         )
+        entry_filter_cache_ready = not entry_filter_cache_required
+        market_state_available = market_state_source != "hub"
+
+        def refresh_entry_enabled() -> None:
+            if draining:
+                daemon.set_entry_enabled(False, reason="session_draining")
+            elif not market_state_available:
+                daemon.set_entry_enabled(
+                    False,
+                    reason="market_state_hub_connecting",
+                )
+            elif not entry_filter_cache_ready:
+                daemon.set_entry_enabled(
+                    False,
+                    reason="entry_filter_cache_warming",
+                )
+            else:
+                daemon.set_entry_enabled(
+                    True,
+                    reason="live_entry_prerequisites_ready",
+                )
+
+        def on_entry_filter_cache_ready(ready: bool) -> None:
+            nonlocal entry_filter_cache_ready
+            entry_filter_cache_ready = ready
+            refresh_entry_enabled()
+
+        if entry_filter_cache_required:
+            assert ema_provider is not None
+            assert entry_symbol_loader is not None
+            entry_filter_cache = LiveEntryFilterCache(
+                ema_provider=ema_provider,
+                symbol_loader=entry_symbol_loader,
+                config=EntryFilterCacheConfig(
+                    refresh_interval_seconds=15.0,
+                    prefetch_concurrency=_LIVE_ENTRY_FILTER_PREFETCH_CONCURRENCY,
+                ),
+            )
+            entry_filter_cache.set_ready_callback(
+                on_entry_filter_cache_ready
+            )
+        refresh_entry_enabled()
         if not draining:
             await _record_transition(
                 live_repository,
@@ -826,15 +1217,123 @@ async def _run_live_daemon(
                 risk_config_hash=risk_config_hash,
                 state=LiveSessionState.LIVE_ENABLED,
             )
-        result = await daemon.run(
-            poll_live_market_states(
+        startup_phase = False
+        hub_source: WebSocketMarketStateSource | None = None
+        state_stream: AsyncIterable[MarketState15s]
+        if market_state_source == "hub":
+
+            def on_market_connection_change(
+                available: bool,
+                reason: str | None,
+            ) -> None:
+                nonlocal market_state_available
+                market_state_available = available
+                refresh_entry_enabled()
+
+            hub_source = WebSocketMarketStateSource(
+                url=market_state_hub_url,
+                environment=market_environment,
+                consumer_id=f"live-strategy:{session_id}",
+                on_connection_change=on_market_connection_change,
+            )
+            state_stream = _resilient_market_state_stream(hub_source)
+        else:
+            state_stream = poll_live_market_states(
                 repository=state_repository,
                 environment=market_environment,
                 max_runtime_seconds=max_runtime_seconds,
                 poll_interval_seconds=poll_interval_seconds,
                 cursor=market_cursor,
             )
+        latest_market_states = _LatestMarketStateCache()
+        account_source = WebSocketAccountEventSource(
+            url=account_event_hub_url,
+            environment="live",
+            account_label=account_label,
+            consumer_id=f"live-exit:{session_id}",
         )
+        market_task = asyncio.create_task(
+            daemon.run(_observe_market_states(state_stream, latest_market_states))
+        )
+        account_task = asyncio.create_task(
+            _run_account_event_channel(
+                source=account_source,
+                daemon=daemon,
+                latest_market_states=latest_market_states,
+                order_repository=order_repository,
+                state_machine=state_machine,
+                run_id=session_id,
+            )
+        )
+        if entry_filter_cache is not None:
+            entry_filter_cache_task = asyncio.create_task(
+                entry_filter_cache.run()
+            )
+        lease_task = asyncio.create_task(lease_heartbeat.run())
+        reconcile_task = asyncio.create_task(
+            _periodic_reconcile_run_orders(
+                order_repository=order_repository,
+                state_machine=state_machine,
+                run_id=session_id,
+            )
+        )
+        try:
+            monitored_tasks: set[asyncio.Task[object]] = {
+                market_task,
+                account_task,
+                lease_task,
+                reconcile_task,
+            }
+            if entry_filter_cache_task is not None:
+                monitored_tasks.add(entry_filter_cache_task)
+            await asyncio.wait(
+                monitored_tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if account_task.done():
+                await account_task
+                raise RuntimeError("account event channel stopped unexpectedly")
+            if lease_task.done():
+                await lease_task
+                raise RuntimeError("live lease heartbeat stopped unexpectedly")
+            if reconcile_task.done():
+                await reconcile_task
+                raise RuntimeError("live order reconcile task stopped unexpectedly")
+            if (
+                entry_filter_cache_task is not None
+                and entry_filter_cache_task.done()
+            ):
+                await entry_filter_cache_task
+                raise RuntimeError(
+                    "live entry filter cache task stopped unexpectedly"
+                )
+            result = await market_task
+        finally:
+            if hub_source is not None:
+                hub_source.stop()
+            account_source.stop()
+            if not market_task.done():
+                market_task.cancel()
+            if not account_task.done():
+                account_task.cancel()
+            if not lease_task.done():
+                lease_task.cancel()
+            if not reconcile_task.done():
+                reconcile_task.cancel()
+            if entry_filter_cache is not None:
+                await entry_filter_cache.stop()
+            await asyncio.gather(
+                market_task,
+                account_task,
+                lease_task,
+                reconcile_task,
+                *(
+                    (entry_filter_cache_task,)
+                    if entry_filter_cache_task is not None
+                    else ()
+                ),
+                return_exceptions=True,
+            )
         await _record_transition(
             live_repository,
             session_id=session_id,
@@ -850,6 +1349,8 @@ async def _run_live_daemon(
         )
         return result
     except Exception as exc:
+        if startup_phase and _is_retryable_live_startup_error(exc):
+            raise _LiveStartupRetryableError(exc) from exc
         if live_repository is not None and risk_config_hash:
             await _record_transition(
                 live_repository,
@@ -866,7 +1367,110 @@ async def _run_live_daemon(
             await client.aclose()
         if candle_source is not None:
             candle_source.close()
+        if ema_candle_source is not None:
+            ema_candle_source.close()
         await engine.dispose()
+
+
+class _LatestMarketStateCache:
+    def __init__(self) -> None:
+        self._states: dict[str, MarketState15s] = {}
+
+    def observe(self, state: MarketState15s) -> None:
+        previous = self._states.get(state.symbol)
+        if previous is None or state.bucket_start >= previous.bucket_start:
+            self._states[state.symbol] = state
+
+    def for_symbols(self, symbols: tuple[str, ...]) -> tuple[MarketState15s, ...]:
+        if symbols:
+            selected = [
+                self._states[symbol]
+                for symbol in symbols
+                if symbol in self._states
+            ]
+        else:
+            selected = list(self._states.values())
+        return tuple(
+            sorted(selected, key=lambda state: (state.bucket_start, state.symbol))
+        )
+
+
+async def _observe_market_states(
+    states: AsyncIterable[MarketState15s],
+    cache: _LatestMarketStateCache,
+) -> AsyncIterator[MarketState15s]:
+    async for state in states:
+        cache.observe(state)
+        yield state
+
+
+async def _resilient_market_state_stream(
+    states: AsyncIterable[MarketState15s],
+    *,
+    retry_delay_seconds: float = 1.0,
+) -> AsyncIterator[MarketState15s]:
+    """Keep the live process alive while the market transport reconnects.
+
+    The source owns connection-level retries and reports availability changes.
+    This outer loop handles the longer outage threshold without terminating the
+    live daemon, so the account-event exit lane can continue independently.
+    """
+    if retry_delay_seconds < 0:
+        raise ValueError("retry_delay_seconds must not be negative")
+    while True:
+        try:
+            async for state in states:
+                yield state
+        except asyncio.CancelledError:
+            raise
+        except MarketStateHubError as error:
+            log.warning(
+                "live_market_state_stream_retry",
+                error_type=type(error).__name__,
+                error=str(error),
+                retry_delay_seconds=retry_delay_seconds,
+            )
+            if retry_delay_seconds > 0:
+                await asyncio.sleep(retry_delay_seconds)
+        else:
+            return
+
+
+async def _run_account_event_channel(
+    *,
+    source: WebSocketAccountEventSource,
+    daemon: LiveStrategyDaemon,
+    latest_market_states: _LatestMarketStateCache,
+    order_repository: PostgresOrderRepository,
+    state_machine: OrderExecutionStateMachine,
+    run_id: str,
+) -> None:
+    async for event in source:
+        if event.event_type == "ORDER_TRADE_UPDATE" and event.client_order_id:
+            await _reconcile_account_event_order(
+                event=event,
+                order_repository=order_repository,
+                state_machine=state_machine,
+                run_id=run_id,
+            )
+        for state in latest_market_states.for_symbols(event.symbols):
+            failure = await daemon.process_account_event(state)
+            if failure is not None:
+                raise RuntimeError(f"account_event_exit_failed:{failure}")
+
+
+async def _reconcile_account_event_order(
+    *,
+    event: AccountEvent,
+    order_repository: PostgresOrderRepository,
+    state_machine: OrderExecutionStateMachine,
+    run_id: str,
+) -> None:
+    unresolved = await order_repository.load_unresolved_orders(run_id)
+    for order in unresolved:
+        if order.plan.client_order_id == event.client_order_id:
+            await state_machine.reconcile_order(order.plan)
+            return
 
 
 class _LiveDaemonRepositoryAdapter:
@@ -902,6 +1506,43 @@ async def _reconcile_run_orders(
 ) -> None:
     for order in await order_repository.load_unresolved_orders(run_id):
         await state_machine.reconcile_order(order.plan)
+
+
+async def _periodic_reconcile_run_orders(
+    *,
+    order_repository: PostgresOrderRepository,
+    state_machine: OrderExecutionStateMachine,
+    run_id: str,
+    interval_seconds: float = _LIVE_RECONCILE_INTERVAL_SECONDS,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Reconcile ordinary unresolved orders off the market-state hot path.
+
+    Account WebSocket events still trigger an immediate reconcile for the
+    affected client order.  This loop is the eventual-consistency safety net
+    for orders without a recent account event; a transient REST/DB failure is
+    logged and retried on the next interval rather than stopping market
+    processing.
+    """
+
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    while True:
+        await sleep(interval_seconds)
+        try:
+            await _reconcile_run_orders(
+                order_repository=order_repository,
+                state_machine=state_machine,
+                run_id=run_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception(
+                "live_periodic_order_reconcile_failed",
+                run_id=run_id,
+                interval_seconds=interval_seconds,
+            )
 
 
 async def _has_matching_shadow_session(
@@ -1090,12 +1731,30 @@ def _live_strategy_config() -> dict[str, object]:
     }
 
 
-def _live_strategy_config_hash(strategy_name: str) -> str:
+def _live_strategy_config_hash(
+    strategy_name: str,
+    *,
+    entry_positive_gainer_top_count: int | None = _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT,
+    require_price_above_ema5: bool = _LIVE_ENTRY_PRICE_ABOVE_EMA5,
+    require_price_above_ema10: bool = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
+) -> str:
+    if (
+        entry_positive_gainer_top_count is not None
+        and entry_positive_gainer_top_count <= 0
+    ):
+        raise ValueError("entry_positive_gainer_top_count must be positive")
     return deterministic_config_hash(
-        build_runtime_config(
-            strategy_name,
-            config=_live_strategy_config(),
-        )
+        {
+            "strategy": build_runtime_config(
+                strategy_name,
+                config=_live_strategy_config(),
+            ),
+            "entry_filter": {
+                "entry_positive_gainer_top_count": entry_positive_gainer_top_count,
+                "require_price_above_ema5": require_price_above_ema5,
+                "require_price_above_ema10": require_price_above_ema10,
+            },
+        }
     )
 
 
@@ -1110,6 +1769,9 @@ async def _prepare_live_risk_gates(
     max_gross_notional: Decimal | None,
     max_daily_loss: Decimal | None,
     max_open_positions: int | None,
+    entry_positive_gainer_top_count: int | None,
+    require_price_above_ema5: bool,
+    require_price_above_ema10: bool,
 ) -> dict[str, str]:
     now = datetime.now(tz=UTC)
     risk_config = RiskConfigSnapshot(
@@ -1147,7 +1809,12 @@ async def _prepare_live_risk_gates(
         "lease_id": lease.lease_id,
         "lease_expires_at": lease.expires_at.isoformat(),
         "risk_config_hash": risk_config.config_hash,
-        "strategy_config_hash": _live_strategy_config_hash(strategy_name),
+        "strategy_config_hash": _live_strategy_config_hash(
+            strategy_name,
+            entry_positive_gainer_top_count=entry_positive_gainer_top_count,
+            require_price_above_ema5=require_price_above_ema5,
+            require_price_above_ema10=require_price_above_ema10,
+        ),
     }
 
 
@@ -1182,9 +1849,7 @@ def _parse_optional_decimal_limit(
             f"{option_name} must be positive or 'unlimited'"
         ) from error
     if not value.is_finite() or value <= 0:
-        raise typer.BadParameter(
-            f"{option_name} must be positive or 'unlimited'"
-        )
+        raise typer.BadParameter(f"{option_name} must be positive or 'unlimited'")
     return value
 
 

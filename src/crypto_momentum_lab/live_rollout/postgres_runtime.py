@@ -19,7 +19,11 @@ from crypto_momentum_lab.domain.execution import (
 )
 from crypto_momentum_lab.domain.live_rollout import LiveOperatorApproval
 from crypto_momentum_lab.domain.market.models import MarketState15s
-from crypto_momentum_lab.domain.risk import RiskConfigSnapshot, StrategyLiveState
+from crypto_momentum_lab.domain.risk import (
+    RiskConfigSnapshot,
+    StrategyLiveState,
+    TradingLease,
+)
 from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.execution_account.orders.quantization import (
     SymbolTradingRules,
@@ -67,15 +71,7 @@ class PostgresLiveContextProvider:
         migration_revision: str,
         lease_owner: str,
         approval_id: str,
-        lease_ttl_seconds: int = 300,
-        lease_renew_before_seconds: int = 120,
     ) -> None:
-        if lease_ttl_seconds <= 0:
-            raise ValueError("lease_ttl_seconds must be positive")
-        if not 0 < lease_renew_before_seconds < lease_ttl_seconds:
-            raise ValueError(
-                "lease_renew_before_seconds must be between zero and lease TTL"
-            )
         self._sessions = session_factory
         self._account_label = account_label
         self._run_id = run_id
@@ -85,8 +81,6 @@ class PostgresLiveContextProvider:
         self._migration_revision = migration_revision
         self._lease_owner = lease_owner
         self._approval_id = approval_id
-        self._lease_ttl_seconds = lease_ttl_seconds
-        self._lease_renew_before_seconds = lease_renew_before_seconds
         self._risk_repository = PostgresRiskRepository(session_factory)
         self._live_repository = PostgresLiveRolloutRepository(session_factory)
         self._order_repository = PostgresOrderRepository(session_factory)
@@ -170,17 +164,6 @@ class PostgresLiveContextProvider:
         strategy_state = strategy_state_task.result()
         if approval is not None and approval.approval_id != self._approval_id:
             approval = None
-        if (
-            lease is not None
-            and lease.owner == self._lease_owner
-            and lease.expires_at
-            <= now + timedelta(seconds=self._lease_renew_before_seconds)
-        ):
-            lease = await self._risk_repository.renew_lease(
-                lease.lease_id,
-                self._lease_owner,
-                now + timedelta(seconds=self._lease_ttl_seconds),
-            )
         (
             account_observed_at,
             position_symbols,
@@ -231,6 +214,25 @@ class PostgresLiveContextProvider:
         self._cached_bucket_start = state.bucket_start
         self._cached_context = context
         return context
+
+    def update_lease(self, lease: TradingLease) -> None:
+        """Publish a heartbeat renewal into the cached runtime context.
+
+        Lease renewal is owned by the independent heartbeat task.  Updating
+        the cache here keeps the gate on the hot market-state path consistent
+        with the lease that was just committed to PostgreSQL.
+        """
+
+        if lease.owner != self._lease_owner or self._cached_context is None:
+            return
+        self._cached_context = replace(
+            self._cached_context,
+            active_lease=lease,
+            gate_context=replace(
+                self._cached_context.gate_context,
+                active_lease=lease,
+            ),
+        )
 
     def invalidate_cache(self) -> None:
         """Force the next state to reload account and risk state."""
@@ -524,13 +526,42 @@ async def poll_live_market_states(
     poll_interval_seconds: float,
     batch_size: int = 500,
     cursor: RuntimeStateCursor | None = None,
+    max_state_lag_seconds: float = 45.0,
+    lag_check_interval_seconds: float = 1.0,
 ) -> AsyncIterator[MarketState15s]:
+    if max_state_lag_seconds <= 0:
+        raise ValueError("max_state_lag_seconds must be positive")
+    if lag_check_interval_seconds <= 0:
+        raise ValueError("lag_check_interval_seconds must be positive")
     active_cursor = cursor or RuntimeStateCursor(
         bucket_start=datetime.now(tz=UTC),
         symbol="",
     )
     deadline = time.monotonic() + max_runtime_seconds
+    next_lag_check_at = 0.0
     while time.monotonic() < deadline:
+        monotonic_now = time.monotonic()
+        if monotonic_now >= next_lag_check_at:
+            latest_bucket = await repository.load_latest_bucket(
+                environment=environment
+            )
+            if (
+                latest_bucket is not None
+                and active_cursor.bucket_start is not None
+                and (
+                    latest_bucket - active_cursor.bucket_start
+                ).total_seconds()
+                > max_state_lag_seconds
+            ):
+                # A live worker must never submit an entry for an old signal.
+                # Reposition just before the newest closed bucket; the daemon
+                # will reset per-symbol strategy state across this gap while
+                # still evaluating exits against the newest market state.
+                active_cursor = RuntimeStateCursor(
+                    bucket_start=latest_bucket - timedelta(microseconds=1),
+                    symbol="",
+                )
+            next_lag_check_at = monotonic_now + lag_check_interval_seconds
         batch = await repository.load_after(
             environment=environment,
             cursor=active_cursor,

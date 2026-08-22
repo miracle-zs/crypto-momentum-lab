@@ -13,6 +13,7 @@ class RankingSide(StrEnum):
 class MembershipStatus(StrEnum):
     TARGET = "target"
     RETAINED = "retained"
+    EXTENDED = "extended"
     FORCED = "forced"
 
 

@@ -1,6 +1,21 @@
 from crypto_momentum_lab.execution_account.binance.client import (
+    BinanceRateLimitError,
     BinanceUsdMPrivateReadClient,
     BinanceUsdMTradeClient,
 )
+from crypto_momentum_lab.execution_account.binance.user_data import (
+    BinancePayloadError,
+    BinanceUsdMUserDataStream,
+    BinanceUserDataEvent,
+    parse_user_data_event,
+)
 
-__all__ = ["BinanceUsdMPrivateReadClient", "BinanceUsdMTradeClient"]
+__all__ = [
+    "BinanceRateLimitError",
+    "BinancePayloadError",
+    "BinanceUsdMPrivateReadClient",
+    "BinanceUsdMTradeClient",
+    "BinanceUsdMUserDataStream",
+    "BinanceUserDataEvent",
+    "parse_user_data_event",
+]
