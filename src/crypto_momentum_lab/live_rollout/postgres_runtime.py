@@ -62,7 +62,9 @@ class PostgresLiveContextProvider:
     def __init__(
         self,
         *,
-        session_factory: async_sessionmaker[AsyncSession],
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
+        execution_session_factory: async_sessionmaker[AsyncSession] | None = None,
+        market_session_factory: async_sessionmaker[AsyncSession] | None = None,
         account_label: str,
         run_id: str,
         strategy_name: str,
@@ -72,7 +74,13 @@ class PostgresLiveContextProvider:
         lease_owner: str,
         approval_id: str,
     ) -> None:
-        self._sessions = session_factory
+        execution_sessions = execution_session_factory or session_factory
+        if execution_sessions is None:
+            raise ValueError(
+                "session_factory or execution_session_factory is required"
+            )
+        self._sessions = execution_sessions
+        self._market_sessions = market_session_factory or execution_sessions
         self._account_label = account_label
         self._run_id = run_id
         self._strategy_name = strategy_name
@@ -81,9 +89,9 @@ class PostgresLiveContextProvider:
         self._migration_revision = migration_revision
         self._lease_owner = lease_owner
         self._approval_id = approval_id
-        self._risk_repository = PostgresRiskRepository(session_factory)
-        self._live_repository = PostgresLiveRolloutRepository(session_factory)
-        self._order_repository = PostgresOrderRepository(session_factory)
+        self._risk_repository = PostgresRiskRepository(execution_sessions)
+        self._live_repository = PostgresLiveRolloutRepository(execution_sessions)
+        self._order_repository = PostgresOrderRepository(execution_sessions)
         self._cached_bucket_start: datetime | None = None
         self._cached_context: LiveDaemonRuntimeContext | None = None
         self._cache_epoch = 0
@@ -275,7 +283,8 @@ class PostgresLiveContextProvider:
             < self._TRADING_RULE_CACHE_SECONDS
         ):
             return cached
-        loaded_rules = await _load_trading_rules(self._sessions, {symbol})
+        market_sessions = getattr(self, "_market_sessions", self._sessions)
+        loaded_rules = await _load_trading_rules(market_sessions, {symbol})
         symbol_rules = loaded_rules[symbol]
         self._cached_rules[symbol] = symbol_rules
         self._cached_rules_at[symbol] = now

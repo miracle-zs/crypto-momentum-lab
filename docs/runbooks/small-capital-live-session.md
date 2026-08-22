@@ -31,6 +31,21 @@ set +a
 COMPOSE="docker compose --env-file .env.server --env-file .env.live -f compose.server.yaml"
 ```
 
+## Database Planes
+
+The live deployment uses three logical database planes with bounded connection
+pools: execution (orders, account, risk, and lease), market (market states and
+universe), and observability (checkpoints and runtime telemetry). The default
+configuration intentionally points all three at the same PostgreSQL service;
+this is connection-pool and write-path isolation, not a second disk.
+
+Leave `CML_EXECUTION_DATABASE_URL`, `CML_MARKET_DATABASE_URL`, and
+`CML_OBSERVABILITY_DATABASE_URL` blank on the current cloud server. If a future
+deployment gets separate PostgreSQL endpoints, set those variables only after
+running the same Alembic migrations against each endpoint. High-frequency
+market/strategy telemetry remains in memory for latency summaries; durable
+telemetry is limited to order lifecycle events and uses best-effort commits.
+
 ## 1. Start Read-Only Account Sync
 
 Build the exact Git commit, apply migrations, and start only the authenticated
@@ -68,8 +83,11 @@ $COMPOSE --profile live run --rm --no-deps live-strategy prepare \
 ```
 
 Record the returned `risk_config_hash`, `strategy_config_hash`, `lease_id`, and
-expiry. The live daemon renews its five-minute lease while healthy; if it stops,
-the lease expires without another process taking over.
+expiry. The live daemon renews its five-minute lease while healthy. If a feed or
+worker restart lets that lease expire, a session that has already reached
+`live_enabled` may automatically reacquire a short lease after all other gates
+still pass; a first startup still requires `prepare`, and an operator-draining
+session is never auto-restarted.
 
 ## 3. Run Matching Shadow
 

@@ -7,7 +7,10 @@ from crypto_momentum_lab.domain.execution import (
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.execution_account.hub import AccountEvent
-from crypto_momentum_lab.live_rollout.telemetry import LiveRuntimeTelemetry
+from crypto_momentum_lab.live_rollout.telemetry import (
+    MARKET_STATE_RECEIVED,
+    LiveRuntimeTelemetry,
+)
 from tests.unit.shadow_operation.test_service import _intent, _state
 
 
@@ -127,7 +130,11 @@ async def test_live_telemetry_persists_events_in_batches_without_blocking_record
     async def persist(events) -> None:
         batches.append(tuple(dict(event) for event in events))
 
-    telemetry = LiveRuntimeTelemetry(run_id="run-1", persist=persist)
+    telemetry = LiveRuntimeTelemetry(
+        run_id="run-1",
+        persist=persist,
+        persist_event_types=frozenset({MARKET_STATE_RECEIVED}),
+    )
     await telemetry.start()
     await telemetry.market_state_received(
         _state(),
@@ -138,3 +145,52 @@ async def test_live_telemetry_persists_events_in_batches_without_blocking_record
     assert len(batches) == 1
     assert batches[0][0]["event_type"] == "market_state_received"
     assert batches[0][0]["details"]["lane"] == "entry"
+
+
+async def test_high_frequency_telemetry_stays_in_memory_when_not_persisted() -> None:
+    batches: list[tuple[dict[str, object], ...]] = []
+
+    async def persist(events) -> None:
+        batches.append(tuple(dict(event) for event in events))
+
+    telemetry = LiveRuntimeTelemetry(
+        run_id="run-1",
+        persist=persist,
+        persist_event_types=frozenset(),
+    )
+    await telemetry.start()
+    state = _state()
+    await telemetry.market_state_received(
+        state,
+        occurred_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+    await telemetry.strategy_decision(
+        state,
+        occurred_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+        signal_count=0,
+        candidate_count=0,
+    )
+    await telemetry.stop()
+
+    assert batches == []
+    assert telemetry.recorded_event_count == 2
+    assert telemetry.persist_failure_count == 0
+
+
+def test_live_database_plane_urls_prefer_explicit_plane_environment(
+    monkeypatch,
+) -> None:
+    from crypto_momentum_lab.apps.live_rollout import main
+
+    monkeypatch.setenv("CML_DATABASE_URL", "postgresql+asyncpg://data")
+    monkeypatch.setenv("CML_EXECUTION_DATABASE_URL", "postgresql+asyncpg://exec")
+    monkeypatch.setenv(
+        "CML_OBSERVABILITY_DATABASE_URL",
+        "postgresql+asyncpg://observability",
+    )
+
+    assert main._execution_database_url(None) == "postgresql+asyncpg://exec"
+    assert main._observability_database_url(None) == (
+        "postgresql+asyncpg://observability"
+    )
+    assert main._market_database_url(None) == "postgresql+asyncpg://data"

@@ -89,6 +89,7 @@ from crypto_momentum_lab.live_rollout.session import (
     LiveSessionResult,
 )
 from crypto_momentum_lab.live_rollout.telemetry import (
+    PERSISTED_ORDER_TELEMETRY_EVENTS,
     LiveRuntimeTelemetry,
     LiveTelemetrySink,
 )
@@ -120,8 +121,13 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
     RuntimeStateCursor,
 )
+from crypto_momentum_lab.persistence.postgres.runtime_telemetry_repository import (
+    PostgresRuntimeTelemetryRepository,
+)
 from crypto_momentum_lab.persistence.postgres.session import (
-    create_async_database_engine,
+    create_execution_database_engine,
+    create_market_database_engine,
+    create_observability_database_engine,
 )
 from crypto_momentum_lab.risk.gateway import RiskGateway
 from crypto_momentum_lab.strategy_runner.candle_source import (
@@ -486,7 +492,9 @@ def run_command(
 
     async def run_once() -> LiveDaemonResult:
         return await _run_live_daemon(
-            database_url=_database_url(database_url),
+            execution_database_url=_execution_database_url(database_url),
+            market_database_url=_market_database_url(database_url),
+            observability_database_url=_observability_database_url(database_url),
             account_label=account_label,
             strategy_name=strategy,
             market_environment=market_environment,
@@ -592,7 +600,7 @@ async def _run_live_plan(
     if plan.run_id != session_id:
         raise ValueError("order plan run_id must match session_id")
     now = datetime.now(tz=UTC)
-    engine = create_async_database_engine(database_url)
+    engine = create_execution_database_engine(database_url)
     client: BinanceUsdMTradeClient | None = None
     execution_coordinator: OrderExecutionCoordinator | None = None
     try:
@@ -834,7 +842,9 @@ def _live_startup_retry_delay(
 
 async def _run_live_daemon(
     *,
-    database_url: str,
+    execution_database_url: str,
+    market_database_url: str,
+    observability_database_url: str,
     account_label: str,
     strategy_name: str,
     market_environment: str,
@@ -872,7 +882,11 @@ async def _run_live_daemon(
     if not account_event_hub_url.strip():
         raise ValueError("account_event_hub_url must not be empty")
     now = datetime.now(tz=UTC)
-    engine = create_async_database_engine(database_url)
+    execution_engine = create_execution_database_engine(execution_database_url)
+    market_engine = create_market_database_engine(market_database_url)
+    observability_engine = create_observability_database_engine(
+        observability_database_url
+    )
     heartbeat_engine: AsyncEngine | None = None
     client: BinanceUsdMTradeClient | None = None
     execution_coordinator: OrderExecutionCoordinator | None = None
@@ -885,14 +899,25 @@ async def _run_live_daemon(
     risk_config_hash = ""
     startup_phase = True
     try:
-        factory = async_sessionmaker(engine, expire_on_commit=False)
-        live_repository = PostgresLiveRolloutRepository(factory)
-        risk_repository = PostgresRiskRepository(factory)
+        execution_factory = async_sessionmaker(
+            execution_engine,
+            expire_on_commit=False,
+        )
+        market_factory = async_sessionmaker(
+            market_engine,
+            expire_on_commit=False,
+        )
+        observability_factory = async_sessionmaker(
+            observability_engine,
+            expire_on_commit=False,
+        )
+        live_repository = PostgresLiveRolloutRepository(execution_factory)
+        risk_repository = PostgresRiskRepository(execution_factory)
         # Lease liveness is a control-plane concern.  Give it one isolated
         # connection with a short driver timeout so a slow market/reconcile
         # query cannot consume the pool needed by the heartbeat.
-        heartbeat_engine = create_async_database_engine(
-            database_url,
+        heartbeat_engine = create_execution_database_engine(
+            execution_database_url,
             pool_size=1,
             max_overflow=0,
             pool_timeout_seconds=3,
@@ -903,14 +928,18 @@ async def _run_live_daemon(
             expire_on_commit=False,
         )
         heartbeat_risk_repository = PostgresRiskRepository(heartbeat_factory)
-        order_repository = PostgresOrderRepository(factory)
-        checkpoint_repository = PostgresPaperDaemonRepository(factory)
+        order_repository = PostgresOrderRepository(execution_factory)
+        checkpoint_repository = PostgresPaperDaemonRepository(observability_factory)
+        telemetry_repository = PostgresRuntimeTelemetryRepository(
+            observability_factory
+        )
         telemetry = LiveRuntimeTelemetry(
             run_id=session_id,
-            persist=checkpoint_repository.save_runtime_events,
+            persist=telemetry_repository.save_runtime_events,
+            persist_event_types=PERSISTED_ORDER_TELEMETRY_EVENTS,
         )
         await telemetry.start()
-        risk_config = await _latest_risk_config(factory, account_label)
+        risk_config = await _latest_risk_config(execution_factory, account_label)
         risk_config_hash = risk_config.config_hash
         client = BinanceUsdMTradeClient(
             api_key=api_key,
@@ -948,7 +977,7 @@ async def _run_live_daemon(
             state_machine=execution_coordinator,
             run_id=session_id,
         )
-        draining = await _session_is_draining(factory, session_id)
+        draining = await _session_is_draining(execution_factory, session_id)
         if not draining:
             await _record_transition(
                 live_repository,
@@ -980,12 +1009,15 @@ async def _run_live_daemon(
             active_lease=active_lease,
             risk_config=risk_config,
             approval=approval,
-            account_state=await _latest_account_state(factory, account_label),
+            account_state=await _latest_account_state(
+                execution_factory,
+                account_label,
+            ),
             active_halts=await risk_repository.load_active_halts("live", account_label),
             unresolved_order_states=tuple(item.state for item in unresolved),
         )
         active_lease = await _maybe_auto_reacquire_live_lease(
-            factory=factory,
+            factory=execution_factory,
             risk_repository=risk_repository,
             gate_context=gate_context,
             session_id=session_id,
@@ -1021,7 +1053,7 @@ async def _run_live_daemon(
                 state=LiveSessionState.SHADOW_PREFLIGHT,
             )
         await _warn_if_shadow_preflight_missing(
-            factory,
+            execution_factory,
             strategy_name=strategy_name,
             strategy_config_hash=strategy_config_hash,
             account_label=account_label,
@@ -1045,7 +1077,7 @@ async def _run_live_daemon(
         checkpoint = await checkpoint_repository.load_checkpoint(session_id)
         if checkpoint is not None:
             strategy.restore_checkpoint(checkpoint)
-        state_repository = PostgresRuntimeMarketStateRepository(factory)
+        state_repository = PostgresRuntimeMarketStateRepository(market_factory)
         market_cursor: RuntimeStateCursor | None = None
         if checkpoint is not None:
             market_cursor = RuntimeStateCursor(bucket_start=now, symbol="")
@@ -1081,7 +1113,7 @@ async def _run_live_daemon(
             None
         )
         if entry_positive_gainer_top_count is not None:
-            universe_repository = PostgresUniverseRepository(factory)
+            universe_repository = PostgresUniverseRepository(market_factory)
 
             async def load_entry_symbols_from_database(
                 observed_at: datetime,
@@ -1171,7 +1203,8 @@ async def _run_live_daemon(
 
             entry_filter_context_loader = load_entry_filter_context
         context_provider = PostgresLiveContextProvider(
-            session_factory=factory,
+            execution_session_factory=execution_factory,
+            market_session_factory=market_factory,
             account_label=account_label,
             run_id=session_id,
             strategy_name=strategy_name,
@@ -1182,7 +1215,8 @@ async def _run_live_daemon(
             approval_id=approval.approval_id,
         )
         heartbeat_context_provider = PostgresLiveContextProvider(
-            session_factory=heartbeat_factory,
+            execution_session_factory=heartbeat_factory,
+            market_session_factory=market_factory,
             account_label=account_label,
             run_id=session_id,
             strategy_name=strategy_name,
@@ -1489,7 +1523,9 @@ async def _run_live_daemon(
             ema_candle_source.close()
         if telemetry is not None:
             await telemetry.stop()
-        await engine.dispose()
+        await execution_engine.dispose()
+        await market_engine.dispose()
+        await observability_engine.dispose()
         if heartbeat_engine is not None:
             await heartbeat_engine.dispose()
 
@@ -1961,7 +1997,7 @@ async def _prepare_live_risk_gates(
         acquired_at=now,
         expires_at=now + timedelta(seconds=lease_ttl_seconds),
     )
-    engine = create_async_database_engine(database_url)
+    engine = create_execution_database_engine(database_url)
     try:
         repository = PostgresRiskRepository(
             async_sessionmaker(engine, expire_on_commit=False)
@@ -1987,7 +2023,7 @@ async def _save_approval(
     database_url: str,
     approval: LiveOperatorApproval,
 ) -> None:
-    engine = create_async_database_engine(database_url)
+    engine = create_execution_database_engine(database_url)
     try:
         repository = PostgresLiveRolloutRepository(
             async_sessionmaker(engine, expire_on_commit=False)
@@ -2064,7 +2100,7 @@ async def _preflight_summary(
     strategy_name: str,
 ) -> dict[str, object]:
     now = datetime.now(tz=UTC)
-    engine = create_async_database_engine(database_url)
+    engine = create_execution_database_engine(database_url)
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         approval = await PostgresLiveRolloutRepository(factory).load_active_approval(
@@ -2112,7 +2148,7 @@ async def _load_transition(
     database_url: str,
     session_id: str,
 ) -> LiveSessionTransition | None:
-    engine = create_async_database_engine(database_url)
+    engine = create_execution_database_engine(database_url)
     try:
         return await PostgresLiveRolloutRepository(
             async_sessionmaker(engine, expire_on_commit=False)
@@ -2142,7 +2178,7 @@ async def _save_transition(
         reason=reason,
         details={},
     )
-    engine = create_async_database_engine(database_url)
+    engine = create_execution_database_engine(database_url)
     try:
         await PostgresLiveRolloutRepository(
             async_sessionmaker(engine, expire_on_commit=False)
@@ -2151,8 +2187,30 @@ async def _save_transition(
         await engine.dispose()
 
 
-def _database_url(value: str | None) -> str:
-    resolved = value or os.environ.get("CML_DATABASE_URL")
+def _execution_database_url(value: str | None) -> str:
+    return _resolve_database_url(value, "CML_EXECUTION_DATABASE_URL")
+
+
+def _market_database_url(value: str | None) -> str:
+    return _resolve_database_url(value, "CML_MARKET_DATABASE_URL")
+
+
+def _observability_database_url(value: str | None) -> str:
+    return _resolve_database_url(value, "CML_OBSERVABILITY_DATABASE_URL")
+
+
+def _resolve_database_url(value: str | None, plane_env_var: str) -> str:
+    resolved = value or os.environ.get(plane_env_var) or os.environ.get(
+        "CML_DATABASE_URL"
+    )
     if not resolved:
-        raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
+        raise typer.BadParameter(
+            f"--database-url or {plane_env_var} or CML_DATABASE_URL is required"
+        )
     return resolved
+
+
+def _database_url(value: str | None) -> str:
+    """Resolve the execution plane for legacy live CLI commands."""
+
+    return _execution_database_url(value)

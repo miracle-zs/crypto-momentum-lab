@@ -9,7 +9,7 @@ turning telemetry into another reason to stop submitting or closing orders.
 
 import asyncio
 from collections import defaultdict, deque
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
@@ -57,6 +57,24 @@ _PHASE_ORDER = (
 _REPEATABLE_PHASES = frozenset({ACCOUNT_FILL})
 _MAX_EVENT_BATCH = 128
 _PERSIST_BATCH_TIMEOUT_SECONDS = 0.25
+
+# Market-state and strategy-decision events remain available in the in-memory
+# trace, but are intentionally not durable by default.  Persisting those
+# high-frequency events turns observability into a steady WAL producer and can
+# lengthen checkpoints for the execution data plane.  Order lifecycle events
+# are sparse enough to retain for post-incident reconstruction.
+PERSISTED_ORDER_TELEMETRY_EVENTS = frozenset(
+    {
+        CANDIDATE_ACCEPTED,
+        RISK_APPROVED,
+        INTENT_SAVED,
+        SUBMITTING,
+        EXCHANGE_REQUEST_STARTED,
+        EXCHANGE_RESPONSE_RECEIVED,
+        EXCHANGE_FILLED,
+        ACCOUNT_FILL,
+    }
+)
 
 
 class LiveTelemetrySink(Protocol):
@@ -181,6 +199,8 @@ class LiveRuntimeTelemetry:
     The persistence sink receives batches on a background task.  ``record``
     methods still update phase timestamps synchronously before yielding, so a
     slow or unavailable database cannot hide the latency of the live lanes.
+    ``persist_event_types`` only controls the durable stream; omitted values
+    preserve the diagnostic behavior of persisting every event type.
     """
 
     def __init__(
@@ -188,6 +208,7 @@ class LiveRuntimeTelemetry:
         *,
         run_id: str,
         persist: RuntimeEventBatchSink | None = None,
+        persist_event_types: Collection[str] | None = None,
         queue_size: int = 4096,
         max_trace_count: int = 8192,
         max_samples_per_metric: int = 4096,
@@ -202,6 +223,11 @@ class LiveRuntimeTelemetry:
             raise ValueError("max_samples_per_metric must be positive")
         self._run_id = run_id
         self._persist = persist
+        self._persist_event_types = (
+            None
+            if persist_event_types is None
+            else frozenset(persist_event_types)
+        )
         self._queue_size = queue_size
         self._max_trace_count = max_trace_count
         self._max_samples_per_metric = max_samples_per_metric
@@ -637,6 +663,11 @@ class LiveRuntimeTelemetry:
     def _enqueue(self, event: LiveRuntimeEvent) -> None:
         if self._queue is None:
             return
+        if (
+            self._persist_event_types is not None
+            and event.event_type not in self._persist_event_types
+        ):
+            return
         try:
             self._queue.put_nowait(event)
         except asyncio.QueueFull:
@@ -748,6 +779,7 @@ __all__ = [
     "LiveRuntimeTelemetry",
     "LiveTelemetrySink",
     "MARKET_STATE_RECEIVED",
+    "PERSISTED_ORDER_TELEMETRY_EVENTS",
     "RISK_APPROVED",
     "STRATEGY_DECISION",
     "SUBMITTING",

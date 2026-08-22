@@ -5,6 +5,9 @@ from crypto_momentum_lab.persistence.postgres.base import Base
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
 )
+from crypto_momentum_lab.persistence.postgres.operational_retention import (
+    PostgresOperationalRetentionRepository,
+)
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PersistedExchangeOrder,
     PostgresOrderRepository,
@@ -25,8 +28,14 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     RuntimeStateCursor,
     RuntimeStateSequenceRange,
 )
+from crypto_momentum_lab.persistence.postgres.runtime_telemetry_repository import (
+    PostgresRuntimeTelemetryRepository,
+)
 from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,
+    create_execution_database_engine,
+    create_market_database_engine,
+    create_observability_database_engine,
     create_sync_engine,
 )
 from crypto_momentum_lab.persistence.postgres.shadow_repository import (
@@ -40,10 +49,12 @@ __all__ = [
     "Base",
     "PostgresAccountRepository",
     "PostgresOrderRepository",
+    "PostgresOperationalRetentionRepository",
     "PostgresLiveRolloutRepository",
     "PostgresRuntimeMarketStateRepository",
     "PostgresPaperDaemonRepository",
     "PostgresRiskRepository",
+    "PostgresRuntimeTelemetryRepository",
     "PostgresShadowRepository",
     "PostgresStrategyRunRepository",
     "PostgresUniverseRepository",
@@ -53,5 +64,8 @@ __all__ = [
     "LeaseOwnershipError",
     "PersistedExchangeOrder",
     "create_async_database_engine",
+    "create_execution_database_engine",
+    "create_market_database_engine",
+    "create_observability_database_engine",
     "create_sync_engine",
 ]

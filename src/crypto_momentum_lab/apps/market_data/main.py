@@ -72,7 +72,7 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
-    create_async_database_engine,
+    create_market_database_engine,
 )
 from crypto_momentum_lab.persistence.raw_files.archive import ZstdJsonlArchive
 from crypto_momentum_lab.persistence.raw_files.journal import PendingManifestJournal
@@ -140,6 +140,12 @@ def resolve_config_path(value: Path | None) -> Path:
     )
 
 
+def _market_database_url(default_url: str) -> str:
+    """Use the market plane when configured, otherwise the shared database."""
+
+    return os.environ.get("CML_MARKET_DATABASE_URL") or default_url
+
+
 def parse_paper_exit_run_ids(value: str | None = None) -> frozenset[str]:
     raw_value = (
         os.environ.get(_PAPER_EXIT_RUN_IDS_ENV, "")
@@ -183,7 +189,7 @@ async def build_refresh_service(
     config_path: Path,
 ) -> AsyncIterator[tuple[UniverseRefreshService, int, int]]:
     runtime = load_runtime_config(config_path)
-    engine = create_async_database_engine(runtime.database_url)
+    engine = create_market_database_engine(_market_database_url(runtime.database_url))
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     repository = PostgresUniverseRepository(session_factory)
     client = BinanceUsdMRestClient(str(runtime.binance_base_url))
@@ -558,7 +564,7 @@ async def build_market_data_runtime(
     config_path: Path,
 ) -> AsyncIterator[MarketDataRuntime]:
     runtime = load_runtime_config(config_path)
-    engine = create_async_database_engine(runtime.database_url)
+    engine = create_market_database_engine(_market_database_url(runtime.database_url))
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     universe_repository = PostgresUniverseRepository(sessions)
     capture_repository = PostgresCaptureRepository(sessions)

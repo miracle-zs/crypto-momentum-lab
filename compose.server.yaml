@@ -7,6 +7,12 @@ x-app: &app
       CML_CODE_COMMIT: ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
   environment: &app-environment
     CML_DATABASE_URL: postgresql+asyncpg://cml:${CML_POSTGRES_PASSWORD:?set CML_POSTGRES_PASSWORD}@postgres:5432/cml
+    # Optional logical database-plane overrides. Empty values intentionally
+    # fall back to CML_DATABASE_URL, so this does not require another disk or
+    # another PostgreSQL container on the current cloud host.
+    CML_EXECUTION_DATABASE_URL: ${CML_EXECUTION_DATABASE_URL:-}
+    CML_MARKET_DATABASE_URL: ${CML_MARKET_DATABASE_URL:-}
+    CML_OBSERVABILITY_DATABASE_URL: ${CML_OBSERVABILITY_DATABASE_URL:-}
     CML_CODE_COMMIT: ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
   restart: unless-stopped
   stop_grace_period: 60s

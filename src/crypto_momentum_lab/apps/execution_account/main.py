@@ -1,6 +1,7 @@
 import asyncio
 import os
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Annotated
 
 import typer
@@ -27,7 +28,7 @@ from crypto_momentum_lab.execution_account.sync import (
 )
 from crypto_momentum_lab.persistence.postgres import (
     PostgresAccountRepository,
-    create_async_database_engine,
+    create_execution_database_engine,
 )
 
 app = typer.Typer(no_args_is_help=True)
@@ -74,9 +75,12 @@ def sync_once_command(
         ),
     ] = "",
 ) -> None:
-    resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
+    resolved_database_url = _execution_database_url(database_url)
     if not resolved_database_url:
-        raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
+        raise typer.BadParameter(
+            "--database-url or CML_EXECUTION_DATABASE_URL or "
+            "CML_DATABASE_URL is required"
+        )
     api_key = os.environ.get(api_key_env)
     api_secret = os.environ.get(api_secret_env)
     if not api_key or not api_secret:
@@ -160,9 +164,12 @@ def sync_command(
         typer.Option("--rest-reconciliation-interval-seconds", min=30),
     ] = 300.0,
 ) -> None:
-    resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
+    resolved_database_url = _execution_database_url(database_url)
     if not resolved_database_url:
-        raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
+        raise typer.BadParameter(
+            "--database-url or CML_EXECUTION_DATABASE_URL or "
+            "CML_DATABASE_URL is required"
+        )
     api_key = os.environ.get(api_key_env)
     api_secret = os.environ.get(api_secret_env)
     if not api_key or not api_secret:
@@ -204,7 +211,7 @@ async def sync_once(
     expected_hedge_mode: bool = False,
     fill_symbols: tuple[str, ...] = (),
 ) -> ExecutionAccountSyncResult:
-    engine = create_async_database_engine(database_url)
+    engine = create_execution_database_engine(database_url)
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         repository = PostgresAccountRepository(factory)
@@ -253,7 +260,7 @@ async def sync_continuously(
     account_event_hub_port: int,
     rest_reconciliation_interval_seconds: float,
 ) -> None:
-    engine = create_async_database_engine(database_url)
+    engine = create_execution_database_engine(database_url)
     account_event_hub = AccountEventHub(
         AccountEventHubConfig(
             host=account_event_hub_host,
@@ -336,6 +343,18 @@ def _parse_symbols(value: str) -> tuple[str, ...]:
     )
 
 
+def _execution_database_url(value: str | None) -> str:
+    resolved = value or os.environ.get("CML_EXECUTION_DATABASE_URL") or os.environ.get(
+        "CML_DATABASE_URL"
+    )
+    if not resolved:
+        raise typer.BadParameter(
+            "--database-url or CML_EXECUTION_DATABASE_URL or "
+            "CML_DATABASE_URL is required"
+        )
+    return resolved
+
+
 def _account_event_from_user_data(
     event: BinanceUserDataEvent,
     result: ExecutionAccountSyncResult,
@@ -347,12 +366,20 @@ def _account_event_from_user_data(
     symbol: str | None = None
     client_order_id: str | None = None
     order_status: str | None = None
+    has_fill = False
+    trade_id: str | None = None
     if event.event_type == "ORDER_TRADE_UPDATE":
         order = event.payload.get("o")
         if isinstance(order, dict):
             symbol = _event_text(order.get("s"))
             client_order_id = _event_text(order.get("c"))
             order_status = _event_text(order.get("X"))
+            has_fill = (
+                _event_text(order.get("x")) == "TRADE"
+                and _is_nonzero_quantity(order.get("l"))
+            )
+            if has_fill:
+                trade_id = _event_text(order.get("t"))
             if symbol is not None:
                 symbols.add(symbol)
     elif event.event_type == "ACCOUNT_UPDATE":
@@ -377,6 +404,8 @@ def _account_event_from_user_data(
         client_order_id=client_order_id,
         order_status=order_status,
         reason=result.status.value,
+        has_fill=has_fill,
+        trade_id=trade_id,
     )
 
 
@@ -385,3 +414,10 @@ def _event_text(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _is_nonzero_quantity(value: object) -> bool:
+    try:
+        return Decimal(str(value or "0")) != 0
+    except (InvalidOperation, ValueError):
+        return False
