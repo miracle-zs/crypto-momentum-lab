@@ -6,6 +6,7 @@ enabled_streams:
   - forceOrder
 max_subscriptions_per_connection: 100
 book_ticker_max_subscriptions_per_connection: 25
+book_ticker_use_all_stream: true
 book_ticker_coalescing_interval_seconds: 1.0
 control_messages_per_second: 5
 control_ack_timeout_seconds: 10

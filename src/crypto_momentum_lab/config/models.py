@@ -81,6 +81,7 @@ class CaptureConfig(BaseModel):
         gt=0,
         le=100,
     )
+    book_ticker_use_all_stream: bool = False
     book_ticker_coalescing_interval_seconds: float = Field(
         default=1.0,
         gt=0,
