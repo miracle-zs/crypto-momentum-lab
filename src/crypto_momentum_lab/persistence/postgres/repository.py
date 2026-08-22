@@ -47,12 +47,30 @@ def _candidate_return(candidate: MarketCandidate) -> Decimal | None:
     return candidate.current_price / candidate.open_price - Decimal(1)
 
 
+def _contract_metadata_signature(
+    contract: ContractMetadata,
+) -> tuple[object, ...]:
+    return (
+        contract.contract_type,
+        contract.status,
+        contract.quote_asset,
+        contract.margin_asset,
+        contract.onboard_at,
+        contract.raw,
+    )
+
+
 class PostgresUniverseRepository:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         self._session_factory = session_factory
+        # Contract metadata changes much less often than the universe is
+        # refreshed.  Keep the last payload in the long-lived market-data
+        # process and write only new/changed contracts instead of appending the
+        # full exchangeInfo response every minute.
+        self._contract_metadata_signatures: dict[str, tuple[object, ...]] = {}
 
     async def save_contract_metadata(
         self,
@@ -62,35 +80,75 @@ class PostgresUniverseRepository:
     ) -> None:
         if not contracts:
             return
-        statement = insert(ContractMetadataRow).values(
-            [
-                {
-                    "symbol": item.symbol,
-                    "effective_at": effective_at,
-                    "contract_type": item.contract_type,
-                    "status": item.status,
-                    "quote_asset": item.quote_asset,
-                    "margin_asset": item.margin_asset,
-                    "onboard_at": item.onboard_at,
-                    "raw_payload": item.raw,
-                }
-                for item in contracts
-            ]
-        )
-        statement = statement.on_conflict_do_update(
-            index_elements=["symbol", "effective_at"],
-            set_={
-                "contract_type": statement.excluded.contract_type,
-                "status": statement.excluded.status,
-                "quote_asset": statement.excluded.quote_asset,
-                "margin_asset": statement.excluded.margin_asset,
-                "onboard_at": statement.excluded.onboard_at,
-                "raw_payload": statement.excluded.raw_payload,
-            },
+        changed_contracts = tuple(
+            item
+            for item in contracts
+            if self._contract_metadata_signatures.get(item.symbol)
+            != _contract_metadata_signature(item)
         )
         async with self._session_factory() as session:
             async with session.begin():
+                contracts_to_write = changed_contracts
+                if len(changed_contracts) != len(contracts):
+                    # The signature cache is only an optimization.  Retention
+                    # or an operator may remove a row while this process is
+                    # alive, so restore any cached symbol missing from the DB.
+                    persisted_symbols = set(
+                        (
+                            await session.scalars(
+                                select(ContractMetadataRow.symbol).where(
+                                    ContractMetadataRow.symbol.in_(
+                                        tuple(item.symbol for item in contracts)
+                                    )
+                                )
+                            )
+                        ).all()
+                    )
+                    changed_symbols = {
+                        item.symbol for item in changed_contracts
+                    }
+                    contracts_to_write = tuple(
+                        item
+                        for item in contracts
+                        if item.symbol in changed_symbols
+                        or item.symbol not in persisted_symbols
+                    )
+                if not contracts_to_write:
+                    return
+
+                statement = insert(ContractMetadataRow).values(
+                    [
+                        {
+                            "symbol": item.symbol,
+                            "effective_at": effective_at,
+                            "contract_type": item.contract_type,
+                            "status": item.status,
+                            "quote_asset": item.quote_asset,
+                            "margin_asset": item.margin_asset,
+                            "onboard_at": item.onboard_at,
+                            "raw_payload": item.raw,
+                        }
+                        for item in contracts_to_write
+                    ]
+                )
+                statement = statement.on_conflict_do_update(
+                    index_elements=["symbol", "effective_at"],
+                    set_={
+                        "contract_type": statement.excluded.contract_type,
+                        "status": statement.excluded.status,
+                        "quote_asset": statement.excluded.quote_asset,
+                        "margin_asset": statement.excluded.margin_asset,
+                        "onboard_at": statement.excluded.onboard_at,
+                        "raw_payload": statement.excluded.raw_payload,
+                    },
+                )
                 await session.execute(statement)
+        self._contract_metadata_signatures.update(
+            {
+                item.symbol: _contract_metadata_signature(item)
+                for item in contracts_to_write
+            }
+        )
 
     async def load_daily_opens(
         self,

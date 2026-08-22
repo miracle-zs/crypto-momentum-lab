@@ -4,7 +4,7 @@ import signal
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
@@ -59,6 +59,9 @@ from crypto_momentum_lab.persistence.postgres.account_repository import (
 from crypto_momentum_lab.persistence.postgres.capture_repository import (
     PostgresCaptureRepository,
 )
+from crypto_momentum_lab.persistence.postgres.operational_retention import (
+    PostgresOperationalRetentionRepository,
+)
 from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     PostgresPaperDaemonRepository,
 )
@@ -90,6 +93,11 @@ _MARKET_DATA_STALE_AFTER_SECONDS = 120.0
 _MARKET_DATA_WATCHDOG_INTERVAL_SECONDS = 15.0
 _CAPTURE_STOP_TIMEOUT_SECONDS = 55.0
 _PAPER_EXIT_RECONCILE_SECONDS = 15.0
+_DATABASE_RETENTION_INTERVAL_SECONDS = 60.0
+_CONTRACT_METADATA_RETENTION_HOURS = 6.0
+_RUNTIME_STATE_RETENTION_HOURS = 48.0
+_CONTRACT_METADATA_RETENTION_BATCH_SIZE = 1_000
+_RUNTIME_STATE_RETENTION_BATCH_SIZE = 1_000
 _PAPER_EXIT_RUN_IDS_ENV = "CML_PAPER_EXIT_RUN_IDS"
 _LIVE_POSITION_ACCOUNT_LABEL_ENV = "CML_LIVE_POSITION_ACCOUNT_LABEL"
 _MARKET_STATE_HUB_HOST_ENV = "CML_MARKET_STATE_HUB_HOST"
@@ -446,6 +454,81 @@ async def run_raw_archive_retention_loop(
             )
 
 
+async def prune_operational_database_once(
+    repository: PostgresOperationalRetentionRepository,
+    *,
+    contract_metadata_retention_hours: float = _CONTRACT_METADATA_RETENTION_HOURS,
+    runtime_state_retention_hours: float = _RUNTIME_STATE_RETENTION_HOURS,
+    contract_metadata_batch_size: int = (
+        _CONTRACT_METADATA_RETENTION_BATCH_SIZE
+    ),
+    runtime_state_batch_size: int = _RUNTIME_STATE_RETENTION_BATCH_SIZE,
+    now: datetime | None = None,
+) -> None:
+    if contract_metadata_retention_hours <= 0:
+        raise ValueError("contract_metadata_retention_hours must be positive")
+    if runtime_state_retention_hours <= 0:
+        raise ValueError("runtime_state_retention_hours must be positive")
+    if contract_metadata_batch_size <= 0:
+        raise ValueError("contract_metadata_batch_size must be positive")
+    if runtime_state_batch_size <= 0:
+        raise ValueError("runtime_state_batch_size must be positive")
+    observed_at = datetime.now(UTC) if now is None else now
+    contract_cutoff = observed_at - timedelta(
+        hours=contract_metadata_retention_hours
+    )
+    runtime_cutoff = observed_at - timedelta(hours=runtime_state_retention_hours)
+    deleted_contracts = await repository.prune_contract_metadata(
+        before=contract_cutoff,
+        batch_size=contract_metadata_batch_size,
+    )
+    deleted_states = await repository.prune_runtime_market_states(
+        before=runtime_cutoff,
+        batch_size=runtime_state_batch_size,
+    )
+    if deleted_contracts or deleted_states:
+        log.info(
+            "operational_database_retention_pruned",
+            contract_metadata_deleted=deleted_contracts,
+            runtime_market_states_deleted=deleted_states,
+            contract_metadata_cutoff=contract_cutoff.isoformat(),
+            runtime_state_cutoff=runtime_cutoff.isoformat(),
+        )
+
+
+async def run_operational_database_retention_loop(
+    repository: PostgresOperationalRetentionRepository,
+    *,
+    interval_seconds: float = _DATABASE_RETENTION_INTERVAL_SECONDS,
+    contract_metadata_retention_hours: float = _CONTRACT_METADATA_RETENTION_HOURS,
+    runtime_state_retention_hours: float = _RUNTIME_STATE_RETENTION_HOURS,
+    contract_metadata_batch_size: int = (
+        _CONTRACT_METADATA_RETENTION_BATCH_SIZE
+    ),
+    runtime_state_batch_size: int = _RUNTIME_STATE_RETENTION_BATCH_SIZE,
+    sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    while True:
+        await sleeper(interval_seconds)
+        try:
+            await prune_operational_database_once(
+                repository,
+                contract_metadata_retention_hours=contract_metadata_retention_hours,
+                runtime_state_retention_hours=runtime_state_retention_hours,
+                contract_metadata_batch_size=contract_metadata_batch_size,
+                runtime_state_batch_size=runtime_state_batch_size,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            log.exception(
+                "operational_database_retention_failed",
+                error=str(error),
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class MarketDataRuntime:
     capture: MarketDataCaptureService
@@ -462,6 +545,12 @@ class MarketDataRuntime:
     universe_refresh_interval_minutes: int
     enabled_streams: tuple[CaptureStream, ...]
     initial_symbols: frozenset[str]
+    operational_retention: PostgresOperationalRetentionRepository | None = None
+    database_retention_interval_seconds: float = (
+        _DATABASE_RETENTION_INTERVAL_SECONDS
+    )
+    contract_metadata_retention_hours: float = _CONTRACT_METADATA_RETENTION_HOURS
+    runtime_state_retention_hours: float = _RUNTIME_STATE_RETENTION_HOURS
 
 
 @asynccontextmanager
@@ -473,6 +562,7 @@ async def build_market_data_runtime(
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     universe_repository = PostgresUniverseRepository(sessions)
     capture_repository = PostgresCaptureRepository(sessions)
+    operational_retention = PostgresOperationalRetentionRepository(sessions)
     paper_repository = PostgresPaperDaemonRepository(sessions)
     account_repository = PostgresAccountRepository(sessions)
     runtime_state_repository = PostgresRuntimeMarketStateRepository(sessions)
@@ -623,6 +713,7 @@ async def build_market_data_runtime(
             control_messages_per_second=(
                 runtime.capture.control_messages_per_second
             ),
+            symbol_filter=coordinator.accepts_symbol,
         )
 
     connection_pool = BinanceConnectionPool(
@@ -644,6 +735,9 @@ async def build_market_data_runtime(
                 is not None
             )
             else None
+        ),
+        use_all_book_ticker_stream=(
+            runtime.capture.book_ticker_use_all_stream
         ),
     )
     capture = MarketDataCaptureService(
@@ -691,6 +785,7 @@ async def build_market_data_runtime(
             ),
             enabled_streams=enabled_streams,
             initial_symbols=initial_symbols,
+            operational_retention=operational_retention,
         )
     finally:
         await rest_client.aclose()
@@ -801,6 +896,28 @@ async def run_market_data(
                     )
                 ),
             )
+            operational_retention = getattr(
+                runtime,
+                "operational_retention",
+                None,
+            )
+            if operational_retention is not None:
+                auxiliary_tasks += (
+                    asyncio.create_task(
+                        run_operational_database_retention_loop(
+                            operational_retention,
+                            interval_seconds=(
+                                runtime.database_retention_interval_seconds
+                            ),
+                            contract_metadata_retention_hours=(
+                                runtime.contract_metadata_retention_hours
+                            ),
+                            runtime_state_retention_hours=(
+                                runtime.runtime_state_retention_hours
+                            ),
+                        )
+                    ),
+                )
             monitored_tasks: tuple[asyncio.Task[object], ...] = (
                 capture_task,
                 *auxiliary_tasks,
@@ -890,6 +1007,7 @@ async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
         scheduler_task: asyncio.Task[None] | None = None
         subscription_task: asyncio.Task[None] | None = None
         retention_task: asyncio.Task[None] | None = None
+        operational_retention_task: asyncio.Task[None] | None = None
         health_task: asyncio.Task[None] | None = None
         try:
             await runtime.state_hub.start()
@@ -927,6 +1045,26 @@ async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
                     interval_seconds=runtime.archive_retention_interval_seconds,
                 )
             )
+            operational_retention = getattr(
+                runtime,
+                "operational_retention",
+                None,
+            )
+            if operational_retention is not None:
+                operational_retention_task = asyncio.create_task(
+                    run_operational_database_retention_loop(
+                        operational_retention,
+                        interval_seconds=(
+                            runtime.database_retention_interval_seconds
+                        ),
+                        contract_metadata_retention_hours=(
+                            runtime.contract_metadata_retention_hours
+                        ),
+                        runtime_state_retention_hours=(
+                            runtime.runtime_state_retention_hours
+                        ),
+                    )
+                )
             health_task = asyncio.create_task(
                 monitor_market_data_health(
                     capture_metrics=runtime.capture.metrics_snapshot,
@@ -942,6 +1080,7 @@ async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
                 scheduler_task,
                 subscription_task,
                 retention_task,
+                operational_retention_task,
                 health_task,
             ):
                 if task is not None:
@@ -953,6 +1092,7 @@ async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
                     scheduler_task,
                     subscription_task,
                     retention_task,
+                    operational_retention_task,
                     health_task,
                 )
                 if task is not None

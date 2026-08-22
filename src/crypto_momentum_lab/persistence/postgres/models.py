@@ -35,6 +35,10 @@ class ContractMetadataRow(Base):
     onboard_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     raw_payload: Mapped[dict[str, object]] = mapped_column(JSONB)
 
+    __table_args__ = (
+        Index("ix_contract_metadata_effective_at", "effective_at"),
+    )
+
 
 class DailyOpenRow(Base):
     __tablename__ = "daily_open_prices"

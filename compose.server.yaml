@@ -48,10 +48,12 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     restart: unless-stopped
-    # PostgreSQL hit its old 384 MiB cgroup limit and killed a backend during
-    # recovery. Give it headroom while keeping a bounded swap allowance.
-    mem_limit: 512m
-    memswap_limit: 768m
+    # PostgreSQL is the live control-plane store.  Retention and recovery can
+    # briefly use more memory than the steady-state working set.  Keep a
+    # bounded 512 MiB swap allowance so the database does not take all host
+    # memory while avoiding cgroup OOM during maintenance.
+    mem_limit: 1g
+    memswap_limit: 1536m
 
   migrate:
     <<: *app
