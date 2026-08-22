@@ -1,3 +1,4 @@
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -25,6 +26,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     PaperPositionRow,
     StrategyRunRow,
     StrategyRuntimeCheckpointRow,
+    StrategyRuntimeEventRow,
     StrategySignalRow,
 )
 from crypto_momentum_lab.persistence.postgres.strategy_run_repository import (
@@ -106,6 +108,39 @@ def checkpoint_from_row_values(
         cooldown_buckets_remaining_by_symbol=cooldown_buckets_remaining_by_symbol,
         payload=payload,
     )
+
+
+def runtime_event_row(
+    *,
+    event_id: str,
+    run_id: str,
+    event_type: str,
+    occurred_at: datetime,
+    symbol: str | None,
+    bucket_start: datetime | None,
+    details: Mapping[str, object],
+) -> dict[str, object]:
+    for value, field_name in (
+        (event_id, "event_id"),
+        (run_id, "run_id"),
+        (event_type, "event_type"),
+    ):
+        if not value.strip():
+            raise ValueError(f"{field_name} must not be empty")
+    _require_aware(occurred_at, "occurred_at")
+    if bucket_start is not None:
+        _require_aware(bucket_start, "bucket_start")
+    if symbol is not None and not symbol.strip():
+        raise ValueError("symbol must not be blank when present")
+    return {
+        "event_id": event_id,
+        "run_id": run_id,
+        "event_type": event_type,
+        "occurred_at": occurred_at,
+        "symbol": symbol,
+        "bucket_start": bucket_start,
+        "details": _jsonable(dict(details)),
+    }
 
 
 def paper_live_run_row(
@@ -516,6 +551,32 @@ class PostgresPaperDaemonRepository:
                 for key, value in values.items():
                     setattr(existing, key, value)
 
+    async def save_runtime_events(
+        self,
+        events: Sequence[Mapping[str, object]],
+    ) -> None:
+        if not events:
+            return
+        values = tuple(
+            runtime_event_row(
+                event_id=_required_event_value(event, "event_id"),
+                run_id=_required_event_value(event, "run_id"),
+                event_type=_required_event_value(event, "event_type"),
+                occurred_at=_event_datetime(event, "occurred_at"),
+                symbol=_event_optional_string(event, "symbol"),
+                bucket_start=_event_optional_datetime(event, "bucket_start"),
+                details=_event_mapping(event.get("details", {}), "details"),
+            )
+            for event in events
+        )
+        async with self._session_factory() as session:
+            async with session.begin():
+                await session.execute(
+                    insert(StrategyRuntimeEventRow)
+                    .values(values)
+                    .on_conflict_do_nothing(index_elements=["event_id"])
+                )
+
     async def load_checkpoint(self, run_id: str) -> StrategyCheckpoint | None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
@@ -820,3 +881,46 @@ def _legacy_paper_run_upgrade_values(
 def _require_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
+
+
+def _required_event_value(event: Mapping[str, object], field_name: str) -> str:
+    value = event.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"runtime event {field_name} must be non-empty")
+    return value
+
+
+def _event_datetime(event: Mapping[str, object], field_name: str) -> datetime:
+    value = event.get(field_name)
+    if not isinstance(value, datetime):
+        raise ValueError(f"runtime event {field_name} must be a datetime")
+    return value
+
+
+def _event_optional_datetime(
+    event: Mapping[str, object],
+    field_name: str,
+) -> datetime | None:
+    value = event.get(field_name)
+    if value is not None and not isinstance(value, datetime):
+        raise ValueError(f"runtime event {field_name} must be a datetime or None")
+    return value
+
+
+def _event_optional_string(
+    event: Mapping[str, object],
+    field_name: str,
+) -> str | None:
+    value = event.get(field_name)
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"runtime event {field_name} must be a string or None")
+    return value
+
+
+def _event_mapping(
+    value: object,
+    field_name: str,
+) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"runtime event {field_name} must be an object")
+    return value
