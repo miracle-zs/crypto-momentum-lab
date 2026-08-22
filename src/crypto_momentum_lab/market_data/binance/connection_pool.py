@@ -60,6 +60,7 @@ class BinanceConnectionPool:
         max_subscriptions_per_connection_by_stream: Mapping[
             CaptureStream, int
         ] | None = None,
+        use_all_book_ticker_stream: bool = False,
     ) -> None:
         self._connection_factory = connection_factory
         self._max_subscriptions_per_connection = max_subscriptions_per_connection
@@ -67,6 +68,7 @@ class BinanceConnectionPool:
             max_subscriptions_per_connection_by_stream or {}
         )
         self._control_messages_per_second = control_messages_per_second
+        self._use_all_book_ticker_stream = use_all_book_ticker_stream
         self._active_subscriptions: frozenset[Subscription] = frozenset()
         self._connections: dict[str, PoolConnection] = {}
         self._subscription_connections: dict[Subscription, str] = {}
@@ -81,11 +83,19 @@ class BinanceConnectionPool:
         streams: tuple[CaptureStream, ...],
         generation: int,
     ) -> None:
-        desired = frozenset(
-            Subscription.for_symbol(stream, symbol)
-            for symbol in symbols
-            for stream in streams
-        )
+        desired_items: set[Subscription] = set()
+        for stream in streams:
+            if (
+                stream is CaptureStream.BOOK_TICKER
+                and self._use_all_book_ticker_stream
+            ):
+                desired_items.add(Subscription.global_book_ticker())
+                continue
+            desired_items.update(
+                Subscription.for_symbol(stream, symbol)
+                for symbol in symbols
+            )
+        desired = frozenset(desired_items)
         groups = build_subscription_groups(
             desired,
             max_per_connection=self._max_subscriptions_per_connection,

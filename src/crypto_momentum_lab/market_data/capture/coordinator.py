@@ -69,8 +69,35 @@ class CaptureCoordinator:
         self._archive_streams = archive_streams
         self._max_archive_batch_size = max_archive_batch_size
         self._stopping = False
+        self._monitored_symbols: frozenset[str] | None = None
+        self._filtered_book_ticker_events = 0
+
+    @property
+    def filtered_book_ticker_events(self) -> int:
+        return self._filtered_book_ticker_events
+
+    def set_monitored_symbols(self, symbols: frozenset[str]) -> None:
+        """Bound global quote ingress to the active universe."""
+        self._monitored_symbols = frozenset(
+            symbol.upper() for symbol in symbols
+        )
+
+    def accepts_symbol(self, stream: CaptureStream, symbol: str) -> bool:
+        if (
+            stream is CaptureStream.BOOK_TICKER
+            and self._monitored_symbols is not None
+            and symbol.upper() not in self._monitored_symbols
+        ):
+            self._filtered_book_ticker_events += 1
+            return False
+        return True
 
     async def submit(self, envelope: RawEnvelope) -> None:
+        if (
+            envelope.symbol is not None
+            and not self.accepts_symbol(envelope.stream, envelope.symbol)
+        ):
+            return
         await self._queue.put_nowait(envelope)
 
     async def observe_lifecycle(

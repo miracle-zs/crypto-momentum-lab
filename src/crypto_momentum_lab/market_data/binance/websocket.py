@@ -20,6 +20,9 @@ from crypto_momentum_lab.domain.market.models import (
     RawEnvelope,
 )
 from crypto_momentum_lab.market_data.capture.queue import CaptureQueueFull
+from crypto_momentum_lab.market_data.capture.subscriptions import (
+    GLOBAL_BOOK_TICKER_STREAM_NAME,
+)
 
 
 class BinancePayloadError(ValueError):
@@ -53,8 +56,10 @@ class BinanceWebSocketMetricsSnapshot:
     last_close_code: int | None
     last_reason: str | None
     phase: str = "disconnected"
-    pending_control_id: int | None = None
+    pending_control_id: str | None = None
     pending_control_method: str | None = None
+    ingress_queue_events: int = 0
+    ingress_queue_dropped_events: int = 0
 
 
 class _ConnectionPhase(StrEnum):
@@ -65,7 +70,7 @@ class _ConnectionPhase(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class _PendingControl:
-    control_id: int
+    control_id: str
     method: str
     names: tuple[str, ...]
     generation: int
@@ -92,6 +97,8 @@ class BinanceWebSocketConnection:
         silence_timeout_seconds: float,
         control_ack_timeout_seconds: float = 10.0,
         control_messages_per_second: float = 5,
+        ingress_queue_max_events: int = 512,
+        symbol_filter: Callable[[CaptureStream, str], bool] | None = None,
     ) -> None:
         self._base_url = base_url
         self._group_id = group_id
@@ -110,8 +117,12 @@ class BinanceWebSocketConnection:
         self._silence_timeout_seconds = silence_timeout_seconds
         if control_ack_timeout_seconds <= 0:
             raise ValueError("control_ack_timeout_seconds must be positive")
+        if ingress_queue_max_events <= 0:
+            raise ValueError("ingress_queue_max_events must be positive")
         self._control_ack_timeout_seconds = control_ack_timeout_seconds
         self._control_interval_seconds = 1 / control_messages_per_second
+        self._ingress_queue_max_events = ingress_queue_max_events
+        self._symbol_filter = symbol_filter
         self._connection_lock = asyncio.Lock()
         self._desired_lock = asyncio.Lock()
         self._desired_event = asyncio.Event()
@@ -132,6 +143,8 @@ class BinanceWebSocketConnection:
         self._last_received_monotonic: float | None = None
         self._last_close_code: int | None = None
         self._last_reason: str | None = None
+        self._ingress_queue_events = 0
+        self._ingress_queue_dropped_events = 0
 
     def metrics_snapshot(self) -> BinanceWebSocketMetricsSnapshot:
         return BinanceWebSocketMetricsSnapshot(
@@ -167,6 +180,8 @@ class BinanceWebSocketConnection:
                 if self._pending_control is None
                 else self._pending_control.method
             ),
+            ingress_queue_events=self._ingress_queue_events,
+            ingress_queue_dropped_events=self._ingress_queue_dropped_events,
         )
 
     async def start(self) -> None:
@@ -290,9 +305,14 @@ class BinanceWebSocketConnection:
 
     async def _run_once(self, session_id: UUID) -> str:
         uri = self._base_url.rstrip("/")
-        local_sequence = 0
         opened_at = time.monotonic()
-        receive_task: asyncio.Task[str | bytes] | None = None
+        data_queue: asyncio.Queue[RawEnvelope] = asyncio.Queue(
+            maxsize=self._ingress_queue_max_events
+        )
+        ack_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=32)
+        reader_task: asyncio.Task[None] | None = None
+        dispatch_task: asyncio.Task[None] | None = None
+        ack_task: asyncio.Task[object] | None = None
         async with connect(
             uri,
             proxy=None,
@@ -311,6 +331,21 @@ class BinanceWebSocketConnection:
             self._pending_control = None
             self._last_received_monotonic = None
             await self._emit_lifecycle(session_id, opened=True, reason=None)
+            # The socket reader is deliberately independent from the
+            # downstream capture queue.  A high-frequency bookTicker/aggTrade
+            # consumer must not delay a control ACK long enough to make the
+            # Binance actor believe the connection is dead.
+            reader_task = asyncio.create_task(
+                self._read_messages(
+                    connection,
+                    session_id=session_id,
+                    data_queue=data_queue,
+                    ack_queue=ack_queue,
+                )
+            )
+            dispatch_task = asyncio.create_task(
+                self._dispatch_messages(data_queue)
+            )
             initial_names, initial_generation = await self._desired_snapshot()
             await self._start_control(
                 connection,
@@ -318,9 +353,8 @@ class BinanceWebSocketConnection:
                 initial_names,
                 generation=initial_generation,
             )
-            receive_task = asyncio.create_task(connection.recv())
+            ack_task = asyncio.create_task(ack_queue.get())
             desired_task = asyncio.create_task(self._desired_event.wait())
-            last_received_at = time.monotonic()
             silence_timeout = _silence_timeout_for_stream(
                 self._stream,
                 configured_timeout=self._silence_timeout_seconds,
@@ -346,9 +380,10 @@ class BinanceWebSocketConnection:
                     timeout = (
                         None
                         if silence_timeout is None
-                        else max(
-                            0.001,
-                            silence_timeout - (now - last_received_at),
+                        else _remaining_silence_timeout(
+                            self._last_received_monotonic,
+                            now=now,
+                            silence_timeout=silence_timeout,
                         )
                     )
                     if control_timeout is not None:
@@ -358,7 +393,7 @@ class BinanceWebSocketConnection:
                             else min(timeout, control_timeout)
                         )
                     done, _ = await asyncio.wait(
-                        (receive_task, desired_task),
+                        (reader_task, ack_task, desired_task),
                         timeout=timeout,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
@@ -376,63 +411,34 @@ class BinanceWebSocketConnection:
                             )
                         raise TimeoutError("Binance WebSocket is silent")
 
+                    if reader_task in done:
+                        reader_task.result()
+                        return "stopped"
+
+                    if ack_task in done:
+                        decoded = ack_task.result()
+                        self._resolve_control_ack(decoded)
+                        await self._maybe_start_next_control(connection)
+                        ack_task = asyncio.create_task(ack_queue.get())
+
                     desired_changed = desired_task in done
                     if desired_changed:
                         self._desired_event.clear()
-                        # Keep one waiter alive for the whole session. The
-                        # old loop created and cancelled a task for every
-                        # market-data message, which made bookTicker traffic
-                        # spend a material share of the event loop on task
-                        # bookkeeping instead of reading the socket.
                         desired_task = asyncio.create_task(
                             self._desired_event.wait()
                         )
-
-                    if receive_task in done:
-                        message = receive_task.result()
-                        self._received_messages += 1
-                        self._received_bytes += (
-                            len(message)
-                            if isinstance(message, bytes)
-                            else len(message.encode("utf-8"))
-                        )
-                        last_received_at = time.monotonic()
-                        self._last_received_monotonic = last_received_at
-                        decoded = _decode_message(message)
-                        if self._resolve_control_ack(decoded):
-                            await self._maybe_start_next_control(connection)
-                        else:
-                            received_at = datetime.now(UTC)
-                            received_monotonic_ns = time.monotonic_ns()
-                            try:
-                                envelope = _parse_decoded_message(
-                                    route=self._route,
-                                    decoded=decoded,
-                                    environment=self._environment,
-                                    connection_session_id=session_id,
-                                    local_sequence=local_sequence + 1,
-                                    subscription_generation=(
-                                        self._active_generation
-                                    ),
-                                    received_at=received_at,
-                                    received_monotonic_ns=(
-                                        received_monotonic_ns
-                                    ),
-                                    expected_stream=self._stream,
-                                )
-                            except BinancePayloadError:
-                                envelope = None
-                            if envelope is not None:
-                                local_sequence += 1
-                                await self._on_envelope(envelope)
-                        receive_task = asyncio.create_task(connection.recv())
 
                     if desired_changed:
                         await self._maybe_start_next_control(connection)
             finally:
                 pending_tasks = tuple(
                     task
-                    for task in (receive_task, desired_task)
+                    for task in (
+                        reader_task,
+                        dispatch_task,
+                        ack_task,
+                        desired_task,
+                    )
                     if task is not None and not task.done()
                 )
                 for task in pending_tasks:
@@ -444,17 +450,102 @@ class BinanceWebSocketConnection:
                     )
         return "closed"
 
+    async def _read_messages(
+        self,
+        connection: ClientConnection,
+        *,
+        session_id: UUID,
+        data_queue: asyncio.Queue[RawEnvelope],
+        ack_queue: asyncio.Queue[object],
+    ) -> None:
+        local_sequence = 0
+        while not self._stopping:
+            message = await connection.recv()
+            self._received_messages += 1
+            self._received_bytes += (
+                len(message)
+                if isinstance(message, bytes)
+                else len(message.encode("utf-8"))
+            )
+            self._last_received_monotonic = time.monotonic()
+            decoded = _decode_message(message)
+            if _is_control_ack(decoded):
+                try:
+                    ack_queue.put_nowait(decoded)
+                except asyncio.QueueFull as exc:
+                    raise CaptureQueueFull(
+                        "control ACK queue is saturated"
+                    ) from exc
+                continue
+
+            if self._symbol_filter is not None:
+                symbol = _fast_symbol(decoded)
+                if symbol is not None and not self._symbol_filter(
+                    self._stream,
+                    symbol,
+                ):
+                    continue
+
+            received_at = datetime.now(UTC)
+            received_monotonic_ns = time.monotonic_ns()
+            try:
+                envelope = _parse_decoded_message(
+                    route=self._route,
+                    decoded=decoded,
+                    environment=self._environment,
+                    connection_session_id=session_id,
+                    local_sequence=local_sequence + 1,
+                    subscription_generation=self._active_generation,
+                    received_at=received_at,
+                    received_monotonic_ns=received_monotonic_ns,
+                    expected_stream=self._stream,
+                )
+            except BinancePayloadError:
+                continue
+            local_sequence += 1
+            try:
+                data_queue.put_nowait(envelope)
+            except asyncio.QueueFull as exc:
+                self._ingress_queue_dropped_events += 1
+                raise CaptureQueueFull(
+                    "WebSocket ingress queue is saturated"
+                ) from exc
+            self._ingress_queue_events = data_queue.qsize()
+            # websockets may return an already-buffered message without
+            # suspending. Yield explicitly so the actor can process an ACK
+            # and the dispatcher can make progress under bursty streams.
+            await asyncio.sleep(0)
+
+    async def _dispatch_messages(
+        self,
+        data_queue: asyncio.Queue[RawEnvelope],
+    ) -> None:
+        while not self._stopping or not data_queue.empty():
+            try:
+                envelope = await asyncio.wait_for(
+                    data_queue.get(),
+                    timeout=0.1,
+                )
+            except TimeoutError:
+                continue
+            self._ingress_queue_events = data_queue.qsize()
+            try:
+                await self._on_envelope(envelope)
+            finally:
+                data_queue.task_done()
+            await asyncio.sleep(0)
+
     async def _send_control(
         self,
         connection: ClientConnection,
         method: str,
         names: tuple[str, ...],
-    ) -> int:
+    ) -> str:
         if not names:
             raise ValueError("control message must contain at least one name")
         await asyncio.sleep(self._control_interval_seconds)
         self._control_id += 1
-        control_id = self._control_id
+        control_id = str(self._control_id)
         await connection.send(
             json.dumps(
                 {
@@ -529,9 +620,12 @@ class BinanceWebSocketConnection:
     def _resolve_control_ack(self, decoded: object) -> bool:
         if not isinstance(decoded, dict) or "id" not in decoded:
             return False
-        control_id = decoded.get("id")
-        if not isinstance(control_id, int):
+        raw_control_id = decoded.get("id")
+        if isinstance(raw_control_id, bool) or not isinstance(
+            raw_control_id, str | int
+        ):
             return False
+        control_id = str(raw_control_id)
         pending = self._pending_control
         if pending is None or pending.control_id != control_id:
             self._ack_mismatch_count += 1
@@ -596,10 +690,14 @@ def _silence_timeout_for_stream(
     *,
     configured_timeout: float,
 ) -> float | None:
-    # forceOrder is an event stream. A quiet interval means that no
-    # liquidation occurred, not that the transport is dead. Transport
-    # liveness is still covered by the WebSocket ping/pong watchdog.
-    if stream is CaptureStream.FORCE_ORDER:
+    # A quiet interval is not a transport failure for event streams. The
+    # WebSocket ping/pong watchdog owns transport liveness; otherwise an
+    # inactive symbol set would be mistaken for a dead connection.
+    if stream in {
+        CaptureStream.AGG_TRADE,
+        CaptureStream.BOOK_TICKER,
+        CaptureStream.FORCE_ORDER,
+    }:
         return None
     return configured_timeout
 
@@ -614,14 +712,26 @@ def _remaining_control_timeout(
     return pending.deadline_monotonic - now
 
 
+def _remaining_silence_timeout(
+    last_received_monotonic: float | None,
+    *,
+    now: float,
+    silence_timeout: float,
+) -> float:
+    if last_received_monotonic is None:
+        return silence_timeout
+    return max(0.001, silence_timeout - (now - last_received_monotonic))
+
+
 def _ping_timeout_for_stream(
     stream: CaptureStream,
     *,
     configured_timeout: float,
 ) -> float | None:
-    # High-frequency streams have an independent data-freshness watchdog.
-    # A delayed pong from an otherwise flowing socket must not tear down the
-    # data path; the recv-side silence timeout remains the failure detector.
+    # Binance can delay pong frames while a high-frequency multiplexed socket
+    # is flowing normally. A delayed pong must not tear down the data path;
+    # the WebSocket close signal and scheduled connection lifetime remain the
+    # transport recovery mechanisms for these streams.
     if stream in {CaptureStream.AGG_TRADE, CaptureStream.BOOK_TICKER}:
         return None
     return configured_timeout
@@ -665,6 +775,28 @@ def _decode_message(message: str | bytes) -> object:
         return json.loads(message)
     except json.JSONDecodeError as exc:
         raise BinancePayloadError("message is not valid JSON") from exc
+
+
+def _fast_symbol(decoded: object) -> str | None:
+    """Extract a Binance symbol before allocating a RawEnvelope."""
+    if not isinstance(decoded, dict):
+        return None
+    payload = decoded.get("data")
+    if not isinstance(payload, dict):
+        payload = decoded
+    direct = payload.get("s")
+    if isinstance(direct, str):
+        return direct
+    order = payload.get("o")
+    if isinstance(order, dict):
+        nested = order.get("s")
+        if isinstance(nested, str):
+            return nested
+    return None
+
+
+def _is_control_ack(decoded: object) -> bool:
+    return isinstance(decoded, dict) and "id" in decoded
 
 
 def _parse_decoded_message(
@@ -717,6 +849,8 @@ def _parse_decoded_message(
 
 
 def _stream_from_name(stream_name: str) -> CaptureStream:
+    if stream_name == GLOBAL_BOOK_TICKER_STREAM_NAME:
+        return CaptureStream.BOOK_TICKER
     _, separator, suffix = stream_name.partition("@")
     if not separator:
         raise BinancePayloadError("stream name is invalid")
@@ -727,6 +861,8 @@ def _stream_from_name(stream_name: str) -> CaptureStream:
 
 
 def _symbol_from_stream_name(stream_name: str) -> str:
+    if stream_name == GLOBAL_BOOK_TICKER_STREAM_NAME:
+        return "*"
     symbol, separator, _ = stream_name.partition("@")
     if not separator or not symbol:
         raise BinancePayloadError("stream name is invalid")

@@ -101,6 +101,16 @@ async def monitor_market_data_health(
                     "pending_control_method",
                     None,
                 ),
+                "ingress_queue_events": getattr(
+                    snapshot,
+                    "ingress_queue_events",
+                    None,
+                ),
+                "ingress_queue_dropped_events": getattr(
+                    snapshot,
+                    "ingress_queue_dropped_events",
+                    None,
+                ),
             }
             for snapshot in getattr(connections, "connection_snapshots", ())
         )
@@ -117,6 +127,11 @@ async def monitor_market_data_health(
             queue_pending_coalesced_events=getattr(
                 capture,
                 "queue_pending_coalesced_events",
+                0,
+            ),
+            filtered_book_ticker_events=getattr(
+                capture,
+                "filtered_book_ticker_events",
                 0,
             ),
             monitoring_symbols=capture.monitoring_symbols,

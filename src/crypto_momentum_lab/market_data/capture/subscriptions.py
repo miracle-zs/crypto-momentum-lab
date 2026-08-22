@@ -14,6 +14,8 @@ _ROUTES = {
     CaptureStream.KLINE_1M: CaptureRoute.MARKET,
 }
 
+GLOBAL_BOOK_TICKER_STREAM_NAME = "!bookTicker"
+
 
 @dataclass(frozen=True, slots=True, order=True)
 class Subscription:
@@ -34,6 +36,15 @@ class Subscription:
             stream=stream,
             symbol=normalized,
             binance_name=f"{normalized.lower()}@{stream.value}",
+        )
+
+    @classmethod
+    def global_book_ticker(cls) -> "Subscription":
+        return cls(
+            route=CaptureRoute.PUBLIC,
+            stream=CaptureStream.BOOK_TICKER,
+            symbol="*",
+            binance_name=GLOBAL_BOOK_TICKER_STREAM_NAME,
         )
 
 

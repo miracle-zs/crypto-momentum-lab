@@ -70,6 +70,7 @@ class CaptureMetricsSnapshot:
     queue_coalesced_replacements: int = 0
     queue_dropped_events: int = 0
     queue_pending_coalesced_events: int = 0
+    filtered_book_ticker_events: int = 0
 
 
 class CaptureStateRepository(Protocol):
@@ -95,6 +96,11 @@ class CaptureConnectionPool(Protocol):
 
 
 class CaptureRunner(Protocol):
+    @property
+    def filtered_book_ticker_events(self) -> int: ...
+
+    def set_monitored_symbols(self, symbols: frozenset[str]) -> None: ...
+
     async def run(self) -> None: ...
 
     async def stop(self) -> None: ...
@@ -178,6 +184,8 @@ class MarketDataCaptureService:
         streams: tuple[CaptureStream, ...],
         generation: int,
     ) -> None:
+        if self._coordinator is not None:
+            self._coordinator.set_monitored_symbols(symbols)
         await self._connection_pool.apply_symbols(
             symbols,
             streams=streams,
@@ -204,6 +212,11 @@ class MarketDataCaptureService:
             queue_dropped_events=self._queue.dropped_events,
             queue_pending_coalesced_events=(
                 self._queue.pending_coalesced_events
+            ),
+            filtered_book_ticker_events=(
+                0
+                if self._coordinator is None
+                else self._coordinator.filtered_book_ticker_events
             ),
             archived_rows=self._archived_rows,
             archived_bytes=self._archived_bytes,
