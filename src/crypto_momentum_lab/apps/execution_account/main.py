@@ -21,6 +21,10 @@ from crypto_momentum_lab.execution_account.hub import (
     AccountEventHub,
     AccountEventHubConfig,
 )
+from crypto_momentum_lab.execution_account.retention import (
+    AccountSnapshotRetentionConfig,
+    run_account_snapshot_retention,
+)
 from crypto_momentum_lab.execution_account.sync import (
     ExecutionAccountSyncConfig,
     ExecutionAccountSyncResult,
@@ -28,6 +32,7 @@ from crypto_momentum_lab.execution_account.sync import (
 )
 from crypto_momentum_lab.persistence.postgres import (
     PostgresAccountRepository,
+    PostgresOperationalRetentionRepository,
     create_execution_database_engine,
 )
 
@@ -163,6 +168,18 @@ def sync_command(
         float,
         typer.Option("--rest-reconciliation-interval-seconds", min=30),
     ] = 300.0,
+    snapshot_retention_days: Annotated[
+        int,
+        typer.Option(
+            "--snapshot-retention-days",
+            min=1,
+            help="Days of account snapshot history retained for operations.",
+        ),
+    ] = 7,
+    snapshot_retention_interval_seconds: Annotated[
+        float,
+        typer.Option("--snapshot-retention-interval-seconds", min=300),
+    ] = 3_600.0,
 ) -> None:
     resolved_database_url = _execution_database_url(database_url)
     if not resolved_database_url:
@@ -194,6 +211,10 @@ def sync_command(
             account_event_hub_port=account_event_hub_port,
             rest_reconciliation_interval_seconds=(
                 rest_reconciliation_interval_seconds
+            ),
+            snapshot_retention_days=snapshot_retention_days,
+            snapshot_retention_interval_seconds=(
+                snapshot_retention_interval_seconds
             ),
         )
     )
@@ -259,6 +280,8 @@ async def sync_continuously(
     account_event_hub_host: str,
     account_event_hub_port: int,
     rest_reconciliation_interval_seconds: float,
+    snapshot_retention_days: int,
+    snapshot_retention_interval_seconds: float,
 ) -> None:
     engine = create_execution_database_engine(database_url)
     account_event_hub = AccountEventHub(
@@ -271,6 +294,7 @@ async def sync_continuously(
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         repository = PostgresAccountRepository(factory)
+        retention_repository = PostgresOperationalRetentionRepository(factory)
         client = BinanceUsdMPrivateReadClient(
             api_key=api_key,
             api_secret=api_secret,
@@ -278,6 +302,7 @@ async def sync_continuously(
             account_label=account_label,
             base_url=base_url,
         )
+        retention_task: asyncio.Task[None] | None = None
         try:
             service = ExecutionAccountSyncService(
                 client=client,
@@ -323,8 +348,38 @@ async def sync_continuously(
                 ),
                 on_persisted=publish_account_event,
             )
+            retention_task = asyncio.create_task(
+                run_account_snapshot_retention(
+                    repository=retention_repository,
+                    environment=environment,
+                    account_label=account_label,
+                    config=AccountSnapshotRetentionConfig(
+                        retention_days=snapshot_retention_days,
+                        interval_seconds=snapshot_retention_interval_seconds,
+                    ),
+                    on_error=lambda error: typer.echo(
+                        "Account snapshot retention failed: "
+                        f"{type(error).__name__}",
+                        err=True,
+                    ),
+                    on_pruned=lambda deleted: typer.echo(
+                        "Account snapshot retention deleted: "
+                        + ", ".join(
+                            f"{table}={count}"
+                            for table, count in deleted.items()
+                            if count
+                        )
+                    ),
+                )
+            )
             await daemon.run()
         finally:
+            if retention_task is not None:
+                retention_task.cancel()
+                try:
+                    await retention_task
+                except asyncio.CancelledError:
+                    pass
             await client.aclose()
     finally:
         await account_event_hub.stop()

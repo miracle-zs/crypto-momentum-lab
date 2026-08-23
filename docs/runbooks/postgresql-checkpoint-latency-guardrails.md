@@ -4,6 +4,28 @@ These settings are constraints for the live trading database. The objective is
 to reduce the amount of dirty data and application write amplification before
 tuning the checkpointer.
 
+## Account snapshot retention
+
+`execution-account-live` retains seven days of balance, position, account
+configuration, and reconciliation snapshots by default. The retention task
+runs once per hour, deletes at most 1,000 rows per batch and 10,000 rows per
+table per cycle, and always preserves the newest row for each account/asset or
+account/position key. `account_fill_events` is the execution audit trail and
+is not deleted by this task.
+
+The policy is controlled in `compose.server.yaml`:
+
+```text
+CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS=7
+CML_ACCOUNT_SNAPSHOT_RETENTION_INTERVAL_SECONDS=3600
+```
+
+After the first logical cleanup, inspect table sizes and run `VACUUM
+(ANALYZE)` during a quiet period. Use `VACUUM FULL` or `pg_repack` only with
+an explicit maintenance window because it rewrites the table and takes a
+strong lock. Retention is deliberately isolated from the account event and
+order submission path.
+
 ## Keep the checkpoint write rate smooth
 
 Verify the production values before and after each database change:

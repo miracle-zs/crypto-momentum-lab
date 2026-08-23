@@ -13,6 +13,25 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.elements import TextClause
 
+_ACCOUNT_SNAPSHOT_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "account_balance_snapshots",
+        ("environment", "account_label", "asset"),
+    ),
+    (
+        "account_position_snapshots",
+        ("environment", "account_label", "symbol", "position_side"),
+    ),
+    (
+        "account_config_snapshots",
+        ("environment", "account_label"),
+    ),
+    (
+        "account_reconciliation_runs",
+        ("environment", "account_label"),
+    ),
+)
+
 
 class PostgresOperationalRetentionRepository:
     """Prune data that can be rebuilt from the market-data archive."""
@@ -71,6 +90,54 @@ class PostgresOperationalRetentionRepository:
             batch_size=batch_size,
         )
 
+    async def prune_account_snapshots(
+        self,
+        *,
+        environment: str,
+        account_label: str,
+        before: datetime,
+        batch_size: int = 1_000,
+        max_rows_per_table: int = 10_000,
+    ) -> dict[str, int]:
+        """Delete old account snapshots without deleting each latest view.
+
+        Account snapshot tables are operational history, not the durable fill
+        ledger.  The latest row for every balance asset, position side,
+        account configuration, and reconciliation stream is retained even if
+        it is older than the configured horizon.  Fills are intentionally not
+        included here because they are the audit trail for execution.
+        """
+        if not environment.strip():
+            raise ValueError("environment must not be empty")
+        if not account_label.strip():
+            raise ValueError("account_label must not be empty")
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if max_rows_per_table <= 0:
+            raise ValueError("max_rows_per_table must be positive")
+
+        deleted: dict[str, int] = {}
+        for table_name, key_columns in _ACCOUNT_SNAPSHOT_KEYS:
+            table_deleted = 0
+            while table_deleted < max_rows_per_table:
+                current_batch_size = min(
+                    batch_size,
+                    max_rows_per_table - table_deleted,
+                )
+                count = await self._execute_account_snapshot_delete(
+                    table_name,
+                    key_columns,
+                    environment=environment,
+                    account_label=account_label,
+                    before=before,
+                    batch_size=current_batch_size,
+                )
+                table_deleted += count
+                if count < current_batch_size:
+                    break
+            deleted[table_name] = table_deleted
+        return deleted
+
     async def _delete_batch(
         self,
         table_name: str,
@@ -114,6 +181,51 @@ class PostgresOperationalRetentionRepository:
                     await session.execute(
                         statement,
                         {"before": before, "batch_size": batch_size},
+                    ),
+                )
+                return max(result.rowcount or 0, 0)
+
+    async def _execute_account_snapshot_delete(
+        self,
+        table_name: str,
+        key_columns: tuple[str, ...],
+        *,
+        environment: str,
+        account_label: str,
+        before: datetime,
+        batch_size: int,
+    ) -> int:
+        key_match = " AND ".join(
+            f"newer.{column} = candidate.{column}" for column in key_columns
+        )
+        statement = text(
+            "WITH doomed AS ("
+            f"SELECT candidate.ctid FROM {table_name} AS candidate "
+            "WHERE candidate.environment = :environment "
+            "AND candidate.account_label = :account_label "
+            "AND candidate.observed_at < :before "
+            "AND EXISTS ("
+            f"SELECT 1 FROM {table_name} AS newer WHERE {key_match} "
+            "AND newer.observed_at > candidate.observed_at"
+            ") "
+            "ORDER BY candidate.observed_at "
+            "LIMIT :batch_size"
+            ") "
+            f"DELETE FROM {table_name} AS candidate "
+            "USING doomed WHERE candidate.ctid = doomed.ctid"
+        )
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = cast(
+                    CursorResult[Any],
+                    await session.execute(
+                        statement,
+                        {
+                            "environment": environment,
+                            "account_label": account_label,
+                            "before": before,
+                            "batch_size": batch_size,
+                        },
                     ),
                 )
                 return max(result.rowcount or 0, 0)
