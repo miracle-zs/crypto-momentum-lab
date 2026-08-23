@@ -1195,7 +1195,6 @@ def partition_runtime_states_command(
                         (
                             "cut over",
                             f"rows_copied={cutover_report.rows_copied_during_cutover}",
-                            f"rows_removed={cutover_report.rows_removed_during_cutover}",
                             f"source_rows={cutover_report.source_rows}",
                             f"partitioned_rows={cutover_report.shadow_rows}",
                             f"legacy_table={cutover_report.legacy_table}",

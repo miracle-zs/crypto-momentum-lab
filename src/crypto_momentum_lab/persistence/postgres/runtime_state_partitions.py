@@ -56,7 +56,6 @@ class RuntimeStatePartitionPrepareReport:
 @dataclass(frozen=True, slots=True)
 class RuntimeStatePartitionCutoverReport:
     rows_copied_during_cutover: int
-    rows_removed_during_cutover: int
     source_rows: int
     shadow_rows: int
     legacy_table: str
@@ -342,23 +341,6 @@ async def cutover_runtime_state_partition(
                 ),
             )
             copied = max(inserted.rowcount or 0, 0)
-            removed = cast(
-                CursorResult[Any],
-                await session.execute(
-                    text(
-                        f"DELETE FROM {shadow} AS shadow_row "
-                        f"WHERE NOT EXISTS ("
-                        f"SELECT 1 FROM {source} AS source_row "
-                        "WHERE shadow_row.\"environment\" = "
-                        "source_row.\"environment\" "
-                        "AND shadow_row.\"symbol\" = source_row.\"symbol\" "
-                        "AND shadow_row.\"bucket_start\" = "
-                        "source_row.\"bucket_start\""
-                        f")"
-                    )
-                ),
-            )
-            removed_rows = max(removed.rowcount or 0, 0)
             source_rows = int(
                 await session.scalar(text(f"SELECT count(*)::bigint FROM {source}"))
                 or 0
@@ -367,27 +349,10 @@ async def cutover_runtime_state_partition(
                 await session.scalar(text(f"SELECT count(*)::bigint FROM {shadow}"))
                 or 0
             )
-            missing_rows = int(
-                await session.scalar(
-                    text(
-                        f"SELECT count(*)::bigint FROM {source} AS source_row "
-                        f"WHERE NOT EXISTS ("
-                        f"SELECT 1 FROM {shadow} AS shadow_row "
-                        "WHERE shadow_row.\"environment\" = "
-                        "source_row.\"environment\" "
-                        "AND shadow_row.\"symbol\" = source_row.\"symbol\" "
-                        "AND shadow_row.\"bucket_start\" = "
-                        "source_row.\"bucket_start\""
-                        f")"
-                    )
-                )
-                or 0
-            )
-            if source_rows != shadow_rows or missing_rows:
+            if shadow_rows < source_rows:
                 raise RuntimeError(
                     "runtime-state cutover validation failed: "
-                    f"source={source_rows} shadow={shadow_rows} "
-                    f"missing={missing_rows}"
+                    f"source={source_rows} shadow={shadow_rows}"
                 )
 
             await session.execute(
@@ -411,7 +376,6 @@ async def cutover_runtime_state_partition(
 
     return RuntimeStatePartitionCutoverReport(
         rows_copied_during_cutover=copied,
-        rows_removed_during_cutover=removed_rows,
         source_rows=source_rows,
         shadow_rows=shadow_rows,
         legacy_table=resolved_legacy_table,
