@@ -68,11 +68,16 @@ from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
 )
+from crypto_momentum_lab.persistence.postgres.runtime_state_partitions import (
+    cutover_runtime_state_partition,
+    prepare_runtime_state_partition,
+)
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
     create_market_database_engine,
+    create_partitioning_database_engine,
 )
 from crypto_momentum_lab.persistence.raw_files.archive import ZstdJsonlArchive
 from crypto_momentum_lab.persistence.raw_files.journal import PendingManifestJournal
@@ -1129,3 +1134,74 @@ def run_market_data_command(
         )
     except KeyboardInterrupt:
         log.info("market_data_stopped")
+
+
+@app.command("partition-runtime-states")
+def partition_runtime_states_command(
+    phase: str = typer.Option("prepare", "--phase"),
+    lookahead_hours: float = typer.Option(168.0, "--lookahead-hours"),
+    confirm_writer_paused: bool = typer.Option(
+        False,
+        "--confirm-writer-paused",
+        help="Required for cutover; market-data must already be stopped.",
+    ),
+) -> None:
+    """Prepare or cut over the runtime market-state partitioned table."""
+
+    database_url = (
+        os.environ.get("CML_MARKET_DATABASE_URL")
+        or os.environ.get("CML_DATABASE_URL")
+    )
+    if not database_url:
+        raise typer.BadParameter(
+            "CML_MARKET_DATABASE_URL or CML_DATABASE_URL is required"
+        )
+    if phase not in {"prepare", "cutover"}:
+        raise typer.BadParameter("--phase must be prepare or cutover")
+    if lookahead_hours <= 0:
+        raise typer.BadParameter("--lookahead-hours must be positive")
+    if phase == "cutover" and not confirm_writer_paused:
+        raise typer.BadParameter(
+            "--confirm-writer-paused is required for cutover"
+        )
+
+    async def run() -> None:
+        engine = create_partitioning_database_engine(database_url)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            if phase == "prepare":
+                prepare_report = await prepare_runtime_state_partition(
+                    session_factory,
+                    lookahead=timedelta(hours=lookahead_hours),
+                )
+                typer.echo(
+                    " ".join(
+                        (
+                            "prepared",
+                            f"source_rows={prepare_report.source_rows}",
+                            f"shadow_rows={prepare_report.shadow_rows}",
+                            f"partitions_created={prepare_report.partitions_created}",
+                            f"first_partition={prepare_report.first_partition_start.isoformat()}",
+                            f"last_partition_end={prepare_report.last_partition_end.isoformat()}",
+                        )
+                    )
+                )
+            else:
+                cutover_report = await cutover_runtime_state_partition(
+                    session_factory
+                )
+                typer.echo(
+                    " ".join(
+                        (
+                            "cut over",
+                            f"rows_copied={cutover_report.rows_copied_during_cutover}",
+                            f"source_rows={cutover_report.source_rows}",
+                            f"partitioned_rows={cutover_report.shadow_rows}",
+                            f"legacy_table={cutover_report.legacy_table}",
+                        )
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    _run_market_data(run())

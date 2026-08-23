@@ -38,6 +38,7 @@ from crypto_momentum_lab.persistence.postgres.session import (
     create_maintenance_database_engine,
     create_market_database_engine,
     create_observability_database_engine,
+    create_partitioning_database_engine,
     create_sync_engine,
 )
 from crypto_momentum_lab.persistence.postgres.shadow_repository import (
@@ -71,5 +72,6 @@ __all__ = [
     "create_maintenance_database_engine",
     "create_market_database_engine",
     "create_observability_database_engine",
+    "create_partitioning_database_engine",
     "create_sync_engine",
 ]

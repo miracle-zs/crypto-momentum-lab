@@ -5,13 +5,20 @@ bounded, small-batch delete keeps the database's working set finite and avoids
 one large transaction holding locks or generating a second memory spike.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from sqlalchemy import text
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.elements import TextClause
+
+from crypto_momentum_lab.persistence.postgres.runtime_state_partitions import (
+    RUNTIME_STATE_PARTITION_LOOKAHEAD,
+    drop_expired_runtime_state_partitions,
+    ensure_runtime_state_partitions,
+    runtime_state_table_is_partitioned,
+)
 
 _ACCOUNT_SNAPSHOT_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
@@ -83,6 +90,16 @@ class PostgresOperationalRetentionRepository:
         before: datetime,
         batch_size: int = 1_000,
     ) -> int:
+        if await runtime_state_table_is_partitioned(self._session_factory):
+            observed_at = datetime.now(UTC)
+            await ensure_runtime_state_partitions(
+                self._session_factory,
+                through=observed_at + RUNTIME_STATE_PARTITION_LOOKAHEAD,
+            )
+            return await drop_expired_runtime_state_partitions(
+                self._session_factory,
+                before=before,
+            )
         return await self._delete_batch(
             "runtime_market_states_15s",
             "bucket_start",

@@ -18,6 +18,10 @@ _MAINTENANCE_POOL_SIZE = 1
 _MAINTENANCE_MAX_OVERFLOW = 0
 _MAINTENANCE_POOL_TIMEOUT_SECONDS = 3
 _MAINTENANCE_COMMAND_TIMEOUT_SECONDS = 60
+_PARTITIONING_POOL_SIZE = 1
+_PARTITIONING_MAX_OVERFLOW = 0
+_PARTITIONING_POOL_TIMEOUT_SECONDS = 3
+_PARTITIONING_COMMAND_TIMEOUT_SECONDS = 900
 _MARKET_POOL_SIZE = 2
 _MARKET_MAX_OVERFLOW = 0
 _MARKET_POOL_TIMEOUT_SECONDS = 2
@@ -92,6 +96,18 @@ def create_maintenance_database_engine(database_url: str) -> AsyncEngine:
         max_overflow=_MAINTENANCE_MAX_OVERFLOW,
         pool_timeout_seconds=_MAINTENANCE_POOL_TIMEOUT_SECONDS,
         command_timeout_seconds=_MAINTENANCE_COMMAND_TIMEOUT_SECONDS,
+    )
+
+
+def create_partitioning_database_engine(database_url: str) -> AsyncEngine:
+    """Create the isolated, long-running pool for an explicit table cutover."""
+
+    return create_async_database_engine(
+        database_url,
+        pool_size=_PARTITIONING_POOL_SIZE,
+        max_overflow=_PARTITIONING_MAX_OVERFLOW,
+        pool_timeout_seconds=_PARTITIONING_POOL_TIMEOUT_SECONDS,
+        command_timeout_seconds=_PARTITIONING_COMMAND_TIMEOUT_SECONDS,
     )
 
 
