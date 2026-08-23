@@ -60,6 +60,10 @@ services:
     # memory while avoiding cgroup OOM during maintenance.
     mem_limit: 1g
     memswap_limit: 1536m
+    # PostgreSQL maintenance can use dynamic shared memory for parallel
+    # vacuum/index work.  The Docker default is only 64 MiB and previously
+    # caused VACUUM (ANALYZE) to fail with ENOSPC despite free disk space.
+    shm_size: 256m
 
   migrate:
     <<: *app

@@ -4,6 +4,15 @@ These settings are constraints for the live trading database. The objective is
 to reduce the amount of dirty data and application write amplification before
 tuning the checkpointer.
 
+## Container shared memory
+
+The server PostgreSQL container reserves `shm_size: 256m`.  Docker's default
+64 MiB `/dev/shm` is too small for some `VACUUM (ANALYZE)` and index-maintenance
+plans, causing a misleading `No space left on device` even when the data
+volume has free space.  Keep parallel maintenance disabled explicitly for a
+one-off operation if the plan still approaches the limit; do not compensate
+by raising application command timeouts.
+
 ## Account snapshot retention
 
 `execution-account-live` retains seven days of balance, position, account
