@@ -94,7 +94,18 @@ class CaptureConfig(BaseModel):
     ping_interval_seconds: float = Field(gt=0)
     ping_timeout_seconds: float = Field(gt=0)
     silence_timeout_seconds: float = Field(gt=0)
-    closure_delay_seconds: float = Field(default=3.0, gt=0, le=30)
+    # Realtime consumers and the durable audit path intentionally use
+    # different lateness budgets.
+    realtime_closure_delay_seconds: float = Field(
+        default=1.0,
+        gt=0,
+        le=30,
+    )
+    durable_closure_delay_seconds: float = Field(
+        default=3.0,
+        gt=0,
+        le=30,
+    )
     queue_max_events: int = Field(gt=0)
     queue_max_bytes: int = Field(gt=0)
     shutdown_timeout_seconds: float = Field(gt=0)
@@ -107,8 +118,32 @@ class CaptureConfig(BaseModel):
             raise ValueError("websocket URLs must use ws or wss")
         return value
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_closure_delay(cls, value: object) -> object:
+        if not isinstance(value, dict) or "closure_delay_seconds" not in value:
+            return value
+        normalized = dict(value)
+        legacy_delay = normalized.pop("closure_delay_seconds")
+        normalized.setdefault("realtime_closure_delay_seconds", legacy_delay)
+        normalized.setdefault("durable_closure_delay_seconds", legacy_delay)
+        return normalized
+
+    @property
+    def closure_delay_seconds(self) -> float:
+        """Compatibility alias for the effective realtime delay."""
+        return self.realtime_closure_delay_seconds
+
     @model_validator(mode="after")
     def validate_archive_streams(self) -> "CaptureConfig":
+        if (
+            self.durable_closure_delay_seconds
+            < self.realtime_closure_delay_seconds
+        ):
+            raise ValueError(
+                "durable_closure_delay_seconds must be >= "
+                "realtime_closure_delay_seconds"
+            )
         if self.archive.streams is None:
             return self
         unknown = set(self.archive.streams) - set(self.enabled_streams)

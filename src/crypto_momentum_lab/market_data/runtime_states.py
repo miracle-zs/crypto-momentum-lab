@@ -13,6 +13,7 @@ from crypto_momentum_lab.domain.market.models import (
     NormalizedBookTicker,
     NormalizedMarketEvent,
     RawEnvelope,
+    RealtimeMarketQuote,
 )
 from crypto_momentum_lab.market_data.aggregation import (
     aggregate_market_states_15s,
@@ -73,21 +74,74 @@ class ClosedStateRepository(Protocol):
 
 
 type RealtimeStateSink = Callable[[tuple[MarketState15s, ...]], Awaitable[None]]
+type RealtimeQuoteSink = Callable[[RealtimeMarketQuote], Awaitable[None]]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ClosedMarketStatePublisherConfig:
-    closure_delay_seconds: float = 3.0
+    realtime_closure_delay_seconds: float
+    durable_closure_delay_seconds: float
     persistence_queue_size: int = 128
     persistence_retry_seconds: float = 1.0
 
+    def __init__(
+        self,
+        *,
+        realtime_closure_delay_seconds: float = 1.0,
+        durable_closure_delay_seconds: float = 3.0,
+        persistence_queue_size: int = 128,
+        persistence_retry_seconds: float = 1.0,
+        closure_delay_seconds: float | None = None,
+    ) -> None:
+        # Existing research fixtures still pass one delay.  Treat it as both
+        # clocks so those callers retain their original semantics.
+        if closure_delay_seconds is not None:
+            realtime_closure_delay_seconds = closure_delay_seconds
+            durable_closure_delay_seconds = closure_delay_seconds
+        object.__setattr__(
+            self,
+            "realtime_closure_delay_seconds",
+            realtime_closure_delay_seconds,
+        )
+        object.__setattr__(
+            self,
+            "durable_closure_delay_seconds",
+            durable_closure_delay_seconds,
+        )
+        object.__setattr__(self, "persistence_queue_size", persistence_queue_size)
+        object.__setattr__(
+            self,
+            "persistence_retry_seconds",
+            persistence_retry_seconds,
+        )
+        self.__post_init__()
+
     def __post_init__(self) -> None:
-        if self.closure_delay_seconds <= 0:
-            raise ValueError("closure_delay_seconds must be positive")
+        if self.realtime_closure_delay_seconds <= 0:
+            raise ValueError(
+                "realtime_closure_delay_seconds must be positive"
+            )
+        if self.durable_closure_delay_seconds <= 0:
+            raise ValueError(
+                "durable_closure_delay_seconds must be positive"
+            )
+        if (
+            self.durable_closure_delay_seconds
+            < self.realtime_closure_delay_seconds
+        ):
+            raise ValueError(
+                "durable_closure_delay_seconds must be >= "
+                "realtime_closure_delay_seconds"
+            )
         if self.persistence_queue_size <= 0:
             raise ValueError("persistence_queue_size must be positive")
         if self.persistence_retry_seconds <= 0:
             raise ValueError("persistence_retry_seconds must be positive")
+
+    @property
+    def closure_delay_seconds(self) -> float:
+        """Compatibility alias for the realtime clock."""
+        return self.realtime_closure_delay_seconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,9 +253,11 @@ class ClosedMarketStatePublisher:
         repository: ClosedStateRepository,
         config: ClosedMarketStatePublisherConfig | None = None,
         realtime_state_sink: RealtimeStateSink | None = None,
+        realtime_quote_sink: RealtimeQuoteSink | None = None,
     ) -> None:
         self._repository = repository
         self._realtime_state_sink = realtime_state_sink
+        self._realtime_quote_sink = realtime_quote_sink
         self._config = (
             ClosedMarketStatePublisherConfig()
             if config is None
@@ -215,9 +271,16 @@ class ClosedMarketStatePublisher:
             _BucketKey,
             NormalizedBookTicker,
         ] = {}
-        self._latest_quotes: dict[tuple[str, str], tuple[Decimal, Decimal]] = {}
+        self._realtime_emitted_keys: set[_BucketKey] = set()
+        self._realtime_latest_quotes: dict[
+            tuple[str, str], tuple[Decimal, Decimal]
+        ] = {}
+        self._durable_latest_quotes: dict[
+            tuple[str, str], tuple[Decimal, Decimal]
+        ] = {}
         self._max_seen_event_at: datetime | None = None
         self._latest_watermark_at: datetime | None = None
+        self._latest_durable_watermark_at: datetime | None = None
         self._received_envelope_count = 0
         self._normalized_event_count = 0
         self._closed_state_count = 0
@@ -225,6 +288,7 @@ class ClosedMarketStatePublisher:
         self._late_event_count = 0
         self._realtime_batch_count = 0
         self._realtime_sink_failure_count = 0
+        self._realtime_quote_failure_count = 0
         self._durable_sink_failure_count = 0
         self._lateness_by_stream: dict[
             CaptureStream,
@@ -289,8 +353,15 @@ class ClosedMarketStatePublisher:
         """
         return {
             "configured_closure_delay_seconds": (
-                self._config.closure_delay_seconds
+                self._config.realtime_closure_delay_seconds
             ),
+            "configured_realtime_closure_delay_seconds": (
+                self._config.realtime_closure_delay_seconds
+            ),
+            "configured_durable_closure_delay_seconds": (
+                self._config.durable_closure_delay_seconds
+            ),
+            "realtime_quote_failure_count": self._realtime_quote_failure_count,
             "thresholds_seconds": _LATENESS_THRESHOLDS_SECONDS,
             "streams": {
                 stream.value: counters.snapshot()
@@ -300,6 +371,33 @@ class ClosedMarketStatePublisher:
                 )
             },
         }
+
+    async def observe_realtime_quote(self, envelope: RawEnvelope) -> None:
+        """Publish a book-ticker quote before capture coalescing/archive I/O."""
+        if (
+            self._realtime_quote_sink is None
+            or envelope.stream is not CaptureStream.BOOK_TICKER
+        ):
+            return
+        try:
+            event = normalize_binance_envelope(envelope)
+            if not isinstance(event, NormalizedBookTicker):
+                return
+            await self._realtime_quote_sink(
+                RealtimeMarketQuote(
+                    exchange=event.exchange,
+                    environment=event.environment,
+                    symbol=event.symbol,
+                    event_at=event.event_at,
+                    received_at=event.received_at,
+                    bid_price=event.bid_price,
+                    ask_price=event.ask_price,
+                )
+            )
+        except Exception:
+            # A quote consumer outage must not stop the primary capture
+            # connection. The state and durable paths remain independent.
+            self._realtime_quote_failure_count += 1
 
     async def observe(self, envelope: RawEnvelope) -> None:
         self._received_envelope_count += 1
@@ -320,10 +418,14 @@ class ClosedMarketStatePublisher:
             or event.event_at > self._max_seen_event_at
         ):
             self._max_seen_event_at = event.event_at
-        watermark = self._max_seen_event_at - timedelta(
-            seconds=self._config.closure_delay_seconds
+        realtime_watermark = self._max_seen_event_at - timedelta(
+            seconds=self._config.realtime_closure_delay_seconds
         )
-        self._latest_watermark_at = watermark
+        durable_watermark = self._max_seen_event_at - timedelta(
+            seconds=self._config.durable_closure_delay_seconds
+        )
+        self._latest_watermark_at = realtime_watermark
+        self._latest_durable_watermark_at = durable_watermark
 
         key = _bucket_key(event)
         bucket_end = key[2] + timedelta(seconds=_BUCKET_SECONDS)
@@ -335,7 +437,11 @@ class ClosedMarketStatePublisher:
         counters.observe_normalized(
             simulated_close_drops=simulated_close_drops
         )
-        if bucket_end <= watermark:
+        # The durable watermark is the point after which the event can no
+        # longer be incorporated into the audit row. Events between the two
+        # clocks are deliberately accepted after realtime publication and are
+        # folded into the durable state below.
+        if bucket_end <= durable_watermark:
             self._late_event_count += 1
             return
 
@@ -348,37 +454,115 @@ class ClosedMarketStatePublisher:
             self._latest_book_ticker_by_bucket[key] = event
         else:
             self._events_by_bucket.setdefault(key, []).append(event)
-        await self._close_ready_buckets(watermark)
+        await self._close_ready_buckets(
+            realtime_watermark=realtime_watermark,
+            durable_watermark=durable_watermark,
+        )
 
-    async def _close_ready_buckets(self, watermark: datetime) -> None:
+    async def _close_ready_buckets(
+        self,
+        *,
+        realtime_watermark: datetime,
+        durable_watermark: datetime,
+    ) -> None:
         pending_keys = set(self._events_by_bucket)
         pending_keys.update(self._latest_book_ticker_by_bucket)
-        ready_keys = tuple(
+        realtime_ready_keys = tuple(
             key
             for key in sorted(
                 pending_keys,
                 key=lambda item: (item[2], item[1], item[0]),
             )
-            if key[2] + timedelta(seconds=_BUCKET_SECONDS) <= watermark
+            if (
+                key not in self._realtime_emitted_keys
+                and key[2] + timedelta(seconds=_BUCKET_SECONDS)
+                <= realtime_watermark
+            )
         )
-        if not ready_keys:
+        if realtime_ready_keys:
+            realtime_states, _ = self._build_states(
+                realtime_ready_keys,
+                latest_quotes=self._realtime_latest_quotes,
+            )
+            for state in realtime_states:
+                if (
+                    state.last_bid_price is not None
+                    and state.last_ask_price is not None
+                ):
+                    self._realtime_latest_quotes[(state.environment, state.symbol)] = (
+                        state.last_bid_price,
+                        state.last_ask_price,
+                    )
+            if self._realtime_state_sink is not None and realtime_states:
+                try:
+                    await self._realtime_state_sink(realtime_states)
+                    self._realtime_batch_count += 1
+                except Exception:
+                    self._realtime_sink_failure_count += 1
+            self._realtime_emitted_keys.update(realtime_ready_keys)
+
+        durable_ready_keys = tuple(
+            key
+            for key in sorted(
+                pending_keys,
+                key=lambda item: (item[2], item[1], item[0]),
+            )
+            if key[2] + timedelta(seconds=_BUCKET_SECONDS) <= durable_watermark
+        )
+        if not durable_ready_keys:
             return
 
+        states_tuple, closed_events = self._build_states(
+            durable_ready_keys,
+            latest_quotes=self._durable_latest_quotes,
+        )
+        for key in durable_ready_keys:
+            self._events_by_bucket.pop(key, None)
+            self._latest_book_ticker_by_bucket.pop(key, None)
+            self._realtime_emitted_keys.discard(key)
+        for state in states_tuple:
+            if (
+                state.last_bid_price is not None
+                and state.last_ask_price is not None
+            ):
+                self._durable_latest_quotes[(state.environment, state.symbol)] = (
+                    state.last_bid_price,
+                    state.last_ask_price,
+                )
+        if not closed_events:
+            return
+
+        sequence_range = RuntimeStateSequenceRange(
+            minimum=min(event.source_local_sequence for event in closed_events),
+            maximum=max(event.source_local_sequence for event in closed_events),
+        )
+        durable_batch = (states_tuple, durable_watermark, sequence_range)
+        if self._durable_queue is None:
+            await self._persist_batch(durable_batch)
+        else:
+            await self._durable_queue.put(durable_batch)
+        self._closed_state_count += len(states_tuple)
+
+    def _build_states(
+        self,
+        keys: tuple[_BucketKey, ...],
+        *,
+        latest_quotes: dict[tuple[str, str], tuple[Decimal, Decimal]],
+    ) -> tuple[tuple[MarketState15s, ...], tuple[NormalizedMarketEvent, ...]]:
         states: list[MarketState15s] = []
-        closed_events: list[NormalizedMarketEvent] = []
-        for key in ready_keys:
-            events = tuple(self._events_by_bucket.pop(key, ()))
-            latest_book_ticker = self._latest_book_ticker_by_bucket.pop(
-                key,
-                None,
-            )
+        events_for_sequence: list[NormalizedMarketEvent] = []
+        for key in keys:
+            events = tuple(self._events_by_bucket.get(key, ()))
+            latest_book_ticker = self._latest_book_ticker_by_bucket.get(key)
             if latest_book_ticker is not None:
                 events = (*events, latest_book_ticker)
-            closed_events.extend(events)
+            if not events:
+                continue
+            events_for_sequence.extend(events)
             environment = events[0].environment
             initial_quotes = {
                 symbol: quote
-                for (quote_environment, symbol), quote in self._latest_quotes.items()
+                for (quote_environment, symbol), quote in latest_quotes.items()
                 if quote_environment == environment
             }
             batch_states = aggregate_market_states_15s(
@@ -391,35 +575,14 @@ class ClosedMarketStatePublisher:
                     state.last_bid_price is not None
                     and state.last_ask_price is not None
                 ):
-                    self._latest_quotes[(state.environment, state.symbol)] = (
+                    latest_quotes[(state.environment, state.symbol)] = (
                         state.last_bid_price,
                         state.last_ask_price,
                     )
         states_tuple = tuple(
             sorted(states, key=lambda state: (state.bucket_start, state.symbol))
         )
-        sequence_range = RuntimeStateSequenceRange(
-            minimum=min(event.source_local_sequence for event in closed_events),
-            maximum=max(event.source_local_sequence for event in closed_events),
-        )
-
-        # The realtime sink is intentionally before the durable adapter. A
-        # slow database write must not put the live decision path behind the
-        # historical runtime-state backlog. The database remains the
-        # audit/recovery path if a consumer disconnects.
-        if self._realtime_state_sink is not None:
-            try:
-                await self._realtime_state_sink(states_tuple)
-                self._realtime_batch_count += 1
-            except Exception:
-                self._realtime_sink_failure_count += 1
-
-        durable_batch = (states_tuple, watermark, sequence_range)
-        if self._durable_queue is None:
-            await self._persist_batch(durable_batch)
-        else:
-            await self._durable_queue.put(durable_batch)
-        self._closed_state_count += len(states_tuple)
+        return states_tuple, tuple(events_for_sequence)
 
     async def _persist_loop(self) -> None:
         queue = self._durable_queue

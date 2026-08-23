@@ -49,6 +49,10 @@ from crypto_momentum_lab.market_data.observability import (
     monitor_market_data_health,
 )
 from crypto_momentum_lab.market_data.quality.tracker import StreamQualityTracker
+from crypto_momentum_lab.market_data.quote_hub import (
+    MarketQuoteHub,
+    MarketQuoteHubConfig,
+)
 from crypto_momentum_lab.market_data.runtime_states import (
     ClosedMarketStatePublisher,
     ClosedMarketStatePublisherConfig,
@@ -109,6 +113,10 @@ _MARKET_STATE_HUB_HOST_ENV = "CML_MARKET_STATE_HUB_HOST"
 _MARKET_STATE_HUB_PORT_ENV = "CML_MARKET_STATE_HUB_PORT"
 _MARKET_STATE_HUB_DEFAULT_HOST = "0.0.0.0"
 _MARKET_STATE_HUB_DEFAULT_PORT = 8766
+_MARKET_QUOTE_HUB_HOST_ENV = "CML_MARKET_QUOTE_HUB_HOST"
+_MARKET_QUOTE_HUB_PORT_ENV = "CML_MARKET_QUOTE_HUB_PORT"
+_MARKET_QUOTE_HUB_DEFAULT_HOST = "0.0.0.0"
+_MARKET_QUOTE_HUB_DEFAULT_PORT = 8768
 
 
 def _run_market_data(coroutine: Coroutine[object, object, None]) -> None:
@@ -186,6 +194,21 @@ def parse_market_state_hub_port(value: str | None = None) -> int:
         raise ValueError("market-state hub port must be an integer") from error
     if not 0 <= port <= 65535:
         raise ValueError("market-state hub port must be between 0 and 65535")
+    return port
+
+
+def parse_market_quote_hub_port(value: str | None = None) -> int:
+    raw_value = (
+        os.environ.get(_MARKET_QUOTE_HUB_PORT_ENV, str(_MARKET_QUOTE_HUB_DEFAULT_PORT))
+        if value is None
+        else value
+    )
+    try:
+        port = int(raw_value)
+    except ValueError as error:
+        raise ValueError("market-quote hub port must be an integer") from error
+    if not 0 <= port <= 65535:
+        raise ValueError("market-quote hub port must be between 0 and 65535")
     return port
 
 
@@ -552,6 +575,7 @@ class MarketDataRuntime:
     subscription_observer: CaptureUniverseObserver
     runtime_state_publisher: ClosedMarketStatePublisher
     state_hub: MarketStateHub
+    quote_hub: MarketQuoteHub
     universe_activation_minute: int
     universe_refresh_interval_minutes: int
     enabled_streams: tuple[CaptureStream, ...]
@@ -586,12 +610,27 @@ async def build_market_data_runtime(
             port=parse_market_state_hub_port(),
         )
     )
+    quote_hub = MarketQuoteHub(
+        MarketQuoteHubConfig(
+            host=os.environ.get(
+                _MARKET_QUOTE_HUB_HOST_ENV,
+                _MARKET_QUOTE_HUB_DEFAULT_HOST,
+            ),
+            port=parse_market_quote_hub_port(),
+        )
+    )
     runtime_state_publisher = ClosedMarketStatePublisher(
         repository=runtime_state_repository,
         config=ClosedMarketStatePublisherConfig(
-            closure_delay_seconds=runtime.capture.closure_delay_seconds
+            realtime_closure_delay_seconds=(
+                runtime.capture.realtime_closure_delay_seconds
+            ),
+            durable_closure_delay_seconds=(
+                runtime.capture.durable_closure_delay_seconds
+            ),
         ),
         realtime_state_sink=state_hub.publish,
+        realtime_quote_sink=quote_hub.publish,
     )
     protected_run_ids = parse_paper_exit_run_ids()
     live_position_account_label = parse_live_position_account_label()
@@ -725,6 +764,7 @@ async def build_market_data_runtime(
                 runtime.capture.control_messages_per_second
             ),
             symbol_filter=coordinator.accepts_symbol,
+            on_realtime_envelope=runtime_state_publisher.observe_realtime_quote,
         )
 
     connection_pool = BinanceConnectionPool(
@@ -790,6 +830,7 @@ async def build_market_data_runtime(
             subscription_observer=observer,
             runtime_state_publisher=runtime_state_publisher,
             state_hub=state_hub,
+            quote_hub=quote_hub,
             universe_activation_minute=runtime.universe.activation_minute,
             universe_refresh_interval_minutes=(
                 runtime.universe.refresh_interval_minutes
@@ -846,8 +887,11 @@ async def run_market_data(
         capture_task: asyncio.Task[None] | None = None
         auxiliary_tasks: tuple[asyncio.Task[None], ...] = ()
         stop_task: asyncio.Task[bool] | None = None
+        quote_hub = getattr(runtime, "quote_hub", None)
         try:
             await runtime.state_hub.start()
+            if quote_hub is not None:
+                await quote_hub.start()
             await runtime.runtime_state_publisher.start()
             await runtime.capture.start(
                 symbols=runtime.initial_symbols,
@@ -975,6 +1019,8 @@ async def run_market_data(
             if capture_task is not None:
                 await asyncio.gather(capture_task, return_exceptions=True)
             await runtime.runtime_state_publisher.stop()
+            if quote_hub is not None:
+                await quote_hub.stop()
             await runtime.state_hub.stop()
 
 
@@ -1023,8 +1069,11 @@ async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
         retention_task: asyncio.Task[None] | None = None
         operational_retention_task: asyncio.Task[None] | None = None
         health_task: asyncio.Task[None] | None = None
+        quote_hub = getattr(runtime, "quote_hub", None)
         try:
             await runtime.state_hub.start()
+            if quote_hub is not None:
+                await quote_hub.start()
             await runtime.runtime_state_publisher.start()
             await runtime.capture.start(
                 symbols=runtime.initial_symbols,
@@ -1117,6 +1166,8 @@ async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             await runtime.runtime_state_publisher.stop()
+            if quote_hub is not None:
+                await quote_hub.stop()
             await runtime.state_hub.stop()
 
 

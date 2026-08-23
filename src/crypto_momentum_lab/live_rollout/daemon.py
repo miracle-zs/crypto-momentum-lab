@@ -18,7 +18,10 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.execution import ExchangeOrderState, OrderExecutionPlan
-from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.market.models import (
+    MarketState15s,
+    RealtimeMarketQuote,
+)
 from crypto_momentum_lab.domain.risk import (
     RiskConfigSnapshot,
     RiskDecision,
@@ -216,6 +219,14 @@ class _ExitLaneWork:
     completion: asyncio.Future[_ExitLaneOutcome] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _QuoteLaneWork:
+    quote: RealtimeMarketQuote
+    state: MarketState15s
+    context: LiveDaemonRuntimeContext
+    completion: asyncio.Future[_ExitLaneOutcome] | None = None
+
+
 class _ExitExecutionLane:
     """Run account exits independently from the market-state consumer.
 
@@ -233,16 +244,25 @@ class _ExitExecutionLane:
             [MarketState15s, LiveDaemonRuntimeContext],
             Awaitable[_ExitLaneOutcome],
         ],
+        quote_processor: Callable[
+            [RealtimeMarketQuote, MarketState15s, LiveDaemonRuntimeContext],
+            Awaitable[_ExitLaneOutcome],
+        ],
     ) -> None:
         self._processor = processor
+        self._quote_processor = quote_processor
         self._started = False
         self._account_queue: asyncio.Queue[_ExitLaneWork | None] | None = None
         self._market_queue: asyncio.Queue[str | None] | None = None
+        self._quote_queue: asyncio.Queue[str | None] | None = None
         self._market_state_lock: asyncio.Lock | None = None
         self._market_latest: dict[str, _ExitLaneWork] = {}
         self._market_enqueued: set[str] = set()
+        self._quote_latest: dict[str, _QuoteLaneWork] = {}
+        self._quote_enqueued: set[str] = set()
         self._account_worker: asyncio.Task[None] | None = None
         self._market_workers: tuple[asyncio.Task[None], ...] = ()
+        self._quote_workers: tuple[asyncio.Task[None], ...] = ()
         self._idle: asyncio.Event | None = None
         self._outstanding_work = 0
         self._outcome = _ExitLaneOutcome()
@@ -260,9 +280,12 @@ class _ExitExecutionLane:
             return
         self._account_queue = asyncio.Queue()
         self._market_queue = asyncio.Queue()
+        self._quote_queue = asyncio.Queue()
         self._market_state_lock = asyncio.Lock()
         self._market_latest = {}
         self._market_enqueued = set()
+        self._quote_latest = {}
+        self._quote_enqueued = set()
         self._outstanding_work = 0
         self._outcome = _ExitLaneOutcome()
         self._idle = asyncio.Event()
@@ -276,6 +299,13 @@ class _ExitExecutionLane:
             asyncio.create_task(
                 self._run_market_worker(),
                 name=f"live-exit-market-worker-{index}",
+            )
+            for index in range(self._MARKET_WORKER_COUNT)
+        )
+        self._quote_workers = tuple(
+            asyncio.create_task(
+                self._run_quote_worker(),
+                name=f"live-exit-quote-worker-{index}",
             )
             for index in range(self._MARKET_WORKER_COUNT)
         )
@@ -316,28 +346,70 @@ class _ExitExecutionLane:
                 self._market_enqueued.add(state.symbol)
                 self._market_queue.put_nowait(state.symbol)
 
+    async def submit_quote(
+        self,
+        quote: RealtimeMarketQuote,
+        state: MarketState15s,
+        context: LiveDaemonRuntimeContext,
+        *,
+        wait: bool = False,
+    ) -> _ExitLaneOutcome | None:
+        if (
+            not self._started
+            or self._quote_queue is None
+            or self._market_state_lock is None
+            or self._idle is None
+        ):
+            raise RuntimeError("exit lane is not started")
+        completion: asyncio.Future[_ExitLaneOutcome] | None = None
+        if wait:
+            completion = asyncio.get_running_loop().create_future()
+        async with self._market_state_lock:
+            if quote.symbol not in self._quote_latest:
+                self._outstanding_work += 1
+            self._idle.clear()
+            self._quote_latest[quote.symbol] = _QuoteLaneWork(
+                quote,
+                state,
+                context,
+                completion,
+            )
+            if quote.symbol not in self._quote_enqueued:
+                self._quote_enqueued.add(quote.symbol)
+                self._quote_queue.put_nowait(quote.symbol)
+        if completion is None:
+            return None
+        return await completion
+
     async def stop(self) -> _ExitLaneOutcome:
         if not self._started:
             return _ExitLaneOutcome()
         await self.drain()
         account_queue = self._account_queue
         market_queue = self._market_queue
+        quote_queue = self._quote_queue
         account_worker = self._account_worker
         market_workers = self._market_workers
+        quote_workers = self._quote_workers
         if account_queue is not None:
             account_queue.put_nowait(None)
         if market_queue is not None:
             for _ in market_workers:
                 market_queue.put_nowait(None)
+        if quote_queue is not None:
+            for _ in quote_workers:
+                quote_queue.put_nowait(None)
         workers: tuple[asyncio.Task[None], ...] = (
             (account_worker,) if account_worker is not None else ()
         )
         workers += market_workers
+        workers += quote_workers
         if workers:
             await asyncio.gather(*workers)
         outcome = self._outcome
         self._started = False
         self._market_workers = ()
+        self._quote_workers = ()
         return outcome
 
     async def drain(self) -> None:
@@ -375,6 +447,26 @@ class _ExitExecutionLane:
             self._outstanding_work -= 1
             self._mark_idle_if_ready()
 
+    async def _run_quote_worker(self) -> None:
+        assert self._quote_queue is not None
+        assert self._market_state_lock is not None
+        while True:
+            symbol = await self._quote_queue.get()
+            if symbol is None:
+                return
+            async with self._market_state_lock:
+                work = self._quote_latest.pop(symbol, None)
+                self._quote_enqueued.discard(symbol)
+            if work is None:
+                self._mark_idle_if_ready()
+                continue
+            outcome = await self._run_quote_work(work)
+            self._record_outcome(outcome)
+            if work.completion is not None and not work.completion.done():
+                work.completion.set_result(outcome)
+            self._outstanding_work -= 1
+            self._mark_idle_if_ready()
+
     async def _run_work(self, work: _ExitLaneWork) -> _ExitLaneOutcome:
         try:
             return await self._processor(work.state, work.context)
@@ -386,6 +478,23 @@ class _ExitExecutionLane:
             )
             return _ExitLaneOutcome(
                 failure=f"exit_execution_failed:{type(error).__name__}"
+            )
+
+    async def _run_quote_work(self, work: _QuoteLaneWork) -> _ExitLaneOutcome:
+        try:
+            return await self._quote_processor(
+                work.quote,
+                work.state,
+                work.context,
+            )
+        except Exception as error:
+            log.exception(
+                "live_quote_exit_lane_work_failed",
+                symbol=work.quote.symbol,
+                error_type=type(error).__name__,
+            )
+            return _ExitLaneOutcome(
+                failure=f"quote_exit_execution_failed:{type(error).__name__}"
             )
 
     def _record_outcome(self, outcome: _ExitLaneOutcome) -> None:
@@ -433,7 +542,11 @@ class LiveStrategyDaemon:
         self._exit_manager = exit_manager
         self._reconcile_orders = reconcile_orders
         self._exit_symbol_locks: dict[str, asyncio.Lock] = {}
-        self._exit_lane = _ExitExecutionLane(self._process_exit_work)
+        self._quote_symbol_locks: dict[str, asyncio.Lock] = {}
+        self._exit_lane = _ExitExecutionLane(
+            self._process_exit_work,
+            self._process_quote_work,
+        )
         self._checkpoint_writer = CheckpointWriter(
             run_id=config.run_id,
             persist=self._repository.save_checkpoint,
@@ -486,7 +599,12 @@ class LiveStrategyDaemon:
             run_id=self._config.run_id,
         )
 
-    async def process_account_event(self, state: MarketState15s) -> str | None:
+    async def process_account_event(
+        self,
+        state: MarketState15s,
+        *,
+        quote: RealtimeMarketQuote | None = None,
+    ) -> str | None:
         """Run the exit lane from the latest account event.
 
         The entry lane remains driven by market buckets.  This method is a
@@ -504,14 +622,55 @@ class LiveStrategyDaemon:
             return f"unmanaged_live_positions:{symbols}"
         if self._run_active:
             await self._exit_lane.start()
-            outcome = await self._exit_lane.submit_account(state, context)
+            if quote is None:
+                outcome = await self._exit_lane.submit_account(state, context)
+            else:
+                # Account events already have their own channel.  Execute the
+                # quote-triggered check directly here so an account update
+                # cannot be replaced by a newer ticker in the coalescing
+                # quote queue.
+                outcome = await self._process_quote_work(quote, state, context)
         else:
-            outcome = await self._process_exit_work(state, context)
+            outcome = (
+                await self._process_exit_work(state, context)
+                if quote is None
+                else await self._process_quote_work(quote, state, context)
+            )
         self._invalidate_context_cache()
         if outcome.failure is not None:
             log.error(
                 "live_account_event_exit_failed",
                 symbol=state.symbol,
+                reason=outcome.failure,
+            )
+        return outcome.failure
+
+    async def process_market_quote(
+        self,
+        quote: RealtimeMarketQuote,
+        state: MarketState15s,
+    ) -> str | None:
+        """Submit a latest-value quote to the reduce-only exit lane."""
+        if self._exit_manager is None or not self._exit_enabled:
+            return None
+        if state.symbol != quote.symbol:
+            return None
+        # The provider caches the account/risk view for the current state
+        # bucket.  No invalidation happens on ticker arrival; account events
+        # are the explicit cache-refresh seam.
+        context = await self._context_provider(state)
+        if context.unmanaged_position_symbols:
+            symbols = ",".join(sorted(context.unmanaged_position_symbols))
+            return f"unmanaged_live_positions:{symbols}"
+        if self._run_active:
+            await self._exit_lane.start()
+            await self._exit_lane.submit_quote(quote, state, context)
+            return None
+        outcome = await self._process_quote_work(quote, state, context)
+        if outcome.failure is not None:
+            log.error(
+                "live_quote_exit_failed",
+                symbol=quote.symbol,
                 reason=outcome.failure,
             )
         return outcome.failure
@@ -974,12 +1133,45 @@ class LiveStrategyDaemon:
             failure=failure,
         )
 
+    async def _process_quote_work(
+        self,
+        quote: RealtimeMarketQuote,
+        state: MarketState15s,
+        context: LiveDaemonRuntimeContext,
+    ) -> _ExitLaneOutcome:
+        if self._exit_manager is None or not self._exit_enabled:
+            return _ExitLaneOutcome()
+        # This lock is intentionally separate from the 15-minute candle exit
+        # lock.  A slow REST candle lookup must never hold the realtime quote
+        # lane behind it; the execution coordinator still serializes the
+        # resulting reduce-only exchange commands per symbol.
+        lock = self._quote_symbol_locks.setdefault(
+            quote.symbol,
+            asyncio.Lock(),
+        )
+        async with lock:
+            requests = await self._exit_manager.requests_for_quote(
+                quote,
+                context.managed_positions,
+            )
+            approved, submitted, failure = await self._process_exit_requests(
+                requests,
+                state=state,
+                context=context,
+            )
+        return _ExitLaneOutcome(
+            approved_intent_count=approved,
+            submitted_order_count=submitted,
+            failure=failure,
+        )
+
     async def _process_exit_requests(
         self,
         requests: tuple[LiveExitRequest, ...],
         *,
         state: MarketState15s,
         context: LiveDaemonRuntimeContext,
+        reference_price: Decimal | None = None,
     ) -> tuple[int, int, str | None]:
         approved = 0
         submitted = 0
@@ -1009,6 +1201,7 @@ class LiveStrategyDaemon:
                     requested_quantity=min(request.fallback_quantity, remaining),
                     state=state,
                     context=context,
+                    reference_price=reference_price,
                 )
                 if result is None:
                     continue
@@ -1028,6 +1221,7 @@ class LiveStrategyDaemon:
                 requested_quantity=request.quantity,
                 state=state,
                 context=context,
+                reference_price=reference_price,
             )
             if result is None:
                 continue
@@ -1045,6 +1239,7 @@ class LiveStrategyDaemon:
         requested_quantity: Decimal | None,
         state: MarketState15s,
         context: LiveDaemonRuntimeContext,
+        reference_price: Decimal | None = None,
     ) -> OrderExecutionResult | None:
         executable_candidate = candidate
         if not candidate.reduce_only:
@@ -1105,13 +1300,24 @@ class LiveStrategyDaemon:
                 evaluation_id=evaluation.evaluation_id,
             )
         rules = context.trading_rules.get(candidate.symbol)
-        reference_price = state.mark_price or state.close_price
-        if rules is None or reference_price is None:
+        execution_reference_price = reference_price
+        if execution_reference_price is None:
+            candidate_reference_price = executable_candidate.features.get(
+                "reference_price"
+            )
+            if isinstance(candidate_reference_price, str):
+                try:
+                    execution_reference_price = Decimal(candidate_reference_price)
+                except ArithmeticError:
+                    execution_reference_price = None
+        if execution_reference_price is None:
+            execution_reference_price = state.mark_price or state.close_price
+        if rules is None or execution_reference_price is None:
             return None
         plan = quantize_order_plan(
             executable_candidate,
             rules,
-            reference_price=reference_price,
+            reference_price=execution_reference_price,
             resize_tolerance=self._config.resize_tolerance,
             hedge_mode=self._config.hedge_mode,
             requested_quantity=requested_quantity,

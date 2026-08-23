@@ -25,7 +25,10 @@ from crypto_momentum_lab.domain.live_rollout import (
     LiveSessionState,
     LiveSessionTransition,
 )
-from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.market.models import (
+    MarketState15s,
+    RealtimeMarketQuote,
+)
 from crypto_momentum_lab.domain.risk import (
     RiskConfigSnapshot,
     RiskEvaluation,
@@ -96,6 +99,10 @@ from crypto_momentum_lab.live_rollout.telemetry import (
 from crypto_momentum_lab.market_data.hub import (
     MarketStateHubError,
     WebSocketMarketStateSource,
+)
+from crypto_momentum_lab.market_data.quote_hub import (
+    MarketQuoteHubError,
+    WebSocketMarketQuoteSource,
 )
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
@@ -413,6 +420,10 @@ def run_command(
         str,
         typer.Option("--market-state-hub-url"),
     ] = "ws://market-data:8766",
+    market_quote_hub_url: Annotated[
+        str,
+        typer.Option("--market-quote-hub-url"),
+    ] = "ws://market-data:8768",
     account_event_hub_url: Annotated[
         str,
         typer.Option("--account-event-hub-url"),
@@ -501,6 +512,7 @@ def run_command(
             market_environment=market_environment,
             market_state_source=market_state_source,
             market_state_hub_url=market_state_hub_url,
+            market_quote_hub_url=market_quote_hub_url,
             account_event_hub_url=account_event_hub_url,
             session_id=session_id,
             operator=operator,
@@ -851,6 +863,7 @@ async def _run_live_daemon(
     market_environment: str,
     market_state_source: str,
     market_state_hub_url: str,
+    market_quote_hub_url: str,
     account_event_hub_url: str,
     session_id: str,
     operator: str,
@@ -880,6 +893,8 @@ async def _run_live_daemon(
         raise ValueError("market_state_source must be 'hub' or 'postgres'")
     if market_state_source == "hub" and not market_state_hub_url.strip():
         raise ValueError("market_state_hub_url must not be empty in hub mode")
+    if market_state_source == "hub" and not market_quote_hub_url.strip():
+        raise ValueError("market_quote_hub_url must not be empty in hub mode")
     if not account_event_hub_url.strip():
         raise ValueError("account_event_hub_url must not be empty")
     now = datetime.now(tz=UTC)
@@ -1242,6 +1257,7 @@ async def _run_live_daemon(
             approval_id=approval.approval_id,
         )
         latest_market_states = _LatestMarketStateCache()
+        latest_market_quotes = _LatestMarketQuoteCache()
 
         async def recover_live_lease() -> TradingLease | None:
             states = latest_market_states.for_symbols(())
@@ -1384,6 +1400,7 @@ async def _run_live_daemon(
             )
         startup_phase = False
         hub_source: WebSocketMarketStateSource | None = None
+        quote_source: WebSocketMarketQuoteSource | None = None
         state_stream: AsyncIterable[MarketState15s]
         if market_state_source == "hub":
 
@@ -1416,6 +1433,21 @@ async def _run_live_daemon(
             account_label=account_label,
             consumer_id=f"live-exit:{session_id}",
         )
+        quote_task: asyncio.Task[None] | None = None
+        if market_state_source == "hub":
+            quote_source = WebSocketMarketQuoteSource(
+                url=market_quote_hub_url,
+                environment=market_environment,
+                consumer_id=f"live-exit-quotes:{session_id}",
+            )
+            quote_task = asyncio.create_task(
+                _run_quote_channel(
+                    source=quote_source,
+                    daemon=daemon,
+                    latest_market_quotes=latest_market_quotes,
+                    latest_market_states=latest_market_states,
+                )
+            )
         market_task = asyncio.create_task(
             daemon.run(_observe_market_states(state_stream, latest_market_states))
         )
@@ -1424,6 +1456,7 @@ async def _run_live_daemon(
                 source=account_source,
                 daemon=daemon,
                 latest_market_states=latest_market_states,
+                latest_market_quotes=latest_market_quotes,
                 order_repository=order_repository,
                 state_machine=execution_coordinator,
                 run_id=session_id,
@@ -1446,6 +1479,7 @@ async def _run_live_daemon(
             monitored_tasks: set[asyncio.Task[object]] = {
                 market_task,
                 account_task,
+                *(() if quote_task is None else (quote_task,)),
                 lease_task,
                 reconcile_task,
             }
@@ -1458,6 +1492,9 @@ async def _run_live_daemon(
             if account_task.done():
                 await account_task
                 raise RuntimeError("account event channel stopped unexpectedly")
+            if quote_task is not None and quote_task.done():
+                await quote_task
+                raise RuntimeError("market quote channel stopped unexpectedly")
             if lease_task.done():
                 await lease_task
                 raise RuntimeError("live lease heartbeat stopped unexpectedly")
@@ -1476,11 +1513,15 @@ async def _run_live_daemon(
         finally:
             if hub_source is not None:
                 hub_source.stop()
+            if quote_source is not None:
+                quote_source.stop()
             account_source.stop()
             if not market_task.done():
                 market_task.cancel()
             if not account_task.done():
                 account_task.cancel()
+            if quote_task is not None and not quote_task.done():
+                quote_task.cancel()
             if not lease_task.done():
                 lease_task.cancel()
             if not reconcile_task.done():
@@ -1490,6 +1531,7 @@ async def _run_live_daemon(
             await asyncio.gather(
                 market_task,
                 account_task,
+                *((quote_task,) if quote_task is not None else ()),
                 lease_task,
                 reconcile_task,
                 *(
@@ -1569,6 +1611,32 @@ class _LatestMarketStateCache:
         )
 
 
+class _LatestMarketQuoteCache:
+    def __init__(self) -> None:
+        self._quotes: dict[str, RealtimeMarketQuote] = {}
+
+    def observe(self, quote: RealtimeMarketQuote) -> None:
+        previous = self._quotes.get(quote.symbol)
+        if previous is None or quote.received_at >= previous.received_at:
+            self._quotes[quote.symbol] = quote
+
+    def for_symbols(
+        self,
+        symbols: tuple[str, ...],
+    ) -> tuple[RealtimeMarketQuote, ...]:
+        if symbols:
+            selected = [
+                self._quotes[symbol]
+                for symbol in symbols
+                if symbol in self._quotes
+            ]
+        else:
+            selected = list(self._quotes.values())
+        return tuple(
+            sorted(selected, key=lambda quote: (quote.received_at, quote.symbol))
+        )
+
+
 async def _observe_market_states(
     states: AsyncIterable[MarketState15s],
     cache: _LatestMarketStateCache,
@@ -1610,11 +1678,64 @@ async def _resilient_market_state_stream(
             return
 
 
+async def _resilient_market_quote_stream(
+    quotes: AsyncIterable[RealtimeMarketQuote],
+    *,
+    retry_delay_seconds: float = 1.0,
+) -> AsyncIterator[RealtimeMarketQuote]:
+    """Keep the quote exit lane alive while the quote hub reconnects."""
+    if retry_delay_seconds < 0:
+        raise ValueError("retry_delay_seconds must not be negative")
+    while True:
+        try:
+            async for quote in quotes:
+                yield quote
+        except asyncio.CancelledError:
+            raise
+        except MarketQuoteHubError as error:
+            log.warning(
+                "live_market_quote_stream_retry",
+                error_type=type(error).__name__,
+                error=str(error),
+                retry_delay_seconds=retry_delay_seconds,
+            )
+            if retry_delay_seconds > 0:
+                await asyncio.sleep(retry_delay_seconds)
+        else:
+            return
+
+
+async def _run_quote_channel(
+    *,
+    source: WebSocketMarketQuoteSource,
+    daemon: LiveStrategyDaemon,
+    latest_market_quotes: _LatestMarketQuoteCache,
+    latest_market_states: _LatestMarketStateCache,
+) -> None:
+    async for quote in _resilient_market_quote_stream(source):
+        latest_market_quotes.observe(quote)
+        for state in latest_market_states.for_symbols((quote.symbol,)):
+            try:
+                failure = await daemon.process_market_quote(quote, state)
+            except Exception as error:
+                if not _is_transient_live_runtime_error(error):
+                    raise
+                log.warning(
+                    "live_market_quote_processing_degraded",
+                    symbol=quote.symbol,
+                    error_type=type(error).__name__,
+                )
+                continue
+            if failure is not None:
+                raise RuntimeError(f"market_quote_exit_failed:{failure}")
+
+
 async def _run_account_event_channel(
     *,
     source: WebSocketAccountEventSource,
     daemon: LiveStrategyDaemon,
     latest_market_states: _LatestMarketStateCache,
+    latest_market_quotes: _LatestMarketQuoteCache,
     order_repository: PostgresOrderRepository,
     state_machine: OrderExecutionPort,
     run_id: str,
@@ -1635,7 +1756,14 @@ async def _run_account_event_channel(
                     run_id=run_id,
                 )
             for state in latest_market_states.for_symbols(event.symbols):
-                failure = await daemon.process_account_event(state)
+                quote = next(
+                    iter(latest_market_quotes.for_symbols((state.symbol,))),
+                    None,
+                )
+                failure = await daemon.process_account_event(
+                    state,
+                    quote=quote,
+                )
                 if failure is not None:
                     raise RuntimeError(f"account_event_exit_failed:{failure}")
         except asyncio.CancelledError:

@@ -342,6 +342,7 @@ services:
       BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
       CML_HEALTHCHECK_RUN_ID: ${CML_LIVE_SESSION_ID:-live-primary-v1}
       CML_MARKET_STATE_HUB_URL: ${CML_MARKET_STATE_HUB_URL:-ws://market-data:8766}
+      CML_MARKET_QUOTE_HUB_URL: ${CML_MARKET_QUOTE_HUB_URL:-ws://market-data:8768}
       CML_ACCOUNT_EVENT_HUB_URL: ${CML_ACCOUNT_EVENT_HUB_URL:-ws://execution-account-live:8767}
     entrypoint: ["cml-live-rollout"]
     command:
@@ -356,6 +357,8 @@ services:
       - hub
       - --market-state-hub-url
       - ${CML_MARKET_STATE_HUB_URL:-ws://market-data:8766}
+      - --market-quote-hub-url
+      - ${CML_MARKET_QUOTE_HUB_URL:-ws://market-data:8768}
       - --account-event-hub-url
       - ${CML_ACCOUNT_EVENT_HUB_URL:-ws://execution-account-live:8767}
       - --session-id

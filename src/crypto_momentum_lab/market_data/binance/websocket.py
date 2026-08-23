@@ -99,6 +99,7 @@ class BinanceWebSocketConnection:
         control_messages_per_second: float = 5,
         ingress_queue_max_events: int = 512,
         symbol_filter: Callable[[CaptureStream, str], bool] | None = None,
+        on_realtime_envelope: EnvelopeSink | None = None,
     ) -> None:
         self._base_url = base_url
         self._group_id = group_id
@@ -123,6 +124,7 @@ class BinanceWebSocketConnection:
         self._control_interval_seconds = 1 / control_messages_per_second
         self._ingress_queue_max_events = ingress_queue_max_events
         self._symbol_filter = symbol_filter
+        self._on_realtime_envelope = on_realtime_envelope
         self._connection_lock = asyncio.Lock()
         self._desired_lock = asyncio.Lock()
         self._desired_event = asyncio.Event()
@@ -497,6 +499,8 @@ class BinanceWebSocketConnection:
             except BinancePayloadError:
                 continue
             local_sequence += 1
+            if self._on_realtime_envelope is not None:
+                await self._on_realtime_envelope(envelope)
             try:
                 data_queue.put_nowait(envelope)
             except asyncio.QueueFull as exc:

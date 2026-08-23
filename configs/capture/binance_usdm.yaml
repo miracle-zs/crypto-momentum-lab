@@ -15,7 +15,8 @@ open_timeout_seconds: 10
 ping_interval_seconds: 30
 ping_timeout_seconds: 10
 silence_timeout_seconds: 30
-closure_delay_seconds: 3
+realtime_closure_delay_seconds: 3
+durable_closure_delay_seconds: 3
 queue_max_events: 100000
 queue_max_bytes: 268435456
 shutdown_timeout_seconds: 30

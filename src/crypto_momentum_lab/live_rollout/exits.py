@@ -7,7 +7,10 @@ from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
 from crypto_momentum_lab.domain.execution import FuturesPositionSide, OrderExecutionPlan
-from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.market.models import (
+    MarketState15s,
+    RealtimeMarketQuote,
+)
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
@@ -196,6 +199,49 @@ class LiveExitManager:
                 requests.append(request)
         return tuple(requests)
 
+    async def requests_for_quote(
+        self,
+        quote: RealtimeMarketQuote,
+        positions: tuple[ManagedLivePosition, ...],
+    ) -> tuple[LiveExitRequest, ...]:
+        """Evaluate only immediate exits against the live bid/ask.
+
+        Candle-direction exits stay on the closed-state path.  Stop loss,
+        take profit, and max-holding protection do not need a 15-minute
+        candle and therefore must not wait for the candle loader or the
+        durable state watermark.
+        """
+        requests: list[LiveExitRequest] = []
+        for position in positions:
+            if (
+                position.symbol != quote.symbol
+                or position.closing_order_filled
+                or quote.received_at <= position.opened_at
+                or position.recovery_order_client_id is not None
+            ):
+                continue
+            mark_price = _quote_exit_mark_price(quote, position.side)
+            reason = _realtime_exit_reason(
+                position=position,
+                mark_price=mark_price,
+                held_until=quote.received_at,
+                policy=self._config.policy,
+            )
+            if reason is None:
+                continue
+            requests.append(
+                self._build_order_request(
+                    state=None,
+                    position=position,
+                    reason=reason,
+                    trigger_at=quote.received_at,
+                    identity_trigger_at=position.opened_at,
+                    created_at=quote.received_at,
+                    reference_price=mark_price,
+                )
+            )
+        return tuple(requests)
+
     async def _request_for_position(
         self,
         state: MarketState15s,
@@ -346,22 +392,28 @@ class LiveExitManager:
     def _build_order_request(
         self,
         *,
-        state: MarketState15s,
+        state: MarketState15s | None,
         position: ManagedLivePosition,
         reason: str,
         trigger_at: datetime,
         reference_price: Decimal,
+        created_at: datetime | None = None,
+        identity_trigger_at: datetime | None = None,
         entry_type: EntryType = EntryType.MARKET,
         limit_price: Decimal | None = None,
     ) -> LiveExitOrderRequest:
+        identity_trigger_at = identity_trigger_at or trigger_at
         identity = (
             f"{self._config.run_id}:{position.symbol}:"
             f"{position.position_side.value}:{position.opened_at.isoformat()}:"
-            f"{reason}:{trigger_at.isoformat()}"
+            f"{reason}:{identity_trigger_at.isoformat()}"
         )
         signal_id = f"live-exit-signal-{uuid5(NAMESPACE_URL, identity)}"
         candidate_id = f"live-exit-{uuid5(NAMESPACE_URL, signal_id)}"
-        created_at = state.bucket_end
+        if created_at is None:
+            if state is None:
+                raise ValueError("state or created_at is required")
+            created_at = state.bucket_end
         return LiveExitOrderRequest(
             candidate=OrderIntentCandidate(
                 candidate_id=candidate_id,
@@ -419,6 +471,28 @@ def _gross_return(
     return -price_return if position.side is StrategySide.SHORT else price_return
 
 
+def _realtime_exit_reason(
+    *,
+    position: ManagedLivePosition,
+    mark_price: Decimal,
+    held_until: datetime,
+    policy: PositionExitPolicy,
+) -> str | None:
+    """Return emergency/fixed exits without consulting candle policy."""
+    gross_return = _gross_return(position, mark_price)
+    if gross_return >= policy.take_profit_pct:
+        return "take_profit_realtime"
+    if gross_return <= -policy.stop_loss_pct:
+        return "stop_loss_realtime"
+    if (
+        policy.max_holding_seconds is not None
+        and held_until
+        >= position.opened_at + timedelta(seconds=policy.max_holding_seconds)
+    ):
+        return "max_holding_period_realtime"
+    return None
+
+
 def _recovery_price(
     position: ManagedLivePosition,
     profit_pct: Decimal,
@@ -451,6 +525,13 @@ def _exit_mark_price(
     )
     price = quote or state.mark_price or state.close_price
     return price if price is not None and price > 0 else None
+
+
+def _quote_exit_mark_price(
+    quote: RealtimeMarketQuote,
+    side: StrategySide,
+) -> Decimal:
+    return quote.bid_price if side is StrategySide.LONG else quote.ask_price
 
 
 def _candle_start_15m(value: datetime) -> datetime:

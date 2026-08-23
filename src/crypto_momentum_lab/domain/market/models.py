@@ -222,6 +222,31 @@ class NormalizedBookTicker(NormalizedEventSource):
 
 
 @dataclass(frozen=True, slots=True)
+class RealtimeMarketQuote:
+    """Small, transport-independent quote contract for exit decisions."""
+
+    exchange: str
+    environment: str
+    symbol: str
+    event_at: datetime
+    received_at: datetime
+    bid_price: Decimal
+    ask_price: Decimal
+
+    def __post_init__(self) -> None:
+        if not self.exchange.strip() or not self.environment.strip():
+            raise ValueError("exchange and environment must not be empty")
+        if not self.symbol.strip():
+            raise ValueError("symbol must not be empty")
+        if not _is_aware(self.event_at):
+            raise ValueError("event_at must be timezone-aware")
+        if not _is_aware(self.received_at):
+            raise ValueError("received_at must be timezone-aware")
+        if self.bid_price <= 0 or self.ask_price <= 0:
+            raise ValueError("quote prices must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class NormalizedMarkPrice(NormalizedEventSource):
     mark_price: Decimal
     index_price: Decimal | None
