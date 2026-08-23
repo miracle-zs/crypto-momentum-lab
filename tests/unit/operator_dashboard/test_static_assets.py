@@ -23,13 +23,13 @@ def test_static_javascript_uses_relative_api_paths() -> None:
 
     assert 'data-endpoint="api/overview"' in index
     assert (
-        'href="static/dashboard.css?v=20260817-control-room-v10-echarts"'
+        'href="static/dashboard.css?v=20260823-control-room-v11-exit-layout"'
         in index
     )
     assert 'src="static/vendor/echarts.min.js?v=20260817-echarts-6.1.0"' in index
     assert (
-        'type="module" src="static/dashboard.js?v=20260818-control-room-'
-        'v16-daily-anchor"'
+        'type="module" src="static/dashboard.js?v=20260823-control-room-'
+        'v17-exit-layout"'
         in index
     )
     assert 'data-endpoint="/api/' not in index
@@ -156,6 +156,17 @@ def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
     assert "SUMMARY FIRST · DETAIL ON DEMAND" in (
         STATIC / "index.html"
     ).read_text(encoding="utf-8")
+
+
+def test_strategy_comparison_layout_adapts_to_visible_strategy_count() -> None:
+    strategy = (STATIC / "sections" / "strategy.js").read_text(encoding="utf-8")
+    css = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+
+    assert 'data-comparison-count="${comparisonModels.length}"' in strategy
+    assert '.pair-section[data-comparison-count="1"]' in css
+    assert '.pair-section[data-comparison-count="2"] .pair-grid' in css
+    assert "max-width: 1080px" in css
+    assert "height: 300px" in css
 
 
 def test_paper_detail_and_equity_requests_are_cache_throttled() -> None:

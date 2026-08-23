@@ -163,7 +163,7 @@ function paperComparisonBlock(accounts) {
   const content = comparisonModels.length
     ? `<div class="pair-grid">${comparisonModels.map(pairedComparisonPanel).join("")}</div>`
     : emptyBox("同期权益曲线加载中", "账户摘要已就绪，曲线在后台批量加载");
-  return `<div class="block pair-section" data-paper-comparison>
+  return `<div class="block pair-section" data-paper-comparison data-comparison-count="${comparisonModels.length}">
     ${blockTitle("同期退出方式对比", "STRATEGY EXIT EQUITY · DAILY 08:00 ANCHOR · SHARED AXES",
       '<span class="muted">模拟盘版本 + 实盘 B1 · 每日 08:00 UTC+8 起算</span>')}
     ${content}
