@@ -18,6 +18,7 @@ class FakeRetentionRepository:
         environment: str,
         account_label: str,
         before: datetime,
+        equity_before: datetime,
         batch_size: int,
         max_rows_per_table: int,
     ) -> dict[str, int]:
@@ -25,6 +26,7 @@ class FakeRetentionRepository:
             "environment": environment,
             "account_label": account_label,
             "before": before,
+            "equity_before": equity_before,
             "batch_size": batch_size,
             "max_rows_per_table": max_rows_per_table,
         }
@@ -36,12 +38,21 @@ def test_retention_config_rejects_fast_schedule() -> None:
         AccountSnapshotRetentionConfig(interval_seconds=299)
 
 
+def test_retention_config_keeps_equity_at_least_as_long_as_operations() -> None:
+    with pytest.raises(ValueError, match="at least retention_days"):
+        AccountSnapshotRetentionConfig(
+            retention_days=30,
+            equity_retention_days=7,
+        )
+
+
 @pytest.mark.asyncio
 async def test_prune_once_passes_the_configured_horizon() -> None:
     repository = FakeRetentionRepository()
     now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
     config = AccountSnapshotRetentionConfig(
         retention_days=7,
+        equity_retention_days=370,
         interval_seconds=900,
         batch_size=250,
         max_rows_per_table=2_000,
@@ -60,6 +71,7 @@ async def test_prune_once_passes_the_configured_horizon() -> None:
         "environment": "live",
         "account_label": "primary",
         "before": datetime(2026, 8, 16, 12, 0, tzinfo=UTC),
+        "equity_before": datetime(2025, 8, 18, 12, 0, tzinfo=UTC),
         "batch_size": 250,
         "max_rows_per_table": 2_000,
     }

@@ -22,10 +22,6 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_partitions import (
 
 _ACCOUNT_SNAPSHOT_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
-        "account_balance_snapshots",
-        ("environment", "account_label", "asset"),
-    ),
-    (
         "account_position_snapshots",
         ("environment", "account_label", "symbol", "position_side"),
     ),
@@ -115,13 +111,16 @@ class PostgresOperationalRetentionRepository:
         before: datetime,
         batch_size: int = 1_000,
         max_rows_per_table: int = 10_000,
+        equity_before: datetime | None = None,
     ) -> dict[str, int]:
         """Delete old account snapshots without deleting each latest view.
 
         Account snapshot tables are operational history, not the durable fill
-        ledger.  The latest row for every balance asset, position side,
+        ledger. High-frequency balance rows age into one UTC-hour sample until
+        the longer equity horizon; other snapshots use the operational
+        horizon. The latest row for every balance asset, position side,
         account configuration, and reconciliation stream is retained even if
-        it is older than the configured horizon.  Fills are intentionally not
+        it is older than the configured horizon. Fills are intentionally not
         included here because they are the audit trail for execution.
         """
         if not environment.strip():
@@ -132,41 +131,132 @@ class PostgresOperationalRetentionRepository:
             raise ValueError("batch_size must be positive")
         if max_rows_per_table <= 0:
             raise ValueError("max_rows_per_table must be positive")
+        resolved_equity_before = before if equity_before is None else equity_before
+        if resolved_equity_before > before:
+            raise ValueError("equity_before must not be later than before")
 
-        deleted: dict[str, int] = {}
+        balance_deleted = await self._prune_account_snapshot_table(
+            "account_balance_snapshots",
+            ("environment", "account_label", "asset"),
+            environment=environment,
+            account_label=account_label,
+            before=resolved_equity_before,
+            batch_size=batch_size,
+            max_rows=max_rows_per_table,
+        )
+        if balance_deleted < max_rows_per_table:
+            balance_deleted += await self._thin_account_balance_history(
+                environment=environment,
+                account_label=account_label,
+                on_or_after=resolved_equity_before,
+                before=before,
+                batch_size=batch_size,
+                max_rows=max_rows_per_table - balance_deleted,
+            )
+
+        deleted: dict[str, int] = {
+            "account_balance_snapshots": balance_deleted,
+        }
         for table_name, key_columns in _ACCOUNT_SNAPSHOT_KEYS:
-            latest_by_key = await self._account_snapshot_latest_by_key(
+            deleted[table_name] = await self._prune_account_snapshot_table(
                 table_name,
                 key_columns,
                 environment=environment,
                 account_label=account_label,
+                before=before,
+                batch_size=batch_size,
+                max_rows=max_rows_per_table,
             )
-            table_deleted = 0
-            for key, latest_at in latest_by_key:
-                if table_deleted >= max_rows_per_table:
-                    break
-                # If a key stopped updating, preserve its last row while
-                # still removing the older history.  Active keys use the
-                # retention horizon directly.
-                delete_before = before if latest_at > before else latest_at
-                while table_deleted < max_rows_per_table:
-                    current_batch_size = min(
-                        batch_size,
-                        max_rows_per_table - table_deleted,
-                    )
-                    count = await self._execute_account_snapshot_delete(
-                        table_name,
-                        key,
-                        environment=environment,
-                        account_label=account_label,
-                        before=delete_before,
-                        batch_size=current_batch_size,
-                    )
-                    table_deleted += count
-                    if count < current_batch_size:
-                        break
-            deleted[table_name] = table_deleted
         return deleted
+
+    async def _prune_account_snapshot_table(
+        self,
+        table_name: str,
+        key_columns: tuple[str, ...],
+        *,
+        environment: str,
+        account_label: str,
+        before: datetime,
+        batch_size: int,
+        max_rows: int,
+    ) -> int:
+        latest_by_key = await self._account_snapshot_latest_by_key(
+            table_name,
+            key_columns,
+            environment=environment,
+            account_label=account_label,
+        )
+        deleted = 0
+        for key, latest_at in latest_by_key:
+            if deleted >= max_rows:
+                break
+            # If a key stopped updating, preserve its last row while still
+            # removing older history. Active keys use the horizon directly.
+            delete_before = before if latest_at > before else latest_at
+            while deleted < max_rows:
+                current_batch_size = min(batch_size, max_rows - deleted)
+                count = await self._execute_account_snapshot_delete(
+                    table_name,
+                    key,
+                    environment=environment,
+                    account_label=account_label,
+                    before=delete_before,
+                    batch_size=current_batch_size,
+                )
+                deleted += count
+                if count < current_batch_size:
+                    break
+        return deleted
+
+    async def _thin_account_balance_history(
+        self,
+        *,
+        environment: str,
+        account_label: str,
+        on_or_after: datetime,
+        before: datetime,
+        batch_size: int,
+        max_rows: int,
+    ) -> int:
+        """Keep the newest balance snapshot in each UTC hour."""
+        # The ranking scan spans the retained archive. Run one bounded delete
+        # per maintenance cycle rather than repeatedly rescanning it.
+        current_batch_size = min(batch_size, max_rows)
+        statement = text(
+            "WITH ranked AS ("
+            "SELECT candidate.ctid, candidate.observed_at, "
+            "row_number() OVER ("
+            "PARTITION BY candidate.asset, "
+            "date_trunc('hour', candidate.observed_at AT TIME ZONE 'UTC') "
+            "ORDER BY candidate.observed_at DESC"
+            ") AS bucket_rank "
+            "FROM account_balance_snapshots AS candidate "
+            "WHERE candidate.environment = :environment "
+            "AND candidate.account_label = :account_label "
+            "AND candidate.observed_at >= :on_or_after "
+            "AND candidate.observed_at < :before"
+            "), doomed AS ("
+            "SELECT ctid FROM ranked WHERE bucket_rank > 1 "
+            "ORDER BY observed_at LIMIT :batch_size"
+            ") DELETE FROM account_balance_snapshots AS candidate "
+            "USING doomed WHERE candidate.ctid = doomed.ctid"
+        )
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = cast(
+                    CursorResult[Any],
+                    await session.execute(
+                        statement,
+                        {
+                            "environment": environment,
+                            "account_label": account_label,
+                            "on_or_after": on_or_after,
+                            "before": before,
+                            "batch_size": current_batch_size,
+                        },
+                    ),
+                )
+        return max(result.rowcount or 0, 0)
 
     async def _account_snapshot_latest_by_key(
         self,

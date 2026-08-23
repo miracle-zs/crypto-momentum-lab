@@ -4,6 +4,7 @@ const DISPLAY_TIME_FORMATTER = new Intl.DateTimeFormat("en-CA", {
   timeZone: DISPLAY_TIME_ZONE,
   calendar: "gregory",
   numberingSystem: "latn",
+  year: "numeric",
   month: "2-digit",
   day: "2-digit",
   hour: "2-digit",
@@ -95,6 +96,26 @@ export const dayTime = (value) => {
   return parts
     ? `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`
     : String(value);
+};
+
+export const fullDateTime = (value) => {
+  if (!value) return "—";
+  const parts = displayTimeParts(value);
+  return parts
+    ? `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`
+    : String(value);
+};
+
+export const dateOnly = (value) => {
+  if (!value) return "—";
+  const parts = displayTimeParts(value);
+  return parts ? `${parts.month}-${parts.day}` : String(value);
+};
+
+export const yearMonth = (value) => {
+  if (!value) return "—";
+  const parts = displayTimeParts(value);
+  return parts ? `${parts.year}-${parts.month}` : String(value);
 };
 
 export const elapsedTime = (start, end) => {

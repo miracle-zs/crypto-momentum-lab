@@ -20,7 +20,10 @@ import { emptyBox } from "./dashboard-ui.js";
 import { renderOverview, updateOverviewDynamic } from "./sections/overview.js";
 import { renderUniverse } from "./sections/universe.js";
 import { renderRisk } from "./sections/risk.js";
-import { renderAccount } from "./sections/account.js";
+import {
+  renderAccount,
+  wireAccountEquityRanges,
+} from "./sections/account.js";
 import { renderReports } from "./sections/reports.js";
 import { createStrategySection } from "./sections/strategy.js";
 
@@ -212,10 +215,12 @@ function sectionRenderKey(id, data) {
 
 async function refreshSection(id) {
   const section = document.getElementById(id);
+  const endpoint = section.dataset.endpoint;
   try {
-    const response = await fetch(section.dataset.endpoint, { headers: { "Accept": "application/json" } });
+    const response = await fetch(endpoint, { headers: { "Accept": "application/json" } });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
+    if (endpoint !== section.dataset.endpoint) return;
     const body = section.querySelector(".panel-body");
     const renderKey = sectionRenderKey(id, data);
     const shouldRender = sectionRenderKeys.get(id) !== renderKey;
@@ -228,13 +233,22 @@ async function refreshSection(id) {
     body.classList.remove("loading");
     body.removeAttribute("aria-busy");
     if (id === "strategy" && shouldRender) strategySection.wire(body, data);
+    if (id === "account" && shouldRender) {
+      wireAccountEquityRanges(body, async (equityRange) => {
+        section.dataset.endpoint = `api/account?equity_range=${encodeURIComponent(equityRange)}`;
+        sectionRenderKeys.delete(id);
+        body.setAttribute("aria-busy", "true");
+        await refreshSection(id);
+      });
+    }
     if (id === "overview") updateGlobalMode(data);
     updateGlobalState(id, data);
   } catch (error) {
     setSectionStatus(id, "UNKNOWN");
     const body = section.querySelector(".panel-body");
-    const errorHtml = emptyBox("接口不可达", `${section.dataset.endpoint} · ${error.message}`);
-    const errorKey = `error:${section.dataset.endpoint}:${error.message}`;
+    if (endpoint !== section.dataset.endpoint) return;
+    const errorHtml = emptyBox("接口不可达", `${endpoint} · ${error.message}`);
+    const errorKey = `error:${endpoint}:${error.message}`;
     if (sectionRenderKeys.get(id) !== errorKey) {
       replaceChildrenFromHtml(body, errorHtml);
       sectionRenderKeys.set(id, errorKey);

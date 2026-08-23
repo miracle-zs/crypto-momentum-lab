@@ -23,17 +23,17 @@ def test_static_javascript_uses_relative_api_paths() -> None:
 
     assert 'data-endpoint="api/overview"' in index
     assert (
-        'href="static/dashboard.css?v=20260823-control-room-v11-exit-layout"'
+        'href="static/dashboard.css?v=20260824-control-room-v12-equity-ranges"'
         in index
     )
     assert 'src="static/vendor/echarts.min.js?v=20260817-echarts-6.1.0"' in index
     assert (
-        'type="module" src="static/dashboard.js?v=20260823-control-room-'
-        'v17-exit-layout"'
+        'type="module" src="static/dashboard.js?v=20260824-control-room-'
+        'v18-equity-ranges"'
         in index
     )
     assert 'data-endpoint="/api/' not in index
-    assert "fetch(section.dataset.endpoint" in text
+    assert "fetch(endpoint" in text
     assert "binance.com" not in text.lower()
 
 
@@ -250,6 +250,27 @@ def test_live_account_panel_renders_equity_and_close_reasons() -> None:
     assert "live-account-equity" in render_code
     assert 'label: "平仓原因"' in render_code
     assert "row.close_reason" in render_code
+
+
+def test_live_account_equity_supports_longer_time_ranges() -> None:
+    render_code = (STATIC / "sections" / "account.js").read_text(encoding="utf-8")
+    dashboard = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+    stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+
+    for marker in (
+        'key: "24h", label: "24小时"',
+        'key: "7d", label: "1周"',
+        'key: "30d", label: "1月"',
+        'key: "1y", label: "1年"',
+        'role="group" aria-label="实盘账户权益时间范围"',
+        'aria-pressed="${option.key === selectedRange ? "true" : "false"}"',
+        "wireAccountEquityRanges",
+        "equity-coverage-note",
+    ):
+        assert marker in render_code
+    assert "api/account?equity_range=" in dashboard
+    assert "endpoint !== section.dataset.endpoint" in dashboard
+    assert '.equity-range-switch button[aria-pressed="true"]' in stylesheet
 
 
 def test_dashboard_skips_unchanged_section_replacements() -> None:

@@ -994,6 +994,81 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .account-kpi-grid { margin-top: 12px; grid-template-columns: repeat(5, minmax(0, 1fr)); }
 
+.account-equity-block .block-title { align-items: center; }
+
+.account-equity-block .block-title > span {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.account-equity-actions { display: inline-flex; }
+
+.equity-range-switch {
+  display: inline-grid;
+  grid-template-columns: repeat(4, minmax(48px, auto));
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--surface-3) 82%, transparent);
+}
+
+.equity-range-switch button {
+  min-height: 28px;
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--faint);
+  font: 600 9.5px var(--mono);
+  letter-spacing: .04em;
+  cursor: pointer;
+  transition: color .15s ease, border-color .15s ease, background .15s ease;
+}
+
+.equity-range-switch button:hover:not(:disabled) { color: var(--text); }
+
+.equity-range-switch button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--brand) 58%, var(--line));
+  background: color-mix(in srgb, var(--brand) 16%, var(--surface-2));
+  color: var(--brand);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand) 10%, transparent);
+}
+
+.equity-range-switch button:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.equity-range-switch button:disabled { cursor: wait; opacity: .56; }
+
+.account-equity-value {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+  min-width: 94px;
+}
+
+.account-equity-value small { margin: 0; letter-spacing: .05em; }
+.account-equity-value strong { font-size: 17px; }
+
+.account-equity-block.is-range-loading .equity-chart,
+.account-equity-block.is-range-loading .chart-context,
+.account-equity-block.is-range-loading .equity-coverage-note { opacity: .48; }
+
+.equity-coverage-note {
+  margin: -2px 0 9px;
+  padding: 7px 9px;
+  border-left: 2px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 7%, transparent);
+  color: var(--faint);
+  font-size: 9.5px;
+}
+
+.equity-coverage-note b { color: var(--muted); font-weight: 500; }
+
 .account-facts {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1359,6 +1434,8 @@ details.secondary[open] summary { margin-bottom: 10px; }
   .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .account-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .account-state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .account-equity-block .block-title { align-items: flex-start; flex-direction: column; }
+  .account-equity-block .block-title > span { width: 100%; justify-content: space-between; }
   .service-row { grid-template-columns: minmax(0, 1fr) auto; }
   .service-meter { display: none; }
   .service-age { display: none; }
@@ -1401,6 +1478,9 @@ details.secondary[open] summary { margin-bottom: 10px; }
   .account-state-grid { grid-template-columns: 1fr; }
   .account-hero { display: grid; }
   .account-hero-meta { justify-items: start; }
+  .account-equity-block .block-title > span { align-items: stretch; flex-direction: column-reverse; }
+  .account-equity-value { justify-items: start; }
+  .equity-range-switch { width: 100%; grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .clock strong { font-size: 15px; }
   .topbar-meta { grid-template-columns: 1fr; }
   .clock { justify-self: start; }
@@ -1415,5 +1495,5 @@ details.secondary[open] summary { margin-bottom: 10px; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .pulse, .mode-badge.status-LIVE, .skeleton s, .pollbar.run::before { animation: none; }
-  .acct-card, .nav a { transition: none; }
+  .acct-card, .nav a, .equity-range-switch button { transition: none; }
 }

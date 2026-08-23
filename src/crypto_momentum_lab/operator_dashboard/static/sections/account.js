@@ -6,6 +6,7 @@ import {
   asNumber,
   dayTime,
   esc,
+  fullDateTime,
   money,
   num,
   pnlClass,
@@ -18,14 +19,58 @@ import {
 import { accountWindowDelta, equityChart } from "../dashboard-charts.js";
 import { blockTitle, dataTable, pill, tile } from "../dashboard-ui.js";
 
+const ACCOUNT_EQUITY_RANGES = [
+  { key: "24h", label: "24小时", shortLabel: "24H" },
+  { key: "7d", label: "1周", shortLabel: "7D" },
+  { key: "30d", label: "1月", shortLabel: "30D" },
+  { key: "1y", label: "1年", shortLabel: "1Y" },
+];
+
+function equitySampleLabel(seconds) {
+  const value = asNumber(seconds) || DEFAULT_EQUITY_BUCKET_SECONDS;
+  if (value < 60 * 60) return `${Math.round(value / 60)} MIN`;
+  if (value < 24 * 60 * 60) return `${Math.round(value / 3600)} HOUR`;
+  return `${Math.round(value / 86400)} DAY`;
+}
+
+function equityRangeControls(selectedRange) {
+  return `<span class="account-equity-actions">
+    <span class="equity-range-switch" role="group" aria-label="实盘账户权益时间范围">
+      ${ACCOUNT_EQUITY_RANGES.map((option) => `<button type="button" data-account-equity-range="${option.key}" aria-pressed="${option.key === selectedRange ? "true" : "false"}" title="查看最近${option.label}的账户权益">${option.label}</button>`).join("")}
+    </span>
+  </span>`;
+}
+
+export function wireAccountEquityRanges(root, onSelect) {
+  root.querySelectorAll("[data-account-equity-range]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (button.getAttribute("aria-pressed") === "true") return;
+      const range = button.dataset.accountEquityRange;
+      if (!range) return;
+      const controls = root.querySelectorAll("[data-account-equity-range]");
+      controls.forEach((control) => { control.disabled = true; });
+      root.querySelector(".account-equity-block")?.classList.add("is-range-loading");
+      try {
+        await onSelect(range);
+      } finally {
+        if (button.isConnected) {
+          controls.forEach((control) => { control.disabled = false; });
+          root.querySelector(".account-equity-block")?.classList.remove("is-range-loading");
+        }
+      }
+    });
+  });
+}
+
 export function renderAccount(data) {
   const summary = data.summary || {};
   const config = data.account_config || {};
   const reconciliation = data.reconciliation || {};
   const accountEquity = data.equity_curve || [];
-  const accountSampleMinutes = Math.round(
-    (asNumber(data.equity_sample_interval_seconds) || DEFAULT_EQUITY_BUCKET_SECONDS) / 60,
-  );
+  const selectedEquityRange = ACCOUNT_EQUITY_RANGES.find(
+    (option) => option.key === data.equity_range,
+  ) || ACCOUNT_EQUITY_RANGES[0];
+  const accountSample = equitySampleLabel(data.equity_sample_interval_seconds);
   const accountEquityDelta = accountWindowDelta({ equity_curve: accountEquity });
   const latestAccountEquity = accountEquity.at(-1)?.equity;
   const normalized = (value) => String(value || "").trim().toLowerCase();
@@ -110,9 +155,21 @@ export function renderAccount(data) {
     ${tile("持仓名义价值", money(summary.gross_position_notional), "当前交易所总暴露")}
     ${tile("挂单 / 最近成交", `${summary.open_order_count ?? 0} / ${summary.recent_trade_count ?? summary.recent_fill_count ?? 0}`, "当前挂单 / 最近 20 笔订单")}
   </div>`;
-  const equityChartBlock = `<div class="block account-equity-block">
-    ${blockTitle("实盘账户权益", `LIVE USDT ACCOUNT EQUITY · ROLLING 24H · ${accountSampleMinutes} MIN BUCKETS`, `<strong class="num ${pnlClass(accountEquityDelta)}">${esc(money(latestAccountEquity))}</strong>`)}
-    <div class="chart-context"><span>${esc(`${dayTime(data.equity_window_start)} → ${dayTime(data.equity_window_end)} ${DISPLAY_TIME_ZONE_LABEL}`)}</span><b class="num">${accountEquity.length} / 240 桶</b></div>
+  const equityDataStart = accountEquity[0]?.observed_at;
+  const requestedStartMs = new Date(data.equity_window_start || "").getTime();
+  const dataStartMs = new Date(equityDataStart || "").getTime();
+  const bucketMs = (asNumber(data.equity_sample_interval_seconds) || DEFAULT_EQUITY_BUCKET_SECONDS) * 1000;
+  const hasPartialHistory = Number.isFinite(requestedStartMs)
+    && Number.isFinite(dataStartMs)
+    && dataStartMs - requestedStartMs > bucketMs * 2;
+  const equityCoverage = hasPartialHistory
+    ? `<p class="equity-coverage-note">可用历史始于 <b class="num">${esc(fullDateTime(equityDataStart))} ${DISPLAY_TIME_ZONE_LABEL}</b>；更长区间会随实盘运行逐步积累。</p>`
+    : "";
+  const equityValue = `<span class="account-equity-value"><small>${esc(selectedEquityRange.shortLabel)} 期末权益</small><strong class="num ${pnlClass(accountEquityDelta)}">${esc(money(latestAccountEquity))}</strong></span>`;
+  const equityChartBlock = `<div class="block account-equity-block" data-equity-range="${selectedEquityRange.key}">
+    ${blockTitle("实盘账户权益", `LIVE USDT ACCOUNT EQUITY · ROLLING ${selectedEquityRange.shortLabel} · ${accountSample} BUCKETS`, `${equityRangeControls(selectedEquityRange.key)}${equityValue}`)}
+    <div class="chart-context"><span>${esc(`${selectedEquityRange.key === "1y" ? fullDateTime(data.equity_window_start) : dayTime(data.equity_window_start)} → ${selectedEquityRange.key === "1y" ? fullDateTime(data.equity_window_end) : dayTime(data.equity_window_end)} ${DISPLAY_TIME_ZONE_LABEL}`)}</span><b class="num">${accountEquity.length} 个采样点</b></div>
+    ${equityCoverage}
     ${equityChart(accountEquity, "live-account-equity", data.equity_window_start, data.equity_window_end)}
   </div>`;
   const accountFacts = `<div class="account-facts">

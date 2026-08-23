@@ -14,6 +14,7 @@ class AccountSnapshotRetentionRepository(Protocol):
         environment: str,
         account_label: str,
         before: datetime,
+        equity_before: datetime,
         batch_size: int,
         max_rows_per_table: int,
     ) -> dict[str, int]: ...
@@ -22,6 +23,7 @@ class AccountSnapshotRetentionRepository(Protocol):
 @dataclass(frozen=True, slots=True)
 class AccountSnapshotRetentionConfig:
     retention_days: int = 7
+    equity_retention_days: int = 370
     interval_seconds: float = 3_600.0
     batch_size: int = 1_000
     max_rows_per_table: int = 10_000
@@ -29,6 +31,8 @@ class AccountSnapshotRetentionConfig:
     def __post_init__(self) -> None:
         if self.retention_days <= 0:
             raise ValueError("retention_days must be positive")
+        if self.equity_retention_days < self.retention_days:
+            raise ValueError("equity_retention_days must be at least retention_days")
         if self.interval_seconds < 300:
             raise ValueError("interval_seconds must be at least 300 seconds")
         if self.batch_size <= 0:
@@ -52,6 +56,7 @@ async def prune_account_snapshots_once(
         environment=environment,
         account_label=account_label,
         before=observed_at - timedelta(days=config.retention_days),
+        equity_before=observed_at - timedelta(days=config.equity_retention_days),
         batch_size=config.batch_size,
         max_rows_per_table=config.max_rows_per_table,
     )

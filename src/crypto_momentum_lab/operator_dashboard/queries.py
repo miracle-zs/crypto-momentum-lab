@@ -59,12 +59,25 @@ from crypto_momentum_lab.persistence.postgres.models import (
 _EQUITY_WINDOW = timedelta(hours=24)
 _EQUITY_BUCKET_SECONDS = 6 * 60
 _EQUITY_MAX_POINTS = 240
+_ACCOUNT_EQUITY_RANGES: dict[str, tuple[timedelta, int]] = {
+    "24h": (timedelta(hours=24), 6 * 60),
+    "7d": (timedelta(days=7), 60 * 60),
+    "30d": (timedelta(days=30), 3 * 60 * 60),
+    "1y": (timedelta(days=365), 2 * 24 * 60 * 60),
+}
 _CONFIRMED_OPEN_ORDER_STATES = frozenset(
     {
         ExchangeOrderState.ACKNOWLEDGED.value,
         ExchangeOrderState.PARTIALLY_FILLED.value,
     }
 )
+
+
+def _account_equity_range(value: str) -> tuple[timedelta, int]:
+    try:
+        return _ACCOUNT_EQUITY_RANGES[value]
+    except KeyError as error:
+        raise ValueError(f"unsupported account equity range: {value}") from error
 
 
 def _split_exchange_orders(
@@ -934,9 +947,10 @@ class DashboardQueries:
             rejection_summary=_json_mapping(run.rejection_summary),
         )
 
-    async def account(self) -> AccountOverviewResponse:
+    async def account(self, equity_range: str = "24h") -> AccountOverviewResponse:
+        equity_window, equity_bucket_seconds = _account_equity_range(equity_range)
         equity_window_end = self._clock()
-        equity_window_start = equity_window_end - _EQUITY_WINDOW
+        equity_window_start = equity_window_end - equity_window
         process: ExecutionAccountProcessStateRow | None = None
         reconciliation: AccountReconciliationRunRow | None = None
         account_config: AccountConfigSnapshotRow | None = None
@@ -961,7 +975,7 @@ class DashboardQueries:
                         "epoch",
                         AccountBalanceSnapshotRow.observed_at,
                     )
-                    / _EQUITY_BUCKET_SECONDS
+                    / equity_bucket_seconds
                 )
                 equity_rows = (
                     await session.scalars(
@@ -1164,9 +1178,10 @@ class DashboardQueries:
             account_label=None if process is None else process.account_label,
             account_config=account_config_payload,
             reconciliation=reconciliation_payload,
+            equity_range=equity_range,
             equity_window_start=equity_window_start,
             equity_window_end=equity_window_end,
-            equity_sample_interval_seconds=_EQUITY_BUCKET_SECONDS,
+            equity_sample_interval_seconds=equity_bucket_seconds,
             equity_curve=[
                 _live_account_equity_point(row)
                 for row in sorted(

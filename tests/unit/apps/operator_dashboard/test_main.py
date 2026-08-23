@@ -123,10 +123,11 @@ class FakeQueries:
             trade_events=[],
         )
 
-    async def account(self) -> AccountOverviewResponse:
+    async def account(self, equity_range: str = "24h") -> AccountOverviewResponse:
         return AccountOverviewResponse(
             status=OperationalStatus.UNKNOWN,
             observed_at=None,
+            equity_range=equity_range,
             balances=[],
             positions=[],
             open_orders=[],

@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -109,6 +110,7 @@ class AccountOverviewResponse(DashboardSchema):
     account_config: dict[str, JsonValue] = Field(default_factory=dict)
     reconciliation: dict[str, JsonValue] = Field(default_factory=dict)
     summary: dict[str, JsonValue] = Field(default_factory=dict)
+    equity_range: Literal["24h", "7d", "30d", "1y"] = "24h"
     equity_window_start: datetime | None = None
     equity_window_end: datetime | None = None
     equity_sample_interval_seconds: int | None = None

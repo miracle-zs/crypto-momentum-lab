@@ -15,17 +15,21 @@ by raising application command timeouts.
 
 ## Account snapshot retention
 
-`execution-account-live` retains seven days of balance, position, account
-configuration, and reconciliation snapshots by default. The retention task
-runs once per hour, deletes at most 1,000 rows per batch and 10,000 rows per
-table per cycle, and always preserves the newest row for each account/asset or
-account/position key. `account_fill_events` is the execution audit trail and
-is not deleted by this task.
+`execution-account-live` retains seven days of high-frequency balance,
+position, account configuration, and reconciliation snapshots by default.
+Older balance history is thinned to the newest snapshot in each UTC hour and
+retained for 370 days so the operator dashboard can render one-month and
+one-year account-equity ranges without keeping a year of high-frequency raw
+payloads. The retention task runs once per hour, deletes at most 1,000 rows per
+batch and 10,000 rows per table per cycle, and always preserves the newest row
+for each account/asset or account/position key. `account_fill_events` is the
+execution audit trail and is not deleted by this task.
 
 The policy is controlled in `compose.server.yaml`:
 
 ```text
 CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS=7
+CML_ACCOUNT_EQUITY_RETENTION_DAYS=370
 CML_ACCOUNT_SNAPSHOT_RETENTION_INTERVAL_SECONDS=3600
 ```
 

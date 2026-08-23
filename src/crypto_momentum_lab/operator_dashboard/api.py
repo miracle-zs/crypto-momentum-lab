@@ -5,7 +5,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Protocol, TypeVar, cast
+from typing import Annotated, Literal, Protocol, TypeVar, cast
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.gzip import GZipMiddleware
@@ -84,7 +84,7 @@ class DashboardQueryProtocol(Protocol):
 
     async def paper_history(self, run_id: str) -> PaperAccountHistoryResponse: ...
 
-    async def account(self) -> AccountOverviewResponse: ...
+    async def account(self, equity_range: str = "24h") -> AccountOverviewResponse: ...
 
     async def risk_execution(self) -> RiskExecutionResponse: ...
 
@@ -277,8 +277,13 @@ def create_dashboard_app(
         response_model=AccountOverviewResponse,
         dependencies=[Depends(require_dashboard_auth)],
     )
-    async def account() -> AccountOverviewResponse:
-        return await response_cache.get("account", query_service().account)
+    async def account(
+        equity_range: Literal["24h", "7d", "30d", "1y"] = "24h",
+    ) -> AccountOverviewResponse:
+        return await response_cache.get(
+            f"account:{equity_range}",
+            lambda: query_service().account(equity_range),
+        )
 
     @dashboard.get(
         "/api/risk-execution",

@@ -2,11 +2,14 @@ import {
   DISPLAY_TIME_ZONE_LABEL,
 } from "./dashboard-config.js";
 import {
+  dateOnly,
   dayTime,
   esc,
+  fullDateTime,
   money,
   signedMoney,
   timeOnly,
+  yearMonth,
 } from "./dashboard-formatters.js";
 
 const CHART_PAYLOADS = new Map();
@@ -88,8 +91,15 @@ function resolveSeriesColor(color, colors) {
   }[token] || colors.muted);
 }
 
-function axisTime(value) {
-  return timeOnly(Number(value));
+function axisTime(value, payload) {
+  const span = Math.max(
+    0,
+    Number(payload.domainEnd ?? payload.endAt)
+      - Number(payload.domainStart ?? payload.startAt),
+  );
+  if (span <= 2 * 24 * 60 * 60 * 1000) return timeOnly(Number(value));
+  if (span <= 45 * 24 * 60 * 60 * 1000) return dateOnly(Number(value));
+  return yearMonth(Number(value));
 }
 
 function baseAxis(colors) {
@@ -100,6 +110,7 @@ function baseAxis(colors) {
       color: colors.faint,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
       fontSize: 10,
+      hideOverlap: true,
     },
   };
 }
@@ -147,7 +158,7 @@ function baseOption(payload, colors) {
       max: payload.domainEnd ?? payload.endAt,
       axisLabel: {
         ...baseAxis(colors).axisLabel,
-        formatter: axisTime,
+        formatter: (value) => axisTime(value, payload),
       },
       splitLine: { show: false },
     },
@@ -170,10 +181,19 @@ function baseOption(payload, colors) {
   };
 }
 
-function tooltipTime(params) {
+function tooltipTime(params, payload) {
   const first = Array.isArray(params) ? params[0] : params;
   const timestamp = first?.axisValue ?? first?.value?.[0];
-  return Number.isFinite(Number(timestamp)) ? `${dayTime(Number(timestamp))} ${DISPLAY_TIME_ZONE_LABEL}` : "暂无时间";
+  if (!Number.isFinite(Number(timestamp))) return "暂无时间";
+  const span = Math.max(
+    0,
+    Number(payload.domainEnd ?? payload.endAt)
+      - Number(payload.domainStart ?? payload.startAt),
+  );
+  const formatted = span > 180 * 24 * 60 * 60 * 1000
+    ? fullDateTime(Number(timestamp))
+    : dayTime(Number(timestamp));
+  return `${formatted} ${DISPLAY_TIME_ZONE_LABEL}`;
 }
 
 function tooltipValue(param) {
@@ -186,7 +206,7 @@ function equityOption(payload, colors) {
   const option = baseOption(payload, colors);
   option.tooltip.formatter = (params) => {
     const first = Array.isArray(params) ? params[0] : params;
-    return `<div>${esc(payload.title)}</div><div>${esc(tooltipTime(params))}</div><b style="color:${esc(lineColor)}">${esc(money(tooltipValue(first)))}</b>`;
+    return `<div>${esc(payload.title)}</div><div>${esc(tooltipTime(params, payload))}</div><b style="color:${esc(lineColor)}">${esc(money(tooltipValue(first)))}</b>`;
   };
   option.series = [{
     name: payload.title,
@@ -223,7 +243,7 @@ function comparisonOption(payload, colors) {
       const color = param.color || colors.muted;
       return `<div><span style="color:${esc(color)}">●</span> ${esc(param.seriesName)} <b>${esc(signedMoney(value))}</b></div>`;
     }).join("");
-    return `<div>${esc(tooltipTime(params))}</div>${rows}`;
+    return `<div>${esc(tooltipTime(params, payload))}</div>${rows}`;
   };
   option.series = payload.series.map((series, index) => {
     const seriesColor = resolveSeriesColor(series.color, colors);

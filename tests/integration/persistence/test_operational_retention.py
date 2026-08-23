@@ -125,3 +125,62 @@ async def test_account_snapshot_retention_keeps_latest_row(repository) -> None:
     assert [(row.observed_at, row.raw_payload) for row in rows] == [
         (latest_at, {"version": 2})
     ]
+
+
+async def test_account_snapshot_retention_thins_old_balance_history_hourly(
+    repository,
+) -> None:
+    factory = repository._session_factory
+    environment = f"retention-{uuid4().hex}"
+    account_label = "primary"
+    first_at = datetime(2026, 6, 14, 10, 5, tzinfo=UTC)
+    latest_in_hour_at = datetime(2026, 6, 14, 10, 55, tzinfo=UTC)
+    next_hour_at = datetime(2026, 6, 14, 11, 5, tzinfo=UTC)
+
+    async with factory() as session:
+        async with session.begin():
+            for observed_at, version in (
+                (first_at, 1),
+                (latest_in_hour_at, 2),
+                (next_hour_at, 3),
+            ):
+                session.add(
+                    AccountBalanceSnapshotRow(
+                        snapshot_id=uuid4(),
+                        environment=environment,
+                        account_label=account_label,
+                        asset="USDT",
+                        wallet_balance=Decimal(str(10 + version)),
+                        available_balance=Decimal(str(9 + version)),
+                        unrealized_pnl=Decimal("0"),
+                        observed_at=observed_at,
+                        raw_payload={"version": version},
+                    )
+                )
+
+    retention = PostgresOperationalRetentionRepository(factory)
+    deleted = await retention.prune_account_snapshots(
+        environment=environment,
+        account_label=account_label,
+        before=datetime(2026, 6, 15, tzinfo=UTC),
+        equity_before=datetime(2025, 6, 15, tzinfo=UTC),
+        batch_size=10,
+    )
+
+    async with factory() as session:
+        rows = (
+            await session.scalars(
+                select(AccountBalanceSnapshotRow)
+                .where(
+                    AccountBalanceSnapshotRow.environment == environment,
+                    AccountBalanceSnapshotRow.account_label == account_label,
+                )
+                .order_by(AccountBalanceSnapshotRow.observed_at)
+            )
+        ).all()
+
+    assert deleted["account_balance_snapshots"] == 1
+    assert [(row.observed_at, row.raw_payload) for row in rows] == [
+        (latest_in_hour_at, {"version": 2}),
+        (next_hour_at, {"version": 3}),
+    ]

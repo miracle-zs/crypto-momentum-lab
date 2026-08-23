@@ -177,6 +177,14 @@ def sync_command(
             help="Days of account snapshot history retained for operations.",
         ),
     ] = 7,
+    equity_retention_days: Annotated[
+        int,
+        typer.Option(
+            "--equity-retention-days",
+            min=7,
+            help="Days of hourly account equity history retained for charts.",
+        ),
+    ] = 370,
     snapshot_retention_interval_seconds: Annotated[
         float,
         typer.Option("--snapshot-retention-interval-seconds", min=300),
@@ -214,6 +222,7 @@ def sync_command(
                 rest_reconciliation_interval_seconds
             ),
             snapshot_retention_days=snapshot_retention_days,
+            equity_retention_days=equity_retention_days,
             snapshot_retention_interval_seconds=(
                 snapshot_retention_interval_seconds
             ),
@@ -282,6 +291,7 @@ async def sync_continuously(
     account_event_hub_port: int,
     rest_reconciliation_interval_seconds: float,
     snapshot_retention_days: int,
+    equity_retention_days: int,
     snapshot_retention_interval_seconds: float,
 ) -> None:
     engine = create_execution_database_engine(database_url)
@@ -363,6 +373,7 @@ async def sync_continuously(
                     account_label=account_label,
                     config=AccountSnapshotRetentionConfig(
                         retention_days=snapshot_retention_days,
+                        equity_retention_days=equity_retention_days,
                         interval_seconds=snapshot_retention_interval_seconds,
                     ),
                     on_error=lambda error: typer.echo(
