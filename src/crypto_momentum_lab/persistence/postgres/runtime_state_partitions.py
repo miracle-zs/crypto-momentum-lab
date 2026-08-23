@@ -29,15 +29,15 @@ _RUNTIME_STATE_PRIMARY_KEY: Final = (
 _RUNTIME_STATE_INDEXES: Final[tuple[tuple[str, str], ...]] = (
     (
         "ix_runtime_market_states_15s_partitioned_polling",
-        '"environment", "bucket_start", "symbol"',
+        '("environment", "bucket_start", "symbol")',
     ),
     (
         "ix_runtime_market_states_15s_partitioned_created",
-        '"environment", "created_at"',
+        '("environment", "created_at")',
     ),
     (
         "ix_runtime_market_states_15s_partitioned_latest_bucket",
-        '"bucket_start" INCLUDE ("bucket_end")',
+        '("bucket_start") INCLUDE ("bucket_end")',
     ),
 )
 
@@ -455,7 +455,7 @@ async def _create_shadow_indexes(session: AsyncSession) -> None:
         await session.execute(
             text(
                 f"CREATE INDEX {_quote_identifier(index_name)} "
-                f"ON {shadow} ({columns})"
+                f"ON {shadow} {columns}"
             )
         )
 
