@@ -118,43 +118,47 @@ class PostgresOperationalRetentionRepository:
 
         deleted: dict[str, int] = {}
         for table_name, key_columns in _ACCOUNT_SNAPSHOT_KEYS:
-            if not await self._account_snapshot_keys_are_fresh(
+            latest_by_key = await self._account_snapshot_latest_by_key(
                 table_name,
                 key_columns,
                 environment=environment,
                 account_label=account_label,
-                before=before,
-            ):
-                deleted[table_name] = 0
-                continue
+            )
             table_deleted = 0
-            while table_deleted < max_rows_per_table:
-                current_batch_size = min(
-                    batch_size,
-                    max_rows_per_table - table_deleted,
-                )
-                count = await self._execute_account_snapshot_delete(
-                    table_name,
-                    environment=environment,
-                    account_label=account_label,
-                    before=before,
-                    batch_size=current_batch_size,
-                )
-                table_deleted += count
-                if count < current_batch_size:
+            for key, latest_at in latest_by_key:
+                if table_deleted >= max_rows_per_table:
                     break
+                # If a key stopped updating, preserve its last row while
+                # still removing the older history.  Active keys use the
+                # retention horizon directly.
+                delete_before = before if latest_at > before else latest_at
+                while table_deleted < max_rows_per_table:
+                    current_batch_size = min(
+                        batch_size,
+                        max_rows_per_table - table_deleted,
+                    )
+                    count = await self._execute_account_snapshot_delete(
+                        table_name,
+                        key,
+                        environment=environment,
+                        account_label=account_label,
+                        before=delete_before,
+                        batch_size=current_batch_size,
+                    )
+                    table_deleted += count
+                    if count < current_batch_size:
+                        break
             deleted[table_name] = table_deleted
         return deleted
 
-    async def _account_snapshot_keys_are_fresh(
+    async def _account_snapshot_latest_by_key(
         self,
         table_name: str,
         key_columns: tuple[str, ...],
         *,
         environment: str,
         account_label: str,
-        before: datetime,
-    ) -> bool:
+    ) -> tuple[tuple[tuple[tuple[str, object], ...], datetime], ...]:
         grouped_columns = tuple(
             column
             for column in key_columns
@@ -174,33 +178,38 @@ class PostgresOperationalRetentionRepository:
                         "account_label": account_label,
                     },
                 )
-            return isinstance(latest, datetime) and latest > before
+            if not isinstance(latest, datetime):
+                return ()
+            return (((), latest),)
 
         columns = ", ".join(grouped_columns)
         statement = text(
-            "SELECT count(*) AS key_count, "
-            "count(*) FILTER (WHERE latest_observed_at > :before) "
-            "AS fresh_key_count "
-            "FROM ("
             f"SELECT {columns}, max(observed_at) AS latest_observed_at "
             f"FROM {table_name} "
             "WHERE environment = :environment "
             "AND account_label = :account_label "
             f"GROUP BY {columns}"
-            ") AS latest"
         )
         async with self._session_factory() as session:
-            row = (await session.execute(
-                statement,
-                {
-                    "environment": environment,
-                    "account_label": account_label,
-                    "before": before,
-                },
-            )).one()
-        key_count = int(row[0])
-        fresh_key_count = int(row[1])
-        return key_count > 0 and key_count == fresh_key_count
+            rows = (
+                await session.execute(
+                    statement,
+                    {
+                        "environment": environment,
+                        "account_label": account_label,
+                    },
+                )
+            ).all()
+        latest_by_key: list[tuple[tuple[tuple[str, object], ...], datetime]] = []
+        for row in rows:
+            latest_at = row._mapping["latest_observed_at"]
+            if not isinstance(latest_at, datetime):
+                continue
+            key = tuple(
+                (column, row._mapping[column]) for column in grouped_columns
+            )
+            latest_by_key.append((key, latest_at))
+        return tuple(latest_by_key)
 
     async def _delete_batch(
         self,
@@ -252,17 +261,35 @@ class PostgresOperationalRetentionRepository:
     async def _execute_account_snapshot_delete(
         self,
         table_name: str,
+        key: tuple[tuple[str, object], ...],
         *,
         environment: str,
         account_label: str,
         before: datetime,
         batch_size: int,
     ) -> int:
+        key_conditions = " AND ".join(
+            f"candidate.{column} = :key_{index}"
+            for index, (column, _value) in enumerate(key)
+        )
+        scoped_key_conditions = (
+            "AND " + key_conditions if key_conditions else ""
+        )
+        parameters: dict[str, object] = {
+            "environment": environment,
+            "account_label": account_label,
+            "before": before,
+            "batch_size": batch_size,
+        }
+        parameters.update(
+            {f"key_{index}": value for index, (_column, value) in enumerate(key)}
+        )
         statement = text(
             "WITH doomed AS ("
             f"SELECT candidate.ctid FROM {table_name} AS candidate "
             "WHERE candidate.environment = :environment "
             "AND candidate.account_label = :account_label "
+            f"{scoped_key_conditions} "
             "AND candidate.observed_at < :before "
             "ORDER BY candidate.observed_at "
             "LIMIT :batch_size"
@@ -276,12 +303,7 @@ class PostgresOperationalRetentionRepository:
                     CursorResult[Any],
                     await session.execute(
                         statement,
-                        {
-                            "environment": environment,
-                            "account_label": account_label,
-                            "before": before,
-                            "batch_size": batch_size,
-                        },
+                        parameters,
                     ),
                 )
                 return max(result.rowcount or 0, 0)
