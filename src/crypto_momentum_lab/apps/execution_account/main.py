@@ -34,6 +34,7 @@ from crypto_momentum_lab.persistence.postgres import (
     PostgresAccountRepository,
     PostgresOperationalRetentionRepository,
     create_execution_database_engine,
+    create_maintenance_database_engine,
 )
 
 app = typer.Typer(no_args_is_help=True)
@@ -284,6 +285,7 @@ async def sync_continuously(
     snapshot_retention_interval_seconds: float,
 ) -> None:
     engine = create_execution_database_engine(database_url)
+    retention_engine = create_maintenance_database_engine(database_url)
     account_event_hub = AccountEventHub(
         AccountEventHubConfig(
             host=account_event_hub_host,
@@ -294,7 +296,13 @@ async def sync_continuously(
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         repository = PostgresAccountRepository(factory)
-        retention_repository = PostgresOperationalRetentionRepository(factory)
+        retention_factory = async_sessionmaker(
+            retention_engine,
+            expire_on_commit=False,
+        )
+        retention_repository = PostgresOperationalRetentionRepository(
+            retention_factory
+        )
         client = BinanceUsdMPrivateReadClient(
             api_key=api_key,
             api_secret=api_secret,
@@ -383,6 +391,7 @@ async def sync_continuously(
             await client.aclose()
     finally:
         await account_event_hub.stop()
+        await retention_engine.dispose()
         await engine.dispose()
 
 
