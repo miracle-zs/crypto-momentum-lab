@@ -1,9 +1,10 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import cast
 
-from sqlalchemy import func, or_, select, tuple_
+from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -221,6 +222,61 @@ class PostgresRuntimeMarketStateRepository:
                 )
             )
         return latest
+
+    async def load_recovery_window(
+        self,
+        *,
+        environment: str,
+        last_processed_at_by_symbol: Mapping[str, datetime],
+        lookback_seconds: int,
+        limit: int,
+    ) -> tuple[MarketState15s, ...]:
+        """Load only the derivable history needed to rebuild a checkpoint.
+
+        Each symbol has its own recovery boundary because a checkpoint can
+        contain the latest state for symbols at different times.  The primary
+        key's ``(environment, symbol, bucket_start)`` order makes these
+        bounded per-symbol ranges indexable without scanning the full hot
+        table.
+        """
+        if not environment.strip():
+            raise ValueError("environment must not be empty")
+        if lookback_seconds <= 0:
+            raise ValueError("lookback_seconds must be positive")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        if not last_processed_at_by_symbol:
+            return ()
+
+        conditions = []
+        for symbol, upper_bound in last_processed_at_by_symbol.items():
+            if not symbol.strip():
+                raise ValueError("checkpoint symbols must not be empty")
+            _require_aware(upper_bound, "last_processed_at_by_symbol value")
+            conditions.append(
+                and_(
+                    RuntimeMarketState15sRow.symbol == symbol,
+                    RuntimeMarketState15sRow.bucket_start
+                    > upper_bound - timedelta(seconds=lookback_seconds),
+                    RuntimeMarketState15sRow.bucket_start <= upper_bound,
+                )
+            )
+
+        statement = (
+            select(RuntimeMarketState15sRow)
+            .where(
+                RuntimeMarketState15sRow.environment == environment,
+                or_(*conditions),
+            )
+            .order_by(
+                RuntimeMarketState15sRow.bucket_start,
+                RuntimeMarketState15sRow.symbol,
+            )
+            .limit(limit)
+        )
+        async with self._session_factory() as session:
+            rows = (await session.execute(statement)).scalars()
+            return tuple(market_state_from_row(row) for row in rows)
 
 
 async def _insert_many_idempotent(

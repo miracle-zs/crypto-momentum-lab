@@ -114,6 +114,9 @@ class CompressionBreakoutRuntimeStrategy:
                     + self._config.event_config.acceptance_buckets
                 ),
             )
+        else:
+            self._buffers = {}
+            self._pending_signal_states = {}
         self._warmup = {symbol: len(buffer) for symbol, buffer in self._buffers.items()}
         self._cooldown_remaining = dict(checkpoint.cooldown_buckets_remaining_by_symbol)
         self._last_processed = dict(checkpoint.last_processed_at_by_symbol)
@@ -121,6 +124,25 @@ class CompressionBreakoutRuntimeStrategy:
 
     def restore_checkpoint(self, checkpoint: StrategyCheckpoint) -> None:
         self.restore(checkpoint)
+
+    def warm_market_state(self, state: MarketState15s) -> None:
+        """Rebuild signal buckets without changing cooldown or signal ids."""
+        if _state_price(state) is None:
+            return
+        signal_state = self._ingest_signal_state(state)
+        if signal_state is None:
+            return
+        buffer = self._buffers.setdefault(
+            signal_state.symbol,
+            deque(
+                maxlen=(
+                    self._config.event_config.compression_window_buckets
+                    + self._config.event_config.acceptance_buckets
+                )
+            ),
+        )
+        buffer.append(signal_state)
+        self._warmup[signal_state.symbol] = len(buffer)
 
     def reset_symbol(self, symbol: str) -> None:
         """Drop buffered state after the live source skips a data gap."""
@@ -282,22 +304,28 @@ class CompressionBreakoutRuntimeStrategy:
         pending = len(self._pending_signal_states.get(symbol, ()))
         return completed * self._config.signal_interval_seconds // 15 + pending
 
-    def checkpoint(self) -> StrategyCheckpoint:
+    def checkpoint(
+        self,
+        *,
+        include_market_state_buffers: bool = True,
+    ) -> StrategyCheckpoint:
+        payload: dict[str, JsonValue] = {
+            "buffer_sizes": {
+                symbol: len(buffer) for symbol, buffer in self._buffers.items()
+            },
+            "signal_interval_seconds": self._config.signal_interval_seconds,
+            "signal_sequence": self._signal_sequence,
+        }
+        if include_market_state_buffers:
+            payload["signal_buffers"] = {
+                symbol: [market_state_payload(state) for state in buffer]
+                for symbol, buffer in self._buffers.items()
+            }
         return StrategyCheckpoint(
             last_processed_at_by_symbol=dict(self._last_processed),
             warmup_buckets_by_symbol=dict(self._warmup),
             cooldown_buckets_remaining_by_symbol=dict(self._cooldown_remaining),
-            payload={
-                "buffer_sizes": {
-                    symbol: len(buffer) for symbol, buffer in self._buffers.items()
-                },
-                "signal_interval_seconds": self._config.signal_interval_seconds,
-                "signal_sequence": self._signal_sequence,
-                "signal_buffers": {
-                    symbol: [market_state_payload(state) for state in buffer]
-                    for symbol, buffer in self._buffers.items()
-                },
-            },
+            payload=payload,
         )
 
     def _decision(

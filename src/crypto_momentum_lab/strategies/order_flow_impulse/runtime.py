@@ -89,10 +89,29 @@ class OrderFlowImpulseRuntimeStrategy:
             )
             for symbol, buffer in self._buffers.items():
                 self._warmup[symbol] = len(buffer)
+        else:
+            self._buffers = {}
+            self._warmup = {}
         self._signal_sequence = _checkpoint_sequence(checkpoint.payload)
 
     def restore_checkpoint(self, checkpoint: StrategyCheckpoint) -> None:
         self.restore(checkpoint)
+
+    def warm_market_state(self, state: MarketState15s) -> None:
+        """Rebuild the derivable rolling buffer without evaluating signals.
+
+        Durable checkpoints keep only control state.  The canonical runtime
+        market-state table replays this method during restart so warming does
+        not advance cooldowns or signal-id sequences.
+        """
+        if state.close_price is None:
+            return
+        buffer = self._buffers.setdefault(
+            state.symbol,
+            deque(maxlen=self.required_data().warmup_buckets + 16),
+        )
+        buffer.append(state)
+        self._warmup[state.symbol] = len(buffer)
 
     def reset_symbol(self, symbol: str) -> None:
         """Drop buffered state after the live source skips a data gap."""
@@ -174,21 +193,27 @@ class OrderFlowImpulseRuntimeStrategy:
         )
         return self._decision(signals=(signal,), candidates=(candidate,))
 
-    def checkpoint(self) -> StrategyCheckpoint:
+    def checkpoint(
+        self,
+        *,
+        include_market_state_buffers: bool = True,
+    ) -> StrategyCheckpoint:
+        payload: dict[str, JsonValue] = {
+            "buffer_sizes": {
+                symbol: len(buffer) for symbol, buffer in self._buffers.items()
+            },
+            "signal_sequence": self._signal_sequence,
+        }
+        if include_market_state_buffers:
+            payload["market_state_buffers"] = {
+                symbol: [market_state_payload(state) for state in buffer]
+                for symbol, buffer in self._buffers.items()
+            }
         return StrategyCheckpoint(
             last_processed_at_by_symbol=dict(self._last_processed),
             warmup_buckets_by_symbol=dict(self._warmup),
             cooldown_buckets_remaining_by_symbol=dict(self._cooldown_remaining),
-            payload={
-                "buffer_sizes": {
-                    symbol: len(buffer) for symbol, buffer in self._buffers.items()
-                },
-                "market_state_buffers": {
-                    symbol: [market_state_payload(state) for state in buffer]
-                    for symbol, buffer in self._buffers.items()
-                },
-                "signal_sequence": self._signal_sequence,
-            },
+            payload=payload,
         )
 
     def _decision(

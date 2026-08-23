@@ -3,9 +3,11 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
+from time import perf_counter
 from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid5
 
+import structlog
 from sqlalchemy import case, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -65,6 +67,8 @@ _NEW_EXECUTION_FIELDS = {
         "candle_grace_profit_pct",
     ),
 }
+
+log = structlog.get_logger()
 
 
 def checkpoint_row_values(
@@ -531,25 +535,48 @@ class PostgresPaperDaemonRepository:
         checkpoint: StrategyCheckpoint,
         saved_at: datetime,
     ) -> None:
+        started = perf_counter()
         values = checkpoint_row_values(
             run_id=run_id,
             checkpoint=checkpoint,
             saved_at=saved_at,
         )
+        values_ready_at = perf_counter()
         async with self._session_factory() as session:
+            session_acquired_at = perf_counter()
             async with session.begin():
-                existing = await session.scalar(
-                    select(StrategyRuntimeCheckpointRow).where(
-                        StrategyRuntimeCheckpointRow.run_id == run_id
+                statement = insert(StrategyRuntimeCheckpointRow).values(values)
+                execute_started = perf_counter()
+                await session.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=["run_id"],
+                        set_={
+                            key: statement.excluded[key]
+                            for key in values
+                            if key != "run_id"
+                        },
                     )
                 )
-                if existing is None:
-                    await session.execute(
-                        insert(StrategyRuntimeCheckpointRow).values(values)
-                    )
-                    return
-                for key, value in values.items():
-                    setattr(existing, key, value)
+                execute_finished_at = perf_counter()
+            committed_at = perf_counter()
+        log.info(
+            "strategy_checkpoint_persisted",
+            run_id=run_id,
+            prepare_ms=round((values_ready_at - started) * 1000, 3),
+            pool_acquire_ms=round(
+                (session_acquired_at - values_ready_at) * 1000,
+                3,
+            ),
+            sql_execute_ms=round(
+                (execute_finished_at - execute_started) * 1000,
+                3,
+            ),
+            commit_ms=round(
+                (committed_at - execute_finished_at) * 1000,
+                3,
+            ),
+            total_ms=round((committed_at - started) * 1000, 3),
+        )
 
     async def save_runtime_events(
         self,

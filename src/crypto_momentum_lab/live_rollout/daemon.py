@@ -1,8 +1,16 @@
 import asyncio
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
+from collections.abc import (
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Mapping,
+)
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from inspect import Parameter, signature
+from time import perf_counter
 from typing import Protocol
 
 import structlog
@@ -36,6 +44,7 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
     PreparedOrderSubmission,
 )
+from crypto_momentum_lab.live_rollout.checkpoint_writer import CheckpointWriter
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitCancellationRequest,
     LiveExitManager,
@@ -68,7 +77,13 @@ log = structlog.get_logger()
 class LiveRuntimeStrategy(Protocol):
     def on_market_state(self, state: MarketState15s) -> StrategyDecision: ...
 
-    def checkpoint(self) -> StrategyCheckpoint: ...
+    def checkpoint(
+        self,
+        *,
+        include_market_state_buffers: bool = True,
+    ) -> StrategyCheckpoint: ...
+
+    def warm_market_state(self, state: MarketState15s) -> None: ...
 
 
 class LiveDaemonRepository(Protocol):
@@ -419,6 +434,10 @@ class LiveStrategyDaemon:
         self._reconcile_orders = reconcile_orders
         self._exit_symbol_locks: dict[str, asyncio.Lock] = {}
         self._exit_lane = _ExitExecutionLane(self._process_exit_work)
+        self._checkpoint_writer = CheckpointWriter(
+            run_id=config.run_id,
+            persist=self._repository.save_checkpoint,
+        )
         self._telemetry = telemetry
         self._clock = clock or (lambda: datetime.now(tz=UTC))
         self._context_generation = 0
@@ -501,15 +520,18 @@ class LiveStrategyDaemon:
         self,
         states: AsyncIterable[MarketState15s],
     ) -> LiveDaemonResult:
-        if self._exit_manager is None:
-            return await self._run_market_loop(states)
         self._run_active = True
-        await self._exit_lane.start()
+        await self._checkpoint_writer.start()
         result: LiveDaemonResult | None = None
+        exit_outcome = _ExitLaneOutcome()
         try:
+            if self._exit_manager is not None:
+                await self._exit_lane.start()
             result = await self._run_market_loop(states)
         finally:
-            exit_outcome = await self._exit_lane.stop()
+            if self._exit_manager is not None:
+                exit_outcome = await self._exit_lane.stop()
+            await self._checkpoint_writer.stop()
             self._run_active = False
         if result is None:
             raise RuntimeError("live daemon stopped without a result")
@@ -617,7 +639,8 @@ class LiveStrategyDaemon:
         last_checkpoint_saved_at: datetime | None = None
         last_reconciled_bucket: datetime | None = None
         last_processed_at_by_symbol = dict(
-            self._strategy.checkpoint().last_processed_at_by_symbol
+            _checkpoint_for_persistence(self._strategy)
+            .last_processed_at_by_symbol
         )
         max_gap_seconds = _strategy_max_gap_seconds(self._strategy)
         entry_symbols: frozenset[str] | None = None
@@ -903,9 +926,8 @@ class LiveStrategyDaemon:
                             final_state_at,
                         )
             if processed % self._config.checkpoint_every_states == 0:
-                await self._repository.save_checkpoint(
-                    self._config.run_id,
-                    self._strategy.checkpoint(),
+                self._checkpoint_writer.submit(
+                    _checkpoint_for_persistence(self._strategy),
                     context.now,
                 )
                 checkpoint_dirty = False
@@ -1152,11 +1174,46 @@ class LiveStrategyDaemon:
     ) -> None:
         if not dirty or saved_at is None:
             return
-        await self._repository.save_checkpoint(
-            self._config.run_id,
-            self._strategy.checkpoint(),
+        await self._checkpoint_writer.save_now(
+            _checkpoint_for_persistence(self._strategy),
             saved_at,
         )
+
+
+def _checkpoint_for_persistence(strategy: LiveRuntimeStrategy) -> StrategyCheckpoint:
+    """Build a compact checkpoint without breaking lightweight test adapters."""
+    started = perf_counter()
+    checkpoint_method = strategy.checkpoint
+    parameters: Mapping[str, Parameter] | None = None
+    try:
+        parameters = signature(checkpoint_method).parameters
+    except (TypeError, ValueError):
+        pass
+    if parameters is not None and "include_market_state_buffers" in parameters and (
+        parameters["include_market_state_buffers"].kind
+        in {Parameter.KEYWORD_ONLY, Parameter.POSITIONAL_OR_KEYWORD}
+    ):
+        checkpoint = checkpoint_method(include_market_state_buffers=False)
+        log.info(
+            "live_checkpoint_built",
+            build_ms=round((perf_counter() - started) * 1000, 3),
+            payload_keys=tuple(sorted(checkpoint.payload)),
+        )
+        return checkpoint
+
+    checkpoint = checkpoint_method()
+    payload = {
+        key: value
+        for key, value in checkpoint.payload.items()
+        if key not in {"market_state_buffers", "signal_buffers"}
+    }
+    compact = replace(checkpoint, payload=payload)
+    log.info(
+        "live_checkpoint_built",
+        build_ms=round((perf_counter() - started) * 1000, 3),
+        payload_keys=tuple(sorted(compact.payload)),
+    )
+    return compact
 
 
 def _min_notional(rules: SymbolTradingRules | None) -> Decimal | None:

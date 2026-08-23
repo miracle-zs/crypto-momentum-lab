@@ -125,6 +125,7 @@ from crypto_momentum_lab.persistence.postgres.runtime_telemetry_repository impor
     PostgresRuntimeTelemetryRepository,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
+    create_checkpoint_database_engine,
     create_execution_database_engine,
     create_market_database_engine,
     create_observability_database_engine,
@@ -887,6 +888,9 @@ async def _run_live_daemon(
     observability_engine = create_observability_database_engine(
         observability_database_url
     )
+    checkpoint_engine = create_checkpoint_database_engine(
+        observability_database_url
+    )
     heartbeat_engine: AsyncEngine | None = None
     client: BinanceUsdMTradeClient | None = None
     execution_coordinator: OrderExecutionCoordinator | None = None
@@ -911,6 +915,10 @@ async def _run_live_daemon(
             observability_engine,
             expire_on_commit=False,
         )
+        checkpoint_factory = async_sessionmaker(
+            checkpoint_engine,
+            expire_on_commit=False,
+        )
         live_repository = PostgresLiveRolloutRepository(execution_factory)
         risk_repository = PostgresRiskRepository(execution_factory)
         # Lease liveness is a control-plane concern.  Give it one isolated
@@ -929,7 +937,7 @@ async def _run_live_daemon(
         )
         heartbeat_risk_repository = PostgresRiskRepository(heartbeat_factory)
         order_repository = PostgresOrderRepository(execution_factory)
-        checkpoint_repository = PostgresPaperDaemonRepository(observability_factory)
+        checkpoint_repository = PostgresPaperDaemonRepository(checkpoint_factory)
         telemetry_repository = PostgresRuntimeTelemetryRepository(
             observability_factory
         )
@@ -1080,6 +1088,13 @@ async def _run_live_daemon(
         state_repository = PostgresRuntimeMarketStateRepository(market_factory)
         market_cursor: RuntimeStateCursor | None = None
         if checkpoint is not None:
+            if _checkpoint_needs_market_recovery(checkpoint):
+                await _restore_live_strategy_from_checkpoint(
+                    strategy=strategy,
+                    checkpoint=checkpoint,
+                    repository=state_repository,
+                    environment=market_environment,
+                )
             market_cursor = RuntimeStateCursor(bucket_start=now, symbol="")
         elif market_state_source == "postgres":
             market_cursor = await _warm_live_strategy_then_start_fresh(
@@ -1526,6 +1541,7 @@ async def _run_live_daemon(
         await execution_engine.dispose()
         await market_engine.dispose()
         await observability_engine.dispose()
+        await checkpoint_engine.dispose()
         if heartbeat_engine is not None:
             await heartbeat_engine.dispose()
 
@@ -1845,6 +1861,45 @@ async def _warm_live_strategy(
         if len(batch) < _LIVE_WARMUP_BATCH_SIZE:
             break
     return cursor
+
+
+async def _restore_live_strategy_from_checkpoint(
+    *,
+    strategy: LiveRuntimeStrategy,
+    checkpoint: StrategyCheckpoint,
+    repository: PostgresRuntimeMarketStateRepository,
+    environment: str,
+) -> None:
+    warm_market_state = getattr(strategy, "warm_market_state", None)
+    if not callable(warm_market_state):
+        raise RuntimeError(
+            "strategy does not support compact checkpoint recovery"
+        )
+    states = await repository.load_recovery_window(
+        environment=environment,
+        last_processed_at_by_symbol=checkpoint.last_processed_at_by_symbol,
+        lookback_seconds=_live_warmup_seconds(strategy),
+        limit=_LIVE_WARMUP_STATE_LIMIT,
+    )
+    for state in states:
+        warm_market_state(state)
+    compact_checkpoint = strategy.checkpoint(
+        include_market_state_buffers=False
+    )
+    log.info(
+        "live_strategy_checkpoint_recovered",
+        environment=environment,
+        state_count=len(states),
+        symbol_count=len(compact_checkpoint.warmup_buckets_by_symbol),
+        expected_symbol_count=len(checkpoint.last_processed_at_by_symbol),
+    )
+
+
+def _checkpoint_needs_market_recovery(checkpoint: StrategyCheckpoint) -> bool:
+    return not any(
+        key in checkpoint.payload
+        for key in ("market_state_buffers", "signal_buffers")
+    )
 
 
 def _live_warmup_seconds(strategy: LiveRuntimeStrategy) -> int:

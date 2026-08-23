@@ -22,6 +22,10 @@ _OBSERVABILITY_POOL_SIZE = 1
 _OBSERVABILITY_MAX_OVERFLOW = 0
 _OBSERVABILITY_POOL_TIMEOUT_SECONDS = 1
 _OBSERVABILITY_COMMAND_TIMEOUT_SECONDS = 1
+_CHECKPOINT_POOL_SIZE = 1
+_CHECKPOINT_MAX_OVERFLOW = 0
+_CHECKPOINT_POOL_TIMEOUT_SECONDS = 2
+_CHECKPOINT_COMMAND_TIMEOUT_SECONDS = 10
 
 
 def create_async_database_engine(
@@ -88,7 +92,7 @@ def create_market_database_engine(database_url: str) -> AsyncEngine:
 
 
 def create_observability_database_engine(database_url: str) -> AsyncEngine:
-    """Create a small, short-timeout pool for checkpoint/telemetry writes."""
+    """Create a small, best-effort pool for telemetry writes."""
 
     return create_async_database_engine(
         database_url,
@@ -96,6 +100,18 @@ def create_observability_database_engine(database_url: str) -> AsyncEngine:
         max_overflow=_OBSERVABILITY_MAX_OVERFLOW,
         pool_timeout_seconds=_OBSERVABILITY_POOL_TIMEOUT_SECONDS,
         command_timeout_seconds=_OBSERVABILITY_COMMAND_TIMEOUT_SECONDS,
+    )
+
+
+def create_checkpoint_database_engine(database_url: str) -> AsyncEngine:
+    """Create an isolated pool for durable strategy checkpoint writes."""
+
+    return create_async_database_engine(
+        database_url,
+        pool_size=_CHECKPOINT_POOL_SIZE,
+        max_overflow=_CHECKPOINT_MAX_OVERFLOW,
+        pool_timeout_seconds=_CHECKPOINT_POOL_TIMEOUT_SECONDS,
+        command_timeout_seconds=_CHECKPOINT_COMMAND_TIMEOUT_SECONDS,
     )
 
 
