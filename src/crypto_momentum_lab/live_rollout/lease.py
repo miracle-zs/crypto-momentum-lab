@@ -56,6 +56,7 @@ class LeaseHeartbeatConfig:
 
 LeaseRenewedCallback = Callable[[TradingLease], None]
 LeaseErrorCallback = Callable[[Exception], None]
+LeaseRecovery = Callable[[], Awaitable[TradingLease | None]]
 Clock = Callable[[], datetime]
 Sleep = Callable[[float], Awaitable[None]]
 
@@ -81,6 +82,7 @@ class LiveLeaseHeartbeat:
         sleep: Sleep | None = None,
         on_renewed: LeaseRenewedCallback | None = None,
         on_error: LeaseErrorCallback | None = None,
+        recover: LeaseRecovery | None = None,
     ) -> None:
         self._repository = repository
         self._lease = lease
@@ -90,6 +92,7 @@ class LiveLeaseHeartbeat:
         self._sleep = sleep or asyncio.sleep
         self._on_renewed = on_renewed
         self._on_error = on_error
+        self._recover = recover
 
     @property
     def current_lease(self) -> TradingLease:
@@ -112,6 +115,15 @@ class LiveLeaseHeartbeat:
                 continue
 
             try:
+                if self._lease.expires_at <= now and self._recover is not None:
+                    recovered = await self._recover()
+                    if recovered is None:
+                        raise RuntimeError("live lease recovery is not available")
+                    self._lease = recovered
+                    consecutive_failures = 0
+                    if self._on_renewed is not None:
+                        self._on_renewed(recovered)
+                    continue
                 renewed = await self._repository.renew_lease(
                     lease_id=self._lease.lease_id,
                     owner=self._owner,
