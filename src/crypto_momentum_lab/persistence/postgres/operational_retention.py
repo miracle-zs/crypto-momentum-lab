@@ -118,6 +118,15 @@ class PostgresOperationalRetentionRepository:
 
         deleted: dict[str, int] = {}
         for table_name, key_columns in _ACCOUNT_SNAPSHOT_KEYS:
+            if not await self._account_snapshot_keys_are_fresh(
+                table_name,
+                key_columns,
+                environment=environment,
+                account_label=account_label,
+                before=before,
+            ):
+                deleted[table_name] = 0
+                continue
             table_deleted = 0
             while table_deleted < max_rows_per_table:
                 current_batch_size = min(
@@ -126,7 +135,6 @@ class PostgresOperationalRetentionRepository:
                 )
                 count = await self._execute_account_snapshot_delete(
                     table_name,
-                    key_columns,
                     environment=environment,
                     account_label=account_label,
                     before=before,
@@ -137,6 +145,62 @@ class PostgresOperationalRetentionRepository:
                     break
             deleted[table_name] = table_deleted
         return deleted
+
+    async def _account_snapshot_keys_are_fresh(
+        self,
+        table_name: str,
+        key_columns: tuple[str, ...],
+        *,
+        environment: str,
+        account_label: str,
+        before: datetime,
+    ) -> bool:
+        grouped_columns = tuple(
+            column
+            for column in key_columns
+            if column not in {"environment", "account_label"}
+        )
+        if not grouped_columns:
+            statement = text(
+                f"SELECT max(observed_at) FROM {table_name} "
+                "WHERE environment = :environment "
+                "AND account_label = :account_label"
+            )
+            async with self._session_factory() as session:
+                latest = await session.scalar(
+                    statement,
+                    {
+                        "environment": environment,
+                        "account_label": account_label,
+                    },
+                )
+            return isinstance(latest, datetime) and latest > before
+
+        columns = ", ".join(grouped_columns)
+        statement = text(
+            "SELECT count(*) AS key_count, "
+            "count(*) FILTER (WHERE latest_observed_at > :before) "
+            "AS fresh_key_count "
+            "FROM ("
+            f"SELECT {columns}, max(observed_at) AS latest_observed_at "
+            f"FROM {table_name} "
+            "WHERE environment = :environment "
+            "AND account_label = :account_label "
+            f"GROUP BY {columns}"
+            ") AS latest"
+        )
+        async with self._session_factory() as session:
+            row = (await session.execute(
+                statement,
+                {
+                    "environment": environment,
+                    "account_label": account_label,
+                    "before": before,
+                },
+            )).one()
+        key_count = int(row[0])
+        fresh_key_count = int(row[1])
+        return key_count > 0 and key_count == fresh_key_count
 
     async def _delete_batch(
         self,
@@ -188,26 +252,18 @@ class PostgresOperationalRetentionRepository:
     async def _execute_account_snapshot_delete(
         self,
         table_name: str,
-        key_columns: tuple[str, ...],
         *,
         environment: str,
         account_label: str,
         before: datetime,
         batch_size: int,
     ) -> int:
-        key_match = " AND ".join(
-            f"newer.{column} = candidate.{column}" for column in key_columns
-        )
         statement = text(
             "WITH doomed AS ("
             f"SELECT candidate.ctid FROM {table_name} AS candidate "
             "WHERE candidate.environment = :environment "
             "AND candidate.account_label = :account_label "
             "AND candidate.observed_at < :before "
-            "AND EXISTS ("
-            f"SELECT 1 FROM {table_name} AS newer WHERE {key_match} "
-            "AND newer.observed_at > candidate.observed_at"
-            ") "
             "ORDER BY candidate.observed_at "
             "LIMIT :batch_size"
             ") "
