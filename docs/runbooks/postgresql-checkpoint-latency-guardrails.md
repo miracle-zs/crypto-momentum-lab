@@ -79,3 +79,20 @@ and checkpoint latency improve without worsening order-lifecycle latency:
 
 Do not disable `fsync` or `full_page_writes`, and do not use a larger command
 timeout as the primary performance fix.
+
+## Applied production trial (2026-08-23)
+
+After the runtime-state partition cutover, the server trial values are:
+
+```text
+bgwriter_lru_maxpages = 400
+wal_buffers = 16MB
+wal_compression = lz4
+```
+
+The first value is reloadable; `wal_buffers` required a PostgreSQL restart.
+The values were selected from the observed backend-written buffers and
+`wal_buffers_full` counters.  Keep them only after a complete checkpoint
+cycle confirms lower backend write pressure without worse order-lifecycle
+latency.  Roll back one setting at a time with `ALTER SYSTEM RESET <name>` and
+the appropriate reload/restart, then repeat the same measurement window.
