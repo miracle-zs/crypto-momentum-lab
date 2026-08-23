@@ -460,11 +460,15 @@ def _classify_live_positions(
         if opening is None or position.entry_price <= 0:
             unmanaged.add(position.symbol)
             continue
+        # Associate a close with the current position episode by the time the
+        # order was created.  Comparing updated_at is unsafe when an old
+        # reduce-only limit order fills after a later entry has reopened the
+        # same hedge-mode position.
         closing_filled = any(
             order.reduce_only
             and order.symbol == position.symbol
             and FuturesPositionSide(order.position_side) is position_side
-            and order.updated_at >= opening.updated_at
+            and order.created_at >= opening.created_at
             for order in filled_orders
         )
         active_market_exit = any(
