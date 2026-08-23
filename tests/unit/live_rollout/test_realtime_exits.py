@@ -25,7 +25,7 @@ class _FailingCandleLoader:
         raise AssertionError("realtime quote path must not load candles")
 
 
-async def test_realtime_stop_loss_does_not_wait_for_candle_loader() -> None:
+async def test_fixed_realtime_stop_loss_does_not_wait_for_candle_loader() -> None:
     loader = _FailingCandleLoader()
     manager = LiveExitManager(
         config=LiveExitConfig(
@@ -36,7 +36,7 @@ async def test_realtime_stop_loss_does_not_wait_for_candle_loader() -> None:
             policy=PositionExitPolicy(
                 take_profit_pct=Decimal("0.02"),
                 stop_loss_pct=Decimal("0.01"),
-                mode=PositionExitMode.CANDLE_15M,
+                mode=PositionExitMode.FIXED,
             ),
         ),
         candle_loader=loader,
@@ -66,6 +66,64 @@ async def test_realtime_stop_loss_does_not_wait_for_candle_loader() -> None:
     assert requests[0].candidate.reason == "stop_loss_realtime"
     assert requests[0].candidate.created_at == quote.received_at
     assert requests[0].candidate.features["reference_price"] == "98"
+    assert loader.calls == 0
+
+
+async def test_candle_exit_mode_ignores_realtime_fixed_thresholds() -> None:
+    loader = _FailingCandleLoader()
+    manager = LiveExitManager(
+        config=LiveExitConfig(
+            run_id="run-1",
+            strategy_name="strategy",
+            strategy_version="v1",
+            strategy_config_hash="hash",
+            policy=PositionExitPolicy(
+                take_profit_pct=Decimal("0.02"),
+                stop_loss_pct=Decimal("0.01"),
+                mode=PositionExitMode.CANDLE_15M,
+            ),
+        ),
+        candle_loader=loader,
+    )
+    opened_at = datetime(2026, 8, 23, 0, 0, tzinfo=UTC)
+    position = ManagedLivePosition(
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        position_side=FuturesPositionSide.LONG,
+        quantity=Decimal("1"),
+        entry_price=Decimal("100"),
+        opened_at=opened_at,
+    )
+    take_profit_quote = RealtimeMarketQuote(
+        exchange="binance-usdm",
+        environment="research",
+        symbol="BTCUSDT",
+        event_at=opened_at + timedelta(seconds=1),
+        received_at=opened_at + timedelta(seconds=1),
+        bid_price=Decimal("102.01"),
+        ask_price=Decimal("102.02"),
+    )
+    stop_loss_quote = RealtimeMarketQuote(
+        exchange="binance-usdm",
+        environment="research",
+        symbol="BTCUSDT",
+        event_at=opened_at + timedelta(seconds=2),
+        received_at=opened_at + timedelta(seconds=2),
+        bid_price=Decimal("98.99"),
+        ask_price=Decimal("99.00"),
+    )
+
+    take_profit_requests = await manager.requests_for_quote(
+        take_profit_quote,
+        (position,),
+    )
+    stop_loss_requests = await manager.requests_for_quote(
+        stop_loss_quote,
+        (position,),
+    )
+
+    assert take_profit_requests == ()
+    assert stop_loss_requests == ()
     assert loader.calls == 0
 
 

@@ -478,19 +478,17 @@ def _realtime_exit_reason(
     held_until: datetime,
     policy: PositionExitPolicy,
 ) -> str | None:
-    """Return emergency/fixed exits without consulting candle policy."""
-    gross_return = _gross_return(position, mark_price)
-    if gross_return >= policy.take_profit_pct:
-        return "take_profit_realtime"
-    if gross_return <= -policy.stop_loss_pct:
-        return "stop_loss_realtime"
-    if (
-        policy.max_holding_seconds is not None
-        and held_until
-        >= position.opened_at + timedelta(seconds=policy.max_holding_seconds)
-    ):
-        return "max_holding_period_realtime"
-    return None
+    """Evaluate immediate exits without changing the configured mode semantics."""
+    reason = position_exit_reason(
+        gross_return=_gross_return(position, mark_price),
+        held_until=held_until,
+        opened_at=position.opened_at,
+        symbol=position.symbol,
+        side=position.side,
+        policy=policy,
+        closed_candle=None,
+    )
+    return None if reason is None else f"{reason}_realtime"
 
 
 def _recovery_price(
