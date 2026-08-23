@@ -38,6 +38,7 @@ async def monitor_market_data_health(
     connection_metrics: Callable[
         [], BinanceConnectionPoolMetricsSnapshot
     ],
+    runtime_state_metrics: Callable[[], dict[str, object]] | None = None,
     report_interval_seconds: float = 30.0,
     sample_interval_seconds: float = 1.0,
 ) -> None:
@@ -142,6 +143,11 @@ async def monitor_market_data_health(
             control_commands_sent=connections.control_commands_sent,
             received_messages=connections.received_messages,
             connection_details=connection_details,
+            runtime_state_lateness=(
+                None
+                if runtime_state_metrics is None
+                else runtime_state_metrics()
+            ),
         )
         maximum_lag_seconds = 0.0
         next_report_at = now + report_interval_seconds

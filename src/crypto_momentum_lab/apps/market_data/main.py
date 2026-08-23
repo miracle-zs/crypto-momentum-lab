@@ -891,6 +891,9 @@ async def run_market_data(
                         connection_metrics=(
                             runtime.connection_pool.metrics_snapshot
                         ),
+                        runtime_state_metrics=(
+                            runtime.runtime_state_publisher.lateness_metrics_snapshot
+                        ),
                     )
                 ),
                 asyncio.create_task(
@@ -1080,6 +1083,9 @@ async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
                 monitor_market_data_health(
                     capture_metrics=runtime.capture.metrics_snapshot,
                     connection_metrics=runtime.connection_pool.metrics_snapshot,
+                    runtime_state_metrics=(
+                        runtime.runtime_state_publisher.lateness_metrics_snapshot
+                    ),
                 )
             )
             await asyncio.sleep(seconds)

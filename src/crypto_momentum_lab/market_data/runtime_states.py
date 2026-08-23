@@ -1,6 +1,6 @@
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
@@ -8,6 +8,7 @@ from typing import Protocol
 import structlog
 
 from crypto_momentum_lab.domain.market.models import (
+    CaptureStream,
     MarketState15s,
     NormalizedBookTicker,
     NormalizedMarketEvent,
@@ -33,6 +34,32 @@ type _DurableBatch = tuple[
 ]
 
 _BUCKET_SECONDS = 15
+_LATENESS_THRESHOLDS_SECONDS = (0.5, 1.0, 2.0, 3.0)
+_LATENESS_BUCKET_UPPER_BOUNDS_MS = (
+    0.0,
+    50.0,
+    100.0,
+    250.0,
+    500.0,
+    1_000.0,
+    2_000.0,
+    3_000.0,
+    5_000.0,
+    10_000.0,
+)
+_LATENESS_BUCKET_LABELS = (
+    "<=0ms",
+    "0-50ms",
+    "50-100ms",
+    "100-250ms",
+    "250-500ms",
+    "500-1000ms",
+    "1000-2000ms",
+    "2000-3000ms",
+    "3000-5000ms",
+    "5000-10000ms",
+    ">10000ms",
+)
 
 
 class ClosedStateRepository(Protocol):
@@ -77,6 +104,94 @@ class ClosedMarketStatePublisherMetrics:
     durable_sink_failure_count: int
 
 
+@dataclass(slots=True)
+class _EventLatenessCounters:
+    raw_event_count: int = 0
+    timestamped_event_count: int = 0
+    normalized_event_count: int = 0
+    missing_exchange_event_at_count: int = 0
+    negative_lateness_count: int = 0
+    lateness_bucket_counts: list[int] = field(
+        default_factory=lambda: [0] * len(_LATENESS_BUCKET_LABELS)
+    )
+    received_over_threshold_counts: list[int] = field(
+        default_factory=lambda: [0] * len(_LATENESS_THRESHOLDS_SECONDS)
+    )
+    simulated_close_drop_counts: list[int] = field(
+        default_factory=lambda: [0] * len(_LATENESS_THRESHOLDS_SECONDS)
+    )
+
+    def observe_raw(self, envelope: RawEnvelope) -> None:
+        self.raw_event_count += 1
+        exchange_event_at = envelope.exchange_event_at
+        if exchange_event_at is None:
+            self.missing_exchange_event_at_count += 1
+            return
+
+        self.timestamped_event_count += 1
+        lateness_seconds = (
+            envelope.received_at - exchange_event_at
+        ).total_seconds()
+        if lateness_seconds < 0:
+            self.negative_lateness_count += 1
+        lateness_ms = lateness_seconds * 1000
+        bucket_index = len(_LATENESS_BUCKET_UPPER_BOUNDS_MS)
+        for index, upper_bound_ms in enumerate(
+            _LATENESS_BUCKET_UPPER_BOUNDS_MS
+        ):
+            if lateness_ms <= upper_bound_ms:
+                bucket_index = index
+                break
+        self.lateness_bucket_counts[bucket_index] += 1
+        for index, threshold_seconds in enumerate(_LATENESS_THRESHOLDS_SECONDS):
+            if lateness_seconds > threshold_seconds:
+                self.received_over_threshold_counts[index] += 1
+
+    def observe_normalized(self, *, simulated_close_drops: tuple[bool, ...]) -> None:
+        if len(simulated_close_drops) != len(_LATENESS_THRESHOLDS_SECONDS):
+            raise ValueError("simulated_close_drops has an unexpected length")
+        self.normalized_event_count += 1
+        for index, would_drop in enumerate(simulated_close_drops):
+            if would_drop:
+                self.simulated_close_drop_counts[index] += 1
+
+    def snapshot(self) -> dict[str, object]:
+        threshold_keys = tuple(
+            f"{threshold_seconds:g}"
+            for threshold_seconds in _LATENESS_THRESHOLDS_SECONDS
+        )
+        return {
+            "raw_event_count": self.raw_event_count,
+            "timestamped_event_count": self.timestamped_event_count,
+            "normalized_event_count": self.normalized_event_count,
+            "missing_exchange_event_at_count": (
+                self.missing_exchange_event_at_count
+            ),
+            "negative_lateness_count": self.negative_lateness_count,
+            "lateness_histogram_ms": dict(
+                zip(
+                    _LATENESS_BUCKET_LABELS,
+                    self.lateness_bucket_counts,
+                    strict=True,
+                )
+            ),
+            "received_over_threshold_count": dict(
+                zip(
+                    threshold_keys,
+                    self.received_over_threshold_counts,
+                    strict=True,
+                )
+            ),
+            "simulated_close_drop_count": dict(
+                zip(
+                    threshold_keys,
+                    self.simulated_close_drop_counts,
+                    strict=True,
+                )
+            ),
+        }
+
+
 class ClosedMarketStatePublisher:
     def __init__(
         self,
@@ -111,6 +226,10 @@ class ClosedMarketStatePublisher:
         self._realtime_batch_count = 0
         self._realtime_sink_failure_count = 0
         self._durable_sink_failure_count = 0
+        self._lateness_by_stream: dict[
+            CaptureStream,
+            _EventLatenessCounters,
+        ] = {}
         self._durable_queue: asyncio.Queue[_DurableBatch | None] | None = None
         self._durable_task: asyncio.Task[None] | None = None
         self._log = structlog.get_logger()
@@ -159,8 +278,36 @@ class ClosedMarketStatePublisher:
             durable_sink_failure_count=self._durable_sink_failure_count,
         )
 
+    def lateness_metrics_snapshot(self) -> dict[str, object]:
+        """Return bounded transport and close-threshold counters by stream.
+
+        ``received_over_threshold_count`` measures transport lateness directly
+        from ``received_at - exchange_event_at``.  ``simulated_close_drop_count``
+        replays the current watermark rule with each candidate delay, so the
+        two counters do not conflate a late packet with a packet that would
+        actually arrive after a state bucket had already been closed.
+        """
+        return {
+            "configured_closure_delay_seconds": (
+                self._config.closure_delay_seconds
+            ),
+            "thresholds_seconds": _LATENESS_THRESHOLDS_SECONDS,
+            "streams": {
+                stream.value: counters.snapshot()
+                for stream, counters in sorted(
+                    self._lateness_by_stream.items(),
+                    key=lambda item: item[0].value,
+                )
+            },
+        }
+
     async def observe(self, envelope: RawEnvelope) -> None:
         self._received_envelope_count += 1
+        counters = self._lateness_by_stream.setdefault(
+            envelope.stream,
+            _EventLatenessCounters(),
+        )
+        counters.observe_raw(envelope)
         try:
             event = normalize_binance_envelope(envelope)
         except BinanceNormalizationError:
@@ -179,7 +326,16 @@ class ClosedMarketStatePublisher:
         self._latest_watermark_at = watermark
 
         key = _bucket_key(event)
-        if key[2] + timedelta(seconds=_BUCKET_SECONDS) <= watermark:
+        bucket_end = key[2] + timedelta(seconds=_BUCKET_SECONDS)
+        simulated_close_drops = tuple(
+            bucket_end
+            <= self._max_seen_event_at - timedelta(seconds=threshold_seconds)
+            for threshold_seconds in _LATENESS_THRESHOLDS_SECONDS
+        )
+        counters.observe_normalized(
+            simulated_close_drops=simulated_close_drops
+        )
+        if bucket_end <= watermark:
             self._late_event_count += 1
             return
 
