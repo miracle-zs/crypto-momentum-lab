@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import cast
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import structlog
@@ -431,7 +431,7 @@ class BinanceWebSocketConnection:
                     if desired_changed:
                         await self._maybe_start_next_control(connection)
             finally:
-                pending_tasks = tuple(
+                child_tasks: tuple[asyncio.Future[Any], ...] = tuple(
                     task
                     for task in (
                         reader_task,
@@ -439,15 +439,9 @@ class BinanceWebSocketConnection:
                         ack_task,
                         desired_task,
                     )
-                    if task is not None and not task.done()
+                    if task is not None
                 )
-                for task in pending_tasks:
-                    task.cancel()
-                if pending_tasks:
-                    await asyncio.gather(
-                        *pending_tasks,
-                        return_exceptions=True,
-                    )
+                await _cancel_and_drain_tasks(child_tasks)
         return "closed"
 
     async def _read_messages(
@@ -920,6 +914,16 @@ def _required_sequence(payload: dict[object, object], key: str) -> str:
 
 def _utc_from_ms(milliseconds: int) -> datetime:
     return datetime.fromtimestamp(milliseconds / 1000, tz=UTC)
+
+
+async def _cancel_and_drain_tasks(
+    tasks: tuple[asyncio.Future[Any], ...],
+) -> None:
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def should_replace_connection(
