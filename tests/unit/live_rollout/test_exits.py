@@ -6,6 +6,7 @@ from crypto_momentum_lab.domain.execution import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.market.models import RealtimeMarketQuote
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitCancellationRequest,
@@ -218,6 +219,110 @@ async def test_b1_grace_timeout_cancels_limit_before_market_close() -> None:
     assert requests[0].cancel_plan.client_order_id == "recovery-client"
     assert requests[0].fallback_candidate.entry_type is EntryType.MARKET
     assert requests[0].fallback_candidate.reason == "candle_15m_grace_timeout_1"
+
+
+async def test_grace_timeout_timer_does_not_need_a_new_market_state() -> None:
+    created_at = datetime(2026, 7, 4, 0, 15, 15, tzinfo=UTC)
+    recovery_plan = OrderExecutionPlan(
+        intent_id="recovery-intent",
+        run_id="run-1",
+        client_order_id="recovery-client",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("1.25"),
+        price=Decimal("100.88"),
+        reduce_only=True,
+        created_at=created_at,
+        position_side=FuturesPositionSide.LONG,
+        quantized=True,
+    )
+    position = replace(
+        _long_position(),
+        recovery_order_client_id=recovery_plan.client_order_id,
+        recovery_order_created_at=created_at,
+        recovery_order_plan=recovery_plan,
+    )
+    manager = LiveExitManager(
+        config=_config(
+            PositionExitMode.CANDLE_15M,
+            candle_grace_bars=1,
+            candle_grace_profit_pct=Decimal("0.0088"),
+        )
+    )
+    state = replace(
+        _state(),
+        bucket_end=created_at,
+        last_bid_price=Decimal("98"),
+        close_price=Decimal("98"),
+        mark_price=Decimal("98"),
+    )
+    now = datetime(2026, 7, 4, 0, 30, 16, tzinfo=UTC)
+
+    requests = await manager.requests_for_grace_timeout(
+        now=now,
+        state=state,
+        positions=(position,),
+    )
+
+    assert len(requests) == 1
+    assert isinstance(requests[0], LiveExitCancellationRequest)
+    assert requests[0].fallback_candidate.created_at == now
+    assert requests[0].fallback_candidate.features["trigger_at"] == (
+        "2026-07-04T00:30:16+00:00"
+    )
+
+
+async def test_closed_candle_path_does_not_require_a_rest_loader() -> None:
+    manager = LiveExitManager(config=_config(PositionExitMode.CANDLE_15M))
+    candle = ClosedCandle15m(
+        symbol="BTCUSDT",
+        candle_start=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
+        candle_end=datetime(2026, 7, 4, 0, 30, tzinfo=UTC),
+        open_price=Decimal("100"),
+        close_price=Decimal("99"),
+    )
+    quote = RealtimeMarketQuote(
+        exchange="binance-usdm",
+        environment="live",
+        symbol="BTCUSDT",
+        event_at=datetime(2026, 7, 4, 0, 30, tzinfo=UTC),
+        received_at=datetime(2026, 7, 4, 0, 30, 0, 100000, tzinfo=UTC),
+        bid_price=Decimal("99"),
+        ask_price=Decimal("99.1"),
+    )
+
+    requests = await manager.requests_for_closed_candle(
+        candle,
+        (_long_position(),),
+        latest_quote=quote,
+        received_at=quote.received_at,
+    )
+
+    assert len(requests) == 1
+    assert requests[0].candidate.reason == "candle_15m_bearish"
+    assert requests[0].candidate.created_at == quote.received_at
+    assert requests[0].candidate.features["trigger_at"] == (
+        "2026-07-04T00:30:00+00:00"
+    )
+
+
+async def test_closed_candle_path_ignores_the_entry_candle() -> None:
+    manager = LiveExitManager(config=_config(PositionExitMode.CANDLE_15M))
+    entry_candle = ClosedCandle15m(
+        symbol="BTCUSDT",
+        candle_start=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        candle_end=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
+        open_price=Decimal("100"),
+        close_price=Decimal("99"),
+    )
+
+    requests = await manager.requests_for_closed_candle(
+        entry_candle,
+        (_long_position(),),
+    )
+
+    assert requests == ()
 
 
 class FakeCandleLoader:

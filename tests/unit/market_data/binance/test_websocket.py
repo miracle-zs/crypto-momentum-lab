@@ -62,6 +62,17 @@ from crypto_momentum_lab.market_data.capture.queue import CaptureQueueFull
             CaptureStream.KLINE_1M,
             "BTCUSDT",
         ),
+        (
+            "btcusdt@kline_15m",
+            {
+                "e": "kline",
+                "E": 1781488800000,
+                "s": "BTCUSDT",
+                "k": {"t": 1781488800000},
+            },
+            CaptureStream.KLINE_15M,
+            "BTCUSDT",
+        ),
     ],
 )
 def test_parses_combined_stream_payloads(

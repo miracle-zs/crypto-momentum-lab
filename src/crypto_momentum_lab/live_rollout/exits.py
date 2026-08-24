@@ -151,16 +151,25 @@ class LiveExitManager:
         config: LiveExitConfig,
         candle_loader: ClosedCandle15mLoader | None = None,
     ) -> None:
-        if (
-            config.policy.mode is PositionExitMode.CANDLE_15M
-            and candle_loader is None
-        ):
-            raise ValueError("candle_15m exits require a candle loader")
         self._config = config
         self._candles = candle_loader
         self._checked_until: dict[
             tuple[str, FuturesPositionSide, datetime], datetime
         ] = {}
+
+    @property
+    def uses_market_state_exit(self) -> bool:
+        """Whether the legacy 15-second state path should evaluate exits.
+
+        Production candle exits pass no loader and therefore use only the
+        independent final-candle feed.  An explicitly supplied loader keeps
+        the old path available for recovery and backwards-compatible callers.
+        """
+
+        return (
+            self._config.policy.mode is not PositionExitMode.CANDLE_15M
+            or self._candles is not None
+        )
 
     async def requests_for_state(
         self,
@@ -197,6 +206,161 @@ class LiveExitManager:
             request = await self._request_for_position(state, position)
             if request is not None:
                 requests.append(request)
+        return tuple(requests)
+
+    async def requests_for_closed_candle(
+        self,
+        candle: ClosedCandle15m,
+        positions: tuple[ManagedLivePosition, ...],
+        *,
+        latest_quote: RealtimeMarketQuote | None = None,
+        received_at: datetime | None = None,
+    ) -> tuple[LiveExitRequest, ...]:
+        """Evaluate one immutable 15m candle without loading market data.
+
+        This is the execution seam for ``candle_15m`` exits.  The caller has
+        already received Binance's official ``x=true`` event, so this method
+        performs only in-process strategy work and request construction.
+        """
+
+        if self._config.policy.mode is not PositionExitMode.CANDLE_15M:
+            return ()
+        if received_at is None:
+            received_at = candle.candle_end
+        if received_at.tzinfo is None or received_at.utcoffset() is None:
+            raise ValueError("received_at must be timezone-aware")
+        requests: list[LiveExitRequest] = []
+        for position in positions:
+            if (
+                position.symbol != candle.symbol
+                or position.closing_order_filled
+                or position.recovery_order_client_id is not None
+            ):
+                continue
+            key = (position.symbol, position.position_side, position.opened_at)
+            checked_until = self._checked_until.get(key)
+            if checked_until is not None and candle.candle_end <= checked_until:
+                continue
+            first_eligible_start = first_candle_start_after_entry(
+                position.opened_at
+            )
+            if candle.candle_start < first_eligible_start:
+                self._checked_until[key] = candle.candle_end
+                continue
+            reason = position_exit_reason(
+                gross_return=_gross_return(position, candle.close_price),
+                held_until=candle.candle_end,
+                opened_at=position.opened_at,
+                symbol=position.symbol,
+                side=position.side,
+                policy=self._config.policy,
+                closed_candle=candle,
+            )
+            if reason is None:
+                self._checked_until[key] = candle.candle_end
+                continue
+            reference_price = _candle_reference_price(
+                candle=candle,
+                quote=latest_quote,
+                side=position.side,
+            )
+            if (
+                self._config.candle_grace_bars > 0
+                and self._config.candle_grace_profit_pct > 0
+            ):
+                if _recovery_target_touched(
+                    position=position,
+                    mark_price=reference_price,
+                    profit_pct=self._config.candle_grace_profit_pct,
+                ):
+                    requests.append(
+                        self._build_order_request(
+                            state=None,
+                            position=position,
+                            reason=reason,
+                            trigger_at=candle.candle_end,
+                            identity_trigger_at=candle.candle_end,
+                            created_at=received_at,
+                            reference_price=reference_price,
+                        )
+                    )
+                else:
+                    requests.append(
+                        self._build_grace_limit_request(
+                            state=None,
+                            position=position,
+                            reason=reason,
+                            trigger_at=candle.candle_end,
+                            reference_price=reference_price,
+                            created_at=received_at,
+                        )
+                    )
+                continue
+            requests.append(
+                self._build_order_request(
+                    state=None,
+                    position=position,
+                    reason=reason,
+                    trigger_at=candle.candle_end,
+                    identity_trigger_at=candle.candle_end,
+                    created_at=received_at,
+                    reference_price=reference_price,
+                )
+            )
+        return tuple(requests)
+
+    async def requests_for_grace_timeout(
+        self,
+        *,
+        now: datetime,
+        state: MarketState15s,
+        positions: tuple[ManagedLivePosition, ...],
+        latest_quote: RealtimeMarketQuote | None = None,
+    ) -> tuple[LiveExitRequest, ...]:
+        """Build market fallbacks whose grace limit has expired.
+
+        Grace expiry is a wall-clock concern, not a market-bucket concern.
+        Keeping it here lets the daemon run a small timer without consulting
+        REST candles or waiting for the next 15-second state.
+        """
+
+        if (
+            self._config.policy.mode is not PositionExitMode.CANDLE_15M
+            or self._config.candle_grace_bars <= 0
+        ):
+            return ()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        requests: list[LiveExitRequest] = []
+        for position in positions:
+            if (
+                position.symbol != state.symbol
+                or position.closing_order_filled
+                or position.recovery_order_client_id is None
+                or position.recovery_order_created_at is None
+                or position.recovery_order_plan is None
+            ):
+                continue
+            timeout_at = position.recovery_order_created_at + timedelta(
+                minutes=15 * self._config.candle_grace_bars
+            )
+            if now < timeout_at:
+                continue
+            reference_price = (
+                _quote_exit_mark_price(latest_quote, position.side)
+                if latest_quote is not None
+                and latest_quote.symbol == position.symbol
+                else _exit_mark_price(state, position.side)
+            ) or position.entry_price
+            requests.append(
+                self._build_grace_timeout_request(
+                    state=state,
+                    position=position,
+                    reference_price=reference_price,
+                    trigger_at=now,
+                    created_at=now,
+                )
+            )
         return tuple(requests)
 
     async def requests_for_quote(
@@ -251,6 +415,8 @@ class LiveExitManager:
         if mark_price is None:
             return None
         if self._config.policy.mode is PositionExitMode.CANDLE_15M:
+            if self._candles is None:
+                return None
             candle_request = await self._candle_exit_request(
                 state,
                 position,
@@ -346,11 +512,12 @@ class LiveExitManager:
     def _build_grace_limit_request(
         self,
         *,
-        state: MarketState15s,
+        state: MarketState15s | None,
         position: ManagedLivePosition,
         reason: str,
         trigger_at: datetime,
         reference_price: Decimal,
+        created_at: datetime | None = None,
     ) -> LiveExitOrderRequest:
         target_price = _recovery_price(
             position,
@@ -362,6 +529,7 @@ class LiveExitManager:
             reason=f"{reason}_grace_limit_{self._config.candle_grace_bars}",
             trigger_at=trigger_at,
             reference_price=reference_price,
+            created_at=created_at,
             entry_type=EntryType.LIMIT,
             limit_price=target_price,
         )
@@ -372,16 +540,20 @@ class LiveExitManager:
         state: MarketState15s,
         position: ManagedLivePosition,
         reference_price: Decimal,
+        trigger_at: datetime | None = None,
+        created_at: datetime | None = None,
     ) -> LiveExitCancellationRequest:
         recovery_plan = position.recovery_order_plan
         if recovery_plan is None:
             raise AssertionError("grace timeout requires a recovery order")
+        trigger_at = trigger_at or state.bucket_end
         fallback = self._build_order_request(
             state=state,
             position=position,
             reason=f"candle_15m_grace_timeout_{self._config.candle_grace_bars}",
-            trigger_at=state.bucket_end,
+            trigger_at=trigger_at,
             reference_price=reference_price,
+            created_at=created_at,
         )
         return LiveExitCancellationRequest(
             cancel_plan=recovery_plan,
@@ -530,6 +702,21 @@ def _quote_exit_mark_price(
     side: StrategySide,
 ) -> Decimal:
     return quote.bid_price if side is StrategySide.LONG else quote.ask_price
+
+
+def _candle_reference_price(
+    *,
+    candle: ClosedCandle15m,
+    quote: RealtimeMarketQuote | None,
+    side: StrategySide,
+) -> Decimal:
+    if quote is not None and quote.symbol == candle.symbol:
+        price = _quote_exit_mark_price(quote, side)
+        if price > 0:
+            return price
+    if candle.close_price <= 0:
+        raise ValueError("closed candle close price must be positive")
+    return candle.close_price
 
 
 def _candle_start_15m(value: datetime) -> datetime:

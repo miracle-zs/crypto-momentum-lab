@@ -59,6 +59,10 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     PreparedOrderSubmission,
     SubmitPolicy,
 )
+from crypto_momentum_lab.live_rollout.closed_candle_feed import (
+    BinanceClosedCandle15mFeed,
+    ClosedCandle15mFeedConfig,
+)
 from crypto_momentum_lab.live_rollout.daemon import (
     LiveDaemonConfig,
     LiveDaemonResult,
@@ -73,7 +77,6 @@ from crypto_momentum_lab.live_rollout.entry_cache import (
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitConfig,
     LiveExitManager,
-    ThreadedClosedCandle15mLoader,
 )
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext, evaluate_live_gate
 from crypto_momentum_lab.live_rollout.lease import (
@@ -172,6 +175,7 @@ _LIVE_ENTRY_FILTER_PREFETCH_CONCURRENCY = 4
 _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT = 100
 _LIVE_ENTRY_PRICE_ABOVE_EMA5 = True
 _LIVE_ENTRY_PRICE_ABOVE_EMA10 = True
+_LIVE_MARKET_WEBSOCKET_URL = "wss://fstream.binance.com/market/ws"
 
 
 class _LiveStartupRetryableError(RuntimeError):
@@ -424,6 +428,13 @@ def run_command(
         str,
         typer.Option("--market-quote-hub-url"),
     ] = "ws://market-data:8768",
+    market_websocket_url: Annotated[
+        str,
+        typer.Option(
+            "--market-websocket-url",
+            help="Direct Binance market WebSocket used by closed-candle exits.",
+        ),
+    ] = _LIVE_MARKET_WEBSOCKET_URL,
     account_event_hub_url: Annotated[
         str,
         typer.Option("--account-event-hub-url"),
@@ -513,6 +524,7 @@ def run_command(
             market_state_source=market_state_source,
             market_state_hub_url=market_state_hub_url,
             market_quote_hub_url=market_quote_hub_url,
+            market_websocket_url=market_websocket_url,
             account_event_hub_url=account_event_hub_url,
             session_id=session_id,
             operator=operator,
@@ -888,6 +900,7 @@ async def _run_live_daemon(
     api_key: str,
     api_secret: str,
     entry_leverage: int,
+    market_websocket_url: str = _LIVE_MARKET_WEBSOCKET_URL,
 ) -> LiveDaemonResult:
     if market_state_source not in {"hub", "postgres"}:
         raise ValueError("market_state_source must be 'hub' or 'postgres'")
@@ -910,6 +923,7 @@ async def _run_live_daemon(
     client: BinanceUsdMTradeClient | None = None
     execution_coordinator: OrderExecutionCoordinator | None = None
     candle_source: BinanceRestClosedCandle15mSource | None = None
+    closed_candle_feed: BinanceClosedCandle15mFeed | None = None
     ema_candle_source: BinanceRestClosedCandle15mSource | None = None
     entry_filter_cache: LiveEntryFilterCache | None = None
     entry_filter_cache_task: asyncio.Task[None] | None = None
@@ -1130,11 +1144,17 @@ async def _run_live_daemon(
             approval=approval,
             risk_config=risk_config,
         )
-        candle_loader = None
         ema_provider: ClosedCandleEmaProvider | None = None
         if exit_mode is PositionExitMode.CANDLE_15M:
             candle_source = BinanceRestClosedCandle15mSource(base_url)
-            candle_loader = ThreadedClosedCandle15mLoader(candle_source)
+            closed_candle_feed = BinanceClosedCandle15mFeed(
+                config=ClosedCandle15mFeedConfig(
+                    websocket_url=market_websocket_url,
+                    environment=market_environment,
+                    consumer_id=f"live-exit-candles:{session_id}",
+                ),
+                backfill_source=candle_source,
+            )
         if require_price_above_ema5 or require_price_above_ema10:
             ema_candle_source = BinanceRestClosedCandle15mSource(base_url)
             ema_provider = ClosedCandleEmaProvider(ema_candle_source)
@@ -1344,7 +1364,12 @@ async def _run_live_daemon(
                     candle_grace_bars=candle_grace_bars,
                     candle_grace_profit_pct=candle_grace_profit_pct,
                 ),
-                candle_loader=candle_loader,
+                candle_loader=None,
+            ),
+            on_managed_position_symbols=(
+                None
+                if closed_candle_feed is None
+                else closed_candle_feed.set_symbols
             ),
         )
         entry_filter_cache_ready = not entry_filter_cache_required
@@ -1434,6 +1459,26 @@ async def _run_live_daemon(
             consumer_id=f"live-exit:{session_id}",
         )
         quote_task: asyncio.Task[None] | None = None
+        closed_candle_task: asyncio.Task[None] | None = None
+        grace_timeout_task: asyncio.Task[None] | None = None
+        if closed_candle_feed is not None:
+            await closed_candle_feed.start()
+            closed_candle_task = asyncio.create_task(
+                _run_closed_candle_channel(
+                    source=closed_candle_feed,
+                    daemon=daemon,
+                    latest_market_quotes=latest_market_quotes,
+                ),
+                name=f"live-closed-candle:{session_id}",
+            )
+            grace_timeout_task = asyncio.create_task(
+                _run_grace_timeout_channel(
+                    daemon=daemon,
+                    latest_market_states=latest_market_states,
+                    latest_market_quotes=latest_market_quotes,
+                ),
+                name=f"live-grace-timeout:{session_id}",
+            )
         if market_state_source == "hub":
             quote_source = WebSocketMarketQuoteSource(
                 url=market_quote_hub_url,
@@ -1480,6 +1525,16 @@ async def _run_live_daemon(
                 market_task,
                 account_task,
                 *(() if quote_task is None else (quote_task,)),
+                *(
+                    ()
+                    if closed_candle_task is None
+                    else (closed_candle_task,)
+                ),
+                *(
+                    ()
+                    if grace_timeout_task is None
+                    else (grace_timeout_task,)
+                ),
                 lease_task,
                 reconcile_task,
             }
@@ -1495,6 +1550,19 @@ async def _run_live_daemon(
             if quote_task is not None and quote_task.done():
                 await quote_task
                 raise RuntimeError("market quote channel stopped unexpectedly")
+            if (
+                closed_candle_task is not None
+                and closed_candle_task.done()
+            ):
+                await closed_candle_task
+                raise RuntimeError(
+                    "closed candle exit channel stopped unexpectedly"
+                )
+            if grace_timeout_task is not None and grace_timeout_task.done():
+                await grace_timeout_task
+                raise RuntimeError(
+                    "grace timeout exit channel stopped unexpectedly"
+                )
             if lease_task.done():
                 await lease_task
                 raise RuntimeError("live lease heartbeat stopped unexpectedly")
@@ -1522,6 +1590,16 @@ async def _run_live_daemon(
                 account_task.cancel()
             if quote_task is not None and not quote_task.done():
                 quote_task.cancel()
+            if (
+                closed_candle_task is not None
+                and not closed_candle_task.done()
+            ):
+                closed_candle_task.cancel()
+            if (
+                grace_timeout_task is not None
+                and not grace_timeout_task.done()
+            ):
+                grace_timeout_task.cancel()
             if not lease_task.done():
                 lease_task.cancel()
             if not reconcile_task.done():
@@ -1532,6 +1610,16 @@ async def _run_live_daemon(
                 market_task,
                 account_task,
                 *((quote_task,) if quote_task is not None else ()),
+                *(
+                    (closed_candle_task,)
+                    if closed_candle_task is not None
+                    else ()
+                ),
+                *(
+                    (grace_timeout_task,)
+                    if grace_timeout_task is not None
+                    else ()
+                ),
                 lease_task,
                 reconcile_task,
                 *(
@@ -1574,6 +1662,8 @@ async def _run_live_daemon(
             await execution_coordinator.aclose()
         if client is not None:
             await client.aclose()
+        if closed_candle_feed is not None:
+            await closed_candle_feed.stop()
         if candle_source is not None:
             candle_source.close()
         if ema_candle_source is not None:
@@ -1728,6 +1818,86 @@ async def _run_quote_channel(
                 continue
             if failure is not None:
                 raise RuntimeError(f"market_quote_exit_failed:{failure}")
+
+
+async def _run_closed_candle_channel(
+    *,
+    source: BinanceClosedCandle15mFeed,
+    daemon: LiveStrategyDaemon,
+    latest_market_quotes: _LatestMarketQuoteCache,
+) -> None:
+    async for event in source:
+        quote = next(
+            iter(latest_market_quotes.for_symbols((event.candle.symbol,))),
+            None,
+        )
+        failure: str | None = None
+        for attempt in range(3):
+            try:
+                failure = await daemon.process_closed_candle(
+                    event,
+                    latest_quote=quote,
+                )
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if not _is_transient_live_runtime_error(error):
+                    raise
+                if attempt == 2:
+                    raise
+                delay_seconds = float(2**attempt)
+                log.warning(
+                    "live_closed_candle_processing_retry",
+                    symbol=event.candle.symbol,
+                    candle_start=event.candle.candle_start.isoformat(),
+                    attempt=attempt + 1,
+                    retry_delay_seconds=delay_seconds,
+                    error_type=type(error).__name__,
+                )
+                await asyncio.sleep(delay_seconds)
+        if failure is not None:
+            raise RuntimeError(f"closed_candle_exit_failed:{failure}")
+
+
+async def _run_grace_timeout_channel(
+    *,
+    daemon: LiveStrategyDaemon,
+    latest_market_states: _LatestMarketStateCache,
+    latest_market_quotes: _LatestMarketQuoteCache,
+    interval_seconds: float = 1.0,
+) -> None:
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    while True:
+        now = datetime.now(tz=UTC)
+        for state in latest_market_states.for_symbols(
+            tuple(sorted(daemon.managed_position_symbols))
+        ):
+            quote = next(
+                iter(latest_market_quotes.for_symbols((state.symbol,))),
+                None,
+            )
+            try:
+                failure = await daemon.process_grace_timeout(
+                    state,
+                    now=now,
+                    latest_quote=quote,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if not _is_transient_live_runtime_error(error):
+                    raise
+                log.warning(
+                    "live_grace_timeout_processing_degraded",
+                    symbol=state.symbol,
+                    error_type=type(error).__name__,
+                )
+                continue
+            if failure is not None:
+                raise RuntimeError(f"grace_timeout_exit_failed:{failure}")
+        await asyncio.sleep(interval_seconds)
 
 
 async def _run_account_event_channel(

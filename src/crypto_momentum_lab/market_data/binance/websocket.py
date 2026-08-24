@@ -99,6 +99,7 @@ class BinanceWebSocketConnection:
         ping_interval_seconds: float,
         ping_timeout_seconds: float,
         silence_timeout_seconds: float,
+        stream: CaptureStream | None = None,
         control_ack_timeout_seconds: float = 10.0,
         control_messages_per_second: float = 5,
         ingress_queue_max_events: int = 4096,
@@ -110,7 +111,15 @@ class BinanceWebSocketConnection:
         self._route = route
         self._environment = environment
         self._desired_names = tuple(sorted(desired_names))
-        self._stream = _stream_from_name(self._desired_names[0])
+        if not self._desired_names and stream is None:
+            raise ValueError(
+                "stream is required when desired_names is empty"
+            )
+        self._stream = (
+            stream
+            if stream is not None
+            else _stream_from_name(self._desired_names[0])
+        )
         self._generation = generation
         self._on_envelope = on_envelope
         self._on_lifecycle = on_lifecycle
@@ -733,6 +742,7 @@ def _silence_timeout_for_stream(
         CaptureStream.AGG_TRADE,
         CaptureStream.BOOK_TICKER,
         CaptureStream.FORCE_ORDER,
+        CaptureStream.KLINE_15M,
     }:
         return None
     return configured_timeout
@@ -939,7 +949,7 @@ def _exchange_sequence(
         return _required_sequence(payload, "a")
     if stream is CaptureStream.BOOK_TICKER:
         return _required_sequence(payload, "u")
-    if stream is CaptureStream.KLINE_1M:
+    if stream in {CaptureStream.KLINE_1M, CaptureStream.KLINE_15M}:
         kline = payload.get("k")
         if not isinstance(kline, dict):
             raise BinancePayloadError("kline payload is missing")

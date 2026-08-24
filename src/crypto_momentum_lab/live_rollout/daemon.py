@@ -7,7 +7,7 @@ from collections.abc import (
     Mapping,
 )
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from inspect import Parameter, signature
 from time import perf_counter
@@ -48,6 +48,9 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     PreparedOrderSubmission,
 )
 from crypto_momentum_lab.live_rollout.checkpoint_writer import CheckpointWriter
+from crypto_momentum_lab.live_rollout.closed_candle_feed import (
+    ClosedCandle15mEvent,
+)
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitCancellationRequest,
     LiveExitManager,
@@ -73,6 +76,7 @@ from crypto_momentum_lab.persistence.postgres.order_repository import (
     PersistedExchangeOrder,
 )
 from crypto_momentum_lab.risk.gateway import RiskContext, RiskGateway
+from crypto_momentum_lab.strategy_runner.position_exit import ClosedCandle15m
 
 log = structlog.get_logger()
 
@@ -531,6 +535,9 @@ class LiveStrategyDaemon:
         reconcile_orders: Callable[[], Awaitable[None]] | None = None,
         telemetry: LiveTelemetrySink | None = None,
         clock: Callable[[], datetime] | None = None,
+        on_managed_position_symbols: (
+            Callable[[frozenset[str]], Awaitable[None]] | None
+        ) = None,
     ) -> None:
         self._strategy = strategy
         self._risk_gateway = risk_gateway
@@ -553,11 +560,22 @@ class LiveStrategyDaemon:
         )
         self._telemetry = telemetry
         self._clock = clock or (lambda: datetime.now(tz=UTC))
+        self._on_managed_position_symbols = on_managed_position_symbols
+        self._managed_position_symbols: frozenset[str] = frozenset()
         self._context_generation = 0
         self._run_active = False
         self._entry_enabled = True
         self._exit_enabled = True
         self._last_transient_gate_reasons: tuple[str, ...] | None = None
+
+    async def _publish_managed_position_symbols(
+        self,
+        context: LiveDaemonRuntimeContext,
+    ) -> None:
+        symbols = context.open_position_symbols or frozenset()
+        self._managed_position_symbols = symbols
+        if self._on_managed_position_symbols is not None:
+            await self._on_managed_position_symbols(symbols)
 
     def _invalidate_context_cache(self) -> None:
         self._context_generation += 1
@@ -572,6 +590,10 @@ class LiveStrategyDaemon:
     @property
     def exit_enabled(self) -> bool:
         return self._exit_enabled
+
+    @property
+    def managed_position_symbols(self) -> frozenset[str]:
+        return self._managed_position_symbols
 
     def set_entry_enabled(self, enabled: bool, *, reason: str) -> None:
         if not isinstance(enabled, bool):
@@ -617,6 +639,7 @@ class LiveStrategyDaemon:
             return None
         self._invalidate_context_cache()
         context = await self._context_provider(state)
+        await self._publish_managed_position_symbols(context)
         if context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
             return f"unmanaged_live_positions:{symbols}"
@@ -659,6 +682,7 @@ class LiveStrategyDaemon:
         # bucket.  No invalidation happens on ticker arrival; account events
         # are the explicit cache-refresh seam.
         context = await self._context_provider(state)
+        await self._publish_managed_position_symbols(context)
         if context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
             return f"unmanaged_live_positions:{symbols}"
@@ -671,6 +695,73 @@ class LiveStrategyDaemon:
             log.error(
                 "live_quote_exit_failed",
                 symbol=quote.symbol,
+                reason=outcome.failure,
+            )
+        return outcome.failure
+
+    async def process_closed_candle(
+        self,
+        event: ClosedCandle15mEvent,
+        *,
+        latest_quote: RealtimeMarketQuote | None = None,
+    ) -> str | None:
+        """Process one final 15m candle on the independent exit path."""
+
+        if self._exit_manager is None or not self._exit_enabled:
+            return None
+        state = _market_state_for_closed_candle(
+            event.candle,
+            received_at=event.received_at,
+            quote=latest_quote,
+        )
+        # All symbols closing at the same boundary share one synthetic state
+        # bucket.  Reuse the provider's snapshot across that burst; account
+        # events and order execution remain the explicit invalidation seams.
+        context = await self._context_provider(state)
+        await self._publish_managed_position_symbols(context)
+        if context.unmanaged_position_symbols:
+            symbols = ",".join(sorted(context.unmanaged_position_symbols))
+            return f"unmanaged_live_positions:{symbols}"
+        outcome = await self._process_closed_candle_work(
+            event,
+            state,
+            context,
+            latest_quote,
+        )
+        if outcome.failure is not None:
+            log.error(
+                "live_closed_candle_exit_failed",
+                symbol=event.candle.symbol,
+                reason=outcome.failure,
+            )
+        return outcome.failure
+
+    async def process_grace_timeout(
+        self,
+        state: MarketState15s,
+        *,
+        now: datetime,
+        latest_quote: RealtimeMarketQuote | None = None,
+    ) -> str | None:
+        """Run the wall-clock fallback for an expired candle grace order."""
+
+        if self._exit_manager is None or not self._exit_enabled:
+            return None
+        context = await self._context_provider(state)
+        await self._publish_managed_position_symbols(context)
+        if context.unmanaged_position_symbols:
+            symbols = ",".join(sorted(context.unmanaged_position_symbols))
+            return f"unmanaged_live_positions:{symbols}"
+        outcome = await self._process_grace_timeout_work(
+            state,
+            now,
+            context,
+            latest_quote,
+        )
+        if outcome.failure is not None:
+            log.error(
+                "live_grace_timeout_exit_failed",
+                symbol=state.symbol,
                 reason=outcome.failure,
             )
         return outcome.failure
@@ -901,6 +992,7 @@ class LiveStrategyDaemon:
                     error_type=type(error).__name__,
                 )
                 continue
+            await self._publish_managed_position_symbols(context)
             gate = evaluate_live_gate(
                 replace(
                     context.gate_context,
@@ -975,7 +1067,11 @@ class LiveStrategyDaemon:
                     orphan_cancel_reason,
                     final_state_at,
                 )
-            if self._exit_manager is not None and self._exit_enabled:
+            if (
+                self._exit_manager is not None
+                and self._exit_enabled
+                and self._exit_manager.uses_market_state_exit
+            ):
                 await self._exit_lane.submit_market(state, context)
                 # Give the independent exit worker a scheduling opportunity
                 # without waiting for network-backed candle evaluation.
@@ -1108,7 +1204,11 @@ class LiveStrategyDaemon:
         state: MarketState15s,
         context: LiveDaemonRuntimeContext,
     ) -> _ExitLaneOutcome:
-        if self._exit_manager is None or not self._exit_enabled:
+        if (
+            self._exit_manager is None
+            or not self._exit_enabled
+            or not self._exit_manager.uses_market_state_exit
+        ):
             return _ExitLaneOutcome()
         if self._telemetry is not None:
             await self._telemetry.market_state_received(
@@ -1121,6 +1221,72 @@ class LiveStrategyDaemon:
             requests = await self._exit_manager.requests_for_state(
                 state,
                 context.managed_positions,
+            )
+            approved, submitted, failure = await self._process_exit_requests(
+                requests,
+                state=state,
+                context=context,
+            )
+        return _ExitLaneOutcome(
+            approved_intent_count=approved,
+            submitted_order_count=submitted,
+            failure=failure,
+        )
+
+    async def _process_closed_candle_work(
+        self,
+        event: ClosedCandle15mEvent,
+        state: MarketState15s,
+        context: LiveDaemonRuntimeContext,
+        latest_quote: RealtimeMarketQuote | None,
+    ) -> _ExitLaneOutcome:
+        if self._exit_manager is None or not self._exit_enabled:
+            return _ExitLaneOutcome()
+        if self._telemetry is not None:
+            await self._telemetry.market_state_received(
+                state,
+                occurred_at=event.received_at,
+                lane=LIVE_LANE_EXIT,
+            )
+        lock = self._exit_symbol_locks.setdefault(
+            event.candle.symbol,
+            asyncio.Lock(),
+        )
+        async with lock:
+            requests = await self._exit_manager.requests_for_closed_candle(
+                event.candle,
+                context.managed_positions,
+                latest_quote=latest_quote,
+                received_at=event.received_at,
+            )
+            approved, submitted, failure = await self._process_exit_requests(
+                requests,
+                state=state,
+                context=context,
+                invalidate_context=False,
+            )
+        return _ExitLaneOutcome(
+            approved_intent_count=approved,
+            submitted_order_count=submitted,
+            failure=failure,
+        )
+
+    async def _process_grace_timeout_work(
+        self,
+        state: MarketState15s,
+        now: datetime,
+        context: LiveDaemonRuntimeContext,
+        latest_quote: RealtimeMarketQuote | None,
+    ) -> _ExitLaneOutcome:
+        if self._exit_manager is None or not self._exit_enabled:
+            return _ExitLaneOutcome()
+        lock = self._exit_symbol_locks.setdefault(state.symbol, asyncio.Lock())
+        async with lock:
+            requests = await self._exit_manager.requests_for_grace_timeout(
+                now=now,
+                state=state,
+                positions=context.managed_positions,
+                latest_quote=latest_quote,
             )
             approved, submitted, failure = await self._process_exit_requests(
                 requests,
@@ -1172,6 +1338,7 @@ class LiveStrategyDaemon:
         state: MarketState15s,
         context: LiveDaemonRuntimeContext,
         reference_price: Decimal | None = None,
+        invalidate_context: bool = True,
     ) -> tuple[int, int, str | None]:
         approved = 0
         submitted = 0
@@ -1180,7 +1347,8 @@ class LiveStrategyDaemon:
                 cancel_result = await self._state_machine.cancel_order(
                     request.cancel_plan
                 )
-                self._invalidate_context_cache()
+                if invalidate_context:
+                    self._invalidate_context_cache()
                 if (
                     cancel_result.state
                     is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
@@ -1205,7 +1373,8 @@ class LiveStrategyDaemon:
                 )
                 if result is None:
                     continue
-                self._invalidate_context_cache()
+                if invalidate_context:
+                    self._invalidate_context_cache()
                 approved += 1
                 submitted += int(not result.suppressed)
                 if (
@@ -1225,7 +1394,8 @@ class LiveStrategyDaemon:
             )
             if result is None:
                 continue
-            self._invalidate_context_cache()
+            if invalidate_context:
+                self._invalidate_context_cache()
             approved += 1
             submitted += int(not result.suppressed)
             if result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
@@ -1384,6 +1554,49 @@ class LiveStrategyDaemon:
             _checkpoint_for_persistence(self._strategy),
             saved_at,
         )
+
+
+def _market_state_for_closed_candle(
+    candle: ClosedCandle15m,
+    *,
+    received_at: datetime,
+    quote: RealtimeMarketQuote | None,
+) -> MarketState15s:
+    bid_price = quote.bid_price if quote is not None else None
+    ask_price = quote.ask_price if quote is not None else None
+    if bid_price is not None and ask_price is not None:
+        spread = ask_price - bid_price
+        midpoint = (bid_price + ask_price) / Decimal("2")
+    else:
+        spread = None
+        midpoint = candle.close_price
+    return MarketState15s(
+        schema_version=1,
+        exchange="binance-usdm",
+        environment="live",
+        symbol=candle.symbol,
+        bucket_start=candle.candle_end - timedelta(seconds=15),
+        bucket_end=candle.candle_end,
+        open_price=candle.open_price,
+        high_price=None,
+        low_price=None,
+        close_price=candle.close_price,
+        trade_count=0,
+        trade_notional=Decimal("0"),
+        aggressive_buy_notional=Decimal("0"),
+        aggressive_sell_notional=Decimal("0"),
+        last_bid_price=bid_price,
+        last_ask_price=ask_price,
+        spread=spread,
+        midpoint=midpoint,
+        liquidation_count=0,
+        liquidation_notional=Decimal("0"),
+        mark_price=midpoint,
+        closed_kline_count=1,
+        source_event_count=1,
+        first_received_at=received_at,
+        last_received_at=received_at,
+    )
 
 
 def _checkpoint_for_persistence(strategy: LiveRuntimeStrategy) -> StrategyCheckpoint:

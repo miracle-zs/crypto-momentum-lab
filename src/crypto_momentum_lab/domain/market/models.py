@@ -20,6 +20,7 @@ class CaptureStream(StrEnum):
     FORCE_ORDER = "forceOrder"
     MARK_PRICE = "markPrice@1s"
     KLINE_1M = "kline_1m"
+    KLINE_15M = "kline_15m"
 
 
 class MarketDataState(StrEnum):

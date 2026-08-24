@@ -12,6 +12,7 @@ _ROUTES = {
     CaptureStream.FORCE_ORDER: CaptureRoute.MARKET,
     CaptureStream.MARK_PRICE: CaptureRoute.MARKET,
     CaptureStream.KLINE_1M: CaptureRoute.MARKET,
+    CaptureStream.KLINE_15M: CaptureRoute.MARKET,
 }
 
 GLOBAL_BOOK_TICKER_STREAM_NAME = "!bookTicker"
