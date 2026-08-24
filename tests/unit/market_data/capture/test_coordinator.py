@@ -109,6 +109,10 @@ class FakeEnvelopeRecovery:
         result: AggTradeRecoveryBatch,
     ) -> None:
         self.result = result
+        self.monitored_symbol_sets: list[frozenset[str]] = []
+
+    def set_monitored_symbols(self, symbols: frozenset[str]) -> None:
+        self.monitored_symbol_sets.append(symbols)
 
     async def expand(
         self,
@@ -330,6 +334,26 @@ async def test_coordinator_filters_global_book_ticker_to_monitored_symbols(
     )
 
     assert coordinator.filtered_book_ticker_events == 1
+
+
+async def test_coordinator_resets_recovery_and_filters_retired_streams(
+    raw_envelope: RawEnvelope,
+) -> None:
+    recovery = FakeEnvelopeRecovery(AggTradeRecoveryBatch((), ()))
+    queue = BoundedEnvelopeQueue(max_events=10, max_bytes=100000)
+    coordinator = CaptureCoordinator(
+        queue=queue,
+        archive=ControlledArchive(),
+        quality=FakeQualityTracker(),
+        repository=FakeCaptureRepository(),
+        envelope_recovery=recovery,
+    )
+
+    coordinator.set_monitored_symbols(frozenset({"BTCUSDT"}))
+    await coordinator.submit(replace(raw_envelope, symbol="ETHUSDT"))
+
+    assert recovery.monitored_symbol_sets == [frozenset({"BTCUSDT"})]
+    assert queue.size == 0
 
 
 async def test_lifecycle_events_are_persisted() -> None:

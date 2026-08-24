@@ -98,6 +98,22 @@ async def test_recoverer_classifies_unrecovered_cross_session_gap() -> None:
     assert event.details["missing_count"] == 2
 
 
+async def test_recoverer_resets_symbol_after_intentional_unsubscribe() -> None:
+    history = FakeAggTradeHistory(())
+    recoverer = AggTradeGapRecoverer(history)
+    recoverer.set_monitored_symbols(frozenset({"BTCUSDT"}))
+    await recoverer.expand((_envelope(10),))
+
+    recoverer.set_monitored_symbols(frozenset())
+    recoverer.set_monitored_symbols(frozenset({"BTCUSDT"}))
+    resumed = await recoverer.expand((_envelope(100),))
+
+    assert [item.exchange_sequence for item in resumed.envelopes] == ["100"]
+    assert resumed.unrecovered_gaps == ()
+    assert history.calls == []
+    assert recoverer.metrics.detected_gap_count == 0
+
+
 async def test_recoverer_bounds_rest_recovery_latency() -> None:
     recoverer = AggTradeGapRecoverer(
         SlowAggTradeHistory(),

@@ -44,6 +44,8 @@ type GapSink = Callable[[AggTradeGap], object]
 
 
 class EnvelopeRecovery(Protocol):
+    def set_monitored_symbols(self, symbols: frozenset[str]) -> None: ...
+
     async def expand(
         self,
         batch: tuple[RawEnvelope, ...],
@@ -98,18 +100,21 @@ class CaptureCoordinator:
         return self._filtered_book_ticker_events
 
     def set_monitored_symbols(self, symbols: frozenset[str]) -> None:
-        """Bound global quote ingress to the active universe."""
-        self._monitored_symbols = frozenset(
+        """Bound ingress and continuity state to the active symbol set."""
+        normalized = frozenset(
             symbol.upper() for symbol in symbols
         )
+        self._monitored_symbols = normalized
+        if self._envelope_recovery is not None:
+            self._envelope_recovery.set_monitored_symbols(normalized)
 
     def accepts_symbol(self, stream: CaptureStream, symbol: str) -> bool:
         if (
-            stream is CaptureStream.BOOK_TICKER
-            and self._monitored_symbols is not None
+            self._monitored_symbols is not None
             and symbol.upper() not in self._monitored_symbols
         ):
-            self._filtered_book_ticker_events += 1
+            if stream is CaptureStream.BOOK_TICKER:
+                self._filtered_book_ticker_events += 1
             return False
         return True
 

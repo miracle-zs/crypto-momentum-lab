@@ -98,6 +98,7 @@ class AggTradeGapRecoverer:
         self._request_timestamps: deque[float] = deque()
         self._request_budget_lock = asyncio.Lock()
         self._last_seen: dict[tuple[str, str], _SeenTrade] = {}
+        self._monitored_symbols: frozenset[str] | None = None
         self._detected_gap_count = 0
         self._recovered_gap_count = 0
         self._unrecovered_gap_count = 0
@@ -116,6 +117,16 @@ class AggTradeGapRecoverer:
             duplicate_trade_count=self._duplicate_trade_count,
         )
 
+    def set_monitored_symbols(self, symbols: frozenset[str]) -> None:
+        """Forget continuity for intentionally unsubscribed symbols."""
+        normalized = frozenset(symbol.upper() for symbol in symbols)
+        self._monitored_symbols = normalized
+        self._last_seen = {
+            key: seen
+            for key, seen in self._last_seen.items()
+            if key[1] in normalized
+        }
+
     async def expand(
         self,
         batch: Sequence[RawEnvelope],
@@ -128,6 +139,12 @@ class AggTradeGapRecoverer:
                 accepted_indices.add(index)
                 continue
             key, current_id, event_at = parsed
+            if (
+                self._monitored_symbols is not None
+                and key[1] not in self._monitored_symbols
+            ):
+                accepted_indices.add(index)
+                continue
             previous = self._last_seen.get(key)
             if previous is None:
                 self._last_seen[key] = _SeenTrade(
