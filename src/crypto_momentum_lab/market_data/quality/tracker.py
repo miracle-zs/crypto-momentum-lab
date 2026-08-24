@@ -46,9 +46,26 @@ class StreamQualityTracker:
         self._observed: dict[_StateKey, _ObservedState] = {}
         self._known_gap_counts: dict[_StateKey, int] = {}
         self._closed_sessions: dict[UUID, datetime] = {}
+        self._monitored_symbols: frozenset[str] | None = None
+
+    def set_monitored_symbols(self, symbols: frozenset[str]) -> None:
+        """Forget continuity baselines for intentionally retired symbols."""
+        normalized = frozenset(symbol.upper() for symbol in symbols)
+        self._monitored_symbols = normalized
+        self._observed = {
+            key: state
+            for key, state in self._observed.items()
+            if key[2] == "_global" or key[2].upper() in normalized
+        }
 
     def observe(self, envelope: RawEnvelope) -> tuple[QualityEvent, ...]:
         symbol = envelope.symbol or "_global"
+        if (
+            symbol != "_global"
+            and self._monitored_symbols is not None
+            and symbol.upper() not in self._monitored_symbols
+        ):
+            return ()
         key = (envelope.connection_session_id, envelope.stream, symbol)
         previous = self._observed.get(key)
         current_payload = _payload_bytes(envelope)

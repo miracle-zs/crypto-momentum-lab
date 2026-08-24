@@ -18,6 +18,8 @@ from crypto_momentum_lab.market_data.capture.queue import BoundedEnvelopeQueue
 
 
 class QualityTracker(Protocol):
+    def set_monitored_symbols(self, symbols: frozenset[str]) -> None: ...
+
     def observe(self, envelope: RawEnvelope) -> tuple[QualityEvent, ...]: ...
 
     def observe_lifecycle(
@@ -105,6 +107,7 @@ class CaptureCoordinator:
             symbol.upper() for symbol in symbols
         )
         self._monitored_symbols = normalized
+        self._quality.set_monitored_symbols(normalized)
         if self._envelope_recovery is not None:
             self._envelope_recovery.set_monitored_symbols(normalized)
 

@@ -68,6 +68,10 @@ class ControlledArchive:
 class FakeQualityTracker:
     def __init__(self) -> None:
         self.observed: list[RawEnvelope] = []
+        self.monitored_symbol_sets: list[frozenset[str]] = []
+
+    def set_monitored_symbols(self, symbols: frozenset[str]) -> None:
+        self.monitored_symbol_sets.append(symbols)
 
     def observe(self, envelope: RawEnvelope) -> tuple[QualityEvent, ...]:
         self.observed.append(envelope)
@@ -340,11 +344,12 @@ async def test_coordinator_resets_recovery_and_filters_retired_streams(
     raw_envelope: RawEnvelope,
 ) -> None:
     recovery = FakeEnvelopeRecovery(AggTradeRecoveryBatch((), ()))
+    quality = FakeQualityTracker()
     queue = BoundedEnvelopeQueue(max_events=10, max_bytes=100000)
     coordinator = CaptureCoordinator(
         queue=queue,
         archive=ControlledArchive(),
-        quality=FakeQualityTracker(),
+        quality=quality,
         repository=FakeCaptureRepository(),
         envelope_recovery=recovery,
     )
@@ -353,6 +358,7 @@ async def test_coordinator_resets_recovery_and_filters_retired_streams(
     await coordinator.submit(replace(raw_envelope, symbol="ETHUSDT"))
 
     assert recovery.monitored_symbol_sets == [frozenset({"BTCUSDT"})]
+    assert quality.monitored_symbol_sets == [frozenset({"BTCUSDT"})]
     assert queue.size == 0
 
 

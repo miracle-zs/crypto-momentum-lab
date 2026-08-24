@@ -54,6 +54,71 @@ def test_numeric_sequence_gap_is_recorded(
     )
 
 
+def test_tracker_resets_symbol_after_intentional_unsubscribe(
+    raw_envelope: RawEnvelope,
+) -> None:
+    assert raw_envelope.symbol is not None
+    tracker = StreamQualityTracker()
+    tracker.set_monitored_symbols(frozenset({raw_envelope.symbol}))
+    tracker.observe(replace(raw_envelope, exchange_sequence="10"))
+
+    tracker.set_monitored_symbols(frozenset())
+    assert (
+        tracker.observe(
+            replace(
+                raw_envelope,
+                local_sequence=2,
+                exchange_sequence="50",
+            )
+        )
+        == ()
+    )
+    tracker.set_monitored_symbols(frozenset({raw_envelope.symbol}))
+
+    assert (
+        tracker.observe(
+            replace(
+                raw_envelope,
+                local_sequence=3,
+                exchange_sequence="100",
+            )
+        )
+        == ()
+    )
+    assert (
+        tracker.known_gap_count(
+            connection_session_id=raw_envelope.connection_session_id,
+            stream=raw_envelope.stream,
+            symbol=raw_envelope.symbol,
+        )
+        == 0
+    )
+
+
+def test_tracker_preserves_continuity_for_symbols_still_monitored(
+    raw_envelope: RawEnvelope,
+) -> None:
+    assert raw_envelope.symbol is not None
+    tracker = StreamQualityTracker()
+    tracker.set_monitored_symbols(frozenset({raw_envelope.symbol}))
+    tracker.observe(replace(raw_envelope, exchange_sequence="10"))
+
+    tracker.set_monitored_symbols(
+        frozenset({raw_envelope.symbol, "ETHUSDT"})
+    )
+    events = tracker.observe(
+        replace(
+            raw_envelope,
+            local_sequence=2,
+            exchange_sequence="12",
+        )
+    )
+
+    assert [event.category for event in events] == [
+        QualityCategory.SEQUENCE_GAP
+    ]
+
+
 def test_event_time_regression_and_silence_are_recorded(
     raw_envelope: RawEnvelope,
 ) -> None:
