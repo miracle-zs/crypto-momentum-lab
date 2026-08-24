@@ -709,6 +709,14 @@ def market_state_from_payload(payload: dict[str, object]) -> MarketState15s:
         closed_kline_1m_close_price=_optional_decimal(
             payload, "closed_kline_1m_close_price"
         ),
+        data_complete=_optional_bool_default(
+            payload,
+            "data_complete",
+            default=True,
+        ),
+        missing_agg_trade_count=(
+            _optional_int(payload, "missing_agg_trade_count") or 0
+        ),
     )
 
 
@@ -783,6 +791,20 @@ def _optional_int(payload: dict[str, object], name: str) -> int | None:
         return None
     if not isinstance(value, int) or isinstance(value, bool):
         raise MarketStateHubProtocolError(f"{name} must be an integer")
+    return value
+
+
+def _optional_bool_default(
+    payload: dict[str, object],
+    name: str,
+    *,
+    default: bool,
+) -> bool:
+    if name not in payload:
+        return default
+    value = payload[name]
+    if not isinstance(value, bool):
+        raise MarketStateHubProtocolError(f"{name} must be a boolean")
     return value
 
 

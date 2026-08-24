@@ -4,11 +4,11 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import cast
 
-from sqlalchemy import and_, func, or_, select, tuple_
+from sqlalchemy import and_, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.market.models import AggTradeGap, MarketState15s
 from crypto_momentum_lab.persistence.postgres.models import (
     RuntimeMarketState15sRow,
 )
@@ -102,6 +102,8 @@ def runtime_state_row(
         "closure_reason": closure_reason,
         "input_sequence_min": input_sequence_min,
         "input_sequence_max": input_sequence_max,
+        "data_complete": state.data_complete,
+        "missing_agg_trade_count": state.missing_agg_trade_count,
     }
 
 
@@ -136,6 +138,8 @@ def market_state_from_row(row: RuntimeMarketState15sRow) -> MarketState15s:
         source_event_count=row.source_event_count,
         first_received_at=row.first_received_at,
         last_received_at=row.last_received_at,
+        data_complete=row.data_complete,
+        missing_agg_trade_count=row.missing_agg_trade_count,
     )
 
 
@@ -170,6 +174,38 @@ class PostgresRuntimeMarketStateRepository:
         async with self._session_factory() as session:
             async with session.begin():
                 await _insert_many_idempotent(session, values)
+
+    async def mark_incomplete(self, gap: AggTradeGap) -> None:
+        previous_bucket = _bucket_start_15s(gap.previous_event_at)
+        current_bucket = _bucket_start_15s(gap.current_event_at)
+        first_bucket = min(previous_bucket, current_bucket)
+        last_bucket = max(previous_bucket, current_bucket)
+        async with self._session_factory() as session:
+            async with session.begin():
+                await session.execute(
+                    update(RuntimeMarketState15sRow)
+                    .where(
+                        RuntimeMarketState15sRow.environment == gap.environment,
+                        RuntimeMarketState15sRow.symbol == gap.symbol,
+                        RuntimeMarketState15sRow.bucket_start >= first_bucket,
+                        RuntimeMarketState15sRow.bucket_start <= last_bucket,
+                    )
+                    .values(data_complete=False)
+                )
+                await session.execute(
+                    update(RuntimeMarketState15sRow)
+                    .where(
+                        RuntimeMarketState15sRow.environment == gap.environment,
+                        RuntimeMarketState15sRow.symbol == gap.symbol,
+                        RuntimeMarketState15sRow.bucket_start == current_bucket,
+                    )
+                    .values(
+                        missing_agg_trade_count=(
+                            RuntimeMarketState15sRow.missing_agg_trade_count
+                            + gap.missing_count
+                        )
+                    )
+                )
 
     async def load_after(
         self,
@@ -388,3 +424,12 @@ def _normalize_for_compare(value: object) -> object:
 def _require_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
+
+
+def _bucket_start_15s(value: datetime) -> datetime:
+    _require_aware(value, "bucket timestamp")
+    utc_value = value.astimezone(UTC)
+    return utc_value.replace(
+        second=(utc_value.second // 15) * 15,
+        microsecond=0,
+    )

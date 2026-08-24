@@ -125,6 +125,48 @@ def test_parses_raw_stream_payload_when_expected_stream_is_known() -> None:
     assert envelope.exchange_sequence == "42"
 
 
+def test_parses_global_book_ticker_stream_payload() -> None:
+    envelope = parse_binance_message(
+        route=route_for(CaptureStream.BOOK_TICKER),
+        message=json.dumps(
+            {
+                "stream": "!bookTicker",
+                "data": {
+                    "e": "bookTicker",
+                    "E": 1781488800000,
+                    "s": "BTCUSDT",
+                    "u": 7,
+                },
+            }
+        ),
+        environment="test",
+        connection_session_id=UUID(int=1),
+        local_sequence=1,
+        subscription_generation=3,
+        received_at=datetime(2026, 6, 15, 2, 0, tzinfo=UTC),
+        received_monotonic_ns=10,
+        expected_stream=CaptureStream.BOOK_TICKER,
+    )
+
+    assert envelope.stream is CaptureStream.BOOK_TICKER
+    assert envelope.symbol == "BTCUSDT"
+
+
+def test_fast_symbol_extracts_combined_and_nested_payloads() -> None:
+    from crypto_momentum_lab.market_data.binance.websocket import _fast_symbol
+
+    assert (
+        _fast_symbol(
+            {
+                "stream": "!bookTicker",
+                "data": {"s": "BTCUSDT"},
+            }
+        )
+        == "BTCUSDT"
+    )
+    assert _fast_symbol({"o": {"s": "ETHUSDT"}}) == "ETHUSDT"
+
+
 @pytest.mark.asyncio
 async def test_connection_reconnects_after_capture_queue_backpressure(
     monkeypatch,
@@ -207,3 +249,81 @@ async def test_connection_reconnects_after_unexpected_session_error(
 
     assert attempts == 2
     assert lifecycle_reasons == ["RuntimeError", "stopped"]
+
+
+@pytest.mark.asyncio
+async def test_subscription_updates_are_queued_without_direct_socket_access(
+    monkeypatch,
+) -> None:
+    connection = BinanceWebSocketConnection(
+        base_url="wss://example.test/ws",
+        route=route_for(CaptureStream.AGG_TRADE),
+        environment="test",
+        desired_names=("btcusdt@aggTrade",),
+        generation=1,
+        on_envelope=lambda envelope: asyncio.sleep(0),
+        on_lifecycle=lambda event: asyncio.sleep(0),
+        reconnect_delays=(0.0,),
+        connection_lifetime_seconds=60,
+        open_timeout_seconds=1,
+        ping_interval_seconds=20,
+        ping_timeout_seconds=20,
+        silence_timeout_seconds=2,
+    )
+    connection._connection = object()
+
+    async def forbidden_send(*args, **kwargs) -> None:
+        del args, kwargs
+        raise AssertionError("subscription updates must be sent by the actor")
+
+    monkeypatch.setattr(connection, "_send_control", forbidden_send)
+
+    await connection.subscribe(("ethusdt@aggTrade",), generation=2)
+    await connection.unsubscribe(("btcusdt@aggTrade",), generation=3)
+
+    assert connection._desired_names == ("ethusdt@aggTrade",)
+    assert connection._generation == 3
+
+
+@pytest.mark.parametrize(
+    ("stream", "expected_timeout"),
+    [
+        (CaptureStream.AGG_TRADE, None),
+        (CaptureStream.BOOK_TICKER, None),
+        (CaptureStream.FORCE_ORDER, None),
+    ],
+)
+def test_event_stream_silence_policy(
+    stream: CaptureStream,
+    expected_timeout: float | None,
+) -> None:
+    from crypto_momentum_lab.market_data.binance.websocket import (
+        _silence_timeout_for_stream,
+    )
+
+    assert (
+        _silence_timeout_for_stream(stream, configured_timeout=30.0)
+        == expected_timeout
+    )
+
+
+@pytest.mark.parametrize(
+    ("stream", "expected_timeout"),
+    [
+        (CaptureStream.AGG_TRADE, None),
+        (CaptureStream.BOOK_TICKER, None),
+        (CaptureStream.FORCE_ORDER, 10.0),
+    ],
+)
+def test_ping_timeout_policy(
+    stream: CaptureStream,
+    expected_timeout: float | None,
+) -> None:
+    from crypto_momentum_lab.market_data.binance.websocket import (
+        _ping_timeout_for_stream,
+    )
+
+    assert (
+        _ping_timeout_for_stream(stream, configured_timeout=10.0)
+        == expected_timeout
+    )

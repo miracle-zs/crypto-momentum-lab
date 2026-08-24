@@ -81,6 +81,16 @@ def test_replay_envelopes_sorts_by_local_receive_order(
     assert [item.local_sequence for item in replayed] == [9, 1]
 
 
+def test_archive_round_trip_preserves_recovery_provenance(
+    raw_envelope: RawEnvelope,
+) -> None:
+    recovered = replace(raw_envelope, recovered=True)
+
+    decoded = deserialize_envelope_row(serialize_envelope(recovered).decode())
+
+    assert decoded == recovered
+
+
 def _write_zstd_rows(path: Path, rows: tuple[str, ...]) -> None:
     with zstandard.open(path, "wt", encoding="utf-8") as stream:
         for row in rows:

@@ -148,6 +148,8 @@ def market_state_15s_row(state: MarketState15s) -> dict[str, object]:
         "source_event_count": state.source_event_count,
         "first_received_at": state.first_received_at,
         "last_received_at": state.last_received_at,
+        "data_complete": state.data_complete,
+        "missing_agg_trade_count": state.missing_agg_trade_count,
     }
 
 
@@ -467,6 +469,16 @@ def _market_state_from_row(row: dict[str, object], path: Path) -> MarketState15s
         source_event_count=_required_int(row, "source_event_count"),
         first_received_at=_optional_datetime(row, "first_received_at"),
         last_received_at=_optional_datetime(row, "last_received_at"),
+        data_complete=_optional_bool_default(
+            row,
+            "data_complete",
+            default=True,
+        ),
+        missing_agg_trade_count=_optional_int_default(
+            row,
+            "missing_agg_trade_count",
+            default=0,
+        ),
     )
 
 
@@ -486,6 +498,31 @@ def _required_int(row: dict[str, object], key: str) -> int:
     if isinstance(value, str):
         return int(value)
     raise ValueError(f"{key} must be an int")
+
+
+def _optional_int_default(
+    row: dict[str, object],
+    key: str,
+    *,
+    default: int,
+) -> int:
+    if key not in row or row[key] is None:
+        return default
+    return _required_int(row, key)
+
+
+def _optional_bool_default(
+    row: dict[str, object],
+    key: str,
+    *,
+    default: bool,
+) -> bool:
+    if key not in row or row[key] is None:
+        return default
+    value = row[key]
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be a bool")
+    return value
 
 
 def _required_decimal(row: dict[str, object], key: str) -> Decimal:

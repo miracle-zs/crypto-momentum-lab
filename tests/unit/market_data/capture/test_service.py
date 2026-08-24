@@ -40,9 +40,16 @@ class FakeRepository:
         return None
 
 
-def build_service(*, queue_max_events: int) -> MarketDataCaptureService:
+def build_service(
+    *,
+    queue_max_events: int,
+    queue_max_bytes: int = 100000,
+) -> MarketDataCaptureService:
     return MarketDataCaptureService(
-        queue=BoundedEnvelopeQueue(max_events=queue_max_events, max_bytes=100000),
+        queue=BoundedEnvelopeQueue(
+            max_events=queue_max_events,
+            max_bytes=queue_max_bytes,
+        ),
         repository=FakeRepository(),
         connection_pool=FakeConnectionPool(),
         disk_guard=DiskSpaceGuard(
@@ -53,11 +60,12 @@ def build_service(*, queue_max_events: int) -> MarketDataCaptureService:
     )
 
 
-async def test_queue_overflow_halts_service(raw_envelope: RawEnvelope) -> None:
-    service = build_service(queue_max_events=1)
-    await service.submit(raw_envelope)
+async def test_unrecoverable_queue_input_halts_service(
+    raw_envelope: RawEnvelope,
+) -> None:
+    service = build_service(queue_max_events=1, queue_max_bytes=1)
 
-    with pytest.raises(CaptureQueueFull):
+    with pytest.raises(CaptureQueueFull, match="envelope exceeds"):
         await service.submit(raw_envelope)
 
     assert service.state is MarketDataState.HALTED

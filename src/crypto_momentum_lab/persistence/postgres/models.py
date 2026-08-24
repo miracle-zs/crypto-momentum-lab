@@ -4,6 +4,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -218,8 +219,14 @@ class RuntimeMarketState15sRow(Base):
     closure_reason: Mapped[str] = mapped_column(String(32))
     input_sequence_min: Mapped[int | None] = mapped_column(Integer)
     input_sequence_max: Mapped[int | None] = mapped_column(Integer)
+    data_complete: Mapped[bool] = mapped_column(Boolean, default=True)
+    missing_agg_trade_count: Mapped[int] = mapped_column(Integer, default=0)
 
     __table_args__ = (
+        CheckConstraint(
+            "missing_agg_trade_count >= 0",
+            name="missing_agg_trade_nonnegative",
+        ),
         Index(
             "ix_runtime_market_states_15s_polling",
             "environment",

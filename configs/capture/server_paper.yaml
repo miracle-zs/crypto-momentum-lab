@@ -5,6 +5,7 @@ enabled_streams:
   - bookTicker
   - forceOrder
 max_subscriptions_per_connection: 100
+ingress_queue_max_events: 4096
 book_ticker_max_subscriptions_per_connection: 25
 book_ticker_use_all_stream: true
 book_ticker_coalescing_interval_seconds: 1.0

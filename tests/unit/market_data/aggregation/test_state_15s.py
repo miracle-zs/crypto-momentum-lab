@@ -13,6 +13,7 @@ from crypto_momentum_lab.domain.market.models import (
     OrderSide,
 )
 from crypto_momentum_lab.market_data.aggregation.state_15s import (
+    MarketState15sAccumulator,
     aggregate_market_states_15s,
     bucket_start_15s,
 )
@@ -151,6 +152,26 @@ def test_different_symbols_produce_separate_states() -> None:
         ("BTCUSDT", 1),
         ("ETHUSDT", 1),
     ]
+
+
+def test_incremental_accumulator_snapshots_without_consuming_the_bucket() -> None:
+    first = _trade(sequence=1, price=Decimal("100"))
+    accumulator = MarketState15sAccumulator.for_bucket(first)
+    accumulator.observe(first)
+    accumulator.observe(_trade(sequence=2, price=Decimal("101")))
+
+    realtime = accumulator.snapshot()
+    assert realtime.state.trade_count == 2
+    assert realtime.state.close_price == Decimal("101")
+    assert realtime.input_sequence_min == 1
+    assert realtime.input_sequence_max == 2
+
+    accumulator.observe(_trade(sequence=3, price=Decimal("99")))
+    durable = accumulator.snapshot()
+    assert durable.state.trade_count == 3
+    assert durable.state.close_price == Decimal("99")
+    assert durable.input_sequence_min == 1
+    assert durable.input_sequence_max == 3
 
 
 def _trade(

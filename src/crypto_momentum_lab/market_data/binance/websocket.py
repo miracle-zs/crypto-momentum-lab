@@ -60,6 +60,10 @@ class BinanceWebSocketMetricsSnapshot:
     pending_control_method: str | None = None
     ingress_queue_events: int = 0
     ingress_queue_dropped_events: int = 0
+    ingress_queue_max_events: int = 0
+    ingress_queue_high_watermark_events: int = 0
+    reader_task_alive: bool = False
+    dispatch_task_alive: bool = False
 
 
 class _ConnectionPhase(StrEnum):
@@ -97,7 +101,7 @@ class BinanceWebSocketConnection:
         silence_timeout_seconds: float,
         control_ack_timeout_seconds: float = 10.0,
         control_messages_per_second: float = 5,
-        ingress_queue_max_events: int = 512,
+        ingress_queue_max_events: int = 4096,
         symbol_filter: Callable[[CaptureStream, str], bool] | None = None,
         on_realtime_envelope: EnvelopeSink | None = None,
     ) -> None:
@@ -147,6 +151,9 @@ class BinanceWebSocketConnection:
         self._last_reason: str | None = None
         self._ingress_queue_events = 0
         self._ingress_queue_dropped_events = 0
+        self._ingress_queue_high_watermark_events = 0
+        self._reader_task: asyncio.Task[None] | None = None
+        self._dispatch_task: asyncio.Task[None] | None = None
 
     def metrics_snapshot(self) -> BinanceWebSocketMetricsSnapshot:
         return BinanceWebSocketMetricsSnapshot(
@@ -184,6 +191,18 @@ class BinanceWebSocketConnection:
             ),
             ingress_queue_events=self._ingress_queue_events,
             ingress_queue_dropped_events=self._ingress_queue_dropped_events,
+            ingress_queue_max_events=self._ingress_queue_max_events,
+            ingress_queue_high_watermark_events=(
+                self._ingress_queue_high_watermark_events
+            ),
+            reader_task_alive=(
+                self._reader_task is not None
+                and not self._reader_task.done()
+            ),
+            dispatch_task_alive=(
+                self._dispatch_task is not None
+                and not self._dispatch_task.done()
+            ),
         )
 
     async def start(self) -> None:
@@ -315,6 +334,7 @@ class BinanceWebSocketConnection:
         reader_task: asyncio.Task[None] | None = None
         dispatch_task: asyncio.Task[None] | None = None
         ack_task: asyncio.Task[object] | None = None
+        desired_task: asyncio.Task[bool] | None = None
         async with connect(
             uri,
             proxy=None,
@@ -348,20 +368,22 @@ class BinanceWebSocketConnection:
             dispatch_task = asyncio.create_task(
                 self._dispatch_messages(data_queue)
             )
-            initial_names, initial_generation = await self._desired_snapshot()
-            await self._start_control(
-                connection,
-                "SUBSCRIBE",
-                initial_names,
-                generation=initial_generation,
-            )
-            ack_task = asyncio.create_task(ack_queue.get())
-            desired_task = asyncio.create_task(self._desired_event.wait())
-            silence_timeout = _silence_timeout_for_stream(
-                self._stream,
-                configured_timeout=self._silence_timeout_seconds,
-            )
+            self._reader_task = reader_task
+            self._dispatch_task = dispatch_task
             try:
+                initial_names, initial_generation = await self._desired_snapshot()
+                await self._start_control(
+                    connection,
+                    "SUBSCRIBE",
+                    initial_names,
+                    generation=initial_generation,
+                )
+                ack_task = asyncio.create_task(ack_queue.get())
+                desired_task = asyncio.create_task(self._desired_event.wait())
+                silence_timeout = _silence_timeout_for_stream(
+                    self._stream,
+                    configured_timeout=self._silence_timeout_seconds,
+                )
                 while not self._stopping:
                     if should_replace_connection(
                         opened_at=opened_at,
@@ -395,7 +417,12 @@ class BinanceWebSocketConnection:
                             else min(timeout, control_timeout)
                         )
                     done, _ = await asyncio.wait(
-                        (reader_task, ack_task, desired_task),
+                        (
+                            reader_task,
+                            dispatch_task,
+                            ack_task,
+                            desired_task,
+                        ),
                         timeout=timeout,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
@@ -412,6 +439,10 @@ class BinanceWebSocketConnection:
                                 "Binance control ACK timed out"
                             )
                         raise TimeoutError("Binance WebSocket is silent")
+
+                    if dispatch_task in done:
+                        dispatch_task.result()
+                        return "stopped"
 
                     if reader_task in done:
                         reader_task.result()
@@ -444,6 +475,9 @@ class BinanceWebSocketConnection:
                     if task is not None
                 )
                 await _cancel_and_drain_tasks(child_tasks)
+                self._reader_task = None
+                self._dispatch_task = None
+                self._ingress_queue_events = 0
         return "closed"
 
     async def _read_messages(
@@ -509,6 +543,10 @@ class BinanceWebSocketConnection:
                     "WebSocket ingress queue is saturated"
                 ) from exc
             self._ingress_queue_events = data_queue.qsize()
+            self._ingress_queue_high_watermark_events = max(
+                self._ingress_queue_high_watermark_events,
+                self._ingress_queue_events,
+            )
             # websockets may return an already-buffered message without
             # suspending. Yield explicitly so the actor can process an ACK
             # and the dispatcher can make progress under bursty streams.

@@ -6,6 +6,7 @@ from typing import Any
 from uuid import UUID
 
 from crypto_momentum_lab.domain.market.models import (
+    AggTradeGap,
     CaptureRoute,
     CaptureStream,
     ConnectionLifecycleEvent,
@@ -13,6 +14,9 @@ from crypto_momentum_lab.domain.market.models import (
     QualityCategory,
     QualityEvent,
     RawEnvelope,
+)
+from crypto_momentum_lab.market_data.agg_trade_recovery import (
+    AggTradeRecoveryBatch,
 )
 from crypto_momentum_lab.market_data.capture.coordinator import (
     CaptureCoordinator,
@@ -62,7 +66,11 @@ class ControlledArchive:
 
 
 class FakeQualityTracker:
+    def __init__(self) -> None:
+        self.observed: list[RawEnvelope] = []
+
     def observe(self, envelope: RawEnvelope) -> tuple[QualityEvent, ...]:
+        self.observed.append(envelope)
         return ()
 
     def observe_lifecycle(
@@ -93,6 +101,20 @@ class FakeCaptureRepository:
 
     async def save_process_state(self, **kwargs: Any) -> None:
         return None
+
+
+class FakeEnvelopeRecovery:
+    def __init__(
+        self,
+        result: AggTradeRecoveryBatch,
+    ) -> None:
+        self.result = result
+
+    async def expand(
+        self,
+        batch: tuple[RawEnvelope, ...],
+    ) -> AggTradeRecoveryBatch:
+        return self.result
 
 
 async def test_ack_is_emitted_only_after_archive_returns(
@@ -254,6 +276,62 @@ async def test_coordinator_only_archives_selected_streams(
     assert tuple(item.local_sequence for item in archive.appended) == (2,)
 
 
+async def test_coordinator_does_not_side_process_unarchived_book_ticker(
+    raw_envelope: RawEnvelope,
+) -> None:
+    archive = ControlledArchive()
+    quality = FakeQualityTracker()
+    coordinator = CaptureCoordinator(
+        queue=BoundedEnvelopeQueue(max_events=10, max_bytes=100000),
+        archive=archive,
+        quality=quality,
+        repository=FakeCaptureRepository(),
+        archive_streams=frozenset({CaptureStream.FORCE_ORDER}),
+    )
+    book_ticker = replace(
+        raw_envelope,
+        route=CaptureRoute.PUBLIC,
+        stream=CaptureStream.BOOK_TICKER,
+        raw_payload={
+            "e": "bookTicker",
+            "s": "BTCUSDT",
+            "u": 1,
+        },
+    )
+
+    task = asyncio.create_task(coordinator.run())
+    await coordinator.submit(book_ticker)
+    await coordinator.stop()
+    await task
+
+    assert quality.observed == []
+    assert archive.appended == []
+
+
+async def test_coordinator_filters_global_book_ticker_to_monitored_symbols(
+    raw_envelope: RawEnvelope,
+) -> None:
+    coordinator = CaptureCoordinator(
+        queue=BoundedEnvelopeQueue(max_events=10, max_bytes=100000),
+        archive=ControlledArchive(),
+        quality=FakeQualityTracker(),
+        repository=FakeCaptureRepository(),
+        archive_streams=frozenset({CaptureStream.FORCE_ORDER}),
+    )
+    coordinator.set_monitored_symbols(frozenset({"BTCUSDT"}))
+
+    await coordinator.submit(
+        replace(
+            raw_envelope,
+            route=CaptureRoute.PUBLIC,
+            stream=CaptureStream.BOOK_TICKER,
+            symbol="ETHUSDT",
+        )
+    )
+
+    assert coordinator.filtered_book_ticker_events == 1
+
+
 async def test_lifecycle_events_are_persisted() -> None:
     repository = FakeCaptureRepository()
     coordinator = CaptureCoordinator(
@@ -277,3 +355,49 @@ async def test_lifecycle_events_are_persisted() -> None:
     )
 
     assert repository.quality_events[0].category is (QualityCategory.CONNECTION_OPENED)
+
+
+async def test_coordinator_publishes_recovered_events_and_unrecovered_gaps(
+    raw_envelope: RawEnvelope,
+) -> None:
+    recovered = replace(
+        raw_envelope,
+        local_sequence=2,
+        exchange_sequence="2",
+        recovered=True,
+    )
+    gap = AggTradeGap(
+        environment=raw_envelope.environment,
+        symbol=raw_envelope.symbol or "BTCUSDT",
+        previous_id=2,
+        current_id=4,
+        previous_event_at=raw_envelope.received_at,
+        current_event_at=raw_envelope.received_at,
+        missing_count=1,
+        reason="history_incomplete",
+    )
+    published: list[RawEnvelope] = []
+    gaps: list[AggTradeGap] = []
+    coordinator = CaptureCoordinator(
+        queue=BoundedEnvelopeQueue(max_events=10, max_bytes=100000),
+        archive=ControlledArchive(),
+        quality=FakeQualityTracker(),
+        repository=FakeCaptureRepository(),
+        realtime_envelope_sink=published.append,
+        envelope_recovery=FakeEnvelopeRecovery(
+            AggTradeRecoveryBatch(
+                envelopes=(recovered, raw_envelope),
+                unrecovered_gaps=(gap,),
+            )
+        ),
+        gap_sink=gaps.append,
+        archive_streams=frozenset({CaptureStream.FORCE_ORDER}),
+    )
+
+    task = asyncio.create_task(coordinator.run())
+    await coordinator.submit(raw_envelope)
+    await coordinator.stop()
+    await task
+
+    assert published == [recovered, raw_envelope]
+    assert gaps == [gap]

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from crypto_momentum_lab.domain.market.models import (
+    AggTradeGap,
     CaptureStream,
     ConnectionLifecycleEvent,
     DurableArchiveAcknowledgement,
@@ -39,6 +40,22 @@ class QualityRepository(Protocol):
 
 type AcknowledgementSink = Callable[[DurableArchiveAcknowledgement], object]
 type EnvelopeSink = Callable[[RawEnvelope], object]
+type GapSink = Callable[[AggTradeGap], object]
+
+
+class EnvelopeRecovery(Protocol):
+    async def expand(
+        self,
+        batch: tuple[RawEnvelope, ...],
+    ) -> "EnvelopeRecoveryBatch": ...
+
+
+class EnvelopeRecoveryBatch(Protocol):
+    @property
+    def envelopes(self) -> tuple[RawEnvelope, ...]: ...
+
+    @property
+    def unrecovered_gaps(self) -> tuple[AggTradeGap, ...]: ...
 
 _DEFAULT_MAX_ARCHIVE_BATCH_SIZE = 1000
 
@@ -54,6 +71,8 @@ class CaptureCoordinator:
         acknowledgement_sink: AcknowledgementSink | None = None,
         realtime_envelope_sink: EnvelopeSink | None = None,
         archived_envelope_sink: EnvelopeSink | None = None,
+        envelope_recovery: EnvelopeRecovery | None = None,
+        gap_sink: GapSink | None = None,
         archive_streams: frozenset[CaptureStream] | None = None,
         max_archive_batch_size: int = _DEFAULT_MAX_ARCHIVE_BATCH_SIZE,
     ) -> None:
@@ -66,6 +85,8 @@ class CaptureCoordinator:
         self._acknowledgement_sink = acknowledgement_sink
         self._realtime_envelope_sink = realtime_envelope_sink
         self._archived_envelope_sink = archived_envelope_sink
+        self._envelope_recovery = envelope_recovery
+        self._gap_sink = gap_sink
         self._archive_streams = archive_streams
         self._max_archive_batch_size = max_archive_batch_size
         self._stopping = False
@@ -98,7 +119,7 @@ class CaptureCoordinator:
             and not self.accepts_symbol(envelope.stream, envelope.symbol)
         ):
             return
-        await self._queue.put_nowait(envelope)
+        await self._queue.put(envelope)
 
     async def observe_lifecycle(
         self,
@@ -123,10 +144,19 @@ class CaptureCoordinator:
 
     async def _process_batch(self, batch: tuple[RawEnvelope, ...]) -> None:
         try:
-            await self._publish_batch(self._realtime_envelope_sink, batch)
+            processing_batch = batch
+            if self._envelope_recovery is not None:
+                recovery = await self._envelope_recovery.expand(batch)
+                processing_batch = recovery.envelopes
+                await self._publish_gaps(recovery.unrecovered_gaps)
+
+            await self._publish_batch(
+                self._realtime_envelope_sink,
+                processing_batch,
+            )
             tasks = tuple(
                 asyncio.create_task(self._process_envelope(envelope))
-                for envelope in batch
+                for envelope in processing_batch
                 if self._requires_side_effect_processing(envelope)
             )
             results = (
@@ -143,7 +173,10 @@ class CaptureCoordinator:
                 await self._halt(reason)
                 raise failures[0]
 
-            await self._publish_batch(self._archived_envelope_sink, batch)
+            await self._publish_batch(
+                self._archived_envelope_sink,
+                processing_batch,
+            )
         finally:
             for envelope in batch:
                 self._queue.task_done(envelope)
@@ -188,6 +221,14 @@ class CaptureCoordinator:
             return
         for envelope in batch:
             result = sink(envelope)
+            if inspect.isawaitable(result):
+                await result
+
+    async def _publish_gaps(self, gaps: tuple[AggTradeGap, ...]) -> None:
+        if self._gap_sink is None:
+            return
+        for gap in gaps:
+            result = self._gap_sink(gap)
             if inspect.isawaitable(result):
                 await result
 

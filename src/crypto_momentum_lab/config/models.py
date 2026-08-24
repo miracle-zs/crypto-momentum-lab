@@ -76,6 +76,7 @@ class CaptureConfig(BaseModel):
     public_websocket_url: AnyUrl
     enabled_streams: tuple[str, ...]
     max_subscriptions_per_connection: int = Field(gt=0, le=100)
+    ingress_queue_max_events: int = Field(default=4096, gt=0, le=100000)
     book_ticker_max_subscriptions_per_connection: int | None = Field(
         default=None,
         gt=0,

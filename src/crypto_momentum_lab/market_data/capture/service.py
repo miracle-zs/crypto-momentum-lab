@@ -71,6 +71,13 @@ class CaptureMetricsSnapshot:
     queue_dropped_events: int = 0
     queue_pending_coalesced_events: int = 0
     filtered_book_ticker_events: int = 0
+    queue_max_events: int = 0
+    queue_max_bytes: int = 0
+    queue_high_watermark_events: int = 0
+    queue_high_watermark_bytes: int = 0
+    queue_backpressure_wait_count: int = 0
+    queue_backpressure_wait_seconds: float = 0.0
+    queue_waiting_producers: int = 0
 
 
 class CaptureStateRepository(Protocol):
@@ -169,7 +176,7 @@ class MarketDataCaptureService:
 
     async def submit(self, envelope: RawEnvelope) -> None:
         try:
-            await self._queue.put_nowait(envelope)
+            await self._queue.put(envelope)
         except CaptureQueueFull:
             await self._transition(
                 MarketDataState.HALTED,
@@ -213,6 +220,19 @@ class MarketDataCaptureService:
             queue_pending_coalesced_events=(
                 self._queue.pending_coalesced_events
             ),
+            queue_max_events=self._queue.max_events,
+            queue_max_bytes=self._queue.max_bytes,
+            queue_high_watermark_events=(
+                self._queue.high_watermark_events
+            ),
+            queue_high_watermark_bytes=self._queue.high_watermark_bytes,
+            queue_backpressure_wait_count=(
+                self._queue.backpressure_wait_count
+            ),
+            queue_backpressure_wait_seconds=(
+                self._queue.backpressure_wait_seconds
+            ),
+            queue_waiting_producers=self._queue.waiting_producers,
             filtered_book_ticker_events=(
                 0
                 if self._coordinator is None

@@ -66,6 +66,7 @@ def serialize_envelope(envelope: RawEnvelope) -> bytes:
         "exchange_sequence": envelope.exchange_sequence,
         "subscription_generation": envelope.subscription_generation,
         "raw_payload": envelope.raw_payload,
+        "recovered": envelope.recovered,
     }
     return (
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()

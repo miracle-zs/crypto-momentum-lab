@@ -55,6 +55,7 @@ def deserialize_envelope_row(row: str) -> RawEnvelope:
                 "subscription_generation",
             ),
             raw_payload=cast(JsonValue, decoded.get("raw_payload")),
+            recovered=_optional_bool(decoded, "recovered", default=False),
         )
     except (TypeError, ValueError) as exc:
         if isinstance(exc, RawArchiveRowError):
@@ -100,6 +101,20 @@ def _optional_str(row: dict[object, object], key: str) -> str | None:
         return None
     if not isinstance(value, str):
         raise RawArchiveRowError(f"{key} must be a string or null")
+    return value
+
+
+def _optional_bool(
+    row: dict[object, object],
+    key: str,
+    *,
+    default: bool,
+) -> bool:
+    if key not in row:
+        return default
+    value = row[key]
+    if not isinstance(value, bool):
+        raise RawArchiveRowError(f"{key} must be a boolean")
     return value
 
 

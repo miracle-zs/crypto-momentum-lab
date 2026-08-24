@@ -18,11 +18,16 @@ from crypto_momentum_lab.config.loader import (
     load_runtime_config,
 )
 from crypto_momentum_lab.domain.market.models import (
+    AggTradeGap,
     ArchiveManifest,
     CaptureRoute,
     CaptureStream,
 )
 from crypto_momentum_lab.domain.universe.models import UniverseSnapshot
+from crypto_momentum_lab.market_data.agg_trade_recovery import (
+    AggTradeGapRecoverer,
+    agg_trade_gap_quality_event,
+)
 from crypto_momentum_lab.market_data.binance.connection_pool import (
     BinanceConnectionPool,
 )
@@ -574,6 +579,7 @@ class MarketDataRuntime:
     universe: UniverseRefreshService
     subscription_observer: CaptureUniverseObserver
     runtime_state_publisher: ClosedMarketStatePublisher
+    agg_trade_recovery: AggTradeGapRecoverer
     state_hub: MarketStateHub
     quote_hub: MarketQuoteHub
     universe_activation_minute: int
@@ -722,6 +728,15 @@ async def build_market_data_runtime(
             archive_config.group_commit_max_milliseconds
         ),
     )
+    rest_client = BinanceUsdMRestClient(str(runtime.binance_base_url))
+    agg_trade_recovery = AggTradeGapRecoverer(rest_client)
+
+    async def handle_agg_trade_gap(gap: AggTradeGap) -> None:
+        await runtime_state_publisher.mark_incomplete(gap)
+        await capture_repository.save_quality_event(
+            agg_trade_gap_quality_event(gap)
+        )
+
     coordinator = CaptureCoordinator(
         queue=queue,
         archive=archive,
@@ -729,6 +744,8 @@ async def build_market_data_runtime(
         repository=capture_repository,
         acknowledgement_sink=None,
         realtime_envelope_sink=runtime_state_publisher.observe,
+        envelope_recovery=agg_trade_recovery,
+        gap_sink=handle_agg_trade_gap,
         archive_streams=archive_streams,
     )
 
@@ -762,6 +779,9 @@ async def build_market_data_runtime(
             ),
             control_messages_per_second=(
                 runtime.capture.control_messages_per_second
+            ),
+            ingress_queue_max_events=(
+                runtime.capture.ingress_queue_max_events
             ),
             symbol_filter=coordinator.accepts_symbol,
             on_realtime_envelope=runtime_state_publisher.observe_realtime_quote,
@@ -808,7 +828,6 @@ async def build_market_data_runtime(
         initial_generation=1,
         protected_symbol_loader=load_protected_symbols,
     )
-    rest_client = BinanceUsdMRestClient(str(runtime.binance_base_url))
     universe = UniverseRefreshService(
         market_data=rest_client,
         repository=universe_repository,
@@ -829,6 +848,7 @@ async def build_market_data_runtime(
             universe=universe,
             subscription_observer=observer,
             runtime_state_publisher=runtime_state_publisher,
+            agg_trade_recovery=agg_trade_recovery,
             state_hub=state_hub,
             quote_hub=quote_hub,
             universe_activation_minute=runtime.universe.activation_minute,
@@ -937,6 +957,9 @@ async def run_market_data(
                         ),
                         runtime_state_metrics=(
                             runtime.runtime_state_publisher.lateness_metrics_snapshot
+                        ),
+                        recovery_metrics=lambda: (
+                            runtime.agg_trade_recovery.metrics
                         ),
                     )
                 ),

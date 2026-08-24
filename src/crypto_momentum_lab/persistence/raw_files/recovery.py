@@ -234,6 +234,7 @@ def _envelope_from_payload(payload: dict[str, object]) -> RawEnvelope:
         exchange_sequence=_optional_str_value(payload["exchange_sequence"]),
         subscription_generation=_int_value(payload["subscription_generation"]),
         raw_payload=payload["raw_payload"],  # type: ignore[arg-type]
+        recovered=_bool_value(payload.get("recovered", False)),
     )
 
 
@@ -283,6 +284,12 @@ def _optional_str_value(value: object) -> str | None:
 def _int_value(value: object) -> int:
     if not isinstance(value, int):
         raise ValueError("expected integer value")
+    return value
+
+
+def _bool_value(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError("expected boolean value")
     return value
 
 

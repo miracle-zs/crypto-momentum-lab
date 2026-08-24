@@ -1,4 +1,6 @@
 import asyncio
+import heapq
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -8,15 +10,18 @@ from typing import Protocol
 import structlog
 
 from crypto_momentum_lab.domain.market.models import (
+    AggTradeGap,
     CaptureStream,
     MarketState15s,
+    NormalizedAggTrade,
     NormalizedBookTicker,
     NormalizedMarketEvent,
     RawEnvelope,
     RealtimeMarketQuote,
 )
 from crypto_momentum_lab.market_data.aggregation import (
-    aggregate_market_states_15s,
+    MarketState15sAccumulator,
+    MarketState15sSnapshot,
     bucket_start_15s,
 )
 from crypto_momentum_lab.market_data.normalization import (
@@ -28,11 +33,13 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
 )
 
 type _BucketKey = tuple[str, str, datetime]
+type _BucketDeadline = tuple[datetime, str, str, _BucketKey]
 type _DurableBatch = tuple[
     tuple[MarketState15s, ...],
     datetime,
     RuntimeStateSequenceRange,
 ]
+type _DurableCommand = _DurableBatch | AggTradeGap
 
 _BUCKET_SECONDS = 15
 _LATENESS_THRESHOLDS_SECONDS = (0.5, 1.0, 2.0, 3.0)
@@ -71,6 +78,8 @@ class ClosedStateRepository(Protocol):
         source_watermark_at: datetime,
         sequence_range: RuntimeStateSequenceRange,
     ) -> None: ...
+
+    async def mark_incomplete(self, gap: AggTradeGap) -> None: ...
 
 
 type RealtimeStateSink = Callable[[tuple[MarketState15s, ...]], Awaitable[None]]
@@ -156,6 +165,15 @@ class ClosedMarketStatePublisherMetrics:
     realtime_sink_failure_count: int
     durable_queue_size: int
     durable_sink_failure_count: int
+    aggregation_processing_count: int
+    aggregation_processing_average_ms: float
+    aggregation_processing_max_ms: float
+    active_bucket_count: int
+    active_bucket_high_watermark: int
+    incomplete_active_bucket_count: int
+    incomplete_gap_count: int
+    missing_agg_trade_count: int
+    late_recovered_event_count: int
 
 
 @dataclass(slots=True)
@@ -263,15 +281,16 @@ class ClosedMarketStatePublisher:
             if config is None
             else config
         )
-        self._events_by_bucket: dict[
-            _BucketKey,
-            list[NormalizedMarketEvent],
+        self._accumulators_by_bucket: dict[
+            _BucketKey, MarketState15sAccumulator
         ] = {}
         self._latest_book_ticker_by_bucket: dict[
             _BucketKey,
             NormalizedBookTicker,
         ] = {}
-        self._realtime_emitted_keys: set[_BucketKey] = set()
+        self._realtime_deadlines: list[_BucketDeadline] = []
+        self._durable_deadlines: list[_BucketDeadline] = []
+        self._incomplete_buckets: dict[_BucketKey, int] = {}
         self._realtime_latest_quotes: dict[
             tuple[str, str], tuple[Decimal, Decimal]
         ] = {}
@@ -290,21 +309,29 @@ class ClosedMarketStatePublisher:
         self._realtime_sink_failure_count = 0
         self._realtime_quote_failure_count = 0
         self._durable_sink_failure_count = 0
+        self._aggregation_processing_count = 0
+        self._aggregation_processing_seconds = 0.0
+        self._aggregation_processing_max_seconds = 0.0
+        self._active_bucket_high_watermark = 0
+        self._incomplete_gap_count = 0
+        self._missing_agg_trade_count = 0
+        self._late_recovered_event_count = 0
         self._lateness_by_stream: dict[
             CaptureStream,
             _EventLatenessCounters,
         ] = {}
-        self._durable_queue: asyncio.Queue[_DurableBatch | None] | None = None
+        self._durable_queue: asyncio.Queue[_DurableCommand | None] | None = None
         self._durable_task: asyncio.Task[None] | None = None
         self._log = structlog.get_logger()
 
     async def start(self) -> None:
         if self._durable_task is not None:
             return
-        self._durable_queue = asyncio.Queue(
+        queue: asyncio.Queue[_DurableCommand | None] = asyncio.Queue(
             maxsize=self._config.persistence_queue_size
         )
-        self._durable_task = asyncio.create_task(self._persist_loop())
+        self._durable_queue = queue
+        self._durable_task = asyncio.create_task(self._persist_loop(queue))
 
     async def stop(self) -> None:
         task = self._durable_task
@@ -327,6 +354,12 @@ class ClosedMarketStatePublisher:
 
     @property
     def metrics(self) -> ClosedMarketStatePublisherMetrics:
+        average_seconds = (
+            0.0
+            if self._aggregation_processing_count == 0
+            else self._aggregation_processing_seconds
+            / self._aggregation_processing_count
+        )
         return ClosedMarketStatePublisherMetrics(
             received_envelope_count=self._received_envelope_count,
             normalized_event_count=self._normalized_event_count,
@@ -340,6 +373,17 @@ class ClosedMarketStatePublisher:
                 0 if self._durable_queue is None else self._durable_queue.qsize()
             ),
             durable_sink_failure_count=self._durable_sink_failure_count,
+            aggregation_processing_count=self._aggregation_processing_count,
+            aggregation_processing_average_ms=average_seconds * 1000,
+            aggregation_processing_max_ms=(
+                self._aggregation_processing_max_seconds * 1000
+            ),
+            active_bucket_count=len(self._accumulators_by_bucket),
+            active_bucket_high_watermark=self._active_bucket_high_watermark,
+            incomplete_active_bucket_count=len(self._incomplete_buckets),
+            incomplete_gap_count=self._incomplete_gap_count,
+            missing_agg_trade_count=self._missing_agg_trade_count,
+            late_recovered_event_count=self._late_recovered_event_count,
         )
 
     def lateness_metrics_snapshot(self) -> dict[str, object]:
@@ -351,6 +395,7 @@ class ClosedMarketStatePublisher:
         two counters do not conflate a late packet with a packet that would
         actually arrive after a state bucket had already been closed.
         """
+        metrics = self.metrics
         return {
             "configured_closure_delay_seconds": (
                 self._config.realtime_closure_delay_seconds
@@ -369,6 +414,31 @@ class ClosedMarketStatePublisher:
                     self._lateness_by_stream.items(),
                     key=lambda item: item[0].value,
                 )
+            },
+            "aggregation": {
+                "processing_count": metrics.aggregation_processing_count,
+                "processing_average_ms": round(
+                    metrics.aggregation_processing_average_ms,
+                    6,
+                ),
+                "processing_max_ms": round(
+                    metrics.aggregation_processing_max_ms,
+                    6,
+                ),
+                "active_bucket_count": metrics.active_bucket_count,
+                "active_bucket_high_watermark": (
+                    metrics.active_bucket_high_watermark
+                ),
+            },
+            "completeness": {
+                "incomplete_active_bucket_count": (
+                    metrics.incomplete_active_bucket_count
+                ),
+                "incomplete_gap_count": metrics.incomplete_gap_count,
+                "missing_agg_trade_count": metrics.missing_agg_trade_count,
+                "late_recovered_event_count": (
+                    metrics.late_recovered_event_count
+                ),
             },
         }
 
@@ -399,7 +469,51 @@ class ClosedMarketStatePublisher:
             # connection. The state and durable paths remain independent.
             self._realtime_quote_failure_count += 1
 
+    async def mark_incomplete(self, gap: AggTradeGap) -> None:
+        self._incomplete_gap_count += 1
+        self._missing_agg_trade_count += gap.missing_count
+        previous_bucket = bucket_start_15s(gap.previous_event_at)
+        current_bucket = bucket_start_15s(gap.current_event_at)
+        bucket = min(previous_bucket, current_bucket)
+        final_bucket = max(previous_bucket, current_bucket)
+        while bucket <= final_bucket:
+            key = (gap.environment, gap.symbol, bucket)
+            if (
+                key in self._accumulators_by_bucket
+                or self._latest_durable_watermark_at is None
+                or bucket + timedelta(seconds=_BUCKET_SECONDS)
+                > self._latest_durable_watermark_at
+            ):
+                self._incomplete_buckets.setdefault(key, 0)
+            bucket += timedelta(seconds=_BUCKET_SECONDS)
+        current_key = (
+            gap.environment,
+            gap.symbol,
+            current_bucket,
+        )
+        if current_key in self._incomplete_buckets:
+            self._incomplete_buckets[current_key] += gap.missing_count
+        if self._durable_queue is None:
+            await self._persist_gap(gap)
+        else:
+            # State inserts and invalidations share one FIFO actor. A late gap
+            # therefore cannot race ahead of the row it needs to invalidate.
+            await self._durable_queue.put(gap)
+
     async def observe(self, envelope: RawEnvelope) -> None:
+        started_at = time.perf_counter()
+        try:
+            await self._observe(envelope)
+        finally:
+            elapsed = time.perf_counter() - started_at
+            self._aggregation_processing_count += 1
+            self._aggregation_processing_seconds += elapsed
+            self._aggregation_processing_max_seconds = max(
+                self._aggregation_processing_max_seconds,
+                elapsed,
+            )
+
+    async def _observe(self, envelope: RawEnvelope) -> None:
         self._received_envelope_count += 1
         counters = self._lateness_by_stream.setdefault(
             envelope.stream,
@@ -443,7 +557,38 @@ class ClosedMarketStatePublisher:
         # folded into the durable state below.
         if bucket_end <= durable_watermark:
             self._late_event_count += 1
+            if envelope.recovered and isinstance(event, NormalizedAggTrade):
+                self._late_recovered_event_count += 1
+                try:
+                    aggregate_trade_id = int(event.trade_id)
+                except ValueError:
+                    aggregate_trade_id = 0
+                if aggregate_trade_id > 0:
+                    await self.mark_incomplete(
+                        AggTradeGap(
+                            environment=event.environment,
+                            symbol=event.symbol,
+                            previous_id=aggregate_trade_id - 1,
+                            current_id=aggregate_trade_id,
+                            previous_event_at=event.event_at,
+                            current_event_at=event.event_at,
+                            missing_count=1,
+                            reason="late_recovery_after_durable_close",
+                        )
+                    )
             return
+
+        accumulator = self._accumulators_by_bucket.get(key)
+        if accumulator is None:
+            accumulator = MarketState15sAccumulator.for_bucket(event)
+            self._accumulators_by_bucket[key] = accumulator
+            self._active_bucket_high_watermark = max(
+                self._active_bucket_high_watermark,
+                len(self._accumulators_by_bucket),
+            )
+            deadline = _bucket_deadline(key)
+            heapq.heappush(self._realtime_deadlines, deadline)
+            heapq.heappush(self._durable_deadlines, deadline)
 
         if isinstance(event, NormalizedBookTicker):
             # A closed 15-second state only needs the latest executable quote
@@ -453,7 +598,7 @@ class ClosedMarketStatePublisher:
             # WebSocket reader.
             self._latest_book_ticker_by_bucket[key] = event
         else:
-            self._events_by_bucket.setdefault(key, []).append(event)
+            accumulator.observe(event)
         await self._close_ready_buckets(
             realtime_watermark=realtime_watermark,
             durable_watermark=durable_watermark,
@@ -465,24 +610,18 @@ class ClosedMarketStatePublisher:
         realtime_watermark: datetime,
         durable_watermark: datetime,
     ) -> None:
-        pending_keys = set(self._events_by_bucket)
-        pending_keys.update(self._latest_book_ticker_by_bucket)
-        realtime_ready_keys = tuple(
-            key
-            for key in sorted(
-                pending_keys,
-                key=lambda item: (item[2], item[1], item[0]),
-            )
-            if (
-                key not in self._realtime_emitted_keys
-                and key[2] + timedelta(seconds=_BUCKET_SECONDS)
-                <= realtime_watermark
-            )
+        realtime_ready_keys = _pop_ready_keys(
+            self._realtime_deadlines,
+            watermark=realtime_watermark,
+            active_keys=self._accumulators_by_bucket,
         )
         if realtime_ready_keys:
-            realtime_states, _ = self._build_states(
+            realtime_snapshots = self._build_snapshots(
                 realtime_ready_keys,
                 latest_quotes=self._realtime_latest_quotes,
+            )
+            realtime_states = tuple(
+                snapshot.state for snapshot in realtime_snapshots
             )
             for state in realtime_states:
                 if (
@@ -499,27 +638,27 @@ class ClosedMarketStatePublisher:
                     self._realtime_batch_count += 1
                 except Exception:
                     self._realtime_sink_failure_count += 1
-            self._realtime_emitted_keys.update(realtime_ready_keys)
 
-        durable_ready_keys = tuple(
-            key
-            for key in sorted(
-                pending_keys,
-                key=lambda item: (item[2], item[1], item[0]),
-            )
-            if key[2] + timedelta(seconds=_BUCKET_SECONDS) <= durable_watermark
+        durable_ready_keys = _pop_ready_keys(
+            self._durable_deadlines,
+            watermark=durable_watermark,
+            active_keys=self._accumulators_by_bucket,
         )
+        self._prune_orphaned_incomplete_buckets(durable_watermark)
         if not durable_ready_keys:
             return
 
-        states_tuple, closed_events = self._build_states(
+        durable_snapshots = self._build_snapshots(
             durable_ready_keys,
             latest_quotes=self._durable_latest_quotes,
         )
+        states_tuple = tuple(
+            snapshot.state for snapshot in durable_snapshots
+        )
         for key in durable_ready_keys:
-            self._events_by_bucket.pop(key, None)
+            self._accumulators_by_bucket.pop(key, None)
             self._latest_book_ticker_by_bucket.pop(key, None)
-            self._realtime_emitted_keys.discard(key)
+            self._incomplete_buckets.pop(key, None)
         for state in states_tuple:
             if (
                 state.last_bid_price is not None
@@ -529,12 +668,18 @@ class ClosedMarketStatePublisher:
                     state.last_bid_price,
                     state.last_ask_price,
                 )
-        if not closed_events:
+        if not durable_snapshots:
             return
 
         sequence_range = RuntimeStateSequenceRange(
-            minimum=min(event.source_local_sequence for event in closed_events),
-            maximum=max(event.source_local_sequence for event in closed_events),
+            minimum=min(
+                snapshot.input_sequence_min
+                for snapshot in durable_snapshots
+            ),
+            maximum=max(
+                snapshot.input_sequence_max
+                for snapshot in durable_snapshots
+            ),
         )
         durable_batch = (states_tuple, durable_watermark, sequence_range)
         if self._durable_queue is None:
@@ -543,58 +688,70 @@ class ClosedMarketStatePublisher:
             await self._durable_queue.put(durable_batch)
         self._closed_state_count += len(states_tuple)
 
-    def _build_states(
+    def _build_snapshots(
         self,
         keys: tuple[_BucketKey, ...],
         *,
         latest_quotes: dict[tuple[str, str], tuple[Decimal, Decimal]],
-    ) -> tuple[tuple[MarketState15s, ...], tuple[NormalizedMarketEvent, ...]]:
-        states: list[MarketState15s] = []
-        events_for_sequence: list[NormalizedMarketEvent] = []
+    ) -> tuple[MarketState15sSnapshot, ...]:
+        snapshots: list[MarketState15sSnapshot] = []
         for key in keys:
-            events = tuple(self._events_by_bucket.get(key, ()))
-            latest_book_ticker = self._latest_book_ticker_by_bucket.get(key)
-            if latest_book_ticker is not None:
-                events = (*events, latest_book_ticker)
-            if not events:
+            accumulator = self._accumulators_by_bucket.get(key)
+            if accumulator is None:
                 continue
-            events_for_sequence.extend(events)
-            environment = events[0].environment
-            initial_quotes = {
-                symbol: quote
-                for (quote_environment, symbol), quote in latest_quotes.items()
-                if quote_environment == environment
-            }
-            batch_states = aggregate_market_states_15s(
-                events,
-                initial_quotes=initial_quotes,
+            latest_book_ticker = self._latest_book_ticker_by_bucket.get(key)
+            snapshot = accumulator.snapshot(
+                initial_quote=latest_quotes.get((key[0], key[1])),
+                latest_quote=latest_book_ticker,
+                data_complete=key not in self._incomplete_buckets,
+                missing_agg_trade_count=self._incomplete_buckets.get(key, 0),
             )
-            states.extend(batch_states)
-            for state in batch_states:
-                if (
-                    state.last_bid_price is not None
-                    and state.last_ask_price is not None
-                ):
-                    latest_quotes[(state.environment, state.symbol)] = (
-                        state.last_bid_price,
-                        state.last_ask_price,
-                    )
-        states_tuple = tuple(
-            sorted(states, key=lambda state: (state.bucket_start, state.symbol))
+            snapshots.append(snapshot)
+            state = snapshot.state
+            if (
+                state.last_bid_price is not None
+                and state.last_ask_price is not None
+            ):
+                latest_quotes[(state.environment, state.symbol)] = (
+                    state.last_bid_price,
+                    state.last_ask_price,
+                )
+        return tuple(
+            sorted(
+                snapshots,
+                key=lambda snapshot: (
+                    snapshot.state.bucket_start,
+                    snapshot.state.symbol,
+                ),
+            )
         )
-        return states_tuple, tuple(events_for_sequence)
 
-    async def _persist_loop(self) -> None:
-        queue = self._durable_queue
-        if queue is None:
-            raise RuntimeError("durable persistence queue is not initialized")
+    def _prune_orphaned_incomplete_buckets(
+        self,
+        durable_watermark: datetime,
+    ) -> None:
+        for key in tuple(self._incomplete_buckets):
+            if (
+                key not in self._accumulators_by_bucket
+                and key[2] + timedelta(seconds=_BUCKET_SECONDS)
+                <= durable_watermark
+            ):
+                self._incomplete_buckets.pop(key, None)
+
+    async def _persist_loop(
+        self,
+        queue: asyncio.Queue[_DurableCommand | None],
+    ) -> None:
         while True:
-            batch = await queue.get()
-            if batch is None:
+            command = await queue.get()
+            if command is None:
                 queue.task_done()
                 return
             try:
-                await self._persist_batch(batch)
+                if isinstance(command, AggTradeGap):
+                    await self._persist_gap(command)
+                else:
+                    await self._persist_batch(command)
             finally:
                 queue.task_done()
 
@@ -618,6 +775,48 @@ class ClosedMarketStatePublisher:
                     retry_seconds=self._config.persistence_retry_seconds,
                 )
                 await asyncio.sleep(self._config.persistence_retry_seconds)
+
+    async def _persist_gap(self, gap: AggTradeGap) -> None:
+        while True:
+            try:
+                await self._repository.mark_incomplete(gap)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._durable_sink_failure_count += 1
+                self._log.exception(
+                    "runtime_state_gap_persistence_failed",
+                    symbol=gap.symbol,
+                    previous_id=gap.previous_id,
+                    current_id=gap.current_id,
+                    error=str(error),
+                    retry_seconds=self._config.persistence_retry_seconds,
+                )
+                await asyncio.sleep(self._config.persistence_retry_seconds)
+
+
+def _bucket_deadline(key: _BucketKey) -> _BucketDeadline:
+    return (
+        key[2] + timedelta(seconds=_BUCKET_SECONDS),
+        key[1],
+        key[0],
+        key,
+    )
+
+
+def _pop_ready_keys(
+    deadlines: list[_BucketDeadline],
+    *,
+    watermark: datetime,
+    active_keys: dict[_BucketKey, MarketState15sAccumulator],
+) -> tuple[_BucketKey, ...]:
+    ready: list[_BucketKey] = []
+    while deadlines and deadlines[0][0] <= watermark:
+        *_, key = heapq.heappop(deadlines)
+        if key in active_keys:
+            ready.append(key)
+    return tuple(ready)
 
 
 def _bucket_key(event: NormalizedMarketEvent) -> _BucketKey:

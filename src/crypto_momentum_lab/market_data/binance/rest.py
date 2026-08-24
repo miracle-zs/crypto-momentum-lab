@@ -1,10 +1,12 @@
 import asyncio
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Self
 
 import httpx
 
+from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.universe.models import (
     ContractMetadata,
     DailyOpen,
@@ -14,6 +16,32 @@ from crypto_momentum_lab.domain.universe.models import (
 
 def _utc_from_ms(value: int) -> datetime:
     return datetime.fromtimestamp(value / 1000, tz=UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class BinanceAggTrade:
+    aggregate_trade_id: int
+    price: Decimal
+    quantity: Decimal
+    first_trade_id: int
+    last_trade_id: int
+    event_at: datetime
+    buyer_is_maker: bool
+
+    def payload(self, symbol: str) -> dict[str, JsonValue]:
+        event_ms = int(self.event_at.timestamp() * 1000)
+        return {
+            "e": "aggTrade",
+            "E": event_ms,
+            "s": symbol.upper(),
+            "a": self.aggregate_trade_id,
+            "p": str(self.price),
+            "q": str(self.quantity),
+            "f": self.first_trade_id,
+            "l": self.last_trade_id,
+            "T": event_ms,
+            "m": self.buyer_is_maker,
+        }
 
 
 class BinanceUsdMRestClient:
@@ -102,6 +130,38 @@ class BinanceUsdMRestClient:
             )
             for item in response.json()
         }
+
+    async def fetch_agg_trades(
+        self,
+        symbol: str,
+        *,
+        from_id: int,
+        limit: int = 1000,
+    ) -> tuple[BinanceAggTrade, ...]:
+        if from_id < 0:
+            raise ValueError("from_id must be non-negative")
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        response = await self._get(
+            "/fapi/v1/aggTrades",
+            params={
+                "symbol": symbol.upper(),
+                "fromId": from_id,
+                "limit": limit,
+            },
+        )
+        return tuple(
+            BinanceAggTrade(
+                aggregate_trade_id=int(item["a"]),
+                price=Decimal(str(item["p"])),
+                quantity=Decimal(str(item["q"])),
+                first_trade_id=int(item["f"]),
+                last_trade_id=int(item["l"]),
+                event_at=_utc_from_ms(int(item["T"])),
+                buyer_is_maker=bool(item["m"]),
+            )
+            for item in response.json()
+        )
 
     async def fetch_daily_open(
         self,

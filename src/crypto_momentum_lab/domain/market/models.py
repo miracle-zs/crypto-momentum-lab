@@ -92,6 +92,7 @@ class RawEnvelope:
     exchange_sequence: str | None
     subscription_generation: int
     raw_payload: JsonValue
+    recovered: bool = False
 
     def __post_init__(self) -> None:
         if not _is_aware(self.received_at):
@@ -104,6 +105,32 @@ class RawEnvelope:
             raise ValueError("local_sequence must be positive")
         if self.subscription_generation <= 0:
             raise ValueError("subscription_generation must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class AggTradeGap:
+    environment: str
+    symbol: str
+    previous_id: int
+    current_id: int
+    previous_event_at: datetime
+    current_event_at: datetime
+    missing_count: int
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not self.environment.strip() or not self.symbol.strip():
+            raise ValueError("gap environment and symbol must not be empty")
+        if self.previous_id < 0 or self.current_id <= self.previous_id:
+            raise ValueError("gap aggregate trade IDs must be increasing")
+        if not _is_aware(self.previous_event_at) or not _is_aware(
+            self.current_event_at
+        ):
+            raise ValueError("gap event timestamps must be timezone-aware")
+        if self.missing_count <= 0:
+            raise ValueError("gap missing_count must be positive")
+        if not self.reason.strip():
+            raise ValueError("gap reason must not be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,6 +367,8 @@ class MarketState15s:
     closed_kline_1m_close_time: datetime | None = None
     closed_kline_1m_open_price: Decimal | None = None
     closed_kline_1m_close_price: Decimal | None = None
+    data_complete: bool = True
+    missing_agg_trade_count: int = 0
 
     def __post_init__(self) -> None:
         if not _is_aware(self.bucket_start):
@@ -356,6 +385,8 @@ class MarketState15s:
             raise ValueError("closed_kline_count must be non-negative")
         if self.source_event_count < 0:
             raise ValueError("source_event_count must be non-negative")
+        if self.missing_agg_trade_count < 0:
+            raise ValueError("missing_agg_trade_count must be non-negative")
         if self.first_received_at is not None and not _is_aware(
             self.first_received_at
         ):

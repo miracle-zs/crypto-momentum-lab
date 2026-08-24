@@ -17,6 +17,7 @@ class FakeBinanceWebSocketServer:
         default_factory=list
     )
     close_first_connection: bool = True
+    acknowledge_controls: bool = True
     _connection_count: int = 0
     _connection_event: asyncio.Event = field(default_factory=asyncio.Event)
     _control_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -41,6 +42,11 @@ class FakeBinanceWebSocketServer:
             await asyncio.wait_for(self._control_event.wait(), timeout=5)
             self._control_event.clear()
 
+    async def wait_for_subscription_requests(self, count: int) -> None:
+        while len(self.subscribe_requests) < count:
+            await asyncio.wait_for(self._control_event.wait(), timeout=5)
+            self._control_event.clear()
+
     async def stop(self) -> None:
         self.server.close()
         await self.server.wait_closed()
@@ -57,9 +63,10 @@ class FakeBinanceWebSocketServer:
                 self.subscribe_requests.append(names)
                 self.control_events.append(("SUBSCRIBE", names))
                 self._control_event.set()
-                await connection.send(
-                    json.dumps({"result": None, "id": request.get("id")})
-                )
+                if self.acknowledge_controls:
+                    await connection.send(
+                        json.dumps({"result": None, "id": request.get("id")})
+                    )
                 for sequence, name in enumerate(names, start=connection_index):
                     await connection.send(json.dumps(_stream_message(name, sequence)))
                 if self.close_first_connection and connection_index == 1:

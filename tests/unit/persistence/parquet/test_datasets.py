@@ -84,6 +84,8 @@ def test_market_state_15s_row_preserves_decimal_strings() -> None:
     assert row["open_price"] == "100"
     assert row["trade_notional"] == "200.5"
     assert row["spread"] == "0.2"
+    assert row["data_complete"] is True
+    assert row["missing_agg_trade_count"] == 0
     assert partition_for_market_state(state) == Path(
         "market_states_15s/date=2026-06-15/symbol=BTCUSDT"
     )

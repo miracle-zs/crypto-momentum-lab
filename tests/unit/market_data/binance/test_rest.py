@@ -66,6 +66,40 @@ async def test_fetches_all_latest_prices_from_v2() -> None:
 
 
 @respx.mock
+async def test_fetches_aggregate_trade_history_from_id() -> None:
+    route = respx.get("https://fapi.binance.com/fapi/v1/aggTrades").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "a": 11,
+                    "p": "60000.5",
+                    "q": "0.25",
+                    "f": 101,
+                    "l": 102,
+                    "T": 1781415660000,
+                    "m": False,
+                }
+            ],
+        )
+    )
+
+    async with BinanceUsdMRestClient("https://fapi.binance.com") as client:
+        trades = await client.fetch_agg_trades(
+            "btcusdt",
+            from_id=11,
+            limit=2,
+        )
+
+    assert trades[0].aggregate_trade_id == 11
+    assert trades[0].price == Decimal("60000.5")
+    assert trades[0].event_at.tzinfo is UTC
+    assert route.calls[0].request.url.params["symbol"] == "BTCUSDT"
+    assert route.calls[0].request.url.params["fromId"] == "11"
+    assert route.calls[0].request.url.params["limit"] == "2"
+
+
+@respx.mock
 async def test_fetches_current_utc_day_open() -> None:
     route = respx.get("https://fapi.binance.com/fapi/v1/klines").mock(
         return_value=httpx.Response(
