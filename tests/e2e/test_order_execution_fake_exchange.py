@@ -19,7 +19,14 @@ async def test_timeout_then_not_found_is_durable_unknown_state() -> None:
 
     result = await _machine(exchange, repository).execute_approved_intent(_plan())
 
-    assert exchange.calls == ["submit", "query"]
+    assert exchange.calls == [
+        "submit",
+        "query",
+        "query",
+        "query",
+        "query",
+        "query",
+    ]
     assert result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
     assert (
         repository.events[-1].state

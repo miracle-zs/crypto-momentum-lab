@@ -24,6 +24,7 @@ from crypto_momentum_lab.execution_account.orders.quantization import (
     SymbolTradingRules,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
+    ExchangeSubmissionTimeoutError,
     OrderExecutionStateMachine,
     SubmitPolicy,
 )
@@ -35,6 +36,7 @@ from crypto_momentum_lab.live_rollout.daemon import (
     LiveDaemonRuntimeContext,
     LiveEntryFilterContext,
     LiveStrategyDaemon,
+    _is_transient_live_gate,
     _live_entry_candidate_passes,
 )
 from crypto_momentum_lab.live_rollout.exits import (
@@ -335,6 +337,64 @@ async def test_live_daemon_survives_temporary_lease_gate_block() -> None:
     assert result.processed_state_count == 2
     assert result.submitted_order_count == 1
     assert exchange.calls == ["submit"]
+
+
+def test_unresolved_order_gate_is_transient_until_reconciliation_finishes() -> None:
+    assert _is_transient_live_gate(("unresolved_order_uncertainty",))
+    assert not _is_transient_live_gate(("active_risk_halt",))
+
+
+async def test_live_daemon_keeps_running_while_reconciliation_is_pending() -> None:
+    exchange = PlanAwareExchange()
+    calls = 0
+
+    async def flaky_context(state: object) -> LiveDaemonRuntimeContext:
+        nonlocal calls
+        del state
+        calls += 1
+        if calls == 1:
+            uncertain = ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+            return replace(
+                _runtime_context(),
+                gate_context=replace(
+                    gate_context(),
+                    unresolved_order_states=(uncertain,),
+                ),
+                unresolved_order_states=(uncertain,),
+            )
+        return _runtime_context()
+
+    async def states() -> AsyncIterator:
+        first = _state()
+        yield first
+        yield replace(
+            first,
+            bucket_start=first.bucket_start + timedelta(seconds=15),
+            bucket_end=first.bucket_end + timedelta(seconds=15),
+        )
+
+    daemon = _daemon(exchange=exchange, context_provider=flaky_context)
+
+    result = await daemon.run(states())
+
+    assert result.halt_reason is None
+    assert result.processed_state_count == 2
+    assert result.submitted_order_count == 1
+    assert exchange.calls == ["submit"]
+
+
+async def test_live_daemon_does_not_halt_after_order_outcome_stays_unknown() -> None:
+    exchange = FakeExchange(
+        submit_result=ExchangeSubmissionTimeoutError(),
+        query_result=None,
+    )
+    daemon = _daemon(exchange=exchange)
+
+    result = await daemon.run(_states())
+
+    assert result.halt_reason is None
+    assert result.approved_intent_count == 1
+    assert exchange.calls == ["submit", "query", "query", "query", "query", "query"]
 
 
 async def test_live_daemon_keeps_running_through_transient_database_error() -> None:
@@ -900,6 +960,7 @@ def _daemon(
         submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         clock=lambda: NOW,
+        reconciliation_retry_delays=(0.0, 0.0, 0.0, 0.0),
     )
 
     async def default_context(state: object) -> LiveDaemonRuntimeContext:

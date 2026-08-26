@@ -73,13 +73,14 @@ async def test_prepared_submission_does_not_duplicate_write_ahead_journal() -> N
 async def test_timeout_queries_by_client_order_id_before_retry() -> None:
     exchange = FakeExchange(
         submit_result=ExchangeSubmissionTimeoutError(),
-        query_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED),
+        query_result=None,
     )
+    exchange.query_results = [None, _snapshot(ExchangeOrderState.ACKNOWLEDGED)]
     repository = FakeOrderRepository()
 
     result = await _machine(exchange, repository).execute_approved_intent(_plan())
 
-    assert exchange.calls == ["submit", "query"]
+    assert exchange.calls == ["submit", "query", "query"]
     assert result.state is ExchangeOrderState.ACKNOWLEDGED
 
 
@@ -91,6 +92,7 @@ async def test_timeout_with_failed_lookup_is_marked_for_reconciliation() -> None
 
     assert result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
     assert repository.events[-1].details["reason"] == "lookup unavailable"
+    assert repository.events[-1].details["reconciliation_attempts"] == 5
 
 
 async def test_clear_reject_persists_rejected_state() -> None:
@@ -156,6 +158,26 @@ async def test_reconcile_order_promotes_acknowledged_order_to_filled() -> None:
     assert repository.events[-1].state is ExchangeOrderState.FILLED
 
 
+async def test_reconcile_order_retries_transient_lookup_until_snapshot() -> None:
+    exchange = SequencedQueryExchange(
+        query_results=[
+            ExchangeOrderQueryUnknownError("lookup timed out"),
+            None,
+            _snapshot(ExchangeOrderState.FILLED),
+        ]
+    )
+    repository = FakeOrderRepository()
+
+    result = await _machine(exchange, repository).reconcile_order(_plan())
+
+    assert exchange.calls == ["query", "query", "query"]
+    assert result.state is ExchangeOrderState.FILLED
+    assert all(
+        event.state is not ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+        for event in repository.events
+    )
+
+
 async def test_cancel_order_persists_cancel_and_returns_partial_fill_quantity() -> None:
     exchange = CancelExchange(
         _snapshot(
@@ -189,6 +211,19 @@ async def test_cancel_timeout_is_fail_closed() -> None:
     )
 
 
+async def test_cancel_timeout_reconciles_before_marking_order_unknown() -> None:
+    exchange = CancelExchange(
+        ExchangeCancellationUnknownError("timed out"),
+        query_results=[None, _snapshot(ExchangeOrderState.CANCELED)],
+    )
+    repository = FakeOrderRepository()
+
+    result = await _machine(exchange, repository).cancel_order(_plan())
+
+    assert exchange.calls == ["cancel", "query", "query"]
+    assert result.state is ExchangeOrderState.CANCELED
+
+
 class FakeExchange:
     def __init__(
         self,
@@ -199,6 +234,7 @@ class FakeExchange:
         self.submit_result = submit_result
         self.query_result = query_result
         self.calls: list[str] = []
+        self.query_results: list[ExchangeOrderSnapshot | Exception | None] = []
 
     async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
         self.calls.append("submit")
@@ -212,6 +248,11 @@ class FakeExchange:
         client_order_id: str,
     ) -> ExchangeOrderSnapshot | None:
         self.calls.append("query")
+        if self.query_results:
+            result = self.query_results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
         return self.query_result
 
 
@@ -219,9 +260,12 @@ class CancelExchange(FakeExchange):
     def __init__(
         self,
         cancel_result: ExchangeOrderSnapshot | Exception,
+        *,
+        query_results: list[ExchangeOrderSnapshot | Exception | None] | None = None,
     ) -> None:
         super().__init__(submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED))
         self.cancel_result = cancel_result
+        self.query_results = query_results or []
 
     async def cancel_order_by_client_id(
         self,
@@ -233,6 +277,20 @@ class CancelExchange(FakeExchange):
         if isinstance(self.cancel_result, Exception):
             raise self.cancel_result
         return self.cancel_result
+
+    async def query_order_by_client_id(
+        self,
+        symbol: str,
+        client_order_id: str,
+    ) -> ExchangeOrderSnapshot | None:
+        del symbol, client_order_id
+        self.calls.append("query")
+        if not self.query_results:
+            return None
+        result = self.query_results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 class QueryFailExchange(FakeExchange):
@@ -246,6 +304,28 @@ class QueryFailExchange(FakeExchange):
     ) -> ExchangeOrderSnapshot | None:
         del symbol, client_order_id
         raise ExchangeOrderQueryUnknownError("lookup unavailable")
+
+
+class SequencedQueryExchange(FakeExchange):
+    def __init__(
+        self,
+        *,
+        query_results: list[ExchangeOrderSnapshot | Exception | None],
+    ) -> None:
+        super().__init__(submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED))
+        self.query_results = query_results
+
+    async def query_order_by_client_id(
+        self,
+        symbol: str,
+        client_order_id: str,
+    ) -> ExchangeOrderSnapshot | None:
+        del symbol, client_order_id
+        self.calls.append("query")
+        result = self.query_results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 class FakeOrderRepository:
@@ -283,6 +363,7 @@ def _machine(
         submit_policy=SubmitPolicy.LIVE_SUBMIT,
         live_submit_enabled=True,
         clock=lambda: NOW,
+        reconciliation_retry_delays=(0.0, 0.0, 0.0, 0.0),
     )
 
 

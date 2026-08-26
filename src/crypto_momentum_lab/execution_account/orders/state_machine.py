@@ -38,13 +38,27 @@ class ExchangeSubmissionTimeoutError(TimeoutError):
 class ExchangeOrderQueryUnknownError(RuntimeError):
     """Order lookup failed before the exchange state was known."""
 
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
 
 
 class ExchangeCancellationUnknownError(RuntimeError):
     """The cancel request outcome is unknown and needs reconciliation."""
 
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
 
 
 class OrderExchangeClient(Protocol):
@@ -120,6 +134,13 @@ class PreparedOrderSubmission:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class _OrderQueryResult:
+    snapshot: ExchangeOrderSnapshot | None
+    reason: str | None
+    attempts: int
+
+
 class OrderExecutionStateMachine:
     def __init__(
         self,
@@ -133,7 +154,16 @@ class OrderExecutionStateMachine:
         on_exchange_request: ExchangeBoundaryCallback | None = None,
         on_exchange_response: ExchangeBoundaryCallback | None = None,
         serialize_commands: bool = True,
+        reconciliation_retry_delays: tuple[float, ...] = (
+            1.0,
+            2.0,
+            4.0,
+            8.0,
+        ),
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
+        if any(delay < 0 for delay in reconciliation_retry_delays):
+            raise ValueError("reconciliation retry delays must not be negative")
         self._exchange = exchange
         self._repository = repository
         self._submit_policy = submit_policy
@@ -142,6 +172,8 @@ class OrderExecutionStateMachine:
         self._on_event = on_event
         self._on_exchange_request = on_exchange_request
         self._on_exchange_response = on_exchange_response
+        self._reconciliation_retry_delays = tuple(reconciliation_retry_delays)
+        self._sleep = sleep
         self._lock = asyncio.Lock() if serialize_commands else None
 
     async def execute_approved_intent(
@@ -235,38 +267,26 @@ class OrderExecutionStateMachine:
                 None,
             )
         except ExchangeSubmissionTimeoutError:
-            try:
-                queried_snapshot = await self._exchange_call(
-                    plan,
-                    operation="query",
-                    call=lambda: self._exchange.query_order_by_client_id(
-                        plan.symbol,
-                        plan.client_order_id,
-                    ),
-                )
-            except ExchangeOrderQueryUnknownError as exc:
+            query_result = await self._query_order_with_retry(
+                plan,
+                not_found_reason="submit_timeout_order_not_found",
+            )
+            if query_result.snapshot is None:
                 await self._append_event(
                     plan,
                     ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
-                    details={"reason": str(exc)},
+                    details={
+                        "reason": query_result.reason
+                        or "submit_timeout_order_not_found",
+                        "reconciliation_attempts": query_result.attempts,
+                    },
                 )
                 return OrderExecutionResult(
                     plan.client_order_id,
                     ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
                     None,
                 )
-            if queried_snapshot is None:
-                await self._append_event(
-                    plan,
-                    ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
-                    details={"reason": "submit_timeout_order_not_found"},
-                )
-                return OrderExecutionResult(
-                    plan.client_order_id,
-                    ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
-                    None,
-                )
-            snapshot = queried_snapshot
+            snapshot = query_result.snapshot
         return await self._apply_snapshot(plan, snapshot)
 
     async def reconcile_order(
@@ -282,26 +302,26 @@ class OrderExecutionStateMachine:
         self,
         plan: OrderExecutionPlan,
     ) -> OrderExecutionResult:
-        snapshot = await self._exchange_call(
+        query_result = await self._query_order_with_retry(
             plan,
-            operation="query",
-            call=lambda: self._exchange.query_order_by_client_id(
-                plan.symbol,
-                plan.client_order_id,
-            ),
+            not_found_reason="reconciliation_order_not_found",
         )
-        if snapshot is None:
+        if query_result.snapshot is None:
             await self._append_event(
                 plan,
                 ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
-                details={"reason": "reconciliation_order_not_found"},
+                details={
+                    "reason": query_result.reason
+                    or "reconciliation_order_not_found",
+                    "reconciliation_attempts": query_result.attempts,
+                },
             )
             return OrderExecutionResult(
                 plan.client_order_id,
                 ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
                 None,
             )
-        return await self._apply_snapshot(plan, snapshot)
+        return await self._apply_snapshot(plan, query_result.snapshot)
 
     async def cancel_order(
         self,
@@ -335,10 +355,23 @@ class OrderExecutionStateMachine:
                 ),
             )
         except ExchangeCancellationUnknownError as exc:
+            if exc.retry_after_seconds is not None:
+                await self._sleep(exc.retry_after_seconds)
+            query_result = await self._query_order_with_retry(
+                plan,
+                not_found_reason="cancel_result_order_not_found",
+            )
+            if query_result.snapshot is not None:
+                return await self._apply_snapshot(plan, query_result.snapshot)
             await self._append_event(
                 plan,
                 ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
-                details={"reason": str(exc)},
+                details={
+                    "reason": str(exc) or "cancel_outcome_unknown",
+                    "reconciliation_reason": query_result.reason
+                    or "cancel_result_order_not_found",
+                    "reconciliation_attempts": query_result.attempts,
+                },
             )
             return OrderExecutionResult(
                 plan.client_order_id,
@@ -357,6 +390,43 @@ class OrderExecutionStateMachine:
                 None,
             )
         return await self._apply_snapshot(plan, snapshot)
+
+    async def _query_order_with_retry(
+        self,
+        plan: OrderExecutionPlan,
+        *,
+        not_found_reason: str,
+    ) -> _OrderQueryResult:
+        last_reason: str | None = None
+        retry_delays = self._reconciliation_retry_delays
+        for attempt in range(len(retry_delays) + 1):
+            retry_after_seconds: float | None = None
+            try:
+                snapshot = await self._exchange_call(
+                    plan,
+                    operation="query",
+                    call=lambda: self._exchange.query_order_by_client_id(
+                        plan.symbol,
+                        plan.client_order_id,
+                    ),
+                )
+            except ExchangeOrderQueryUnknownError as exc:
+                last_reason = str(exc) or "order_query_unknown"
+                retry_after_seconds = exc.retry_after_seconds
+            else:
+                if snapshot is not None:
+                    return _OrderQueryResult(snapshot, None, attempt + 1)
+                last_reason = not_found_reason
+            if attempt < len(retry_delays):
+                delay = retry_delays[attempt]
+                if retry_after_seconds is not None:
+                    delay = max(delay, retry_after_seconds)
+                await self._sleep(delay)
+        return _OrderQueryResult(
+            snapshot=None,
+            reason=last_reason or not_found_reason,
+            attempts=len(retry_delays) + 1,
+        )
 
     async def _apply_snapshot(
         self,

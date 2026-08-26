@@ -516,6 +516,18 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 400 and _exchange_error_code(exc) == -2013:
                 return None
+            if exc.response.status_code in {418, 429} or (
+                exc.response.status_code >= 500
+            ):
+                raise ExchangeOrderQueryUnknownError(
+                    "Binance order lookup returned a transient HTTP error; "
+                    "order state requires reconciliation",
+                    retry_after_seconds=getattr(
+                        exc,
+                        "retry_after_seconds",
+                        None,
+                    ),
+                ) from exc
             raise
         except httpx.TimeoutException as exc:
             raise ExchangeOrderQueryUnknownError(
@@ -554,6 +566,16 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 "Binance cancel request failed; order state must be reconciled"
             ) from exc
         except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in {418, 429}:
+                raise ExchangeCancellationUnknownError(
+                    "Binance cancel request was rate limited; "
+                    "order state must be reconciled",
+                    retry_after_seconds=getattr(
+                        exc,
+                        "retry_after_seconds",
+                        None,
+                    ),
+                ) from exc
             if exc.response.status_code >= 500:
                 raise ExchangeCancellationUnknownError(
                     "Binance cancel request returned an unknown server outcome"

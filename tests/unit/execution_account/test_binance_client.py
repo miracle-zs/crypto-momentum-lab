@@ -17,6 +17,7 @@ from crypto_momentum_lab.execution_account.binance.client import (
     BinanceUsdMTradeClient,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
+    ExchangeCancellationUnknownError,
     ExchangeOrderQueryUnknownError,
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
@@ -283,6 +284,37 @@ async def test_order_lookup_timeout_becomes_reconciliation_error() -> None:
         await client.aclose()
 
 
+async def test_order_lookup_rate_limit_becomes_reconciliation_error() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "3"},
+            json={"code": -1003, "msg": "Too many requests"},
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        with pytest.raises(ExchangeOrderQueryUnknownError) as error:
+            await client.query_order_by_client_id("BTCUSDT", "client-1")
+    finally:
+        await client.aclose()
+
+    assert error.value.retry_after_seconds == 3.0
+
+
 def test_client_does_not_expose_order_submit_methods() -> None:
     client = BinanceUsdMPrivateReadClient(
         api_key="key",
@@ -442,6 +474,37 @@ async def test_trade_client_cancels_one_known_order_without_operator_command() -
 
     assert captured_path == "/fapi/v1/order"
     assert snapshot.state is ExchangeOrderState.CANCELED
+
+
+async def test_trade_client_treats_cancel_rate_limit_as_unknown_outcome() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "4"},
+            json={"code": -1003, "msg": "Too many requests"},
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        with pytest.raises(ExchangeCancellationUnknownError) as error:
+            await client.cancel_order_by_client_id("BTCUSDT", "client-1")
+    finally:
+        await client.aclose()
+
+    assert error.value.retry_after_seconds == 4.0
 
 
 async def test_trade_client_treats_server_error_as_unknown_submit_outcome() -> None:

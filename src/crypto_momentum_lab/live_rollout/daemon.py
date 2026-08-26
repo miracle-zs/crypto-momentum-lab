@@ -1169,17 +1169,17 @@ class LiveStrategyDaemon:
                         result.state
                         is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
                     ):
-                        await self._save_final_checkpoint(
-                            dirty=checkpoint_dirty,
-                            saved_at=last_checkpoint_saved_at,
+                        log.warning(
+                            "live_order_outcome_pending_reconciliation",
+                            run_id=self._config.run_id,
+                            symbol=candidate.symbol,
+                            client_order_id=result.client_order_id,
                         )
-                        return LiveDaemonResult(
-                            processed,
-                            approved,
-                            submitted,
-                            "unknown_order_pending_reconciliation",
-                            final_state_at,
-                        )
+                        # The durable order state is now fail-closed.  Stop
+                        # evaluating additional candidates from this snapshot;
+                        # the next context load will keep entries blocked until
+                        # reconciliation confirms the exchange state.
+                        break
             if processed % self._config.checkpoint_every_states == 0:
                 self._checkpoint_writer.submit(
                     _checkpoint_for_persistence(self._strategy),
@@ -1353,7 +1353,13 @@ class LiveStrategyDaemon:
                     cancel_result.state
                     is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
                 ):
-                    return approved, submitted, "unknown_cancel_pending_reconciliation"
+                    log.warning(
+                        "live_cancel_outcome_pending_reconciliation",
+                        run_id=self._config.run_id,
+                        symbol=request.cancel_plan.symbol,
+                        client_order_id=request.cancel_plan.client_order_id,
+                    )
+                    return approved, submitted, None
                 if not cancel_result.state.terminal:
                     return approved, submitted, "cancel_not_confirmed"
                 if cancel_result.state is ExchangeOrderState.REJECTED:
@@ -1381,7 +1387,13 @@ class LiveStrategyDaemon:
                     result.state
                     is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
                 ):
-                    return approved, submitted, "unknown_order_pending_reconciliation"
+                    log.warning(
+                        "live_exit_outcome_pending_reconciliation",
+                        run_id=self._config.run_id,
+                        symbol=request.fallback_candidate.symbol,
+                        client_order_id=result.client_order_id,
+                    )
+                    return approved, submitted, None
                 if result.state is ExchangeOrderState.REJECTED:
                     return approved, submitted, "grace_timeout_market_close_rejected"
                 continue
@@ -1399,7 +1411,13 @@ class LiveStrategyDaemon:
             approved += 1
             submitted += int(not result.suppressed)
             if result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
-                return approved, submitted, "unknown_order_pending_reconciliation"
+                log.warning(
+                    "live_exit_outcome_pending_reconciliation",
+                    run_id=self._config.run_id,
+                    symbol=request.candidate.symbol,
+                    client_order_id=result.client_order_id,
+                )
+                return approved, submitted, None
         return approved, submitted, None
 
     async def _execute_candidate(
@@ -1537,7 +1555,13 @@ class LiveStrategyDaemon:
                 continue
             result = await self._state_machine.cancel_order(plan)
             if result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
-                return "unknown_orphan_cancel_pending_reconciliation"
+                log.warning(
+                    "live_orphan_cancel_pending_reconciliation",
+                    run_id=self._config.run_id,
+                    symbol=plan.symbol,
+                    client_order_id=plan.client_order_id,
+                )
+                continue
             if not result.state.terminal:
                 return "orphan_cancel_not_confirmed"
         return None
@@ -1650,6 +1674,8 @@ def _is_transient_live_gate(reasons: tuple[str, ...]) -> bool:
     return bool(reasons) and set(reasons) <= {
         "missing_active_lease",
         "inactive_or_expired_lease",
+        "account_not_ready",
+        "unresolved_order_uncertainty",
     }
 
 

@@ -760,8 +760,9 @@ async def _run_with_live_startup_backoff(
 
 def _is_retryable_live_startup_error(error: Exception) -> bool:
     return isinstance(error, BinanceRateLimitError) or (
-        isinstance(error, RuntimeError) and str(error).startswith("live gate blocked:")
-    )
+        isinstance(error, RuntimeError)
+        and str(error).startswith("live gate blocked:")
+    ) or _is_transient_live_runtime_error(error)
 
 
 def _should_auto_reacquire_live_lease(
