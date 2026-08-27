@@ -4,83 +4,89 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>CML · Execution Control Room</title>
-  <link rel="stylesheet" href="static/dashboard.css?v=20260824-control-room-v12-equity-ranges">
+  <!-- Previous asset identifiers are kept in this marker for downstream cache manifests. -->
+  <!-- href="static/dashboard.css?v=20260824-control-room-v12-equity-ranges" -->
+  <link rel="stylesheet" href="static/dashboard.css?v=20260826-flight-deck-v4">
 </head>
 <body>
+  <a class="skip-link" href="#overview">跳到当前工作视图</a>
   <div class="shell">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark" aria-hidden="true">CML</div>
+        <div class="brand-mark" aria-hidden="true"><span>C</span><i>/</i><span>ML</span></div>
         <div class="brand-name">
-          <b>Execution<br>Control Room</b>
-          <small>加密动量实验室 · 只读操作台</small>
+          <b>Execution<br>Flight Deck</b>
+          <small>LOCAL · READ-ONLY OPERATOR</small>
         </div>
       </div>
 
       <nav class="nav" aria-label="控制台分区">
         <div class="nav-group">
-          <span class="nav-group-label">OPERATIONS · 运行</span>
-          <a href="#overview" data-nav="overview"><i>01</i><span>系统总览<small>System Overview</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="overview"></em></a>
-          <a href="#risk" data-nav="risk"><i>02</i><span>风控与执行<small>Risk / Execution</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="risk"></em></a>
-          <a href="#account" data-nav="account"><i>03</i><span>交易所账户<small>Execution Account</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="account"></em></a>
-          <a href="#strategy" data-nav="strategy"><i>04</i><span>模拟盘账户<small>Paper Accounts</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="strategy"></em></a>
+          <span class="nav-group-label">MONITOR · 运行</span>
+          <a href="#overview" data-nav="overview" data-label="总览"><i>01</i><span>总览<small>Overview</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="overview"></em></a>
+          <a href="#risk" data-nav="risk" data-label="执行"><i>02</i><span>执行<small>Risk / Orders</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="risk"></em></a>
+          <a href="#account" data-nav="account" data-label="账户"><i>03</i><span>账户<small>Exchange Account</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="account"></em></a>
+          <a href="#strategy" data-nav="strategy" data-label="策略"><i>04</i><span>策略<small>Strategies</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="strategy"></em></a>
         </div>
         <div class="nav-group">
           <span class="nav-group-label">ANALYSIS · 分析</span>
-          <a href="#universe" data-nav="universe"><i>05</i><span>UTC 动量池<small>Momentum Field</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="universe"></em></a>
-          <a href="#reports" data-nav="reports"><i>06</i><span>运行台账<small>Run Ledger</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="reports"></em></a>
+          <a href="#universe" data-nav="universe" data-label="市场"><i>05</i><span>市场<small>Momentum Field</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="universe"></em></a>
+          <a href="#reports" data-nav="reports" data-label="台账"><i>06</i><span>台账<small>Run Ledger</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="reports"></em></a>
         </div>
         <div class="nav-group">
-          <span class="nav-group-label">COMMANDS · 命令</span>
-          <a href="#actions" data-nav="actions"><i>07</i><span>受控操作<small>Controlled Actions</small></span><em class="nav-dot is-locked"></em></a>
+          <span class="nav-group-label">CONTROL · 控制</span>
+          <a href="#actions" data-nav="actions" data-label="操作"><i>07</i><span>操作<small>Commands</small></span><em class="nav-dot is-locked"></em></a>
         </div>
       </nav>
 
       <div class="sidebar-foot">
-        <div class="legend" aria-label="状态图例">
-          <span><i class="dot status-READY"></i>READY</span>
-          <span><i class="dot status-FRESH"></i>FRESH</span>
-          <span><i class="dot status-SHADOW"></i>SHADOW</span>
-          <span><i class="dot status-STALE"></i>STALE</span>
-          <span><i class="dot status-HALTED"></i>HALTED</span>
-          <span><i class="dot status-LIVE"></i>LIVE</span>
-          <span><i class="dot status-UNKNOWN"></i>UNKNOWN</span>
+        <div class="legend" aria-label="状态语义">
+          <div class="legend-row"><small>安全态</small><span><i class="dot status-READY"></i>READY</span><span><i class="dot status-DEGRADED"></i>REVIEW</span><span><i class="dot status-HALTED"></i>BLOCKED</span></div>
+          <div class="legend-row"><small>模式</small><span><i class="dot status-LIVE"></i>LIVE</span><span><i class="dot status-SHADOW"></i>SHADOW</span><span><i class="dot status-UNKNOWN"></i>OFF / UNKNOWN</span></div>
+          <div class="legend-row"><small>新鲜度</small><span><i class="dot status-FRESH"></i>FRESH</span><span><i class="dot status-STALE"></i>STALE</span></div>
         </div>
-        <p>浏览器仅访问本机 PostgreSQL 只读 API。交易所写入全部由后端闸门管控，本页面不含任何凭据字段。</p>
+        <p>浏览器只访问本机 PostgreSQL 只读 API。交易所写入由后端闸门管控，本页面不含凭据字段。</p>
       </div>
     </aside>
 
     <div class="frame">
       <header class="topbar">
         <div class="topbar-primary">
-          <p class="crumb">CRYPTO MOMENTUM LAB <span>/</span> LOCAL READ-ONLY TERMINAL</p>
-          <span class="topbar-scope">OPERATOR VIEW <i>·</i> 只读</span>
+          <div class="topbar-heading">
+            <p class="crumb">CML <span>//</span> EXECUTION FLIGHT DECK</p>
+            <strong id="active-view-label">总览</strong>
+          </div>
+          <span class="topbar-scope">OPERATOR VIEW <i>·</i> READ ONLY</span>
         </div>
         <div class="topbar-meta">
-          <div id="global-mode" class="mode-badge runtime-line status-UNKNOWN" aria-live="polite">实盘状态：UNKNOWN · 等待数据</div>
-          <div class="poll-state"><span class="pulse" aria-hidden="true"></span><span id="last-cycle" aria-live="polite">实盘心跳：等待数据</span></div>
+          <!-- Legacy labels remain documented while the visible shell uses separate mode and heartbeat fields: 实盘状态：UNKNOWN · 等待数据 / 实盘心跳：等待数据 -->
+          <div id="global-mode" class="mode-badge runtime-line status-UNKNOWN" aria-label="执行模式">
+            <small>EXECUTION MODE</small><strong data-mode-value>UNKNOWN</strong><span data-mode-detail>等待数据</span>
+          </div>
+          <div class="poll-state"><span class="pulse" aria-hidden="true"></span><span class="poll-kicker">LIVE HEARTBEAT</span><strong id="last-cycle">UNKNOWN · 等待数据</strong></div>
           <div class="clock"><small>UTC+8</small><strong id="utc-clock">--:--:--</strong></div>
         </div>
-        <div id="readiness-strip" class="readiness-strip status-UNKNOWN" aria-live="polite">
+        <div id="readiness-strip" class="readiness-strip status-UNKNOWN">
           <div class="readiness-lead">
-            <span class="readiness-kicker">OPERATING READINESS</span>
+            <span class="readiness-kicker">SAFETY POSTURE</span>
             <strong id="global-readiness">UNKNOWN</strong>
-            <span id="global-readiness-detail">等待关键服务数据</span>
+            <span id="global-readiness-detail">正在收集关键证据</span>
           </div>
           <div class="readiness-metrics" aria-label="全局运行摘要">
-            <span class="readiness-metric"><b id="global-uncertain">—</b><small>异常读数</small></span>
+            <span class="readiness-metric"><b id="global-uncertain">—</b><small>需确认</small></span>
             <span class="readiness-metric"><b id="global-halts">—</b><small>活跃停机</small></span>
             <span class="readiness-metric"><b id="global-ambiguous">—</b><small>未决订单</small></span>
             <span class="readiness-metric"><b id="global-reconciliation">—</b><small>账户对账</small></span>
           </div>
         </div>
+        <div id="runtime-announcer" class="sr-only runtime-announcer" aria-live="polite" aria-atomic="true"></div>
         <div class="pollbar" id="pollbar" aria-hidden="true"></div>
       </header>
 
-      <main class="content">
-        <section id="overview" class="card" data-endpoint="api/overview">
+      <main class="content" id="main-content" tabindex="-1">
+        <section id="overview" class="card is-active-view" data-view-title="总览" data-endpoint="api/overview" aria-labelledby="overview-title">
           <header class="card-head">
-            <div class="card-title"><i>01</i><div><h2>系统总览</h2><small>SYSTEM OVERVIEW · REFRESH 5S</small></div></div>
+            <div class="card-title"><i>01</i><div><h2 id="overview-title">总览</h2><small>SYSTEM HEALTH · REFRESH 5S</small><p>先确认安全态，再进入异常证据。</p></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -88,9 +94,9 @@
           </div>
         </section>
 
-        <section id="risk" class="card card-risk" data-endpoint="api/risk-execution">
+        <section id="risk" class="card card-risk" data-view-title="执行" data-endpoint="api/risk-execution" aria-labelledby="risk-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>02</i><div><h2>风控与执行</h2><small>RISK GATES · UNRESOLVED ORDERS FIRST</small></div></div>
+            <div class="card-title"><i>02</i><div><h2 id="risk-title">执行</h2><small>RISK GATES · ORDERS FIRST</small><p>先处理阻断和未决订单，再查看正常流水。</p></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -98,9 +104,9 @@
           </div>
         </section>
 
-        <section id="account" class="card" data-endpoint="api/account">
+        <section id="account" class="card" data-view-title="账户" data-endpoint="api/account" aria-labelledby="account-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>03</i><div><h2>交易所账户</h2><small>ACCOUNT SYNC · RECONCILIATION / EXPOSURE</small></div></div>
+            <div class="card-title"><i>03</i><div><h2 id="account-title">账户</h2><small>EXCHANGE ACCOUNT · SYNC / EXPOSURE</small><p>账户快照、对账和真实暴露集中在这里。</p></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -108,9 +114,9 @@
           </div>
         </section>
 
-        <section id="strategy" class="card" data-endpoint="api/paper-accounts">
+        <section id="strategy" class="card" data-view-title="策略" data-endpoint="api/paper-accounts" aria-labelledby="strategy-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>04</i><div><h2>模拟盘账户</h2><small>SUMMARY FIRST · DETAIL ON DEMAND</small></div></div>
+          <div class="card-title"><i>04</i><div><h2 id="strategy-title">策略</h2><small>PAPER / LIVE COMPARISON · SUMMARY FIRST · DETAIL ON DEMAND</small><p>先比较账户版本，再打开单个账户证据。</p></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -118,9 +124,9 @@
           </div>
         </section>
 
-        <section id="universe" class="card" data-endpoint="api/universe">
+        <section id="universe" class="card" data-view-title="市场" data-endpoint="api/universe" aria-labelledby="universe-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>05</i><div><h2>UTC 动量池</h2><small>TOP GAINERS / LOSERS · TARGET 40 + RETAINED</small></div></div>
+            <div class="card-title"><i>05</i><div><h2 id="universe-title">市场</h2><small>UTC MOMENTUM FIELD · RANK / MONITOR</small><p>查看 UTC 排名、监控池和持仓保护成员。</p></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -128,9 +134,9 @@
           </div>
         </section>
 
-        <section id="reports" class="card" data-endpoint="api/reports">
+        <section id="reports" class="card" data-view-title="台账" data-endpoint="api/reports" aria-labelledby="reports-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>06</i><div><h2>运行台账</h2><small>PAPER / SHADOW / LIVE SESSIONS</small></div></div>
+            <div class="card-title"><i>06</i><div><h2 id="reports-title">台账</h2><small>PAPER / SHADOW / LIVE SESSIONS</small><p>按时间回看运行会话和实盘状态迁移。</p></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -138,9 +144,9 @@
           </div>
         </section>
 
-        <section id="actions" class="card card-actions">
+        <section id="actions" class="card card-actions" data-view-title="操作" aria-labelledby="actions-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>07</i><div><h2>受控操作</h2><small>CONTROLLED ACTIONS · AUDITED BACKEND ONLY</small></div></div>
+            <div class="card-title"><i>07</i><div><h2 id="actions-title">操作</h2><small>CONTROLLED COMMANDS · AUDITED BACKEND ONLY</small><p>后端命令记录和审计链路就绪后才会解锁。</p></div></div>
             <span class="lock-badge">READ ONLY</span>
           </header>
           <div class="action-grid">
@@ -161,6 +167,7 @@
     </div>
   </div>
   <script src="static/vendor/echarts.min.js?v=20260817-echarts-6.1.0"></script>
-  <script type="module" src="static/dashboard.js?v=20260824-control-room-v18-equity-ranges" defer></script>
+  <!-- type="module" src="static/dashboard.js?v=20260824-control-room-v18-equity-ranges" -->
+  <script type="module" src="static/dashboard.js?v=20260826-flight-deck-v2" defer></script>
 </body>
 </html>

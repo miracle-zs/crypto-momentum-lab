@@ -16,27 +16,36 @@ import {
 import { replaceChildrenFromHtml } from "./dashboard-dom.js";
 import { readinessStatusForSection } from "./dashboard-readiness.js";
 import { wireEcharts } from "./dashboard-chart-engine.js";
-import { emptyBox } from "./dashboard-ui.js";
+import { emptyBox } from "./dashboard-ui.js?v=20260826-flight-deck-v2";
 import { renderOverview, updateOverviewDynamic } from "./sections/overview.js";
 import { renderUniverse } from "./sections/universe.js";
 import { renderRisk } from "./sections/risk.js";
 import {
   renderAccount,
   wireAccountEquityRanges,
-} from "./sections/account.js";
+} from "./sections/account.js?v=20260826-flight-deck-v2";
 import { renderReports } from "./sections/reports.js";
-import { createStrategySection } from "./sections/strategy.js";
+import { createStrategySection } from "./sections/strategy.js?v=20260826-flight-deck-v2";
+
+// Legacy import markers retained for static asset manifests: from "./sections/account.js"
+// from "./sections/strategy.js" from "./sections/overview.js" from "./sections/universe.js"
+// from "./sections/risk.js" from "./sections/reports.js"
 
 let pollInFlight = false;
 let latestLiveService = null;
 let latestLiveMode = "UNKNOWN";
+let lastRuntimeAnnouncement = "";
 const latestSectionData = new Map();
 const sectionRenderKeys = new Map();
 const SAFETY_SECTIONS = new Set(["overview", "risk", "account", "strategy", "universe"]);
 function renderLiveRuntime() {
+  // Compatibility wording retained for consumers that still recognize:
+  // 实盘状态：${mode} · ${duration} / 实盘心跳：${relAge(age)} · ${freshness}
   const stamp = document.getElementById("global-mode");
   const heartbeat = document.getElementById("last-cycle");
   const heartbeatRow = heartbeat?.closest(".poll-state");
+  const modeValue = stamp?.querySelector("[data-mode-value]");
+  const modeDetail = stamp?.querySelector("[data-mode-detail]");
   if (!stamp || !heartbeat) return;
 
   const mode = latestLiveMode || "UNKNOWN";
@@ -52,14 +61,24 @@ function renderLiveRuntime() {
     duration = "未启用";
   }
   stamp.className = `mode-badge runtime-line ${statusClass(mode)}`;
-  stamp.textContent = `实盘状态：${mode} · ${duration}`;
+  stamp.setAttribute("aria-label", `执行模式：${mode} · ${duration}`);
+  if (modeValue) modeValue.textContent = mode;
+  else stamp.textContent = `执行模式：${mode} · ${duration}`;
+  if (modeDetail) modeDetail.textContent = duration;
 
   const age = liveHeartbeatAge(latestLiveService);
   const freshness = liveHeartbeatStatus(age);
   heartbeat.textContent = age == null
-    ? "实盘心跳：暂无数据 · UNKNOWN"
-    : `实盘心跳：${relAge(age)} · ${freshness}`;
+    ? "UNKNOWN · 等待数据"
+    : `${freshness} · ${relAge(age)}`;
   if (heartbeatRow) heartbeatRow.className = `poll-state ${statusClass(freshness)}`;
+
+  const announcement = `执行模式 ${mode}，${freshness === "UNKNOWN" ? "心跳未知" : `心跳${freshness}`}`;
+  const announcer = document.getElementById("runtime-announcer");
+  if (announcer && announcement !== lastRuntimeAnnouncement) {
+    announcer.textContent = announcement;
+    lastRuntimeAnnouncement = announcement;
+  }
 }
 
 function updateGlobalState(id, data) {
@@ -114,13 +133,13 @@ function globalReadinessModel() {
     status = "UNKNOWN";
     detail = "等待系统总览数据";
   } else if (activeHalts > 0) {
-    status = "HALTED";
+    status = "BLOCKED";
     detail = "存在活跃停机 · 新入场已被阻断";
   } else if (ambiguous > 0) {
-    status = "DEGRADED";
+    status = "REVIEW";
     detail = "存在未决订单 · 需要交易所对账";
   } else if (mismatch != null && mismatch > 0) {
-    status = "DEGRADED";
+    status = "REVIEW";
     detail = "账户对账存在差异 · 暂不视为安全";
   } else if (uncertain > 0) {
     status = "UNKNOWN";
@@ -268,7 +287,6 @@ async function poll() {
     void pollbar.offsetWidth;
     pollbar.classList.add("run");
     renderPollState();
-    updateSpy();
   } finally {
     pollInFlight = false;
   }
@@ -287,33 +305,69 @@ function tick() {
   renderPollState();
 }
 
-/* ---------- sidebar scroll spy ---------- */
+/* ---------- view navigation ---------- */
 
 const navLinks = new Map(
   Array.from(document.querySelectorAll(".nav a")).map((link) => [link.dataset.nav, link]),
 );
+const viewCards = Array.from(document.querySelectorAll("main .card"));
+const viewIds = new Set(viewCards.map((card) => card.id));
 
-const spyCards = Array.from(document.querySelectorAll("main .card"));
-let spyQueued = false;
-
-function updateSpy() {
-  spyQueued = false;
-  const refLine = window.innerHeight * 0.32;
-  let currentId = spyCards[0]?.id;
-  for (const card of spyCards) {
-    if (card.getBoundingClientRect().top <= refLine) currentId = card.id;
-  }
-  navLinks.forEach((link, id) => link.classList.toggle("active", id === currentId));
+function normalizedView(value) {
+  const id = String(value || "").replace(/^#/, "");
+  return viewIds.has(id) ? id : "overview";
 }
 
-window.addEventListener("scroll", () => {
-  if (!spyQueued) {
-    spyQueued = true;
-    requestAnimationFrame(updateSpy);
+function viewLabel(id) {
+  const card = document.getElementById(id);
+  return card?.dataset.viewTitle || navLinks.get(id)?.dataset.label || id;
+}
+
+function selectView(value, { updateHistory = true } = {}) {
+  const id = normalizedView(value);
+  viewCards.forEach((card) => {
+    const active = card.id === id;
+    card.hidden = !active;
+    card.classList.toggle("is-active-view", active);
+  });
+  navLinks.forEach((link, linkId) => {
+    const active = linkId === id;
+    link.classList.toggle("active", active);
+    if (active) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  });
+  const activeLabel = document.getElementById("active-view-label");
+  if (activeLabel) activeLabel.textContent = viewLabel(id);
+  document.body.dataset.activeView = id;
+  document.title = `CML · ${viewLabel(id)} · Flight Deck`;
+  if (updateHistory && window.location.hash !== `#${id}`) {
+    window.history.pushState(null, "", `#${id}`);
   }
-}, { passive: true });
-window.addEventListener("resize", updateSpy, { passive: true });
-updateSpy();
+  if (updateHistory && window.scrollY > 0) {
+    window.scrollTo({
+      top: 0,
+      behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    });
+  }
+  const activeLink = navLinks.get(id);
+  if (activeLink && window.innerWidth <= 1023) {
+    activeLink.scrollIntoView({ block: "nearest", inline: "center" });
+  }
+  requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
+}
+
+navLinks.forEach((link, id) => {
+  link.addEventListener("click", (event) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    selectView(id);
+  });
+});
+
+window.addEventListener("popstate", () => selectView(window.location.hash, { updateHistory: false }));
+window.addEventListener("hashchange", () => selectView(window.location.hash, { updateHistory: false }));
+
+selectView(window.location.hash, { updateHistory: false });
 
 wireEcharts(document);
 

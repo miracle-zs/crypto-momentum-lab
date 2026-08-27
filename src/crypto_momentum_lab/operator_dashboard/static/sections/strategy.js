@@ -36,12 +36,13 @@ import {
 import {
   blockTitle,
   dataTable,
+  disclosure,
   emptyBox,
   pill,
   sideTag,
   signalEvidence,
   tile,
-} from "../dashboard-ui.js";
+} from "../dashboard-ui.js?v=20260826-flight-deck-v2";
 
 async function defaultRequestJson(url) {
   const response = await fetch(url, {
@@ -198,6 +199,7 @@ function accountDetail(account, index) {
     <span class="num muted">${historyLoaded ? "全部" : "最近"} ${(account.closed_trades || []).length} / 共 ${summary.closed_trade_count || 0}</span>
     <button class="history-button" type="button" data-load-paper-history>${historyLoaded ? "刷新全部历史" : "查看全部历史"}</button>
   </span>`;
+  const historyToolbar = `<div class="detail-toolbar">${historyAction}</div>`;
   const detailMeta = `<div class="detail-meta">
     <span>RUN <b class="num">${esc(account.run_id || "—")}</b></span>
     <span>CONFIG <b class="num" title="${esc(configHash)}" aria-label="完整配置哈希 ${esc(configHash)}">${esc(shortHash(configHash))}</b></span>
@@ -261,15 +263,17 @@ function accountDetail(account, index) {
     ${detailMeta}
     ${kpis}
     ${chartBlock}
-    <div class="block-split">
-      <div class="block">${blockTitle("当前持仓", "OPEN POSITIONS", `<strong class="num">${positions.length}</strong>`)}${positionsTable}</div>
-      <div class="block">${blockTitle("已平仓交易", historyLoaded ? "CLOSED TRADES · FULL HISTORY" : "CLOSED TRADES · LATEST 30", historyAction)}${closedTable}</div>
-    </div>
-    <div class="block">${blockTitle("开平仓流水", "POSITION LIFECYCLE · BUY / SELL WITH CONTEXT")}${eventsTable}</div>
-    <details class="block secondary" data-state-key="paper-strategy-signals">
-      <summary>${blockTitle("策略信号", "RAW SIGNALS · LATEST 20")}</summary>
-      ${signalsTable}
-    </details>
+    ${disclosure("当前持仓", "OPEN POSITIONS", positionsTable, `<strong class="num">${positions.length}</strong>`, {
+      open: positions.length > 0,
+      stateKey: "paper-open-positions",
+    })}
+    ${disclosure("已平仓交易", historyLoaded ? "CLOSED TRADES · FULL HISTORY" : "CLOSED TRADES · LATEST 30",
+      `${historyToolbar}${closedTable}`,
+      `<strong class="num">${summary.closed_trade_count || 0}</strong>`, { stateKey: "paper-closed-trades" })}
+    ${disclosure("开平仓流水", "POSITION LIFECYCLE · BUY / SELL WITH CONTEXT", eventsTable,
+      `<strong class="num">${(account.trade_events || []).length}</strong>`, { stateKey: "paper-trade-events" })}
+    ${disclosure("策略信号", "RAW SIGNALS · LATEST 20", signalsTable,
+      `<strong class="num">${(account.latest_signals || []).length}</strong>`, { stateKey: "paper-strategy-signals" })}
   </div>`;
 }
 

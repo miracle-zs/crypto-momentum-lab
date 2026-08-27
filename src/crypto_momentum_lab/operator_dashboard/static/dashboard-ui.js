@@ -51,6 +51,20 @@ export const emptyBox = (text = "暂无数据", hint = "") =>
 export const blockTitle = (title, eyebrow, aside = "") =>
   `<div class="block-title"><div><b>${esc(title)}</b><small>${esc(eyebrow)}</small></div>${aside ? `<span>${aside}</span>` : ""}</div>`;
 
+export const disclosure = (
+  title,
+  eyebrow,
+  content,
+  aside = "",
+  { open = false, stateKey = "" } = {},
+) => {
+  const state = stateKey ? ` data-state-key="${esc(stateKey)}"` : "";
+  return `<details class="block secondary disclosure"${state}${open ? " open" : ""}>
+    <summary>${blockTitle(title, eyebrow, aside)}<span class="disclosure-hint">查看详情</span></summary>
+    <div class="disclosure-body">${content}</div>
+  </details>`;
+};
+
 export function dataTable(columns, rows, options = {}) {
   if (!rows?.length) return emptyBox(options.emptyText || "暂无数据");
   const head = columns.map((column) =>

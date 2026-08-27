@@ -7,6 +7,7 @@ import {
   dayTime,
   esc,
   fullDateTime,
+  hasUncertainStatus,
   money,
   num,
   pnlClass,
@@ -17,7 +18,13 @@ import {
   signedPercent,
 } from "../dashboard-formatters.js";
 import { accountWindowDelta, equityChart } from "../dashboard-charts.js";
-import { blockTitle, dataTable, pill, tile } from "../dashboard-ui.js";
+import {
+  blockTitle,
+  dataTable,
+  disclosure,
+  pill,
+  tile,
+} from "../dashboard-ui.js?v=20260826-flight-deck-v2";
 
 const ACCOUNT_EQUITY_RANGES = [
   { key: "24h", label: "24小时", shortLabel: "24H" },
@@ -231,14 +238,19 @@ export function renderAccount(data) {
     { label: "手续费", value: (row) => `${num(row.fee, 4)} ${row.fee_asset || ""}`, align: "right" },
     { label: "平仓原因", value: (row) => row.reduce_only ? (row.close_reason || "原因未记录") : "开仓", cls: "muted" },
   ], data.fills, { emptyText: "尚无成交记录", tall: true });
+  const accountNeedsReview = mismatchCount > 0
+    || hasUncertainStatus(syncStatus)
+    || hasUncertainStatus(normalized(reconciliation.status))
+    || !data.observed_at;
+  const positions = data.positions || [];
+  const openOrders = data.open_orders || [];
+  const fills = data.fills || [];
   const body = `<div class="detail-meta"><span>同步时间 <b class="num">${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</b></span><span>${esc(relToNow(data.observed_at))}</span></div>
     ${hero}${stateGrid}${kpis}${equityChartBlock}
-    <div class="block-split account-overview-grid">
-      <div class="block">${blockTitle("账户权限与对账", "EXECUTION CHANNEL / RECONCILIATION")}${accountFacts}</div>
-      <div class="block">${blockTitle("USDT 资产余额", "USDT BALANCE · ACCOUNT COLLATERAL")}${balancesTable}</div>
-    </div>
-    <div class="block">${blockTitle("交易所持仓", "EXCHANGE POSITIONS · STRATEGY ATTRIBUTION", `<strong class="num">${(data.positions || []).length}</strong>`)}${positionsTable}</div>
-    <div class="block">${blockTitle("当前挂单", "OPEN ORDERS · EXCHANGE SOURCE OF TRUTH", `<strong class="num">${(data.open_orders || []).length}</strong>`)}${ordersTable}</div>
-    <div class="block">${blockTitle("最近成交订单", "RECENT TRADES · ONE ORDER PER ROW", `<strong class="num">${(data.fills || []).length}</strong>`)}${fillsTable}</div>`;
+    ${disclosure("账户权限与对账", "EXECUTION CHANNEL / RECONCILIATION", accountFacts, "", { open: accountNeedsReview, stateKey: "account-reconciliation" })}
+    ${disclosure("USDT 资产余额", "USDT BALANCE · ACCOUNT COLLATERAL", balancesTable, `<strong class="num">${usdtBalances.length}</strong>`, { open: usdtBalances.length > 0, stateKey: "account-balances" })}
+    ${disclosure("交易所持仓", "EXCHANGE POSITIONS · STRATEGY ATTRIBUTION", positionsTable, `<strong class="num">${positions.length}</strong>`, { open: positions.length > 0, stateKey: "account-positions" })}
+    ${disclosure("当前挂单", "OPEN ORDERS · EXCHANGE SOURCE OF TRUTH", ordersTable, `<strong class="num">${openOrders.length}</strong>`, { open: openOrders.length > 0, stateKey: "account-open-orders" })}
+    ${disclosure("最近成交订单", "RECENT TRADES · ONE ORDER PER ROW", fillsTable, `<strong class="num">${fills.length}</strong>`, { stateKey: "account-fills" })}`;
   return [data.status, body];
 }
