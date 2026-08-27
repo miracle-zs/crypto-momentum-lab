@@ -84,8 +84,8 @@ def test_run_strategy_replay_simulates_latency_fee_and_spread_fill() -> None:
     assert fill.signal_id == report.signals[0].signal_id
     assert fill.symbol == "BTCUSDT"
     assert fill.side is StrategySide.LONG
-    assert fill.target_fill_at == datetime(2026, 6, 22, 0, 1, 15, tzinfo=UTC)
-    assert fill.filled_at == datetime(2026, 6, 22, 0, 1, 15, tzinfo=UTC)
+    assert fill.target_fill_at == datetime(2026, 6, 22, 0, 1, 30, tzinfo=UTC)
+    assert fill.filled_at == datetime(2026, 6, 22, 0, 1, 30, tzinfo=UTC)
     assert fill.reference_midpoint == Decimal("101.4")
     assert fill.spread == Decimal("0.02")
     assert fill.fill_price == Decimal("101.420141")

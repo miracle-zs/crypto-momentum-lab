@@ -53,6 +53,9 @@ class RuntimeStrategy(Protocol):
     def checkpoint(self) -> StrategyCheckpoint:
         pass
 
+    def warm_market_state(self, state: MarketState15s) -> None:
+        pass
+
     def required_data(self) -> StrategyDataRequirement:
         pass
 
@@ -449,7 +452,9 @@ def run_paired_paper_live_daemon(
                 pending_by_account[index].extend(account_decision.candidates)
 
         # Resolve entries after the strategy decision so zero-latency paper
-        # execution uses the same closed state that live execution consumes.
+        # execution can use the current closed state's end-of-bucket quote.
+        # The state is not eligible at bucket_start: its values are only
+        # available once bucket_end has been reached.
         for index, account in enumerate(accounts):
             config = account.config
             pending_by_account[index], fills = _resolve_pending_candidates(
@@ -475,23 +480,23 @@ def run_paired_paper_live_daemon(
                     if position.status is PaperPositionStatus.OPEN:
                         last_position_persisted_at_by_account[index][
                             position.position_id
-                        ] = state.bucket_start
+                        ] = position.updated_at
             last_snapshot_at = last_equity_snapshot_at[index]
             should_snapshot = (
                 last_snapshot_at is None
-                or state.bucket_start - last_snapshot_at >= timedelta(minutes=1)
+                or state.bucket_end - last_snapshot_at >= timedelta(minutes=1)
             )
             persisted_position_updates = _persistable_position_updates(
                 position_updates_by_account[index],
                 last_position_persisted_at_by_account[index],
-                state.bucket_start,
+                state.bucket_end,
             )
             if persisted_position_updates or fills or should_snapshot:
                 _run_async(
                     account.artifact_repository.save_portfolio(
                         config.run_id,
                         persisted_position_updates,
-                        state.bucket_start,
+                        state.bucket_end,
                         config.portfolio,
                     )
                 )
@@ -503,9 +508,9 @@ def run_paired_paper_live_daemon(
                     else:
                         last_position_persisted_at_by_account[index][
                             position.position_id
-                        ] = state.bucket_start
+                        ] = position.updated_at
                 if should_snapshot:
-                    last_equity_snapshot_at[index] = state.bucket_start
+                    last_equity_snapshot_at[index] = state.bucket_end
 
         checkpoint_dirty = True
         processed += 1
@@ -987,24 +992,24 @@ def run_paper_live_daemon(
                 for position in opened_positions:
                     if position.status is PaperPositionStatus.OPEN:
                         last_position_persisted_at[position.position_id] = (
-                            state.bucket_start
+                            position.updated_at
                         )
             should_snapshot = (
                 last_equity_snapshot_at is None
-                or state.bucket_start - last_equity_snapshot_at
+                or state.bucket_end - last_equity_snapshot_at
                 >= timedelta(minutes=1)
             )
             persisted_position_updates = _persistable_position_updates(
                 position_updates,
                 last_position_persisted_at,
-                state.bucket_start,
+                state.bucket_end,
             )
             if persisted_position_updates or fills or should_snapshot:
                 _run_async(
                     artifact_repository.save_portfolio(
                         config.run_id,
                         persisted_position_updates,
-                        state.bucket_start,
+                        state.bucket_end,
                         config.portfolio,
                     )
                 )
@@ -1013,10 +1018,10 @@ def run_paper_live_daemon(
                         last_position_persisted_at.pop(position.position_id, None)
                     else:
                         last_position_persisted_at[position.position_id] = (
-                            state.bucket_start
+                            position.updated_at
                         )
                 if should_snapshot:
-                    last_equity_snapshot_at = state.bucket_start
+                    last_equity_snapshot_at = state.bucket_end
         checkpoint_dirty = True
         processed += 1
         processed_since_checkpoint += 1
@@ -1075,7 +1080,7 @@ def _resolve_pending_candidates(
             remaining.append(candidate)
             continue
         target_fill_at = candidate_target_fill_at(candidate, execution)
-        if state.bucket_start > candidate.expires_at:
+        if state.bucket_end > candidate.expires_at:
             fills.append(
                 simulate_candidate_fill(
                     candidate=candidate,
@@ -1084,7 +1089,7 @@ def _resolve_pending_candidates(
                 )
             )
             continue
-        if state.bucket_start < target_fill_at:
+        if state.bucket_end < target_fill_at:
             remaining.append(candidate)
             continue
         fills.append(

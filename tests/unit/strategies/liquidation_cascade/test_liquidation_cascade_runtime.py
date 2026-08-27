@@ -18,14 +18,17 @@ from crypto_momentum_lab.strategies.liquidation_cascade import (
 
 def test_liquidation_cascade_emits_signal_after_liquidation_and_break() -> None:
     strategy = _strategy()
+    states = _cascade_states()
 
-    decision = _last_decision(strategy, _cascade_states())
+    decision = _last_decision(strategy, states)
 
     assert len(decision.signals) == 1
     assert len(decision.candidates) == 1
     signal = decision.signals[0]
     assert signal.strategy_name == "liquidation_cascade"
     assert signal.side is StrategySide.LONG
+    assert signal.detected_at == states[-1].bucket_end
+    assert signal.source_state_at == states[-1].bucket_start
     assert signal.reason == "liquidation_cascade"
     assert signal.features["direction"] == "up"
     assert signal.features["liquidation_count"] == 2
@@ -34,6 +37,7 @@ def test_liquidation_cascade_emits_signal_after_liquidation_and_break() -> None:
     assert signal.features["cluster_trade_notional"] == "600"
     assert signal.features["aggressive_buy_notional"] == "500"
     assert signal.features["aggressive_sell_notional"] == "100"
+    assert decision.candidates[0].created_at == states[-1].bucket_end
 
 
 def test_liquidation_cascade_ignores_states_without_liquidation() -> None:

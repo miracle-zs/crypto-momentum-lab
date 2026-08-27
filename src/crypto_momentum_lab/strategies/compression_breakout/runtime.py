@@ -347,11 +347,10 @@ class CompressionBreakoutRuntimeStrategy:
         evaluation: _CompressionEvaluation,
     ) -> tuple[StrategySignal, OrderIntentCandidate]:
         self._signal_sequence += 1
-        detected_at = (
-            state.bucket_end
-            if self._config.signal_interval_seconds > 15
-            else state.bucket_start
-        )
+        # ``state`` is a closed market state.  Its derived features become
+        # available at bucket_end, so a signal must never be backdated to the
+        # start of the interval that supplied those features.
+        detected_at = state.bucket_end
         side = _strategy_side(evaluation.direction)
         signal_id = deterministic_signal_id(
             identity=self._identity,

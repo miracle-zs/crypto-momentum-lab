@@ -158,18 +158,20 @@ def run_paper_trading(
             break
         _validate_state(state, last_processed_at_by_symbol)
         input_state_count += 1
+        decision = strategy.on_market_state(state)
+        signals.extend(decision.signals)
+        candidates.extend(decision.candidates)
+        pending_candidates.extend(decision.candidates)
+        rejections.extend(decision.rejections)
+        # The strategy consumes a closed state.  Resolve after the decision so
+        # a zero-latency candidate can fill at this state's bucket_end, never
+        # at bucket_start where the state was still incomplete.
         pending_candidates, fills = _resolve_pending_candidates(
             pending_candidates=tuple(pending_candidates),
             state=state,
             execution=config.execution,
         )
         paper_fills.extend(fills)
-
-        decision = strategy.on_market_state(state)
-        signals.extend(decision.signals)
-        candidates.extend(decision.candidates)
-        pending_candidates.extend(decision.candidates)
-        rejections.extend(decision.rejections)
         last_processed_at_by_symbol[state.symbol] = state.bucket_start
 
     if input_state_count == 0:
@@ -233,7 +235,7 @@ def _resolve_pending_candidates(
             remaining.append(candidate)
             continue
         target_fill_at = candidate_target_fill_at(candidate, execution)
-        if state.bucket_start > candidate.expires_at:
+        if state.bucket_end > candidate.expires_at:
             fills.append(
                 simulate_candidate_fill(
                     candidate=candidate,
@@ -242,7 +244,7 @@ def _resolve_pending_candidates(
                 )
             )
             continue
-        if target_fill_at <= state.bucket_start <= candidate.expires_at:
+        if target_fill_at <= state.bucket_end <= candidate.expires_at:
             fills.append(
                 simulate_candidate_fill(
                     candidate=candidate,

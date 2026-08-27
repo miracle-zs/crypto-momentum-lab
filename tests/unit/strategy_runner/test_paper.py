@@ -41,11 +41,24 @@ def test_run_paper_trading_emits_incremental_fill_after_latency() -> None:
         22,
         0,
         1,
-        15,
+        30,
         tzinfo=UTC,
     )
     assert report.pending_candidate_count == 0
     assert report.fill_summary["fills_by_status"] == {"filled": 1}
+
+
+def test_run_paper_trading_zero_latency_fills_at_closed_state_end() -> None:
+    states = _breakout_states()
+    report = run_paper_trading(
+        source=InMemoryPaperMarketStateSource(states),
+        config=_paper_config(execution=ReplayExecutionConfig(latency_buckets=0)),
+    )
+
+    assert len(report.paper_fills) == 1
+    assert report.paper_fills[0].status is SimulatedFillStatus.FILLED
+    assert report.paper_fills[0].target_fill_at == states[-1].bucket_end
+    assert report.paper_fills[0].filled_at == states[-1].bucket_end
 
 
 def test_run_paper_trading_leaves_candidate_pending_when_source_ends() -> None:
@@ -131,6 +144,7 @@ def _paper_config(
     max_states: int | None = None,
     *,
     strategy_name: str = "compression_breakout",
+    execution: ReplayExecutionConfig | None = None,
 ) -> PaperRunnerConfig:
     return PaperRunnerConfig(
         strategy_name=strategy_name,
@@ -148,7 +162,11 @@ def _paper_config(
         candidate_notional=Decimal("100"),
         candidate_ttl_buckets=2,
         signal_interval_seconds=15,
-        execution=ReplayExecutionConfig(latency_buckets=1),
+        execution=(
+            ReplayExecutionConfig(latency_buckets=1)
+            if execution is None
+            else execution
+        ),
         max_states=max_states,
     )
 

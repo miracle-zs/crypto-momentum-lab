@@ -187,7 +187,10 @@ class OrderFlowImpulseRuntimeStrategy:
                 )
             )
 
-        signal, candidate = self._build_signal_and_candidate(event)
+        signal, candidate = self._build_signal_and_candidate(
+            event,
+            detected_at=state.bucket_end,
+        )
         self._cooldown_remaining[state.symbol] = (
             self._config.event_config.cooldown_buckets
         )
@@ -232,6 +235,8 @@ class OrderFlowImpulseRuntimeStrategy:
     def _build_signal_and_candidate(
         self,
         event: OrderFlowImpulseEvent,
+        *,
+        detected_at: datetime,
     ) -> tuple[StrategySignal, OrderIntentCandidate]:
         self._signal_sequence += 1
         side = _strategy_side(event.direction)
@@ -239,7 +244,7 @@ class OrderFlowImpulseRuntimeStrategy:
             identity=self._identity,
             symbol=event.symbol,
             side=side,
-            detected_at=event.detected_at,
+            detected_at=detected_at,
             sequence=self._signal_sequence,
         )
         features = _features(event)
@@ -251,7 +256,7 @@ class OrderFlowImpulseRuntimeStrategy:
             config_hash=self._identity.config_hash,
             symbol=event.symbol,
             side=side,
-            detected_at=event.detected_at,
+            detected_at=detected_at,
             source_state_at=event.detected_at,
             reason="orderflow_impulse",
             features=features,
@@ -277,9 +282,9 @@ class OrderFlowImpulseRuntimeStrategy:
             limit_price=None,
             desired_notional=self._config.candidate_notional,
             reduce_only=False,
-            expires_at=event.detected_at
+            expires_at=detected_at
             + timedelta(seconds=15 * self._config.candidate_ttl_buckets),
-            created_at=event.detected_at,
+            created_at=detected_at,
             reason="orderflow_impulse",
             features=features,
         )

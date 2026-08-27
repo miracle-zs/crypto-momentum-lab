@@ -42,10 +42,31 @@ def test_simulate_candidate_fill_uses_latency_fee_spread_and_fill_id() -> None:
     assert fill.fill_id == deterministic_fill_id(candidate_id=candidate.candidate_id)
     assert fill.status is SimulatedFillStatus.FILLED
     assert fill.target_fill_at == datetime(2026, 6, 22, 0, 1, 15, tzinfo=UTC)
-    assert fill.filled_at == datetime(2026, 6, 22, 0, 1, 15, tzinfo=UTC)
+    assert fill.filled_at == datetime(2026, 6, 22, 0, 1, 30, tzinfo=UTC)
     assert fill.fill_price == Decimal("101.420141")
     assert fill.fee == Decimal("0.0400")
     assert fill.total_cost > fill.fee
+
+
+def test_zero_latency_fill_is_not_backdated_to_bucket_start() -> None:
+    identity = _identity()
+    signal = _signal(identity)
+    state = _state(5, close=Decimal("101.4"))
+    candidate = _candidate(
+        identity=identity,
+        signal_id=signal.signal_id,
+        created_at=state.bucket_end,
+    )
+
+    fill = simulate_candidate_fill(
+        candidate=candidate,
+        states=(state,),
+        execution=ReplayExecutionConfig(latency_buckets=0),
+    )
+
+    assert fill.status is SimulatedFillStatus.FILLED
+    assert fill.target_fill_at == state.bucket_end
+    assert fill.filled_at == state.bucket_end
 
 
 def test_pending_fill_records_source_ended_before_fill() -> None:

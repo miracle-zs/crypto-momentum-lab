@@ -36,7 +36,7 @@ def test_runtime_emits_upward_signal_after_acceptance_window() -> None:
     candidate = decision.candidates[0]
     assert signal.symbol == "BTCUSDT"
     assert signal.side is StrategySide.LONG
-    assert signal.detected_at == states[-1].bucket_start
+    assert signal.detected_at == states[-1].bucket_end
     assert signal.source_state_at == states[-1].bucket_start
     assert signal.features["direction"] == "up"
     assert signal.features["range_high"] == "100.1"
@@ -51,8 +51,8 @@ def test_runtime_emits_upward_signal_after_acceptance_window() -> None:
     assert candidate.signal_id == signal.signal_id
     assert candidate.side is StrategySide.LONG
     assert candidate.desired_notional == Decimal("100")
-    assert candidate.created_at == states[-1].bucket_start
-    assert candidate.expires_at == states[-1].bucket_start + timedelta(seconds=30)
+    assert candidate.created_at == states[-1].bucket_end
+    assert candidate.expires_at == states[-1].bucket_end + timedelta(seconds=30)
 
 
 def test_runtime_emits_downward_signal_after_acceptance_window() -> None:

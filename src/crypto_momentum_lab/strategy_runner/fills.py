@@ -90,6 +90,13 @@ def candidate_target_fill_at(
     candidate: OrderIntentCandidate,
     execution: ReplayExecutionConfig,
 ) -> datetime:
+    """Return the earliest time a closed-state execution may be filled.
+
+    Strategy candidates are timestamped at the availability boundary of the
+    closed state that produced them.  ``latency_buckets=0`` therefore means
+    "the end of that closed state", rather than the start of the state whose
+    values were needed to create the candidate.
+    """
     return candidate.created_at + timedelta(
         seconds=execution.latency_buckets * execution.state_interval_seconds
     )
@@ -134,7 +141,7 @@ def simulate_candidate_fill(
         (
             state
             for state in states
-            if target_fill_at <= state.bucket_start <= candidate.expires_at
+            if target_fill_at <= state.bucket_end <= candidate.expires_at
         ),
         None,
     )
@@ -200,7 +207,7 @@ def simulate_candidate_fill(
         side=candidate.side,
         status=SimulatedFillStatus.FILLED,
         target_fill_at=target_fill_at,
-        filled_at=fill_state.bucket_start,
+        filled_at=fill_state.bucket_end,
         requested_notional=requested_notional,
         filled_notional=requested_notional,
         quantity=quantity,

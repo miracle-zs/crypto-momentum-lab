@@ -42,6 +42,22 @@ def test_long_position_closes_at_take_profit_with_net_pnl() -> None:
     assert closed.return_pct == Decimal("0.019192")
 
 
+def test_state_based_mark_and_exit_use_closed_state_end() -> None:
+    position = position_from_entry_fill("run-1", _fill())
+    assert position is not None
+    state = _state(close=Decimal("102"))
+
+    closed = mark_positions(
+        positions=(position,),
+        state=state,
+        config=PaperExitConfig(),
+        taker_fee_rate=Decimal("0.0004"),
+    )[0]
+
+    assert closed.closed_at == state.bucket_end
+    assert closed.updated_at == state.bucket_end
+
+
 def test_short_position_closes_at_stop_loss() -> None:
     position = position_from_entry_fill(
         "run-1",

@@ -161,7 +161,7 @@ class SignalStrategy(FakeStrategy):
             config_hash=self._identity.config_hash,
             symbol=state.symbol,
             side=self._side,
-            detected_at=state.bucket_start,
+            detected_at=state.bucket_end,
             source_state_at=state.bucket_start,
             reason="compression_breakout",
             features=self._features,
@@ -180,8 +180,8 @@ class SignalStrategy(FakeStrategy):
             limit_price=None,
             desired_notional=Decimal("25"),
             reduce_only=False,
-            expires_at=state.bucket_start + timedelta(seconds=60),
-            created_at=state.bucket_start,
+            expires_at=state.bucket_end + timedelta(seconds=60),
+            created_at=state.bucket_end,
             reason=signal.reason,
             features=self._features,
         )
@@ -427,8 +427,67 @@ def test_daemon_fills_new_candidate_on_current_state_without_extra_latency() -> 
 
     assert len(artifacts.fills) == 1
     assert artifacts.fills[0].status is SimulatedFillStatus.FILLED
-    assert artifacts.fills[0].target_fill_at == state.bucket_start
-    assert artifacts.fills[0].filled_at == state.bucket_start
+    assert artifacts.fills[0].target_fill_at == state.bucket_end
+    assert artifacts.fills[0].filled_at == state.bucket_end
+
+
+def test_daemon_requires_entry_price_above_both_15m_emas() -> None:
+    state = fixture_state("BTCUSDT", 0)
+    identity = _identity()
+    artifacts = FakeArtifactRepository()
+
+    run_paper_live_daemon(
+        source=(state,),
+        strategy=SignalStrategy(identity),
+        repository=FakeRepository(),
+        artifact_repository=artifacts,
+        config=_config(
+            run_identity=identity,
+            execution=ReplayExecutionConfig(latency_buckets=0),
+            entry_filter=PaperEntryFilterConfig(
+                require_price_above_ema5=True,
+                require_price_above_ema10=True,
+            ),
+        ),
+        clock=FakeClock(state.bucket_end + timedelta(seconds=1)),
+        entry_filter_context_loader=lambda _state: PaperEntryFilterContext(
+            entry_price=Decimal("100.01"),
+            ema5=Decimal("100"),
+            ema10=Decimal("100"),
+        ),
+    )
+
+    assert len(artifacts.decisions) == 1
+    assert len(artifacts.fills) == 1
+
+
+def test_daemon_rejects_equal_or_missing_ema_entry_filter_values() -> None:
+    state = fixture_state("BTCUSDT", 0)
+    identity = _identity()
+    artifacts = FakeArtifactRepository()
+
+    run_paper_live_daemon(
+        source=(state,),
+        strategy=SignalStrategy(identity),
+        repository=FakeRepository(),
+        artifact_repository=artifacts,
+        config=_config(
+            run_identity=identity,
+            entry_filter=PaperEntryFilterConfig(
+                require_price_above_ema5=True,
+                require_price_above_ema10=True,
+            ),
+        ),
+        clock=FakeClock(state.bucket_end + timedelta(seconds=1)),
+        entry_filter_context_loader=lambda _state: PaperEntryFilterContext(
+            entry_price=Decimal("100.01"),
+            ema5=Decimal("100.01"),
+            ema10=None,
+        ),
+    )
+
+    assert artifacts.decisions == []
+    assert artifacts.fills == []
 
 
 def test_daemon_expires_pending_candidate_after_deadline() -> None:
@@ -476,9 +535,10 @@ def test_daemon_throttles_open_position_mark_persistence() -> None:
         clock=FakeClock(states[-1].bucket_end + timedelta(seconds=1)),
     )
 
-    assert len(artifacts.portfolio_updates) == 2
+    assert len(artifacts.portfolio_updates) == 3
     assert artifacts.portfolio_updates[0] == ()
-    assert artifacts.portfolio_updates[1][0].updated_at == states[-1].bucket_start
+    assert artifacts.portfolio_updates[1][0].updated_at == states[3].bucket_end
+    assert artifacts.portfolio_updates[2] == ()
 
 
 def test_paired_daemon_calculates_entries_once_and_fans_out_accounts() -> None:
@@ -557,9 +617,9 @@ def test_paired_daemon_calculates_entries_once_and_fans_out_accounts() -> None:
     assert first_artifacts.fills[0].filled_notional == Decimal("25")
     assert second_artifacts.fills[0].filled_notional == Decimal("25")
     assert third_artifacts.fills[0].filled_notional == Decimal("25")
-    assert first_artifacts.fills[0].filled_at == states[0].bucket_start
-    assert second_artifacts.fills[0].filled_at == states[0].bucket_start
-    assert third_artifacts.fills[0].filled_at == states[0].bucket_start
+    assert first_artifacts.fills[0].filled_at == states[0].bucket_end
+    assert second_artifacts.fills[0].filled_at == states[0].bucket_end
+    assert third_artifacts.fills[0].filled_at == states[0].bucket_end
 
 
 def test_paired_entry_filters_preserve_b2_and_c1_subsets() -> None:

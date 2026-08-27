@@ -19,14 +19,17 @@ from crypto_momentum_lab.strategies.order_flow_impulse import (
 
 def test_orderflow_impulse_emits_long_signal_on_buy_imbalance() -> None:
     strategy = _strategy()
+    states = _impulse_states()
 
-    decision = _last_decision(strategy, _impulse_states())
+    decision = _last_decision(strategy, states)
 
     assert len(decision.signals) == 1
     assert len(decision.candidates) == 1
     signal = decision.signals[0]
     assert signal.strategy_name == "orderflow_impulse"
     assert signal.side is StrategySide.LONG
+    assert signal.detected_at == states[-1].bucket_end
+    assert signal.source_state_at == states[-1].bucket_start
     assert signal.reason == "orderflow_impulse"
     assert signal.features["direction"] == "up"
     assert signal.features["impulse_trade_count"] == 30
@@ -36,6 +39,7 @@ def test_orderflow_impulse_emits_long_signal_on_buy_imbalance() -> None:
     assert signal.features["baseline_notional"] == "300"
     assert signal.features["liquidation_notional"] == "0"
     assert decision.candidates[0].desired_notional == Decimal("100")
+    assert decision.candidates[0].created_at == states[-1].bucket_end
 
 
 def test_orderflow_impulse_accepts_missing_midpoint_when_trade_price_exists() -> None:
@@ -71,6 +75,17 @@ def test_orderflow_impulse_restores_market_buffer_from_checkpoint() -> None:
     restored.restore_checkpoint(checkpoint)
 
     assert restored.checkpoint().payload["buffer_sizes"] == {"BTCUSDT": 7}
+
+
+def test_orderflow_impulse_compact_checkpoint_omits_market_buffer_payload() -> None:
+    strategy = _strategy()
+    _last_decision(strategy, _impulse_states())
+
+    checkpoint = strategy.checkpoint(include_market_state_buffers=False)
+
+    assert checkpoint.payload["buffer_sizes"] == {"BTCUSDT": 7}
+    assert "market_state_buffers" not in checkpoint.payload
+    assert checkpoint.payload["signal_sequence"] == 1
 
 
 def test_orderflow_impulse_resets_symbol_after_a_market_data_gap() -> None:

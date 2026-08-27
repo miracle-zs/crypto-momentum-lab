@@ -223,11 +223,12 @@ def mark_positions(
     closed_candles: tuple[ClosedCandle15m, ...] = (),
 ) -> tuple[PaperPosition, ...]:
     updates: list[PaperPosition] = []
+    observed_at = state.bucket_end
     for position in positions:
         if (
             position.status is not PaperPositionStatus.OPEN
             or position.symbol != state.symbol
-            or state.bucket_start <= position.opened_at
+            or observed_at <= position.opened_at
         ):
             continue
         mark_price = _position_mark_price(
@@ -258,7 +259,7 @@ def mark_positions(
                 continue
         close_reason = _close_reason(
             gross_return=gross_return,
-            held_until=state.bucket_start,
+            held_until=observed_at,
             position=position,
             config=config,
             closed_candle=closed_candle,
@@ -270,12 +271,12 @@ def mark_positions(
                     position,
                     last_mark_price=mark_price,
                     unrealized_pnl=unrealized_pnl,
-                    updated_at=state.bucket_start,
+                    updated_at=observed_at,
                 )
             )
             continue
         exit_price = mark_price
-        closed_at = state.bucket_start
+        closed_at = observed_at
         if close_reason.startswith("candle_15m_"):
             if closed_candle is None:
                 raise AssertionError("candle exit requires a closed candle")
@@ -399,12 +400,12 @@ def _apply_candle_grace_exit(
     elif deadline is None:
         deadline = started_at + timedelta(minutes=15 * config.candle_grace_bars)
 
-    if state.bucket_start >= position.opened_at + timedelta(
+    if state.bucket_end >= position.opened_at + timedelta(
         seconds=config.max_holding_buckets * config.state_interval_seconds
     ):
         return _close_at_price(
             position=position,
-            closed_at=state.bucket_start,
+            closed_at=state.bucket_end,
             exit_price=mark_price,
             close_reason="max_holding_period",
             taker_fee_rate=taker_fee_rate,
@@ -417,7 +418,7 @@ def _apply_candle_grace_exit(
     if _entry_limit_touched(position.side, mark_price, recovery_limit):
         return _close_at_price(
             position=position,
-            closed_at=state.bucket_start,
+            closed_at=state.bucket_end,
             exit_price=mark_price,
             close_reason=(
                 f"candle_15m_grace_limit_{config.candle_grace_bars}"
@@ -432,7 +433,7 @@ def _apply_candle_grace_exit(
     ):
         return _close_at_price(
             position=position,
-            closed_at=state.bucket_start,
+            closed_at=state.bucket_end,
             exit_price=mark_price,
             close_reason=(
                 f"candle_15m_grace_timeout_{config.candle_grace_bars}"
@@ -446,7 +447,7 @@ def _apply_candle_grace_exit(
         unrealized_pnl=unrealized_pnl,
         grace_exit_started_at=started_at,
         grace_exit_deadline=deadline,
-        updated_at=state.bucket_start,
+        updated_at=state.bucket_end,
     )
 
 
