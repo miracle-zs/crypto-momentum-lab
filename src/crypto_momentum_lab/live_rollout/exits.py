@@ -105,6 +105,7 @@ class LiveExitConfig:
     policy: PositionExitPolicy
     candidate_ttl_seconds: int = 60
     candle_grace_bars: int = 0
+    candle_grace_decision_profit_pct: Decimal | None = None
     candle_grace_profit_pct: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
@@ -120,12 +121,29 @@ class LiveExitConfig:
             raise ValueError("candidate_ttl_seconds must be positive")
         if self.candle_grace_bars < 0:
             raise ValueError("candle_grace_bars must not be negative")
-        if self.candle_grace_bars > 0 and self.candle_grace_profit_pct <= 0:
+        decision_profit_pct = self.candle_grace_decision_profit_pct
+        if decision_profit_pct is None:
+            decision_profit_pct = self.candle_grace_profit_pct
+        if self.candle_grace_bars > 0 and decision_profit_pct <= 0:
             raise ValueError(
-                "candle_grace_profit_pct must be positive when grace is enabled"
+                "candle_grace_decision_profit_pct must be positive when grace "
+                "is enabled"
             )
         if self.candle_grace_profit_pct < 0 or self.candle_grace_profit_pct >= 1:
             raise ValueError("candle_grace_profit_pct must be in [0, 1)")
+        if decision_profit_pct < 0 or decision_profit_pct >= 1:
+            raise ValueError(
+                "candle_grace_decision_profit_pct must be in [0, 1)"
+            )
+
+    @property
+    def decision_profit_pct(self) -> Decimal:
+        """Profit threshold for direct close on the first adverse candle."""
+        return (
+            self.candle_grace_profit_pct
+            if self.candle_grace_decision_profit_pct is None
+            else self.candle_grace_decision_profit_pct
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,7 +289,7 @@ class LiveExitManager:
                 if _recovery_target_touched(
                     position=position,
                     mark_price=reference_price,
-                    profit_pct=self._config.candle_grace_profit_pct,
+                    profit_pct=self._config.decision_profit_pct,
                 ):
                     requests.append(
                         self._build_order_request(
@@ -483,7 +501,7 @@ class LiveExitManager:
                     if _recovery_target_touched(
                         position=position,
                         mark_price=mark_price,
-                        profit_pct=self._config.candle_grace_profit_pct,
+                        profit_pct=self._config.decision_profit_pct,
                     ):
                         return self._build_request(
                             state=state,

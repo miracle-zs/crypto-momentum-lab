@@ -209,6 +209,10 @@ services:
       - --entry-long-only
       - --entry-positive-gainer-top-count
       - "100"
+      - --no-entry-price-above-ema5
+      - --no-entry-price-above-ema10
+      - --orderflow-min-aggressive-imbalance
+      - "0.40"
       - --candidate-notional
       - "100"
       - --paper-initial-balance
@@ -385,8 +389,8 @@ services:
       - --entry-long-only
       - --entry-positive-gainer-top-count
       - ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-100}
-      - --entry-price-above-ema5
-      - --entry-price-above-ema10
+      - --no-entry-price-above-ema5
+      - --no-entry-price-above-ema10
       - --entry-leverage
       - ${CML_LIVE_ENTRY_LEVERAGE:-5}
       - --exit-mode
@@ -397,6 +401,8 @@ services:
       - ${CML_LIVE_STOP_LOSS_PCT:-0.01}
       - --candle-grace-bars
       - ${CML_LIVE_CANDLE_GRACE_BARS:-1}
+      - --candle-grace-decision-profit-pct
+      - ${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT:-0.001}
       - --candle-grace-profit-pct
       - ${CML_LIVE_CANDLE_GRACE_PROFIT_PCT:-0.0088}
       - --i-understand-this-places-real-orders

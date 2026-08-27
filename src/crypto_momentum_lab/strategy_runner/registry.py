@@ -1,5 +1,5 @@
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Protocol
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -40,7 +40,14 @@ class RuntimeStrategyProtocol(Protocol):
     def on_market_state(self, state: MarketState15s) -> StrategyDecision:
         pass
 
-    def checkpoint(self) -> StrategyCheckpoint:
+    def checkpoint(
+        self,
+        *,
+        include_market_state_buffers: bool = True,
+    ) -> StrategyCheckpoint:
+        pass
+
+    def warm_market_state(self, state: MarketState15s) -> None:
         pass
 
 
@@ -97,6 +104,25 @@ def build_runtime_config(
             event_config = _default_order_flow_config()
         if not isinstance(event_config, OrderFlowImpulseConfig):
             raise StrategyRegistryError("orderflow_impulse config is invalid")
+        min_imbalance_override = config.get(
+            "order_flow_impulse_min_aggressive_imbalance"
+        )
+        if min_imbalance_override is not None:
+            try:
+                min_imbalance = Decimal(str(min_imbalance_override))
+            except (InvalidOperation, ValueError) as error:
+                raise StrategyRegistryError(
+                    "order_flow_impulse_min_aggressive_imbalance is invalid"
+                ) from error
+            if not min_imbalance.is_finite() or min_imbalance < 0:
+                raise StrategyRegistryError(
+                    "order_flow_impulse_min_aggressive_imbalance must be "
+                    "finite and non-negative"
+                )
+            event_config = replace(
+                event_config,
+                min_aggressive_imbalance=min_imbalance,
+            )
         if "cooldown_buckets" in config:
             event_config = replace(
                 event_config,

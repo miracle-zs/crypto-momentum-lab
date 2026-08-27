@@ -173,8 +173,9 @@ _LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS = 15.0
 _LIVE_RECONCILE_INTERVAL_SECONDS = 60.0
 _LIVE_ENTRY_FILTER_PREFETCH_CONCURRENCY = 4
 _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT = 100
-_LIVE_ENTRY_PRICE_ABOVE_EMA5 = True
-_LIVE_ENTRY_PRICE_ABOVE_EMA10 = True
+_LIVE_ENTRY_PRICE_ABOVE_EMA5 = False
+_LIVE_ENTRY_PRICE_ABOVE_EMA10 = False
+_LIVE_ORDERFLOW_MIN_AGGRESSIVE_IMBALANCE = Decimal("0.40")
 _LIVE_MARKET_WEBSOCKET_URL = "wss://fstream.binance.com/market/ws"
 
 
@@ -490,6 +491,10 @@ def run_command(
         int,
         typer.Option("--candle-grace-bars", min=0),
     ] = 1,
+    candle_grace_decision_profit_pct: Annotated[
+        str,
+        typer.Option("--candle-grace-decision-profit-pct"),
+    ] = "0.001",
     candle_grace_profit_pct: Annotated[
         str,
         typer.Option("--candle-grace-profit-pct"),
@@ -544,6 +549,9 @@ def run_command(
             require_price_above_ema5=entry_price_above_ema5,
             require_price_above_ema10=entry_price_above_ema10,
             candle_grace_bars=candle_grace_bars,
+            candle_grace_decision_profit_pct=Decimal(
+                candle_grace_decision_profit_pct
+            ),
             candle_grace_profit_pct=Decimal(candle_grace_profit_pct),
             base_url=base_url,
             api_key=api_key,
@@ -896,6 +904,7 @@ async def _run_live_daemon(
     require_price_above_ema5: bool,
     require_price_above_ema10: bool,
     candle_grace_bars: int,
+    candle_grace_decision_profit_pct: Decimal,
     candle_grace_profit_pct: Decimal,
     base_url: str,
     api_key: str,
@@ -1363,6 +1372,9 @@ async def _run_live_daemon(
                         mode=exit_mode,
                     ),
                     candle_grace_bars=candle_grace_bars,
+                    candle_grace_decision_profit_pct=(
+                        candle_grace_decision_profit_pct
+                    ),
                     candle_grace_profit_pct=candle_grace_profit_pct,
                 ),
                 candle_loader=None,
@@ -2281,6 +2293,9 @@ def _live_strategy_config() -> dict[str, object]:
     return {
         "candidate_notional": Decimal("100"),
         "candidate_ttl_buckets": 4,
+        "order_flow_impulse_min_aggressive_imbalance": (
+            _LIVE_ORDERFLOW_MIN_AGGRESSIVE_IMBALANCE
+        ),
         # B1 must not suppress a same-symbol signal for two 15-second buckets.
         "cooldown_buckets": 0,
     }
