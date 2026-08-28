@@ -53,6 +53,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ExchangeOrderRow,
     ExecutionAccountProcessStateRow,
     LiveSessionTransitionRow,
+    LiveStrategySignalRow,
     MonitoringMembershipRow,
     OrderIntentCandidateRow,
     OrderIntentExecutionRow,
@@ -75,6 +76,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
 _EQUITY_WINDOW = timedelta(hours=24)
 _EQUITY_BUCKET_SECONDS = 6 * 60
 _EQUITY_MAX_POINTS = 240
+_LIVE_SIGNAL_MAX_ROWS = 30
 _COMMON_EQUITY_BUCKET_SECONDS = 15 * 60
 _ACCOUNT_EQUITY_RANGES: dict[str, tuple[timedelta, int]] = {
     "24h": (timedelta(hours=24), 6 * 60),
@@ -1351,6 +1353,7 @@ class DashboardQueries:
         positions: Sequence[AccountPositionSnapshotRow] = ()
         orders: Sequence[AccountOpenOrderRow] = ()
         fills: Sequence[AccountFillEventRow] = ()
+        live_signals: Sequence[LiveStrategySignalRow] = ()
         execution_orders: Sequence[ExchangeOrderRow] = ()
         intent_rows: Sequence[OrderIntentExecutionRow] = ()
         async with self._session_factory() as session:
@@ -1362,6 +1365,19 @@ class DashboardQueries:
             if process is not None:
                 environment = process.environment
                 account_label = process.account_label
+                live_signals = (
+                    await session.scalars(
+                        select(LiveStrategySignalRow)
+                        .where(
+                            LiveStrategySignalRow.account_label == account_label
+                        )
+                        .order_by(
+                            LiveStrategySignalRow.detected_at.desc(),
+                            LiveStrategySignalRow.recorded_at.desc(),
+                        )
+                        .limit(_LIVE_SIGNAL_MAX_ROWS)
+                    )
+                ).all()
                 equity_bucket = func.floor(
                     func.extract(
                         "epoch",
@@ -1654,6 +1670,7 @@ class DashboardQueries:
                 for row in orders
             ],
             fills=recent_trades,
+            live_signals=[_live_strategy_signal(row) for row in live_signals],
         )
 
     async def risk_execution(self) -> RiskExecutionResponse:
@@ -2199,6 +2216,50 @@ def _exchange_order(row: ExchangeOrderRow) -> dict[str, JsonValue]:
         "state": row.state,
         "quantity": str(row.quantity),
         "updated_at": row.updated_at.isoformat(),
+    }
+
+
+def _live_strategy_signal(row: LiveStrategySignalRow) -> dict[str, JsonValue]:
+    return {
+        "observation_id": row.observation_id,
+        "signal_id": row.signal_id,
+        "candidate_id": row.candidate_id,
+        "run_id": row.run_id,
+        "account_label": row.account_label,
+        "strategy_name": row.strategy_name,
+        "strategy_version": row.strategy_version,
+        "config_hash": row.config_hash,
+        "code_commit": row.code_commit,
+        "signal_kind": row.signal_kind,
+        "symbol": row.symbol,
+        "side": row.side,
+        "detected_at": row.detected_at.isoformat(),
+        "source_state_at": row.source_state_at.isoformat(),
+        "recorded_at": row.recorded_at.isoformat(),
+        "reason": row.reason,
+        "schema_version": row.schema_version,
+        "quote_volume_24h": (
+            None if row.quote_volume_24h is None else str(row.quote_volume_24h)
+        ),
+        "quote_volume_24h_quote_asset": row.quote_volume_24h_quote_asset,
+        "quote_volume_24h_source": row.quote_volume_24h_source,
+        "quote_volume_24h_source_at": (
+            None
+            if row.quote_volume_24h_source_at is None
+            else row.quote_volume_24h_source_at.isoformat()
+        ),
+        "quote_volume_24h_fetched_at": (
+            None
+            if row.quote_volume_24h_fetched_at is None
+            else row.quote_volume_24h_fetched_at.isoformat()
+        ),
+        "quote_volume_24h_age_ms": row.quote_volume_24h_age_ms,
+        "features": _json_mapping(row.features),
+        "reference_prices": _json_mapping(row.reference_prices),
+        "market_context": _json_mapping(row.market_context),
+        "filter_context": _json_mapping(row.filter_context),
+        "candidate_context": _json_mapping(row.candidate_context),
+        "account_context": _json_mapping(row.account_context),
     }
 
 

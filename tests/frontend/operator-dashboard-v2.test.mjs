@@ -31,6 +31,24 @@ const populatedAccount = {
   positions: [{ symbol: "BTCUSDT", position_side: "LONG", strategy_name: "compression_breakout", position_amt: "0.01", entry_price: "60000", mark_price: "60125", leverage: 3, margin_type: "isolated", notional: "250", unrealized_pnl: "12.5" }],
   open_orders: [{ symbol: "BTCUSDT", strategy_name: "compression_breakout", side: "SELL", order_type: "LIMIT", price: "61000", executed_quantity: "0", original_quantity: "0.01", status: "ACKNOWLEDGED", reduce_only: true, observed_at: "2026-08-26T08:00:00Z" }],
   fills: [{ trade_at: "2026-08-26T07:55:00Z", symbol: "BTCUSDT", order_id: "order-123456789", strategy_name: "compression_breakout", side: "BUY", price: "60000", quantity: "0.01", fill_count: 1, realized_pnl: "0", fee: "0.24", fee_asset: "USDT", reduce_only: false }],
+  live_signals: [{
+    signal_id: "signal-1",
+    strategy_name: "orderflow_impulse",
+    strategy_version: "v0",
+    config_hash: "config-hash",
+    code_commit: "commit-hash",
+    signal_kind: "strategy_signal",
+    symbol: "BTCUSDT",
+    side: "long",
+    detected_at: "2026-08-26T07:54:30Z",
+    recorded_at: "2026-08-26T07:54:31Z",
+    reason: "orderflow_impulse",
+    quote_volume_24h: "1234567",
+    quote_volume_24h_quote_asset: "USDT",
+    features: { impulse_return_pct: "0.01", notional_intensity: "2" },
+    reference_prices: { midpoint: "60000" },
+    filter_context: { entry_enabled: true, entry_long_only: true },
+  }],
   equity_curve: [
     { observed_at: "2026-08-26T07:54:00Z", equity: "1237.5" },
     { observed_at: "2026-08-26T08:00:00Z", equity: "1250" },
@@ -44,7 +62,11 @@ test("account v2 keeps populated evidence behind stable disclosures", () => {
   const [status, html] = renderAccount(populatedAccount);
 
   assert.equal(status, "READY");
-  assert.equal((html.match(/class="block secondary disclosure"/g) || []).length, 5);
+  assert.equal((html.match(/class="block secondary disclosure"/g) || []).length, 6);
+  assert.match(html, /实盘策略信号/);
+  assert.match(html, /24H 成交额/);
+  assert.match(html, /过滤 \/ 门控/);
+  assert.match(html, /data-state-key="live-strategy-signals" open/);
   assert.match(html, /data-state-key="account-balances"/);
   assert.match(html, /data-state-key="account-positions"/);
   assert.match(html, /data-state-key="account-open-orders"/);

@@ -115,6 +115,7 @@ class AccountOverviewResponse(DashboardSchema):
     positions: list[dict[str, JsonValue]]
     open_orders: list[dict[str, JsonValue]]
     fills: list[dict[str, JsonValue]]
+    live_signals: list[dict[str, JsonValue]] = Field(default_factory=list)
     environment: str | None = None
     account_label: str | None = None
     account_config: dict[str, JsonValue] = Field(default_factory=dict)

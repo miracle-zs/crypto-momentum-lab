@@ -44,3 +44,4 @@ def test_account_schema_exposes_live_equity_curve() -> None:
 
     assert response.equity_sample_interval_seconds == 360
     assert response.equity_curve[0]["equity"] == "276.80"
+    assert response.live_signals == []

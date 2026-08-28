@@ -353,6 +353,12 @@ class LiveStrategySignalRow(Base):
 
     __table_args__ = (
         Index(
+            "ix_live_strategy_signals_account_time",
+            "account_label",
+            "detected_at",
+            "recorded_at",
+        ),
+        Index(
             "ix_live_strategy_signals_run_time_symbol",
             "run_id",
             "detected_at",

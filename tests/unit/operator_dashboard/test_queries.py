@@ -16,6 +16,7 @@ from crypto_momentum_lab.operator_dashboard.queries import (
     _live_account_equity_point,
     _live_equity_observations,
     _live_observation,
+    _live_strategy_signal,
     _paper_account_summary,
     _paper_common_equity_statement,
     _paper_exit_label,
@@ -264,6 +265,49 @@ def test_live_account_balance_becomes_equity_point() -> None:
     assert point["equity"] == "276.80"
     assert point["balance"] == "282.28"
     assert point["unrealized_pnl"] == "-5.48"
+
+
+def test_live_strategy_signal_serializes_context_and_volume() -> None:
+    detected_at = datetime(2026, 8, 28, 11, 0, tzinfo=UTC)
+    recorded_at = datetime(2026, 8, 28, 11, 0, 1, tzinfo=UTC)
+    signal = _live_strategy_signal(
+        SimpleNamespace(
+            observation_id="live-observation",
+            signal_id="signal-1",
+            candidate_id=None,
+            run_id="live-run",
+            account_label="primary",
+            strategy_name="orderflow_impulse",
+            strategy_version="v0",
+            config_hash="config-hash",
+            code_commit="commit-hash",
+            signal_kind="strategy_signal",
+            symbol="BTCUSDT",
+            side="long",
+            detected_at=detected_at,
+            source_state_at=detected_at,
+            recorded_at=recorded_at,
+            reason="orderflow_impulse",
+            schema_version=1,
+            quote_volume_24h=Decimal("1234.50"),
+            quote_volume_24h_quote_asset="USDT",
+            quote_volume_24h_source="ticker",
+            quote_volume_24h_source_at=detected_at,
+            quote_volume_24h_fetched_at=recorded_at,
+            quote_volume_24h_age_ms=1000,
+            features={"impulse_return_pct": "0.01"},
+            reference_prices={"midpoint": "100"},
+            market_context={"spread": "0.001"},
+            filter_context={"entry_enabled": True},
+            candidate_context={"candidate_count": 1},
+            account_context={"gross_exposure": "10"},
+        )
+    )
+
+    assert signal["detected_at"] == detected_at.isoformat()
+    assert signal["quote_volume_24h"] == "1234.50"
+    assert signal["features"] == {"impulse_return_pct": "0.01"}
+    assert signal["filter_context"] == {"entry_enabled": True}
 
 
 def test_common_equity_curve_starts_at_zero_and_carries_latest_15m_bucket() -> None:

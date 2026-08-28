@@ -12,6 +12,17 @@ def test_strategy_run_tables_are_registered_in_metadata() -> None:
     } <= set(Base.metadata.tables)
 
 
+def test_live_signal_table_has_account_time_read_index() -> None:
+    live_signals = Base.metadata.tables["live_strategy_signals"]
+
+    assert any(
+        index.name == "ix_live_strategy_signals_account_time"
+        and [column.name for column in index.columns]
+        == ["account_label", "detected_at", "recorded_at"]
+        for index in live_signals.indexes
+    )
+
+
 def test_strategy_run_relationships_are_declared() -> None:
     strategy_signals = Base.metadata.tables["strategy_signals"]
     candidates = Base.metadata.tables["order_intent_candidates"]
