@@ -1,10 +1,13 @@
 name: crypto-momentum-lab
 
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 x-app: &app
-  build:
-    context: .
-    args:
-      CML_CODE_COMMIT: ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
+  image: crypto-momentum-lab-app:${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
   environment: &app-environment
     CML_DATABASE_URL: postgresql+asyncpg://cml:${CML_POSTGRES_PASSWORD:?set CML_POSTGRES_PASSWORD}@postgres:5432/cml
     # Optional logical database-plane overrides. Empty values intentionally
@@ -16,6 +19,7 @@ x-app: &app
     CML_CODE_COMMIT: ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
   restart: unless-stopped
   stop_grace_period: 60s
+  logging: *default-logging
 
 x-paper: &paper
   <<: *app
@@ -40,6 +44,7 @@ x-paper: &paper
 services:
   postgres:
     image: postgres:16-alpine
+    logging: *default-logging
     environment:
       POSTGRES_DB: cml
       POSTGRES_USER: cml
@@ -67,6 +72,10 @@ services:
 
   migrate:
     <<: *app
+    build:
+      context: .
+      args:
+        CML_CODE_COMMIT: ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
     entrypoint: ["alembic"]
     command: ["upgrade", "head"]
     depends_on:
@@ -445,6 +454,7 @@ services:
         paper-account-13-orderflow-b8-long-candle15m-v1,
         paper-account-14-orderflow-b1-gainer100-v1,
         paper-account-15-orderflow-b1-gainer100-ema-v1
+      CML_DASHBOARD_LIVE_CASH_FLOWS_JSON: ${CML_DASHBOARD_LIVE_CASH_FLOWS_JSON:-}
     entrypoint: ["cml-operator-dashboard"]
     command: ["--host", "0.0.0.0", "--port", "8765"]
     depends_on:

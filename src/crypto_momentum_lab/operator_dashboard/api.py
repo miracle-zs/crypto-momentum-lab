@@ -2,7 +2,7 @@ import asyncio
 import os
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal, Protocol, TypeVar, cast
@@ -14,7 +14,10 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
-from crypto_momentum_lab.operator_dashboard.queries import DashboardQueries
+from crypto_momentum_lab.operator_dashboard.queries import (
+    DashboardQueries,
+    LiveCashFlowAdjustment,
+)
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
     PaperAccountHistoryResponse,
@@ -27,12 +30,13 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     UniverseStatusResponse,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
-    create_async_database_engine,
+    create_dashboard_database_engine,
 )
 
 STATIC_DIR = Path(__file__).with_name("static")
 _BASIC_AUTH = HTTPBasic(auto_error=False)
 _PAPER_CACHE_TTL_SECONDS = 5.0
+_PAPER_EQUITY_CACHE_TTL_SECONDS = 30.0
 _OVERVIEW_CACHE_TTL_SECONDS = 15.0
 _OVERVIEW_QUERY_TIMEOUT_SECONDS = 10.0
 _T = TypeVar("_T")
@@ -98,6 +102,7 @@ def create_dashboard_app(
     auth_username: str | None = None,
     auth_password: str | None = None,
     paper_run_ids: frozenset[str] | None = None,
+    live_cash_flow_adjustments: Sequence[LiveCashFlowAdjustment] | None = None,
     overview_cache_ttl_seconds: float = _OVERVIEW_CACHE_TTL_SECONDS,
     overview_query_timeout_seconds: float = _OVERVIEW_QUERY_TIMEOUT_SECONDS,
 ) -> FastAPI:
@@ -119,10 +124,11 @@ def create_dashboard_app(
     engine: AsyncEngine | None = None
     resolved_queries = queries
     if resolved_queries is None and database_url is not None:
-        engine = create_async_database_engine(database_url)
+        engine = create_dashboard_database_engine(database_url)
         resolved_queries = DashboardQueries(
             async_sessionmaker(engine, expire_on_commit=False),
             paper_run_ids=paper_run_ids,
+            live_cash_flow_adjustments=live_cash_flow_adjustments,
         )
 
     @asynccontextmanager
@@ -248,6 +254,7 @@ def create_dashboard_app(
         return await response_cache.get(
             "paper-accounts-equity",
             query_service().paper_account_equity,
+            ttl_seconds=_PAPER_EQUITY_CACHE_TTL_SECONDS,
         )
 
     @dashboard.get(

@@ -1,6 +1,6 @@
 import asyncio
 import time
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
@@ -20,6 +20,14 @@ class RuntimeStateLoader(Protocol):
         self,
         *,
         cursor: RuntimeStateCursor,
+        limit: int,
+    ) -> tuple[MarketState15s, ...]: ...
+
+    def load_recovery_window(
+        self,
+        *,
+        last_processed_at_by_symbol: Mapping[str, datetime],
+        lookback_seconds: int,
         limit: int,
     ) -> tuple[MarketState15s, ...]: ...
 
@@ -72,6 +80,19 @@ class PostgresPaperMarketStateSource:
 
     def load_active_symbols(self) -> frozenset[str]:
         return self.loader.load_active_symbols()
+
+    def load_recovery_window(
+        self,
+        *,
+        last_processed_at_by_symbol: Mapping[str, datetime],
+        lookback_seconds: int,
+        limit: int,
+    ) -> tuple[MarketState15s, ...]:
+        return self.loader.load_recovery_window(
+            last_processed_at_by_symbol=last_processed_at_by_symbol,
+            lookback_seconds=lookback_seconds,
+            limit=limit,
+        )
 
     def load_active_symbols_at(self, observed_at: datetime) -> frozenset[str]:
         return self.loader.load_active_symbols_at(observed_at)
@@ -154,6 +175,22 @@ class AsyncPostgresRuntimeStateLoader:
             self.repository.load_after(
                 environment=self.environment,
                 cursor=cursor,
+                limit=limit,
+            )
+        )
+
+    def load_recovery_window(
+        self,
+        *,
+        last_processed_at_by_symbol: Mapping[str, datetime],
+        lookback_seconds: int,
+        limit: int,
+    ) -> tuple[MarketState15s, ...]:
+        return self._event_loop.run_until_complete(
+            self.repository.load_recovery_window(
+                environment=self.environment,
+                last_processed_at_by_symbol=last_processed_at_by_symbol,
+                lookback_seconds=lookback_seconds,
                 limit=limit,
             )
         )

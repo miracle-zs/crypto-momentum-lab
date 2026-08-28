@@ -291,11 +291,12 @@ class PostgresOperationalRetentionRepository:
 
         columns = ", ".join(grouped_columns)
         statement = text(
-            f"SELECT {columns}, max(observed_at) AS latest_observed_at "
+            f"SELECT DISTINCT ON ({columns}) {columns}, "
+            "observed_at AS latest_observed_at "
             f"FROM {table_name} "
             "WHERE environment = :environment "
             "AND account_label = :account_label "
-            f"GROUP BY {columns}"
+            f"ORDER BY {columns}, observed_at DESC"
         )
         async with self._session_factory() as session:
             rows = (

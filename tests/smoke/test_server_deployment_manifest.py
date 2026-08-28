@@ -13,14 +13,19 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         "bootstrap-universe",
         "market-data",
         "paper-orderflow-pair",
+        "paper-b1-gainer100",
+        "paper-b1-gainer100-ema",
         "dashboard",
     } <= services.keys()
     assert "paper-liquidation-optimized" not in services
     assert services["dashboard"]["ports"] == ["127.0.0.1:8765:8765"]
     assert manifest["x-app"]["stop_grace_period"] == "60s"
+    assert "build" not in manifest["x-app"]
+    assert services["migrate"]["build"]["context"] == "."
+    assert services["migrate"]["image"] == manifest["x-app"]["image"]
     assert services["market-data"]["healthcheck"]["start_period"] == "15m"
-    assert services["postgres"]["mem_limit"] == "512m"
-    assert services["postgres"]["memswap_limit"] == "768m"
+    assert services["postgres"]["mem_limit"] == "1g"
+    assert services["postgres"]["memswap_limit"] == "1536m"
     assert services["execution-account-live"]["mem_limit"] == "160m"
     assert services["live-strategy"]["mem_limit"] == "512m"
     assert services["dashboard"]["mem_limit"] == "320m"
@@ -52,11 +57,12 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         if item.strip()
     }
     assert configured_run_ids == {
-        "paper-account-02-orderflow-v1",
         "paper-account-05-orderflow-candle15m-v1",
         "paper-account-10-orderflow-b2-long-candle15m-v1",
         "paper-account-12-orderflow-b1-long-candle15m-v1",
         "paper-account-13-orderflow-b8-long-candle15m-v1",
+        "paper-account-14-orderflow-b1-gainer100-v1",
+        "paper-account-15-orderflow-b1-gainer100-ema-v1",
     }
     assert {
         item.strip()
@@ -64,7 +70,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
             "CML_PAPER_ACCOUNT_RUN_IDS"
         ].split(",")
         if item.strip()
-    } == configured_run_ids - {"paper-account-02-orderflow-v1"}
+    } == configured_run_ids
     assert (
         _option_value(
             services["paper-orderflow-pair"]["command"],
@@ -89,8 +95,43 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert "--seventh-entry-long-only" in orderflow
     assert _option_value(orderflow, "--seventh-candle-grace-bars") == "8"
     assert _option_value(orderflow, "--seventh-candle-grace-profit-pct") == "0.0088"
+    assert "--fixed-run-id" not in orderflow
+    for service in ("paper-b1-gainer100", "paper-b1-gainer100-ema"):
+        command = services[service]["command"]
+        assert _option_value(command, "--entry-positive-gainer-top-count") == "100"
+        assert "--entry-long-only" in command
+    account14_command = services["paper-b1-gainer100"]["command"]
+    assert "--no-entry-price-above-ema5" in account14_command
+    assert "--no-entry-price-above-ema10" in account14_command
+    assert _option_value(
+        account14_command,
+        "--orderflow-min-aggressive-imbalance",
+    ) == "0.40"
+    assert "--entry-price-above-ema5" not in services["paper-b1-gainer100"]["command"]
+    assert "--entry-price-above-ema10" not in services["paper-b1-gainer100"]["command"]
+    assert "--entry-price-above-ema5" in services["paper-b1-gainer100-ema"]["command"]
+    assert "--entry-price-above-ema10" in services["paper-b1-gainer100-ema"]["command"]
     assert services["execution-account-live"]["profiles"] == ["live"]
     assert services["live-strategy"]["profiles"] == ["live"]
+    live_healthcheck = services["live-strategy"]["healthcheck"]["test"]
+    assert _option_value(live_healthcheck, "--service") == "live"
+    assert "--ignore-age" not in live_healthcheck
+    assert _option_value(live_healthcheck, "--session-id") == (
+        "${CML_LIVE_SESSION_ID:-live-primary-v1}"
+    )
+    live_command = services["live-strategy"]["command"]
+    assert _option_value(live_command, "--entry-positive-gainer-top-count") == (
+        "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-100}"
+    )
+    assert "--entry-long-only" in live_command
+    assert "--no-entry-price-above-ema5" in live_command
+    assert "--no-entry-price-above-ema10" in live_command
+    assert "--entry-price-above-ema5" not in live_command
+    assert "--entry-price-above-ema10" not in live_command
+    assert _option_value(
+        live_command,
+        "--candle-grace-decision-profit-pct",
+    ) == "${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT:-0.001}"
     assert services["execution-account-live"]["environment"][
         "BINANCE_API_KEY"
     ] == "${BINANCE_API_KEY:-}"

@@ -278,6 +278,7 @@ async function refreshSection(id) {
 }
 
 async function poll() {
+  if (document.hidden) return;
   if (pollInFlight) return;
   pollInFlight = true;
   try {

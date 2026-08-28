@@ -3,15 +3,28 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
+from sqlalchemy.dialects.postgresql import dialect as postgresql_dialect
+
 from crypto_momentum_lab.operator_dashboard.queries import (
     _aggregate_account_fills,
+    _build_common_equity_curve,
+    _checkpoint_times_statement,
     _downsample_equity_snapshots,
+    _EquityObservation,
     _is_dashboard_paper_run,
+    _latest_checkpoint_at_statement,
     _live_account_equity_point,
+    _live_equity_observations,
+    _live_observation,
+    _paper_account_summary,
+    _paper_common_equity_statement,
     _paper_exit_label,
+    _paper_first_equity_statement,
     _split_exchange_orders,
     _universe_membership,
+    parse_live_cash_flow_adjustments,
 )
+from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
 from crypto_momentum_lab.persistence.postgres.models import PaperEquitySnapshotRow
 
 
@@ -52,6 +65,73 @@ def test_dashboard_uses_latest_checkpoint_without_append_only_events() -> None:
 
     assert "StrategyRuntimeCheckpointRow" in source
     assert "StrategyRuntimeEventRow" not in source
+
+
+def test_latest_checkpoint_query_selects_only_timestamp() -> None:
+    statement = _latest_checkpoint_at_statement()
+
+    assert [column.key for column in statement.selected_columns] == ["saved_at"]
+
+
+def test_paper_checkpoint_query_selects_only_identity_and_timestamp() -> None:
+    statement = _checkpoint_times_statement(["paper-a", "paper-b"])
+
+    assert [column.key for column in statement.selected_columns] == [
+        "run_id",
+        "saved_at",
+    ]
+
+
+def test_common_equity_query_uses_indexable_lateral_bucket_lookups() -> None:
+    statement = _paper_common_equity_statement(
+        ["paper-a", "paper-b"],
+        datetime(2026, 8, 21, 2, 45, tzinfo=UTC),
+        datetime(2026, 8, 27, 17, 12, tzinfo=UTC),
+    )
+
+    sql = str(statement.compile(dialect=postgresql_dialect()))
+
+    assert "generate_series" in sql
+    assert "AS equity_buckets(bucket)" in sql
+    assert "LATERAL" in sql
+    assert "DISTINCT ON" not in sql
+
+
+def test_first_equity_query_uses_one_index_lookup_per_run() -> None:
+    statement = _paper_first_equity_statement(["paper-a", "paper-b"])
+
+    sql = str(statement.compile(dialect=postgresql_dialect()))
+
+    assert "LATERAL" in sql
+    assert "min(" not in sql.lower()
+
+
+def test_live_preflight_uses_current_transition_instead_of_old_checkpoint() -> None:
+    transition_at = datetime(2026, 8, 21, 0, 40, tzinfo=UTC)
+    old_checkpoint_at = transition_at - timedelta(hours=6)
+
+    observed_at, heartbeat_source = _live_observation(
+        state="preflight",
+        runtime_checkpoint_at=old_checkpoint_at,
+        transition_at=transition_at,
+    )
+
+    assert observed_at == transition_at
+    assert heartbeat_source == "state_transition"
+
+
+def test_live_enabled_uses_runtime_checkpoint() -> None:
+    transition_at = datetime(2026, 8, 21, 0, 40, tzinfo=UTC)
+    checkpoint_at = transition_at - timedelta(seconds=3)
+
+    observed_at, heartbeat_source = _live_observation(
+        state="live_enabled",
+        runtime_checkpoint_at=checkpoint_at,
+        transition_at=transition_at,
+    )
+
+    assert observed_at == checkpoint_at
+    assert heartbeat_source == "runtime_checkpoint"
 
 
 def test_dashboard_separates_confirmed_open_orders_from_uncertain_orders() -> None:
@@ -120,6 +200,16 @@ def test_candle_exit_label_includes_entry_filter_variants() -> None:
             "max_abs_aggressive_imbalance": "0.7113",
         },
     ) == "15M 收线退出 · 仅多头 · 主动不平衡 ≤ 71.13%"
+    assert _paper_exit_label(
+        "candle_15m",
+        portfolio,
+        {
+            "allow_long": True,
+            "allow_short": False,
+            "require_price_above_ema5": True,
+            "require_price_above_ema10": True,
+        },
+    ) == "15M 收线退出 · 仅多头 · 价格 > 15M EMA5 · 价格 > 15M EMA10"
 
 
 def test_candle_exit_label_includes_grace_recovery_threshold() -> None:
@@ -141,6 +231,27 @@ def test_dashboard_excludes_fixed_exit_paper_accounts() -> None:
     )
 
 
+def test_dashboard_marks_paper_account_stale_when_checkpoint_is_old() -> None:
+    now = datetime(2026, 8, 21, 5, 15, tzinfo=UTC)
+    summary = _paper_account_summary(
+        SimpleNamespace(
+            run_id="paper-account-old",
+            strategy_name="orderflow_impulse",
+            config_hash="config-hash",
+            execution_config={"portfolio": {"exit_mode": "candle_15m"}},
+        ),
+        now=now,
+        stale_after_seconds=120,
+        checkpoint_at=now - timedelta(hours=2),
+        open_position_count=0,
+        closed_trade_count=0,
+        winning_trade_count=0,
+        latest_equity=None,
+    )
+
+    assert summary.status is OperationalStatus.STALE
+
+
 def test_live_account_balance_becomes_equity_point() -> None:
     point = _live_account_equity_point(
         SimpleNamespace(
@@ -153,6 +264,76 @@ def test_live_account_balance_becomes_equity_point() -> None:
     assert point["equity"] == "276.80"
     assert point["balance"] == "282.28"
     assert point["unrealized_pnl"] == "-5.48"
+
+
+def test_common_equity_curve_starts_at_zero_and_carries_latest_15m_bucket() -> None:
+    common_start = datetime(2026, 8, 21, 2, 45, tzinfo=UTC)
+    points, baseline = _build_common_equity_curve(
+        [
+            _EquityObservation(
+                observed_at=common_start + timedelta(minutes=2),
+                equity=Decimal("1000"),
+                source_observed_at=common_start + timedelta(minutes=2),
+            ),
+            _EquityObservation(
+                observed_at=common_start + timedelta(minutes=17),
+                equity=Decimal("1002"),
+                source_observed_at=common_start + timedelta(minutes=17),
+            ),
+            _EquityObservation(
+                observed_at=common_start + timedelta(minutes=31),
+                equity=Decimal("1001"),
+                source_observed_at=common_start + timedelta(minutes=31),
+            ),
+        ],
+        common_start_at=common_start,
+        end_at=common_start + timedelta(minutes=45),
+    )
+
+    assert baseline == Decimal("1000")
+    assert [point["delta"] for point in points] == [
+        "0",
+        "2",
+        "1",
+        "1",
+    ]
+    assert all(point["return_pct"] is not None for point in points)
+
+
+def test_live_common_equity_removes_configured_external_deposit() -> None:
+    observed_at = datetime(2026, 8, 21, 9, 45, tzinfo=UTC)
+    observations = _live_equity_observations(
+        [
+            SimpleNamespace(
+                account_label="primary",
+                observed_at=datetime(2026, 8, 21, 9, 30, tzinfo=UTC),
+                wallet_balance=Decimal("1000"),
+                unrealized_pnl=Decimal("0"),
+            ),
+            SimpleNamespace(
+                account_label="primary",
+                observed_at=observed_at,
+                wallet_balance=Decimal("1202"),
+                unrealized_pnl=Decimal("0"),
+            ),
+        ],
+        account_label="primary",
+        cash_flow_adjustments=parse_live_cash_flow_adjustments(
+            '[{"account_label":"primary","effective_at":"2026-08-21T09:41:00Z","amount":"200"}]'
+        ),
+    )
+
+    assert [observation.equity for observation in observations] == [
+        Decimal("1000"),
+        Decimal("1002"),
+    ]
+
+
+def test_live_cash_flow_parser_allows_explicit_empty_configuration() -> None:
+    assert parse_live_cash_flow_adjustments("[]") == ()
+    default = parse_live_cash_flow_adjustments("")
+    assert len(default) == 1
+    assert default[0].amount == Decimal("200")
 
 
 def test_account_fills_are_aggregated_to_one_row_per_order() -> None:

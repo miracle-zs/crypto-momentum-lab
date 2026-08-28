@@ -112,3 +112,32 @@ async def test_mark_incomplete_invalidates_existing_runtime_state(
 
     assert rows[0].data_complete is False
     assert rows[0].missing_agg_trade_count == 2
+
+
+async def test_load_recovery_window_is_bounded_and_globally_ordered(
+    runtime_state_repository: PostgresRuntimeMarketStateRepository,
+) -> None:
+    first = fixture_state("ETHUSDT", 0)
+    second = fixture_state("BTCUSDT", 1)
+    third = fixture_state("BTCUSDT", 2)
+    await runtime_state_repository.save_closed_states(
+        (third, first, second),
+        source_watermark_at=datetime(2026, 7, 3, 0, 1, tzinfo=UTC),
+        sequence_range=RuntimeStateSequenceRange(1, 3),
+    )
+
+    rows = await runtime_state_repository.load_recovery_window(
+        environment="research",
+        last_processed_at_by_symbol={
+            "BTCUSDT": third.bucket_start,
+            "ETHUSDT": first.bucket_start,
+        },
+        lookback_seconds=30,
+        limit=10,
+    )
+
+    assert tuple((row.symbol, row.bucket_start) for row in rows) == (
+        ("ETHUSDT", first.bucket_start),
+        ("BTCUSDT", second.bucket_start),
+        ("BTCUSDT", third.bucket_start),
+    )

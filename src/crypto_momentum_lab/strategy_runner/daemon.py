@@ -4,6 +4,7 @@ from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from inspect import Parameter, signature
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
@@ -58,6 +59,9 @@ class RuntimeStrategy(Protocol):
 
     def required_data(self) -> StrategyDataRequirement:
         pass
+
+
+_PAPER_RECOVERY_STATE_LIMIT = 100_000
 
 
 class PaperLiveDaemonRepository(Protocol):
@@ -269,6 +273,12 @@ def run_paired_paper_live_daemon(
     )
     if restored_checkpoint is not None:
         strategy.restore_checkpoint(restored_checkpoint)
+        if _checkpoint_needs_market_recovery(restored_checkpoint):
+            _restore_paper_strategy_from_checkpoint(
+                strategy=strategy,
+                source=source,
+                checkpoint=restored_checkpoint,
+            )
 
     pending_by_account: list[list[OrderIntentCandidate]] = []
     open_positions_by_account: list[dict[str, PaperPosition]] = []
@@ -523,7 +533,7 @@ def run_paired_paper_live_daemon(
             >= first_config.checkpoint_every_seconds
         )
         if checkpoint_due:
-            checkpoint_to_save = strategy.checkpoint()
+            checkpoint_to_save = _checkpoint_for_persistence(strategy)
             for account in accounts:
                 _run_async(
                     account.repository.save_checkpoint(
@@ -539,7 +549,7 @@ def run_paired_paper_live_daemon(
 
     if checkpoint_dirty:
         saved_at = clock.now()
-        checkpoint_to_save = strategy.checkpoint()
+        checkpoint_to_save = _checkpoint_for_persistence(strategy)
         for account in accounts:
             _run_async(
                 account.repository.save_checkpoint(
@@ -794,6 +804,12 @@ def run_paper_live_daemon(
     checkpoint = _run_async(repository.load_checkpoint(config.run_id))
     if checkpoint is not None:
         strategy.restore_checkpoint(checkpoint)
+        if _checkpoint_needs_market_recovery(checkpoint):
+            _restore_paper_strategy_from_checkpoint(
+                strategy=strategy,
+                source=source,
+                checkpoint=checkpoint,
+            )
     pending_candidates: list[OrderIntentCandidate] = []
     open_positions: dict[str, PaperPosition] = {}
     last_position_persisted_at: dict[str, datetime] = {}
@@ -1034,7 +1050,7 @@ def run_paper_live_daemon(
             now - last_checkpoint_elapsed_anchor
         ).total_seconds() >= config.checkpoint_every_seconds
         if should_checkpoint_by_count or should_checkpoint_by_time:
-            checkpoint_to_save = strategy.checkpoint()
+            checkpoint_to_save = _checkpoint_for_persistence(strategy)
             _run_async(
                 repository.save_checkpoint(
                     config.run_id,
@@ -1049,7 +1065,7 @@ def run_paper_live_daemon(
 
     if checkpoint_dirty:
         saved_at = clock.now()
-        checkpoint_to_save = strategy.checkpoint()
+        checkpoint_to_save = _checkpoint_for_persistence(strategy)
         _run_async(
             repository.save_checkpoint(
                 config.run_id,
@@ -1126,6 +1142,89 @@ def _already_processed(
         return False
     processed_at = checkpoint.last_processed_at_by_symbol.get(state.symbol)
     return processed_at is not None and state.bucket_start <= processed_at
+
+
+def _checkpoint_for_persistence(strategy: RuntimeStrategy) -> StrategyCheckpoint:
+    """Build a compact checkpoint without breaking older strategy adapters."""
+    checkpoint_method = strategy.checkpoint
+    try:
+        parameters = signature(checkpoint_method).parameters
+    except (TypeError, ValueError):
+        parameters = None
+
+    checkpoint: StrategyCheckpoint
+    if parameters is not None:
+        buffer_parameter = parameters.get("include_market_state_buffers")
+        if buffer_parameter is not None and buffer_parameter.kind in {
+            Parameter.KEYWORD_ONLY,
+            Parameter.POSITIONAL_OR_KEYWORD,
+        }:
+            checkpoint = checkpoint_method(  # type: ignore[call-arg]
+                include_market_state_buffers=False
+            )
+        else:
+            checkpoint = checkpoint_method()
+    else:
+        checkpoint = checkpoint_method()
+    compact_payload = {
+        key: value
+        for key, value in checkpoint.payload.items()
+        if key not in {"market_state_buffers", "signal_buffers"}
+    }
+    return replace(checkpoint, payload=compact_payload)
+
+
+def _checkpoint_needs_market_recovery(checkpoint: StrategyCheckpoint) -> bool:
+    """Identify compact checkpoints produced by the paper daemon."""
+    return (
+        not any(
+            key in checkpoint.payload
+            for key in ("market_state_buffers", "signal_buffers")
+        )
+        and any(
+            key in checkpoint.payload
+            for key in ("buffer_sizes", "signal_sequence")
+        )
+    )
+
+
+def _restore_paper_strategy_from_checkpoint(
+    *,
+    strategy: RuntimeStrategy,
+    source: Iterable[MarketState15s],
+    checkpoint: StrategyCheckpoint,
+) -> None:
+    warm_market_state = getattr(strategy, "warm_market_state", None)
+    if not callable(warm_market_state):
+        raise RuntimeError(
+            "strategy does not support compact paper checkpoint recovery"
+        )
+    load_recovery_window = getattr(source, "load_recovery_window", None)
+    if not callable(load_recovery_window):
+        raise RuntimeError(
+            "paper market-state source does not support compact checkpoint "
+            "recovery"
+        )
+    states = load_recovery_window(
+        last_processed_at_by_symbol=checkpoint.last_processed_at_by_symbol,
+        lookback_seconds=_strategy_recovery_lookback_seconds(strategy),
+        limit=_PAPER_RECOVERY_STATE_LIMIT,
+    )
+    for state in states:
+        warm_market_state(state)
+
+
+def _strategy_recovery_lookback_seconds(strategy: RuntimeStrategy) -> int:
+    required_data = strategy.required_data()
+    base_interval_seconds = max(
+        1,
+        int(required_data.base_state_interval_seconds),
+    )
+    warmup_buckets = max(0, int(required_data.warmup_buckets))
+    return max(
+        base_interval_seconds,
+        (warmup_buckets + 16) * base_interval_seconds,
+    )
 
 
 def _state_age_seconds(now: datetime, state: MarketState15s) -> float:

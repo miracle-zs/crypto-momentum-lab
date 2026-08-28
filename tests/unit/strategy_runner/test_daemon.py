@@ -17,11 +17,13 @@ from crypto_momentum_lab.domain.strategy import (
 from crypto_momentum_lab.strategy_runner.daemon import (
     PairedPaperLiveAccount,
     PaperEntryFilterConfig,
+    PaperEntryFilterContext,
     PaperLiveArtifactRepository,
     PaperLiveDaemonConfig,
     PaperLiveDaemonRepository,
     PaperLiveDaemonResult,
     RuntimeStrategy,
+    _checkpoint_for_persistence,
     run_paired_paper_live_daemon,
     run_paper_live_daemon,
 )
@@ -134,6 +136,64 @@ class FakeStrategy(RuntimeStrategy):
         if self._checkpoint is None:
             raise AssertionError("checkpoint requested before processing a state")
         return self._checkpoint
+
+
+class CompactCheckpointStrategy(FakeStrategy):
+    def __init__(self) -> None:
+        super().__init__()
+        self.checkpoint_modes: list[bool] = []
+
+    def checkpoint(
+        self,
+        *,
+        include_market_state_buffers: bool = True,
+    ) -> StrategyCheckpoint:
+        self.checkpoint_modes.append(include_market_state_buffers)
+        return StrategyCheckpoint(
+            last_processed_at_by_symbol={"BTCUSDT": datetime(2026, 7, 3, tzinfo=UTC)},
+            warmup_buckets_by_symbol={"BTCUSDT": 1},
+            cooldown_buckets_remaining_by_symbol={"BTCUSDT": 0},
+            payload={
+                "buffer_sizes": {"BTCUSDT": 1},
+                "market_state_buffers": {"BTCUSDT": [{"close_price": "100"}]},
+                "signal_sequence": 7,
+            },
+        )
+
+
+class RecoverySource:
+    def __init__(
+        self,
+        recovery_states: tuple[MarketState15s, ...],
+        stream_states: tuple[MarketState15s, ...],
+    ) -> None:
+        self.recovery_states = recovery_states
+        self.stream_states = stream_states
+        self.recovery_calls: list[tuple[dict[str, datetime], int, int]] = []
+
+    def load_recovery_window(
+        self,
+        *,
+        last_processed_at_by_symbol: dict[str, datetime],
+        lookback_seconds: int,
+        limit: int,
+    ) -> tuple[MarketState15s, ...]:
+        self.recovery_calls.append(
+            (last_processed_at_by_symbol, lookback_seconds, limit)
+        )
+        return self.recovery_states
+
+    def __iter__(self):
+        return iter(self.stream_states)
+
+
+class WarmableFakeStrategy(FakeStrategy):
+    def __init__(self) -> None:
+        super().__init__()
+        self.warmed: list[MarketState15s] = []
+
+    def warm_market_state(self, state: MarketState15s) -> None:
+        self.warmed.append(state)
 
 
 class SignalStrategy(FakeStrategy):
@@ -254,6 +314,43 @@ class FakeArtifactRepository(PaperLiveArtifactRepository):
     ) -> None:
         del run_id, observed_at, config
         self.portfolio_updates.append(positions)
+
+
+def test_checkpoint_for_persistence_uses_compact_strategy_checkpoint() -> None:
+    strategy = CompactCheckpointStrategy()
+
+    checkpoint = _checkpoint_for_persistence(strategy)
+
+    assert strategy.checkpoint_modes == [False]
+    assert "market_state_buffers" not in checkpoint.payload
+    assert checkpoint.payload["buffer_sizes"] == {"BTCUSDT": 1}
+
+
+def test_paper_daemon_recovers_compact_checkpoint_from_market_state_source() -> None:
+    previous = fixture_state("BTCUSDT", 0)
+    fresh = fixture_state("BTCUSDT", 1)
+    checkpoint = StrategyCheckpoint(
+        last_processed_at_by_symbol={"BTCUSDT": previous.bucket_start},
+        warmup_buckets_by_symbol={"BTCUSDT": 1},
+        cooldown_buckets_remaining_by_symbol={"BTCUSDT": 0},
+        payload={"buffer_sizes": {"BTCUSDT": 1}, "signal_sequence": 0},
+    )
+    source = RecoverySource((previous,), (fresh,))
+    strategy = WarmableFakeStrategy()
+
+    result = run_paper_live_daemon(
+        source=source,
+        strategy=strategy,
+        repository=FakeRepository(checkpoint),
+        config=_config(checkpoint_every_states=100),
+        clock=FakeClock(fresh.bucket_end + timedelta(seconds=1)),
+    )
+
+    assert result.processed_state_count == 1
+    assert strategy.warmed == [previous]
+    assert source.recovery_calls == [
+        ({"BTCUSDT": previous.bucket_start}, 255, 100_000)
+    ]
 
 
 def test_daemon_saves_checkpoint_after_state_count_threshold() -> None:

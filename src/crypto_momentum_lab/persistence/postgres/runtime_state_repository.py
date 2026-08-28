@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import cast
 
-from sqlalchemy import and_, func, or_, select, tuple_, update
+from sqlalchemy import func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -14,6 +14,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
 )
 
 _MAX_RUNTIME_STATE_INSERT_ROWS = 500
+_RUNTIME_STATE_INTERVAL_SECONDS = 15
 type _RuntimeStateKey = tuple[str, str, datetime]
 
 
@@ -284,35 +285,49 @@ class PostgresRuntimeMarketStateRepository:
         if not last_processed_at_by_symbol:
             return ()
 
-        conditions = []
+        bounds = []
         for symbol, upper_bound in last_processed_at_by_symbol.items():
             if not symbol.strip():
                 raise ValueError("checkpoint symbols must not be empty")
             _require_aware(upper_bound, "last_processed_at_by_symbol value")
-            conditions.append(
-                and_(
-                    RuntimeMarketState15sRow.symbol == symbol,
-                    RuntimeMarketState15sRow.bucket_start
-                    > upper_bound - timedelta(seconds=lookback_seconds),
-                    RuntimeMarketState15sRow.bucket_start <= upper_bound,
+            bounds.append(
+                (
+                    symbol,
+                    upper_bound - timedelta(seconds=lookback_seconds),
+                    upper_bound,
                 )
             )
 
-        statement = (
-            select(RuntimeMarketState15sRow)
-            .where(
-                RuntimeMarketState15sRow.environment == environment,
-                or_(*conditions),
-            )
-            .order_by(
-                RuntimeMarketState15sRow.bucket_start,
-                RuntimeMarketState15sRow.symbol,
-            )
-            .limit(limit)
+        # Do one bounded index range per symbol instead of one giant OR.  The
+        # latter encourages PostgreSQL to build a broad bitmap/heap plan for
+        # the hot table when a checkpoint contains the whole universe, and can
+        # consume the database memory budget before returning any rows.
+        per_symbol_limit = min(
+            limit,
+            max(
+                1,
+                lookback_seconds // _RUNTIME_STATE_INTERVAL_SECONDS + 2,
+            ),
         )
         async with self._session_factory() as session:
-            rows = (await session.execute(statement)).scalars()
-            return tuple(market_state_from_row(row) for row in rows)
+            recovered: list[MarketState15s] = []
+            for symbol, lower_bound, upper_bound in bounds:
+                statement = (
+                    select(RuntimeMarketState15sRow)
+                    .where(
+                        RuntimeMarketState15sRow.environment == environment,
+                        RuntimeMarketState15sRow.symbol == symbol,
+                        RuntimeMarketState15sRow.bucket_start > lower_bound,
+                        RuntimeMarketState15sRow.bucket_start <= upper_bound,
+                    )
+                    .order_by(RuntimeMarketState15sRow.bucket_start)
+                    .limit(per_symbol_limit)
+                )
+                rows = (await session.execute(statement)).scalars()
+                recovered.extend(market_state_from_row(row) for row in rows)
+
+        recovered.sort(key=lambda state: (state.bucket_start, state.symbol))
+        return tuple(recovered[:limit])
 
 
 async def _insert_many_idempotent(
