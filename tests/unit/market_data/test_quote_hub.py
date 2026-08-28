@@ -30,6 +30,9 @@ class _Repository:
     ) -> None:
         self.saved_states.extend(states)
 
+    async def mark_incomplete(self, gap) -> None:
+        del gap
+
 
 async def test_realtime_and_durable_clocks_are_independent() -> None:
     repository = _Repository()

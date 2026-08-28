@@ -6,6 +6,7 @@ from crypto_momentum_lab.operator_dashboard.api import (
     _ResponseCache,
     create_dashboard_app,
 )
+from crypto_momentum_lab.operator_dashboard.schemas import SystemOverviewResponse
 from tests.unit.apps.operator_dashboard.test_main import (
     DASHBOARD_AUTH_KWARGS,
     DASHBOARD_BASIC_AUTH,
@@ -39,6 +40,17 @@ def test_all_read_only_dashboard_routes_are_available() -> None:
             "/api/reports",
         ):
             assert client.get(route, auth=DASHBOARD_BASIC_AUTH).status_code == 200
+
+
+def test_equity_endpoint_exposes_unified_start_comparison_metadata() -> None:
+    with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
+        response = client.get("/api/paper-accounts/equity")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["common_equity_start_at"] is None
+    assert payload["common_equity_account_count"] == 0
+    assert payload["common_equity_cash_flows"] == []
 
 
 def test_paper_accounts_starts_with_summary_and_loads_detail_separately() -> None:
@@ -82,3 +94,21 @@ async def test_response_cache_deduplicates_concurrent_loads_and_expires() -> Non
 
     await asyncio.sleep(0.025)
     assert await cache.get("paper-accounts", loader) == 2
+
+
+def test_overview_timeout_returns_gateway_timeout() -> None:
+    class SlowQueries(FakeQueries):
+        async def overview(self) -> SystemOverviewResponse:
+            await asyncio.sleep(0.05)
+            return await super().overview()
+
+    with TestClient(
+        create_dashboard_app(
+            queries=SlowQueries(),
+            overview_query_timeout_seconds=0.01,
+        )
+    ) as client:
+        response = client.get("/api/overview")
+
+    assert response.status_code == 504
+    assert response.json()["detail"] == "dashboard overview query timed out"

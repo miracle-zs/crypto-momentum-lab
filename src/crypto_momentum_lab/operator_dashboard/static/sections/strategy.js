@@ -27,9 +27,11 @@ import {
 } from "../dashboard-dom.js";
 import {
   accountWindowDelta,
+  buildLatestStartEquityModels,
   buildStrategyEquityModels,
   comparisonSeriesStyle,
   equityChart,
+  latestStartEquityChart,
   standaloneSparkline,
   strategyEquityChart,
 } from "../dashboard-charts.js";
@@ -59,6 +61,7 @@ export function createStrategySection({ requestJson = defaultRequestJson } = {})
   const paperDetailLoadedAt = new Map();
   const paperDetailRequests = new Map();
   const paperEquityByRun = new Map();
+  let paperEquityMeta = {};
   let paperEquityRequest = null;
   let paperEquityLoadedAt = 0;
   let paperEquityCacheKey = "";
@@ -91,6 +94,22 @@ function pairedComparisonPanel(model) {
     <div class="pair-legend">${legend}</div>
     ${strategyEquityChart(model)}
     <footer><span>${esc(comparisonAnchorText(model))} · ${bucketMinutes} 分钟 UTC 采样</span><b>${esc(elapsedTime(model.startAt, model.endAt))}</b></footer>
+  </article>`;
+}
+
+function latestStartComparisonPanel(model) {
+  const bucketMinutes = Math.round(model.intervalSeconds / 60);
+  const legend = model.series.map((series) =>
+    `<span class="${series.colorClass}" ${comparisonSeriesStyle(series)}><i></i><em>${esc(series.label)}</em> <b class="num ${pnlClass(series.delta)}">${esc(signedMoney(series.delta))}</b></span>`).join("");
+  return `<article class="pair-panel common-equity-panel">
+    <div class="pair-head">
+      <div><strong>${esc(model.strategyName)}</strong>
+        <small>${esc(dayTime(model.startAt))} → ${esc(dayTime(model.endAt))} ${DISPLAY_TIME_ZONE_LABEL} · ${model.points.length} 个共同桶</small></div>
+      <div class="pair-spread"><span>统一起点</span><b class="num">0 USDT</b></div>
+    </div>
+    <div class="pair-legend">${legend}</div>
+    ${latestStartEquityChart(model)}
+    <footer><span>各账号从 0 USDT 起算 · ${bucketMinutes} 分钟 UTC 采样</span><b>${esc(elapsedTime(model.startAt, model.endAt))}</b></footer>
   </article>`;
 }
 
@@ -152,22 +171,44 @@ function paperCards(accounts) {
     .join("")}</div>`;
 }
 
-function paperComparisonBlock(accounts) {
+function paperComparisonBlock(accounts, meta = paperEquityMeta) {
   const paperAccounts = accounts.map(withPaperEquity);
   const liveAccounts = [...paperEquityByRun.values()].filter(
     (account) => account.source === "live",
   );
-  const comparisonModels = buildStrategyEquityModels([
+  const comparisonAccounts = [
     ...paperAccounts,
     ...liveAccounts,
-  ]);
+  ];
+  const comparisonModels = buildStrategyEquityModels(comparisonAccounts);
+  const latestStartModels = buildLatestStartEquityModels(
+    comparisonAccounts,
+    meta,
+  );
   const content = comparisonModels.length
     ? `<div class="pair-grid">${comparisonModels.map(pairedComparisonPanel).join("")}</div>`
     : emptyBox("同期权益曲线加载中", "账户摘要已就绪，曲线在后台批量加载");
-  return `<div class="block pair-section" data-paper-comparison data-comparison-count="${comparisonModels.length}">
-    ${blockTitle("同期退出方式对比", "STRATEGY EXIT EQUITY · DAILY 08:00 ANCHOR · SHARED AXES",
-      '<span class="muted">模拟盘版本 + 实盘 B1 · 每日 08:00 UTC+8 起算</span>')}
-    ${content}
+  const latestStartContent = latestStartModels.length
+    ? `<div class="pair-grid">${latestStartModels.map(latestStartComparisonPanel).join("")}</div>`
+    : emptyBox("统一起点曲线加载中", "正在等待全部账号的有效 15M 快照");
+  const startText = meta.common_equity_start_at
+    ? `统一起点 ${dayTime(meta.common_equity_start_at)} ${DISPLAY_TIME_ZONE_LABEL}`
+    : "统一起点待数据加载";
+  const note = meta.common_equity_note
+    ? `<div class="common-equity-note">${esc(meta.common_equity_note)}</div>`
+    : "";
+  return `<div data-paper-comparison>
+    <div class="block pair-section" data-comparison-count="${comparisonModels.length}">
+      ${blockTitle("同期退出方式对比", "STRATEGY EXIT EQUITY · DAILY 08:00 ANCHOR · SHARED AXES",
+        '<span class="muted">模拟盘版本 + 实盘 B1 · 每日 08:00 UTC+8 起算</span>')}
+      ${content}
+    </div>
+    <div class="block pair-section common-equity-section" data-common-comparison-count="${latestStartModels.length}">
+      ${blockTitle("统一起点权益金额变化", "LATEST START · DELTA IN USDT · 15M BUCKETS",
+        `<span class="muted">${esc(startText)} · 全部曲线从 0 开始</span>`)}
+      ${note}
+      ${latestStartContent}
+    </div>
   </div>`;
 }
 
@@ -468,6 +509,16 @@ async function loadPaperEquityComparison(body) {
       const data = await requestJson("api/paper-accounts/equity");
       paperEquityByRun.clear();
       for (const account of data.accounts || []) paperEquityByRun.set(account.run_id, account);
+      paperEquityMeta = {
+        common_equity_start_at: data.common_equity_start_at,
+        common_equity_end_at: data.common_equity_end_at,
+        common_equity_sample_interval_seconds: data.common_equity_sample_interval_seconds,
+        common_equity_anchor: data.common_equity_anchor,
+        common_equity_anchor_accounts: data.common_equity_anchor_accounts || [],
+        common_equity_account_count: data.common_equity_account_count || 0,
+        common_equity_cash_flows: data.common_equity_cash_flows || [],
+        common_equity_note: data.common_equity_note || "",
+      };
       paperEquityCacheKey = cacheKey;
       paperEquityLoadedAt = Date.now();
       const comparison = body.querySelector("[data-paper-comparison]");

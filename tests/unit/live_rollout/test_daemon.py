@@ -610,6 +610,22 @@ async def test_live_daemon_saves_final_checkpoint_before_normal_exit() -> None:
     assert repository.saved_checkpoint_run_ids == ["run-1"]
 
 
+async def test_live_daemon_does_not_halt_on_periodic_checkpoint_timeout() -> None:
+    exchange = PlanAwareExchange()
+    repository = FakeLiveRepository()
+    repository.checkpoint_failures_remaining = 1
+    daemon = _daemon(
+        exchange=exchange,
+        repository=repository,
+        checkpoint_every_states=1,
+    )
+
+    result = await daemon.run(_states())
+
+    assert result.halt_reason is None
+    assert exchange.calls == ["submit"]
+
+
 async def test_live_daemon_submits_hedge_mode_reduce_only_exit() -> None:
     exchange = PlanAwareExchange()
     position = ManagedLivePosition(
@@ -921,6 +937,7 @@ async def test_live_daemon_halts_on_unmanaged_account_position() -> None:
 class FakeLiveRepository:
     def __init__(self) -> None:
         self.saved_checkpoint_run_ids: list[str] = []
+        self.checkpoint_failures_remaining = 0
 
     async def save_approved_intent(
         self,
@@ -935,6 +952,9 @@ class FakeLiveRepository:
         checkpoint: StrategyCheckpoint,
         saved_at: datetime,
     ) -> None:
+        if self.checkpoint_failures_remaining > 0:
+            self.checkpoint_failures_remaining -= 1
+            raise TimeoutError("checkpoint timeout")
         self.saved_checkpoint_run_ids.append(run_id)
 
 

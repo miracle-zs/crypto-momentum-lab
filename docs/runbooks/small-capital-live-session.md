@@ -139,15 +139,17 @@ $COMPOSE --profile live run --rm --no-deps live-strategy preflight \
 ## 5. Start Live
 
 The checked-in live Compose profile is wired for the B1 long-only variant:
-`orderflow_impulse`, Hedge Mode, one 15-minute grace candle, and a `0.88%`
-recovery target. On the first adverse official closed candle, a long whose
-current executable bid has already reached `entry * (1 + 0.0088)` is closed
-directly with a reduce-only MARKET order. Otherwise the executor places a
-reduce-only LIMIT at that recovery target; if it is still open at the next
-15-minute close, the executor cancels it and market-closes the remaining
-quantity. The 15-minute candle containing the entry is observation-only and is
-not eligible to trigger this logic; evaluation starts with the next complete
-15-minute candle. No protective stop is placed after an entry fill.
+`orderflow_impulse`, Hedge Mode, a minimum aggressive imbalance of `0.40`, no
+EMA5/EMA10 entry filters, one 15-minute grace candle, a `0.10%` first-candle
+direct-close threshold, and a `0.88%` recovery target. On the
+first adverse official closed candle, a long whose current executable bid has
+already reached `entry * (1 + 0.001)` is closed directly with a reduce-only
+MARKET order. Otherwise the executor places a reduce-only LIMIT at
+`entry * (1 + 0.0088)`; if it is still open at the next 15-minute close, the
+executor cancels it and market-closes the remaining quantity. The 15-minute
+candle containing the entry is observation-only and is not eligible to trigger
+this logic; evaluation starts with the next complete 15-minute candle. No
+protective stop is placed after an entry fill.
 
 The following execution protections are intentionally absent from the live
 path: maximum holding time (including the old 24-hour fallback), spread

@@ -229,6 +229,72 @@ function strategyEquityModel(strategyName, accounts, omittedAccounts = []) {
   };
 }
 
+function commonEquityBucketMap(account) {
+  const buckets = new Map();
+  for (const row of account.common_equity_curve || []) {
+    const observedAt = new Date(row.observed_at).getTime();
+    const delta = asNumber(row.delta);
+    if (!Number.isFinite(observedAt) || delta == null) continue;
+    buckets.set(observedAt, delta);
+  }
+  return buckets;
+}
+
+function commonEquityComparisonModel(strategyName, accounts, meta = {}) {
+  if (accounts.length < 2) return null;
+  const maps = accounts.map(commonEquityBucketMap);
+  const commonBuckets = [...maps[0].keys()]
+    .filter((bucket) => maps.every((map) => map.has(bucket)))
+    .sort((left, right) => left - right);
+  if (commonBuckets.length < 2) return null;
+
+  const series = accounts.map((account, index) => {
+    const map = maps[index];
+    const values = commonBuckets.map((bucket) => map.get(bucket));
+    return {
+      account,
+      label: comparisonSeriesLabel(account, index, accounts),
+      colorClass: comparisonSeriesClass(account),
+      color: comparisonSeriesColor(account, index),
+      values,
+      delta: values.at(-1),
+    };
+  });
+  const points = commonBuckets.map((bucket, index) => ({
+    at: bucket,
+    values: series.map((item) => item.values[index]),
+  }));
+  const domainValues = [0, ...series.flatMap((item) => item.values)];
+  let min = Math.min(...domainValues);
+  let max = Math.max(...domainValues);
+  if (min === max) {
+    min -= 0.01;
+    max += 0.01;
+  } else {
+    const padding = Math.max((max - min) * 0.08, 0.01);
+    min -= padding;
+    max += padding;
+  }
+  const metadataStart = new Date(meta.common_equity_start_at || "").getTime();
+  const metadataEnd = new Date(meta.common_equity_end_at || "").getTime();
+  return {
+    strategyName,
+    accounts,
+    series,
+    points,
+    startAt: Number.isFinite(metadataStart) ? metadataStart : commonBuckets[0],
+    endAt: Number.isFinite(metadataEnd) ? metadataEnd : commonBuckets.at(-1),
+    commonStartAt: commonBuckets[0],
+    commonEndAt: commonBuckets.at(-1),
+    anchorAt: commonBuckets[0],
+    anchorMode: "latest-start",
+    min,
+    max,
+    intervalSeconds: asNumber(meta.common_equity_sample_interval_seconds) || 15 * 60,
+    note: meta.common_equity_note || "",
+  };
+}
+
 export function buildStrategyEquityModels(accounts) {
   return STRATEGY_ORDER.flatMap((strategyName) => {
     const strategyAccounts = accounts
@@ -243,6 +309,27 @@ export function buildStrategyEquityModels(accounts) {
       strategyName,
       synchronized.accounts,
       synchronized.omittedAccounts,
+    );
+    return model ? [model] : [];
+  });
+}
+
+export function buildLatestStartEquityModels(accounts, meta = {}) {
+  return STRATEGY_ORDER.flatMap((strategyName) => {
+    const strategyAccounts = accounts
+      .filter((account) => (
+        account.strategy_name === strategyName
+        && (account.common_equity_curve || []).length >= 2
+      ))
+      .sort((left, right) => {
+        const leftLive = left.source === "live" ? 1 : 0;
+        const rightLive = right.source === "live" ? 1 : 0;
+        return leftLive - rightLive || String(left.run_id).localeCompare(String(right.run_id));
+      });
+    const model = commonEquityComparisonModel(
+      strategyName,
+      strategyAccounts,
+      meta,
     );
     return model ? [model] : [];
   });
@@ -322,12 +409,10 @@ export function equityChart(rows, chartId = "eq", windowStart = null, windowEnd 
   </div>`;
 }
 
-export function strategyEquityChart(model) {
-  const chartId = `comparison-${String(model.strategyName || "strategy")
-    .replace(/[^A-Za-z0-9_-]+/g, "-")}`;
+function renderComparisonChart(model, chartId, title, ariaLabel) {
   registerChartPayload(chartId, {
     kind: "comparison",
-    title: `${model.strategyName} 各退出方式同期权益对比`,
+    title,
     strategyName: model.strategyName,
     startAt: model.startAt,
     endAt: model.endAt,
@@ -345,9 +430,31 @@ export function strategyEquityChart(model) {
       isLive: series.account?.source === "live",
     })),
   });
-  return `<div class="pair-chart echart-shell" data-echart-chart data-echart-kind="comparison" data-echart-id="${esc(chartId)}" tabindex="0" role="group" aria-label="${esc(model.strategyName)} 各退出方式同期权益对比；使用左右方向键查看数据点">
+  return `<div class="pair-chart echart-shell" data-echart-chart data-echart-kind="comparison" data-echart-id="${esc(chartId)}" tabindex="0" role="group" aria-label="${esc(ariaLabel)}；使用左右方向键查看数据点">
     <div class="echart-surface" aria-hidden="true"></div>
   </div>`;
+}
+
+export function strategyEquityChart(model) {
+  const chartId = `comparison-${String(model.strategyName || "strategy")
+    .replace(/[^A-Za-z0-9_-]+/g, "-")}`;
+  return renderComparisonChart(
+    model,
+    chartId,
+    `${model.strategyName} 各退出方式同期权益对比`,
+    `${model.strategyName} 各退出方式同期权益对比`,
+  );
+}
+
+export function latestStartEquityChart(model) {
+  const chartId = `latest-start-${String(model.strategyName || "strategy")
+    .replace(/[^A-Za-z0-9_-]+/g, "-")}`;
+  return renderComparisonChart(
+    model,
+    chartId,
+    `${model.strategyName} 最晚启动统一起点权益金额变化`,
+    `${model.strategyName} 最晚启动统一起点权益金额变化`,
+  );
 }
 
 export function returnBar(value, maxAbs) {

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import httpx
@@ -6,9 +6,57 @@ import pytest
 
 from crypto_momentum_lab.strategy_runner.candle_source import (
     BinanceRestClosedCandle15mSource,
+    ClosedCandleEmaProvider,
     ClosedCandleSourceError,
 )
 from crypto_momentum_lab.strategy_runner.portfolio import ClosedCandle15m
+
+
+class FakeClosedCandleSource:
+    def __init__(self, candles: tuple[ClosedCandle15m, ...]) -> None:
+        self.candles = candles
+        self.calls = 0
+
+    def load_closed_candles(
+        self,
+        *,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+    ) -> tuple[ClosedCandle15m, ...]:
+        del symbol, start, end
+        self.calls += 1
+        return self.candles
+
+
+def test_closed_candle_ema_provider_uses_closed_prices_and_caches_boundary() -> None:
+    candle_start = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    candles = tuple(
+        ClosedCandle15m(
+            symbol="BTCUSDT",
+            candle_start=candle_start + index * timedelta(minutes=15),
+            candle_end=candle_start + (index + 1) * timedelta(minutes=15),
+            open_price=Decimal(index + 1),
+            close_price=Decimal(index + 1),
+        )
+        for index in range(10)
+    )
+    source = FakeClosedCandleSource(candles)
+    provider = ClosedCandleEmaProvider(source)
+
+    first = provider.load(
+        symbol="btcusdt",
+        observed_at=datetime(2026, 8, 1, 14, 31, tzinfo=UTC),
+    )
+    second = provider.load(
+        symbol="BTCUSDT",
+        observed_at=datetime(2026, 8, 1, 14, 44, tzinfo=UTC),
+    )
+
+    assert first == second
+    assert first.ema5 == Decimal("8")
+    assert first.ema10 == Decimal("5.5")
+    assert source.calls == 1
 
 
 def test_binance_candle_source_loads_closed_15m_rows_and_caches_range() -> None:

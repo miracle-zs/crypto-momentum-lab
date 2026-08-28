@@ -77,3 +77,34 @@ def test_execution_account_readiness_can_skip_age_cutoff() -> None:
         account_label="primary",
         max_age_seconds=None,
     )
+
+
+def test_live_readiness_rejects_checkpoint_without_active_lease() -> None:
+    connection = _Connection(
+        {"state": "live_enabled"},
+        None,
+    )
+
+    assert not healthcheck._live_ready(
+        connection,
+        account_label="primary",
+        session_id="live-primary-v1",
+        lease_owner="live-worker",
+        max_age_seconds=None,
+    )
+
+
+def test_live_readiness_rejects_latest_halted_session() -> None:
+    connection = _Connection(
+        {"state": "halted"},
+        {"lease_id": "lease-1"},
+        datetime.now(UTC),
+    )
+
+    assert not healthcheck._live_ready(
+        connection,
+        account_label="primary",
+        session_id="live-primary-v1",
+        lease_owner="live-worker",
+        max_age_seconds=None,
+    )

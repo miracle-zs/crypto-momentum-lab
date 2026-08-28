@@ -583,6 +583,13 @@ def paper_live_daemon_command(
         int,
         typer.Option("--candidate-ttl-buckets", min=1),
     ] = 4,
+    order_flow_min_aggressive_imbalance: Annotated[
+        str | None,
+        typer.Option(
+            "--orderflow-min-aggressive-imbalance",
+            help="Override the minimum aggressive imbalance for orderflow signals.",
+        ),
+    ] = None,
     paper_initial_balance: Annotated[
         str,
         typer.Option("--paper-initial-balance"),
@@ -702,6 +709,12 @@ def paper_live_daemon_command(
     if not resolved_database_url:
         raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
     resolved_run_id = run_id or f"paper-live-daemon-{uuid4()}"
+    order_flow_min_aggressive_imbalance_decimal = (
+        _parse_optional_non_negative_decimal(
+            order_flow_min_aggressive_imbalance,
+            "--orderflow-min-aggressive-imbalance",
+        )
+    )
     clock = _SystemClock()
     created_at = clock.now()
     source = build_postgres_paper_source(
@@ -730,6 +743,9 @@ def paper_live_daemon_command(
         candidate_notional=Decimal(candidate_notional),
         candidate_ttl_buckets=candidate_ttl_buckets,
         signal_interval_seconds=signal_interval_seconds,
+        order_flow_min_aggressive_imbalance=(
+            order_flow_min_aggressive_imbalance_decimal
+        ),
     )
     strategy = build_runtime_strategy_for_cli(
         strategy_name=strategy_name,
@@ -740,6 +756,9 @@ def paper_live_daemon_command(
         candidate_notional=Decimal(candidate_notional),
         candidate_ttl_buckets=candidate_ttl_buckets,
         signal_interval_seconds=signal_interval_seconds,
+        order_flow_min_aggressive_imbalance=(
+            order_flow_min_aggressive_imbalance_decimal
+        ),
         identity=identity,
     )
     repository = build_paper_daemon_repository(resolved_database_url)
@@ -1511,6 +1530,23 @@ def _entry_filter_config(
         raise typer.BadParameter(str(error)) from error
 
 
+def _parse_optional_non_negative_decimal(
+    value: str | None,
+    option_name: str,
+) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        parsed = Decimal(value)
+    except (InvalidOperation, ValueError) as error:
+        raise typer.BadParameter(f"{option_name} must be a decimal") from error
+    if not parsed.is_finite() or parsed < 0:
+        raise typer.BadParameter(
+            f"{option_name} must be finite and non-negative"
+        )
+    return parsed
+
+
 def build_runtime_strategy_for_cli(
     *,
     strategy_name: str,
@@ -1521,6 +1557,7 @@ def build_runtime_strategy_for_cli(
     candidate_notional: Decimal | None,
     candidate_ttl_buckets: int,
     signal_interval_seconds: int = 300,
+    order_flow_min_aggressive_imbalance: Decimal | None = None,
     identity: StrategyRunIdentity | None = None,
 ) -> RuntimeStrategyProtocol:
     resolved_identity = identity or build_runtime_identity_for_cli(
@@ -1532,6 +1569,7 @@ def build_runtime_strategy_for_cli(
         candidate_notional=candidate_notional,
         candidate_ttl_buckets=candidate_ttl_buckets,
         signal_interval_seconds=signal_interval_seconds,
+        order_flow_min_aggressive_imbalance=order_flow_min_aggressive_imbalance,
     )
     config_payload: dict[str, object] = {
         "candidate_notional": candidate_notional,
@@ -1539,6 +1577,10 @@ def build_runtime_strategy_for_cli(
         "signal_interval_seconds": signal_interval_seconds,
         "compression_breakout": compression_breakout,
     }
+    if order_flow_min_aggressive_imbalance is not None:
+        config_payload[
+            "order_flow_impulse_min_aggressive_imbalance"
+        ] = order_flow_min_aggressive_imbalance
     return build_runtime_strategy(
         strategy_name,
         config=config_payload,
@@ -1556,6 +1598,7 @@ def build_runtime_identity_for_cli(
     candidate_notional: Decimal | None,
     candidate_ttl_buckets: int,
     signal_interval_seconds: int = 300,
+    order_flow_min_aggressive_imbalance: Decimal | None = None,
     code_commit: str | None = None,
 ) -> StrategyRunIdentity:
     config_payload: dict[str, object] = {
@@ -1564,6 +1607,10 @@ def build_runtime_identity_for_cli(
         "signal_interval_seconds": signal_interval_seconds,
         "compression_breakout": compression_breakout,
     }
+    if order_flow_min_aggressive_imbalance is not None:
+        config_payload[
+            "order_flow_impulse_min_aggressive_imbalance"
+        ] = order_flow_min_aggressive_imbalance
     runtime_config = build_runtime_config(
         strategy_name,
         config=config_payload,

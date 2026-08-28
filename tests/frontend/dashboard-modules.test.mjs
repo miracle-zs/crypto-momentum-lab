@@ -7,9 +7,11 @@ import {
   statusClass,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-formatters.js";
 import {
+  buildLatestStartEquityModels,
   buildStrategyEquityModels,
   equityChart,
   equityWindowMetrics,
+  latestStartEquityChart,
   maxDrawdown,
   standaloneSparkline,
   strategyEquityChart,
@@ -100,6 +102,90 @@ test("strategy equity comparison starts at the first common bucket after 08:00",
   assert.equal(model.startAt, Date.parse("2026-08-16T00:06:00Z"));
   assert.equal(model.anchorMode, "after-anchor");
   assert.deepEqual(model.series.map((series) => series.values), [[0, 2, 5], [0, -1, 3]]);
+});
+
+test("strategy equity comparison keeps the current synchronized cohort", () => {
+  const equityCurve = (startHour, values) => values.map((equity, index) => ({
+    observed_at: `2026-08-16T${String(startHour).padStart(2, "0")}:${String(index * 6).padStart(2, "0")}:00Z`,
+    equity,
+  }));
+  const [model] = buildStrategyEquityModels([
+    {
+      run_id: "paper-account-old-1",
+      strategy_name: "orderflow_impulse",
+      source: "paper",
+      exit_label: "旧版本 A",
+      equity_curve: equityCurve(0, [1000, 1001, 1002]),
+    },
+    {
+      run_id: "paper-account-old-2",
+      strategy_name: "orderflow_impulse",
+      source: "paper",
+      exit_label: "旧版本 B",
+      equity_curve: equityCurve(0, [1000, 999, 1001]),
+    },
+    {
+      run_id: "paper-account-current-1",
+      strategy_name: "orderflow_impulse",
+      source: "paper",
+      exit_label: "当前版本 A",
+      equity_curve: equityCurve(3, [1000, 1002, 1004]),
+    },
+    {
+      run_id: "paper-account-current-2",
+      strategy_name: "orderflow_impulse",
+      source: "paper",
+      exit_label: "当前版本 B",
+      equity_curve: equityCurve(3, [1000, 1001, 1003]),
+    },
+  ]);
+
+  assert.deepEqual(
+    model.accounts.map((account) => account.run_id),
+    ["paper-account-current-1", "paper-account-current-2"],
+  );
+  assert.equal(model.omittedAccounts.length, 2);
+  assert.equal(model.points.length, 3);
+});
+
+test("latest-start equity models expose cash-flow-adjusted amount deltas", () => {
+  const commonCurve = (deltas) => deltas.map((delta, index) => ({
+    observed_at: new Date(Date.parse("2026-08-21T02:45:00Z") + index * 900000).toISOString(),
+    equity: String(1000 + delta),
+    delta: String(delta),
+    return_pct: String(delta / 10),
+  }));
+  const meta = {
+    common_equity_start_at: "2026-08-21T02:45:00Z",
+    common_equity_end_at: "2026-08-21T03:15:00Z",
+    common_equity_sample_interval_seconds: 900,
+    common_equity_note: "实盘已扣除 200 USDT 充值。",
+  };
+  const [model] = buildLatestStartEquityModels([
+    {
+      run_id: "paper-account-15",
+      strategy_name: "orderflow_impulse",
+      source: "paper",
+      exit_label: "15M 收线退出",
+      common_equity_curve: commonCurve([0, 2, 5]),
+    },
+    {
+      run_id: "live-primary-b1",
+      strategy_name: "orderflow_impulse",
+      source: "live",
+      exit_label: "实盘 B1",
+      common_equity_curve: commonCurve([0, -1, 3]),
+    },
+  ], meta);
+
+  assert.equal(model.startAt, Date.parse("2026-08-21T02:45:00Z"));
+  assert.deepEqual(model.series.map((series) => series.values), [[0, 2, 5], [0, -1, 3]]);
+  assert.equal(model.series[1].delta, 3);
+  const chartHtml = latestStartEquityChart(model);
+  const payload = getChartPayload("latest-start-orderflow_impulse");
+  assert.match(chartHtml, /data-echart-id="latest-start-orderflow_impulse"/);
+  assert.equal(payload.kind, "comparison");
+  assert.deepEqual(payload.series.map((series) => series.label), ["15M 收线退出", "实盘 B1"]);
 });
 
 test("sparklines render an empty state without a browser DOM", () => {

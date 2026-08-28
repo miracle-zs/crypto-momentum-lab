@@ -69,6 +69,7 @@ def main() -> int:
                     session_id=session_id,
                     lease_owner=args.lease_owner,
                     max_age_seconds=max_age_seconds,
+                    not_before=_process_started_at(),
                 ) else 1
             configured_run_ids = os.environ.get("CML_HEALTHCHECK_RUN_IDS")
             if configured_run_ids:
@@ -153,16 +154,22 @@ def _live_ready(
     session_id: str,
     lease_owner: str,
     max_age_seconds: float | None,
+    not_before: datetime | None = None,
 ) -> bool:
     transition = connection.execute(
         text(
-            "SELECT state FROM live_session_transitions "
+            "SELECT state, occurred_at FROM live_session_transitions "
             "WHERE session_id = :session_id "
             "ORDER BY occurred_at DESC LIMIT 1"
         ),
         {"session_id": session_id},
     ).mappings().first()
     if transition is None or transition["state"] not in {"live_enabled", "draining"}:
+        return False
+    if not_before is not None and (
+        transition["occurred_at"] is None
+        or _as_utc(transition["occurred_at"]) < not_before.astimezone(UTC)
+    ):
         return False
     lease = connection.execute(
         text(

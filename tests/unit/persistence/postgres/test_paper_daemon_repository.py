@@ -10,6 +10,7 @@ from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     candidate_from_row,
     checkpoint_from_row_values,
     paper_live_run_row,
+    runtime_event_row,
 )
 from crypto_momentum_lab.strategy_runner.daemon import PaperEntryFilterConfig
 from crypto_momentum_lab.strategy_runner.portfolio import PaperExitConfig
@@ -38,6 +39,30 @@ def test_checkpoint_from_row_values_restores_checkpoint() -> None:
     )
 
 
+def test_runtime_event_row_preserves_live_phase_fields() -> None:
+    occurred_at = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+
+    row = runtime_event_row(
+        event_id="event-1",
+        run_id="live-run-1",
+        event_type="exchange_filled",
+        occurred_at=occurred_at,
+        symbol="BTCUSDT",
+        bucket_start=occurred_at,
+        details={"lane": "entry", "latency_ms_from_previous": 125.0},
+    )
+
+    assert row == {
+        "event_id": "event-1",
+        "run_id": "live-run-1",
+        "event_type": "exchange_filled",
+        "occurred_at": occurred_at,
+        "symbol": "BTCUSDT",
+        "bucket_start": occurred_at,
+        "details": {"lane": "entry", "latency_ms_from_previous": 125.0},
+    }
+
+
 def test_paper_live_run_row_initializes_zero_count_summary() -> None:
     report = fixture_paper_report()
 
@@ -60,6 +85,8 @@ def test_paper_live_run_row_initializes_zero_count_summary() -> None:
         "allow_short": True,
         "max_abs_aggressive_imbalance": None,
         "max_cluster_trade_count": None,
+        "require_price_above_ema5": False,
+        "require_price_above_ema10": False,
     }
     assert row["execution_config"]["portfolio"]["take_profit_pct"] == "0.02"
 
@@ -126,6 +153,8 @@ def test_legacy_unknown_commit_run_can_upgrade_new_execution_flags() -> None:
                 "allow_short": True,
                 "max_abs_aggressive_imbalance": None,
                 "max_cluster_trade_count": None,
+                "require_price_above_ema5": False,
+                "require_price_above_ema10": False,
             },
             "portfolio": {
                 **actual["execution_config"]["portfolio"],
@@ -195,6 +224,8 @@ def test_known_commit_paper_run_can_upgrade_candle_exit_fields() -> None:
                 "allow_short": True,
                 "max_abs_aggressive_imbalance": None,
                 "max_cluster_trade_count": None,
+                "require_price_above_ema5": False,
+                "require_price_above_ema10": False,
             },
             "portfolio": {
                 "exit_mode": "candle_15m",

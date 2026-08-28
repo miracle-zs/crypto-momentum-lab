@@ -27,10 +27,13 @@ BASELINE_DETECTION = MODULE.BASELINE_DETECTION
 Candidate = MODULE.Candidate
 CascadeEvent = MODULE.CascadeEvent
 ExitIndex = MODULE.ExitIndex
+Entry = MODULE.Entry
+OfficialCandle15m = MODULE.OfficialCandle15m
 SymbolStates = MODULE.SymbolStates
 candidate_entry = MODULE.candidate_entry
 detect_events = MODULE.detect_events
 gate_events = MODULE.gate_events
+simulate_trade = MODULE.simulate_trade
 
 
 START = datetime(2026, 8, 1, tzinfo=UTC)
@@ -241,6 +244,71 @@ def test_delayed_continuation_uses_quote_after_condition_bucket() -> None:
     assert entry.quote_index == 7
     assert entry.opened_at == states.at[7] + 15
     assert entry.side == "long"
+
+
+def test_online_entry_uses_quote_from_condition_bucket() -> None:
+    rows = [_row(index, price=100.0) for index in range(4)]
+    rows.extend(
+        [
+            _row(4, price=102.0, liquidation_count=1, liquidation_notional=1000),
+            _row(5, price=103.0),
+        ]
+    )
+    states = _states(rows)
+    candidate = _candidate("C0")
+
+    entry = candidate_entry(
+        states,
+        ExitIndex.build(states),
+        _event(),
+        candidate,
+        entry_latency_buckets=0,
+    )
+
+    assert entry is not None
+    assert entry.condition_index == 4
+    assert entry.quote_index == 4
+    assert entry.opened_at == states.at[4] + 15
+    assert entry.entry_price == states.ask[4]
+
+
+def test_official_15m_close_is_the_primary_adverse_exit_price() -> None:
+    rows = [_row(index, price=100.0) for index in range(80)]
+    states = _states(rows)
+    exits = ExitIndex.build(
+        states,
+        official_candles=(
+            OfficialCandle15m(
+                candle_start=int(START.timestamp()),
+                candle_end=int((START + timedelta(minutes=15)).timestamp()),
+                open_price=100.0,
+                close_price=90.0,
+            ),
+        ),
+    )
+    candidate = _candidate("C0")
+    entry = Entry(
+        condition_index=4,
+        quote_index=4,
+        opened_at=states.at[4],
+        side="long",
+        entry_price=states.ask[4],
+    )
+
+    trade = simulate_trade(
+        states,
+        exits,
+        _event(),
+        candidate,
+        entry,
+        "train",
+    )
+
+    assert trade.close_reason == "first_adverse_15m"
+    assert trade.closed_at == int((START + timedelta(minutes=15)).timestamp())
+    assert trade.exit_price == 90.0
+    assert trade.official_exit_price == 90.0
+    assert trade.pnl is not None and trade.pnl < 0
 
 
 def test_delayed_continuation_dies_after_return_inside_breakout() -> None:

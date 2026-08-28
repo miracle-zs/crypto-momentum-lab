@@ -1129,6 +1129,15 @@ details.secondary[open] summary { margin-bottom: 10px; }
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.common-equity-section[data-common-comparison-count="1"] {
+  width: 100%;
+  max-width: 1080px;
+}
+
+.common-equity-section[data-common-comparison-count="1"] .pair-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .pair-panel {
   min-width: 0;
   padding: 13px 14px 11px;
@@ -1201,6 +1210,16 @@ details.secondary[open] summary { margin-bottom: 10px; }
 }
 
 .pair-panel footer b { color: var(--muted); font: 500 9px var(--mono); white-space: nowrap; }
+
+.common-equity-note {
+  margin: 10px 0 2px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--brand);
+  background: color-mix(in srgb, var(--brand) 7%, transparent);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
 
 /* ============ equity chart ============ */
 

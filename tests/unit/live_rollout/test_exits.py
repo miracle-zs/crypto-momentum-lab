@@ -174,6 +174,40 @@ async def test_b1_adverse_candle_uses_direct_market_close_at_target() -> None:
     assert direct.candidate.reason == "candle_15m_bearish"
 
 
+async def test_b1_uses_lower_decision_threshold_and_keeps_recovery_target() -> None:
+    candle = ClosedCandle15m(
+        symbol="BTCUSDT",
+        candle_start=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
+        candle_end=datetime(2026, 7, 4, 0, 30, tzinfo=UTC),
+        open_price=Decimal("105"),
+        close_price=Decimal("102"),
+    )
+    manager = LiveExitManager(
+        config=_config(
+            PositionExitMode.CANDLE_15M,
+            candle_grace_bars=1,
+            candle_grace_decision_profit_pct=Decimal("0.001"),
+            candle_grace_profit_pct=Decimal("0.0088"),
+        ),
+        candle_loader=FakeCandleLoader((candle,)),
+    )
+    state = replace(
+        _state(),
+        bucket_start=datetime(2026, 7, 4, 0, 30, tzinfo=UTC),
+        bucket_end=datetime(2026, 7, 4, 0, 30, 15, tzinfo=UTC),
+        last_bid_price=Decimal("100.20"),
+        mark_price=Decimal("100.20"),
+        close_price=Decimal("100.20"),
+    )
+
+    requests = await manager.requests_for_state(state, (_long_position(),))
+
+    assert len(requests) == 1
+    direct = requests[0]
+    assert direct.candidate.entry_type is EntryType.MARKET
+    assert direct.candidate.limit_price is None
+
+
 async def test_b1_grace_timeout_cancels_limit_before_market_close() -> None:
     recovery_plan = OrderExecutionPlan(
         intent_id="recovery-intent",
@@ -340,6 +374,7 @@ def _config(
     mode: PositionExitMode,
     *,
     candle_grace_bars: int = 0,
+    candle_grace_decision_profit_pct: Decimal | None = None,
     candle_grace_profit_pct: Decimal = Decimal("0"),
 ) -> LiveExitConfig:
     return LiveExitConfig(
@@ -354,6 +389,7 @@ def _config(
             mode=mode,
         ),
         candle_grace_bars=candle_grace_bars,
+        candle_grace_decision_profit_pct=candle_grace_decision_profit_pct,
         candle_grace_profit_pct=candle_grace_profit_pct,
     )
 

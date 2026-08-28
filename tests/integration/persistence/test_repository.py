@@ -2,7 +2,10 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
+from sqlalchemy import delete, select
+
 from crypto_momentum_lab.domain.universe.models import (
+    ContractMetadata,
     MarketCandidate,
     MembershipStatus,
     RankEntry,
@@ -11,6 +14,7 @@ from crypto_momentum_lab.domain.universe.models import (
     TrackedMembership,
     UniverseSnapshot,
 )
+from crypto_momentum_lab.persistence.postgres.models import ContractMetadataRow
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
 )
@@ -71,6 +75,43 @@ async def test_save_snapshot_is_idempotent(
     assert loaded is not None
     assert loaded.snapshot_id == snapshot.snapshot_id
     assert loaded.memberships == snapshot.memberships
+
+
+async def test_save_contract_metadata_rehydrates_after_retention_delete(
+    repository: PostgresUniverseRepository,
+) -> None:
+    first_at = datetime(2026, 6, 14, 11, 1, tzinfo=UTC)
+    second_at = datetime(2026, 6, 14, 11, 6, tzinfo=UTC)
+    contract = ContractMetadata(
+        "BTCUSDT",
+        "PERPETUAL",
+        "TRADING",
+        "USDT",
+        "USDT",
+        first_at,
+        {"filters": []},
+    )
+
+    await repository.save_contract_metadata((contract,), effective_at=first_at)
+
+    async with repository._session_factory() as session:
+        async with session.begin():
+            await session.execute(delete(ContractMetadataRow))
+
+    await repository.save_contract_metadata((contract,), effective_at=second_at)
+
+    async with repository._session_factory() as session:
+        rows = (
+            await session.scalars(
+                select(ContractMetadataRow).where(
+                    ContractMetadataRow.symbol == "BTCUSDT"
+                )
+            )
+        ).all()
+
+    assert [(row.symbol, row.effective_at) for row in rows] == [
+        ("BTCUSDT", second_at)
+    ]
 
 
 async def test_load_active_memberships_ignores_unactivated_snapshot(

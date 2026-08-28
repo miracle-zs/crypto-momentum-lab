@@ -1,11 +1,15 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from inspect import signature
 from types import SimpleNamespace
 
+import pytest
 from typer.testing import CliRunner
 
 from crypto_momentum_lab.apps.live_rollout import main
+from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
+from crypto_momentum_lab.market_data.hub import MarketStateHubError
 
 app = main.app
 
@@ -55,6 +59,30 @@ def test_strategy_config_hash_is_stable_for_selected_strategy() -> None:
     assert len(first.stdout.strip()) == 64
 
 
+def test_strategy_config_hash_includes_live_entry_filters() -> None:
+    filtered = main._live_strategy_config_hash(
+        "orderflow_impulse",
+        require_price_above_ema5=True,
+        require_price_above_ema10=True,
+    )
+    unfiltered = main._live_strategy_config_hash(
+        "orderflow_impulse",
+        entry_positive_gainer_top_count=None,
+        require_price_above_ema5=False,
+        require_price_above_ema10=False,
+    )
+
+    assert filtered != unfiltered
+
+
+def test_live_defaults_disable_ema_and_use_lower_orderflow_imbalance() -> None:
+    assert main._LIVE_ENTRY_PRICE_ABOVE_EMA5 is False
+    assert main._LIVE_ENTRY_PRICE_ABOVE_EMA10 is False
+    assert main._live_strategy_config()[
+        "order_flow_impulse_min_aggressive_imbalance"
+    ] == Decimal("0.40")
+
+
 def test_unlimited_cli_values_map_to_absent_capacity_limits() -> None:
     assert main._parse_optional_decimal_limit("unlimited", "--cap") is None
     assert main._parse_optional_integer_limit("unlimited", "--count") is None
@@ -79,6 +107,124 @@ def test_live_run_does_not_expose_removed_safety_limits() -> None:
         "max_holding_seconds",
     ):
         assert removed not in parameters
+
+
+def test_live_startup_retry_delay_uses_exchange_retry_after() -> None:
+    assert main._live_startup_retry_delay(1, retry_after_seconds=17) == 17
+    assert main._live_startup_retry_delay(2, retry_after_seconds=None) == 30
+    assert main._live_startup_retry_delay(10, retry_after_seconds=None) == 300
+
+
+def test_only_transient_live_startup_errors_are_retryable() -> None:
+    assert main._is_retryable_live_startup_error(
+        RuntimeError("live gate blocked: missing_active_lease")
+    )
+    assert main._is_retryable_live_startup_error(TimeoutError("recovery timed out"))
+    assert not main._is_retryable_live_startup_error(
+        RuntimeError("position mode mismatch: expected hedge, got one-way")
+    )
+
+
+@pytest.mark.asyncio
+async def test_compact_checkpoint_recovery_warms_without_evaluating_signals() -> None:
+    now = datetime(2026, 8, 23, 0, 0, tzinfo=UTC)
+    warmed: list[object] = []
+    seen: dict[str, object] = {}
+
+    class Strategy:
+        def required_data(self):
+            return SimpleNamespace(warmup_buckets=1)
+
+        def warm_market_state(self, state) -> None:
+            warmed.append(state)
+
+        def checkpoint(self, *, include_market_state_buffers=True):
+            assert include_market_state_buffers is False
+            return StrategyCheckpoint(
+                last_processed_at_by_symbol={"BTCUSDT": now},
+                warmup_buckets_by_symbol={"BTCUSDT": len(warmed)},
+                cooldown_buckets_remaining_by_symbol={"BTCUSDT": 2},
+                payload={"signal_sequence": 4},
+            )
+
+    class Repository:
+        async def load_recovery_window(self, **kwargs):
+            seen.update(kwargs)
+            return (SimpleNamespace(symbol="BTCUSDT"),)
+
+    checkpoint = StrategyCheckpoint(
+        last_processed_at_by_symbol={"BTCUSDT": now},
+        warmup_buckets_by_symbol={"BTCUSDT": 7},
+        cooldown_buckets_remaining_by_symbol={"BTCUSDT": 2},
+        payload={"signal_sequence": 4},
+    )
+
+    await main._restore_live_strategy_from_checkpoint(
+        strategy=Strategy(),
+        checkpoint=checkpoint,
+        repository=Repository(),
+        environment="research",
+    )
+
+    assert len(warmed) == 1
+    assert seen["environment"] == "research"
+    assert seen["last_processed_at_by_symbol"] == {"BTCUSDT": now}
+
+
+@pytest.mark.asyncio
+async def test_periodic_reconcile_runs_outside_market_state_loop(monkeypatch) -> None:
+    calls = 0
+    delays: list[float] = []
+
+    async def fake_reconcile(**_: object) -> None:
+        nonlocal calls
+        calls += 1
+
+    async def controlled_sleep(delay: float) -> None:
+        delays.append(delay)
+        if len(delays) == 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(main, "_reconcile_run_orders", fake_reconcile)
+
+    with pytest.raises(asyncio.CancelledError):
+        await main._periodic_reconcile_run_orders(
+            order_repository=object(),  # type: ignore[arg-type]
+            state_machine=object(),  # type: ignore[arg-type]
+            run_id="live-manual",
+            interval_seconds=60,
+            sleep=controlled_sleep,
+        )
+
+    assert calls == 1
+    assert delays == [60, 60]
+
+
+def test_live_lease_auto_reacquire_requires_prior_live_session() -> None:
+    assert main._should_auto_reacquire_live_lease(
+        lease_present=False,
+        session_was_live_enabled=True,
+        draining=False,
+        gate_reasons=("missing_active_lease",),
+    )
+    assert not main._should_auto_reacquire_live_lease(
+        lease_present=False,
+        session_was_live_enabled=False,
+        draining=False,
+        gate_reasons=("missing_active_lease",),
+    )
+    assert not main._should_auto_reacquire_live_lease(
+        lease_present=False,
+        session_was_live_enabled=True,
+        draining=True,
+        gate_reasons=("missing_active_lease",),
+    )
+    assert not main._should_auto_reacquire_live_lease(
+        lease_present=False,
+        session_was_live_enabled=True,
+        draining=False,
+        gate_reasons=("missing_active_lease", "active_risk_halt"),
+    )
 
 
 async def test_live_warmup_applies_all_states_and_continues_from_boundary() -> None:
@@ -118,6 +264,37 @@ async def test_live_warmup_applies_all_states_and_continues_from_boundary() -> N
     assert strategy.seen == [stale, fresh]
     assert cursor.bucket_start == fresh.bucket_start
     assert cursor.symbol == "BTCUSDT"
+
+
+async def test_resilient_market_state_stream_retries_after_hub_failure() -> None:
+    state = SimpleNamespace(symbol="BTCUSDT")
+
+    class Source:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def __aiter__(self):
+            self.attempts += 1
+            attempt = self.attempts
+
+            async def stream():
+                if attempt == 1:
+                    raise MarketStateHubError("market-state hub unavailable")
+                yield state
+
+            return stream()
+
+    source = Source()
+    observed = []
+
+    async for item in main._resilient_market_state_stream(
+        source,
+        retry_delay_seconds=0,
+    ):
+        observed.append(item)
+
+    assert observed == [state]
+    assert source.attempts == 2
 
 
 async def test_shadow_preflight_accepts_an_old_matching_session() -> None:

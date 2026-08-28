@@ -6,9 +6,15 @@ from crypto_momentum_lab.domain.account import (
     AccountConfigSnapshot,
     ExecutionAccountStatus,
 )
+from crypto_momentum_lab.execution_account.binance.user_data import (
+    parse_user_data_event,
+)
 from crypto_momentum_lab.execution_account.sync import (
     ExecutionAccountSyncConfig,
     ExecutionAccountSyncService,
+)
+from crypto_momentum_lab.execution_account.user_data_sync import (
+    AccountUserDataState,
 )
 
 
@@ -131,6 +137,44 @@ async def test_sync_once_persists_snapshot_and_ready_state() -> None:
     assert len(repository.balances) == 1
     assert repository.process_states[-1].state is ExecutionAccountStatus.READY_READONLY
     assert repository.reconciliation_runs[-1].status == "ready"
+
+
+async def test_user_data_event_persists_merged_snapshot() -> None:
+    repository = FakeRepository()
+    service = ExecutionAccountSyncService(
+        client=FakeClient(),
+        repository=repository,
+        config=_config(),
+    )
+
+    initial = await service.sync_once()
+    assert initial.snapshot is not None
+    state = AccountUserDataState(initial.snapshot)
+    event = parse_user_data_event(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "E": 1783123201000,
+            "a": {
+                "B": [{"a": "USDT", "wb": "101", "cw": "81"}],
+                "P": [],
+            },
+        },
+        received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+    )
+    update = state.apply(event)
+
+    result = await service.persist_user_data_event(
+        snapshot=update.snapshot,
+        event=event,
+        fills=update.fills,
+    )
+
+    assert result.status is ExecutionAccountStatus.READY_READONLY
+    assert repository.snapshot_calls == 2
+    assert repository.reconciliation_runs[-1].details["source"] == (
+        "user_data_stream"
+    )
+    assert repository.process_states[-1].state is ExecutionAccountStatus.READY_READONLY
 
 
 async def test_sync_once_halts_on_account_mode_mismatch() -> None:

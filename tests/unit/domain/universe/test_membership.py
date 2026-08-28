@@ -15,6 +15,10 @@ from crypto_momentum_lab.domain.universe.models import (
 NOW = datetime(2026, 6, 14, 12, 1, tzinfo=UTC)
 
 
+def test_persisted_extended_membership_status_is_supported() -> None:
+    assert MembershipStatus("extended") is MembershipStatus.EXTENDED
+
+
 def result(
     gainers: list[str],
     losers: list[str],
@@ -48,6 +52,24 @@ def test_current_target_is_immediately_monitored() -> None:
 
     assert memberships["A"].status is MembershipStatus.TARGET
     assert memberships["X"].status is MembershipStatus.TARGET
+
+
+def test_extended_memberships_cover_positive_gainers_without_changing_targets() -> None:
+    memberships = build_monitoring_memberships(
+        result(["A", "B", "C", "D"], ["X", "Y", "Z"]),
+        previous={},
+        forced_symbols=frozenset(),
+        observed_at=NOW,
+        retention_rank=3,
+        retention_duration=timedelta(hours=2),
+        extended_gainer_count=4,
+    )
+
+    assert memberships["A"].status is MembershipStatus.TARGET
+    assert memberships["B"].status is MembershipStatus.TARGET
+    assert memberships["C"].status is MembershipStatus.EXTENDED
+    assert memberships["D"].status is MembershipStatus.EXTENDED
+    assert "Z" not in memberships
 
 
 def test_symbol_is_retained_until_time_limit_is_reached() -> None:

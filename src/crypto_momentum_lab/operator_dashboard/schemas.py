@@ -78,11 +78,21 @@ class PaperAccountEquityResponse(DashboardSchema):
     source: str = "paper"
     account_label: str | None = None
     equity_curve: list[dict[str, JsonValue]] = Field(default_factory=list)
+    common_equity_baseline: str | None = None
+    common_equity_curve: list[dict[str, JsonValue]] = Field(default_factory=list)
 
 
 class PaperAccountsEquityResponse(DashboardSchema):
     status: OperationalStatus
     accounts: list[PaperAccountEquityResponse] = Field(default_factory=list)
+    common_equity_start_at: datetime | None = None
+    common_equity_end_at: datetime | None = None
+    common_equity_sample_interval_seconds: int | None = None
+    common_equity_anchor: str | None = None
+    common_equity_anchor_accounts: list[str] = Field(default_factory=list)
+    common_equity_account_count: int = 0
+    common_equity_cash_flows: list[dict[str, JsonValue]] = Field(default_factory=list)
+    common_equity_note: str | None = None
 
 
 class PaperAccountsResponse(DashboardSchema):

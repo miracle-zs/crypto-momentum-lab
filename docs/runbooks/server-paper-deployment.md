@@ -46,6 +46,11 @@ Rejected signals still advance the baseline strategy cooldown, so these accounts
 remain strict subsets of the same signal stream used by the historical filter
 study.
 
+The standalone account 14 runner (`paper-account-14-orderflow-b1-gainer100-v1`)
+uses a `0.40` minimum aggressive imbalance and explicitly disables EMA5/EMA10
+entry filters. Its previous run metadata must be migrated or versioned when the
+strategy configuration hash changes; do not silently reuse a mismatched run.
+
 ## Deploy
 
 1. Install Docker Engine with the Compose plugin.

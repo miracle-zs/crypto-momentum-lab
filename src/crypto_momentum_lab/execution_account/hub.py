@@ -51,6 +51,8 @@ class AccountEvent:
     client_order_id: str | None = None
     order_status: str | None = None
     reason: str | None = None
+    has_fill: bool = False
+    trade_id: str | None = None
 
     def __post_init__(self) -> None:
         for text_value, field_name in (
@@ -81,9 +83,12 @@ class AccountEvent:
             (self.client_order_id, "client_order_id"),
             (self.order_status, "order_status"),
             (self.reason, "reason"),
+            (self.trade_id, "trade_id"),
         ):
             if optional_value is not None and not optional_value.strip():
                 raise ValueError(f"{field_name} must not be blank when present")
+        if not isinstance(self.has_fill, bool):
+            raise TypeError("has_fill must be a bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,6 +408,8 @@ def encode_account_event(event: AccountEvent, *, sequence: int) -> str:
             "client_order_id": event.client_order_id,
             "order_status": event.order_status,
             "reason": event.reason,
+            "has_fill": event.has_fill,
+            "trade_id": event.trade_id,
         },
         separators=(",", ":"),
     )
@@ -440,6 +447,8 @@ def decode_account_event(
         client_order_id=_optional_string(payload, "client_order_id"),
         order_status=_optional_string(payload, "order_status"),
         reason=_optional_string(payload, "reason"),
+        has_fill=_optional_bool(payload, "has_fill"),
+        trade_id=_optional_string(payload, "trade_id"),
     )
 
 
@@ -471,6 +480,13 @@ def _optional_string(payload: dict[str, object], field_name: str) -> str | None:
         return None
     if not isinstance(value, str) or not value.strip():
         raise AccountEventHubProtocolError(f"{field_name} must be a non-empty string")
+    return value
+
+
+def _optional_bool(payload: dict[str, object], field_name: str) -> bool:
+    value = payload.get(field_name, False)
+    if not isinstance(value, bool):
+        raise AccountEventHubProtocolError(f"{field_name} must be a boolean")
     return value
 
 

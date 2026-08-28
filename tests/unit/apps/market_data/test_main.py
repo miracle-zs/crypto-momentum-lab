@@ -25,6 +25,17 @@ from crypto_momentum_lab.universe.scheduler import run_scheduler_loop
 runner = CliRunner()
 
 
+def test_market_database_url_prefers_the_market_plane(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "CML_MARKET_DATABASE_URL",
+        "postgresql+asyncpg://market",
+    )
+
+    assert main._market_database_url("postgresql+asyncpg://shared") == (
+        "postgresql+asyncpg://market"
+    )
+
+
 def fixture_snapshot() -> UniverseSnapshot:
     at = datetime(2026, 6, 14, 11, 1, tzinfo=UTC)
     candidate = MarketCandidate(
@@ -111,6 +122,41 @@ def test_parse_live_position_account_label_normalizes_optional_value() -> None:
     assert main.parse_live_position_account_label("  ") is None
 
 
+async def test_operational_retention_uses_bounded_batches() -> None:
+    class RecordingRetention:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int]] = []
+
+        async def prune_contract_metadata(
+            self,
+            *,
+            before: datetime,
+            batch_size: int,
+        ) -> int:
+            del before
+            self.calls.append(("contract", batch_size))
+            return 0
+
+        async def prune_runtime_market_states(
+            self,
+            *,
+            before: datetime,
+            batch_size: int,
+        ) -> int:
+            del before
+            self.calls.append(("runtime", batch_size))
+            return 0
+
+    repository = RecordingRetention()
+
+    await main.prune_operational_database_once(
+        repository,
+        now=datetime(2026, 6, 14, 11, 1, tzinfo=UTC),
+    )
+
+    assert repository.calls == [("contract", 1_000), ("runtime", 1_000)]
+
+
 def test_run_market_data_uses_combined_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -195,26 +241,70 @@ async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
             self.stop_called = True
             self.run_finished.set()
 
+        def metrics_snapshot(self):
+            return SimpleNamespace(
+                queue_events=0,
+                queue_bytes=0,
+                monitoring_symbols=1,
+            )
+
     class FakeUniverse:
         async def refresh(self, *, observed_at: datetime) -> UniverseSnapshot:
             del observed_at
             return fixture_snapshot()
+
+    class FakeStateHub:
+        def __init__(self) -> None:
+            self.started = False
+            self.stopped = False
+
+        async def start(self) -> None:
+            self.started = True
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+    class FakePublisher:
+        def __init__(self) -> None:
+            self.started = False
+            self.stopped = False
+            self.metrics = SimpleNamespace(latest_watermark_at=None)
+
+        def lateness_metrics_snapshot(self) -> dict[str, object]:
+            return {}
+
+        async def start(self) -> None:
+            self.started = True
+
+        async def stop(self) -> None:
+            self.stopped = True
 
     async def block_forever(*args, **kwargs) -> None:
         del args, kwargs
         await asyncio.Event().wait()
 
     capture = FakeCapture()
+    state_hub = FakeStateHub()
+    publisher = FakePublisher()
     runtime = SimpleNamespace(
         capture=capture,
+        connection_pool=SimpleNamespace(
+            metrics_snapshot=lambda: SimpleNamespace(
+                active_connections=1,
+                ready_connections=1,
+                reconnect_count=0,
+                ack_mismatch_count=0,
+                control_commands_sent=1,
+                received_messages=1,
+            )
+        ),
+        state_hub=state_hub,
         initial_symbols=frozenset({"BTCUSDT"}),
         enabled_streams=(CaptureStream.AGG_TRADE,),
         universe=FakeUniverse(),
         universe_activation_minute=1,
         universe_refresh_interval_minutes=15,
-        runtime_state_publisher=SimpleNamespace(
-            metrics=SimpleNamespace(latest_watermark_at=None)
-        ),
+        runtime_state_publisher=publisher,
         subscription_observer=object(),
         capture_repository=object(),
         archive_root=Path("raw"),
@@ -230,6 +320,7 @@ async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
     monkeypatch.setattr(main, "build_market_data_runtime", fake_runtime)
     monkeypatch.setattr(main, "run_scheduler_loop", block_forever)
     monkeypatch.setattr(main, "monitor_market_data_freshness", block_forever)
+    monkeypatch.setattr(main, "monitor_market_data_health", block_forever)
     monkeypatch.setattr(
         main,
         "reconcile_paper_exit_subscriptions",
@@ -248,6 +339,10 @@ async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
     assert capture.stop_called is True
     assert capture.run_finished.is_set()
     assert capture.run_cancelled is False
+    assert state_hub.started is True
+    assert state_hub.stopped is True
+    assert publisher.started is True
+    assert publisher.stopped is True
 
 
 async def test_scheduler_propagates_cancellation_cleanly() -> None:

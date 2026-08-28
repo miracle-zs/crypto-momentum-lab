@@ -32,6 +32,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
         'v18-equity-ranges"'
         in index
     )
+    assert 'dashboard.css?v=20260827-unified-equity-v1' in index
+    assert 'dashboard.js?v=20260827-unified-equity-v1' in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(endpoint" in text
     assert "binance.com" not in text.lower()
@@ -136,9 +138,15 @@ def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
     for marker in (
         "buildStrategyEquityModels",
         "strategyEquityChart",
+        "buildLatestStartEquityModels",
+        "latestStartEquityChart",
         "STRATEGY EXIT EQUITY",
         "DAILY 08:00 ANCHOR",
         "SHARED AXES",
+        "LATEST START",
+        "统一起点权益金额变化",
+        "common_equity_curve",
+        "common_equity_note",
         "实盘 B1",
         "每日 08:00 UTC+8 起算",
         "comparisonAnchorText",

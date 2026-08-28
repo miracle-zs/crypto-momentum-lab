@@ -8,6 +8,7 @@ from crypto_momentum_lab.market_data.binance.connection_pool import (
     BinanceConnectionPool,
 )
 from crypto_momentum_lab.market_data.binance.websocket import (
+    BinanceWebSocketMetricsSnapshot,
     should_replace_connection,
 )
 from crypto_momentum_lab.market_data.capture.subscriptions import (
@@ -48,6 +49,24 @@ class FakeConnection:
     async def stop(self) -> None:
         self.stopped = True
 
+    def metrics_snapshot(self) -> BinanceWebSocketMetricsSnapshot:
+        return BinanceWebSocketMetricsSnapshot(
+            group_id=self.group.group_id,
+            stream=self.group.stream,
+            desired_subscriptions=len(self.group.subscriptions),
+            connection_attempts=1,
+            reconnect_count=0,
+            active=self.started and not self.stopped,
+            ready=self.started and not self.stopped,
+            ack_mismatch_count=0,
+            control_commands_sent=0,
+            received_messages=0,
+            received_bytes=0,
+            last_message_age_seconds=None,
+            last_close_code=None,
+            last_reason=None,
+        )
+
 
 def build_pool() -> tuple[
     BinanceConnectionPool,
@@ -70,6 +89,29 @@ def build_pool() -> tuple[
         ),
         connections,
         events,
+    )
+
+
+def build_pool_with_book_ticker_limit(
+    limit: int,
+) -> tuple[BinanceConnectionPool, list[FakeConnection]]:
+    connections: list[FakeConnection] = []
+
+    def factory(group: SubscriptionGroup) -> FakeConnection:
+        connection = FakeConnection(group, [])
+        connections.append(connection)
+        return connection
+
+    return (
+        BinanceConnectionPool(
+            connection_factory=factory,
+            max_subscriptions_per_connection=100,
+            control_messages_per_second=5,
+            max_subscriptions_per_connection_by_stream={
+                CaptureStream.BOOK_TICKER: limit,
+            },
+        ),
+        connections,
     )
 
 
@@ -118,6 +160,61 @@ async def test_pool_reuses_group_and_adds_before_removing() -> None:
         ("SUBSCRIBE", ("ethusdt@aggTrade",)),
         ("UNSUBSCRIBE", ("btcusdt@aggTrade",)),
     ]
+
+
+async def test_pool_applies_book_ticker_specific_shard_limit() -> None:
+    pool, connections = build_pool_with_book_ticker_limit(50)
+
+    await pool.apply_symbols(
+        frozenset(f"S{i:03d}USDT" for i in range(125)),
+        streams=(CaptureStream.BOOK_TICKER,),
+        generation=1,
+    )
+
+    assert [
+        len(connection.group.subscriptions) for connection in connections
+    ] == [50, 50, 25]
+    assert [connection.group.group_id for connection in connections] == [
+        "public:bookTicker:0000",
+        "public:bookTicker:0001",
+        "public:bookTicker:0002",
+    ]
+
+
+async def test_pool_global_book_ticker_does_not_reconfigure_on_refresh() -> None:
+    connections: list[FakeConnection] = []
+    events: list[tuple[str, tuple[str, ...]]] = []
+
+    def factory(group: SubscriptionGroup) -> FakeConnection:
+        connection = FakeConnection(group, events)
+        connections.append(connection)
+        return connection
+
+    pool = BinanceConnectionPool(
+        connection_factory=factory,
+        max_subscriptions_per_connection=100,
+        control_messages_per_second=5,
+        use_all_book_ticker_stream=True,
+    )
+
+    await pool.apply_symbols(
+        frozenset({"BTCUSDT", "ETHUSDT"}),
+        streams=(CaptureStream.BOOK_TICKER,),
+        generation=1,
+    )
+    events.clear()
+
+    await pool.apply_symbols(
+        frozenset({"SOLUSDT", "XRPUSDT"}),
+        streams=(CaptureStream.BOOK_TICKER,),
+        generation=2,
+    )
+
+    assert len(connections) == 1
+    assert connections[0].group.subscriptions[0].binance_name == (
+        "!bookTicker"
+    )
+    assert events == []
 
 
 async def test_pool_stops_connections_concurrently() -> None:

@@ -34,6 +34,11 @@ _CHECKPOINT_POOL_SIZE = 1
 _CHECKPOINT_MAX_OVERFLOW = 0
 _CHECKPOINT_POOL_TIMEOUT_SECONDS = 2
 _CHECKPOINT_COMMAND_TIMEOUT_SECONDS = 10
+_DASHBOARD_POOL_SIZE = 2
+_DASHBOARD_MAX_OVERFLOW = 0
+_DASHBOARD_POOL_TIMEOUT_SECONDS = 3
+_DASHBOARD_COMMAND_TIMEOUT_SECONDS = 10
+_DASHBOARD_POOL_RECYCLE_SECONDS = 900
 
 
 def create_async_database_engine(
@@ -44,6 +49,7 @@ def create_async_database_engine(
     max_overflow: int = _MAX_OVERFLOW,
     pool_timeout_seconds: float = _POOL_TIMEOUT_SECONDS,
     command_timeout_seconds: float | None = None,
+    pool_recycle_seconds: int | None = None,
 ) -> AsyncEngine:
     if not pooled:
         return create_async_engine(database_url, poolclass=NullPool)
@@ -53,19 +59,23 @@ def create_async_database_engine(
         raise ValueError("max_overflow must not be negative")
     if pool_timeout_seconds <= 0:
         raise ValueError("pool_timeout_seconds must be positive")
+    if pool_recycle_seconds is not None and pool_recycle_seconds <= 0:
+        raise ValueError("pool_recycle_seconds must be positive")
     connect_args = (
         {}
         if command_timeout_seconds is None
         else {"command_timeout": command_timeout_seconds}
     )
-    return create_async_engine(
-        database_url,
-        pool_pre_ping=True,
-        pool_size=pool_size,
-        max_overflow=max_overflow,
-        pool_timeout=pool_timeout_seconds,
-        connect_args=connect_args,
-    )
+    engine_options: dict[str, object] = {
+        "pool_pre_ping": True,
+        "pool_size": pool_size,
+        "max_overflow": max_overflow,
+        "pool_timeout": pool_timeout_seconds,
+        "connect_args": connect_args,
+    }
+    if pool_recycle_seconds is not None:
+        engine_options["pool_recycle"] = pool_recycle_seconds
+    return create_async_engine(database_url, **engine_options)
 
 
 def create_execution_database_engine(
@@ -144,6 +154,19 @@ def create_checkpoint_database_engine(database_url: str) -> AsyncEngine:
         max_overflow=_CHECKPOINT_MAX_OVERFLOW,
         pool_timeout_seconds=_CHECKPOINT_POOL_TIMEOUT_SECONDS,
         command_timeout_seconds=_CHECKPOINT_COMMAND_TIMEOUT_SECONDS,
+    )
+
+
+def create_dashboard_database_engine(database_url: str) -> AsyncEngine:
+    """Create a bounded, recyclable pool for read-only dashboard queries."""
+
+    return create_async_database_engine(
+        database_url,
+        pool_size=_DASHBOARD_POOL_SIZE,
+        max_overflow=_DASHBOARD_MAX_OVERFLOW,
+        pool_timeout_seconds=_DASHBOARD_POOL_TIMEOUT_SECONDS,
+        command_timeout_seconds=_DASHBOARD_COMMAND_TIMEOUT_SECONDS,
+        pool_recycle_seconds=_DASHBOARD_POOL_RECYCLE_SECONDS,
     )
 
 
