@@ -84,6 +84,26 @@ class PostgresAccountRepository:
             position_snapshot_row(snapshot),
         )
 
+    async def save_balance_position_snapshot(
+        self,
+        *,
+        balances: tuple[AccountBalanceSnapshot, ...],
+        positions: tuple[AccountPositionSnapshot, ...],
+    ) -> None:
+        """Persist a lightweight account-state observation atomically."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                await self._insert_in_session(
+                    session,
+                    AccountBalanceSnapshotRow,
+                    [balance_snapshot_row(item) for item in balances],
+                )
+                await self._insert_in_session(
+                    session,
+                    AccountPositionSnapshotRow,
+                    [position_snapshot_row(item) for item in positions],
+                )
+
     async def upsert_open_order(self, order: AccountOpenOrderSnapshot) -> None:
         await self._insert(AccountOpenOrderRow, open_order_snapshot_row(order))
 

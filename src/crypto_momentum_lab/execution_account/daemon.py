@@ -1,8 +1,11 @@
 import asyncio
+import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
+
+import structlog
 
 from crypto_momentum_lab.domain.account import AccountFillEvent
 from crypto_momentum_lab.execution_account.binance.user_data import (
@@ -16,6 +19,8 @@ from crypto_momentum_lab.execution_account.sync import (
 from crypto_momentum_lab.execution_account.user_data_sync import (
     AccountUserDataState,
 )
+
+log = structlog.get_logger(__name__)
 
 
 class AccountSyncCycle(Protocol):
@@ -153,6 +158,8 @@ class ContinuousAccountSyncDaemon:
 
 
 class UserDataAccountSyncCycle(AccountSyncCycle, Protocol):
+    async def snapshot_once(self, *, observed_at: datetime) -> None: ...
+
     async def publish_user_data_heartbeat(
         self,
         *,
@@ -184,10 +191,18 @@ class UserDataAccountEventStream(Protocol):
     async def stop(self) -> None:
         pass
 
+    @property
+    def metrics(self) -> object:
+        pass
+
+    async def request_reconnect(self, reason: str) -> None:
+        pass
+
 
 @dataclass(frozen=True, slots=True)
 class UserDataAccountSyncConfig:
     rest_reconciliation_interval_seconds: float = 300.0
+    snapshot_interval_seconds: float = 15.0
     heartbeat_interval_seconds: float = 30.0
     failure_backoff_initial_seconds: float = 10.0
     failure_backoff_max_seconds: float = 300.0
@@ -195,6 +210,8 @@ class UserDataAccountSyncConfig:
     def __post_init__(self) -> None:
         if self.rest_reconciliation_interval_seconds <= 0:
             raise ValueError("rest_reconciliation_interval_seconds must be positive")
+        if self.snapshot_interval_seconds <= 0:
+            raise ValueError("snapshot_interval_seconds must be positive")
         if self.heartbeat_interval_seconds <= 0:
             raise ValueError("heartbeat_interval_seconds must be positive")
         if self.heartbeat_interval_seconds > self.rest_reconciliation_interval_seconds:
@@ -235,11 +252,15 @@ class UserDataAccountSyncDaemon:
         self._state: AccountUserDataState | None = None
         self._accept_events = False
         self._state_lock = asyncio.Lock()
+        self._rest_sync_lock = asyncio.Lock()
+        self._last_reconciled_fill_count: int | None = None
+        self._last_stream_fill_event_count: int | None = None
 
     async def run(self) -> None:
         stream_task: asyncio.Task[None] | None = None
         heartbeat_task: asyncio.Future[None] | None = None
         reconciliation_task: asyncio.Future[None] | None = None
+        snapshot_task: asyncio.Future[None] | None = None
         consecutive_failures = 0
         try:
             while True:
@@ -277,8 +298,17 @@ class UserDataAccountSyncDaemon:
                             self._config.rest_reconciliation_interval_seconds
                         )
                     )
+                if snapshot_task is None or snapshot_task.done():
+                    snapshot_task = asyncio.ensure_future(
+                        self._sleep(self._config.snapshot_interval_seconds)
+                    )
                 done, _ = await asyncio.wait(
-                    {heartbeat_task, reconciliation_task, stream_task},
+                    {
+                        heartbeat_task,
+                        reconciliation_task,
+                        snapshot_task,
+                        stream_task,
+                    },
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if stream_task in done:
@@ -286,8 +316,11 @@ class UserDataAccountSyncDaemon:
                         await _cancel_task(heartbeat_task)
                     if reconciliation_task is not None:
                         await _cancel_task(reconciliation_task)
+                    if snapshot_task is not None:
+                        await _cancel_task(snapshot_task)
                     heartbeat_task = None
                     reconciliation_task = None
+                    snapshot_task = None
                     self._observe_stream_failure(stream_task)
                     continue
                 if heartbeat_task in done:
@@ -312,12 +345,20 @@ class UserDataAccountSyncDaemon:
                             consecutive_failures,
                             _retry_after_seconds(error),
                         )
+                if snapshot_task in done:
+                    snapshot_task = None
+                    try:
+                        await self._snapshot()
+                    except Exception as error:
+                        self._report_error(error)
         finally:
             await self._stream.stop()
             if heartbeat_task is not None:
                 await _cancel_task(heartbeat_task)
             if reconciliation_task is not None:
                 await _cancel_task(reconciliation_task)
+            if snapshot_task is not None:
+                await _cancel_task(snapshot_task)
             if stream_task is not None and not stream_task.done():
                 stream_task.cancel()
                 try:
@@ -366,11 +407,12 @@ class UserDataAccountSyncDaemon:
         include_fills: bool,
     ) -> ExecutionAccountSyncResult:
         async with self._state_lock:
-            result = await self._service.sync_once(
-                observed_at=self._now(),
-                publish_transient_states=False,
-                include_fills=include_fills,
-            )
+            async with self._rest_sync_lock:
+                result = await self._service.sync_once(
+                    observed_at=self._now(),
+                    publish_transient_states=False,
+                    include_fills=include_fills,
+                )
             if _is_ready_result(result):
                 snapshot = _ready_snapshot(result)
                 if self._state is None:
@@ -380,7 +422,80 @@ class UserDataAccountSyncDaemon:
                 self._accept_events = True
             else:
                 self._accept_events = False
-            return result
+        await self._inspect_reconciliation(result)
+        return result
+
+    async def _snapshot(self) -> None:
+        async with self._rest_sync_lock:
+            await self._service.snapshot_once(observed_at=self._now())
+
+    async def _inspect_reconciliation(
+        self,
+        result: ExecutionAccountSyncResult,
+    ) -> None:
+        if not _is_ready_result(result):
+            return
+        metrics = getattr(self._stream, "metrics", None)
+        stream_event_count = _metric_int(metrics, "parsed_event_count")
+        stream_fill_event_count = _metric_int(metrics, "fill_event_count")
+        if stream_event_count is None or stream_fill_event_count is None:
+            return
+
+        previous_fill_count = self._last_reconciled_fill_count
+        previous_stream_fill_event_count = self._last_stream_fill_event_count
+        if (
+            previous_fill_count is not None
+            and previous_stream_fill_event_count is not None
+        ):
+            rest_fill_delta = max(0, result.fill_count - previous_fill_count)
+            stream_fill_delta = max(
+                0,
+                stream_fill_event_count - previous_stream_fill_event_count,
+            )
+            missing_fill_count = rest_fill_delta - stream_fill_delta
+            if missing_fill_count > 0:
+                reconnect_requested = False
+                request_reconnect = getattr(
+                    self._stream,
+                    "request_reconnect",
+                    None,
+                )
+                if callable(request_reconnect):
+                    try:
+                        reconnect_result = request_reconnect(
+                            "rest_reconciliation_found_unmatched_fills"
+                        )
+                        if inspect.isawaitable(reconnect_result):
+                            await reconnect_result
+                        reconnect_requested = True
+                    except Exception as error:
+                        self._report_error(error)
+                log.warning(
+                    "binance_user_data_stream_missing_fill_events",
+                    rest_fill_delta=rest_fill_delta,
+                    stream_fill_delta=stream_fill_delta,
+                    missing_fill_count=missing_fill_count,
+                    parsed_event_count=stream_event_count,
+                    reconnect_requested=reconnect_requested,
+                )
+
+        last_event_received_at = getattr(
+            metrics,
+            "last_event_received_at",
+            None,
+        )
+        log.info(
+            "binance_user_data_stream_health",
+            parsed_event_count=stream_event_count,
+            fill_event_count=stream_fill_event_count,
+            last_event_received_at=(
+                None
+                if not isinstance(last_event_received_at, datetime)
+                else last_event_received_at.isoformat()
+            ),
+        )
+        self._last_reconciled_fill_count = result.fill_count
+        self._last_stream_fill_event_count = stream_fill_event_count
 
     async def _sleep_for_failure(
         self,
@@ -424,6 +539,13 @@ def _retry_after_seconds(error: Exception) -> float | None:
     if isinstance(value, int | float) and not isinstance(value, bool):
         if value >= 0:
             return float(value)
+    return None
+
+
+def _metric_int(metrics: object, name: str) -> int | None:
+    value = getattr(metrics, name, None)
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
     return None
 
 

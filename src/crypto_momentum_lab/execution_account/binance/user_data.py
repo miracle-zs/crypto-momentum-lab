@@ -4,6 +4,7 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Protocol
 from urllib.parse import quote
 
@@ -46,6 +47,20 @@ class BinanceUserDataEvent:
             raise ValueError("received_at must be timezone-aware")
         if len(self.event_id) != 64:
             raise ValueError("event_id must be a SHA-256 hex digest")
+
+
+@dataclass(frozen=True, slots=True)
+class BinanceUserDataStreamMetrics:
+    connection_count: int
+    received_message_count: int
+    parsed_event_count: int
+    malformed_message_count: int
+    fill_event_count: int
+    last_connected_at: datetime | None
+    last_received_at: datetime | None
+    last_event_received_at: datetime | None
+    last_event_at: datetime | None
+    last_event_type: str | None
 
 
 def parse_user_data_event(
@@ -153,6 +168,31 @@ class BinanceUsdMUserDataStream:
         self._stopping = False
         self._connection: ClientConnection | None = None
         self._connection_lock = asyncio.Lock()
+        self._connection_count = 0
+        self._received_message_count = 0
+        self._parsed_event_count = 0
+        self._malformed_message_count = 0
+        self._fill_event_count = 0
+        self._last_connected_at: datetime | None = None
+        self._last_received_at: datetime | None = None
+        self._last_event_received_at: datetime | None = None
+        self._last_event_at: datetime | None = None
+        self._last_event_type: str | None = None
+
+    @property
+    def metrics(self) -> BinanceUserDataStreamMetrics:
+        return BinanceUserDataStreamMetrics(
+            connection_count=self._connection_count,
+            received_message_count=self._received_message_count,
+            parsed_event_count=self._parsed_event_count,
+            malformed_message_count=self._malformed_message_count,
+            fill_event_count=self._fill_event_count,
+            last_connected_at=self._last_connected_at,
+            last_received_at=self._last_received_at,
+            last_event_received_at=self._last_event_received_at,
+            last_event_at=self._last_event_at,
+            last_event_type=self._last_event_type,
+        )
 
     def set_handler(self, on_event: UserDataEventSink) -> None:
         self._on_event = on_event
@@ -220,6 +260,19 @@ class BinanceUsdMUserDataStream:
         if connection is not None:
             await connection.close()
 
+    async def request_reconnect(self, reason: str) -> None:
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
+        async with self._connection_lock:
+            connection = self._connection
+        log.warning(
+            "binance_user_data_stream_reconnect_requested",
+            reason=reason,
+            connection_present=connection is not None,
+        )
+        if connection is not None:
+            await connection.close()
+
     async def _run_connection(self, listen_key: str) -> str:
         keepalive_failed = asyncio.Event()
         keepalive_task = asyncio.create_task(
@@ -236,6 +289,8 @@ class BinanceUsdMUserDataStream:
             ) as connection:
                 async with self._connection_lock:
                     self._connection = connection
+                    self._connection_count += 1
+                    self._last_connected_at = datetime.now(tz=UTC)
                 log.info("binance_user_data_stream_connected")
                 while not self._stopping:
                     if keepalive_failed.is_set():
@@ -244,17 +299,27 @@ class BinanceUsdMUserDataStream:
                         message = await asyncio.wait_for(connection.recv(), timeout=5)
                     except TimeoutError:
                         continue
+                    received_at = datetime.now(tz=UTC)
+                    self._received_message_count += 1
+                    self._last_received_at = received_at
                     try:
                         event = parse_user_data_event(
                             message,
-                            received_at=datetime.now(tz=UTC),
+                            received_at=received_at,
                         )
                     except BinancePayloadError as error:
+                        self._malformed_message_count += 1
                         log.warning(
                             "binance_user_data_malformed_event",
                             reason=str(error),
                         )
                         continue
+                    self._parsed_event_count += 1
+                    self._last_event_received_at = received_at
+                    self._last_event_at = event.event_at
+                    self._last_event_type = event.event_type
+                    if _is_fill_event(event):
+                        self._fill_event_count += 1
                     if self._on_event is not None:
                         try:
                             await self._on_event(event)
@@ -335,10 +400,24 @@ def _json_value(value: object) -> JsonValue:
     raise BinancePayloadError(f"unsupported JSON value type: {type(value).__name__}")
 
 
+def _is_fill_event(event: BinanceUserDataEvent) -> bool:
+    if event.event_type != "ORDER_TRADE_UPDATE":
+        return False
+    order = event.payload.get("o")
+    if not isinstance(order, dict) or order.get("x") != "TRADE":
+        return False
+    quantity = order.get("l")
+    try:
+        return Decimal(str(quantity)) != 0
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+
 __all__ = [
     "BinancePayloadError",
     "BinanceUsdMUserDataStream",
     "BinanceUserDataEvent",
     "BinanceUserDataListenKeyClient",
+    "BinanceUserDataStreamMetrics",
     "parse_user_data_event",
 ]

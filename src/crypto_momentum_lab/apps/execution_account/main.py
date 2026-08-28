@@ -359,6 +359,7 @@ async def sync_continuously(
                     rest_reconciliation_interval_seconds=(
                         rest_reconciliation_interval_seconds
                     ),
+                    snapshot_interval_seconds=interval_seconds,
                 ),
                 on_error=lambda error: typer.echo(
                     f"Execution account sync failed: {type(error).__name__}",

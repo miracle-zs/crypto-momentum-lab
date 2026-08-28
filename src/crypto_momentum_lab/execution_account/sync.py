@@ -49,6 +49,14 @@ class AccountSyncRepository(Protocol):
     async def save_position_snapshot(self, snapshot: AccountPositionSnapshot) -> None:
         pass
 
+    async def save_balance_position_snapshot(
+        self,
+        *,
+        balances: tuple[AccountBalanceSnapshot, ...],
+        positions: tuple[AccountPositionSnapshot, ...],
+    ) -> None:
+        pass
+
     async def upsert_open_order(self, order: AccountOpenOrderSnapshot) -> None:
         pass
 
@@ -108,6 +116,7 @@ class ExecutionAccountSyncResult:
     reconciliation_id: str
     mismatch_count: int
     snapshot: AccountSnapshot | None = None
+    fill_count: int = 0
 
 
 class ExecutionAccountSyncService:
@@ -122,6 +131,54 @@ class ExecutionAccountSyncService:
         self._repository = repository
         self._config = config
         self._tracked_fill_symbols = set(config.recent_fill_symbols)
+        self._active_position_keys: set[tuple[str, str]] = set()
+
+    async def snapshot_once(self, *, observed_at: datetime | None = None) -> None:
+        """Persist a lightweight balance/position observation.
+
+        This path deliberately skips account configuration, open orders, and
+        historical fill lookups.  Those endpoints remain part of the slower
+        authoritative reconciliation loop.
+        """
+        resolved_observed_at = (
+            self._config.observed_at
+            if observed_at is None
+            else observed_at
+        )
+        if (
+            resolved_observed_at.tzinfo is None
+            or resolved_observed_at.utcoffset() is None
+        ):
+            raise ValueError("observed_at must be timezone-aware")
+        balances = await self._client.fetch_balances()
+        positions = await self._client.fetch_positions()
+        active_positions = tuple(
+            position for position in positions if position.position_amt != 0
+        )
+        active_position_keys = _position_keys(active_positions)
+        closed_position_keys = self._active_position_keys - active_position_keys
+        positions_to_save = tuple(
+            position
+            for position in positions
+            if (
+                (position.symbol, position.position_side) in active_position_keys
+                or (
+                    (position.symbol, position.position_side)
+                    in closed_position_keys
+                )
+            )
+        )
+        await self._repository.save_balance_position_snapshot(
+            balances=tuple(
+                replace(balance, observed_at=resolved_observed_at)
+                for balance in balances
+            ),
+            positions=tuple(
+                replace(position, observed_at=resolved_observed_at)
+                for position in positions_to_save
+            ),
+        )
+        self._active_position_keys = active_position_keys
 
     async def sync_once(
         self,
@@ -194,6 +251,7 @@ class ExecutionAccountSyncService:
             active_positions = tuple(
                 position for position in positions if position.position_amt != 0
             )
+            self._active_position_keys = _position_keys(active_positions)
             open_orders = await self._client.fetch_open_orders()
             self._tracked_fill_symbols.update(
                 position.symbol for position in active_positions
@@ -238,6 +296,7 @@ class ExecutionAccountSyncService:
                     positions=active_positions,
                     open_orders=open_orders,
                 ),
+                fill_count=len(fills),
             )
         except Exception as error:
             try:
@@ -268,6 +327,7 @@ class ExecutionAccountSyncService:
         active_positions = tuple(
             position for position in snapshot.positions if position.position_amt != 0
         )
+        self._active_position_keys = _position_keys(active_positions)
         reconciliation_id = _user_data_reconciliation_id(
             config,
             event.event_id,
@@ -304,6 +364,7 @@ class ExecutionAccountSyncService:
             reconciliation_id=reconciliation_id,
             mismatch_count=0,
             snapshot=snapshot,
+            fill_count=len(fills),
         )
 
     async def publish_user_data_heartbeat(
@@ -346,6 +407,12 @@ def _reconciliation_id(config: ExecutionAccountSyncConfig) -> str:
             f"{config.observed_at.isoformat()}",
         )
     )
+
+
+def _position_keys(
+    positions: tuple[AccountPositionSnapshot, ...],
+) -> set[tuple[str, str]]:
+    return {(position.symbol, position.position_side) for position in positions}
 
 
 def _user_data_reconciliation_id(

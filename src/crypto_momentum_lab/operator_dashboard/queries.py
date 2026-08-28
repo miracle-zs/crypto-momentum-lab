@@ -616,6 +616,7 @@ class DashboardQueries:
         paper_first_at_by_run: dict[str, datetime] = {}
         live_first_at: datetime | None = None
         common_start_at: datetime | None = None
+        common_source_end_at: datetime | None = None
         async with self._session_factory() as session:
             selected_runs = await self._selected_paper_runs(session)
             if not selected_runs:
@@ -787,25 +788,30 @@ class DashboardQueries:
                 if observations
             }
             if len(available_observations) >= 2:
-                latest_observation = max(
-                    observation.observed_at
+                common_source_end_at = min(
+                    max(
+                        observation.source_observed_at
+                        for observation in observations
+                    )
                     for observations in available_observations.values()
-                    for observation in observations
                 )
-                common_end_at = _bucket_start(
-                    latest_observation,
+                curve_end_at = _bucket_start(
+                    common_source_end_at,
                     _COMMON_EQUITY_BUCKET_SECONDS,
                 )
                 for run_id, observations in available_observations.items():
                     curve, baseline = _build_common_equity_curve(
                         observations,
                         common_start_at=common_start_at,
-                        end_at=common_end_at,
+                        end_at=curve_end_at,
                         interval_seconds=_COMMON_EQUITY_BUCKET_SECONDS,
+                        source_end_at=common_source_end_at,
                     )
                     if len(curve) >= 2 and baseline is not None:
                         common_equity_by_run[run_id] = curve
                         common_baseline_by_run[run_id] = baseline
+                if common_equity_by_run:
+                    common_end_at = common_source_end_at
                 common_anchor_accounts = [
                     run_id
                     for run_id, first_at in first_buckets.items()
@@ -823,7 +829,10 @@ class DashboardQueries:
                         for adjustment in self._live_cash_flow_adjustments
                         if (
                             adjustment.account_label == live_account_label
-                            and adjustment.effective_at <= common_end_at
+                            and (
+                                common_end_at is not None
+                                and adjustment.effective_at <= common_end_at
+                            )
                         )
                     ]
                 common_note = _common_equity_note(common_cash_flows)
@@ -1932,9 +1941,21 @@ def _build_common_equity_curve(
     common_start_at: datetime,
     end_at: datetime,
     interval_seconds: int = _COMMON_EQUITY_BUCKET_SECONDS,
+    source_end_at: datetime | None = None,
 ) -> tuple[list[dict[str, JsonValue]], Decimal | None]:
+    resolved_source_end_at = (
+        None if source_end_at is None else _as_utc(source_end_at)
+    )
     buckets = _bucket_equity_observations(
-        observations,
+        (
+            observation
+            for observation in observations
+            if (
+                resolved_source_end_at is None
+                or _as_utc(observation.source_observed_at)
+                <= resolved_source_end_at
+            )
+        ),
         interval_seconds=interval_seconds,
     )
     if not buckets:

@@ -300,6 +300,45 @@ def test_common_equity_curve_starts_at_zero_and_carries_latest_15m_bucket() -> N
     assert all(point["return_pct"] is not None for point in points)
 
 
+def test_common_equity_curve_respects_shared_source_watermark() -> None:
+    common_start = datetime(2026, 8, 21, 2, 45, tzinfo=UTC)
+    points, baseline = _build_common_equity_curve(
+        [
+            _EquityObservation(
+                observed_at=common_start + timedelta(minutes=2),
+                equity=Decimal("1000"),
+                source_observed_at=common_start + timedelta(minutes=2),
+            ),
+            _EquityObservation(
+                observed_at=common_start + timedelta(minutes=17),
+                equity=Decimal("1002"),
+                source_observed_at=common_start + timedelta(minutes=17),
+            ),
+            _EquityObservation(
+                observed_at=common_start + timedelta(minutes=31),
+                equity=Decimal("1001"),
+                source_observed_at=common_start + timedelta(minutes=31),
+            ),
+        ],
+        common_start_at=common_start,
+        end_at=common_start + timedelta(minutes=45),
+        source_end_at=common_start + timedelta(minutes=20),
+    )
+
+    assert baseline == Decimal("1000")
+    assert [point["delta"] for point in points] == [
+        "0",
+        "2",
+        "2",
+        "2",
+    ]
+    assert all(
+        point["source_observed_at"]
+        <= (common_start + timedelta(minutes=17)).isoformat()
+        for point in points
+    )
+
+
 def test_live_common_equity_removes_configured_external_deposit() -> None:
     observed_at = datetime(2026, 8, 21, 9, 45, tzinfo=UTC)
     observations = _live_equity_observations(
