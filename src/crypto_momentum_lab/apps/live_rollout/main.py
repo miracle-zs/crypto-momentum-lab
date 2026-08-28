@@ -94,11 +94,16 @@ from crypto_momentum_lab.live_rollout.session import (
     LiveSessionConfig,
     LiveSessionResult,
 )
+from crypto_momentum_lab.live_rollout.signal_recorder import (
+    LiveStrategySignalRecorder,
+)
 from crypto_momentum_lab.live_rollout.telemetry import (
     PERSISTED_ORDER_TELEMETRY_EVENTS,
     LiveRuntimeTelemetry,
     LiveTelemetrySink,
 )
+from crypto_momentum_lab.live_rollout.volume import Binance24hQuoteVolumeCache
+from crypto_momentum_lab.market_data.binance.rest import BinanceUsdMRestClient
 from crypto_momentum_lab.market_data.hub import (
     MarketStateHubError,
     WebSocketMarketStateSource,
@@ -109,6 +114,9 @@ from crypto_momentum_lab.market_data.quote_hub import (
 )
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
+)
+from crypto_momentum_lab.persistence.postgres.live_signal_repository import (
+    PostgresLiveSignalRepository,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     LiveSessionTransitionRow,
@@ -939,6 +947,9 @@ async def _run_live_daemon(
     entry_filter_cache_task: asyncio.Task[None] | None = None
     live_repository: PostgresLiveRolloutRepository | None = None
     telemetry: LiveRuntimeTelemetry | None = None
+    volume_rest_client: BinanceUsdMRestClient | None = None
+    volume_cache: Binance24hQuoteVolumeCache | None = None
+    signal_recorder: LiveStrategySignalRecorder | None = None
     risk_config_hash = ""
     startup_phase = True
     try:
@@ -986,6 +997,21 @@ async def _run_live_daemon(
             persist_event_types=PERSISTED_ORDER_TELEMETRY_EVENTS,
         )
         await telemetry.start()
+        volume_rest_client = BinanceUsdMRestClient(base_url)
+        volume_cache = Binance24hQuoteVolumeCache(volume_rest_client)
+        await volume_cache.start()
+        signal_repository = PostgresLiveSignalRepository(observability_factory)
+        signal_recorder = LiveStrategySignalRecorder(
+            run_id=session_id,
+            account_label=account_label,
+            strategy_name=strategy_name,
+            strategy_version="v0",
+            config_hash=strategy_config_hash,
+            code_commit=git_commit_hash,
+            quote_volume_provider=volume_cache,
+            persist=signal_repository.save_signals,
+        )
+        await signal_recorder.start()
         risk_config = await _latest_risk_config(execution_factory, account_label)
         risk_config_hash = risk_config.config_hash
         client = BinanceUsdMTradeClient(
@@ -1348,6 +1374,7 @@ async def _run_live_daemon(
             state_machine=execution_coordinator,
             context_provider=context_provider,
             telemetry=telemetry,
+            signal_recorder=signal_recorder,
             config=LiveDaemonConfig(
                 run_id=session_id,
                 resize_tolerance=Decimal("0.10"),
@@ -1681,8 +1708,14 @@ async def _run_live_daemon(
             candle_source.close()
         if ema_candle_source is not None:
             ema_candle_source.close()
+        if signal_recorder is not None:
+            await signal_recorder.stop()
         if telemetry is not None:
             await telemetry.stop()
+        if volume_cache is not None:
+            await volume_cache.stop()
+        if volume_rest_client is not None:
+            await volume_rest_client.aclose()
         await execution_engine.dispose()
         await market_engine.dispose()
         await observability_engine.dispose()

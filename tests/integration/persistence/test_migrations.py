@@ -29,6 +29,7 @@ def test_initial_migration_creates_universe_tables(database_url: str) -> None:
         "market_data_quality_events",
         "live_operator_approvals",
         "live_rollback_commands",
+        "live_strategy_signals",
         "live_session_transitions",
         "order_intent_candidates",
         "order_intent_claims",

@@ -66,6 +66,30 @@ async def test_fetches_all_latest_prices_from_v2() -> None:
 
 
 @respx.mock
+async def test_fetches_24h_quote_volume_from_ticker_endpoint() -> None:
+    respx.get("https://fapi.binance.com/fapi/v1/ticker/24hr").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "symbol": "BTCUSDT",
+                    "quoteVolume": "123456789.25",
+                    "openTime": 1781400000000,
+                    "closeTime": 1781486399999,
+                }
+            ],
+        )
+    )
+    async with BinanceUsdMRestClient("https://fapi.binance.com") as client:
+        tickers = await client.fetch_24h_tickers()
+
+    ticker = tickers["BTCUSDT"]
+    assert ticker.quote_volume == Decimal("123456789.25")
+    assert ticker.open_time.tzinfo is UTC
+    assert ticker.close_time.tzinfo is UTC
+
+
+@respx.mock
 async def test_fetches_aggregate_trade_history_from_id() -> None:
     route = respx.get("https://fapi.binance.com/fapi/v1/aggTrades").mock(
         return_value=httpx.Response(

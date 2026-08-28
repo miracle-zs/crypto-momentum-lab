@@ -308,6 +308,68 @@ class StrategySignalRow(Base):
     )
 
 
+class LiveStrategySignalRow(Base):
+    """Standalone live signal observations kept off paper-run foreign keys."""
+
+    __tablename__ = "live_strategy_signals"
+
+    observation_id: Mapped[str] = mapped_column(String(192), primary_key=True)
+    signal_id: Mapped[str] = mapped_column(String(128))
+    candidate_id: Mapped[str | None] = mapped_column(String(128))
+    run_id: Mapped[str] = mapped_column(String(128))
+    account_label: Mapped[str] = mapped_column(String(64))
+    strategy_name: Mapped[str] = mapped_column(String(64))
+    strategy_version: Mapped[str] = mapped_column(String(32))
+    config_hash: Mapped[str] = mapped_column(String(64))
+    code_commit: Mapped[str] = mapped_column(String(64))
+    signal_kind: Mapped[str] = mapped_column(String(32))
+    symbol: Mapped[str] = mapped_column(String(32))
+    side: Mapped[str] = mapped_column(String(16))
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    source_state_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reason: Mapped[str] = mapped_column(Text)
+    schema_version: Mapped[int] = mapped_column(Integer)
+    quote_volume_24h: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+    )
+    quote_volume_24h_quote_asset: Mapped[str | None] = mapped_column(
+        String(16),
+    )
+    quote_volume_24h_source: Mapped[str | None] = mapped_column(String(64))
+    quote_volume_24h_source_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+    quote_volume_24h_fetched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+    quote_volume_24h_age_ms: Mapped[int | None] = mapped_column(Integer)
+    features: Mapped[dict[str, object]] = mapped_column(JSONB)
+    reference_prices: Mapped[dict[str, object]] = mapped_column(JSONB)
+    market_context: Mapped[dict[str, object]] = mapped_column(JSONB)
+    filter_context: Mapped[dict[str, object]] = mapped_column(JSONB)
+    candidate_context: Mapped[dict[str, object]] = mapped_column(JSONB)
+    account_context: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+    __table_args__ = (
+        Index(
+            "ix_live_strategy_signals_run_time_symbol",
+            "run_id",
+            "detected_at",
+            "symbol",
+        ),
+        Index(
+            "ix_live_strategy_signals_symbol_time",
+            "symbol",
+            "detected_at",
+        ),
+        Index(
+            "ix_live_strategy_signals_signal_id",
+            "signal_id",
+        ),
+    )
+
+
 class OrderIntentCandidateRow(Base):
     __tablename__ = "order_intent_candidates"
 

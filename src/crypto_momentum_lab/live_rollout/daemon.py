@@ -67,6 +67,9 @@ from crypto_momentum_lab.live_rollout.limits import (
     LiveLimitContext,
     evaluate_fixed_live_limits,
 )
+from crypto_momentum_lab.live_rollout.signal_recorder import (
+    LiveSignalRecorderPort,
+)
 from crypto_momentum_lab.live_rollout.telemetry import (
     LIVE_LANE_ENTRY,
     LIVE_LANE_EXIT,
@@ -534,6 +537,7 @@ class LiveStrategyDaemon:
         exit_manager: LiveExitManager | None = None,
         reconcile_orders: Callable[[], Awaitable[None]] | None = None,
         telemetry: LiveTelemetrySink | None = None,
+        signal_recorder: LiveSignalRecorderPort | None = None,
         clock: Callable[[], datetime] | None = None,
         on_managed_position_symbols: (
             Callable[[frozenset[str]], Awaitable[None]] | None
@@ -559,6 +563,7 @@ class LiveStrategyDaemon:
             persist=self._repository.save_checkpoint,
         )
         self._telemetry = telemetry
+        self._signal_recorder = signal_recorder
         self._clock = clock or (lambda: datetime.now(tz=UTC))
         self._on_managed_position_symbols = on_managed_position_symbols
         self._managed_position_symbols: frozenset[str] = frozenset()
@@ -879,6 +884,93 @@ class LiveStrategyDaemon:
             if pending_tasks:
                 await asyncio.gather(*pending_tasks, return_exceptions=True)
 
+    def _record_strategy_decision(
+        self,
+        *,
+        decision: StrategyDecision,
+        state: MarketState15s,
+        recorded_at: datetime,
+        context: LiveDaemonRuntimeContext | None = None,
+        gate_reasons: tuple[str, ...] = (),
+        entry_symbols: frozenset[str] | None = None,
+        entry_filter_context: LiveEntryFilterContext | None = None,
+        filter_context: Mapping[str, object] | None = None,
+    ) -> None:
+        recorder = self._signal_recorder
+        if recorder is None:
+            return
+        candidate_filter_results: dict[str, object] = {}
+        for candidate in decision.candidates:
+            rejection_reason = _live_entry_candidate_rejection_reason(
+                candidate,
+                entry_enabled=self._entry_enabled,
+                entry_long_only=self._config.entry_long_only,
+                entry_symbols=entry_symbols,
+                context=entry_filter_context,
+                require_price_above_ema5=self._config.require_price_above_ema5,
+                require_price_above_ema10=self._config.require_price_above_ema10,
+            )
+            candidate_filter_results[candidate.candidate_id] = {
+                "symbol": candidate.symbol,
+                "side": _enum_text(candidate.side),
+                "reduce_only": candidate.reduce_only,
+                "passed": rejection_reason is None,
+                "rejection_reason": rejection_reason,
+            }
+        details: dict[str, object] = dict(filter_context or {})
+        details.update(
+            {
+                "entry_enabled": self._entry_enabled,
+                "entry_long_only": self._config.entry_long_only,
+                "entry_symbol_pool_configured": entry_symbols is not None,
+                "entry_symbol_pool_size": (
+                    None if entry_symbols is None else len(entry_symbols)
+                ),
+                "require_price_above_ema5": (
+                    self._config.require_price_above_ema5
+                ),
+                "require_price_above_ema10": (
+                    self._config.require_price_above_ema10
+                ),
+                "gate_reasons": list(gate_reasons),
+                "signal_count": len(decision.signals),
+                "candidate_count": len(decision.candidates),
+                "rejection_count": len(decision.rejections),
+                "strategy_rejections": [
+                    {
+                        "reason": _enum_text(rejection.reason),
+                        "symbol": rejection.symbol,
+                        "bucket_start": rejection.bucket_start,
+                        "details": rejection.details,
+                    }
+                    for rejection in decision.rejections
+                ],
+                "entry_filter_values": _entry_filter_values(
+                    entry_filter_context
+                ),
+                "candidate_filter_results": candidate_filter_results,
+            }
+        )
+        try:
+            recorder.record_decision(
+                decision=decision,
+                state=state,
+                recorded_at=recorded_at,
+                account_context=_live_signal_account_context(
+                    context,
+                    gate_reasons=gate_reasons,
+                ),
+                filter_context=details,
+            )
+        except Exception as error:
+            # A third-party recorder implementation is observational only.
+            # Never let it alter the decision or order path.
+            log.warning(
+                "live_strategy_signal_recorder_failed",
+                run_id=self._config.run_id,
+                error_type=type(error).__name__,
+            )
+
     async def _run_market_loop(
         self,
         states: AsyncIterable[MarketState15s],
@@ -973,6 +1065,15 @@ class LiveStrategyDaemon:
                 # Once PostgreSQL recovers, the next state reloads the full
                 # context and trading resumes without a process restart.
                 decision = self._strategy.on_market_state(state)
+                self._record_strategy_decision(
+                    decision=decision,
+                    state=state,
+                    recorded_at=self._clock(),
+                    filter_context={
+                        "context_available": False,
+                        "context_error_type": type(error).__name__,
+                    },
+                )
                 if self._telemetry is not None:
                     await self._telemetry.strategy_decision(
                         state,
@@ -1015,6 +1116,17 @@ class LiveStrategyDaemon:
                     # Process the state for indicator continuity while the
                     # risk gate is closed.  No entry or exit is evaluated.
                     decision = self._strategy.on_market_state(state)
+                    self._record_strategy_decision(
+                        decision=decision,
+                        state=state,
+                        recorded_at=self._clock(),
+                        context=context,
+                        gate_reasons=gate.reasons,
+                        filter_context={
+                            "context_available": True,
+                            "gate_approved": False,
+                        },
+                    )
                     if self._telemetry is not None:
                         await self._telemetry.strategy_decision(
                             state,
@@ -1131,29 +1243,30 @@ class LiveStrategyDaemon:
                 except Exception:
                     # Missing or stale EMA data must not authorize a live entry.
                     entry_filter_context = None
+            self._record_strategy_decision(
+                decision=decision,
+                state=state,
+                recorded_at=self._clock(),
+                context=context,
+                gate_reasons=gate.reasons,
+                entry_symbols=entry_symbols,
+                entry_filter_context=entry_filter_context,
+            )
             processed += 1
             final_state_at = state.bucket_start
             last_processed_at_by_symbol[state.symbol] = state.bucket_start
             checkpoint_dirty = True
             last_checkpoint_saved_at = context.now
             for candidate in decision.candidates:
-                if not candidate.reduce_only and not self._entry_enabled:
-                    continue
-                if (
-                    self._config.entry_long_only
-                    and not candidate.reduce_only
-                    and getattr(candidate.side, "value", candidate.side) != "long"
-                ):
-                    continue
-                if not candidate.reduce_only and entry_symbols is not None:
-                    if candidate.symbol not in entry_symbols:
-                        continue
-                if not candidate.reduce_only and not _live_entry_candidate_passes(
+                if _live_entry_candidate_rejection_reason(
                     candidate,
+                    entry_enabled=self._entry_enabled,
+                    entry_long_only=self._config.entry_long_only,
+                    entry_symbols=entry_symbols,
                     context=entry_filter_context,
                     require_price_above_ema5=self._config.require_price_above_ema5,
                     require_price_above_ema10=self._config.require_price_above_ema10,
-                ):
+                ) is not None:
                     continue
                 result = await self._execute_candidate(
                     candidate,
@@ -1456,6 +1569,13 @@ class LiveStrategyDaemon:
                 desired_notional=limit_decision.capped_notional,
             )
         lane = LIVE_LANE_EXIT if executable_candidate.reduce_only else LIVE_LANE_ENTRY
+        if executable_candidate.reduce_only:
+            self._record_signal_candidate(
+                candidate=executable_candidate,
+                state=state,
+                recorded_at=self._clock(),
+                context=context,
+            )
         if self._telemetry is not None:
             await self._telemetry.candidate_accepted(
                 executable_candidate,
@@ -1539,6 +1659,37 @@ class LiveStrategyDaemon:
             plan,
             prepared_submission=prepared_submission,
         )
+
+    def _record_signal_candidate(
+        self,
+        *,
+        candidate: OrderIntentCandidate,
+        state: MarketState15s,
+        recorded_at: datetime,
+        context: LiveDaemonRuntimeContext,
+    ) -> None:
+        recorder = self._signal_recorder
+        if recorder is None:
+            return
+        try:
+            recorder.record_candidate(
+                candidate=candidate,
+                state=state,
+                recorded_at=recorded_at,
+                account_context=_live_signal_account_context(context),
+                filter_context={
+                    "entry_enabled": self._entry_enabled,
+                    "entry_long_only": self._config.entry_long_only,
+                    "candidate_execution_path": "reduce_only_exit",
+                },
+            )
+        except Exception as error:
+            log.warning(
+                "live_strategy_signal_candidate_recorder_failed",
+                run_id=self._config.run_id,
+                candidate_id=candidate.candidate_id,
+                error_type=type(error).__name__,
+            )
 
     async def _cancel_orphan_exit_orders(
         self,
@@ -1701,6 +1852,106 @@ def _live_entry_candidate_passes(
     ):
         return False
     return True
+
+
+def _live_entry_candidate_rejection_reason(
+    candidate: OrderIntentCandidate,
+    *,
+    entry_enabled: bool,
+    entry_long_only: bool,
+    entry_symbols: frozenset[str] | None,
+    context: LiveEntryFilterContext | None,
+    require_price_above_ema5: bool,
+    require_price_above_ema10: bool,
+) -> str | None:
+    """Return the same entry-filter reason used by the live execution loop."""
+
+    if candidate.reduce_only:
+        return None
+    if not entry_enabled:
+        return "entry_disabled"
+    if (
+        entry_long_only
+        and getattr(candidate.side, "value", candidate.side) != "long"
+    ):
+        return "short_entries_disabled"
+    if entry_symbols is not None and candidate.symbol not in entry_symbols:
+        return "outside_entry_symbol_pool"
+    if not _live_entry_candidate_passes(
+        candidate,
+        context=context,
+        require_price_above_ema5=require_price_above_ema5,
+        require_price_above_ema10=require_price_above_ema10,
+    ):
+        return "ema_filter_failed"
+    return None
+
+
+def _entry_filter_values(
+    context: LiveEntryFilterContext | None,
+) -> dict[str, object]:
+    if context is None:
+        return {
+            "entry_price": None,
+            "ema5": None,
+            "ema10": None,
+        }
+    return {
+        "entry_price": context.entry_price,
+        "ema5": context.ema5,
+        "ema10": context.ema10,
+    }
+
+
+def _live_signal_account_context(
+    context: LiveDaemonRuntimeContext | None,
+    *,
+    gate_reasons: tuple[str, ...] = (),
+) -> dict[str, object]:
+    if context is None:
+        return {
+            "context_available": False,
+            "gate_reasons": list(gate_reasons),
+        }
+    lease = context.active_lease
+    return {
+        "context_available": True,
+        "account_state": _enum_text(context.account_state),
+        "account_observed_at": context.account_observed_at,
+        "realized_pnl": context.realized_pnl,
+        "unrealized_pnl": context.unrealized_pnl,
+        "gross_exposure": context.gross_exposure,
+        "open_position_symbols": sorted(context.open_position_symbols or ()),
+        "managed_position_symbols": sorted(
+            position.symbol for position in context.managed_positions
+        ),
+        "unmanaged_position_symbols": sorted(
+            context.unmanaged_position_symbols
+        ),
+        "active_halt_count": len(context.active_halts),
+        "active_halt_reasons": [halt.reason for halt in context.active_halts],
+        "unresolved_order_count": len(context.unresolved_order_states),
+        "unresolved_order_states": [
+            _enum_text(state) for state in context.unresolved_order_states
+        ],
+        "active_lease_state": (
+            None if lease is None else _enum_text(lease.state)
+        ),
+        "active_lease_expires_at": (
+            None if lease is None else lease.expires_at
+        ),
+        "risk_config": {
+            "max_order_notional": context.risk_config.max_order_notional,
+            "max_gross_notional": context.risk_config.max_gross_notional,
+            "max_daily_loss": context.risk_config.max_daily_loss,
+            "max_open_positions": context.risk_config.max_open_positions,
+        },
+        "gate_reasons": list(gate_reasons),
+    }
+
+
+def _enum_text(value: object) -> str:
+    return str(getattr(value, "value", value))
 
 
 def _strategy_max_gap_seconds(strategy: LiveRuntimeStrategy) -> int | None:

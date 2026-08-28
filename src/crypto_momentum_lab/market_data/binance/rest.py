@@ -44,6 +44,24 @@ class BinanceAggTrade:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class Binance24hTicker:
+    symbol: str
+    quote_volume: Decimal
+    open_time: datetime
+    close_time: datetime
+
+    def __post_init__(self) -> None:
+        if not self.symbol.strip():
+            raise ValueError("symbol must not be empty")
+        if self.quote_volume < 0:
+            raise ValueError("quote_volume must be non-negative")
+        for field_name in ("open_time", "close_time"):
+            value = getattr(self, field_name)
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError(f"{field_name} must be timezone-aware")
+
+
 class BinanceUsdMRestClient:
     def __init__(
         self,
@@ -127,6 +145,18 @@ class BinanceUsdMRestClient:
                 symbol=item["symbol"],
                 price=Decimal(item["price"]),
                 observed_at=_utc_from_ms(item["time"]),
+            )
+            for item in response.json()
+        }
+
+    async def fetch_24h_tickers(self) -> dict[str, Binance24hTicker]:
+        response = await self._get("/fapi/v1/ticker/24hr")
+        return {
+            item["symbol"]: Binance24hTicker(
+                symbol=item["symbol"],
+                quote_volume=Decimal(str(item["quoteVolume"])),
+                open_time=_utc_from_ms(int(item["openTime"])),
+                close_time=_utc_from_ms(int(item["closeTime"])),
             )
             for item in response.json()
         }
