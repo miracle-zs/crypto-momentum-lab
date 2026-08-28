@@ -254,6 +254,34 @@ async def test_realtime_envelope_sink_runs_before_archive(
     await task
 
 
+async def test_realtime_envelope_sink_yields_between_synchronous_events(
+    raw_envelope: RawEnvelope,
+) -> None:
+    coordinator = CaptureCoordinator(
+        queue=BoundedEnvelopeQueue(max_events=10, max_bytes=100000),
+        archive=ControlledArchive(),
+        quality=FakeQualityTracker(),
+        repository=FakeCaptureRepository(),
+        cooperative_yield_every=1,
+    )
+    marker_ran = asyncio.Event()
+
+    async def marker() -> None:
+        marker_ran.set()
+
+    marker_task = asyncio.create_task(marker())
+    try:
+        await coordinator._publish_batch(
+            lambda envelope: envelope,
+            (raw_envelope,),
+        )
+        assert marker_ran.is_set()
+    finally:
+        if not marker_task.done():
+            marker_task.cancel()
+        await asyncio.gather(marker_task, return_exceptions=True)
+
+
 async def test_coordinator_only_archives_selected_streams(
     raw_envelope: RawEnvelope,
 ) -> None:

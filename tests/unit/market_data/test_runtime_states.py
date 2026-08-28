@@ -238,6 +238,35 @@ async def test_publisher_fanout_happens_before_durable_runtime_state_write() -> 
     assert publisher.metrics.realtime_sink_failure_count == 0
 
 
+async def test_snapshot_build_yields_when_closing_many_symbols() -> None:
+    repository = FakeRuntimeStateRepository()
+    publisher = ClosedMarketStatePublisher(repository=repository)
+    marker_ran = asyncio.Event()
+
+    async def marker() -> None:
+        marker_ran.set()
+
+    marker_task = asyncio.create_task(marker())
+    try:
+        for index in range(32):
+            await publisher.observe(
+                fixture_trade(
+                    0,
+                    price="100",
+                    sequence=index + 1,
+                    symbol=f"COIN{index}USDT",
+                )
+            )
+        await publisher.observe(
+            fixture_trade(2, price="102", sequence=33, symbol="BTCUSDT")
+        )
+        assert marker_ran.is_set()
+    finally:
+        if not marker_task.done():
+            marker_task.cancel()
+        await asyncio.gather(marker_task, return_exceptions=True)
+
+
 async def test_publisher_durable_write_runs_behind_realtime_fanout() -> None:
     class BlockingRepository(FakeRuntimeStateRepository):
         def __init__(self) -> None:

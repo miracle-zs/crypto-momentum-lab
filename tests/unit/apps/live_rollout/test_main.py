@@ -297,6 +297,38 @@ async def test_resilient_market_state_stream_retries_after_hub_failure() -> None
     assert source.attempts == 2
 
 
+@pytest.mark.asyncio
+async def test_resilient_account_event_stream_retries_after_hub_failure() -> None:
+    event = SimpleNamespace(event_type="ORDER_TRADE_UPDATE")
+
+    class Source:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def __aiter__(self):
+            self.attempts += 1
+            attempt = self.attempts
+
+            async def stream():
+                if attempt == 1:
+                    raise main.AccountEventHubError("account-event hub unavailable")
+                yield event
+
+            return stream()
+
+    source = Source()
+    observed = []
+
+    async for item in main._resilient_account_event_stream(
+        source,
+        retry_delay_seconds=0,
+    ):
+        observed.append(item)
+
+    assert observed == [event]
+    assert source.attempts == 2
+
+
 async def test_shadow_preflight_accepts_an_old_matching_session() -> None:
     class FakeSession:
         def __init__(self) -> None:

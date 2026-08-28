@@ -48,6 +48,7 @@ from crypto_momentum_lab.execution_account.binance import (
 )
 from crypto_momentum_lab.execution_account.hub import (
     AccountEvent,
+    AccountEventHubError,
     WebSocketAccountEventSource,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
@@ -1841,6 +1842,39 @@ async def _resilient_market_quote_stream(
             return
 
 
+async def _resilient_account_event_stream(
+    source: WebSocketAccountEventSource,
+    *,
+    retry_delay_seconds: float = 1.0,
+) -> AsyncIterator[AccountEvent]:
+    """Keep the live process alive while the account hub reconnects.
+
+    Account-event delivery is an acceleration path for order reconciliation;
+    PostgreSQL recovery and the periodic reconcile loop remain the safety net.
+    A temporary account-service restart therefore must not tear down the live
+    strategy process and its independent candle/quote exit lanes.
+    """
+    if retry_delay_seconds < 0:
+        raise ValueError("retry_delay_seconds must not be negative")
+    while True:
+        try:
+            async for event in source:
+                yield event
+        except asyncio.CancelledError:
+            raise
+        except AccountEventHubError as error:
+            log.warning(
+                "live_account_event_stream_retry",
+                error_type=type(error).__name__,
+                error=str(error),
+                retry_delay_seconds=retry_delay_seconds,
+            )
+            if retry_delay_seconds > 0:
+                await asyncio.sleep(retry_delay_seconds)
+        else:
+            return
+
+
 async def _run_quote_channel(
     *,
     source: WebSocketMarketQuoteSource,
@@ -1957,7 +1991,7 @@ async def _run_account_event_channel(
     run_id: str,
     telemetry: LiveTelemetrySink | None = None,
 ) -> None:
-    async for event in source:
+    async for event in _resilient_account_event_stream(source):
         try:
             if telemetry is not None and event.has_fill:
                 await telemetry.account_fill(

@@ -26,6 +26,22 @@ import { renderRisk } from "../../src/crypto_momentum_lab/operator_dashboard/sta
 import { renderAccount } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/account.js";
 import { createStrategySection } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/strategy.js";
 import { renderUniverse } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/universe.js";
+import {
+  POLL_MS,
+  SECTION_POLL_MS,
+} from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-config.js";
+
+test("dashboard polling keeps safety sections fresh and backs off cold sections", () => {
+  assert.equal(POLL_MS, 5000);
+  assert.deepEqual(SECTION_POLL_MS, {
+    overview: 5000,
+    risk: 5000,
+    account: 5000,
+    strategy: 15000,
+    universe: 15000,
+    reports: 30000,
+  });
+});
 
 test("operator formatters keep status and money output stable", () => {
   assert.equal(esc('<live status="READY">'), "&lt;live status=&quot;READY&quot;&gt;");

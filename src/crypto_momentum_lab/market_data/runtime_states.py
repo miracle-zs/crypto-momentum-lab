@@ -42,6 +42,7 @@ type _DurableBatch = tuple[
 type _DurableCommand = _DurableBatch | AggTradeGap
 
 _BUCKET_SECONDS = 15
+_SNAPSHOT_BUILD_YIELD_EVERY = 32
 _LATENESS_THRESHOLDS_SECONDS = (0.5, 1.0, 2.0, 3.0)
 _LATENESS_BUCKET_UPPER_BOUNDS_MS = (
     0.0,
@@ -616,7 +617,7 @@ class ClosedMarketStatePublisher:
             active_keys=self._accumulators_by_bucket,
         )
         if realtime_ready_keys:
-            realtime_snapshots = self._build_snapshots(
+            realtime_snapshots = await self._build_snapshots(
                 realtime_ready_keys,
                 latest_quotes=self._realtime_latest_quotes,
             )
@@ -648,7 +649,7 @@ class ClosedMarketStatePublisher:
         if not durable_ready_keys:
             return
 
-        durable_snapshots = self._build_snapshots(
+        durable_snapshots = await self._build_snapshots(
             durable_ready_keys,
             latest_quotes=self._durable_latest_quotes,
         )
@@ -688,14 +689,14 @@ class ClosedMarketStatePublisher:
             await self._durable_queue.put(durable_batch)
         self._closed_state_count += len(states_tuple)
 
-    def _build_snapshots(
+    async def _build_snapshots(
         self,
         keys: tuple[_BucketKey, ...],
         *,
         latest_quotes: dict[tuple[str, str], tuple[Decimal, Decimal]],
     ) -> tuple[MarketState15sSnapshot, ...]:
         snapshots: list[MarketState15sSnapshot] = []
-        for key in keys:
+        for index, key in enumerate(keys, start=1):
             accumulator = self._accumulators_by_bucket.get(key)
             if accumulator is None:
                 continue
@@ -716,6 +717,8 @@ class ClosedMarketStatePublisher:
                     state.last_bid_price,
                     state.last_ask_price,
                 )
+            if index % _SNAPSHOT_BUILD_YIELD_EVERY == 0:
+                await asyncio.sleep(0)
         return tuple(
             sorted(
                 snapshots,

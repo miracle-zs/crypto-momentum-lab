@@ -44,6 +44,8 @@ async def monitor_market_data_health(
     sample_interval_seconds: float = 1.0,
     queue_warning_utilization: float = 0.75,
     queue_critical_utilization: float = 0.90,
+    event_loop_lag_warning_seconds: float = 0.05,
+    event_loop_lag_critical_seconds: float = 0.50,
 ) -> None:
     """Log bounded queues, WebSocket churn, event-loop lag, and RSS.
 
@@ -57,6 +59,10 @@ async def monitor_market_data_health(
         raise ValueError("sample_interval_seconds must be positive")
     if not 0 < queue_warning_utilization < queue_critical_utilization <= 1:
         raise ValueError("queue utilization thresholds are invalid")
+    if not (
+        0 < event_loop_lag_warning_seconds < event_loop_lag_critical_seconds
+    ):
+        raise ValueError("event-loop lag thresholds are invalid")
 
     loop = asyncio.get_running_loop()
     next_sample_at = loop.time() + sample_interval_seconds
@@ -224,6 +230,25 @@ async def monitor_market_data_health(
             runtime_state_lateness=runtime_snapshot,
             agg_trade_recovery=_recovery_snapshot(recovery_snapshot),
         )
+        lag_level = _event_loop_lag_level(
+            maximum_lag_seconds,
+            event_loop_lag_warning_seconds,
+            event_loop_lag_critical_seconds,
+        )
+        if lag_level is not None:
+            log.warning(
+                "market_data_event_loop_lag",
+                level=lag_level,
+                lag_ms=round(maximum_lag_seconds * 1000, 3),
+                warning_threshold_ms=round(
+                    event_loop_lag_warning_seconds * 1000,
+                    3,
+                ),
+                critical_threshold_ms=round(
+                    event_loop_lag_critical_seconds * 1000,
+                    3,
+                ),
+            )
         dead_dispatchers = tuple(
             detail["group_id"]
             for detail in connection_details
@@ -304,6 +329,16 @@ async def monitor_market_data_health(
 
 def _counter_rate(current: int, previous: int, elapsed_seconds: float) -> float:
     return max(0, current - previous) / elapsed_seconds
+
+
+def _event_loop_lag_level(
+    lag_seconds: float,
+    warning_threshold_seconds: float,
+    critical_threshold_seconds: float,
+) -> str | None:
+    if lag_seconds < warning_threshold_seconds:
+        return None
+    return "critical" if lag_seconds >= critical_threshold_seconds else "warning"
 
 
 def _queue_utilization(capture: CaptureMetricsSnapshot) -> float:

@@ -6,6 +6,12 @@ import pytest
 import crypto_momentum_lab.market_data.observability as observability
 
 
+def test_event_loop_lag_level_uses_warning_and_critical_thresholds() -> None:
+    assert observability._event_loop_lag_level(0.049, 0.05, 0.5) is None
+    assert observability._event_loop_lag_level(0.05, 0.05, 0.5) == "warning"
+    assert observability._event_loop_lag_level(0.5, 0.05, 0.5) == "critical"
+
+
 @pytest.mark.asyncio
 async def test_market_data_health_monitor_reports_runtime_signals(
     monkeypatch: pytest.MonkeyPatch,

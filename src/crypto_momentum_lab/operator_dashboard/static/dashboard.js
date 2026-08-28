@@ -1,7 +1,8 @@
 import {
   SECTIONS,
   POLL_MS,
-} from "./dashboard-config.js";
+  SECTION_POLL_MS,
+} from "./dashboard-config.js?v=20260828-performance-v1";
 import {
   statusClass,
   normalizedStatus,
@@ -32,6 +33,7 @@ import { createStrategySection } from "./sections/strategy.js?v=20260826-flight-
 // from "./sections/risk.js" from "./sections/reports.js"
 
 let pollInFlight = false;
+const lastSectionPollAt = new Map();
 let latestLiveService = null;
 let latestLiveMode = "UNKNOWN";
 let lastRuntimeAnnouncement = "";
@@ -280,9 +282,17 @@ async function refreshSection(id) {
 async function poll() {
   if (document.hidden) return;
   if (pollInFlight) return;
+  const now = Date.now();
+  const dueSections = SECTIONS.filter((id) => {
+    const lastPolledAt = lastSectionPollAt.get(id);
+    const interval = SECTION_POLL_MS[id] || POLL_MS;
+    return lastPolledAt == null || now - lastPolledAt >= interval;
+  });
+  if (!dueSections.length) return;
+  dueSections.forEach((id) => lastSectionPollAt.set(id, now));
   pollInFlight = true;
   try {
-    await Promise.allSettled(SECTIONS.map(refreshSection));
+    await Promise.allSettled(dueSections.map(refreshSection));
     const pollbar = document.getElementById("pollbar");
     pollbar.classList.remove("run");
     void pollbar.offsetWidth;

@@ -61,7 +61,9 @@ class EnvelopeRecoveryBatch(Protocol):
     @property
     def unrecovered_gaps(self) -> tuple[AggTradeGap, ...]: ...
 
+
 _DEFAULT_MAX_ARCHIVE_BATCH_SIZE = 1000
+_DEFAULT_COOPERATIVE_YIELD_EVERY = 128
 
 
 class CaptureCoordinator:
@@ -79,9 +81,12 @@ class CaptureCoordinator:
         gap_sink: GapSink | None = None,
         archive_streams: frozenset[CaptureStream] | None = None,
         max_archive_batch_size: int = _DEFAULT_MAX_ARCHIVE_BATCH_SIZE,
+        cooperative_yield_every: int = _DEFAULT_COOPERATIVE_YIELD_EVERY,
     ) -> None:
         if max_archive_batch_size <= 0:
             raise ValueError("max_archive_batch_size must be positive")
+        if cooperative_yield_every <= 0:
+            raise ValueError("cooperative_yield_every must be positive")
         self._queue = queue
         self._archive = archive
         self._quality = quality
@@ -93,6 +98,7 @@ class CaptureCoordinator:
         self._gap_sink = gap_sink
         self._archive_streams = archive_streams
         self._max_archive_batch_size = max_archive_batch_size
+        self._cooperative_yield_every = cooperative_yield_every
         self._stopping = False
         self._monitored_symbols: frozenset[str] | None = None
         self._filtered_book_ticker_events = 0
@@ -227,10 +233,12 @@ class CaptureCoordinator:
     ) -> None:
         if sink is None:
             return
-        for envelope in batch:
+        for index, envelope in enumerate(batch, start=1):
             result = sink(envelope)
             if inspect.isawaitable(result):
                 await result
+            if index % self._cooperative_yield_every == 0:
+                await asyncio.sleep(0)
 
     async def _publish_gaps(self, gaps: tuple[AggTradeGap, ...]) -> None:
         if self._gap_sink is None:
