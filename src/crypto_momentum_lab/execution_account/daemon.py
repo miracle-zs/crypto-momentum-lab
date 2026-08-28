@@ -1,6 +1,6 @@
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -15,6 +15,7 @@ from crypto_momentum_lab.execution_account.binance.user_data import (
 from crypto_momentum_lab.execution_account.sync import (
     AccountSnapshot,
     ExecutionAccountSyncResult,
+    FillKey,
 )
 from crypto_momentum_lab.execution_account.user_data_sync import (
     AccountUserDataState,
@@ -253,8 +254,7 @@ class UserDataAccountSyncDaemon:
         self._accept_events = False
         self._state_lock = asyncio.Lock()
         self._rest_sync_lock = asyncio.Lock()
-        self._last_reconciled_fill_count: int | None = None
-        self._last_stream_fill_event_count: int | None = None
+        self._pending_missing_fill_keys: dict[FillKey, datetime] = {}
 
     async def run(self) -> None:
         stream_task: asyncio.Task[None] | None = None
@@ -441,20 +441,24 @@ class UserDataAccountSyncDaemon:
         if stream_event_count is None or stream_fill_event_count is None:
             return
 
-        previous_fill_count = self._last_reconciled_fill_count
-        previous_stream_fill_event_count = self._last_stream_fill_event_count
-        if (
-            previous_fill_count is not None
-            and previous_stream_fill_event_count is not None
-        ):
-            rest_fill_delta = max(0, result.fill_count - previous_fill_count)
-            stream_fill_delta = max(
-                0,
-                stream_fill_event_count - previous_stream_fill_event_count,
-            )
-            missing_fill_count = rest_fill_delta - stream_fill_delta
-            if missing_fill_count > 0:
-                reconnect_requested = False
+        stream_fill_keys = _metric_fill_keys(metrics)
+        if stream_fill_keys is not None:
+            pending_before = dict(self._pending_missing_fill_keys)
+            candidates = set(pending_before)
+            candidates.update(result.new_fill_keys)
+            now = self._now()
+            pending_after: dict[FillKey, datetime] = {}
+            still_missing: set[FillKey] = set()
+            for fill_key in candidates:
+                if fill_key in stream_fill_keys:
+                    continue
+                if fill_key in pending_before:
+                    still_missing.add(fill_key)
+                else:
+                    pending_after[fill_key] = now
+
+            reconnect_requested = False
+            if still_missing:
                 request_reconnect = getattr(
                     self._stream,
                     "request_reconnect",
@@ -463,21 +467,29 @@ class UserDataAccountSyncDaemon:
                 if callable(request_reconnect):
                     try:
                         reconnect_result = request_reconnect(
-                            "rest_reconciliation_found_unmatched_fills"
+                            "rest_reconciliation_found_unmatched_fill_keys"
                         )
                         if inspect.isawaitable(reconnect_result):
                             await reconnect_result
                         reconnect_requested = True
                     except Exception as error:
                         self._report_error(error)
+                        pending_after.update(
+                            {
+                                fill_key: pending_before[fill_key]
+                                for fill_key in still_missing
+                            }
+                        )
                 log.warning(
                     "binance_user_data_stream_missing_fill_events",
-                    rest_fill_delta=rest_fill_delta,
-                    stream_fill_delta=stream_fill_delta,
-                    missing_fill_count=missing_fill_count,
+                    rest_new_fill_count=len(result.new_fill_keys),
+                    unmatched_fill_count=len(still_missing),
+                    unmatched_fill_keys=sorted(still_missing)[:10],
+                    pending_fill_count=len(pending_after),
                     parsed_event_count=stream_event_count,
                     reconnect_requested=reconnect_requested,
                 )
+            self._pending_missing_fill_keys = pending_after
 
         last_event_received_at = getattr(
             metrics,
@@ -488,14 +500,19 @@ class UserDataAccountSyncDaemon:
             "binance_user_data_stream_health",
             parsed_event_count=stream_event_count,
             fill_event_count=stream_fill_event_count,
+            fill_event_key_count=(
+                None if stream_fill_keys is None else len(stream_fill_keys)
+            ),
+            rest_fill_count=result.fill_count,
+            rest_new_fill_count=len(result.new_fill_keys),
+            rest_fill_counts_by_symbol=dict(result.fill_count_by_symbol),
+            pending_fill_count=len(self._pending_missing_fill_keys),
             last_event_received_at=(
                 None
                 if not isinstance(last_event_received_at, datetime)
                 else last_event_received_at.isoformat()
             ),
         )
-        self._last_reconciled_fill_count = result.fill_count
-        self._last_stream_fill_event_count = stream_fill_event_count
 
     async def _sleep_for_failure(
         self,
@@ -547,6 +564,27 @@ def _metric_int(metrics: object, name: str) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
         return value
     return None
+
+
+def _metric_fill_keys(metrics: object) -> set[FillKey] | None:
+    value = getattr(metrics, "fill_event_keys", None)
+    if value is None or isinstance(value, str | bytes):
+        return None
+    if not isinstance(value, Iterable):
+        return None
+    keys: set[FillKey] = set()
+    for item in value:
+        if not isinstance(item, tuple | list) or len(item) != 2:
+            return None
+        symbol, trade_id = item
+        if not isinstance(symbol, str) or not isinstance(trade_id, str):
+            return None
+        normalized_symbol = symbol.strip().upper()
+        normalized_trade_id = trade_id.strip()
+        if not normalized_symbol or not normalized_trade_id:
+            return None
+        keys.add((normalized_symbol, normalized_trade_id))
+    return keys
 
 
 def _is_ready_result(result: ExecutionAccountSyncResult) -> bool:

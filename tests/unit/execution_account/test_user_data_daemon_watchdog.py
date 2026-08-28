@@ -20,9 +20,10 @@ class SnapshotService:
 class WatchdogStream:
     def __init__(self) -> None:
         self.metrics = SimpleNamespace(
-            parsed_event_count=4,
-            fill_event_count=1,
-            last_event_received_at=None,
+        parsed_event_count=4,
+        fill_event_count=1,
+        fill_event_keys=(),
+        last_event_received_at=None,
         )
         self.reconnect_reasons = []
 
@@ -30,13 +31,18 @@ class WatchdogStream:
         self.reconnect_reasons.append(reason)
 
 
-def _result(fill_count: int) -> ExecutionAccountSyncResult:
+def _result(
+    fill_count: int,
+    *,
+    new_fill_keys: frozenset[tuple[str, str]] = frozenset(),
+) -> ExecutionAccountSyncResult:
     return ExecutionAccountSyncResult(
         status=ExecutionAccountStatus.READY_READONLY,
         reconciliation_id="reconciliation",
         mismatch_count=0,
         snapshot=SimpleNamespace(),
         fill_count=fill_count,
+        new_fill_keys=new_fill_keys,
     )
 
 
@@ -56,18 +62,57 @@ async def test_daemon_runs_lightweight_snapshot_with_injected_clock() -> None:
     ]
 
 
-async def test_daemon_reconnects_when_rest_finds_unseen_fill_events() -> None:
+async def test_daemon_does_not_reconnect_for_historical_fill_count_growth() -> None:
     stream = WatchdogStream()
     daemon = UserDataAccountSyncDaemon(
         service=SnapshotService(),
         stream=stream,
         config=UserDataAccountSyncConfig(),
     )
-    daemon._last_reconciled_fill_count = 10
-    daemon._last_stream_fill_event_count = 1
+
+    await daemon._inspect_reconciliation(_result(fill_count=12))
+
+    assert stream.reconnect_reasons == []
+
+
+async def test_daemon_reconnects_after_a_fill_key_stays_unmatched() -> None:
+    stream = WatchdogStream()
+    daemon = UserDataAccountSyncDaemon(
+        service=SnapshotService(),
+        stream=stream,
+        config=UserDataAccountSyncConfig(),
+    )
+    fill_key = ("BTCUSDT", "42")
+
+    await daemon._inspect_reconciliation(
+        _result(
+            fill_count=12,
+            new_fill_keys=frozenset({fill_key}),
+        )
+    )
+    assert stream.reconnect_reasons == []
 
     await daemon._inspect_reconciliation(_result(fill_count=12))
 
     assert stream.reconnect_reasons == [
-        "rest_reconciliation_found_unmatched_fills"
+        "rest_reconciliation_found_unmatched_fill_keys"
     ]
+
+
+async def test_daemon_accepts_a_fill_key_seen_by_the_stream() -> None:
+    stream = WatchdogStream()
+    stream.metrics.fill_event_keys = (("BTCUSDT", "42"),)
+    daemon = UserDataAccountSyncDaemon(
+        service=SnapshotService(),
+        stream=stream,
+        config=UserDataAccountSyncConfig(),
+    )
+
+    await daemon._inspect_reconciliation(
+        _result(
+            fill_count=12,
+            new_fill_keys=frozenset({("BTCUSDT", "42")}),
+        )
+    )
+
+    assert stream.reconnect_reasons == []

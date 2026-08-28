@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import math
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import cast
@@ -213,13 +213,30 @@ class BinanceUsdMPrivateReadClient:
     async def fetch_recent_fills(
         self,
         symbols: tuple[str, ...] = (),
+        *,
+        from_id_by_symbol: Mapping[str, int] | None = None,
+        start_time_by_symbol: Mapping[str, int] | None = None,
     ) -> tuple[AccountFillEvent, ...]:
         normalized_symbols = _normalize_symbols(symbols)
+        normalized_from_ids = _normalize_fill_cursors(from_id_by_symbol)
+        normalized_start_times = _normalize_fill_cursors(start_time_by_symbol)
         fills: dict[tuple[str, str], AccountFillEvent] = {}
         for symbol in normalized_symbols:
+            if symbol in normalized_from_ids and symbol in normalized_start_times:
+                raise ValueError(
+                    f"from_id and start_time cannot both be set for {symbol}"
+                )
+            params: dict[str, str | int | float | bool | None] = {
+                "symbol": symbol,
+                "limit": 1000,
+            }
+            if symbol in normalized_from_ids:
+                params["fromId"] = normalized_from_ids[symbol]
+            elif symbol in normalized_start_times:
+                params["startTime"] = normalized_start_times[symbol]
             payload = await self._signed_get(
                 "/fapi/v1/userTrades",
-                {"symbol": symbol, "limit": 1000},
+                params,
             )
             for item in _require_sequence_of_mappings(payload):
                 trade_id = str(item.get("id", ""))
@@ -688,6 +705,24 @@ def _normalize_symbols(symbols: Iterable[str]) -> tuple[str, ...]:
         raise ValueError("fill symbols must not be empty")
     if any("/" in symbol or "\\" in symbol for symbol in normalized):
         raise ValueError("fill symbols must be valid Binance symbols")
+    return normalized
+
+
+def _normalize_fill_cursors(
+    cursors: Mapping[str, int] | None,
+) -> dict[str, int]:
+    if cursors is None:
+        return {}
+    normalized: dict[str, int] = {}
+    for raw_symbol, raw_cursor in cursors.items():
+        symbol = str(raw_symbol).strip().upper()
+        if not symbol or "/" in symbol or "\\" in symbol:
+            raise ValueError("fill cursor symbols must be valid Binance symbols")
+        if isinstance(raw_cursor, bool) or not isinstance(raw_cursor, int):
+            raise ValueError("fill cursors must be integer values")
+        if raw_cursor < 0:
+            raise ValueError("fill cursors must be non-negative")
+        normalized[symbol] = raw_cursor
     return normalized
 
 

@@ -74,7 +74,13 @@ class FastSnapshotClient:
     async def fetch_open_orders(self):
         raise AssertionError("fast snapshots must not fetch open orders")
 
-    async def fetch_recent_fills(self, symbols=()):
+    async def fetch_recent_fills(
+        self,
+        symbols=(),
+        *,
+        from_id_by_symbol=None,
+        start_time_by_symbol=None,
+    ):
         raise AssertionError("fast snapshots must not fetch recent fills")
 
 

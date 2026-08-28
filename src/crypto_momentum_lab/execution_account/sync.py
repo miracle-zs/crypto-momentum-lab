@@ -1,3 +1,5 @@
+from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Protocol
@@ -18,6 +20,17 @@ from crypto_momentum_lab.execution_account.binance.user_data import (
     BinanceUserDataEvent,
 )
 
+type FillKey = tuple[str, str]
+
+_FILL_KEY_CACHE_SIZE = 8192
+_FILL_FETCH_OVERLAP_MS = 60_000
+
+
+@dataclass(frozen=True, slots=True)
+class _FillCursor:
+    from_id: int | None = None
+    start_time_ms: int | None = None
+
 
 class ReadOnlyAccountClient(Protocol):
     async def fetch_account_config(self) -> AccountConfigSnapshot:
@@ -35,6 +48,9 @@ class ReadOnlyAccountClient(Protocol):
     async def fetch_recent_fills(
         self,
         symbols: tuple[str, ...] = (),
+        *,
+        from_id_by_symbol: Mapping[str, int] | None = None,
+        start_time_by_symbol: Mapping[str, int] | None = None,
     ) -> tuple[AccountFillEvent, ...]:
         pass
 
@@ -117,6 +133,8 @@ class ExecutionAccountSyncResult:
     mismatch_count: int
     snapshot: AccountSnapshot | None = None
     fill_count: int = 0
+    new_fill_keys: frozenset[FillKey] = frozenset()
+    fill_count_by_symbol: tuple[tuple[str, int], ...] = ()
 
 
 class ExecutionAccountSyncService:
@@ -130,8 +148,15 @@ class ExecutionAccountSyncService:
         self._client = client
         self._repository = repository
         self._config = config
-        self._tracked_fill_symbols = set(config.recent_fill_symbols)
+        self._tracked_fill_symbols = {
+            symbol.strip().upper() for symbol in config.recent_fill_symbols
+        }
         self._active_position_keys: set[tuple[str, str]] = set()
+        self._fill_cursors: dict[str, _FillCursor] = {}
+        self._known_fill_keys: set[FillKey] = set()
+        self._known_fill_key_order: deque[FillKey] = deque(
+            maxlen=_FILL_KEY_CACHE_SIZE
+        )
 
     async def snapshot_once(self, *, observed_at: datetime | None = None) -> None:
         """Persist a lightweight balance/position observation.
@@ -254,15 +279,52 @@ class ExecutionAccountSyncService:
             self._active_position_keys = _position_keys(active_positions)
             open_orders = await self._client.fetch_open_orders()
             self._tracked_fill_symbols.update(
-                position.symbol for position in active_positions
+                position.symbol.strip().upper() for position in active_positions
             )
-            self._tracked_fill_symbols.update(order.symbol for order in open_orders)
+            self._tracked_fill_symbols.update(
+                order.symbol.strip().upper() for order in open_orders
+            )
+            tracked_fill_symbols = tuple(sorted(self._tracked_fill_symbols))
+            previous_fill_cursors = dict(self._fill_cursors)
             fills = (
                 await self._client.fetch_recent_fills(
-                    tuple(sorted(self._tracked_fill_symbols))
+                    tracked_fill_symbols,
+                    from_id_by_symbol={
+                        symbol: cursor.from_id
+                        for symbol, cursor in previous_fill_cursors.items()
+                        if cursor.from_id is not None
+                    },
+                    start_time_by_symbol={
+                        symbol: cursor.start_time_ms
+                        for symbol, cursor in previous_fill_cursors.items()
+                        if (
+                            cursor.from_id is None
+                            and cursor.start_time_ms is not None
+                        )
+                    },
                 )
-                if include_fills and self._tracked_fill_symbols
+                if include_fills and tracked_fill_symbols
                 else ()
+            )
+            fill_keys = _fill_keys(fills)
+            new_fill_keys = frozenset(
+                key
+                for key in fill_keys
+                if (
+                    key[0] in previous_fill_cursors
+                    and key not in self._known_fill_keys
+                )
+            )
+            fill_count_by_symbol = _fill_counts_by_symbol(fills)
+            next_fill_cursors = (
+                _advance_fill_cursors(
+                    previous_fill_cursors,
+                    tracked_fill_symbols,
+                    fills,
+                    observed_at=config.observed_at,
+                )
+                if include_fills
+                else previous_fill_cursors
             )
             await self._repository.save_reconciliation_snapshot(
                 config=account_config,
@@ -282,6 +344,9 @@ class ExecutionAccountSyncService:
                     fill_count=len(fills),
                 ),
             )
+            self._fill_cursors = next_fill_cursors
+            for key in fill_keys:
+                self._remember_fill_key(key)
             await self._save_state(
                 ExecutionAccountStatus.READY_READONLY,
                 config=config,
@@ -297,6 +362,8 @@ class ExecutionAccountSyncService:
                     open_orders=open_orders,
                 ),
                 fill_count=len(fills),
+                new_fill_keys=new_fill_keys,
+                fill_count_by_symbol=fill_count_by_symbol,
             )
         except Exception as error:
             try:
@@ -365,7 +432,18 @@ class ExecutionAccountSyncService:
             mismatch_count=0,
             snapshot=snapshot,
             fill_count=len(fills),
+            new_fill_keys=frozenset(_fill_keys(fills)),
+            fill_count_by_symbol=_fill_counts_by_symbol(fills),
         )
+
+    def _remember_fill_key(self, key: FillKey) -> None:
+        if key in self._known_fill_keys:
+            return
+        if len(self._known_fill_key_order) == self._known_fill_key_order.maxlen:
+            oldest = self._known_fill_key_order.popleft()
+            self._known_fill_keys.discard(oldest)
+        self._known_fill_key_order.append(key)
+        self._known_fill_keys.add(key)
 
     async def publish_user_data_heartbeat(
         self,
@@ -396,6 +474,58 @@ class ExecutionAccountSyncService:
                 reason=reason,
             )
         )
+
+
+def _fill_keys(fills: tuple[AccountFillEvent, ...]) -> set[FillKey]:
+    return {
+        (fill.symbol.strip().upper(), fill.trade_id.strip())
+        for fill in fills
+    }
+
+
+def _fill_counts_by_symbol(
+    fills: tuple[AccountFillEvent, ...],
+) -> tuple[tuple[str, int], ...]:
+    counts: dict[str, int] = {}
+    for fill in fills:
+        symbol = fill.symbol.strip().upper()
+        counts[symbol] = counts.get(symbol, 0) + 1
+    return tuple(sorted(counts.items()))
+
+
+def _advance_fill_cursors(
+    previous: dict[str, _FillCursor],
+    symbols: tuple[str, ...],
+    fills: tuple[AccountFillEvent, ...],
+    *,
+    observed_at: datetime,
+) -> dict[str, _FillCursor]:
+    next_cursors = dict(previous)
+    max_trade_id_by_symbol: dict[str, int] = {}
+    for fill in fills:
+        try:
+            trade_id = int(fill.trade_id)
+        except (TypeError, ValueError):
+            continue
+        symbol = fill.symbol.strip().upper()
+        current = max_trade_id_by_symbol.get(symbol)
+        if current is None or trade_id > current:
+            max_trade_id_by_symbol[symbol] = trade_id
+
+    observed_at_ms = int(observed_at.timestamp() * 1000)
+    for symbol in symbols:
+        max_trade_id = max_trade_id_by_symbol.get(symbol)
+        if max_trade_id is not None:
+            next_cursors[symbol] = _FillCursor(from_id=max_trade_id + 1)
+            continue
+        cursor = previous.get(symbol)
+        if cursor is None:
+            next_cursors[symbol] = _FillCursor(start_time_ms=observed_at_ms)
+        elif cursor.from_id is None and cursor.start_time_ms is not None:
+            next_cursors[symbol] = _FillCursor(
+                start_time_ms=max(0, observed_at_ms - _FILL_FETCH_OVERLAP_MS)
+            )
+    return next_cursors
 
 
 def _reconciliation_id(config: ExecutionAccountSyncConfig) -> str:

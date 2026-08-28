@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -60,6 +61,7 @@ class BinanceUserDataStreamMetrics:
     parsed_event_count: int
     malformed_message_count: int
     fill_event_count: int
+    fill_event_keys: tuple[tuple[str, str], ...]
     last_connected_at: datetime | None
     last_received_at: datetime | None
     last_event_received_at: datetime | None
@@ -177,6 +179,8 @@ class BinanceUsdMUserDataStream:
         self._parsed_event_count = 0
         self._malformed_message_count = 0
         self._fill_event_count = 0
+        self._fill_event_keys: deque[tuple[str, str]] = deque(maxlen=4096)
+        self._fill_event_key_set: set[tuple[str, str]] = set()
         self._last_connected_at: datetime | None = None
         self._last_received_at: datetime | None = None
         self._last_event_received_at: datetime | None = None
@@ -191,6 +195,7 @@ class BinanceUsdMUserDataStream:
             parsed_event_count=self._parsed_event_count,
             malformed_message_count=self._malformed_message_count,
             fill_event_count=self._fill_event_count,
+            fill_event_keys=tuple(self._fill_event_keys),
             last_connected_at=self._last_connected_at,
             last_received_at=self._last_received_at,
             last_event_received_at=self._last_event_received_at,
@@ -324,6 +329,9 @@ class BinanceUsdMUserDataStream:
                     self._last_event_type = event.event_type
                     if _is_fill_event(event):
                         self._fill_event_count += 1
+                        fill_key = _fill_event_key(event)
+                        if fill_key is not None:
+                            self._remember_fill_event_key(fill_key)
                     if self._on_event is not None:
                         try:
                             await self._on_event(event)
@@ -345,6 +353,15 @@ class BinanceUsdMUserDataStream:
             async with self._connection_lock:
                 self._connection = None
         return "closed"
+
+    def _remember_fill_event_key(self, key: tuple[str, str]) -> None:
+        if key in self._fill_event_key_set:
+            return
+        if len(self._fill_event_keys) == self._fill_event_keys.maxlen:
+            oldest = self._fill_event_keys.popleft()
+            self._fill_event_key_set.discard(oldest)
+        self._fill_event_keys.append(key)
+        self._fill_event_key_set.add(key)
 
     async def _keepalive_loop(
         self,
@@ -415,6 +432,24 @@ def _is_fill_event(event: BinanceUserDataEvent) -> bool:
         return Decimal(str(quantity)) != 0
     except (InvalidOperation, TypeError, ValueError):
         return False
+
+
+def _fill_event_key(event: BinanceUserDataEvent) -> tuple[str, str] | None:
+    if not _is_fill_event(event):
+        return None
+    order = event.payload.get("o")
+    if not isinstance(order, dict):
+        return None
+    symbol = order.get("s")
+    trade_id = order.get("t")
+    if not isinstance(symbol, str) or not symbol.strip():
+        return None
+    if isinstance(trade_id, bool) or not isinstance(trade_id, str | int | float):
+        return None
+    normalized_trade_id = str(trade_id).strip()
+    if not normalized_trade_id or normalized_trade_id == "-1":
+        return None
+    return symbol.strip().upper(), normalized_trade_id
 
 
 __all__ = [

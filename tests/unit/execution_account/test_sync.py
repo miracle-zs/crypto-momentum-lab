@@ -4,6 +4,7 @@ from decimal import Decimal
 from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
+    AccountFillEvent,
     ExecutionAccountStatus,
 )
 from crypto_momentum_lab.execution_account.binance.user_data import (
@@ -59,7 +60,13 @@ class FakeClient:
     async def fetch_open_orders(self):
         return ()
 
-    async def fetch_recent_fills(self, symbols=()):
+    async def fetch_recent_fills(
+        self,
+        symbols=(),
+        *,
+        from_id_by_symbol=None,
+        start_time_by_symbol=None,
+    ):
         return ()
 
     async def aclose(self) -> None:
@@ -137,6 +144,42 @@ async def test_sync_once_persists_snapshot_and_ready_state() -> None:
     assert len(repository.balances) == 1
     assert repository.process_states[-1].state is ExecutionAccountStatus.READY_READONLY
     assert repository.reconciliation_runs[-1].status == "ready"
+
+
+async def test_sync_tracks_incremental_fill_keys_and_baselines_new_symbols() -> None:
+    first_fill = _fill("BTCUSDT", "42")
+    second_fill = _fill("BTCUSDT", "43")
+    new_symbol_fill = _fill("ETHUSDT", "99")
+    client = CursorClient(
+        responses=[(first_fill,), (second_fill, new_symbol_fill)],
+    )
+    service = ExecutionAccountSyncService(
+        client=client,
+        repository=FakeRepository(),
+        config=_config(),
+    )
+    service._tracked_fill_symbols.add("BTCUSDT")
+
+    first = await service.sync_once()
+    service._tracked_fill_symbols.add("ETHUSDT")
+    second = await service.sync_once()
+
+    assert client.calls[0] == (
+        ("BTCUSDT",),
+        {},
+        {},
+    )
+    assert client.calls[1] == (
+        ("BTCUSDT", "ETHUSDT"),
+        {"BTCUSDT": 43},
+        {},
+    )
+    assert first.new_fill_keys == frozenset()
+    assert second.new_fill_keys == frozenset({("BTCUSDT", "43")})
+    assert second.fill_count_by_symbol == (
+        ("BTCUSDT", 1),
+        ("ETHUSDT", 1),
+    )
 
 
 async def test_user_data_event_persists_merged_snapshot() -> None:
@@ -236,4 +279,45 @@ def _config(
         expected_multi_assets_mode=expected_multi_assets_mode,
         expected_hedge_mode=expected_hedge_mode,
         observed_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+
+class CursorClient(FakeClient):
+    def __init__(self, *, responses) -> None:
+        super().__init__()
+        self.responses = list(responses)
+        self.calls = []
+
+    async def fetch_recent_fills(
+        self,
+        symbols=(),
+        *,
+        from_id_by_symbol=None,
+        start_time_by_symbol=None,
+    ):
+        self.calls.append(
+            (
+                tuple(symbols),
+                dict(from_id_by_symbol or {}),
+                dict(start_time_by_symbol or {}),
+            )
+        )
+        return self.responses.pop(0)
+
+
+def _fill(symbol: str, trade_id: str) -> AccountFillEvent:
+    return AccountFillEvent(
+        environment="live",
+        account_label="primary",
+        symbol=symbol,
+        trade_id=trade_id,
+        order_id=f"order-{trade_id}",
+        side="BUY",
+        price=Decimal("100"),
+        quantity=Decimal("1"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0.01"),
+        fee_asset="USDT",
+        trade_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        raw_payload={},
     )

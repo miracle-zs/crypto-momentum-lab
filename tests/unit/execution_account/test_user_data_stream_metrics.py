@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 from crypto_momentum_lab.execution_account.binance.user_data import (
     BinanceUsdMUserDataStream,
+    _fill_event_key,
     _is_fill_event,
     parse_user_data_event,
 )
@@ -64,3 +65,21 @@ def test_stream_classifies_only_nonzero_trade_updates_as_fill_events() -> None:
 
     assert _is_fill_event(event)
     assert not _is_fill_event(zero_event)
+
+
+def test_stream_extracts_unique_fill_identity() -> None:
+    event = parse_user_data_event(
+        {
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 1783209600000,
+            "o": {
+                "s": "btcusdt",
+                "t": 42,
+                "x": "TRADE",
+                "l": "0.01",
+            },
+        },
+        received_at=datetime(2026, 8, 28, tzinfo=UTC),
+    )
+
+    assert _fill_event_key(event) == ("BTCUSDT", "42")

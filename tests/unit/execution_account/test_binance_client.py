@@ -215,6 +215,70 @@ async def test_client_fetches_recent_user_trades() -> None:
     assert fills[0].fee == Decimal("0.12")
 
 
+async def test_client_fetches_recent_user_trades_from_symbol_cursor() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/fapi/v1/userTrades"
+        assert request.url.params["symbol"] == "BTCUSDT"
+        assert request.url.params["fromId"] == "43"
+        assert "startTime" not in request.url.params
+        return httpx.Response(200, json=[])
+
+    client = BinanceUsdMPrivateReadClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        fills = await client.fetch_recent_fills(
+            ("btcusdt",),
+            from_id_by_symbol={"btcusdt": 43},
+        )
+    finally:
+        await client.aclose()
+
+    assert fills == ()
+
+
+async def test_client_fetches_recent_user_trades_from_time_cursor() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/fapi/v1/userTrades"
+        assert request.url.params["symbol"] == "BTCUSDT"
+        assert request.url.params["startTime"] == "1783123200000"
+        assert "fromId" not in request.url.params
+        return httpx.Response(200, json=[])
+
+    client = BinanceUsdMPrivateReadClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        fills = await client.fetch_recent_fills(
+            ("btcusdt",),
+            start_time_by_symbol={"btcusdt": 1783123200000},
+        )
+    finally:
+        await client.aclose()
+
+    assert fills == ()
+
+
 async def test_client_manages_user_data_listen_key_without_signature() -> None:
     requests: list[tuple[str, str, str]] = []
 
