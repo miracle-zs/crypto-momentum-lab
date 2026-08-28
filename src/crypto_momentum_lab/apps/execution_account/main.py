@@ -8,6 +8,7 @@ import typer
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.execution_account.binance import (
+    DEFAULT_BINANCE_USDM_USER_DATA_WEBSOCKET_URL,
     BinanceUsdMPrivateReadClient,
     BinanceUsdMUserDataStream,
     BinanceUserDataEvent,
@@ -156,7 +157,7 @@ def sync_command(
     websocket_url: Annotated[
         str,
         typer.Option("--websocket-url"),
-    ] = "wss://fstream.binance.com/ws",
+    ] = DEFAULT_BINANCE_USDM_USER_DATA_WEBSOCKET_URL,
     account_event_hub_host: Annotated[
         str,
         typer.Option("--account-event-hub-host"),

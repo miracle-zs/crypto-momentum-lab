@@ -14,6 +14,10 @@ from websockets.exceptions import ConnectionClosed
 
 from crypto_momentum_lab.domain.market.models import JsonValue
 
+DEFAULT_BINANCE_USDM_USER_DATA_WEBSOCKET_URL = (
+    "wss://fstream.binance.com/private/ws"
+)
+
 
 class BinancePayloadError(ValueError):
     """A Binance user-data payload that cannot be safely interpreted."""
@@ -140,7 +144,7 @@ class BinanceUsdMUserDataStream:
         *,
         listen_key_client: BinanceUserDataListenKeyClient,
         on_event: UserDataEventSink | None = None,
-        websocket_url: str = "wss://fstream.binance.com/ws",
+        websocket_url: str = DEFAULT_BINANCE_USDM_USER_DATA_WEBSOCKET_URL,
         keepalive_interval_seconds: float = 30 * 60,
         reconnect_delays: tuple[float, ...] = (1.0, 2.0, 5.0, 15.0, 30.0),
         open_timeout_seconds: float = 15.0,
