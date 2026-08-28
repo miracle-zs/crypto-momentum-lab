@@ -23,6 +23,18 @@ def test_live_signal_table_has_account_time_read_index() -> None:
     )
 
 
+def test_account_balance_table_has_descending_latest_index() -> None:
+    balances = Base.metadata.tables["account_balance_snapshots"]
+
+    assert any(
+        index.name == "ix_account_balance_latest_desc"
+        and [column.name for column in index.columns]
+        == ["environment", "account_label", "asset", "observed_at"]
+        and str(index.expressions[-1]).endswith("observed_at DESC")
+        for index in balances.indexes
+    )
+
+
 def test_strategy_run_relationships_are_declared() -> None:
     strategy_signals = Base.metadata.tables["strategy_signals"]
     candidates = Base.metadata.tables["order_intent_candidates"]

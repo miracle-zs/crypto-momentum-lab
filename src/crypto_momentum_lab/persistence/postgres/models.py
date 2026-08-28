@@ -13,6 +13,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    desc,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
@@ -612,6 +613,13 @@ class AccountBalanceSnapshotRow(Base):
             "account_label",
             "asset",
             "observed_at",
+        ),
+        Index(
+            "ix_account_balance_latest_desc",
+            "environment",
+            "account_label",
+            "asset",
+            desc(observed_at),
         ),
         Index(
             "ix_account_balance_account_observed",
