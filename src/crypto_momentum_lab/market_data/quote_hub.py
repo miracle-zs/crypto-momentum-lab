@@ -18,7 +18,7 @@ from decimal import Decimal
 from typing import cast
 
 import structlog
-from websockets.asyncio.client import connect
+from websockets.asyncio.client import ClientConnection, connect
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
@@ -337,18 +337,35 @@ class WebSocketMarketQuoteSource:
                     self._notify_connection_change(True, None)
                     unavailable_since = time.monotonic()
                     reconnect_attempt = 0
-                    while not self._stopping:
-                        message = _decode_object(await connection.recv())
-                        message_type = message.get("type")
-                        if message_type == _QUOTE_MESSAGE:
-                            yield decode_market_quote(
-                                message,
-                                expected_environment=self._environment,
-                            )
-                        else:
-                            raise MarketQuoteHubProtocolError(
-                                "unexpected market quote message type"
-                            )
+                    latest_quotes: dict[str, RealtimeMarketQuote] = {}
+                    quote_available = asyncio.Event()
+                    reader_error: list[Exception | None] = [None]
+
+                    reader_task = asyncio.create_task(
+                        self._read_market_quotes(
+                            connection,
+                            latest_quotes,
+                            quote_available,
+                            reader_error,
+                        ),
+                        name=f"market-quote-reader:{self._consumer_id}",
+                    )
+                    try:
+                        while not self._stopping:
+                            while latest_quotes:
+                                symbol = next(iter(latest_quotes))
+                                yield latest_quotes.pop(symbol)
+                            if reader_error[0] is not None:
+                                raise reader_error[0]
+                            quote_available.clear()
+                            await quote_available.wait()
+                    finally:
+                        if not reader_task.done():
+                            reader_task.cancel()
+                        await asyncio.gather(
+                            reader_task,
+                            return_exceptions=True,
+                        )
             except asyncio.CancelledError:
                 raise
             except (
@@ -375,6 +392,37 @@ class WebSocketMarketQuoteSource:
                 reconnect_attempt += 1
                 if delay > 0:
                     await asyncio.sleep(delay)
+
+    async def _read_market_quotes(
+        self,
+        connection: ClientConnection,
+        latest_quotes: dict[str, RealtimeMarketQuote],
+        quote_available: asyncio.Event,
+        reader_error: list[Exception | None],
+    ) -> None:
+        try:
+            while True:
+                message = _decode_object(await connection.recv())
+                message_type = message.get("type")
+                if message_type != _QUOTE_MESSAGE:
+                    raise MarketQuoteHubProtocolError(
+                        "unexpected market quote message type"
+                    )
+                quote = decode_market_quote(
+                    message,
+                    expected_environment=self._environment,
+                )
+                # Quote delivery is latest-value by design. Keep one pending
+                # value per symbol so a slow exit check cannot stop the socket
+                # reader.
+                latest_quotes[quote.symbol] = quote
+                quote_available.set()
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            reader_error[0] = error
+            quote_available.set()
 
     def _notify_connection_change(
         self,

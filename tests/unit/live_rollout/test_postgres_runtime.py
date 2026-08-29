@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -171,6 +172,161 @@ async def test_symbol_rules_use_the_market_session_factory(monkeypatch) -> None:
 
     assert result is expected
     assert seen == {"sessions": market_sessions, "symbols": {"BTCUSDT"}}
+
+
+async def test_symbol_rule_load_is_single_flight(monkeypatch) -> None:
+    provider = object.__new__(PostgresLiveContextProvider)
+    provider._sessions = object()
+    provider._market_sessions = object()
+    provider._cached_rules = {}
+    provider._cached_rules_at = {}
+    expected = _runtime_context().trading_rules["BTCUSDT"]
+    started = asyncio.Event()
+    release = asyncio.Event()
+    load_count = 0
+
+    async def load_trading_rules(_sessions, _symbols):
+        nonlocal load_count
+        load_count += 1
+        started.set()
+        await release.wait()
+        return {"BTCUSDT": expected}
+
+    monkeypatch.setattr(
+        "crypto_momentum_lab.live_rollout.postgres_runtime._load_trading_rules",
+        load_trading_rules,
+    )
+
+    first = asyncio.create_task(provider._load_symbol_rules("BTCUSDT", NOW))
+    second = asyncio.create_task(provider._load_symbol_rules("BTCUSDT", NOW))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert load_count == 1
+    release.set()
+
+    assert await asyncio.gather(first, second) == [expected, expected]
+    assert load_count == 1
+
+
+def test_context_invalidation_preserves_symbol_rules() -> None:
+    provider = object.__new__(PostgresLiveContextProvider)
+    expected = _runtime_context().trading_rules["BTCUSDT"]
+    provider._cache_epoch = 3
+    provider._cached_bucket_start = NOW
+    provider._cached_context = _runtime_context()
+    provider._cached_rules = {"BTCUSDT": expected}
+    provider._cached_rules_at = {"BTCUSDT": NOW}
+
+    provider.invalidate_cache()
+
+    assert provider._cache_epoch == 4
+    assert provider._cached_context is None
+    assert provider._cached_rules == {"BTCUSDT": expected}
+    assert provider._cached_rules_at == {"BTCUSDT": NOW}
+
+
+async def test_delayed_state_reuses_newer_cached_context(monkeypatch) -> None:
+    state = SimpleNamespace(
+        symbol="BTCUSDT",
+        bucket_start=NOW,
+    )
+    cached = _runtime_context()
+    expected_rule = cached.trading_rules["BTCUSDT"]
+    provider = object.__new__(PostgresLiveContextProvider)
+    provider._account_label = "primary"
+    provider._strategy_name = cached.gate_context.strategy_name
+    provider._strategy_config_hash = cached.gate_context.strategy_config_hash
+    provider._git_commit_hash = cached.gate_context.git_commit_hash
+    provider._migration_revision = cached.gate_context.database_migration_revision
+    provider._lease_owner = cached.gate_context.required_lease_owner
+    provider._approval_id = cached.gate_context.approval.approval_id
+    provider._cached_bucket_start = NOW + timedelta(minutes=1)
+    provider._cached_context = cached
+    provider._cached_rules = {"BTCUSDT": expected_rule}
+    provider._cached_rules_at = {"BTCUSDT": NOW}
+    provider._cache_epoch = 0
+
+    full_loads = 0
+    rule_loads = 0
+
+    async def full_context_load(**_kwargs):
+        nonlocal full_loads
+        full_loads += 1
+        return cached.gate_context.approval
+
+    class RiskRepository:
+        async def load_active_lease(self, *_args):
+            nonlocal full_loads
+            full_loads += 1
+            return cached.active_lease
+
+        async def load_active_halts(self, *_args):
+            nonlocal full_loads
+            full_loads += 1
+            return ()
+
+    async def load_symbol_rules(_symbol, _now):
+        nonlocal rule_loads
+        rule_loads += 1
+        return expected_rule
+
+    async def load_positions():
+        nonlocal full_loads
+        full_loads += 1
+        return (
+            (),
+            (
+                NOW,
+                frozenset(),
+                Decimal("0"),
+                Decimal("0"),
+                (),
+                frozenset(),
+            ),
+        )
+
+    async def latest_risk_config(_sessions, _account_label):
+        nonlocal full_loads
+        full_loads += 1
+        return cached.risk_config
+
+    async def latest_account_state(_sessions, _account_label):
+        nonlocal full_loads
+        full_loads += 1
+        return cached.account_state
+
+    async def realized_pnl(_now):
+        nonlocal full_loads
+        full_loads += 1
+        return Decimal("0")
+
+    async def strategy_state():
+        nonlocal full_loads
+        full_loads += 1
+        return cached.strategy_state
+
+    provider._live_repository = SimpleNamespace(
+        load_active_approval=full_context_load,
+    )
+    provider._risk_repository = RiskRepository()
+    provider._load_symbol_rules = load_symbol_rules
+    provider._load_unresolved_and_position_view = load_positions
+    provider._daily_realized_pnl = realized_pnl
+    provider._strategy_live_state = strategy_state
+
+    monkeypatch.setattr(
+        "crypto_momentum_lab.live_rollout.postgres_runtime._latest_risk_config",
+        latest_risk_config,
+    )
+    monkeypatch.setattr(
+        "crypto_momentum_lab.live_rollout.postgres_runtime._latest_account_state",
+        latest_account_state,
+    )
+
+    result = await provider(state)
+
+    assert result.trading_rules == {"BTCUSDT": expected_rule}
+    assert full_loads == 0
+    assert rule_loads == 1
 
 
 async def test_live_market_poll_skips_a_backlog_to_the_latest_closed_bucket() -> None:

@@ -571,6 +571,9 @@ class LiveStrategyDaemon:
         self._run_active = False
         self._entry_enabled = True
         self._exit_enabled = True
+        self._entry_enabled_reason = "initializing"
+        self._market_gap_generation = 0
+        self._strategy_gap_reset_generation_by_symbol: dict[str, int] = {}
         self._last_transient_gate_reasons: tuple[str, ...] | None = None
 
     async def _publish_managed_position_symbols(
@@ -593,6 +596,10 @@ class LiveStrategyDaemon:
         return self._entry_enabled
 
     @property
+    def entry_enabled_reason(self) -> str:
+        return self._entry_enabled_reason
+
+    @property
     def exit_enabled(self) -> bool:
         return self._exit_enabled
 
@@ -603,12 +610,20 @@ class LiveStrategyDaemon:
     def set_entry_enabled(self, enabled: bool, *, reason: str) -> None:
         if not isinstance(enabled, bool):
             raise TypeError("enabled must be a bool")
-        if self._entry_enabled == enabled:
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
+        if (
+            self._entry_enabled == enabled
+            and self._entry_enabled_reason == reason
+        ):
             return
+        state_changed = self._entry_enabled != enabled
         self._entry_enabled = enabled
+        self._entry_enabled_reason = reason
         log.warning(
             "live_entry_lane_state_changed",
             enabled=enabled,
+            state_changed=state_changed,
             reason=reason,
             run_id=self._config.run_id,
         )
@@ -624,6 +639,18 @@ class LiveStrategyDaemon:
             enabled=enabled,
             reason=reason,
             run_id=self._config.run_id,
+        )
+
+    def notify_market_state_gap(self, *, reason: str) -> None:
+        """Force each symbol to rebuild indicators after a skipped batch."""
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
+        self._market_gap_generation += 1
+        log.warning(
+            "live_strategy_market_state_gap_detected",
+            run_id=self._config.run_id,
+            reason=reason,
+            generation=self._market_gap_generation,
         )
 
     async def process_account_event(
@@ -909,6 +936,7 @@ class LiveStrategyDaemon:
                 context=entry_filter_context,
                 require_price_above_ema5=self._config.require_price_above_ema5,
                 require_price_above_ema10=self._config.require_price_above_ema10,
+                now=recorded_at,
             )
             candidate_filter_results[candidate.candidate_id] = {
                 "symbol": candidate.symbol,
@@ -921,6 +949,7 @@ class LiveStrategyDaemon:
         details.update(
             {
                 "entry_enabled": self._entry_enabled,
+                "entry_enabled_reason": self._entry_enabled_reason,
                 "entry_long_only": self._config.entry_long_only,
                 "entry_symbol_pool_configured": entry_symbols is not None,
                 "entry_symbol_pool_size": (
@@ -947,6 +976,13 @@ class LiveStrategyDaemon:
                 ],
                 "entry_filter_values": _entry_filter_values(
                     entry_filter_context
+                ),
+                "market_state_bucket_start": state.bucket_start,
+                "market_state_bucket_end": state.bucket_end,
+                "market_state_last_received_at": state.last_received_at,
+                "market_state_age_seconds": round(
+                    _market_state_age_seconds(state, recorded_at),
+                    3,
                 ),
                 "candidate_filter_results": candidate_filter_results,
             }
@@ -1039,6 +1075,27 @@ class LiveStrategyDaemon:
                         f"order_reconciliation_failed:{type(error).__name__}",
                         final_state_at,
                     )
+            gap_generation = self._market_gap_generation
+            if (
+                gap_generation
+                > self._strategy_gap_reset_generation_by_symbol.get(
+                    state.symbol,
+                    0,
+                )
+            ):
+                reset = getattr(self._strategy, "reset_symbol", None)
+                if callable(reset):
+                    reset(state.symbol)
+                    last_processed_at_by_symbol.pop(state.symbol, None)
+                    log.info(
+                        "live_strategy_symbol_reset_after_market_gap",
+                        run_id=self._config.run_id,
+                        symbol=state.symbol,
+                        generation=gap_generation,
+                    )
+                self._strategy_gap_reset_generation_by_symbol[
+                    state.symbol
+                ] = gap_generation
             _reset_strategy_for_gap(
                 strategy=self._strategy,
                 symbol=state.symbol,
@@ -1202,10 +1259,11 @@ class LiveStrategyDaemon:
                         final_state_at,
                     )
             decision = self._strategy.on_market_state(state)
+            decision_recorded_at = self._clock()
             if self._telemetry is not None:
                 await self._telemetry.strategy_decision(
                     state,
-                    occurred_at=self._clock(),
+                    occurred_at=decision_recorded_at,
                     signal_count=len(decision.signals),
                     candidate_count=len(decision.candidates),
                 )
@@ -1246,7 +1304,7 @@ class LiveStrategyDaemon:
             self._record_strategy_decision(
                 decision=decision,
                 state=state,
-                recorded_at=self._clock(),
+                recorded_at=decision_recorded_at,
                 context=context,
                 gate_reasons=gate.reasons,
                 entry_symbols=entry_symbols,
@@ -1266,6 +1324,7 @@ class LiveStrategyDaemon:
                     context=entry_filter_context,
                     require_price_above_ema5=self._config.require_price_above_ema5,
                     require_price_above_ema10=self._config.require_price_above_ema10,
+                    now=decision_recorded_at,
                 ) is not None:
                     continue
                 result = await self._execute_candidate(
@@ -1542,6 +1601,18 @@ class LiveStrategyDaemon:
         context: LiveDaemonRuntimeContext,
         reference_price: Decimal | None = None,
     ) -> OrderExecutionResult | None:
+        execution_now = self._clock()
+        if not candidate.reduce_only and candidate.expires_at <= execution_now:
+            log.warning(
+                "live_entry_candidate_expired_before_execution",
+                run_id=self._config.run_id,
+                candidate_id=candidate.candidate_id,
+                symbol=candidate.symbol,
+                candidate_expires_at=candidate.expires_at,
+                execution_now=execution_now,
+                market_state_bucket_end=state.bucket_end,
+            )
+            return None
         executable_candidate = candidate
         if not candidate.reduce_only:
             limit_decision = evaluate_fixed_live_limits(
@@ -1679,6 +1750,7 @@ class LiveStrategyDaemon:
                 account_context=_live_signal_account_context(context),
                 filter_context={
                     "entry_enabled": self._entry_enabled,
+                    "entry_enabled_reason": self._entry_enabled_reason,
                     "entry_long_only": self._config.entry_long_only,
                     "candidate_execution_path": "reduce_only_exit",
                 },
@@ -1863,6 +1935,7 @@ def _live_entry_candidate_rejection_reason(
     context: LiveEntryFilterContext | None,
     require_price_above_ema5: bool,
     require_price_above_ema10: bool,
+    now: datetime | None = None,
 ) -> str | None:
     """Return the same entry-filter reason used by the live execution loop."""
 
@@ -1870,6 +1943,8 @@ def _live_entry_candidate_rejection_reason(
         return None
     if not entry_enabled:
         return "entry_disabled"
+    if now is not None and candidate.expires_at <= now:
+        return "candidate_expired"
     if (
         entry_long_only
         and getattr(candidate.side, "value", candidate.side) != "long"
@@ -1885,6 +1960,13 @@ def _live_entry_candidate_rejection_reason(
     ):
         return "ema_filter_failed"
     return None
+
+
+def _market_state_age_seconds(
+    state: MarketState15s,
+    now: datetime,
+) -> float:
+    return max(0.0, (now - state.bucket_end).total_seconds())
 
 
 def _entry_filter_values(

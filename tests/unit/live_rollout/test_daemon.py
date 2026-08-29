@@ -82,6 +82,47 @@ async def test_live_daemon_submits_strategy_candidate_after_all_gates() -> None:
     assert exchange.calls == ["submit"]
 
 
+async def test_live_daemon_does_not_submit_expired_entry_candidate() -> None:
+    exchange = PlanAwareExchange()
+
+    class ExpiredCandidateStrategy(FakeStrategy):
+        def on_market_state(self, state: MarketState15s) -> StrategyDecision:
+            decision = super().on_market_state(state)
+            return replace(
+                decision,
+                candidates=(
+                    replace(
+                        decision.candidates[0],
+                        expires_at=NOW + timedelta(seconds=1),
+                    ),
+                ),
+            )
+
+    daemon = _daemon(
+        exchange=exchange,
+        strategy=ExpiredCandidateStrategy(),
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+
+    result = await daemon.run(_states())
+
+    assert result.halt_reason is None
+    assert result.approved_intent_count == 0
+    assert result.submitted_order_count == 0
+    assert exchange.calls == []
+
+
+def test_live_daemon_tracks_entry_lane_reason_even_when_state_is_unchanged() -> None:
+    daemon = _daemon(exchange=PlanAwareExchange())
+
+    daemon.set_entry_enabled(True, reason="prerequisites_ready")
+    assert daemon.entry_enabled_reason == "prerequisites_ready"
+
+    daemon.set_entry_enabled(False, reason="market_state_consumer_lagged")
+    assert daemon.entry_enabled is False
+    assert daemon.entry_enabled_reason == "market_state_consumer_lagged"
+
+
 async def test_live_daemon_prefetches_next_context_while_exchange_is_busy() -> None:
     exchange = BlockingPlanAwareExchange()
     second_context_started = asyncio.Event()
@@ -596,6 +637,19 @@ async def test_live_daemon_resets_strategy_after_market_state_gap() -> None:
     assert strategy.reset_counts_at_decision == [0, 1]
 
 
+async def test_live_daemon_resets_each_symbol_after_explicit_market_gap() -> None:
+    exchange = PlanAwareExchange()
+    strategy = GapAwareFakeStrategy()
+    daemon = _daemon(exchange=exchange, strategy=strategy)
+
+    daemon.notify_market_state_gap(reason="market_state_consumer_lagged")
+    result = await daemon.run(_states())
+
+    assert result.halt_reason is None
+    assert strategy.reset_symbols == ["BTCUSDT"]
+    assert strategy.reset_counts_at_decision == [1]
+
+
 async def test_live_daemon_saves_final_checkpoint_before_normal_exit() -> None:
     exchange = PlanAwareExchange()
     repository = FakeLiveRepository()
@@ -972,6 +1026,7 @@ def _daemon(
     require_price_above_ema5: bool = False,
     require_price_above_ema10: bool = False,
     reconcile_orders=None,
+    clock=None,
 ) -> LiveStrategyDaemon:
     order_repository = FakeOrderRepository()
     machine = OrderExecutionStateMachine(
@@ -1011,6 +1066,7 @@ def _daemon(
         ),
         exit_manager=exit_manager,
         reconcile_orders=reconcile_orders,
+        clock=clock or (lambda: NOW),
     )
 
 

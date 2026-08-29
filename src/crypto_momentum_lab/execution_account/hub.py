@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import structlog
-from websockets.asyncio.client import connect
+from websockets.asyncio.client import ClientConnection, connect
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
@@ -28,6 +28,7 @@ _SCHEMA_VERSION = 1
 _SUBSCRIBE_MESSAGE = "subscribe_account_events"
 _READY_MESSAGE = "account_event_hub_ready"
 _EVENT_MESSAGE = "account_event"
+_CLIENT_RECEIVE_QUEUE_SIZE = 16
 
 
 class AccountEventHubError(RuntimeError):
@@ -89,6 +90,9 @@ class AccountEvent:
                 raise ValueError(f"{field_name} must not be blank when present")
         if not isinstance(self.has_fill, bool):
             raise TypeError("has_fill must be a bool")
+
+
+_AccountEventQueueItem = AccountEvent | Exception
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,11 +366,28 @@ class WebSocketAccountEventSource:
                         )
                     unavailable_since = time.monotonic()
                     reconnect_attempt = 0
-                    while not self._stopping:
-                        yield decode_account_event(
-                            await connection.recv(),
-                            expected_environment=self._environment,
-                            expected_account_label=self._account_label,
+                    receive_queue: asyncio.Queue[_AccountEventQueueItem] = (
+                        asyncio.Queue(maxsize=_CLIENT_RECEIVE_QUEUE_SIZE)
+                    )
+                    reader_task = asyncio.create_task(
+                        self._read_account_events(
+                            connection,
+                            receive_queue,
+                        ),
+                        name=f"account-event-reader:{self._consumer_id}",
+                    )
+                    try:
+                        while not self._stopping:
+                            item = await receive_queue.get()
+                            if isinstance(item, Exception):
+                                raise item
+                            yield item
+                    finally:
+                        if not reader_task.done():
+                            reader_task.cancel()
+                        await asyncio.gather(
+                            reader_task,
+                            return_exceptions=True,
                         )
             except (
                 ConnectionClosed,
@@ -387,6 +408,54 @@ class WebSocketAccountEventSource:
                 if delay > 0:
                     await asyncio.sleep(delay)
         return
+
+    async def _read_account_events(
+        self,
+        connection: ClientConnection,
+        receive_queue: asyncio.Queue[_AccountEventQueueItem],
+    ) -> None:
+        try:
+            while True:
+                event = decode_account_event(
+                    await connection.recv(),
+                    expected_environment=self._environment,
+                    expected_account_label=self._account_label,
+                )
+                self._enqueue_account_event(receive_queue, event)
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._enqueue_account_event_reader_error(receive_queue, error)
+
+    def _enqueue_account_event(
+        self,
+        receive_queue: asyncio.Queue[_AccountEventQueueItem],
+        event: AccountEvent,
+    ) -> None:
+        if receive_queue.full():
+            while True:
+                try:
+                    receive_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            log.warning(
+                "account_event_hub_client_queue_overflow",
+                consumer_id=self._consumer_id,
+                environment=self._environment,
+                account_label=self._account_label,
+                event_id=event.event_id,
+            )
+        receive_queue.put_nowait(event)
+
+    @staticmethod
+    def _enqueue_account_event_reader_error(
+        receive_queue: asyncio.Queue[_AccountEventQueueItem],
+        error: Exception,
+    ) -> None:
+        while receive_queue.full():
+            receive_queue.get_nowait()
+        receive_queue.put_nowait(error)
 
 
 def encode_account_event(event: AccountEvent, *, sequence: int) -> str:

@@ -32,6 +32,16 @@ REST               --> startup/periodic reconciliation
 - Each subscriber has a bounded queue. If a live subscriber falls behind, its
   old queued batch is replaced by the newest batch and the sequence gap is
   detected by the client.
+- The live market-state client drains the WebSocket in a dedicated reader
+  task. Its small bounded receive queue never applies strategy or database
+  backpressure to the socket: on overflow it records
+  `market_state_hub_client_queue_overflow`, advances to the newest sequence,
+  reconnects without replaying the stale backlog, and keeps entries disabled
+  until the first new batch has been processed.
+- Account events and realtime quotes use the same reader/processor split.
+  Account-event overflow is logged and coalesces to the latest event; quote
+  delivery keeps the latest pending value per symbol. Both are acceleration
+  paths with PostgreSQL reconciliation as the recovery adapter.
 - The Hub keeps a bounded per-environment replay window. Reconnects carry the
   last stream epoch and sequence, and receive contiguous missing batches when
   they are still buffered.
@@ -39,6 +49,9 @@ REST               --> startup/periodic reconciliation
   stream is caught up. If the requested sequence is outside the replay window,
   the client fails closed rather than silently continuing with incomplete
   strategy state.
+- A market-state consumer-lag reset clears each strategy symbol's rolling
+  indicators on its first post-gap state. This prevents a bounded latest-state
+  recovery from continuing with a partially missing warmup window.
 - PostgreSQL remains the durable recovery adapter. The current increment makes
   the realtime replay boundary explicit; durable gap replay is a separate
   recovery step and must not be replaced with blind latest-state processing.

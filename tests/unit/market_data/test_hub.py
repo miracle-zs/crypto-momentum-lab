@@ -322,6 +322,118 @@ async def test_market_state_source_resumes_from_last_sequence(monkeypatch) -> No
     assert json.loads(sent_messages[1])["last_sequence"] == 1
 
 
+async def test_market_state_source_reader_skips_backlog_when_consumer_is_slow(
+    monkeypatch,
+) -> None:
+    states = [fixture_state("BTCUSDT", index) for index in range(5)]
+    sent_messages: list[str] = []
+    disconnect = asyncio.Event()
+
+    def ready(latest_sequence: int) -> str:
+        return json.dumps(
+            {
+                "type": "market_state_hub_ready",
+                "schema_version": 1,
+                "environment": "research",
+                "stream_id": "stream-a",
+                "replay_available": True,
+                "latest_sequence": latest_sequence,
+            }
+        )
+
+    class FakeConnection:
+        def __init__(self, messages) -> None:
+            self._messages = list(messages)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, message):
+            sent_messages.append(message)
+
+        async def recv(self):
+            if self._messages:
+                message = self._messages.pop(0)
+                if isinstance(message, BaseException):
+                    raise message
+                return message
+            await disconnect.wait()
+            raise OSError("simulated disconnect")
+
+    connections = [
+        FakeConnection(
+            (
+                ready(1),
+                encode_market_state_batch(
+                    (states[0],),
+                    sequence=1,
+                    published_at=states[0].bucket_end,
+                    stream_id="stream-a",
+                ),
+                encode_market_state_batch(
+                    (states[1],),
+                    sequence=2,
+                    published_at=states[1].bucket_end,
+                    stream_id="stream-a",
+                ),
+                encode_market_state_batch(
+                    (states[2],),
+                    sequence=3,
+                    published_at=states[2].bucket_end,
+                    stream_id="stream-a",
+                ),
+                encode_market_state_batch(
+                    (states[3],),
+                    sequence=4,
+                    published_at=states[3].bucket_end,
+                    stream_id="stream-a",
+                ),
+            )
+        ),
+        FakeConnection(
+            (
+                ready(4),
+                encode_market_state_batch(
+                    (states[4],),
+                    sequence=5,
+                    published_at=states[4].bucket_end,
+                    stream_id="stream-a",
+                ),
+            )
+        ),
+    ]
+
+    monkeypatch.setattr(
+        hub_module,
+        "connect",
+        lambda *_args, **_kwargs: connections.pop(0),
+    )
+    source = WebSocketMarketStateSource(
+        url="ws://unused",
+        environment="research",
+        consumer_id="test-live",
+        config=MarketStateHubConfig(
+            reconnect_delays=(0,),
+            unavailable_timeout_seconds=10,
+        ),
+    )
+    iterator = source.__aiter__()
+    try:
+        assert await anext(iterator) == states[0]
+        # Give the independent reader a chance to drain the socket while the
+        # strategy consumer is between state-processing calls.
+        await asyncio.sleep(0.01)
+        assert await anext(iterator) == states[4]
+    finally:
+        source.stop()
+        await iterator.aclose()
+
+    assert json.loads(sent_messages[1])["last_sequence"] == 4
+
+
 async def test_market_state_source_fails_closed_on_sequence_gap(monkeypatch) -> None:
     first = fixture_state("BTCUSDT", 0)
     skipped = fixture_state("BTCUSDT", 2)

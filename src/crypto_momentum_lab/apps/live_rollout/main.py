@@ -1415,6 +1415,7 @@ async def _run_live_daemon(
         )
         entry_filter_cache_ready = not entry_filter_cache_required
         market_state_available = market_state_source != "hub"
+        market_state_unavailable_reason = "market_state_hub_connecting"
 
         def refresh_entry_enabled() -> None:
             if draining:
@@ -1422,7 +1423,7 @@ async def _run_live_daemon(
             elif not market_state_available:
                 daemon.set_entry_enabled(
                     False,
-                    reason="market_state_hub_connecting",
+                    reason=market_state_unavailable_reason,
                 )
             elif not entry_filter_cache_ready:
                 daemon.set_entry_enabled(
@@ -1474,8 +1475,22 @@ async def _run_live_daemon(
                 available: bool,
                 reason: str | None,
             ) -> None:
-                nonlocal market_state_available
+                nonlocal market_state_available, market_state_unavailable_reason
                 market_state_available = available
+                if available:
+                    market_state_unavailable_reason = "market_state_hub_ready"
+                else:
+                    market_state_unavailable_reason = (
+                        reason or "market_state_hub_unavailable"
+                    )
+                    if reason is not None and (
+                        reason.startswith("market_state_consumer_lagged")
+                        or (
+                            reason.startswith("MarketStateHubSequenceGap")
+                            and "consumer queue overflowed" not in reason
+                        )
+                    ):
+                        daemon.notify_market_state_gap(reason=reason)
                 refresh_entry_enabled()
 
             hub_source = WebSocketMarketStateSource(

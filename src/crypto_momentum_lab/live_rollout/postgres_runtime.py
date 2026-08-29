@@ -97,8 +97,83 @@ class PostgresLiveContextProvider:
         self._cache_epoch = 0
         self._cached_rules: dict[str, SymbolTradingRules] = {}
         self._cached_rules_at: dict[str, datetime] = {}
+        self._context_load_lock = asyncio.Lock()
+        self._rules_load_lock = asyncio.Lock()
+        self._rules_load_tasks: dict[
+            str,
+            asyncio.Task[SymbolTradingRules],
+        ] = {}
 
     async def __call__(self, state: MarketState15s) -> LiveDaemonRuntimeContext:
+        now = datetime.now(tz=UTC)
+        cache_epoch = getattr(self, "_cache_epoch", 0)
+        cached_context = getattr(self, "_cached_context", None)
+        cached_bucket_start = getattr(self, "_cached_bucket_start", None)
+        if (
+            cached_context is not None
+            and cached_bucket_start is not None
+            and state.bucket_start <= cached_bucket_start
+        ):
+            symbol_rules = await self._load_symbol_rules(state.symbol, now)
+            current_context = self._cached_context
+            current_bucket_start = self._cached_bucket_start
+            if (
+                getattr(self, "_cache_epoch", 0) == cache_epoch
+                and current_context is not None
+                and current_bucket_start is not None
+                and state.bucket_start <= current_bucket_start
+            ):
+                return replace(
+                    current_context,
+                    now=now,
+                    gate_context=replace(current_context.gate_context, now=now),
+                    trading_rules={state.symbol: symbol_rules},
+                )
+
+        async with self._context_load_guard():
+            # Another live lane may have refreshed the cache while this call
+            # waited for the single-flight lock. Never issue the full account
+            # query set when a newer snapshot is already available.
+            now = datetime.now(tz=UTC)
+            cache_epoch = getattr(self, "_cache_epoch", 0)
+            cached_context = getattr(self, "_cached_context", None)
+            cached_bucket_start = getattr(self, "_cached_bucket_start", None)
+            if (
+                cached_context is not None
+                and cached_bucket_start is not None
+                and state.bucket_start <= cached_bucket_start
+            ):
+                symbol_rules = await self._load_symbol_rules(state.symbol, now)
+                current_context = self._cached_context
+                current_bucket_start = self._cached_bucket_start
+                if (
+                    getattr(self, "_cache_epoch", 0) == cache_epoch
+                    and current_context is not None
+                    and current_bucket_start is not None
+                    and state.bucket_start <= current_bucket_start
+                ):
+                    return replace(
+                        current_context,
+                        now=now,
+                        gate_context=replace(
+                            current_context.gate_context,
+                            now=now,
+                        ),
+                        trading_rules={state.symbol: symbol_rules},
+                    )
+            return await self._load_context(state)
+
+    def _context_load_guard(self) -> asyncio.Lock:
+        lock = getattr(self, "_context_load_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._context_load_lock = lock
+        return lock
+
+    async def _load_context(
+        self,
+        state: MarketState15s,
+    ) -> LiveDaemonRuntimeContext:
         now = datetime.now(tz=UTC)
         cached_context = self._cached_context
         if (
@@ -262,12 +337,28 @@ class PostgresLiveContextProvider:
         )
 
     def invalidate_cache(self) -> None:
-        """Force the next state to reload account and risk state."""
+        """Force the next state to reload account and risk state.
+
+        Trading rules are market metadata, not account/risk state.  Keeping
+        their short-lived cache intact is important because account events
+        can invalidate this provider several times while a delayed market
+        state is still waiting to be evaluated.
+        """
         self._cache_epoch = getattr(self, "_cache_epoch", 0) + 1
         self._cached_bucket_start = None
         self._cached_context = None
+
+    def invalidate_trading_rules(self) -> None:
+        """Force the next symbol-rule lookup to reload market metadata."""
         self._cached_rules.clear()
         self._cached_rules_at.clear()
+
+    def _rules_load_guard(self) -> asyncio.Lock:
+        lock = getattr(self, "_rules_load_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._rules_load_lock = lock
+        return lock
 
     async def _load_symbol_rules(
         self,
@@ -283,7 +374,50 @@ class PostgresLiveContextProvider:
             < self._TRADING_RULE_CACHE_SECONDS
         ):
             return cached
-        market_sessions = getattr(self, "_market_sessions", self._sessions)
+
+        async with self._rules_load_guard():
+            # A different lane may have loaded this symbol while this call
+            # waited for the rules lock.
+            cached = self._cached_rules.get(symbol)
+            cached_at = self._cached_rules_at.get(symbol)
+            if (
+                cached is not None
+                and cached_at is not None
+                and (now - cached_at).total_seconds()
+                < self._TRADING_RULE_CACHE_SECONDS
+            ):
+                return cached
+
+            tasks = getattr(self, "_rules_load_tasks", None)
+            if tasks is None:
+                tasks = {}
+                self._rules_load_tasks = tasks
+            task = tasks.get(symbol)
+            if task is None:
+                task = asyncio.create_task(
+                    self._load_symbol_rules_uncached(symbol, now)
+                )
+                tasks[symbol] = task
+
+        try:
+            # One cancelled caller must not cancel the shared database load;
+            # the next lane should be able to await the same task.
+            return await asyncio.shield(task)
+        finally:
+            if task.done():
+                async with self._rules_load_guard():
+                    tasks = getattr(self, "_rules_load_tasks", None)
+                    if tasks is not None and tasks.get(symbol) is task:
+                        tasks.pop(symbol, None)
+
+    async def _load_symbol_rules_uncached(
+        self,
+        symbol: str,
+        now: datetime,
+    ) -> SymbolTradingRules:
+        market_sessions = getattr(self, "_market_sessions", None)
+        if market_sessions is None:
+            market_sessions = self._sessions
         loaded_rules = await _load_trading_rules(market_sessions, {symbol})
         symbol_rules = loaded_rules[symbol]
         self._cached_rules[symbol] = symbol_rules

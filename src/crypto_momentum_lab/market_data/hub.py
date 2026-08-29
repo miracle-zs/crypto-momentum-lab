@@ -20,7 +20,7 @@ from typing import cast
 from uuid import uuid4
 
 import structlog
-from websockets.asyncio.client import connect
+from websockets.asyncio.client import ClientConnection, connect
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
@@ -32,6 +32,7 @@ _HUB_SCHEMA_VERSION = 1
 _SUBSCRIBE_MESSAGE = "subscribe_market_states"
 _READY_MESSAGE = "market_state_hub_ready"
 _BATCH_MESSAGE = "market_state_batch"
+_CLIENT_RECEIVE_QUEUE_SIZE = 2
 
 
 class MarketStateHubError(RuntimeError):
@@ -57,6 +58,14 @@ class MarketStateBatch:
     environment: str
     states: tuple[MarketState15s, ...]
     stream_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _MarketStateQueueOverflow:
+    latest_sequence: int
+
+
+_MarketStateQueueItem = MarketStateBatch | _MarketStateQueueOverflow | Exception
 
 
 @dataclass(frozen=True, slots=True)
@@ -413,8 +422,10 @@ class WebSocketMarketStateSource:
         self._config = config or MarketStateHubConfig()
         self._on_connection_change = on_connection_change
         self._connection_available: bool | None = None
+        self._connection_reason: str | None = None
         self._stream_id: str | None = None
         self._last_sequence: int | None = None
+        self._rewarm_required = False
         self._stopping = False
 
     def stop(self) -> None:
@@ -474,7 +485,8 @@ class WebSocketMarketStateSource:
                         "latest_sequence",
                     )
                     if (
-                        self._last_sequence is not None
+                        not self._rewarm_required
+                        and self._last_sequence is not None
                         and ready_latest_sequence is not None
                         and self._last_sequence >= ready_latest_sequence
                     ):
@@ -482,49 +494,84 @@ class WebSocketMarketStateSource:
                     else:
                         self._notify_connection_change(
                             False,
-                            "market_state_replaying",
+                            (
+                                "market_state_rewarming"
+                                if self._rewarm_required
+                                else "market_state_replaying"
+                            ),
                         )
                     unavailable_since = time.monotonic()
                     reconnect_attempt = 0
-                    while not self._stopping:
-                        message = await connection.recv()
-                        batch = decode_market_state_batch_envelope(
-                            message,
-                            expected_environment=self._environment,
-                        )
-                        if (
-                            self._stream_id is not None
-                            and batch.stream_id is not None
-                            and batch.stream_id != self._stream_id
-                        ):
-                            raise MarketStateHubProtocolError(
-                                "market-state stream mismatch"
-                            )
-                        if self._last_sequence is not None:
-                            if batch.sequence <= self._last_sequence:
-                                log.warning(
-                                    "market_state_batch_duplicate_ignored",
-                                    sequence=batch.sequence,
-                                    last_sequence=self._last_sequence,
-                                    environment=self._environment,
-                                    consumer_id=self._consumer_id,
+                    receive_queue: asyncio.Queue[_MarketStateQueueItem] = (
+                        asyncio.Queue(maxsize=_CLIENT_RECEIVE_QUEUE_SIZE)
+                    )
+                    reader_task = asyncio.create_task(
+                        self._read_market_state_batches(
+                            connection,
+                            receive_queue,
+                        ),
+                        name=f"market-state-reader:{self._consumer_id}",
+                    )
+                    try:
+                        while not self._stopping:
+                            item = await receive_queue.get()
+                            if isinstance(item, _MarketStateQueueOverflow):
+                                self._last_sequence = item.latest_sequence
+                                self._rewarm_required = True
+                                self._notify_connection_change(
+                                    False,
+                                    "market_state_consumer_lagged",
                                 )
-                                continue
-                            expected_sequence = self._last_sequence + 1
-                            if batch.sequence != expected_sequence:
                                 raise MarketStateHubSequenceGap(
-                                    "market-state sequence gap: "
-                                    f"expected={expected_sequence}, "
-                                    f"received={batch.sequence}"
+                                    "market-state consumer queue overflowed; "
+                                    f"skipped through sequence={item.latest_sequence}"
                                 )
-                        for state in batch.states:
-                            yield state
-                        self._last_sequence = batch.sequence
-                        if (
-                            ready_latest_sequence is None
-                            or self._last_sequence >= ready_latest_sequence
-                        ):
-                            self._notify_connection_change(True, None)
+                            if isinstance(item, Exception):
+                                raise item
+                            batch = item
+                            if (
+                                self._stream_id is not None
+                                and batch.stream_id is not None
+                                and batch.stream_id != self._stream_id
+                            ):
+                                raise MarketStateHubProtocolError(
+                                    "market-state stream mismatch"
+                                )
+                            if self._last_sequence is not None:
+                                if batch.sequence <= self._last_sequence:
+                                    log.warning(
+                                        "market_state_batch_duplicate_ignored",
+                                        sequence=batch.sequence,
+                                        last_sequence=self._last_sequence,
+                                        environment=self._environment,
+                                        consumer_id=self._consumer_id,
+                                    )
+                                    continue
+                                expected_sequence = self._last_sequence + 1
+                                if batch.sequence != expected_sequence:
+                                    raise MarketStateHubSequenceGap(
+                                        "market-state sequence gap: "
+                                        f"expected={expected_sequence}, "
+                                        f"received={batch.sequence}"
+                                    )
+                            for state in batch.states:
+                                yield state
+                            self._last_sequence = batch.sequence
+                            if self._rewarm_required:
+                                self._rewarm_required = False
+                                self._notify_connection_change(True, None)
+                            elif (
+                                ready_latest_sequence is None
+                                or self._last_sequence >= ready_latest_sequence
+                            ):
+                                self._notify_connection_change(True, None)
+                    finally:
+                        if not reader_task.done():
+                            reader_task.cancel()
+                        await asyncio.gather(
+                            reader_task,
+                            return_exceptions=True,
+                        )
             except asyncio.CancelledError:
                 raise
             except (
@@ -552,14 +599,115 @@ class WebSocketMarketStateSource:
                 if delay > 0:
                     await asyncio.sleep(delay)
 
+    async def _read_market_state_batches(
+        self,
+        connection: ClientConnection,
+        receive_queue: asyncio.Queue[_MarketStateQueueItem],
+    ) -> None:
+        try:
+            while True:
+                batch = decode_market_state_batch_envelope(
+                    await connection.recv(),
+                    expected_environment=self._environment,
+                )
+                if (
+                    self._stream_id is not None
+                    and batch.stream_id is not None
+                    and batch.stream_id != self._stream_id
+                ):
+                    raise MarketStateHubProtocolError(
+                        "market-state stream mismatch"
+                    )
+                self._enqueue_market_state_batch(receive_queue, batch)
+                # Yield to the strategy consumer after each buffered message.
+                # Without this fairness point a burst can be drained and
+                # coalesced before the consumer receives its first batch.
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._enqueue_market_state_reader_error(receive_queue, error)
+
+    def _enqueue_market_state_batch(
+        self,
+        receive_queue: asyncio.Queue[_MarketStateQueueItem],
+        batch: MarketStateBatch,
+    ) -> None:
+        queued_items: list[_MarketStateQueueItem] = []
+        while True:
+            try:
+                queued_items.append(receive_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        if any(
+            isinstance(item, _MarketStateQueueOverflow)
+            for item in queued_items
+        ):
+            receive_queue.put_nowait(
+                _MarketStateQueueOverflow(latest_sequence=batch.sequence)
+            )
+            log.warning(
+                "market_state_hub_client_queue_overflow",
+                consumer_id=self._consumer_id,
+                environment=self._environment,
+                latest_sequence=batch.sequence,
+            )
+            return
+        for item in queued_items:
+            receive_queue.put_nowait(item)
+        try:
+            receive_queue.put_nowait(batch)
+            return
+        except asyncio.QueueFull:
+            pass
+        while True:
+            try:
+                receive_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        receive_queue.put_nowait(
+            _MarketStateQueueOverflow(latest_sequence=batch.sequence)
+        )
+        log.warning(
+            "market_state_hub_client_queue_overflow",
+            consumer_id=self._consumer_id,
+            environment=self._environment,
+            latest_sequence=batch.sequence,
+        )
+
+    @staticmethod
+    def _enqueue_market_state_reader_error(
+        receive_queue: asyncio.Queue[_MarketStateQueueItem],
+        error: Exception,
+    ) -> None:
+        queued_items: list[_MarketStateQueueItem] = []
+        while True:
+            try:
+                queued_items.append(receive_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        overflow = next(
+            (
+                item
+                for item in queued_items
+                if isinstance(item, _MarketStateQueueOverflow)
+            ),
+            None,
+        )
+        receive_queue.put_nowait(error if overflow is None else overflow)
+
     def _notify_connection_change(
         self,
         available: bool,
         reason: str | None,
     ) -> None:
-        if self._connection_available == available:
+        if (
+            self._connection_available == available
+            and self._connection_reason == reason
+        ):
             return
         self._connection_available = available
+        self._connection_reason = reason
         log.warning(
             "market_state_hub_connection_state_changed",
             available=available,
