@@ -44,6 +44,27 @@ x-paper: &paper
 services:
   postgres:
     image: postgres:16-alpine
+    # Keep observability always-on and bound maintenance concurrency.  The
+    # latter prevents a retention/index plan from multiplying work_mem across
+    # parallel workers inside the 1 GiB cgroup.
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - track_io_timing=on
+      - -c
+      - track_wal_io_timing=on
+      - -c
+      - max_parallel_workers_per_gather=1
+      - -c
+      - max_parallel_maintenance_workers=0
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - autovacuum_work_mem=32MB
     logging: *default-logging
     environment:
       POSTGRES_DB: cml
@@ -321,6 +342,12 @@ services:
       - ${CML_ACCOUNT_EQUITY_RETENTION_DAYS:-370}
       - --snapshot-retention-interval-seconds
       - ${CML_ACCOUNT_SNAPSHOT_RETENTION_INTERVAL_SECONDS:-3600}
+      - --snapshot-retention-batch-size
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_BATCH_SIZE:-250}
+      - --snapshot-retention-max-rows-per-table
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_ROWS_PER_TABLE:-2000}
+      - --snapshot-retention-max-runtime-seconds
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_RUNTIME_SECONDS:-45}
       - --account-event-hub-host
       - ${CML_ACCOUNT_EVENT_HUB_HOST:-0.0.0.0}
       - --account-event-hub-port

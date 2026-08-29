@@ -9,9 +9,9 @@ tuning the checkpointer.
 The server PostgreSQL container reserves `shm_size: 256m`.  Docker's default
 64 MiB `/dev/shm` is too small for some `VACUUM (ANALYZE)` and index-maintenance
 plans, causing a misleading `No space left on device` even when the data
-volume has free space.  Keep parallel maintenance disabled explicitly for a
-one-off operation if the plan still approaches the limit; do not compensate
-by raising application command timeouts.
+volume has free space. The server Compose profile disables parallel maintenance
+explicitly; do not compensate for a slow plan by raising application command
+timeouts.
 
 ## Account snapshot retention
 
@@ -20,10 +20,11 @@ position, account configuration, and reconciliation snapshots by default.
 Older balance history is thinned to the newest snapshot in each UTC hour and
 retained for 370 days so the operator dashboard can render one-month and
 one-year account-equity ranges without keeping a year of high-frequency raw
-payloads. The retention task runs once per hour, deletes at most 1,000 rows per
-batch and 10,000 rows per table per cycle, and always preserves the newest row
-for each account/asset or account/position key. `account_fill_events` is the
-execution audit trail and is not deleted by this task.
+payloads. The retention task runs once per hour, deletes at most 250 rows per
+batch and 2,000 rows per table per cycle, and aborts a cycle after 45 seconds.
+It always preserves the newest row for each account/asset or account/position
+key. `account_fill_events` is the execution audit trail and is not deleted by
+this task.
 
 The policy is controlled in `compose.server.yaml`:
 
@@ -31,6 +32,9 @@ The policy is controlled in `compose.server.yaml`:
 CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS=7
 CML_ACCOUNT_EQUITY_RETENTION_DAYS=370
 CML_ACCOUNT_SNAPSHOT_RETENTION_INTERVAL_SECONDS=3600
+CML_ACCOUNT_SNAPSHOT_RETENTION_BATCH_SIZE=250
+CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_ROWS_PER_TABLE=2000
+CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_RUNTIME_SECONDS=45
 ```
 
 After the first logical cleanup, inspect table sizes and run `VACUUM
@@ -68,9 +72,11 @@ SELECT wal_bytes, wal_fpi, wal_buffers_full
 FROM pg_stat_wal;
 ```
 
-Enable `track_io_timing` and `track_wal_io_timing` only during a planned,
-measured change. Compare cloud-disk IOPS, throughput, utilization, and await at
-10-second resolution around an actual application timeout.
+The server Compose profile enables `track_io_timing`, `track_wal_io_timing`,
+and `pg_stat_statements` at startup. Compare cloud-disk IOPS, throughput,
+utilization, and await at 10-second resolution around an actual application
+timeout; disable them only after a measured rollback shows unacceptable
+overhead.
 
 ## Candidate trials after application write reduction
 

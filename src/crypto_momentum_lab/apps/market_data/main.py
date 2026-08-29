@@ -107,11 +107,12 @@ _MARKET_DATA_STALE_AFTER_SECONDS = 120.0
 _MARKET_DATA_WATCHDOG_INTERVAL_SECONDS = 15.0
 _CAPTURE_STOP_TIMEOUT_SECONDS = 55.0
 _PAPER_EXIT_RECONCILE_SECONDS = 15.0
-_DATABASE_RETENTION_INTERVAL_SECONDS = 60.0
+_DATABASE_RETENTION_INTERVAL_SECONDS = 300.0
+_DATABASE_RETENTION_MAX_RUNTIME_SECONDS = 45.0
 _CONTRACT_METADATA_RETENTION_HOURS = 6.0
 _RUNTIME_STATE_RETENTION_HOURS = 48.0
-_CONTRACT_METADATA_RETENTION_BATCH_SIZE = 1_000
-_RUNTIME_STATE_RETENTION_BATCH_SIZE = 1_000
+_CONTRACT_METADATA_RETENTION_BATCH_SIZE = 250
+_RUNTIME_STATE_RETENTION_BATCH_SIZE = 250
 _PAPER_EXIT_RUN_IDS_ENV = "CML_PAPER_EXIT_RUN_IDS"
 _LIVE_POSITION_ACCOUNT_LABEL_ENV = "CML_LIVE_POSITION_ACCOUNT_LABEL"
 _MARKET_STATE_HUB_HOST_ENV = "CML_MARKET_STATE_HUB_HOST"
@@ -552,13 +553,16 @@ async def run_operational_database_retention_loop(
     while True:
         await sleeper(interval_seconds)
         try:
-            await prune_operational_database_once(
-                repository,
-                contract_metadata_retention_hours=contract_metadata_retention_hours,
-                runtime_state_retention_hours=runtime_state_retention_hours,
-                contract_metadata_batch_size=contract_metadata_batch_size,
-                runtime_state_batch_size=runtime_state_batch_size,
-            )
+            async with asyncio.timeout(_DATABASE_RETENTION_MAX_RUNTIME_SECONDS):
+                await prune_operational_database_once(
+                    repository,
+                    contract_metadata_retention_hours=(
+                        contract_metadata_retention_hours
+                    ),
+                    runtime_state_retention_hours=runtime_state_retention_hours,
+                    contract_metadata_batch_size=contract_metadata_batch_size,
+                    runtime_state_batch_size=runtime_state_batch_size,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as error:

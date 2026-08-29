@@ -1,0 +1,23 @@
+[Unit]
+Description=Crypto Momentum Lab operational alert monitor
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/crypto-momentum-lab
+Environment=PYTHONUNBUFFERED=1
+Environment=CML_PROJECT_DIRECTORY=/opt/crypto-momentum-lab
+Environment=CML_COMPOSE_FILE=/opt/crypto-momentum-lab/compose.server.yaml
+Environment=CML_COMPOSE_ENV_FILE=/opt/crypto-momentum-lab/.env.server
+EnvironmentFile=-/etc/crypto-momentum-lab/ops-monitor.env
+ExecStart=/usr/bin/python3 /opt/crypto-momentum-lab/deploy/ops/cml_ops_monitor.py
+Restart=always
+RestartSec=10s
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -25,8 +25,11 @@ class AccountSnapshotRetentionConfig:
     retention_days: int = 7
     equity_retention_days: int = 370
     interval_seconds: float = 3_600.0
-    batch_size: int = 1_000
-    max_rows_per_table: int = 10_000
+    # Keep each transaction small enough that retention cannot compete with
+    # order/account writes for the PostgreSQL memory budget.
+    batch_size: int = 250
+    max_rows_per_table: int = 2_000
+    max_runtime_seconds: float = 45.0
 
     def __post_init__(self) -> None:
         if self.retention_days <= 0:
@@ -39,6 +42,8 @@ class AccountSnapshotRetentionConfig:
             raise ValueError("batch_size must be positive")
         if self.max_rows_per_table <= 0:
             raise ValueError("max_rows_per_table must be positive")
+        if self.max_runtime_seconds < 5:
+            raise ValueError("max_runtime_seconds must be at least 5 seconds")
 
 
 async def prune_account_snapshots_once(
@@ -76,12 +81,13 @@ async def run_account_snapshot_retention(
     while True:
         await sleep(config.interval_seconds)
         try:
-            deleted = await prune_account_snapshots_once(
-                repository=repository,
-                environment=environment,
-                account_label=account_label,
-                config=config,
-            )
+            async with asyncio.timeout(config.max_runtime_seconds):
+                deleted = await prune_account_snapshots_once(
+                    repository=repository,
+                    environment=environment,
+                    account_label=account_label,
+                    config=config,
+                )
         except Exception as error:
             if on_error is not None:
                 on_error(error)

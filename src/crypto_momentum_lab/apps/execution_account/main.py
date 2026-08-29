@@ -190,6 +190,33 @@ def sync_command(
         float,
         typer.Option("--snapshot-retention-interval-seconds", min=300),
     ] = 3_600.0,
+    snapshot_retention_batch_size: Annotated[
+        int,
+        typer.Option(
+            "--snapshot-retention-batch-size",
+            min=50,
+            max=1_000,
+            help="Rows deleted per retention transaction.",
+        ),
+    ] = 250,
+    snapshot_retention_max_rows_per_table: Annotated[
+        int,
+        typer.Option(
+            "--snapshot-retention-max-rows-per-table",
+            min=250,
+            max=5_000,
+            help="Maximum rows deleted from one table per cycle.",
+        ),
+    ] = 2_000,
+    snapshot_retention_max_runtime_seconds: Annotated[
+        float,
+        typer.Option(
+            "--snapshot-retention-max-runtime-seconds",
+            min=5,
+            max=300,
+            help="Hard timeout for one retention cycle.",
+        ),
+    ] = 45.0,
 ) -> None:
     resolved_database_url = _execution_database_url(database_url)
     if not resolved_database_url:
@@ -226,6 +253,13 @@ def sync_command(
             equity_retention_days=equity_retention_days,
             snapshot_retention_interval_seconds=(
                 snapshot_retention_interval_seconds
+            ),
+            snapshot_retention_batch_size=snapshot_retention_batch_size,
+            snapshot_retention_max_rows_per_table=(
+                snapshot_retention_max_rows_per_table
+            ),
+            snapshot_retention_max_runtime_seconds=(
+                snapshot_retention_max_runtime_seconds
             ),
         )
     )
@@ -294,6 +328,9 @@ async def sync_continuously(
     snapshot_retention_days: int,
     equity_retention_days: int,
     snapshot_retention_interval_seconds: float,
+    snapshot_retention_batch_size: int,
+    snapshot_retention_max_rows_per_table: int,
+    snapshot_retention_max_runtime_seconds: float,
 ) -> None:
     engine = create_execution_database_engine(database_url)
     retention_engine = create_maintenance_database_engine(database_url)
@@ -377,6 +414,9 @@ async def sync_continuously(
                         retention_days=snapshot_retention_days,
                         equity_retention_days=equity_retention_days,
                         interval_seconds=snapshot_retention_interval_seconds,
+                        batch_size=snapshot_retention_batch_size,
+                        max_rows_per_table=snapshot_retention_max_rows_per_table,
+                        max_runtime_seconds=snapshot_retention_max_runtime_seconds,
                     ),
                     on_error=lambda error: typer.echo(
                         "Account snapshot retention failed: "

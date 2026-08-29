@@ -154,7 +154,7 @@ async def test_operational_retention_uses_bounded_batches() -> None:
         now=datetime(2026, 6, 14, 11, 1, tzinfo=UTC),
     )
 
-    assert repository.calls == [("contract", 1_000), ("runtime", 1_000)]
+    assert repository.calls == [("contract", 250), ("runtime", 250)]
 
 
 def test_run_market_data_uses_combined_service(
