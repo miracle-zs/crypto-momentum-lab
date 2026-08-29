@@ -603,9 +603,9 @@ SELECT 'parallel_maintenance' || E'\\t' || current_setting(
         age = _parse_float(values.get("event_age"))
         return DatabaseState(
             latest_event_age_seconds=None if age is None or age < 0 else age,
-            pg_stat_statements_ready=values.get("pg_stat_statements") == "t",
-            track_io_timing=values.get("track_io_timing") == "on",
-            track_wal_io_timing=values.get("track_wal_io_timing") == "on",
+            pg_stat_statements_ready=_parse_bool(values.get("pg_stat_statements")),
+            track_io_timing=_parse_bool(values.get("track_io_timing")),
+            track_wal_io_timing=_parse_bool(values.get("track_wal_io_timing")),
             max_parallel_maintenance_workers=_parse_int(
                 values.get("parallel_maintenance")
             ),
@@ -751,6 +751,12 @@ def _parse_int(value: str | None) -> int | None:
         return int(value)
     except ValueError:
         return None
+
+
+def _parse_bool(value: str | None) -> bool:
+    """Parse the boolean spellings emitted by PostgreSQL's text output."""
+
+    return (value or "").strip().lower() in {"1", "on", "t", "true", "yes"}
 
 
 def _sql_literal(value: str) -> str:

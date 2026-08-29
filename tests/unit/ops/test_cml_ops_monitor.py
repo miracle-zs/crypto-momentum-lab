@@ -4,6 +4,8 @@ from deploy.ops.cml_ops_monitor import (
     Alert,
     ContainerSnapshot,
     LogSignals,
+    MonitorConfig,
+    OpsMonitor,
     evaluate_container,
     evaluate_database_state,
     evaluate_log_signals,
@@ -62,3 +64,29 @@ def test_container_alerts_on_oom_and_rss_limit() -> None:
         "container_memory_high",
     }
     assert all(alert.severity == "critical" for alert in alerts)
+
+
+def test_database_state_parses_postgres_boolean_text(tmp_path) -> None:
+    class Runner:
+        def run(self, args, *, timeout_seconds):
+            del args, timeout_seconds
+            return (
+                "event_age\t12\n"
+                "pg_stat_statements\ttrue\n"
+                "track_io_timing\ton\n"
+                "track_wal_io_timing\tt\n"
+                "parallel_maintenance\t0\n"
+            )
+
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+        runner=Runner(),
+    )
+
+    state = monitor._database_state("postgres")
+
+    assert state.latest_event_age_seconds == 12
+    assert state.pg_stat_statements_ready is True
+    assert state.track_io_timing is True
+    assert state.track_wal_io_timing is True
+    assert state.max_parallel_maintenance_workers == 0
