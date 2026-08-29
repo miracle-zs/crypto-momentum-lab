@@ -827,18 +827,49 @@ def _env_path(name: str, default: Path | None) -> Path | None:
     return Path(value) if value else None
 
 
+def _read_env_value(path: Path | None, name: str) -> str | None:
+    """Read one non-secret value from a Compose-style environment file."""
+
+    if path is None:
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        candidate = line.strip()
+        if not candidate or candidate.startswith("#"):
+            continue
+        if candidate.startswith("export "):
+            candidate = candidate[7:].lstrip()
+        key, separator, value = candidate.partition("=")
+        if separator and key.strip() == name:
+            value = value.strip()
+            if value[:1] == value[-1:] and value[:1] in {"'", '"'}:
+                value = value[1:-1]
+            return value
+    return None
+
+
 def build_config(args: argparse.Namespace) -> MonitorConfig:
     services = tuple(
         item.strip()
         for item in args.services.split(",")
         if item.strip()
     )
+    compose_env_file = _env_path("CML_COMPOSE_ENV_FILE", None)
+    live_run_id = (
+        args.live_run_id
+        or os.environ.get("CML_LIVE_SESSION_ID")
+        or _read_env_value(compose_env_file, "CML_LIVE_SESSION_ID")
+        or "live-primary-v1"
+    )
     return MonitorConfig(
         project_directory=Path(args.project_directory),
         compose_file=Path(args.compose_file),
-        compose_env_file=_env_path("CML_COMPOSE_ENV_FILE", None),
+        compose_env_file=compose_env_file,
         services=services or _DEFAULT_SERVICES,
-        live_run_id=args.live_run_id,
+        live_run_id=live_run_id,
         interval_seconds=args.interval_seconds,
         log_window_seconds=args.log_window_seconds,
         telemetry_stale_after_seconds=args.telemetry_stale_after_seconds,
@@ -872,7 +903,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--live-run-id",
-        default=os.environ.get("CML_LIVE_SESSION_ID", "live-primary-v1"),
+        default=None,
     )
     parser.add_argument(
         "--interval-seconds",

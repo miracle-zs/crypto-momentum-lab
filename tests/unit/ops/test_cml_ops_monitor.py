@@ -1,3 +1,4 @@
+import argparse
 from datetime import UTC, datetime
 
 from deploy.ops.cml_ops_monitor import (
@@ -6,6 +7,7 @@ from deploy.ops.cml_ops_monitor import (
     LogSignals,
     MonitorConfig,
     OpsMonitor,
+    build_config,
     evaluate_container,
     evaluate_database_state,
     evaluate_log_signals,
@@ -90,3 +92,34 @@ def test_database_state_parses_postgres_boolean_text(tmp_path) -> None:
     assert state.track_io_timing is True
     assert state.track_wal_io_timing is True
     assert state.max_parallel_maintenance_workers == 0
+
+
+def test_build_config_reads_live_session_from_compose_env(
+    tmp_path, monkeypatch
+) -> None:
+    env_file = tmp_path / "compose.env"
+    env_file.write_text(
+        "CML_LIVE_SESSION_ID='live-b1-long-100u-5x-v1'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CML_COMPOSE_ENV_FILE", str(env_file))
+    args = argparse.Namespace(
+        project_directory=str(tmp_path),
+        compose_file=str(tmp_path / "compose.yaml"),
+        services="postgres",
+        live_run_id=None,
+        interval_seconds=60.0,
+        log_window_seconds=120.0,
+        telemetry_stale_after_seconds=900.0,
+        rss_warning_fraction=0.75,
+        rss_critical_fraction=0.90,
+        rss_growth_bytes=64 * 1024 * 1024,
+        rss_growth_window_seconds=1_800.0,
+        alert_cooldown_seconds=900.0,
+        command_timeout_seconds=15.0,
+        state_path=str(tmp_path / "state.json"),
+    )
+
+    config = build_config(args)
+
+    assert config.live_run_id == "live-b1-long-100u-5x-v1"
