@@ -111,7 +111,7 @@ class _Subscriber:
     connection: ServerConnection
     environment: str
     queue: asyncio.Queue[str]
-    writer_task: asyncio.Task[None]
+    writer_task: asyncio.Task[None] | None = None
 
 
 class MarketStateHub:
@@ -202,11 +202,13 @@ class MarketStateHub:
             self._subscribers.clear()
         for subscriber in subscribers:
             await subscriber.connection.close()
-        if subscribers:
-            await asyncio.gather(
-                *(subscriber.writer_task for subscriber in subscribers),
-                return_exceptions=True,
-            )
+        writer_tasks = tuple(
+            subscriber.writer_task
+            for subscriber in subscribers
+            if subscriber.writer_task is not None
+        )
+        if writer_tasks:
+            await asyncio.gather(*writer_tasks, return_exceptions=True)
         self._bound_host = None
         self._bound_port = None
 
@@ -221,7 +223,11 @@ class MarketStateHub:
             )
             sequence = self._sequence_by_environment.get(environment, 0) + 1
             self._sequence_by_environment[environment] = sequence
-            message = encode_market_state_batch(
+            # Snapshot payload encoding can be sizeable when many symbols
+            # close together. Run it off the publisher loop so one batch does
+            # not create an event-loop-lag spike for the Binance reader.
+            message = await asyncio.to_thread(
+                encode_market_state_batch,
                 environment_states,
                 sequence=sequence,
                 published_at=published_at,
@@ -281,6 +287,10 @@ class MarketStateHub:
                 requested_stream_id is not None
                 and requested_stream_id != self._stream_id
             )
+            replay_available = True
+            oldest_sequence: int | None = None
+            latest_sequence: int | None = None
+            replay_messages: tuple[str, ...] = ()
             async with self._subscriber_lock:
                 (
                     replay_available,
@@ -291,44 +301,50 @@ class MarketStateHub:
                     environment,
                     None if stream_reset else last_sequence,
                 )
-                await connection.send(
-                    json.dumps(
-                        {
-                            "type": _READY_MESSAGE,
-                            "schema_version": _HUB_SCHEMA_VERSION,
-                            "environment": environment,
-                            "stream_id": self._stream_id,
-                            "stream_reset": stream_reset,
-                            "replay_available": replay_available,
-                            "oldest_sequence": oldest_sequence,
-                            "latest_sequence": latest_sequence,
-                        },
-                        separators=(",", ":"),
+                if replay_available:
+                    queue: asyncio.Queue[str] = asyncio.Queue(
+                        maxsize=max(
+                            self._config.subscriber_queue_size,
+                            len(replay_messages) + 1,
+                        )
                     )
-                )
-                if not replay_available:
-                    await connection.close(
-                        code=1013,
-                        reason="market-state replay is unavailable",
+                    for replay_message in replay_messages:
+                        queue.put_nowait(replay_message)
+                    subscriber = _Subscriber(
+                        connection=connection,
+                        environment=environment,
+                        queue=queue,
                     )
-                    return
-                queue: asyncio.Queue[str] = asyncio.Queue(
-                    maxsize=max(
-                        self._config.subscriber_queue_size,
-                        len(replay_messages) + 1,
-                    )
+                    self._subscribers[id(connection)] = subscriber
+            # The subscriber is registered before the handshake completes so a
+            # newly published batch is queued after any replay messages.  Keep
+            # the network send outside the global lock; a slow client must not
+            # pause the market-state publisher.
+            await connection.send(
+                json.dumps(
+                    {
+                        "type": _READY_MESSAGE,
+                        "schema_version": _HUB_SCHEMA_VERSION,
+                        "environment": environment,
+                        "stream_id": self._stream_id,
+                        "stream_reset": stream_reset,
+                        "replay_available": replay_available,
+                        "oldest_sequence": oldest_sequence,
+                        "latest_sequence": latest_sequence,
+                    },
+                    separators=(",", ":"),
                 )
-                for replay_message in replay_messages:
-                    queue.put_nowait(replay_message)
-                subscriber = _Subscriber(
-                    connection=connection,
-                    environment=environment,
-                    queue=queue,
-                    writer_task=asyncio.create_task(
-                        self._write_messages(connection, queue)
-                    ),
+            )
+            if not replay_available:
+                await connection.close(
+                    code=1013,
+                    reason="market-state replay is unavailable",
                 )
-                self._subscribers[id(connection)] = subscriber
+                return
+            assert subscriber is not None
+            subscriber.writer_task = asyncio.create_task(
+                self._write_messages(connection, queue)
+            )
             log.info(
                 "market_state_hub_subscriber_connected",
                 consumer_id=consumer_id,
@@ -345,12 +361,16 @@ class MarketStateHub:
             if subscriber is not None:
                 async with self._subscriber_lock:
                     self._subscribers.pop(id(connection), None)
-                if not subscriber.writer_task.done():
+                if (
+                    subscriber.writer_task is not None
+                    and not subscriber.writer_task.done()
+                ):
                     subscriber.writer_task.cancel()
-                await asyncio.gather(
-                    subscriber.writer_task,
-                    return_exceptions=True,
-                )
+                if subscriber.writer_task is not None:
+                    await asyncio.gather(
+                        subscriber.writer_task,
+                        return_exceptions=True,
+                    )
             log.info("market_state_hub_subscriber_disconnected")
 
     def _replay_snapshot(

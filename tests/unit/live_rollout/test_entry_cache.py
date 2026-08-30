@@ -7,6 +7,7 @@ import pytest
 from crypto_momentum_lab.live_rollout.entry_cache import (
     EntryFilterCacheConfig,
     LiveEntryFilterCache,
+    LiveEntrySymbolCache,
 )
 from crypto_momentum_lab.strategy_runner.candle_source import (
     ClosedCandleEmaSnapshot,
@@ -69,3 +70,36 @@ async def test_entry_filter_cache_warms_in_background_and_reads_without_io() -> 
 def test_entry_filter_cache_rejects_invalid_prefetch_config() -> None:
     with pytest.raises(ValueError, match="prefetch_concurrency"):
         EntryFilterCacheConfig(prefetch_concurrency=0)
+
+
+@pytest.mark.asyncio
+async def test_entry_symbol_cache_refreshes_pool_without_blocking_reads() -> None:
+    now = datetime(2026, 8, 22, 1, 2, 3, tzinfo=UTC)
+    ready = asyncio.Event()
+    calls: list[datetime] = []
+
+    async def load_symbols(observed_at: datetime) -> frozenset[str]:
+        calls.append(observed_at)
+        return frozenset({"BTCUSDT"})
+
+    def on_ready(value: bool) -> None:
+        assert value is True
+        ready.set()
+
+    cache = LiveEntrySymbolCache(
+        symbol_loader=load_symbols,
+        clock=lambda: now,
+        on_ready=on_ready,
+    )
+    task = asyncio.create_task(cache.run())
+    try:
+        await asyncio.wait_for(ready.wait(), timeout=1)
+        assert cache.ready is True
+        assert cache.symbols_for(now) == frozenset({"BTCUSDT"})
+        assert cache.symbols_for(now + timedelta(seconds=15)) == frozenset(
+            {"BTCUSDT"}
+        )
+        assert calls == [now]
+    finally:
+        await cache.stop()
+        await task

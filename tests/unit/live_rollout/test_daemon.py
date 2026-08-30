@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from sqlalchemy.exc import OperationalError
 
 from crypto_momentum_lab.domain.execution import (
+    ExchangeOrderEvent,
     ExchangeOrderSnapshot,
     ExchangeOrderState,
     FuturesPositionSide,
@@ -16,6 +17,7 @@ from crypto_momentum_lab.domain.execution import (
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import RiskEvaluation
 from crypto_momentum_lab.domain.strategy import (
+    EntryType,
     OrderIntentCandidate,
     StrategyCheckpoint,
     StrategyDecision,
@@ -80,6 +82,22 @@ async def test_live_daemon_submits_strategy_candidate_after_all_gates() -> None:
     assert result.submitted_order_count == 1
     assert result.halt_reason is None
     assert exchange.calls == ["submit"]
+
+
+async def test_live_daemon_uses_signal_close_gtd_limit_for_entries() -> None:
+    exchange = PlanAwareExchange()
+    daemon = _daemon(exchange=exchange, entry_order_type=EntryType.LIMIT)
+
+    result = await daemon.run(_states())
+
+    assert result.halt_reason is None
+    assert result.submitted_order_count == 1
+    assert len(exchange.plans) == 1
+    plan = exchange.plans[0]
+    assert plan.order_type == "LIMIT"
+    assert plan.price == Decimal("30000")
+    assert plan.time_in_force == "GTD"
+    assert plan.expires_at == NOW + timedelta(minutes=15)
 
 
 async def test_live_daemon_does_not_submit_expired_entry_candidate() -> None:
@@ -218,6 +236,60 @@ async def test_live_daemon_allows_entry_when_same_symbol_is_already_open() -> No
     assert result.submitted_order_count == 1
     assert result.halt_reason is None
     assert exchange.calls == ["submit"]
+
+
+async def test_live_daemon_allows_multiple_same_symbol_limit_entries() -> None:
+    exchange = PlanAwareExchange()
+
+    daemon = _daemon(
+        exchange=exchange,
+        strategy=TwoCandidateStrategy(),
+        max_gross_exposure=Decimal("100"),
+    )
+
+    result = await daemon.run(_states())
+
+    assert result.approved_intent_count == 2
+    assert result.submitted_order_count == 2
+    assert exchange.calls == ["submit", "submit"]
+
+
+async def test_live_daemon_reserves_unfilled_limit_entry_notional() -> None:
+    exchange = PlanAwareExchange()
+
+    daemon = _daemon(
+        exchange=exchange,
+        strategy=TwoCandidateStrategy(),
+    )
+
+    result = await daemon.run(_states())
+
+    assert result.approved_intent_count == 1
+    assert result.submitted_order_count == 1
+    assert exchange.calls == ["submit"]
+
+
+async def test_terminal_entry_event_releases_in_memory_reservation() -> None:
+    exchange = PlanAwareExchange()
+    daemon = _daemon(exchange=exchange)
+
+    await daemon.run(_states())
+    plan = exchange.plans[0]
+    assert daemon._pending_entry_plans
+
+    daemon.observe_entry_order_event(
+        plan,
+        ExchangeOrderEvent(
+            event_id="filled-event",
+            client_order_id=plan.client_order_id,
+            state=ExchangeOrderState.FILLED,
+            occurred_at=NOW,
+            exchange_order_id="exchange-1",
+            details={"executed_quantity": str(plan.quantity)},
+        ),
+    )
+
+    assert daemon._pending_entry_plans == {}
 
 
 async def test_live_daemon_allows_entry_with_confirmed_resting_order() -> None:
@@ -581,6 +653,7 @@ async def test_live_daemon_processes_delayed_startup_state_without_age_gate() ->
 
     daemon = _daemon(
         exchange=exchange,
+        max_gross_exposure=Decimal("100"),
     )
 
     result = await daemon.run(states())
@@ -1025,6 +1098,8 @@ def _daemon(
     entry_filter_context_loader=None,
     require_price_above_ema5: bool = False,
     require_price_above_ema10: bool = False,
+    entry_order_type: EntryType = EntryType.LIMIT,
+    max_gross_exposure: Decimal = Decimal("25"),
     reconcile_orders=None,
     clock=None,
 ) -> LiveStrategyDaemon:
@@ -1049,7 +1124,7 @@ def _daemon(
             notional_cap=Decimal("25"),
             max_open_positions=1,
             max_daily_loss=Decimal("10"),
-            max_gross_exposure=Decimal("25"),
+            max_gross_exposure=max_gross_exposure,
         ),
         repository=repository or FakeLiveRepository(),
         state_machine=machine,
@@ -1063,6 +1138,7 @@ def _daemon(
             require_price_above_ema5=require_price_above_ema5,
             require_price_above_ema10=require_price_above_ema10,
             entry_filter_context_loader=entry_filter_context_loader,
+            entry_order_type=entry_order_type,
         ),
         exit_manager=exit_manager,
         reconcile_orders=reconcile_orders,
@@ -1094,6 +1170,16 @@ class PlanAwareExchange:
     ) -> ExchangeOrderSnapshot | None:
         self.calls.append("query")
         return None
+
+
+class TwoCandidateStrategy(FakeStrategy):
+    def on_market_state(self, state: MarketState15s) -> StrategyDecision:
+        decision = super().on_market_state(state)
+        second = replace(
+            decision.candidates[0],
+            candidate_id="candidate-2",
+        )
+        return replace(decision, candidates=(decision.candidates[0], second))
 
 
 class BlockingPlanAwareExchange(PlanAwareExchange):

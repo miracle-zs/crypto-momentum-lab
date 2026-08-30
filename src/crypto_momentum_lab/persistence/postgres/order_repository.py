@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -41,6 +41,7 @@ class PersistedExchangeOrder:
     state: ExchangeOrderState
     exchange_order_id: str | None
     updated_at: datetime
+    executed_quantity: Decimal = Decimal("0")
 
 
 class PostgresOrderRepository:
@@ -118,6 +119,9 @@ class PostgresOrderRepository:
             "order_type": plan.order_type,
             "quantity": plan.quantity,
             "price": plan.price,
+            "time_in_force": plan.time_in_force,
+            "expires_at": plan.expires_at,
+            "executed_quantity": Decimal("0"),
             "reduce_only": plan.reduce_only,
             "position_side": plan.position_side.value,
             "state": ExchangeOrderState.SUBMITTING.value,
@@ -220,6 +224,9 @@ class PostgresOrderRepository:
             "order_type": plan.order_type,
             "quantity": plan.quantity,
             "price": plan.price,
+            "time_in_force": plan.time_in_force,
+            "expires_at": plan.expires_at,
+            "executed_quantity": Decimal("0"),
             "reduce_only": plan.reduce_only,
             "position_side": plan.position_side.value,
             "state": ExchangeOrderState.PLANNED.value,
@@ -263,6 +270,15 @@ class PostgresOrderRepository:
                     }
                     if event.exchange_order_id is not None:
                         order_values["exchange_order_id"] = event.exchange_order_id
+                    executed_quantity = _event_executed_quantity(event)
+                    if executed_quantity is not None:
+                        # Exchange snapshots are cumulative, but callbacks can
+                        # arrive out of order after a reconnect. Never let an
+                        # older snapshot lower the reservation baseline.
+                        order_values["executed_quantity"] = func.greatest(
+                            ExchangeOrderRow.executed_quantity,
+                            executed_quantity,
+                        )
                     await session.execute(
                         update(ExchangeOrderRow)
                         .where(
@@ -414,11 +430,25 @@ def _persisted_order(row: ExchangeOrderRow) -> PersistedExchangeOrder:
             created_at=row.created_at,
             position_side=FuturesPositionSide(row.position_side),
             quantized=True,
+            time_in_force=row.time_in_force,
+            expires_at=row.expires_at,
         ),
         state=ExchangeOrderState(row.state),
         exchange_order_id=row.exchange_order_id,
         updated_at=row.updated_at,
+        executed_quantity=row.executed_quantity or Decimal("0"),
     )
+
+
+def _event_executed_quantity(event: ExchangeOrderEvent) -> Decimal | None:
+    value = event.details.get("executed_quantity")
+    if value is None:
+        return None
+    try:
+        quantity = Decimal(str(value))
+    except ArithmeticError:
+        return None
+    return quantity if quantity >= 0 else None
 
 
 def _order_event_id(

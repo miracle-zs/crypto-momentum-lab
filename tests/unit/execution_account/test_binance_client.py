@@ -454,6 +454,57 @@ async def test_trade_client_submits_signed_binance_order() -> None:
     assert snapshot.state is ExchangeOrderState.FILLED
 
 
+async def test_trade_client_submits_gtd_limit_entry() -> None:
+    captured_body = ""
+    plan = replace(
+        _order_plan(),
+        order_type="LIMIT",
+        price=Decimal("30000"),
+        time_in_force="GTD",
+        expires_at=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_body
+        captured_body = request.content.decode()
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": plan.client_order_id,
+                "orderId": 12345,
+                "status": "NEW",
+                "executedQty": "0",
+                "avgPrice": "0",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        snapshot = await client.submit_order(plan)
+    finally:
+        await client.aclose()
+
+    params = parse_qs(captured_body)
+    assert params["type"] == ["LIMIT"]
+    assert params["price"] == ["30000"]
+    assert params["timeInForce"] == ["GTD"]
+    assert params["goodTillDate"] == ["1783124100000"]
+    assert snapshot.state is ExchangeOrderState.ACKNOWLEDGED
+
+
 async def test_trade_client_uses_position_side_for_hedge_mode_close() -> None:
     captured_body = ""
     plan = replace(

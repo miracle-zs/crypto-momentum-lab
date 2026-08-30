@@ -102,6 +102,69 @@ def test_prior_exit_does_not_suppress_a_reopened_position() -> None:
     assert managed[0].closing_order_filled is False
 
 
+def test_partial_entry_fill_is_managed_and_refreshes_latest_exit_anchor() -> None:
+    old_entry_at = NOW
+    partial_entry_fill_at = NOW + timedelta(seconds=25)
+
+    managed, unmanaged = _classify_live_positions(
+        [_position()],
+        [
+            _order(
+                reduce_only=False,
+                side="BUY",
+                updated_at=old_entry_at,
+                state=ExchangeOrderState.FILLED.value,
+                exchange_order_id="old-order",
+            ),
+            _order(
+                reduce_only=False,
+                side="BUY",
+                updated_at=NOW + timedelta(seconds=30),
+                state=ExchangeOrderState.PARTIALLY_FILLED.value,
+                exchange_order_id="partial-order",
+            ),
+        ],
+        entry_fill_times={
+            "old-order": old_entry_at,
+            "partial-order": partial_entry_fill_at,
+        },
+    )
+
+    assert unmanaged == frozenset()
+    assert managed[0].opened_at == partial_entry_fill_at
+    assert managed[0].closing_order_filled is False
+
+
+def test_late_fill_after_an_exit_is_a_new_position_episode() -> None:
+    pending_entry_created_at = NOW + timedelta(seconds=5)
+    pending_entry_fill_at = NOW + timedelta(seconds=25)
+
+    managed, unmanaged = _classify_live_positions(
+        [_position()],
+        [
+            _order(
+                reduce_only=True,
+                side="SELL",
+                created_at=NOW + timedelta(seconds=10),
+                updated_at=NOW + timedelta(seconds=15),
+            ),
+            _order(
+                reduce_only=False,
+                side="BUY",
+                created_at=pending_entry_created_at,
+                updated_at=pending_entry_fill_at,
+                state=ExchangeOrderState.PARTIALLY_FILLED.value,
+                exchange_order_id="late-entry",
+            ),
+        ],
+        entry_fill_times={"late-entry": pending_entry_fill_at},
+    )
+
+    assert unmanaged == frozenset()
+    assert managed[0].opened_at == pending_entry_fill_at
+    assert managed[0].closing_order_filled is False
+
+
 def test_draining_control_survives_a_later_operational_halt() -> None:
     assert (
         _resolve_strategy_live_state("draining", "halted")
@@ -329,6 +392,33 @@ async def test_delayed_state_reuses_newer_cached_context(monkeypatch) -> None:
     assert rule_loads == 1
 
 
+async def test_next_market_bucket_reuses_fresh_context_cache() -> None:
+    cached_loaded_at = datetime.now(tz=UTC)
+    cached = _runtime_context()
+    expected_rule = cached.trading_rules["BTCUSDT"]
+    provider = object.__new__(PostgresLiveContextProvider)
+    provider._cached_bucket_start = cached_loaded_at
+    provider._cached_loaded_at = cached_loaded_at
+    provider._cached_context = cached
+    provider._cached_rules = {"BTCUSDT": expected_rule}
+    provider._cached_rules_at = {"BTCUSDT": cached_loaded_at}
+    provider._cache_epoch = 0
+
+    async def load_symbol_rules(_symbol, _now):
+        return expected_rule
+
+    provider._load_symbol_rules = load_symbol_rules
+    state = SimpleNamespace(
+        symbol="BTCUSDT",
+        bucket_start=cached_loaded_at + timedelta(seconds=15),
+    )
+
+    result = await provider(state)
+
+    assert result.trading_rules == {"BTCUSDT": expected_rule}
+    assert result.gate_context.now == result.now
+
+
 async def test_live_market_poll_skips_a_backlog_to_the_latest_closed_bucket() -> None:
     latest_bucket = NOW + timedelta(minutes=5)
     stale_state = SimpleNamespace(symbol="BTCUSDT", bucket_start=NOW)
@@ -510,13 +600,16 @@ def _order(
     side: str,
     updated_at: datetime = NOW,
     created_at: datetime | None = None,
+    state: str = ExchangeOrderState.FILLED.value,
+    exchange_order_id: str | None = None,
 ):
     return SimpleNamespace(
-        state=ExchangeOrderState.FILLED.value,
+        state=state,
         reduce_only=reduce_only,
         symbol="BTCUSDT",
         position_side="LONG",
         side=side,
         created_at=updated_at if created_at is None else created_at,
         updated_at=updated_at,
+        exchange_order_id=exchange_order_id,
     )

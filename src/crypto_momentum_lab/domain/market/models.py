@@ -94,6 +94,7 @@ class RawEnvelope:
     subscription_generation: int
     raw_payload: JsonValue
     recovered: bool = False
+    raw_payload_size_bytes: int | None = None
 
     def __post_init__(self) -> None:
         if not _is_aware(self.received_at):
@@ -106,6 +107,8 @@ class RawEnvelope:
             raise ValueError("local_sequence must be positive")
         if self.subscription_generation <= 0:
             raise ValueError("subscription_generation must be positive")
+        if self.raw_payload_size_bytes is not None and self.raw_payload_size_bytes <= 0:
+            raise ValueError("raw_payload_size_bytes must be positive")
 
 
 @dataclass(frozen=True, slots=True)

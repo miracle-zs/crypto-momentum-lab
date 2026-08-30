@@ -289,6 +289,102 @@ class LiveEntryFilterCache:
         )
 
 
+class LiveEntrySymbolCache:
+    """Refresh the live entry symbol pool without blocking state evaluation."""
+
+    def __init__(
+        self,
+        *,
+        symbol_loader: SymbolLoader,
+        config: EntryFilterCacheConfig | None = None,
+        clock: Clock | None = None,
+        on_ready: ReadyCallback | None = None,
+    ) -> None:
+        self._symbol_loader = symbol_loader
+        self._config = config or EntryFilterCacheConfig()
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._on_ready = on_ready
+        self._stop_event = asyncio.Event()
+        self._run_task: asyncio.Task[None] | None = None
+        self._ready = False
+        self._symbols_by_bucket: dict[datetime, frozenset[str]] = {}
+        self._refresh_count = 0
+        self._refresh_failure_count = 0
+
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
+    def set_ready_callback(self, callback: ReadyCallback | None) -> None:
+        self._on_ready = callback
+
+    def symbols_for(self, observed_at: datetime) -> frozenset[str]:
+        bucket = _bucket_start_15s(observed_at)
+        candidates = [key for key in self._symbols_by_bucket if key <= bucket]
+        if not candidates:
+            return frozenset()
+        return self._symbols_by_bucket[max(candidates)]
+
+    async def run(self) -> None:
+        if self._run_task is not None:
+            raise RuntimeError("entry symbol cache is already running")
+        self._run_task = asyncio.current_task()
+        try:
+            while not self._stop_event.is_set():
+                await self._refresh(self._clock())
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(),
+                        timeout=self._config.refresh_interval_seconds,
+                    )
+                except TimeoutError:
+                    continue
+        finally:
+            self._run_task = None
+
+    async def stop(self) -> None:
+        self._stop_event.set()
+        task = self._run_task
+        current = asyncio.current_task()
+        if task is not None and task is not current:
+            await task
+
+    async def _refresh(self, observed_at: datetime) -> None:
+        self._refresh_count += 1
+        try:
+            symbols = await self._symbol_loader(observed_at)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._refresh_failure_count += 1
+            log.warning(
+                "live_entry_symbol_cache_refresh_failed",
+                error_type=type(error).__name__,
+            )
+            return
+        bucket = _bucket_start_15s(observed_at)
+        self._symbols_by_bucket[bucket] = symbols
+        if len(self._symbols_by_bucket) > 32:
+            retained = sorted(self._symbols_by_bucket)[-32:]
+            retained_set = set(retained)
+            self._symbols_by_bucket = {
+                key: value
+                for key, value in self._symbols_by_bucket.items()
+                if key in retained_set
+            }
+        ready = bool(symbols)
+        changed = ready != self._ready
+        self._ready = ready
+        log.info(
+            "live_entry_symbol_cache_refreshed",
+            symbols=len(symbols),
+            ready=ready,
+            refresh_count=self._refresh_count,
+        )
+        if changed and self._on_ready is not None:
+            self._on_ready(ready)
+
+
 def _bucket_start_15s(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("observed_at must be timezone-aware")

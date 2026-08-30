@@ -116,7 +116,9 @@ class ZstdJsonlArchive:
         self,
         envelope: RawEnvelope,
     ) -> DurableArchiveAcknowledgement:
-        row = serialize_envelope(envelope)
+        # JSON encoding is CPU-bound. Keep it out of the market-data event
+        # loop; the writer lock below still preserves partition ordering.
+        row = await asyncio.to_thread(serialize_envelope, envelope)
         key = partition_key(envelope)
         async with self._lock:
             if self._closed:

@@ -803,6 +803,9 @@ def parse_binance_message(
     received_monotonic_ns: int,
     expected_stream: CaptureStream | None = None,
 ) -> RawEnvelope:
+    raw_message_size = len(
+        message.encode("utf-8") if isinstance(message, str) else message
+    )
     return _parse_decoded_message(
         route=route,
         decoded=_decode_message(message),
@@ -813,6 +816,7 @@ def parse_binance_message(
         received_at=received_at,
         received_monotonic_ns=received_monotonic_ns,
         expected_stream=expected_stream,
+        raw_payload_size_bytes=raw_message_size,
     )
 
 
@@ -856,6 +860,7 @@ def _parse_decoded_message(
     received_at: datetime,
     received_monotonic_ns: int,
     expected_stream: CaptureStream | None = None,
+    raw_payload_size_bytes: int | None = None,
 ) -> RawEnvelope:
     if not isinstance(decoded, dict):
         raise BinancePayloadError("message must be an object")
@@ -891,6 +896,7 @@ def _parse_decoded_message(
         exchange_sequence=exchange_sequence,
         subscription_generation=subscription_generation,
         raw_payload=raw_payload,
+        raw_payload_size_bytes=raw_payload_size_bytes,
     )
 
 

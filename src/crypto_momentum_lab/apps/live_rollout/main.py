@@ -19,7 +19,11 @@ from crypto_momentum_lab.apps.shadow_operation.main import (
     _latest_account_state,
     _latest_risk_config,
 )
-from crypto_momentum_lab.domain.execution import FuturesPositionSide, OrderExecutionPlan
+from crypto_momentum_lab.domain.execution import (
+    ExchangeOrderEvent,
+    FuturesPositionSide,
+    OrderExecutionPlan,
+)
 from crypto_momentum_lab.domain.live_rollout import (
     LiveOperatorApproval,
     LiveSessionState,
@@ -36,6 +40,7 @@ from crypto_momentum_lab.domain.risk import (
     TradingLeaseState,
 )
 from crypto_momentum_lab.domain.strategy import (
+    EntryType,
     OrderIntentCandidate,
     RunMode,
     StrategyCheckpoint,
@@ -74,7 +79,9 @@ from crypto_momentum_lab.live_rollout.daemon import (
 from crypto_momentum_lab.live_rollout.entry_cache import (
     EntryFilterCacheConfig,
     LiveEntryFilterCache,
+    LiveEntrySymbolCache,
 )
+from crypto_momentum_lab.live_rollout.entry_orders import LiveLimitOrderLifecycle
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitConfig,
     LiveExitManager,
@@ -184,6 +191,8 @@ _LIVE_ENTRY_FILTER_PREFETCH_CONCURRENCY = 4
 _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT = 100
 _LIVE_ENTRY_PRICE_ABOVE_EMA5 = False
 _LIVE_ENTRY_PRICE_ABOVE_EMA10 = False
+_LIVE_ENTRY_ORDER_TYPE = EntryType.LIMIT
+_LIVE_ENTRY_LIMIT_TTL_SECONDS = 900
 _LIVE_ORDERFLOW_MIN_AGGRESSIVE_IMBALANCE = Decimal("0.40")
 _LIVE_MARKET_WEBSOCKET_URL = "wss://fstream.binance.com/market/ws"
 
@@ -214,6 +223,14 @@ def strategy_config_hash_command(
         bool,
         typer.Option("--entry-price-above-ema10/--no-entry-price-above-ema10"),
     ] = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
+    entry_order_type: Annotated[
+        EntryType,
+        typer.Option("--entry-order-type"),
+    ] = _LIVE_ENTRY_ORDER_TYPE,
+    entry_limit_ttl_seconds: Annotated[
+        int,
+        typer.Option("--entry-limit-ttl-seconds", min=601),
+    ] = _LIVE_ENTRY_LIMIT_TTL_SECONDS,
 ) -> None:
     typer.echo(
         _live_strategy_config_hash(
@@ -221,6 +238,8 @@ def strategy_config_hash_command(
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=entry_price_above_ema5,
             require_price_above_ema10=entry_price_above_ema10,
+            entry_order_type=entry_order_type,
+            entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         )
     )
 
@@ -263,6 +282,14 @@ def prepare_command(
         bool,
         typer.Option("--entry-price-above-ema10/--no-entry-price-above-ema10"),
     ] = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
+    entry_order_type: Annotated[
+        EntryType,
+        typer.Option("--entry-order-type"),
+    ] = _LIVE_ENTRY_ORDER_TYPE,
+    entry_limit_ttl_seconds: Annotated[
+        int,
+        typer.Option("--entry-limit-ttl-seconds", min=601),
+    ] = _LIVE_ENTRY_LIMIT_TTL_SECONDS,
     confirmation: Annotated[str, typer.Option("--confirmation")] = "",
 ) -> None:
     if confirmation != _PREPARE_CONFIRMATION:
@@ -293,6 +320,8 @@ def prepare_command(
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=entry_price_above_ema5,
             require_price_above_ema10=entry_price_above_ema10,
+            entry_order_type=entry_order_type,
+            entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         )
     )
     typer.echo(json.dumps(payload, sort_keys=True))
@@ -496,6 +525,14 @@ def run_command(
         bool,
         typer.Option("--entry-price-above-ema10/--no-entry-price-above-ema10"),
     ] = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
+    entry_order_type: Annotated[
+        EntryType,
+        typer.Option("--entry-order-type"),
+    ] = _LIVE_ENTRY_ORDER_TYPE,
+    entry_limit_ttl_seconds: Annotated[
+        int,
+        typer.Option("--entry-limit-ttl-seconds", min=601),
+    ] = _LIVE_ENTRY_LIMIT_TTL_SECONDS,
     candle_grace_bars: Annotated[
         int,
         typer.Option("--candle-grace-bars", min=0),
@@ -557,6 +594,8 @@ def run_command(
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=entry_price_above_ema5,
             require_price_above_ema10=entry_price_above_ema10,
+            entry_order_type=entry_order_type,
+            entry_limit_ttl_seconds=entry_limit_ttl_seconds,
             candle_grace_bars=candle_grace_bars,
             candle_grace_decision_profit_pct=Decimal(
                 candle_grace_decision_profit_pct
@@ -912,6 +951,8 @@ async def _run_live_daemon(
     entry_positive_gainer_top_count: int | None,
     require_price_above_ema5: bool,
     require_price_above_ema10: bool,
+    entry_order_type: EntryType,
+    entry_limit_ttl_seconds: int,
     candle_grace_bars: int,
     candle_grace_decision_profit_pct: Decimal,
     candle_grace_profit_pct: Decimal,
@@ -946,11 +987,15 @@ async def _run_live_daemon(
     ema_candle_source: BinanceRestClosedCandle15mSource | None = None
     entry_filter_cache: LiveEntryFilterCache | None = None
     entry_filter_cache_task: asyncio.Task[None] | None = None
+    entry_symbol_cache: LiveEntrySymbolCache | None = None
+    entry_symbol_cache_task: asyncio.Task[None] | None = None
+    entry_order_lifecycle: LiveLimitOrderLifecycle | None = None
     live_repository: PostgresLiveRolloutRepository | None = None
     telemetry: LiveRuntimeTelemetry | None = None
     volume_rest_client: BinanceUsdMRestClient | None = None
     volume_cache: Binance24hQuoteVolumeCache | None = None
     signal_recorder: LiveStrategySignalRecorder | None = None
+    daemon: LiveStrategyDaemon | None = None
     risk_config_hash = ""
     startup_phase = True
     try:
@@ -1031,13 +1076,32 @@ async def _run_live_daemon(
             raise RuntimeError(
                 f"position mode mismatch: expected {expected}, got {actual}"
             )
+        async def on_live_order_event(
+            plan: OrderExecutionPlan,
+            event: ExchangeOrderEvent,
+        ) -> None:
+            try:
+                await telemetry.order_event(plan, event)
+            except Exception as error:
+                log.warning(
+                    "live_order_telemetry_failed",
+                    symbol=plan.symbol,
+                    client_order_id=plan.client_order_id,
+                    error_type=type(error).__name__,
+                )
+            finally:
+                if entry_order_lifecycle is not None:
+                    entry_order_lifecycle.observe(plan, event)
+                if daemon is not None:
+                    daemon.observe_entry_order_event(plan, event)
+
         state_machine = OrderExecutionStateMachine(
             exchange=client,
             repository=order_repository,
             submit_policy=SubmitPolicy.LIVE_SUBMIT,
             live_submit_enabled=True,
             clock=lambda: datetime.now(tz=UTC),
-            on_event=telemetry.order_event,
+            on_event=on_live_order_event,
             on_exchange_request=telemetry.exchange_request_started,
             on_exchange_response=telemetry.exchange_response_received,
             serialize_commands=False,
@@ -1067,6 +1131,10 @@ async def _run_live_daemon(
             now=now,
         )
         unresolved = await order_repository.load_unresolved_orders(session_id)
+        entry_order_lifecycle = LiveLimitOrderLifecycle(
+            cancel_order=execution_coordinator.cancel_order,
+        )
+        await entry_order_lifecycle.restore(unresolved)
         active_lease = await risk_repository.load_active_lease(
             "live", account_label, now
         )
@@ -1112,6 +1180,8 @@ async def _run_live_daemon(
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=require_price_above_ema5,
             require_price_above_ema10=require_price_above_ema10,
+            entry_order_type=entry_order_type,
+            entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         )
         if computed_hash != strategy_config_hash:
             raise RuntimeError(
@@ -1234,6 +1304,9 @@ async def _run_live_daemon(
         entry_filter_cache_required = (
             ema_provider is not None and entry_symbol_loader is not None
         )
+        entry_symbol_cache_required = (
+            entry_symbol_loader is not None and not entry_filter_cache_required
+        )
         daemon_entry_symbol_loader = entry_symbol_loader
         if entry_filter_cache_required:
 
@@ -1245,6 +1318,16 @@ async def _run_live_daemon(
                 return entry_filter_cache.symbols_for(observed_at)
 
             daemon_entry_symbol_loader = load_entry_symbols_from_cache
+        elif entry_symbol_cache_required:
+
+            async def load_entry_symbols_from_symbol_cache(
+                observed_at: datetime,
+            ) -> frozenset[str]:
+                if entry_symbol_cache is None:
+                    return frozenset()
+                return entry_symbol_cache.symbols_for(observed_at)
+
+            daemon_entry_symbol_loader = load_entry_symbols_from_symbol_cache
 
         entry_filter_context_loader: (
             Callable[
@@ -1376,6 +1459,7 @@ async def _run_live_daemon(
             context_provider=context_provider,
             telemetry=telemetry,
             signal_recorder=signal_recorder,
+            entry_order_lifecycle=entry_order_lifecycle,
             config=LiveDaemonConfig(
                 run_id=session_id,
                 resize_tolerance=Decimal("0.10"),
@@ -1386,6 +1470,8 @@ async def _run_live_daemon(
                 require_price_above_ema5=require_price_above_ema5,
                 require_price_above_ema10=require_price_above_ema10,
                 entry_filter_context_loader=entry_filter_context_loader,
+                entry_order_type=entry_order_type,
+                entry_limit_ttl_seconds=entry_limit_ttl_seconds,
             ),
             exit_manager=LiveExitManager(
                 config=LiveExitConfig(
@@ -1413,7 +1499,9 @@ async def _run_live_daemon(
                 else closed_candle_feed.set_symbols
             ),
         )
-        entry_filter_cache_ready = not entry_filter_cache_required
+        entry_filter_cache_ready = not (
+            entry_filter_cache_required or entry_symbol_cache_required
+        )
         market_state_available = market_state_source != "hub"
         market_state_unavailable_reason = "market_state_hub_connecting"
 
@@ -1428,7 +1516,7 @@ async def _run_live_daemon(
             elif not entry_filter_cache_ready:
                 daemon.set_entry_enabled(
                     False,
-                    reason="entry_filter_cache_warming",
+                    reason="entry_cache_warming",
                 )
             else:
                 daemon.set_entry_enabled(
@@ -1455,6 +1543,16 @@ async def _run_live_daemon(
             entry_filter_cache.set_ready_callback(
                 on_entry_filter_cache_ready
             )
+        elif entry_symbol_cache_required:
+            assert entry_symbol_loader is not None
+            entry_symbol_cache = LiveEntrySymbolCache(
+                symbol_loader=entry_symbol_loader,
+                config=EntryFilterCacheConfig(
+                    refresh_interval_seconds=15.0,
+                    prefetch_concurrency=1,
+                ),
+            )
+            entry_symbol_cache.set_ready_callback(on_entry_filter_cache_ready)
         refresh_entry_enabled()
         if not draining:
             await _record_transition(
@@ -1568,6 +1666,10 @@ async def _run_live_daemon(
             entry_filter_cache_task = asyncio.create_task(
                 entry_filter_cache.run()
             )
+        if entry_symbol_cache is not None:
+            entry_symbol_cache_task = asyncio.create_task(
+                entry_symbol_cache.run()
+            )
         lease_task = asyncio.create_task(lease_heartbeat.run())
         reconcile_task = asyncio.create_task(
             _periodic_reconcile_run_orders(
@@ -1596,6 +1698,8 @@ async def _run_live_daemon(
             }
             if entry_filter_cache_task is not None:
                 monitored_tasks.add(entry_filter_cache_task)
+            if entry_symbol_cache_task is not None:
+                monitored_tasks.add(entry_symbol_cache_task)
             await asyncio.wait(
                 monitored_tasks,
                 return_when=asyncio.FIRST_COMPLETED,
@@ -1633,6 +1737,14 @@ async def _run_live_daemon(
                 raise RuntimeError(
                     "live entry filter cache task stopped unexpectedly"
                 )
+            if (
+                entry_symbol_cache_task is not None
+                and entry_symbol_cache_task.done()
+            ):
+                await entry_symbol_cache_task
+                raise RuntimeError(
+                    "live entry symbol cache task stopped unexpectedly"
+                )
             result = await market_task
         finally:
             if hub_source is not None:
@@ -1662,6 +1774,8 @@ async def _run_live_daemon(
                 reconcile_task.cancel()
             if entry_filter_cache is not None:
                 await entry_filter_cache.stop()
+            if entry_symbol_cache is not None:
+                await entry_symbol_cache.stop()
             await asyncio.gather(
                 market_task,
                 account_task,
@@ -1681,6 +1795,11 @@ async def _run_live_daemon(
                 *(
                     (entry_filter_cache_task,)
                     if entry_filter_cache_task is not None
+                    else ()
+                ),
+                *(
+                    (entry_symbol_cache_task,)
+                    if entry_symbol_cache_task is not None
                     else ()
                 ),
                 return_exceptions=True,
@@ -1714,6 +1833,8 @@ async def _run_live_daemon(
             )
         raise
     finally:
+        if entry_order_lifecycle is not None:
+            await entry_order_lifecycle.stop()
         if execution_coordinator is not None:
             await execution_coordinator.aclose()
         if client is not None:
@@ -2365,6 +2486,16 @@ def _load_plan(path: Path) -> OrderExecutionPlan:
             str(payload.get("position_side", FuturesPositionSide.BOTH.value))
         ),
         quantized=bool(payload.get("quantized", False)),
+        time_in_force=(
+            None
+            if payload.get("time_in_force") is None
+            else str(payload["time_in_force"])
+        ),
+        expires_at=(
+            None
+            if payload.get("expires_at") is None
+            else datetime.fromisoformat(str(payload["expires_at"]))
+        ),
     )
     if not plan.quantized:
         raise typer.BadParameter("order plan must be quantized")
@@ -2389,12 +2520,18 @@ def _live_strategy_config_hash(
     entry_positive_gainer_top_count: int | None = _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT,
     require_price_above_ema5: bool = _LIVE_ENTRY_PRICE_ABOVE_EMA5,
     require_price_above_ema10: bool = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
+    entry_order_type: EntryType = _LIVE_ENTRY_ORDER_TYPE,
+    entry_limit_ttl_seconds: int = _LIVE_ENTRY_LIMIT_TTL_SECONDS,
 ) -> str:
     if (
         entry_positive_gainer_top_count is not None
         and entry_positive_gainer_top_count <= 0
     ):
         raise ValueError("entry_positive_gainer_top_count must be positive")
+    if not isinstance(entry_order_type, EntryType):
+        raise TypeError("entry_order_type must be an EntryType")
+    if entry_limit_ttl_seconds < 601:
+        raise ValueError("entry_limit_ttl_seconds must be at least 601")
     return deterministic_config_hash(
         {
             "strategy": build_runtime_config(
@@ -2405,6 +2542,10 @@ def _live_strategy_config_hash(
                 "entry_positive_gainer_top_count": entry_positive_gainer_top_count,
                 "require_price_above_ema5": require_price_above_ema5,
                 "require_price_above_ema10": require_price_above_ema10,
+            },
+            "entry_execution": {
+                "order_type": entry_order_type.value,
+                "limit_ttl_seconds": entry_limit_ttl_seconds,
             },
         }
     )
@@ -2424,6 +2565,8 @@ async def _prepare_live_risk_gates(
     entry_positive_gainer_top_count: int | None,
     require_price_above_ema5: bool,
     require_price_above_ema10: bool,
+    entry_order_type: EntryType,
+    entry_limit_ttl_seconds: int,
 ) -> dict[str, str]:
     now = datetime.now(tz=UTC)
     risk_config = RiskConfigSnapshot(
@@ -2466,6 +2609,8 @@ async def _prepare_live_risk_gates(
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=require_price_above_ema5,
             require_price_above_ema10=require_price_above_ema10,
+            entry_order_type=entry_order_type,
+            entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         ),
     }
 

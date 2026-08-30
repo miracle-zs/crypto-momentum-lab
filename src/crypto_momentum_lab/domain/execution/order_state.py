@@ -53,6 +53,8 @@ class OrderExecutionPlan:
     created_at: datetime
     position_side: FuturesPositionSide = FuturesPositionSide.BOTH
     quantized: bool = False
+    time_in_force: str | None = None
+    expires_at: datetime | None = None
 
     def __post_init__(self) -> None:
         for value, field_name in (
@@ -75,6 +77,19 @@ class OrderExecutionPlan:
                 FuturesPositionSide(self.position_side),
             )
         _require_aware(self.created_at, "created_at")
+        if self.time_in_force is not None:
+            time_in_force = self.time_in_force.upper()
+            if time_in_force not in {"GTC", "IOC", "FOK", "GTX", "GTD", "RPI"}:
+                raise ValueError("unsupported time_in_force")
+            if self.order_type.upper() != "LIMIT":
+                raise ValueError("time_in_force requires a LIMIT order")
+            object.__setattr__(self, "time_in_force", time_in_force)
+        if self.expires_at is not None:
+            _require_aware(self.expires_at, "expires_at")
+            if self.expires_at <= self.created_at:
+                raise ValueError("expires_at must be after created_at")
+        if self.time_in_force == "GTD" and self.expires_at is None:
+            raise ValueError("GTD orders require expires_at")
 
 
 @dataclass(frozen=True, slots=True)

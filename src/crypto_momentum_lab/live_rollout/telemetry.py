@@ -32,7 +32,11 @@ LIVE_LANE_EXIT = "exit"
 LIVE_LANE_UNKNOWN = "unknown"
 
 MARKET_STATE_RECEIVED = "market_state_received"
+CONTEXT_READY = "context_ready"
+GATE_EVALUATED = "gate_evaluated"
 STRATEGY_DECISION = "strategy_decision"
+ENTRY_FILTER_READY = "entry_filter_ready"
+SIGNAL_RECORDED = "signal_recorded"
 CANDIDATE_ACCEPTED = "candidate_accepted"
 RISK_APPROVED = "risk_approved"
 INTENT_SAVED = "intent_saved"
@@ -44,7 +48,11 @@ ACCOUNT_FILL = "account_fill"
 
 _PHASE_ORDER = (
     MARKET_STATE_RECEIVED,
+    CONTEXT_READY,
+    GATE_EVALUATED,
     STRATEGY_DECISION,
+    ENTRY_FILTER_READY,
+    SIGNAL_RECORDED,
     CANDIDATE_ACCEPTED,
     RISK_APPROVED,
     INTENT_SAVED,
@@ -86,12 +94,48 @@ class LiveTelemetrySink(Protocol):
         lane: str = LIVE_LANE_ENTRY,
     ) -> None: ...
 
+    async def context_ready(
+        self,
+        state: MarketState15s,
+        *,
+        occurred_at: datetime,
+        prefetched: bool,
+        reloaded: bool,
+    ) -> None: ...
+
+    async def gate_evaluated(
+        self,
+        state: MarketState15s,
+        *,
+        occurred_at: datetime,
+        approved: bool,
+        reasons: tuple[str, ...],
+    ) -> None: ...
+
     async def strategy_decision(
         self,
         state: MarketState15s,
         *,
         occurred_at: datetime,
         signal_count: int,
+        candidate_count: int,
+    ) -> None: ...
+
+    async def entry_filter_ready(
+        self,
+        state: MarketState15s,
+        *,
+        occurred_at: datetime,
+        candidate_count: int,
+        symbol_pool_loaded: bool,
+        ema_context_loaded: bool,
+    ) -> None: ...
+
+    async def signal_recorded(
+        self,
+        state: MarketState15s,
+        *,
+        occurred_at: datetime,
         candidate_count: int,
     ) -> None: ...
 
@@ -309,6 +353,45 @@ class LiveRuntimeTelemetry:
             },
         )
 
+    async def context_ready(
+        self,
+        state: MarketState15s,
+        *,
+        occurred_at: datetime,
+        prefetched: bool,
+        reloaded: bool,
+    ) -> None:
+        await self._record_phase(
+            phase=CONTEXT_READY,
+            trace_id=state_trace_id(state, LIVE_LANE_ENTRY),
+            lane=LIVE_LANE_ENTRY,
+            symbol=state.symbol,
+            bucket_start=state.bucket_start,
+            occurred_at=occurred_at,
+            details={
+                "prefetched": prefetched,
+                "reloaded": reloaded,
+            },
+        )
+
+    async def gate_evaluated(
+        self,
+        state: MarketState15s,
+        *,
+        occurred_at: datetime,
+        approved: bool,
+        reasons: tuple[str, ...],
+    ) -> None:
+        await self._record_phase(
+            phase=GATE_EVALUATED,
+            trace_id=state_trace_id(state, LIVE_LANE_ENTRY),
+            lane=LIVE_LANE_ENTRY,
+            symbol=state.symbol,
+            bucket_start=state.bucket_start,
+            occurred_at=occurred_at,
+            details={"approved": approved, "reasons": list(reasons)},
+        )
+
     async def strategy_decision(
         self,
         state: MarketState15s,
@@ -328,6 +411,46 @@ class LiveRuntimeTelemetry:
                 "signal_count": signal_count,
                 "candidate_count": candidate_count,
             },
+        )
+
+    async def entry_filter_ready(
+        self,
+        state: MarketState15s,
+        *,
+        occurred_at: datetime,
+        candidate_count: int,
+        symbol_pool_loaded: bool,
+        ema_context_loaded: bool,
+    ) -> None:
+        await self._record_phase(
+            phase=ENTRY_FILTER_READY,
+            trace_id=state_trace_id(state, LIVE_LANE_ENTRY),
+            lane=LIVE_LANE_ENTRY,
+            symbol=state.symbol,
+            bucket_start=state.bucket_start,
+            occurred_at=occurred_at,
+            details={
+                "candidate_count": candidate_count,
+                "symbol_pool_loaded": symbol_pool_loaded,
+                "ema_context_loaded": ema_context_loaded,
+            },
+        )
+
+    async def signal_recorded(
+        self,
+        state: MarketState15s,
+        *,
+        occurred_at: datetime,
+        candidate_count: int,
+    ) -> None:
+        await self._record_phase(
+            phase=SIGNAL_RECORDED,
+            trace_id=state_trace_id(state, LIVE_LANE_ENTRY),
+            lane=LIVE_LANE_ENTRY,
+            symbol=state.symbol,
+            bucket_start=state.bucket_start,
+            occurred_at=occurred_at,
+            details={"candidate_count": candidate_count},
         )
 
     async def candidate_accepted(
@@ -770,7 +893,10 @@ def _require_aware(value: datetime, field_name: str) -> None:
 __all__ = [
     "ACCOUNT_FILL",
     "CANDIDATE_ACCEPTED",
+    "CONTEXT_READY",
     "EXCHANGE_FILLED",
+    "ENTRY_FILTER_READY",
+    "GATE_EVALUATED",
     "INTENT_SAVED",
     "LIVE_LANE_ENTRY",
     "LIVE_LANE_EXIT",
@@ -781,6 +907,7 @@ __all__ = [
     "MARKET_STATE_RECEIVED",
     "PERSISTED_ORDER_TELEMETRY_EVENTS",
     "RISK_APPROVED",
+    "SIGNAL_RECORDED",
     "STRATEGY_DECISION",
     "SUBMITTING",
     "state_trace_id",

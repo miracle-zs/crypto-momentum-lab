@@ -344,6 +344,8 @@ def _coalesce_key(
 
 
 def _encoded_payload_size(envelope: RawEnvelope) -> int:
+    if envelope.raw_payload_size_bytes is not None:
+        return envelope.raw_payload_size_bytes
     return len(
         json.dumps(
             envelope.raw_payload,

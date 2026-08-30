@@ -17,7 +17,11 @@ import structlog
 from sqlalchemy.exc import SQLAlchemyError
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
-from crypto_momentum_lab.domain.execution import ExchangeOrderState, OrderExecutionPlan
+from crypto_momentum_lab.domain.execution import (
+    ExchangeOrderEvent,
+    ExchangeOrderState,
+    OrderExecutionPlan,
+)
 from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
     RealtimeMarketQuote,
@@ -31,6 +35,7 @@ from crypto_momentum_lab.domain.risk import (
     TradingLease,
 )
 from crypto_momentum_lab.domain.strategy import (
+    EntryType,
     OrderIntentCandidate,
     StrategyCheckpoint,
     StrategyDecision,
@@ -120,6 +125,14 @@ class LiveDaemonRepository(Protocol):
     ) -> None: ...
 
 
+class LiveEntryOrderLifecycle(Protocol):
+    async def track(
+        self,
+        plan: OrderExecutionPlan,
+        result: OrderExecutionResult,
+    ) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class LiveDaemonConfig:
     run_id: str
@@ -135,6 +148,8 @@ class LiveDaemonConfig:
     entry_filter_context_loader: (
         Callable[[MarketState15s], Awaitable["LiveEntryFilterContext | None"]] | None
     ) = None
+    entry_order_type: EntryType = EntryType.LIMIT
+    entry_limit_ttl_seconds: int = 900
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -147,6 +162,10 @@ class LiveDaemonConfig:
             raise TypeError("reconcile_once_per_bucket must be a bool")
         if self.entry_symbol_refresh_seconds <= 0:
             raise ValueError("entry_symbol_refresh_seconds must be positive")
+        if not isinstance(self.entry_order_type, EntryType):
+            raise TypeError("entry_order_type must be an EntryType")
+        if self.entry_limit_ttl_seconds < 601:
+            raise ValueError("entry_limit_ttl_seconds must be at least 601")
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +209,7 @@ class LiveDaemonResult:
 class _PrefetchedContext:
     state: MarketState15s
     generation: int
+    received_at: datetime
     context: LiveDaemonRuntimeContext | None
     error: Exception | None
 
@@ -198,6 +218,7 @@ class _PrefetchedContext:
 class _PendingContext:
     state: MarketState15s
     generation: int
+    received_at: datetime
     task: asyncio.Task[LiveDaemonRuntimeContext]
 
 
@@ -538,6 +559,7 @@ class LiveStrategyDaemon:
         reconcile_orders: Callable[[], Awaitable[None]] | None = None,
         telemetry: LiveTelemetrySink | None = None,
         signal_recorder: LiveSignalRecorderPort | None = None,
+        entry_order_lifecycle: LiveEntryOrderLifecycle | None = None,
         clock: Callable[[], datetime] | None = None,
         on_managed_position_symbols: (
             Callable[[frozenset[str]], Awaitable[None]] | None
@@ -564,6 +586,7 @@ class LiveStrategyDaemon:
         )
         self._telemetry = telemetry
         self._signal_recorder = signal_recorder
+        self._entry_order_lifecycle = entry_order_lifecycle
         self._clock = clock or (lambda: datetime.now(tz=UTC))
         self._on_managed_position_symbols = on_managed_position_symbols
         self._managed_position_symbols: frozenset[str] = frozenset()
@@ -572,6 +595,10 @@ class LiveStrategyDaemon:
         self._entry_enabled = True
         self._exit_enabled = True
         self._entry_enabled_reason = "initializing"
+        self._pending_entry_plans: dict[
+            str,
+            tuple[OrderExecutionPlan, Decimal],
+        ] = {}
         self._market_gap_generation = 0
         self._strategy_gap_reset_generation_by_symbol: dict[str, int] = {}
         self._last_transient_gate_reasons: tuple[str, ...] | None = None
@@ -641,6 +668,25 @@ class LiveStrategyDaemon:
             run_id=self._config.run_id,
         )
 
+    def observe_entry_order_event(
+        self,
+        plan: OrderExecutionPlan,
+        event: ExchangeOrderEvent,
+    ) -> None:
+        """Release an in-memory reservation after a terminal entry event.
+
+        The exchange/order callback can arrive before the next database
+        context refresh.  Removing the reservation here prevents a filled or
+        canceled limit entry from consuming gross-exposure capacity for the
+        remainder of its 15-minute lifetime.
+        """
+
+        if plan.reduce_only:
+            return
+        state = getattr(event, "state", None)
+        if state is not None and getattr(state, "terminal", False):
+            self._pending_entry_plans.pop(plan.client_order_id, None)
+
     def notify_market_state_gap(self, *, reason: str) -> None:
         """Force each symbol to rebuild indicators after a skipped batch."""
         if not reason.strip():
@@ -671,6 +717,7 @@ class LiveStrategyDaemon:
             return None
         self._invalidate_context_cache()
         context = await self._context_provider(state)
+        self._sync_pending_entry_plans(context)
         await self._publish_managed_position_symbols(context)
         if context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
@@ -714,6 +761,7 @@ class LiveStrategyDaemon:
         # bucket.  No invalidation happens on ticker arrival; account events
         # are the explicit cache-refresh seam.
         context = await self._context_provider(state)
+        self._sync_pending_entry_plans(context)
         await self._publish_managed_position_symbols(context)
         if context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
@@ -750,6 +798,7 @@ class LiveStrategyDaemon:
         # bucket.  Reuse the provider's snapshot across that burst; account
         # events and order execution remain the explicit invalidation seams.
         context = await self._context_provider(state)
+        self._sync_pending_entry_plans(context)
         await self._publish_managed_position_symbols(context)
         if context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
@@ -780,6 +829,7 @@ class LiveStrategyDaemon:
         if self._exit_manager is None or not self._exit_enabled:
             return None
         context = await self._context_provider(state)
+        self._sync_pending_entry_plans(context)
         await self._publish_managed_position_symbols(context)
         if context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
@@ -851,6 +901,7 @@ class LiveStrategyDaemon:
             try:
                 async for state in states:
                     generation = self._context_generation
+                    received_at = self._clock()
                     context_task: asyncio.Task[LiveDaemonRuntimeContext] = (
                         asyncio.ensure_future(self._context_provider(state))
                     )
@@ -859,6 +910,7 @@ class LiveStrategyDaemon:
                         _PendingContext(
                             state=state,
                             generation=generation,
+                            received_at=received_at,
                             task=context_task,
                         )
                     )
@@ -889,6 +941,7 @@ class LiveStrategyDaemon:
                     yield _PrefetchedContext(
                         state=pending.state,
                         generation=pending.generation,
+                        received_at=pending.received_at,
                         context=None,
                         error=error,
                     )
@@ -896,6 +949,7 @@ class LiveStrategyDaemon:
                     yield _PrefetchedContext(
                         state=pending.state,
                         generation=pending.generation,
+                        received_at=pending.received_at,
                         context=context,
                         error=None,
                     )
@@ -1028,7 +1082,7 @@ class LiveStrategyDaemon:
             if self._telemetry is not None:
                 await self._telemetry.market_state_received(
                     state,
-                    occurred_at=self._clock(),
+                    occurred_at=prefetched.received_at,
                     lane=LIVE_LANE_ENTRY,
                 )
             exit_lane_failure = self._exit_lane.failure
@@ -1103,8 +1157,9 @@ class LiveStrategyDaemon:
                 last_processed_at=last_processed_at_by_symbol.get(state.symbol),
                 max_gap_seconds=max_gap_seconds,
             )
+            context_reloaded = prefetched.generation != self._context_generation
             try:
-                if prefetched.generation != self._context_generation:
+                if context_reloaded:
                     context = await self._context_provider(state)
                 elif prefetched.error is not None:
                     raise prefetched.error
@@ -1150,6 +1205,14 @@ class LiveStrategyDaemon:
                     error_type=type(error).__name__,
                 )
                 continue
+            self._sync_pending_entry_plans(context)
+            if self._telemetry is not None:
+                await self._telemetry.context_ready(
+                    state,
+                    occurred_at=self._clock(),
+                    prefetched=not context_reloaded,
+                    reloaded=context_reloaded,
+                )
             await self._publish_managed_position_symbols(context)
             gate = evaluate_live_gate(
                 replace(
@@ -1161,6 +1224,13 @@ class LiveStrategyDaemon:
                     unresolved_order_states=context.unresolved_order_states,
                 )
             )
+            if self._telemetry is not None:
+                await self._telemetry.gate_evaluated(
+                    state,
+                    occurred_at=self._clock(),
+                    approved=gate.approved,
+                    reasons=gate.reasons,
+                )
             if not gate.approved:
                 if _is_transient_live_gate(gate.reasons):
                     if self._last_transient_gate_reasons != gate.reasons:
@@ -1301,6 +1371,24 @@ class LiveStrategyDaemon:
                 except Exception:
                     # Missing or stale EMA data must not authorize a live entry.
                     entry_filter_context = None
+            if self._telemetry is not None:
+                await self._telemetry.entry_filter_ready(
+                    state,
+                    occurred_at=self._clock(),
+                    candidate_count=len(decision.candidates),
+                    symbol_pool_loaded=(
+                        not has_entry_candidates
+                        or entry_symbols is not None
+                    ),
+                    ema_context_loaded=(
+                        not has_entry_candidates
+                        or not (
+                            self._config.require_price_above_ema5
+                            or self._config.require_price_above_ema10
+                        )
+                        or entry_filter_context is not None
+                    ),
+                )
             self._record_strategy_decision(
                 decision=decision,
                 state=state,
@@ -1310,6 +1398,12 @@ class LiveStrategyDaemon:
                 entry_symbols=entry_symbols,
                 entry_filter_context=entry_filter_context,
             )
+            if self._telemetry is not None:
+                await self._telemetry.signal_recorded(
+                    state,
+                    occurred_at=self._clock(),
+                    candidate_count=len(decision.candidates),
+                )
             processed += 1
             final_state_at = state.bucket_start
             last_processed_at_by_symbol[state.symbol] = state.bucket_start
@@ -1613,17 +1707,30 @@ class LiveStrategyDaemon:
                 market_state_bucket_end=state.bucket_end,
             )
             return None
-        executable_candidate = candidate
+        executable_candidate = self._prepare_entry_candidate(
+            candidate,
+            state=state,
+            execution_now=execution_now,
+        )
+        risk_open_position_symbols = context.open_position_symbols or frozenset()
         if not candidate.reduce_only:
+            pending_notional, pending_symbols = self._pending_entry_reservation(
+                context.unresolved_orders
+            )
+            risk_open_position_symbols |= pending_symbols
             limit_decision = evaluate_fixed_live_limits(
                 self._limits,
                 LiveLimitContext(
                     symbol=candidate.symbol,
                     requested_notional=candidate.desired_notional,
-                    open_position_symbols=context.open_position_symbols,
+                    open_position_symbols=risk_open_position_symbols,
                     realized_pnl=context.realized_pnl,
                     unrealized_pnl=context.unrealized_pnl,
-                    gross_exposure=context.gross_exposure,
+                    gross_exposure=(
+                        None
+                        if context.gross_exposure is None
+                        else context.gross_exposure + pending_notional
+                    ),
                     min_notional=_min_notional(
                         context.trading_rules.get(candidate.symbol)
                     ),
@@ -1636,7 +1743,7 @@ class LiveStrategyDaemon:
             if not limit_decision.allowed:
                 return None
             executable_candidate = replace(
-                candidate,
+                executable_candidate,
                 desired_notional=limit_decision.capped_notional,
             )
         lane = LIVE_LANE_EXIT if executable_candidate.reduce_only else LIVE_LANE_ENTRY
@@ -1661,7 +1768,7 @@ class LiveStrategyDaemon:
                 active_lease=context.active_lease,
                 latest_market_state=state,
                 account_state=context.account_state,
-                open_position_symbols=context.open_position_symbols or frozenset(),
+                open_position_symbols=risk_open_position_symbols,
                 active_halts=context.active_halts,
                 risk_config=context.risk_config,
                 strategy_state=context.strategy_state,
@@ -1703,6 +1810,15 @@ class LiveStrategyDaemon:
         )
         if isinstance(plan, QuantizationRejection):
             return None
+        if (
+            not executable_candidate.reduce_only
+            and self._config.entry_order_type is EntryType.LIMIT
+        ):
+            plan = replace(
+                plan,
+                time_in_force="GTD",
+                expires_at=executable_candidate.expires_at,
+            )
         prepared_submission: PreparedOrderSubmission | None = None
         prepare_submission = getattr(self._repository, "prepare_submission", None)
         if callable(prepare_submission):
@@ -1726,10 +1842,115 @@ class LiveStrategyDaemon:
                 occurred_at=intent_saved_at,
                 lane=lane,
             )
-        return await self._state_machine.execute_approved_intent(
+        result = await self._state_machine.execute_approved_intent(
             plan,
             prepared_submission=prepared_submission,
         )
+        if not plan.reduce_only:
+            self._remember_pending_entry(plan, result)
+            lifecycle = self._entry_order_lifecycle
+            if lifecycle is not None:
+                try:
+                    await lifecycle.track(plan, result)
+                except Exception as error:
+                    # Expiry bookkeeping is safety/observability support. It
+                    # must never turn a successful exchange submission into a
+                    # failed live command.
+                    log.warning(
+                        "live_entry_limit_lifecycle_track_failed",
+                        run_id=self._config.run_id,
+                        symbol=plan.symbol,
+                        client_order_id=plan.client_order_id,
+                        error_type=type(error).__name__,
+                    )
+        return result
+
+    def _prepare_entry_candidate(
+        self,
+        candidate: OrderIntentCandidate,
+        *,
+        state: MarketState15s,
+        execution_now: datetime,
+    ) -> OrderIntentCandidate:
+        if candidate.reduce_only or self._config.entry_order_type is EntryType.MARKET:
+            return candidate
+        signal_price = (
+            candidate.limit_price
+            or state.close_price
+            or state.mark_price
+            or state.midpoint
+        )
+        return replace(
+            candidate,
+            entry_type=EntryType.LIMIT,
+            limit_price=signal_price,
+            expires_at=execution_now
+            + timedelta(seconds=self._config.entry_limit_ttl_seconds),
+        )
+
+    def _remember_pending_entry(
+        self,
+        plan: OrderExecutionPlan,
+        result: OrderExecutionResult,
+    ) -> None:
+        if result.state.terminal or result.executed_quantity >= plan.quantity:
+            self._pending_entry_plans.pop(plan.client_order_id, None)
+            return
+        self._pending_entry_plans[plan.client_order_id] = (
+            plan,
+            result.executed_quantity,
+        )
+
+    def _sync_pending_entry_plans(
+        self,
+        context: LiveDaemonRuntimeContext,
+    ) -> None:
+        persisted = {
+            item.plan.client_order_id: item
+            for item in context.unresolved_orders
+            if not item.plan.reduce_only
+        }
+        for client_order_id, (plan, executed_quantity) in tuple(
+            self._pending_entry_plans.items()
+        ):
+            item = persisted.get(client_order_id)
+            if item is None:
+                # Keep a just-submitted order until a fresh account/context
+                # read confirms its terminal state. This avoids releasing a
+                # reservation between two candidates in one market snapshot.
+                if plan.expires_at is not None and plan.expires_at <= self._clock():
+                    self._pending_entry_plans.pop(client_order_id, None)
+                continue
+            if item.state.terminal or item.executed_quantity >= plan.quantity:
+                self._pending_entry_plans.pop(client_order_id, None)
+            elif item.executed_quantity > executed_quantity:
+                self._pending_entry_plans[client_order_id] = (
+                    plan,
+                    item.executed_quantity,
+                )
+
+    def _pending_entry_reservation(
+        self,
+        persisted_orders: tuple[PersistedExchangeOrder, ...],
+    ) -> tuple[Decimal, frozenset[str]]:
+        pending: dict[str, tuple[OrderExecutionPlan, Decimal]] = {
+            item.plan.client_order_id: (item.plan, item.executed_quantity)
+            for item in persisted_orders
+            if not item.plan.reduce_only and not item.state.terminal
+        }
+        pending.update(self._pending_entry_plans)
+        reserved_notional = Decimal("0")
+        reserved_symbols: set[str] = set()
+        for plan, executed_quantity in pending.values():
+            remaining_quantity = max(
+                Decimal("0"),
+                plan.quantity - executed_quantity,
+            )
+            if remaining_quantity <= 0 or plan.price is None:
+                continue
+            reserved_notional += remaining_quantity * plan.price
+            reserved_symbols.add(plan.symbol)
+        return reserved_notional, frozenset(reserved_symbols)
 
     def _record_signal_candidate(
         self,

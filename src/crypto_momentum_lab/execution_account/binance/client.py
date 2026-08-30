@@ -3,7 +3,7 @@ import hashlib
 import hmac
 import math
 from collections.abc import Callable, Iterable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import cast
 from urllib.parse import urlencode
@@ -458,7 +458,18 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             params["positionSide"] = plan.position_side.value
         if plan.price is not None:
             params["price"] = format(plan.price, "f")
-            params["timeInForce"] = "GTC"
+            time_in_force = plan.time_in_force or "GTC"
+            params["timeInForce"] = time_in_force
+            if time_in_force == "GTD":
+                if plan.expires_at is None:
+                    raise ValueError("GTD order is missing expires_at")
+                if plan.expires_at <= self._now() + timedelta(seconds=600):
+                    raise ValueError(
+                        "GTD order must expire more than 600 seconds from now"
+                    )
+                params["goodTillDate"] = int(
+                    plan.expires_at.timestamp() * 1000
+                )
         try:
             payload = await self._signed_post("/fapi/v1/order", params)
         except httpx.TimeoutException as exc:

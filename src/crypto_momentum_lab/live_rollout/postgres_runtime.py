@@ -1,6 +1,6 @@
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -39,6 +39,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     AccountFillEventRow,
     AccountPositionSnapshotRow,
     AccountReconciliationRunRow,
+    ExchangeFillRow,
     ExchangeOrderRow,
     ExecutionAccountProcessStateRow,
     LiveSessionTransitionRow,
@@ -58,6 +59,10 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
 
 class PostgresLiveContextProvider:
     _TRADING_RULE_CACHE_SECONDS = 300
+    # Account events invalidate this snapshot immediately. A short positive
+    # TTL lets consecutive market buckets reuse the same account/risk view
+    # instead of issuing the full nine-query context load every 15 seconds.
+    _CONTEXT_CACHE_SECONDS = 30
 
     def __init__(
         self,
@@ -94,6 +99,7 @@ class PostgresLiveContextProvider:
         self._order_repository = PostgresOrderRepository(execution_sessions)
         self._cached_bucket_start: datetime | None = None
         self._cached_context: LiveDaemonRuntimeContext | None = None
+        self._cached_loaded_at: datetime | None = None
         self._cache_epoch = 0
         self._cached_rules: dict[str, SymbolTradingRules] = {}
         self._cached_rules_at: dict[str, datetime] = {}
@@ -109,10 +115,12 @@ class PostgresLiveContextProvider:
         cache_epoch = getattr(self, "_cache_epoch", 0)
         cached_context = getattr(self, "_cached_context", None)
         cached_bucket_start = getattr(self, "_cached_bucket_start", None)
-        if (
-            cached_context is not None
-            and cached_bucket_start is not None
-            and state.bucket_start <= cached_bucket_start
+        if cached_context is not None and _context_cache_can_be_reused(
+            state=state,
+            cached_bucket_start=cached_bucket_start,
+            cached_loaded_at=getattr(self, "_cached_loaded_at", None),
+            now=now,
+            max_age_seconds=self._CONTEXT_CACHE_SECONDS,
         ):
             symbol_rules = await self._load_symbol_rules(state.symbol, now)
             current_context = self._cached_context
@@ -121,7 +129,13 @@ class PostgresLiveContextProvider:
                 getattr(self, "_cache_epoch", 0) == cache_epoch
                 and current_context is not None
                 and current_bucket_start is not None
-                and state.bucket_start <= current_bucket_start
+                and _context_cache_can_be_reused(
+                    state=state,
+                    cached_bucket_start=current_bucket_start,
+                    cached_loaded_at=getattr(self, "_cached_loaded_at", None),
+                    now=now,
+                    max_age_seconds=self._CONTEXT_CACHE_SECONDS,
+                )
             ):
                 return replace(
                     current_context,
@@ -138,10 +152,12 @@ class PostgresLiveContextProvider:
             cache_epoch = getattr(self, "_cache_epoch", 0)
             cached_context = getattr(self, "_cached_context", None)
             cached_bucket_start = getattr(self, "_cached_bucket_start", None)
-            if (
-                cached_context is not None
-                and cached_bucket_start is not None
-                and state.bucket_start <= cached_bucket_start
+            if cached_context is not None and _context_cache_can_be_reused(
+                state=state,
+                cached_bucket_start=cached_bucket_start,
+                cached_loaded_at=getattr(self, "_cached_loaded_at", None),
+                now=now,
+                max_age_seconds=self._CONTEXT_CACHE_SECONDS,
             ):
                 symbol_rules = await self._load_symbol_rules(state.symbol, now)
                 current_context = self._cached_context
@@ -150,7 +166,13 @@ class PostgresLiveContextProvider:
                     getattr(self, "_cache_epoch", 0) == cache_epoch
                     and current_context is not None
                     and current_bucket_start is not None
-                    and state.bucket_start <= current_bucket_start
+                    and _context_cache_can_be_reused(
+                        state=state,
+                        cached_bucket_start=current_bucket_start,
+                        cached_loaded_at=getattr(self, "_cached_loaded_at", None),
+                        now=now,
+                        max_age_seconds=self._CONTEXT_CACHE_SECONDS,
+                    )
                 ):
                     return replace(
                         current_context,
@@ -315,6 +337,7 @@ class PostgresLiveContextProvider:
         ):
             self._cached_bucket_start = state.bucket_start
             self._cached_context = context
+            self._cached_loaded_at = now
         return context
 
     def update_lease(self, lease: TradingLease) -> None:
@@ -347,6 +370,7 @@ class PostgresLiveContextProvider:
         self._cache_epoch = getattr(self, "_cache_epoch", 0) + 1
         self._cached_bucket_start = None
         self._cached_context = None
+        self._cached_loaded_at = None
 
     def invalidate_trading_rules(self) -> None:
         """Force the next symbol-rule lookup to reload market metadata."""
@@ -511,11 +535,67 @@ class PostgresLiveContextProvider:
                     )
                 ).all()
             )
+            entry_exchange_order_ids = tuple(
+                sorted(
+                    {
+                        row.exchange_order_id
+                        for row in orders
+                        if row.exchange_order_id is not None
+                        and not row.reduce_only
+                    }
+                )
+            )
+            entry_client_order_ids = tuple(
+                sorted(
+                    {
+                        row.client_order_id
+                        for row in orders
+                        if not row.reduce_only
+                    }
+                )
+            )
+            entry_fill_times: dict[str, datetime] = {}
+            if entry_exchange_order_ids:
+                account_fills = (
+                    await session.scalars(
+                        select(AccountFillEventRow).where(
+                            AccountFillEventRow.environment == "live",
+                            AccountFillEventRow.account_label
+                            == self._account_label,
+                            AccountFillEventRow.order_id.in_(
+                                entry_exchange_order_ids
+                            ),
+                        )
+                    )
+                ).all()
+                for account_fill in account_fills:
+                    _record_earliest_fill(
+                        entry_fill_times,
+                        account_fill.order_id,
+                        account_fill.trade_at,
+                    )
+            if entry_client_order_ids:
+                exchange_fills = (
+                    await session.scalars(
+                        select(ExchangeFillRow).where(
+                            ExchangeFillRow.client_order_id.in_(
+                                entry_client_order_ids
+                            )
+                        )
+                    )
+                ).all()
+                for exchange_fill in exchange_fills:
+                    _record_earliest_fill(
+                        entry_fill_times,
+                        exchange_fill.client_order_id,
+                        exchange_fill.filled_at,
+                    )
         active = [row for row in rows if row.position_amt != 0]
         managed, unmanaged = _classify_live_positions(
             active,
             orders,
             unresolved,
+            entry_fill_times=entry_fill_times,
         )
         return (
             process_at,
@@ -567,7 +647,10 @@ def _classify_live_positions(
     positions: list[AccountPositionSnapshotRow],
     orders: list[ExchangeOrderRow],
     unresolved: tuple[PersistedExchangeOrder, ...] = (),
+    *,
+    entry_fill_times: Mapping[str, datetime] | None = None,
 ) -> tuple[tuple[ManagedLivePosition, ...], frozenset[str]]:
+    fill_times = entry_fill_times or {}
     filled_orders = [
         row for row in orders if row.state == ExchangeOrderState.FILLED.value
     ]
@@ -580,29 +663,56 @@ def _classify_live_positions(
             unmanaged.add(position.symbol)
             continue
         side = _strategy_side(position, position_side)
-        opening = next(
-            (
-                order
-                for order in filled_orders
-                if not order.reduce_only
-                and order.symbol == position.symbol
-                and FuturesPositionSide(order.position_side) is position_side
-                and _opening_order_matches_side(order.side, side)
+        opening_candidates = [
+            order
+            for order in orders
+            if not order.reduce_only
+            and order.symbol == position.symbol
+            and FuturesPositionSide(order.position_side) is position_side
+            and _opening_order_matches_side(order.side, side)
+            and (
+                order.state == ExchangeOrderState.FILLED.value
+                or _entry_fill_at(order, fill_times) is not None
+                or (
+                    getattr(order, "executed_quantity", Decimal("0"))
+                    or Decimal("0")
+                )
+                > 0
+            )
+        ]
+        opening = max(
+            opening_candidates,
+            key=lambda order: (
+                _entry_fill_at(order, fill_times) or order.updated_at,
+                order.updated_at,
+                order.created_at,
             ),
-            None,
+            default=None,
         )
         if opening is None or position.entry_price <= 0:
             unmanaged.add(position.symbol)
             continue
+        opening_fill_at = _entry_fill_at(opening, fill_times)
         # Associate a close with the current position episode by the time the
-        # order was created.  Comparing updated_at is unsafe when an old
-        # reduce-only limit order fills after a later entry has reopened the
-        # same hedge-mode position.
+        # order actually filled when that timestamp is available.  A pending
+        # limit add-on may be created before an older exit fills; comparing
+        # only order.created_at would incorrectly attach that exit to the
+        # later position episode.  The created-at fallback preserves the
+        # legacy behavior for rows that predate fill-time persistence.
         closing_filled = any(
             order.reduce_only
             and order.symbol == position.symbol
             and FuturesPositionSide(order.position_side) is position_side
-            and order.created_at >= opening.created_at
+            and (
+                (
+                    opening_fill_at is not None
+                    and order.updated_at >= opening_fill_at
+                )
+                or (
+                    opening_fill_at is None
+                    and order.created_at >= opening.created_at
+                )
+            )
             for order in filled_orders
         )
         active_market_exit = any(
@@ -636,7 +746,7 @@ def _classify_live_positions(
                 position_side=position_side,
                 quantity=abs(position.position_amt),
                 entry_price=position.entry_price,
-                opened_at=opening.updated_at,
+                opened_at=_entry_fill_at(opening, fill_times) or opening.updated_at,
                 closing_order_filled=closing_filled or active_market_exit,
                 recovery_order_client_id=(
                     None
@@ -672,6 +782,51 @@ def _strategy_side(
 
 def _opening_order_matches_side(order_side: str, side: StrategySide) -> bool:
     return (order_side == "BUY") is (side is StrategySide.LONG)
+
+
+def _entry_fill_at(
+    order: ExchangeOrderRow | None,
+    fill_times: Mapping[str, datetime],
+) -> datetime | None:
+    if order is None:
+        return None
+    for identifier in (
+        getattr(order, "exchange_order_id", None),
+        getattr(order, "client_order_id", None),
+    ):
+        if identifier is not None:
+            fill_at = fill_times.get(identifier)
+            if fill_at is not None:
+                return fill_at
+    return None
+
+
+def _record_earliest_fill(
+    fill_times: dict[str, datetime],
+    identifier: str | None,
+    filled_at: datetime,
+) -> None:
+    if identifier is None:
+        return
+    previous = fill_times.get(identifier)
+    if previous is None or filled_at < previous:
+        fill_times[identifier] = filled_at
+
+
+def _context_cache_can_be_reused(
+    *,
+    state: MarketState15s,
+    cached_bucket_start: datetime | None,
+    cached_loaded_at: datetime | None,
+    now: datetime,
+    max_age_seconds: int,
+) -> bool:
+    if cached_bucket_start is not None and state.bucket_start <= cached_bucket_start:
+        return True
+    if cached_loaded_at is None:
+        return False
+    age_seconds = (now - cached_loaded_at).total_seconds()
+    return 0 <= age_seconds < max_age_seconds
 
 
 def _resolve_strategy_live_state(

@@ -71,7 +71,7 @@ class _Subscriber:
     connection: ServerConnection
     environment: str
     queue: asyncio.Queue[str]
-    writer_task: asyncio.Task[None]
+    writer_task: asyncio.Task[None] | None = None
 
 
 class MarketQuoteHub:
@@ -133,13 +133,18 @@ class MarketQuoteHub:
             self._subscribers.clear()
         for subscriber in subscribers:
             await subscriber.connection.close()
-            if not subscriber.writer_task.done():
+            if (
+                subscriber.writer_task is not None
+                and not subscriber.writer_task.done()
+            ):
                 subscriber.writer_task.cancel()
-        if subscribers:
-            await asyncio.gather(
-                *(subscriber.writer_task for subscriber in subscribers),
-                return_exceptions=True,
-            )
+        writer_tasks = tuple(
+            subscriber.writer_task
+            for subscriber in subscribers
+            if subscriber.writer_task is not None
+        )
+        if writer_tasks:
+            await asyncio.gather(*writer_tasks, return_exceptions=True)
         self._bound_host = None
         self._bound_port = None
 
@@ -203,17 +208,6 @@ class MarketQuoteHub:
                     )
                     if quote_environment == environment
                 )
-                await connection.send(
-                    json.dumps(
-                        {
-                            "type": _READY_MESSAGE,
-                            "schema_version": _SCHEMA_VERSION,
-                            "environment": environment,
-                            "snapshot_count": len(snapshot),
-                        },
-                        separators=(",", ":"),
-                    )
-                )
                 queue: asyncio.Queue[str] = asyncio.Queue(
                     maxsize=max(
                         self._config.subscriber_queue_size,
@@ -226,11 +220,26 @@ class MarketQuoteHub:
                     connection=connection,
                     environment=environment,
                     queue=queue,
-                    writer_task=asyncio.create_task(
-                        self._write_messages(connection, queue)
-                    ),
                 )
                 self._subscribers[id(connection)] = subscriber
+            # Register the subscriber before the handshake completes so a
+            # quote published during the network send is queued after the
+            # initial snapshot.  The send itself stays outside the global
+            # subscriber lock; a slow client must not pause the Binance reader.
+            await connection.send(
+                json.dumps(
+                    {
+                        "type": _READY_MESSAGE,
+                        "schema_version": _SCHEMA_VERSION,
+                        "environment": environment,
+                        "snapshot_count": len(snapshot),
+                    },
+                    separators=(",", ":"),
+                )
+            )
+            subscriber.writer_task = asyncio.create_task(
+                self._write_messages(connection, queue)
+            )
             log.info(
                 "market_quote_hub_subscriber_connected",
                 consumer_id=consumer_id,
@@ -247,12 +256,16 @@ class MarketQuoteHub:
             if subscriber is not None:
                 async with self._subscriber_lock:
                     self._subscribers.pop(id(connection), None)
-                if not subscriber.writer_task.done():
+                if (
+                    subscriber.writer_task is not None
+                    and not subscriber.writer_task.done()
+                ):
                     subscriber.writer_task.cancel()
-                await asyncio.gather(
-                    subscriber.writer_task,
-                    return_exceptions=True,
-                )
+                if subscriber.writer_task is not None:
+                    await asyncio.gather(
+                        subscriber.writer_task,
+                        return_exceptions=True,
+                    )
             log.info("market_quote_hub_subscriber_disconnected")
 
     async def _write_messages(

@@ -708,6 +708,13 @@ class AccountFillEventRow(Base):
             "account_label",
             "trade_at",
         ),
+        Index(
+            "ix_account_fill_order_time",
+            "environment",
+            "account_label",
+            "order_id",
+            "trade_at",
+        ),
     )
 
 
@@ -937,6 +944,13 @@ class ExchangeOrderRow(Base):
     order_type: Mapped[str] = mapped_column(String(32))
     quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    time_in_force: Mapped[str | None] = mapped_column(String(8))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    executed_quantity: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18),
+        default=Decimal("0"),
+        server_default="0",
+    )
     reduce_only: Mapped[bool] = mapped_column(Boolean)
     position_side: Mapped[str] = mapped_column(String(8), default="BOTH")
     state: Mapped[str] = mapped_column(String(48))
