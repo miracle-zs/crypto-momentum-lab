@@ -33,6 +33,13 @@ def test_account_balance_table_has_descending_latest_index() -> None:
         and str(index.expressions[-1]).endswith("observed_at DESC")
         for index in balances.indexes
     )
+    assert all(
+        index.name != "ix_account_balance_latest" for index in balances.indexes
+    )
+    assert any(
+        index.name == "ix_account_balance_asset_hour_observed"
+        for index in balances.indexes
+    )
 
 
 def test_strategy_run_relationships_are_declared() -> None:

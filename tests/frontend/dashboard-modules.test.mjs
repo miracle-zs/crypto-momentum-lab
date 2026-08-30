@@ -32,13 +32,13 @@ import {
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-config.js";
 
 test("dashboard polling keeps safety sections fresh and backs off cold sections", () => {
-  assert.equal(POLL_MS, 5000);
+  assert.equal(POLL_MS, 15000);
   assert.deepEqual(SECTION_POLL_MS, {
-    overview: 5000,
-    risk: 5000,
-    account: 5000,
-    strategy: 15000,
-    universe: 15000,
+    overview: 15000,
+    risk: 15000,
+    account: 15000,
+    strategy: 30000,
+    universe: 30000,
     reports: 30000,
   });
 });

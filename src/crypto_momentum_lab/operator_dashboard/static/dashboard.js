@@ -2,7 +2,7 @@ import {
   SECTIONS,
   POLL_MS,
   SECTION_POLL_MS,
-} from "./dashboard-config.js?v=20260828-performance-v1";
+} from "./dashboard-config.js?v=20260830-poll-budget-v1";
 import {
   statusClass,
   normalizedStatus,
@@ -283,7 +283,10 @@ async function poll() {
   if (document.hidden) return;
   if (pollInFlight) return;
   const now = Date.now();
+  const activeView = document.body.dataset.activeView || "overview";
+  const visibleSections = new Set(["overview", activeView]);
   const dueSections = SECTIONS.filter((id) => {
+    if (!visibleSections.has(id)) return false;
     const lastPolledAt = lastSectionPollAt.get(id);
     const interval = SECTION_POLL_MS[id] || POLL_MS;
     return lastPolledAt == null || now - lastPolledAt >= interval;

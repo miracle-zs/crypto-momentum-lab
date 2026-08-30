@@ -1,11 +1,11 @@
 export const SECTIONS = ["overview", "risk", "account", "strategy", "universe", "reports"];
-export const POLL_MS = 5000;
+export const POLL_MS = 15 * 1000;
 export const SECTION_POLL_MS = Object.freeze({
   overview: POLL_MS,
   risk: POLL_MS,
   account: POLL_MS,
-  strategy: 15 * 1000,
-  universe: 15 * 1000,
+  strategy: 30 * 1000,
+  universe: 30 * 1000,
   reports: 30 * 1000,
 });
 export const DEFAULT_EQUITY_BUCKET_SECONDS = 6 * 60;

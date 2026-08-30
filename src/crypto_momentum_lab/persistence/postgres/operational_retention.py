@@ -36,6 +36,40 @@ _ACCOUNT_SNAPSHOT_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+def _account_balance_hourly_duplicate_statement() -> TextClause:
+    """Build a bounded delete for duplicate rows in an hourly bucket.
+
+    The old implementation ranked the whole retained balance history before
+    deleting a small batch.  Walk the account/observed-at index instead and
+    use the hourly expression index for one existence probe per candidate.
+    This keeps each batch proportional to the rows it actually removes.
+    """
+    return text(
+        "WITH doomed AS ("
+        "SELECT candidate.ctid "
+        "FROM account_balance_snapshots AS candidate "
+        "WHERE candidate.environment = :environment "
+        "AND candidate.account_label = :account_label "
+        "AND candidate.observed_at >= :on_or_after "
+        "AND candidate.observed_at < :before "
+        "AND EXISTS ("
+        "SELECT 1 FROM account_balance_snapshots AS newer "
+        "WHERE newer.environment = candidate.environment "
+        "AND newer.account_label = candidate.account_label "
+        "AND newer.asset = candidate.asset "
+        "AND date_trunc('hour', newer.observed_at AT TIME ZONE 'UTC') "
+        "= date_trunc('hour', candidate.observed_at AT TIME ZONE 'UTC') "
+        "AND newer.observed_at >= :on_or_after "
+        "AND newer.observed_at < :before "
+        "AND newer.observed_at > candidate.observed_at"
+        ") "
+        "ORDER BY candidate.observed_at "
+        "LIMIT :batch_size"
+        ") DELETE FROM account_balance_snapshots AS candidate "
+        "USING doomed WHERE candidate.ctid = doomed.ctid"
+    )
+
+
 class PostgresOperationalRetentionRepository:
     """Prune data that can be rebuilt from the market-data archive."""
 
@@ -219,44 +253,34 @@ class PostgresOperationalRetentionRepository:
         max_rows: int,
     ) -> int:
         """Keep the newest balance snapshot in each UTC hour."""
-        # The ranking scan spans the retained archive. Run one bounded delete
-        # per maintenance cycle rather than repeatedly rescanning it.
-        current_batch_size = min(batch_size, max_rows)
-        statement = text(
-            "WITH ranked AS ("
-            "SELECT candidate.ctid, candidate.observed_at, "
-            "row_number() OVER ("
-            "PARTITION BY candidate.asset, "
-            "date_trunc('hour', candidate.observed_at AT TIME ZONE 'UTC') "
-            "ORDER BY candidate.observed_at DESC"
-            ") AS bucket_rank "
-            "FROM account_balance_snapshots AS candidate "
-            "WHERE candidate.environment = :environment "
-            "AND candidate.account_label = :account_label "
-            "AND candidate.observed_at >= :on_or_after "
-            "AND candidate.observed_at < :before"
-            "), doomed AS ("
-            "SELECT ctid FROM ranked WHERE bucket_rank > 1 "
-            "ORDER BY observed_at LIMIT :batch_size"
-            ") DELETE FROM account_balance_snapshots AS candidate "
-            "USING doomed WHERE candidate.ctid = doomed.ctid"
-        )
-        async with self._session_factory() as session:
-            async with session.begin():
-                result = cast(
-                    CursorResult[Any],
-                    await session.execute(
-                        statement,
-                        {
-                            "environment": environment,
-                            "account_label": account_label,
-                            "on_or_after": on_or_after,
-                            "before": before,
-                            "batch_size": current_batch_size,
-                        },
-                    ),
-                )
-        return max(result.rowcount or 0, 0)
+        # Delete independent bounded batches so one maintenance cycle can
+        # catch up with the incoming snapshot rate without one large
+        # transaction.  The candidate scan is ordered by the account/observed
+        # index and the duplicate check probes the hourly expression index.
+        statement = _account_balance_hourly_duplicate_statement()
+        deleted = 0
+        while deleted < max_rows:
+            current_batch_size = min(batch_size, max_rows - deleted)
+            async with self._session_factory() as session:
+                async with session.begin():
+                    result = cast(
+                        CursorResult[Any],
+                        await session.execute(
+                            statement,
+                            {
+                                "environment": environment,
+                                "account_label": account_label,
+                                "on_or_after": on_or_after,
+                                "before": before,
+                                "batch_size": current_batch_size,
+                            },
+                        ),
+                    )
+            count = max(result.rowcount or 0, 0)
+            deleted += count
+            if count < current_batch_size:
+                break
+        return deleted
 
     async def _account_snapshot_latest_by_key(
         self,

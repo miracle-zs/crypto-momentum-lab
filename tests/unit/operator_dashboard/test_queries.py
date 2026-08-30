@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from sqlalchemy.dialects.postgresql import dialect as postgresql_dialect
 
 from crypto_momentum_lab.operator_dashboard.queries import (
+    _account_equity_statement,
     _aggregate_account_fills,
     _build_common_equity_curve,
     _checkpoint_times_statement,
@@ -14,11 +15,13 @@ from crypto_momentum_lab.operator_dashboard.queries import (
     _is_dashboard_paper_run,
     _latest_checkpoint_at_statement,
     _live_account_equity_point,
+    _live_common_equity_statement,
     _live_equity_observations,
     _live_observation,
     _live_strategy_signal,
     _paper_account_summary,
     _paper_common_equity_statement,
+    _paper_equity_statement,
     _paper_exit_label,
     _paper_first_equity_statement,
     _split_exchange_orders,
@@ -96,6 +99,57 @@ def test_common_equity_query_uses_indexable_lateral_bucket_lookups() -> None:
     assert "AS equity_buckets(bucket)" in sql
     assert "LATERAL" in sql
     assert "DISTINCT ON" not in sql
+
+
+def test_account_equity_query_uses_narrow_lateral_bucket_lookups() -> None:
+    statement = _account_equity_statement(
+        environment="live",
+        account_label="primary",
+        asset="USDT",
+        window_start=datetime(2026, 8, 1, tzinfo=UTC),
+        window_end=datetime(2026, 8, 31, tzinfo=UTC),
+        interval_seconds=3 * 60 * 60,
+    )
+
+    sql = str(statement.compile(dialect=postgresql_dialect()))
+
+    assert "generate_series" in sql
+    assert "LATERAL" in sql
+    assert "wallet_balance" in sql
+    assert "unrealized_pnl" in sql
+    assert "raw_payload" not in sql
+    assert "DISTINCT ON" not in sql
+
+
+def test_paper_equity_query_is_bounded_and_narrow() -> None:
+    statement = _paper_equity_statement(
+        ["paper-a", "paper-b"],
+        datetime(2026, 8, 1, tzinfo=UTC),
+        datetime(2026, 8, 31, tzinfo=UTC),
+    )
+
+    sql = str(statement.compile(dialect=postgresql_dialect()))
+
+    assert "generate_series" in sql
+    assert "LATERAL" in sql
+    assert "raw_payload" not in sql
+    assert "DISTINCT ON" not in sql
+
+
+def test_live_common_equity_query_aggregates_latest_timestamp_per_bucket() -> None:
+    statement = _live_common_equity_statement(
+        environment="live",
+        account_label="primary",
+        window_start=datetime(2026, 8, 1, tzinfo=UTC),
+        window_end=datetime(2026, 8, 2, tzinfo=UTC),
+    )
+
+    sql = str(statement.compile(dialect=postgresql_dialect()))
+
+    assert "generate_series" in sql
+    assert "LATERAL" in sql
+    assert "GROUP BY" in sql
+    assert "raw_payload" not in sql
 
 
 def test_first_equity_query_uses_one_index_lookup_per_run() -> None:

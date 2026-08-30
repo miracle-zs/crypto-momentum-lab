@@ -71,7 +71,8 @@ class LogSignals:
 
 @dataclass(frozen=True, slots=True)
 class DatabaseState:
-    latest_event_age_seconds: float | None
+    latest_checkpoint_age_seconds: float | None
+    live_session_ready: bool
     pg_stat_statements_ready: bool
     track_io_timing: bool
     track_wal_io_timing: bool
@@ -81,34 +82,42 @@ class DatabaseState:
 def evaluate_database_state(
     *,
     now: datetime,
-    latest_event_age_seconds: float | None,
+    latest_checkpoint_age_seconds: float | None,
+    live_session_ready: bool,
     pg_stat_statements_ready: bool,
     track_io_timing: bool,
     track_wal_io_timing: bool,
     max_parallel_maintenance_workers: int | None,
     stale_after_seconds: float,
 ) -> tuple[Alert, ...]:
-    """Return alerts for telemetry freshness and PostgreSQL observability."""
+    """Return alerts for live liveness and PostgreSQL observability."""
 
     del now
     alerts: list[Alert] = []
-    if latest_event_age_seconds is None or latest_event_age_seconds < 0:
+    if not live_session_ready:
         alerts.append(
             Alert(
-                "telemetry_timestamp_stale",
+                "live_session_not_ready",
                 "critical",
-                "No live runtime telemetry event is available",
-                {"age_seconds": None},
+                "Live session checkpoint or lease is not ready",
             )
         )
-    elif latest_event_age_seconds > stale_after_seconds:
+    elif (
+        latest_checkpoint_age_seconds is None
+        or latest_checkpoint_age_seconds < 0
+        or latest_checkpoint_age_seconds > stale_after_seconds
+    ):
         alerts.append(
             Alert(
-                "telemetry_timestamp_stale",
+                "live_checkpoint_stale",
                 "critical",
-                "Live runtime telemetry is older than the freshness budget",
+                "Live strategy checkpoint is older than the freshness budget",
                 {
-                    "age_seconds": round(latest_event_age_seconds, 3),
+                    "age_seconds": (
+                        None
+                        if latest_checkpoint_age_seconds is None
+                        else round(latest_checkpoint_age_seconds, 3)
+                    ),
                     "threshold_seconds": stale_after_seconds,
                 },
             )
@@ -309,6 +318,8 @@ class MonitorConfig:
     compose_env_file: Path | None = Path("/opt/crypto-momentum-lab/.env.server")
     services: tuple[str, ...] = _DEFAULT_SERVICES
     live_run_id: str = "live-primary-v1"
+    live_account_label: str = "primary"
+    live_lease_owner: str = "live-worker"
     interval_seconds: float = _DEFAULT_INTERVAL_SECONDS
     log_window_seconds: float = _DEFAULT_LOG_WINDOW_SECONDS
     telemetry_stale_after_seconds: float = _DEFAULT_TELEMETRY_STALE_AFTER_SECONDS
@@ -422,7 +433,10 @@ class OpsMonitor:
                 alerts.extend(
                     evaluate_database_state(
                         now=datetime.fromtimestamp(now, UTC),
-                        latest_event_age_seconds=database_state.latest_event_age_seconds,
+                        latest_checkpoint_age_seconds=(
+                            database_state.latest_checkpoint_age_seconds
+                        ),
+                        live_session_ready=database_state.live_session_ready,
                         pg_stat_statements_ready=database_state.pg_stat_statements_ready,
                         track_io_timing=database_state.track_io_timing,
                         track_wal_io_timing=database_state.track_wal_io_timing,
@@ -563,11 +577,32 @@ class OpsMonitor:
 
     def _database_state(self, container_id: str) -> DatabaseState:
         run_id = _sql_literal(self._config.live_run_id)
+        account_label = _sql_literal(self._config.live_account_label)
+        lease_owner = _sql_literal(self._config.live_lease_owner)
         sql = f"""
-SELECT 'event_age' || E'\\t' || COALESCE(
-  EXTRACT(EPOCH FROM (clock_timestamp() - max(occurred_at)))::text, '-1'
+SELECT 'checkpoint_age' || E'\\t' || COALESCE(
+  EXTRACT(EPOCH FROM (clock_timestamp() - max(saved_at)))::text, '-1'
 )
-FROM strategy_runtime_events WHERE run_id = {run_id};
+FROM strategy_runtime_checkpoints WHERE run_id = {run_id};
+SELECT 'live_ready' || E'\\t' || (
+  EXISTS (
+    SELECT 1 FROM live_session_transitions
+    WHERE session_id = {run_id}
+      AND state IN ('live_enabled', 'draining')
+  )
+  AND EXISTS (
+    SELECT 1 FROM trading_leases
+    WHERE environment = 'live'
+      AND account_label = {account_label}
+      AND owner = {lease_owner}
+      AND state = 'active'
+      AND expires_at > clock_timestamp()
+  )
+  AND EXISTS (
+    SELECT 1 FROM strategy_runtime_checkpoints
+    WHERE run_id = {run_id}
+  )
+);
 SELECT 'pg_stat_statements' || E'\\t' || (
   EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements')
   AND position('pg_stat_statements' in current_setting('shared_preload_libraries')) > 0
@@ -600,9 +635,10 @@ SELECT 'parallel_maintenance' || E'\\t' || current_setting(
             key, separator, value = line.partition("\t")
             if separator:
                 values[key] = value.strip()
-        age = _parse_float(values.get("event_age"))
+        age = _parse_float(values.get("checkpoint_age"))
         return DatabaseState(
-            latest_event_age_seconds=None if age is None or age < 0 else age,
+            latest_checkpoint_age_seconds=None if age is None or age < 0 else age,
+            live_session_ready=_parse_bool(values.get("live_ready")),
             pg_stat_statements_ready=_parse_bool(values.get("pg_stat_statements")),
             track_io_timing=_parse_bool(values.get("track_io_timing")),
             track_wal_io_timing=_parse_bool(values.get("track_wal_io_timing")),
@@ -864,12 +900,26 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         or _read_env_value(compose_env_file, "CML_LIVE_SESSION_ID")
         or "live-primary-v1"
     )
+    live_account_label = (
+        getattr(args, "live_account_label", None)
+        or os.environ.get("CML_LIVE_ACCOUNT_LABEL")
+        or _read_env_value(compose_env_file, "CML_LIVE_ACCOUNT_LABEL")
+        or "primary"
+    )
+    live_lease_owner = (
+        getattr(args, "live_lease_owner", None)
+        or os.environ.get("CML_LIVE_LEASE_OWNER")
+        or _read_env_value(compose_env_file, "CML_LIVE_LEASE_OWNER")
+        or "live-worker"
+    )
     return MonitorConfig(
         project_directory=Path(args.project_directory),
         compose_file=Path(args.compose_file),
         compose_env_file=compose_env_file,
         services=services or _DEFAULT_SERVICES,
         live_run_id=live_run_id,
+        live_account_label=live_account_label,
+        live_lease_owner=live_lease_owner,
         interval_seconds=args.interval_seconds,
         log_window_seconds=args.log_window_seconds,
         telemetry_stale_after_seconds=args.telemetry_stale_after_seconds,
@@ -903,6 +953,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--live-run-id",
+        default=None,
+    )
+    parser.add_argument(
+        "--live-account-label",
+        default=None,
+    )
+    parser.add_argument(
+        "--live-lease-owner",
         default=None,
     )
     parser.add_argument(

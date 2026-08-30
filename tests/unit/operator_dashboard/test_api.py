@@ -112,3 +112,16 @@ def test_overview_timeout_returns_gateway_timeout() -> None:
 
     assert response.status_code == 504
     assert response.json()["detail"] == "dashboard overview query timed out"
+
+
+def test_account_timeout_returns_gateway_timeout() -> None:
+    class SlowAccountQueries(FakeQueries):
+        async def account(self, equity_range: str = "24h") -> object:
+            del equity_range
+            raise TimeoutError("account query timed out")
+
+    with TestClient(create_dashboard_app(queries=SlowAccountQueries())) as client:
+        response = client.get("/api/account?equity_range=30d")
+
+    assert response.status_code == 504
+    assert response.json()["detail"] == "dashboard account query timed out"

@@ -12,6 +12,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from crypto_momentum_lab.operator_dashboard.queries import (
@@ -212,7 +213,7 @@ def create_dashboard_app(
                 ),
                 timeout=overview_query_timeout_seconds,
             )
-        except TimeoutError as exc:
+        except (TimeoutError, SQLAlchemyTimeoutError) as exc:
             raise HTTPException(
                 status_code=504,
                 detail="dashboard overview query timed out",
@@ -287,10 +288,16 @@ def create_dashboard_app(
     async def account(
         equity_range: Literal["24h", "7d", "30d", "1y"] = "24h",
     ) -> AccountOverviewResponse:
-        return await response_cache.get(
-            f"account:{equity_range}",
-            lambda: query_service().account(equity_range),
-        )
+        try:
+            return await response_cache.get(
+                f"account:{equity_range}",
+                lambda: query_service().account(equity_range),
+            )
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=504,
+                detail="dashboard account query timed out",
+            ) from exc
 
     @dashboard.get(
         "/api/risk-execution",

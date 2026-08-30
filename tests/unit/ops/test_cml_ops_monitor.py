@@ -14,10 +14,11 @@ from deploy.ops.cml_ops_monitor import (
 )
 
 
-def test_database_state_alerts_when_telemetry_is_stale() -> None:
+def test_database_state_alerts_when_live_checkpoint_is_stale() -> None:
     alerts = evaluate_database_state(
         now=datetime(2026, 8, 29, 1, 0, tzinfo=UTC),
-        latest_event_age_seconds=901,
+        latest_checkpoint_age_seconds=901,
+        live_session_ready=True,
         pg_stat_statements_ready=True,
         track_io_timing=True,
         track_wal_io_timing=True,
@@ -25,8 +26,23 @@ def test_database_state_alerts_when_telemetry_is_stale() -> None:
         stale_after_seconds=900,
     )
 
-    assert [alert.name for alert in alerts] == ["telemetry_timestamp_stale"]
+    assert [alert.name for alert in alerts] == ["live_checkpoint_stale"]
     assert alerts[0].severity == "critical"
+
+
+def test_database_state_does_not_alert_when_only_order_telemetry_is_quiet() -> None:
+    alerts = evaluate_database_state(
+        now=datetime(2026, 8, 29, 1, 0, tzinfo=UTC),
+        latest_checkpoint_age_seconds=12,
+        live_session_ready=True,
+        pg_stat_statements_ready=True,
+        track_io_timing=True,
+        track_wal_io_timing=True,
+        max_parallel_maintenance_workers=0,
+        stale_after_seconds=900,
+    )
+
+    assert alerts == ()
 
 
 def test_log_signals_alert_on_persist_failure_and_dead_task() -> None:
@@ -73,7 +89,8 @@ def test_database_state_parses_postgres_boolean_text(tmp_path) -> None:
         def run(self, args, *, timeout_seconds):
             del args, timeout_seconds
             return (
-                "event_age\t12\n"
+                "checkpoint_age\t12\n"
+                "live_ready\ttrue\n"
                 "pg_stat_statements\ttrue\n"
                 "track_io_timing\ton\n"
                 "track_wal_io_timing\tt\n"
@@ -87,11 +104,50 @@ def test_database_state_parses_postgres_boolean_text(tmp_path) -> None:
 
     state = monitor._database_state("postgres")
 
-    assert state.latest_event_age_seconds == 12
+    assert state.latest_checkpoint_age_seconds == 12
+    assert state.live_session_ready is True
     assert state.pg_stat_statements_ready is True
     assert state.track_io_timing is True
     assert state.track_wal_io_timing is True
     assert state.max_parallel_maintenance_workers == 0
+
+
+def test_database_state_uses_live_checkpoint_and_lease_not_order_events(
+    tmp_path,
+) -> None:
+    class Runner:
+        last_args = None
+
+        def run(self, args, *, timeout_seconds):
+            del timeout_seconds
+            self.last_args = args
+            return (
+                "checkpoint_age\t12\n"
+                "live_ready\ttrue\n"
+                "pg_stat_statements\ttrue\n"
+                "track_io_timing\ton\n"
+                "track_wal_io_timing\ton\n"
+                "parallel_maintenance\t0\n"
+            )
+
+    runner = Runner()
+    monitor = OpsMonitor(
+        MonitorConfig(
+            state_path=tmp_path / "state.json",
+            live_run_id="live-session",
+            live_account_label="primary",
+            live_lease_owner="live-worker",
+        ),
+        runner=runner,
+    )
+
+    monitor._database_state("postgres")
+    sql = str(runner.last_args[-1])
+
+    assert "strategy_runtime_checkpoints" in sql
+    assert "trading_leases" in sql
+    assert "live_session_transitions" in sql
+    assert "strategy_runtime_events" not in sql
 
 
 def test_build_config_reads_live_session_from_compose_env(
@@ -99,7 +155,9 @@ def test_build_config_reads_live_session_from_compose_env(
 ) -> None:
     env_file = tmp_path / "compose.env"
     env_file.write_text(
-        "CML_LIVE_SESSION_ID='live-b1-long-100u-5x-v1'\n",
+        "CML_LIVE_SESSION_ID='live-b1-long-100u-5x-v1'\n"
+        "CML_LIVE_ACCOUNT_LABEL='primary-2'\n"
+        "CML_LIVE_LEASE_OWNER='worker-2'\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("CML_COMPOSE_ENV_FILE", str(env_file))
@@ -123,3 +181,5 @@ def test_build_config_reads_live_session_from_compose_env(
     config = build_config(args)
 
     assert config.live_run_id == "live-b1-long-100u-5x-v1"
+    assert config.live_account_label == "primary-2"
+    assert config.live_lease_owner == "worker-2"

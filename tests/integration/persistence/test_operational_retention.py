@@ -184,3 +184,70 @@ async def test_account_snapshot_retention_thins_old_balance_history_hourly(
         (latest_in_hour_at, {"version": 2}),
         (next_hour_at, {"version": 3}),
     ]
+
+
+async def test_account_snapshot_retention_thins_multiple_batches(
+    repository,
+) -> None:
+    factory = repository._session_factory
+    environment = f"retention-{uuid4().hex}"
+    account_label = "primary"
+    before = datetime(2026, 6, 15, tzinfo=UTC)
+    equity_before = datetime(2026, 6, 14, tzinfo=UTC)
+    observations = (
+        (datetime(2026, 6, 14, 10, 5, tzinfo=UTC), 1),
+        (datetime(2026, 6, 14, 10, 25, tzinfo=UTC), 2),
+        (datetime(2026, 6, 14, 10, 55, tzinfo=UTC), 3),
+        (datetime(2026, 6, 14, 11, 5, tzinfo=UTC), 4),
+        (datetime(2026, 6, 14, 11, 25, tzinfo=UTC), 5),
+        (datetime(2026, 6, 14, 11, 55, tzinfo=UTC), 6),
+        (datetime(2026, 6, 15, 0, 5, tzinfo=UTC), 7),
+    )
+
+    async with factory() as session:
+        async with session.begin():
+            session.add_all(
+                [
+                    AccountBalanceSnapshotRow(
+                        snapshot_id=uuid4(),
+                        environment=environment,
+                        account_label=account_label,
+                        asset="USDT",
+                        wallet_balance=Decimal(str(10 + version)),
+                        available_balance=Decimal(str(9 + version)),
+                        unrealized_pnl=Decimal("0"),
+                        observed_at=observed_at,
+                        raw_payload={"version": version},
+                    )
+                    for observed_at, version in observations
+                ]
+            )
+
+    retention = PostgresOperationalRetentionRepository(factory)
+    deleted = await retention.prune_account_snapshots(
+        environment=environment,
+        account_label=account_label,
+        before=before,
+        equity_before=equity_before,
+        batch_size=2,
+        max_rows_per_table=4,
+    )
+
+    async with factory() as session:
+        rows = (
+            await session.scalars(
+                select(AccountBalanceSnapshotRow)
+                .where(
+                    AccountBalanceSnapshotRow.environment == environment,
+                    AccountBalanceSnapshotRow.account_label == account_label,
+                )
+                .order_by(AccountBalanceSnapshotRow.observed_at)
+            )
+        ).all()
+
+    assert deleted["account_balance_snapshots"] == 4
+    assert [(row.observed_at, row.raw_payload) for row in rows] == [
+        (datetime(2026, 6, 14, 10, 55, tzinfo=UTC), {"version": 3}),
+        (datetime(2026, 6, 14, 11, 55, tzinfo=UTC), {"version": 6}),
+        (datetime(2026, 6, 15, 0, 5, tzinfo=UTC), {"version": 7}),
+    ]

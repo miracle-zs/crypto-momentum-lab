@@ -11,7 +11,8 @@ The monitor alerts on:
 
 - PostgreSQL/container OOM and high cgroup memory usage;
 - `live_runtime_telemetry_persist_failed` batches;
-- stale `strategy_runtime_events` for the configured live run;
+- stale live checkpoint, session transition, or lease for the configured live
+  run (order-lifecycle telemetry is intentionally not used as a heartbeat);
 - `market_data_connection_task_not_alive` records;
 - RSS/cgroup memory growth of at least 64 MiB in a 30-minute window;
 - missing `pg_stat_statements`, disabled I/O timing, or re-enabled parallel

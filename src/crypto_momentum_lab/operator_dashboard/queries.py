@@ -100,6 +100,27 @@ class LiveCashFlowAdjustment:
     cash_flow_type: str = "deposit"
 
 
+@dataclass(frozen=True, slots=True)
+class _AccountEquityPoint:
+    """Narrow account-equity projection used by the dashboard curve."""
+
+    observed_at: datetime
+    wallet_balance: Decimal
+    unrealized_pnl: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class _PaperEquityPoint:
+    """Scalar paper-equity projection used by the dashboard curve."""
+
+    run_id: str
+    observed_at: datetime
+    balance: Decimal
+    equity: Decimal
+    realized_pnl: Decimal
+    unrealized_pnl: Decimal
+
+
 DEFAULT_LIVE_CASH_FLOW_ADJUSTMENTS = (
     LiveCashFlowAdjustment(
         account_label="primary",
@@ -193,6 +214,202 @@ def _paper_common_equity_statement(
             run_values.join(bucket_series, true()).join(latest_equity, true())
         )
         .order_by(run_values.c.run_id, bucket_start)
+    )
+
+
+def _account_equity_statement(
+    *,
+    environment: str,
+    account_label: str,
+    asset: str,
+    window_start: datetime,
+    window_end: datetime,
+    interval_seconds: int,
+    max_points: int = _EQUITY_MAX_POINTS,
+) -> Select[tuple[datetime, Decimal, Decimal]]:
+    """Fetch one narrow, latest balance row per UTC equity bucket.
+
+    The previous dashboard query selected the full balance row (including the
+    JSON payload), sorted every row in the requested window, and then applied
+    ``DISTINCT ON``. A bounded bucket series with a lateral index lookup keeps
+    the work proportional to the number of points rendered by the dashboard.
+    """
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    if max_points <= 0:
+        raise ValueError("max_points must be positive")
+    if window_start > window_end:
+        raise ValueError("window_start must not be later than window_end")
+
+    bucket_interval = text(f"interval '{interval_seconds} seconds'")
+    end_bucket = _bucket_start(window_end, interval_seconds)
+    earliest_bucket = _bucket_start(window_start, interval_seconds)
+    latest_window_start = end_bucket - timedelta(
+        seconds=interval_seconds * (max_points - 1)
+    )
+    series_start = max(earliest_bucket, latest_window_start)
+    bucket_series = func.generate_series(
+        series_start,
+        end_bucket,
+        bucket_interval,
+    ).table_valued("bucket").render_derived(name="equity_buckets")
+    snapshot = aliased(AccountBalanceSnapshotRow)
+    bucket_start = bucket_series.c.bucket
+    latest_equity = (
+        select(
+            snapshot.observed_at.label("observed_at"),
+            snapshot.wallet_balance.label("wallet_balance"),
+            snapshot.unrealized_pnl.label("unrealized_pnl"),
+        )
+        .where(
+            snapshot.environment == environment,
+            snapshot.account_label == account_label,
+            snapshot.asset == asset,
+            snapshot.observed_at >= window_start,
+            snapshot.observed_at <= window_end,
+            snapshot.observed_at >= bucket_start,
+            snapshot.observed_at < bucket_start + bucket_interval,
+        )
+        .order_by(snapshot.observed_at.desc())
+        .limit(1)
+        .lateral("latest_equity")
+    )
+    return (
+        select(
+            latest_equity.c.observed_at,
+            latest_equity.c.wallet_balance,
+            latest_equity.c.unrealized_pnl,
+        )
+        .select_from(bucket_series.join(latest_equity, true()))
+        .order_by(bucket_start)
+    )
+
+
+def _paper_equity_statement(
+    run_ids: Sequence[str],
+    window_start: datetime,
+    window_end: datetime,
+    interval_seconds: int = _EQUITY_BUCKET_SECONDS,
+    max_points: int = _EQUITY_MAX_POINTS,
+) -> Select[
+    tuple[str, datetime, Decimal, Decimal, Decimal, Decimal]
+]:
+    """Fetch one narrow, latest paper snapshot per run and time bucket."""
+    if not run_ids:
+        raise ValueError("run_ids must not be empty")
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    if max_points <= 0:
+        raise ValueError("max_points must be positive")
+    if window_start > window_end:
+        raise ValueError("window_start must not be later than window_end")
+
+    bucket_interval = text(f"interval '{interval_seconds} seconds'")
+    end_bucket = _bucket_start(window_end, interval_seconds)
+    earliest_bucket = _bucket_start(window_start, interval_seconds)
+    latest_window_start = end_bucket - timedelta(
+        seconds=interval_seconds * (max_points - 1)
+    )
+    series_start = max(earliest_bucket, latest_window_start)
+    run_values = _paper_run_values(run_ids)
+    bucket_series = func.generate_series(
+        series_start,
+        end_bucket,
+        bucket_interval,
+    ).table_valued("bucket").render_derived(name="equity_buckets")
+    snapshot = aliased(PaperEquitySnapshotRow)
+    bucket_start = bucket_series.c.bucket
+    latest_equity = (
+        select(
+            snapshot.run_id.label("run_id"),
+            snapshot.observed_at.label("observed_at"),
+            snapshot.balance.label("balance"),
+            snapshot.equity.label("equity"),
+            snapshot.realized_pnl.label("realized_pnl"),
+            snapshot.unrealized_pnl.label("unrealized_pnl"),
+        )
+        .where(
+            snapshot.run_id == run_values.c.run_id,
+            snapshot.observed_at >= window_start,
+            snapshot.observed_at <= window_end,
+            snapshot.observed_at >= bucket_start,
+            snapshot.observed_at < bucket_start + bucket_interval,
+        )
+        .order_by(snapshot.observed_at.desc())
+        .limit(1)
+        .lateral("latest_equity")
+    )
+    return (
+        select(
+            latest_equity.c.run_id,
+            latest_equity.c.observed_at,
+            latest_equity.c.balance,
+            latest_equity.c.equity,
+            latest_equity.c.realized_pnl,
+            latest_equity.c.unrealized_pnl,
+        )
+        .select_from(
+            run_values.join(bucket_series, true()).join(latest_equity, true())
+        )
+        .order_by(latest_equity.c.run_id, bucket_start)
+    )
+
+
+def _live_common_equity_statement(
+    *,
+    environment: str,
+    account_label: str,
+    window_start: datetime,
+    window_end: datetime,
+    interval_seconds: int = _COMMON_EQUITY_BUCKET_SECONDS,
+    max_points: int = _EQUITY_MAX_POINTS,
+) -> Select[tuple[datetime, Decimal]]:
+    """Aggregate live assets at the latest timestamp in each common bucket."""
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    if max_points <= 0:
+        raise ValueError("max_points must be positive")
+    if window_start > window_end:
+        raise ValueError("window_start must not be later than window_end")
+
+    bucket_interval = text(f"interval '{interval_seconds} seconds'")
+    end_bucket = _bucket_start(window_end, interval_seconds)
+    earliest_bucket = _bucket_start(window_start, interval_seconds)
+    latest_window_start = end_bucket - timedelta(
+        seconds=interval_seconds * (max_points - 1)
+    )
+    series_start = max(earliest_bucket, latest_window_start)
+    bucket_series = func.generate_series(
+        series_start,
+        end_bucket,
+        bucket_interval,
+    ).table_valued("bucket").render_derived(name="equity_buckets")
+    snapshot = aliased(AccountBalanceSnapshotRow)
+    bucket_start = bucket_series.c.bucket
+    total_equity = snapshot.wallet_balance + snapshot.unrealized_pnl
+    latest_equity = (
+        select(
+            snapshot.observed_at.label("observed_at"),
+            func.sum(total_equity).label("equity"),
+        )
+        .where(
+            snapshot.environment == environment,
+            snapshot.account_label == account_label,
+            snapshot.observed_at >= window_start,
+            snapshot.observed_at <= window_end,
+            snapshot.observed_at >= bucket_start,
+            snapshot.observed_at < bucket_start + bucket_interval,
+        )
+        .group_by(snapshot.observed_at)
+        .having(func.sum(total_equity) > 0)
+        .order_by(snapshot.observed_at.desc())
+        .limit(1)
+        .lateral("latest_equity")
+    )
+    return (
+        select(latest_equity.c.observed_at, latest_equity.c.equity)
+        .select_from(bucket_series.join(latest_equity, true()))
+        .order_by(bucket_start)
     )
 
 
@@ -611,7 +828,7 @@ class DashboardQueries:
         window_end = self._clock()
         window_start = window_end - _EQUITY_WINDOW
         live_process: ExecutionAccountProcessStateRow | None = None
-        live_balance_rows: Sequence[AccountBalanceSnapshotRow] = ()
+        live_balance_rows: Sequence[_AccountEquityPoint] = ()
         common_paper_rows: Sequence[tuple[str, datetime, Decimal]] = ()
         common_live_equity_rows: list[tuple[datetime, Decimal]] = []
         live_strategy_name: str | None = None
@@ -625,20 +842,27 @@ class DashboardQueries:
                 run_ids: list[str] = []
             else:
                 run_ids = [run.run_id for run in selected_runs]
-            rows = (
-                await session.scalars(
-                    select(PaperEquitySnapshotRow)
-                    .where(
-                        PaperEquitySnapshotRow.run_id.in_(run_ids),
-                        PaperEquitySnapshotRow.observed_at >= window_start,
-                        PaperEquitySnapshotRow.observed_at <= window_end,
+            rows = []
+            if run_ids:
+                rows = [
+                    _PaperEquityPoint(
+                        run_id=row.run_id,
+                        observed_at=row.observed_at,
+                        balance=row.balance,
+                        equity=row.equity,
+                        realized_pnl=row.realized_pnl,
+                        unrealized_pnl=row.unrealized_pnl,
                     )
-                    .order_by(
-                        PaperEquitySnapshotRow.run_id,
-                        PaperEquitySnapshotRow.observed_at,
-                    )
-                )
-            ).all()
+                    for row in (
+                        await session.execute(
+                            _paper_equity_statement(
+                                run_ids,
+                                window_start,
+                                window_end,
+                            )
+                        )
+                    ).all()
+                ]
             live_process = await session.scalar(
                 select(ExecutionAccountProcessStateRow)
                 .where(ExecutionAccountProcessStateRow.environment == "live")
@@ -656,32 +880,25 @@ class DashboardQueries:
                     .order_by(StrategyLiveStateRow.changed_at.desc())
                     .limit(1)
                 )
-                live_equity_bucket = func.floor(
-                    func.extract(
-                        "epoch",
-                        AccountBalanceSnapshotRow.observed_at,
+                live_balance_rows = [
+                    _AccountEquityPoint(
+                        observed_at=row.observed_at,
+                        wallet_balance=row.wallet_balance,
+                        unrealized_pnl=row.unrealized_pnl,
                     )
-                    / _EQUITY_BUCKET_SECONDS
-                )
-                live_balance_rows = (
-                    await session.scalars(
-                        select(AccountBalanceSnapshotRow)
-                        .where(
-                            AccountBalanceSnapshotRow.environment == "live",
-                            AccountBalanceSnapshotRow.account_label
-                            == live_process.account_label,
-                            AccountBalanceSnapshotRow.asset == "USDT",
-                            AccountBalanceSnapshotRow.observed_at >= window_start,
-                            AccountBalanceSnapshotRow.observed_at <= window_end,
+                    for row in (
+                        await session.execute(
+                            _account_equity_statement(
+                                environment="live",
+                                account_label=live_process.account_label,
+                                asset="USDT",
+                                window_start=window_start,
+                                window_end=window_end,
+                                interval_seconds=_EQUITY_BUCKET_SECONDS,
+                            )
                         )
-                        .distinct(live_equity_bucket)
-                        .order_by(
-                            live_equity_bucket.desc(),
-                            AccountBalanceSnapshotRow.observed_at.desc(),
-                        )
-                        .limit(_EQUITY_MAX_POINTS)
-                    )
-                ).all()
+                    ).all()
+                ]
             if run_ids:
                 paper_first_rows = (
                     await session.execute(
@@ -727,30 +944,16 @@ class DashboardQueries:
                     ).all()
                 ]
                 if live_process is not None:
-                    live_equity = (
-                        AccountBalanceSnapshotRow.wallet_balance
-                        + AccountBalanceSnapshotRow.unrealized_pnl
-                    )
                     common_live_equity_rows = [
                         (observed_at, equity)
                         for observed_at, equity in (
                             await session.execute(
-                                select(
-                                    AccountBalanceSnapshotRow.observed_at,
-                                    func.sum(live_equity).label("equity"),
+                                _live_common_equity_statement(
+                                    environment="live",
+                                    account_label=live_process.account_label,
+                                    window_start=common_start_at,
+                                    window_end=window_end,
                                 )
-                                .where(
-                                    AccountBalanceSnapshotRow.environment == "live",
-                                    AccountBalanceSnapshotRow.account_label
-                                    == live_process.account_label,
-                                    AccountBalanceSnapshotRow.observed_at
-                                    >= common_start_at,
-                                    AccountBalanceSnapshotRow.observed_at
-                                    <= window_end,
-                                )
-                                .group_by(AccountBalanceSnapshotRow.observed_at)
-                                .having(func.sum(live_equity) > 0)
-                                .order_by(AccountBalanceSnapshotRow.observed_at)
                             )
                         ).all()
                     ]
@@ -839,12 +1042,15 @@ class DashboardQueries:
                     ]
                 common_note = _common_equity_note(common_cash_flows)
 
-        rows_by_run: dict[str, list[PaperEquitySnapshotRow]] = {}
+        rows_by_run: dict[str, list[_PaperEquityPoint]] = {}
         for row in rows:
             rows_by_run.setdefault(row.run_id, []).append(row)
         accounts = []
         for run in selected_runs:
-            equity = _downsample_equity_snapshots(rows_by_run.get(run.run_id, []))
+            equity = sorted(
+                rows_by_run.get(run.run_id, []),
+                key=lambda row: row.observed_at,
+            )
             exit_mode, exit_label = _paper_exit_details(run)
             accounts.append(
                 PaperAccountEquityResponse(
@@ -1349,7 +1555,7 @@ class DashboardQueries:
         reconciliation: AccountReconciliationRunRow | None = None
         account_config: AccountConfigSnapshotRow | None = None
         balances: Sequence[AccountBalanceSnapshotRow] = ()
-        equity_rows: Sequence[AccountBalanceSnapshotRow] = ()
+        equity_rows: Sequence[_AccountEquityPoint] = ()
         positions: Sequence[AccountPositionSnapshotRow] = ()
         orders: Sequence[AccountOpenOrderRow] = ()
         fills: Sequence[AccountFillEventRow] = ()
@@ -1378,33 +1584,25 @@ class DashboardQueries:
                         .limit(_LIVE_SIGNAL_MAX_ROWS)
                     )
                 ).all()
-                equity_bucket = func.floor(
-                    func.extract(
-                        "epoch",
-                        AccountBalanceSnapshotRow.observed_at,
+                equity_rows = [
+                    _AccountEquityPoint(
+                        observed_at=row.observed_at,
+                        wallet_balance=row.wallet_balance,
+                        unrealized_pnl=row.unrealized_pnl,
                     )
-                    / equity_bucket_seconds
-                )
-                equity_rows = (
-                    await session.scalars(
-                        select(AccountBalanceSnapshotRow)
-                        .where(
-                            AccountBalanceSnapshotRow.environment == environment,
-                            AccountBalanceSnapshotRow.account_label
-                            == account_label,
-                            AccountBalanceSnapshotRow.asset == "USDT",
-                            AccountBalanceSnapshotRow.observed_at
-                            >= equity_window_start,
-                            AccountBalanceSnapshotRow.observed_at <= equity_window_end,
+                    for row in (
+                        await session.execute(
+                            _account_equity_statement(
+                                environment=environment,
+                                account_label=account_label,
+                                asset="USDT",
+                                window_start=equity_window_start,
+                                window_end=equity_window_end,
+                                interval_seconds=equity_bucket_seconds,
+                            )
                         )
-                        .distinct(equity_bucket)
-                        .order_by(
-                            equity_bucket.desc(),
-                            AccountBalanceSnapshotRow.observed_at.desc(),
-                        )
-                        .limit(_EQUITY_MAX_POINTS)
-                    )
-                ).all()
+                    ).all()
+                ]
                 account_config = await session.scalar(
                     select(AccountConfigSnapshotRow)
                     .where(
@@ -2044,7 +2242,7 @@ def _common_equity_note(
 
 
 def _live_account_equity_point(
-    row: AccountBalanceSnapshotRow,
+    row: AccountBalanceSnapshotRow | _AccountEquityPoint,
 ) -> dict[str, JsonValue]:
     equity = row.wallet_balance + row.unrealized_pnl
     return {

@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     desc,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
@@ -608,17 +609,18 @@ class AccountBalanceSnapshotRow(Base):
 
     __table_args__ = (
         Index(
-            "ix_account_balance_latest",
-            "environment",
-            "account_label",
-            "asset",
-            "observed_at",
-        ),
-        Index(
             "ix_account_balance_latest_desc",
             "environment",
             "account_label",
             "asset",
+            desc(observed_at),
+        ),
+        Index(
+            "ix_account_balance_asset_hour_observed",
+            "environment",
+            "account_label",
+            "asset",
+            text("(date_trunc('hour', observed_at AT TIME ZONE 'UTC'))"),
             desc(observed_at),
         ),
         Index(
