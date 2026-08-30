@@ -224,13 +224,44 @@ def _paper_common_equity_statement(
     run_ids: Sequence[str],
     common_start_at: datetime,
     window_end: datetime,
+    *,
+    interval_seconds: int | None = None,
+    max_points: int = _EQUITY_MAX_POINTS,
 ) -> Select[tuple[str, datetime, Decimal]]:
-    """Fetch the latest valid snapshot in each run/bucket using the run index."""
+    """Fetch the latest valid snapshot in each run/bucket using the run index.
+
+    The sampling interval expands with the requested history so the generated
+    bucket series stays bounded even as the accounts run indefinitely.
+    """
+    if max_points <= 0:
+        raise ValueError("max_points must be positive")
+    if common_start_at > window_end:
+        raise ValueError("common_start_at must not be later than window_end")
+    if interval_seconds is not None and interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    minimum_interval_seconds = _common_equity_interval_seconds(
+        common_start_at,
+        window_end,
+        max_points=max_points,
+    )
+    resolved_interval_seconds = max(
+        minimum_interval_seconds,
+        _COMMON_EQUITY_BUCKET_SECONDS
+        if interval_seconds is None
+        else interval_seconds,
+    )
+    if resolved_interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    bucket_interval = text(f"interval '{resolved_interval_seconds} seconds'")
     run_values = _paper_run_values(run_ids)
     bucket_series = func.generate_series(
         common_start_at,
-        _bucket_start(window_end, _COMMON_EQUITY_BUCKET_SECONDS),
-        text("interval '15 minutes'"),
+        _relative_bucket_end(
+            common_start_at,
+            window_end,
+            resolved_interval_seconds,
+        ),
+        bucket_interval,
     ).table_valued("bucket").render_derived(name="equity_buckets")
     snapshot = aliased(PaperEquitySnapshotRow)
     bucket_start = bucket_series.c.bucket
@@ -245,7 +276,7 @@ def _paper_common_equity_statement(
             snapshot.equity > 0,
             snapshot.observed_at >= bucket_start,
             snapshot.observed_at
-            < bucket_start + text("interval '15 minutes'"),
+            < bucket_start + bucket_interval,
             snapshot.observed_at <= window_end,
         )
         .order_by(snapshot.observed_at.desc())
@@ -420,11 +451,23 @@ def _live_common_equity_statement(
     if window_start > window_end:
         raise ValueError("window_start must not be later than window_end")
 
-    bucket_interval = text(f"interval '{interval_seconds} seconds'")
-    end_bucket = _bucket_start(window_end, interval_seconds)
-    earliest_bucket = _bucket_start(window_start, interval_seconds)
+    minimum_interval_seconds = _common_equity_interval_seconds(
+        window_start,
+        window_end,
+        max_points=max_points,
+    )
+    resolved_interval_seconds = max(interval_seconds, minimum_interval_seconds)
+    if resolved_interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    bucket_interval = text(f"interval '{resolved_interval_seconds} seconds'")
+    end_bucket = _relative_bucket_end(
+        window_start,
+        window_end,
+        resolved_interval_seconds,
+    )
+    earliest_bucket = _as_utc(window_start)
     latest_window_start = end_bucket - timedelta(
-        seconds=interval_seconds * (max_points - 1)
+        seconds=resolved_interval_seconds * (max_points - 1)
     )
     series_start = max(earliest_bucket, latest_window_start)
     bucket_series = func.generate_series(
@@ -884,6 +927,7 @@ class DashboardQueries:
         live_first_at: datetime | None = None
         common_start_at: datetime | None = None
         common_source_end_at: datetime | None = None
+        common_equity_interval_seconds: int | None = None
         async with self._session_factory() as session:
             selected_runs = await self._selected_paper_runs(session)
             if not selected_runs:
@@ -979,6 +1023,10 @@ class DashboardQueries:
                 )
             if len(first_buckets) >= 2:
                 common_start_at = max(first_buckets.values())
+                common_equity_interval_seconds = _common_equity_interval_seconds(
+                    common_start_at,
+                    window_end,
+                )
                 common_paper_rows = [
                     (run_id, observed_at, equity)
                     for run_id, observed_at, equity in (
@@ -987,6 +1035,7 @@ class DashboardQueries:
                                 run_ids,
                                 common_start_at,
                                 window_end,
+                                interval_seconds=common_equity_interval_seconds,
                             )
                         )
                     ).all()
@@ -1001,6 +1050,7 @@ class DashboardQueries:
                                     account_label=live_process.account_label,
                                     window_start=common_start_at,
                                     window_end=window_end,
+                                    interval_seconds=common_equity_interval_seconds,
                                 )
                             )
                         ).all()
@@ -1048,17 +1098,20 @@ class DashboardQueries:
                     )
                     for observations in available_observations.values()
                 )
-                curve_end_at = _bucket_start(
+                assert common_equity_interval_seconds is not None
+                curve_end_at = _relative_bucket_end(
+                    common_start_at,
                     common_source_end_at,
-                    _COMMON_EQUITY_BUCKET_SECONDS,
+                    common_equity_interval_seconds,
                 )
                 for run_id, observations in available_observations.items():
                     curve, baseline = _build_common_equity_curve(
                         observations,
                         common_start_at=common_start_at,
                         end_at=curve_end_at,
-                        interval_seconds=_COMMON_EQUITY_BUCKET_SECONDS,
+                        interval_seconds=common_equity_interval_seconds,
                         source_end_at=common_source_end_at,
+                        max_points=_EQUITY_MAX_POINTS,
                     )
                     if len(curve) >= 2 and baseline is not None:
                         common_equity_by_run[run_id] = curve
@@ -1088,7 +1141,10 @@ class DashboardQueries:
                             )
                         )
                     ]
-                common_note = _common_equity_note(common_cash_flows)
+                common_note = _common_equity_note(
+                    common_cash_flows,
+                    interval_seconds=common_equity_interval_seconds,
+                )
 
         rows_by_run: dict[str, list[_PaperEquityPoint]] = {}
         for row in rows:
@@ -1176,7 +1232,7 @@ class DashboardQueries:
             ),
             common_equity_end_at=common_end_at,
             common_equity_sample_interval_seconds=(
-                _COMMON_EQUITY_BUCKET_SECONDS
+                common_equity_interval_seconds
                 if common_equity_by_run
                 else None
             ),
@@ -2032,10 +2088,65 @@ def _bucket_start(value: datetime, interval_seconds: int) -> datetime:
     return datetime.fromtimestamp(bucket_epoch, tz=UTC)
 
 
+def _relative_bucket_start(
+    value: datetime,
+    origin: datetime,
+    interval_seconds: int,
+) -> datetime:
+    """Return a bucket boundary measured from a caller-provided origin."""
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    observed_at = _as_utc(value)
+    bucket_origin = _as_utc(origin)
+    elapsed_seconds = int((observed_at - bucket_origin).total_seconds())
+    bucket_offset = elapsed_seconds // interval_seconds * interval_seconds
+    return bucket_origin + timedelta(seconds=bucket_offset)
+
+
+def _relative_bucket_end(
+    origin: datetime,
+    value: datetime,
+    interval_seconds: int,
+) -> datetime:
+    """Return the last complete relative bucket at or before ``value``."""
+    return _relative_bucket_start(value, origin, interval_seconds)
+
+
+def _common_equity_interval_seconds(
+    common_start_at: datetime,
+    window_end: datetime,
+    *,
+    max_points: int = _EQUITY_MAX_POINTS,
+) -> int:
+    """Choose a bounded interval while retaining the common equity history."""
+    if max_points <= 0:
+        raise ValueError("max_points must be positive")
+    if common_start_at > window_end:
+        raise ValueError("common_start_at must not be later than window_end")
+
+    base_interval = _COMMON_EQUITY_BUCKET_SECONDS
+    span_seconds = max(
+        0,
+        int((_as_utc(window_end) - _as_utc(common_start_at)).total_seconds()),
+    )
+    base_intervals = span_seconds // base_interval
+    if base_intervals + 1 <= max_points:
+        return base_interval
+
+    if max_points == 1:
+        return base_interval * (base_intervals + 1)
+
+    # Round up to a multiple of the native 15-minute resolution.  The number
+    # of generated buckets is then at most ``max_points`` for any history.
+    multiplier = (base_intervals + max_points - 2) // (max_points - 1)
+    return base_interval * max(multiplier, 1)
+
+
 def _bucket_equity_observations(
     observations: Iterable[_EquityObservation],
     *,
     interval_seconds: int,
+    bucket_origin: datetime | None = None,
 ) -> dict[datetime, _EquityObservation]:
     ordered = sorted(
         (
@@ -2050,7 +2161,15 @@ def _bucket_equity_observations(
     )
     latest_by_bucket: dict[datetime, _EquityObservation] = {}
     for observation in ordered:
-        bucket = _bucket_start(observation.observed_at, interval_seconds)
+        bucket = (
+            _bucket_start(observation.observed_at, interval_seconds)
+            if bucket_origin is None
+            else _relative_bucket_start(
+                observation.observed_at,
+                bucket_origin,
+                interval_seconds,
+            )
+        )
         latest_by_bucket[bucket] = _EquityObservation(
             observed_at=bucket,
             equity=observation.equity,
@@ -2195,10 +2314,16 @@ def _build_common_equity_curve(
     end_at: datetime,
     interval_seconds: int = _COMMON_EQUITY_BUCKET_SECONDS,
     source_end_at: datetime | None = None,
+    max_points: int = _EQUITY_MAX_POINTS,
 ) -> tuple[list[dict[str, JsonValue]], Decimal | None]:
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    if max_points <= 0:
+        raise ValueError("max_points must be positive")
     resolved_source_end_at = (
         None if source_end_at is None else _as_utc(source_end_at)
     )
+    bucket_origin = _as_utc(common_start_at)
     buckets = _bucket_equity_observations(
         (
             observation
@@ -2210,13 +2335,27 @@ def _build_common_equity_curve(
             )
         ),
         interval_seconds=interval_seconds,
+        bucket_origin=bucket_origin,
     )
     if not buckets:
         return [], None
-    start_at = _bucket_start(common_start_at, interval_seconds)
-    end_bucket = _bucket_start(end_at, interval_seconds)
+    start_at = bucket_origin
+    end_bucket = _relative_bucket_end(
+        bucket_origin,
+        end_at,
+        interval_seconds,
+    )
     if end_bucket < start_at:
         return [], None
+
+    # Keep this seam safe even if a future caller passes an unbounded
+    # observation source.  The normal query path chooses an adaptive interval
+    # first, so this is a defensive final cap rather than the hot path.
+    latest_start_at = end_bucket - timedelta(
+        seconds=interval_seconds * (max_points - 1)
+    )
+    if latest_start_at > start_at:
+        start_at = latest_start_at
 
     baseline_observation = buckets.get(start_at)
     if baseline_observation is None:
@@ -2264,11 +2403,18 @@ def _live_cash_flow_payload(
 
 def _common_equity_note(
     cash_flows: Sequence[dict[str, JsonValue]],
+    *,
+    interval_seconds: int | None = None,
 ) -> str:
     note = (
-        "统一起点为全部有效账号首个 15M 桶中的最晚时间；"
+        "统一起点为全部有效账号首个共同桶中的最晚时间；"
+        "共同曲线按历史跨度自适应采样并限制点数；"
         "曲线展示现金流校正后的权益金额变化（USDT），该时点各账号均归零。"
     )
+    if interval_seconds is not None:
+        note = (
+            f"{note} 当前采样间隔为 {interval_seconds // 60} 分钟。"
+        )
     if not cash_flows:
         return f"{note} 当前未配置外部现金流校正。"
     details = "、".join(

@@ -190,7 +190,7 @@ function paperComparisonBlock(accounts, meta = paperEquityMeta) {
     : emptyBox("同期权益曲线加载中", "账户摘要已就绪，曲线在后台批量加载");
   const latestStartContent = latestStartModels.length
     ? `<div class="pair-grid">${latestStartModels.map(latestStartComparisonPanel).join("")}</div>`
-    : emptyBox("统一起点曲线加载中", "正在等待全部账号的有效 15M 快照");
+    : emptyBox("统一起点曲线加载中", "正在等待全部账号的有效快照");
   const startText = meta.common_equity_start_at
     ? `统一起点 ${dayTime(meta.common_equity_start_at)} ${DISPLAY_TIME_ZONE_LABEL}`
     : "统一起点待数据加载";
@@ -204,7 +204,7 @@ function paperComparisonBlock(accounts, meta = paperEquityMeta) {
       ${content}
     </div>
     <div class="block pair-section common-equity-section" data-common-comparison-count="${latestStartModels.length}">
-      ${blockTitle("统一起点权益金额变化", "LATEST START · DELTA IN USDT · 15M BUCKETS",
+      ${blockTitle("统一起点权益金额变化", "LATEST START · DELTA IN USDT · ADAPTIVE BUCKETS",
         `<span class="muted">${esc(startText)} · 全部曲线从 0 开始</span>`)}
       ${note}
       ${latestStartContent}

@@ -207,7 +207,7 @@ def sync_command(
             max=5_000,
             help="Maximum rows deleted from one table per cycle.",
         ),
-    ] = 2_000,
+    ] = 5_000,
     snapshot_retention_max_runtime_seconds: Annotated[
         float,
         typer.Option(

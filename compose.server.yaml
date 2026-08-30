@@ -350,7 +350,7 @@ services:
       - --snapshot-retention-batch-size
       - ${CML_ACCOUNT_SNAPSHOT_RETENTION_BATCH_SIZE:-250}
       - --snapshot-retention-max-rows-per-table
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_ROWS_PER_TABLE:-2000}
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_ROWS_PER_TABLE:-5000}
       - --snapshot-retention-max-runtime-seconds
       - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_RUNTIME_SECONDS:-45}
       - --account-event-hub-host

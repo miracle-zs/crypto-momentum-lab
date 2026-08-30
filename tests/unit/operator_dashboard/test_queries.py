@@ -10,6 +10,7 @@ from crypto_momentum_lab.operator_dashboard.queries import (
     _aggregate_account_fills,
     _build_common_equity_curve,
     _checkpoint_times_statement,
+    _common_equity_interval_seconds,
     _downsample_equity_snapshots,
     _EquityObservation,
     _is_dashboard_paper_run,
@@ -100,6 +101,52 @@ def test_common_equity_query_uses_indexable_lateral_bucket_lookups() -> None:
     assert "AS equity_buckets(bucket)" in sql
     assert "LATERAL" in sql
     assert "DISTINCT ON" not in sql
+
+
+def test_common_equity_interval_keeps_long_history_bounded() -> None:
+    start = datetime(2026, 8, 1, 2, 45, tzinfo=UTC)
+    end = start + timedelta(days=365)
+
+    interval_seconds = _common_equity_interval_seconds(
+        start,
+        end,
+        max_points=240,
+    )
+
+    bucket_count = int((end - start).total_seconds()) // interval_seconds + 1
+
+    assert interval_seconds >= 15 * 60
+    assert interval_seconds % (15 * 60) == 0
+    assert bucket_count <= 240
+
+
+def test_common_equity_curve_caps_points_for_an_unbounded_caller() -> None:
+    start = datetime(2026, 8, 1, 2, 45, tzinfo=UTC)
+    interval_seconds = _common_equity_interval_seconds(
+        start,
+        start + timedelta(days=10),
+        max_points=8,
+    )
+    observations = [
+        _EquityObservation(
+            observed_at=start + timedelta(minutes=15 * index),
+            equity=Decimal(str(1000 + index)),
+            source_observed_at=start + timedelta(minutes=15 * index),
+        )
+        for index in range(1_000)
+    ]
+
+    points, baseline = _build_common_equity_curve(
+        observations,
+        common_start_at=start,
+        end_at=start + timedelta(days=10),
+        interval_seconds=interval_seconds,
+        max_points=8,
+    )
+
+    assert baseline is not None
+    assert len(points) <= 8
+    assert points[0]["delta"] == "0"
 
 
 def test_account_equity_query_uses_narrow_lateral_bucket_lookups() -> None:

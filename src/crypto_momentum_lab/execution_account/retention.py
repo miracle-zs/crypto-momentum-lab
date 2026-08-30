@@ -28,7 +28,10 @@ class AccountSnapshotRetentionConfig:
     # Keep each transaction small enough that retention cannot compete with
     # order/account writes for the PostgreSQL memory budget.
     batch_size: int = 250
-    max_rows_per_table: int = 2_000
+    # The live balance stream produces a little over 3,000 rows per hour;
+    # allow one cycle to drain the normal hourly volume while retaining the
+    # per-batch and per-cycle runtime bounds below.
+    max_rows_per_table: int = 5_000
     max_runtime_seconds: float = 45.0
 
     def __post_init__(self) -> None:

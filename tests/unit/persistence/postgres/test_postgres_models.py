@@ -42,6 +42,24 @@ def test_account_balance_table_has_descending_latest_index() -> None:
     )
 
 
+def test_account_position_table_has_descending_latest_index_per_side() -> None:
+    positions = Base.metadata.tables["account_position_snapshots"]
+
+    assert any(
+        index.name == "ix_account_position_latest_desc"
+        and [column.name for column in index.columns]
+        == [
+            "environment",
+            "account_label",
+            "symbol",
+            "position_side",
+            "observed_at",
+        ]
+        and str(index.expressions[-1]).endswith("observed_at DESC")
+        for index in positions.indexes
+    )
+
+
 def test_strategy_run_relationships_are_declared() -> None:
     strategy_signals = Base.metadata.tables["strategy_signals"]
     candidates = Base.metadata.tables["order_intent_candidates"]

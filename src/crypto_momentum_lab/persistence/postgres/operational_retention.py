@@ -70,6 +70,43 @@ def _account_balance_hourly_duplicate_statement() -> TextClause:
     )
 
 
+def _account_snapshot_history_delete_statement(
+    table_name: str,
+    key_columns: tuple[str, ...],
+) -> TextClause:
+    """Build a bounded delete that preserves every latest row per key.
+
+    A direct anti-join lets PostgreSQL walk the retention index in timestamp
+    order and stop after one batch.  This avoids materializing a DISTINCT ON
+    result for the whole table before deleting a handful of rows.
+    """
+    key_conditions = " AND ".join(
+        f"newer.{column} = candidate.{column}"
+        for column in key_columns
+        if column not in {"environment", "account_label"}
+    )
+    scoped_key_conditions = f"AND {key_conditions} " if key_conditions else ""
+    return text(
+        "WITH doomed AS ("
+        f"SELECT candidate.ctid FROM {table_name} AS candidate "
+        "WHERE candidate.environment = :environment "
+        "AND candidate.account_label = :account_label "
+        "AND candidate.observed_at < :before "
+        "AND EXISTS ("
+        f"SELECT 1 FROM {table_name} AS newer "
+        "WHERE newer.environment = candidate.environment "
+        "AND newer.account_label = candidate.account_label "
+        f"{scoped_key_conditions}"
+        "AND newer.observed_at > candidate.observed_at"
+        ") "
+        "ORDER BY candidate.observed_at "
+        "LIMIT :batch_size"
+        ") DELETE FROM "
+        f"{table_name} AS candidate "
+        "USING doomed WHERE candidate.ctid = doomed.ctid"
+    )
+
+
 class PostgresOperationalRetentionRepository:
     """Prune data that can be rebuilt from the market-data archive."""
 
@@ -214,33 +251,58 @@ class PostgresOperationalRetentionRepository:
         batch_size: int,
         max_rows: int,
     ) -> int:
-        latest_by_key = await self._account_snapshot_latest_by_key(
+        if not await self._account_snapshot_has_rows_before(
             table_name,
-            key_columns,
             environment=environment,
             account_label=account_label,
+            before=before,
+        ):
+            return 0
+        statement = _account_snapshot_history_delete_statement(
+            table_name,
+            key_columns,
         )
         deleted = 0
-        for key, latest_at in latest_by_key:
-            if deleted >= max_rows:
+        while deleted < max_rows:
+            current_batch_size = min(batch_size, max_rows - deleted)
+            count = await self._execute_account_snapshot_history_delete(
+                statement,
+                environment=environment,
+                account_label=account_label,
+                before=before,
+                batch_size=current_batch_size,
+            )
+            deleted += count
+            if count < current_batch_size:
                 break
-            # If a key stopped updating, preserve its last row while still
-            # removing older history. Active keys use the horizon directly.
-            delete_before = before if latest_at > before else latest_at
-            while deleted < max_rows:
-                current_batch_size = min(batch_size, max_rows - deleted)
-                count = await self._execute_account_snapshot_delete(
-                    table_name,
-                    key,
-                    environment=environment,
-                    account_label=account_label,
-                    before=delete_before,
-                    batch_size=current_batch_size,
-                )
-                deleted += count
-                if count < current_batch_size:
-                    break
         return deleted
+
+    async def _account_snapshot_has_rows_before(
+        self,
+        table_name: str,
+        *,
+        environment: str,
+        account_label: str,
+        before: datetime,
+    ) -> bool:
+        """Check the indexed retention range before building a delete batch."""
+        statement = text(
+            f"SELECT 1 FROM {table_name} "
+            "WHERE environment = :environment "
+            "AND account_label = :account_label "
+            "AND observed_at < :before "
+            "LIMIT 1"
+        )
+        async with self._session_factory() as session:
+            result = await session.scalar(
+                statement,
+                {
+                    "environment": environment,
+                    "account_label": account_label,
+                    "before": before,
+                },
+            )
+        return result is not None
 
     async def _thin_account_balance_history(
         self,
@@ -281,67 +343,6 @@ class PostgresOperationalRetentionRepository:
             if count < current_batch_size:
                 break
         return deleted
-
-    async def _account_snapshot_latest_by_key(
-        self,
-        table_name: str,
-        key_columns: tuple[str, ...],
-        *,
-        environment: str,
-        account_label: str,
-    ) -> tuple[tuple[tuple[tuple[str, object], ...], datetime], ...]:
-        grouped_columns = tuple(
-            column
-            for column in key_columns
-            if column not in {"environment", "account_label"}
-        )
-        if not grouped_columns:
-            statement = text(
-                f"SELECT max(observed_at) FROM {table_name} "
-                "WHERE environment = :environment "
-                "AND account_label = :account_label"
-            )
-            async with self._session_factory() as session:
-                latest = await session.scalar(
-                    statement,
-                    {
-                        "environment": environment,
-                        "account_label": account_label,
-                    },
-                )
-            if not isinstance(latest, datetime):
-                return ()
-            return (((), latest),)
-
-        columns = ", ".join(grouped_columns)
-        statement = text(
-            f"SELECT DISTINCT ON ({columns}) {columns}, "
-            "observed_at AS latest_observed_at "
-            f"FROM {table_name} "
-            "WHERE environment = :environment "
-            "AND account_label = :account_label "
-            f"ORDER BY {columns}, observed_at DESC"
-        )
-        async with self._session_factory() as session:
-            rows = (
-                await session.execute(
-                    statement,
-                    {
-                        "environment": environment,
-                        "account_label": account_label,
-                    },
-                )
-            ).all()
-        latest_by_key: list[tuple[tuple[tuple[str, object], ...], datetime]] = []
-        for row in rows:
-            latest_at = row._mapping["latest_observed_at"]
-            if not isinstance(latest_at, datetime):
-                continue
-            key = tuple(
-                (column, row._mapping[column]) for column in grouped_columns
-            )
-            latest_by_key.append((key, latest_at))
-        return tuple(latest_by_key)
 
     async def _delete_batch(
         self,
@@ -390,52 +391,27 @@ class PostgresOperationalRetentionRepository:
                 )
                 return max(result.rowcount or 0, 0)
 
-    async def _execute_account_snapshot_delete(
+    async def _execute_account_snapshot_history_delete(
         self,
-        table_name: str,
-        key: tuple[tuple[str, object], ...],
+        statement: TextClause,
         *,
         environment: str,
         account_label: str,
         before: datetime,
         batch_size: int,
     ) -> int:
-        key_conditions = " AND ".join(
-            f"candidate.{column} = :key_{index}"
-            for index, (column, _value) in enumerate(key)
-        )
-        scoped_key_conditions = (
-            "AND " + key_conditions if key_conditions else ""
-        )
-        parameters: dict[str, object] = {
-            "environment": environment,
-            "account_label": account_label,
-            "before": before,
-            "batch_size": batch_size,
-        }
-        parameters.update(
-            {f"key_{index}": value for index, (_column, value) in enumerate(key)}
-        )
-        statement = text(
-            "WITH doomed AS ("
-            f"SELECT candidate.ctid FROM {table_name} AS candidate "
-            "WHERE candidate.environment = :environment "
-            "AND candidate.account_label = :account_label "
-            f"{scoped_key_conditions} "
-            "AND candidate.observed_at < :before "
-            "ORDER BY candidate.observed_at "
-            "LIMIT :batch_size"
-            ") "
-            f"DELETE FROM {table_name} AS candidate "
-            "USING doomed WHERE candidate.ctid = doomed.ctid"
-        )
         async with self._session_factory() as session:
             async with session.begin():
                 result = cast(
                     CursorResult[Any],
                     await session.execute(
                         statement,
-                        parameters,
+                        {
+                            "environment": environment,
+                            "account_label": account_label,
+                            "before": before,
+                            "batch_size": batch_size,
+                        },
                     ),
                 )
                 return max(result.rowcount or 0, 0)

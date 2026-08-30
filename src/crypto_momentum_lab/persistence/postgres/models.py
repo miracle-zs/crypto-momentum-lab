@@ -659,6 +659,14 @@ class AccountPositionSnapshotRow(Base):
             "observed_at",
         ),
         Index(
+            "ix_account_position_latest_desc",
+            "environment",
+            "account_label",
+            "symbol",
+            "position_side",
+            desc(observed_at),
+        ),
+        Index(
             "ix_account_position_account_observed",
             "environment",
             "account_label",

@@ -21,7 +21,7 @@ Older balance history is thinned to the newest snapshot in each UTC hour and
 retained for 370 days so the operator dashboard can render one-month and
 one-year account-equity ranges without keeping a year of high-frequency raw
 payloads. The retention task runs once per hour, deletes at most 250 rows per
-batch and 2,000 rows per table per cycle, and aborts a cycle after 45 seconds.
+batch and 5,000 rows per table per cycle, and aborts a cycle after 45 seconds.
 It always preserves the newest row for each account/asset or account/position
 key. `account_fill_events` is the execution audit trail and is not deleted by
 this task.
@@ -33,7 +33,7 @@ CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS=7
 CML_ACCOUNT_EQUITY_RETENTION_DAYS=370
 CML_ACCOUNT_SNAPSHOT_RETENTION_INTERVAL_SECONDS=3600
 CML_ACCOUNT_SNAPSHOT_RETENTION_BATCH_SIZE=250
-CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_ROWS_PER_TABLE=2000
+CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_ROWS_PER_TABLE=5000
 CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_RUNTIME_SECONDS=45
 ```
 

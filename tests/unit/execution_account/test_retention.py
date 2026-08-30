@@ -38,6 +38,10 @@ def test_retention_config_rejects_fast_schedule() -> None:
         AccountSnapshotRetentionConfig(interval_seconds=299)
 
 
+def test_retention_config_default_covers_one_hour_of_live_snapshots() -> None:
+    assert AccountSnapshotRetentionConfig().max_rows_per_table == 5_000
+
+
 def test_retention_config_keeps_equity_at_least_as_long_as_operations() -> None:
     with pytest.raises(ValueError, match="at least retention_days"):
         AccountSnapshotRetentionConfig(

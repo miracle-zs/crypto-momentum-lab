@@ -21,10 +21,11 @@ calculated from the full run history.
 
 The strategy section also exposes a `统一起点权益金额变化` panel. It uses the
 latest first valid 15-minute bucket among the selected accounts as the shared
-start, carries each account's latest observation forward on a common 15-minute
-grid, and plots cash-flow-adjusted equity deltas in USDT from zero. The known
-live-account deposit of 200 USDT on 2026-08-21 is excluded by default. Future
-cash-flow corrections can be supplied with
+start, carries each account's latest observation forward on a common grid, and
+plots cash-flow-adjusted equity deltas in USDT from zero. The grid starts at
+15-minute resolution and widens as needed to keep the history within 240
+points. The known live-account deposit of 200 USDT on 2026-08-21 is excluded by
+default. Future cash-flow corrections can be supplied with
 `CML_DASHBOARD_LIVE_CASH_FLOWS_JSON`, for example:
 
 ```json
