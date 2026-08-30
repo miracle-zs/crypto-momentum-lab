@@ -38,7 +38,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         "paper-b1-gainer100",
         "paper-b1-gainer100-ema",
     ):
-        assert services[service]["healthcheck"]["interval"] == "45s"
+        assert services[service]["healthcheck"]["interval"] == "60s"
         assert services[service]["healthcheck"]["retries"] == 2
     for service in (
         "paper-orderflow-pair",

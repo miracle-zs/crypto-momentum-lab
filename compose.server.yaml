@@ -39,7 +39,7 @@ x-paper: &paper
       - crypto_momentum_lab.apps.healthcheck
       - --service
       - paper
-    interval: 45s
+    interval: 60s
     timeout: 15s
     retries: 2
     start_period: 90s
