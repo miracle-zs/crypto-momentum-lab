@@ -25,7 +25,7 @@ from crypto_momentum_lab.live_rollout.volume import (
 
 log = structlog.get_logger()
 
-_SIGNAL_SCHEMA_VERSION = 1
+_SIGNAL_SCHEMA_VERSION = 2
 _MAX_SIGNAL_BATCH = 128
 _PERSIST_BATCH_TIMEOUT_SECONDS = 0.25
 

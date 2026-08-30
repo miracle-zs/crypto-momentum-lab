@@ -1,5 +1,6 @@
 from datetime import date, datetime
 from decimal import Decimal
+from uuid import UUID
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
@@ -71,6 +72,7 @@ class PostgresUniverseRepository:
         # process and write only new/changed contracts instead of appending the
         # full exchangeInfo response every minute.
         self._contract_metadata_signatures: dict[str, tuple[object, ...]] = {}
+        self._snapshot_cache: dict[UUID, UniverseSnapshot] = {}
 
     async def save_contract_metadata(
         self,
@@ -280,6 +282,7 @@ class PostgresUniverseRepository:
             return frozenset(symbols)
 
     async def save_snapshot(self, snapshot: UniverseSnapshot) -> None:
+        self._snapshot_cache.pop(snapshot.snapshot_id, None)
         returns = _return_by_symbol(snapshot)
         gainer_ranks = _rank_by_symbol(snapshot.ranking.gainers)
         loser_ranks = _rank_by_symbol(snapshot.ranking.losers)
@@ -359,14 +362,43 @@ class PostgresUniverseRepository:
         self,
         observed_at: datetime,
     ) -> UniverseSnapshot | None:
+        return await self._load_snapshot(observed_at, at_or_before=False)
+
+    async def load_snapshot_at(
+        self,
+        observed_at: datetime,
+    ) -> UniverseSnapshot | None:
+        """Load the latest activated snapshot available at ``observed_at``."""
+
+        return await self._load_snapshot(observed_at, at_or_before=True)
+
+    async def _load_snapshot(
+        self,
+        observed_at: datetime,
+        *,
+        at_or_before: bool,
+    ) -> UniverseSnapshot | None:
         async with self._session_factory() as session:
-            snapshot_row = await session.scalar(
-                select(UniverseSnapshotRow).where(
+            statement = select(UniverseSnapshotRow)
+            if at_or_before:
+                statement = (
+                    statement.where(
+                        UniverseSnapshotRow.activated.is_(True),
+                        UniverseSnapshotRow.observed_at <= observed_at,
+                    )
+                    .order_by(UniverseSnapshotRow.observed_at.desc())
+                    .limit(1)
+                )
+            else:
+                statement = statement.where(
                     UniverseSnapshotRow.observed_at == observed_at
                 )
-            )
+            snapshot_row = await session.scalar(statement)
             if snapshot_row is None:
                 return None
+            cached = self._snapshot_cache.get(snapshot_row.snapshot_id)
+            if cached is not None:
+                return cached
             entries = tuple(
                 (
                     await session.execute(
@@ -440,7 +472,7 @@ class PostgresUniverseRepository:
                 if row.exclusion_reason is not None
             },
         )
-        return UniverseSnapshot(
+        snapshot = UniverseSnapshot(
             snapshot_id=snapshot_row.snapshot_id,
             observed_at=snapshot_row.observed_at,
             utc_day=snapshot_row.utc_day,
@@ -457,3 +489,7 @@ class PostgresUniverseRepository:
                 for row in membership_rows
             ),
         )
+        self._snapshot_cache[snapshot.snapshot_id] = snapshot
+        while len(self._snapshot_cache) > 4:
+            self._snapshot_cache.pop(next(iter(self._snapshot_cache)))
+        return snapshot

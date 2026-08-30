@@ -80,6 +80,8 @@ from crypto_momentum_lab.live_rollout.entry_cache import (
     EntryFilterCacheConfig,
     LiveEntryFilterCache,
     LiveEntrySymbolCache,
+    LiveEntryUniverseData,
+    universe_context_for,
 )
 from crypto_momentum_lab.live_rollout.entry_orders import LiveLimitOrderLifecycle
 from crypto_momentum_lab.live_rollout.exits import (
@@ -1269,16 +1271,44 @@ async def _run_live_daemon(
         entry_symbol_loader: Callable[[datetime], Awaitable[frozenset[str]]] | None = (
             None
         )
+        entry_universe_loader: Callable[
+            [datetime],
+            Awaitable[LiveEntryUniverseData | None],
+        ] | None = None
         if entry_positive_gainer_top_count is not None:
             universe_repository = PostgresUniverseRepository(market_factory)
+            positive_gainer_top_count = entry_positive_gainer_top_count
+
+            async def load_entry_universe_data(
+                observed_at: datetime,
+            ) -> LiveEntryUniverseData:
+                snapshot = await universe_repository.load_snapshot_at(
+                    observed_at
+                )
+                if snapshot is None:
+                    return LiveEntryUniverseData(
+                        symbols=frozenset(),
+                        snapshot=None,
+                    )
+                symbols = frozenset(
+                    entry.symbol
+                    for entry in snapshot.ranking.gainers[
+                        :positive_gainer_top_count
+                    ]
+                    if entry.utc_day_return > 0
+                )
+                return LiveEntryUniverseData(
+                    symbols=symbols,
+                    snapshot=snapshot,
+                )
+
+            entry_universe_loader = load_entry_universe_data
 
             async def load_entry_symbols_from_database(
                 observed_at: datetime,
             ) -> frozenset[str]:
-                return await universe_repository.load_positive_gainer_symbols_at(
-                    observed_at,
-                    top_count=entry_positive_gainer_top_count,
-                )
+                data = await load_entry_universe_data(observed_at)
+                return data.symbols
 
             entry_symbol_loader = load_entry_symbols_from_database
         if entry_symbol_loader is not None and entry_leverage is not None:
@@ -1442,6 +1472,35 @@ async def _run_live_daemon(
             ),
             recover=recover_live_lease,
         )
+        entry_universe_context_provider: (
+            Callable[[str, datetime], dict[str, object] | None] | None
+        ) = None
+        if entry_positive_gainer_top_count is not None:
+
+            def load_entry_universe_context(
+                symbol: str,
+                observed_at: datetime,
+            ) -> dict[str, object] | None:
+                universe_data: LiveEntryUniverseData | None = None
+                if entry_filter_cache is not None:
+                    universe_data = entry_filter_cache.universe_data_for(
+                        observed_at
+                    )
+                elif entry_symbol_cache is not None:
+                    universe_data = entry_symbol_cache.universe_data_for(
+                        observed_at
+                    )
+                return universe_context_for(
+                    universe_data,
+                    symbol=symbol,
+                    entry_pool_name=(
+                        "positive_gainer_top"
+                        f"{entry_positive_gainer_top_count}"
+                    ),
+                    entry_pool_top_count=entry_positive_gainer_top_count,
+                )
+
+            entry_universe_context_provider = load_entry_universe_context
         daemon = LiveStrategyDaemon(
             strategy=strategy,
             risk_gateway=RiskGateway(),
@@ -1470,6 +1529,9 @@ async def _run_live_daemon(
                 require_price_above_ema5=require_price_above_ema5,
                 require_price_above_ema10=require_price_above_ema10,
                 entry_filter_context_loader=entry_filter_context_loader,
+                entry_universe_context_provider=(
+                    entry_universe_context_provider
+                ),
                 entry_order_type=entry_order_type,
                 entry_limit_ttl_seconds=entry_limit_ttl_seconds,
             ),
@@ -1531,10 +1593,10 @@ async def _run_live_daemon(
 
         if entry_filter_cache_required:
             assert ema_provider is not None
-            assert entry_symbol_loader is not None
+            assert entry_universe_loader is not None
             entry_filter_cache = LiveEntryFilterCache(
                 ema_provider=ema_provider,
-                symbol_loader=entry_symbol_loader,
+                universe_loader=entry_universe_loader,
                 config=EntryFilterCacheConfig(
                     refresh_interval_seconds=15.0,
                     prefetch_concurrency=_LIVE_ENTRY_FILTER_PREFETCH_CONCURRENCY,
@@ -1544,9 +1606,9 @@ async def _run_live_daemon(
                 on_entry_filter_cache_ready
             )
         elif entry_symbol_cache_required:
-            assert entry_symbol_loader is not None
+            assert entry_universe_loader is not None
             entry_symbol_cache = LiveEntrySymbolCache(
-                symbol_loader=entry_symbol_loader,
+                universe_loader=entry_universe_loader,
                 config=EntryFilterCacheConfig(
                     refresh_interval_seconds=15.0,
                     prefetch_concurrency=1,

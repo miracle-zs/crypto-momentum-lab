@@ -64,7 +64,23 @@ async def test_records_24h_quote_volume_and_signal_context() -> None:
         state=_state(),
         recorded_at=detected_at + timedelta(milliseconds=10),
         account_context={"account_state": "ready_readonly"},
-        filter_context={"entry_enabled": True, "ema5": Decimal("99")},
+        filter_context={
+            "entry_enabled": True,
+            "ema5": Decimal("99"),
+            "universe": {
+                "snapshot_id": "snapshot-1",
+                "snapshot_observed_at": detected_at - timedelta(seconds=5),
+                "utc_day_return": Decimal("0.123"),
+                "gainer_rank": 7,
+            },
+            "effective_entry_candidates": {
+                "candidate-1": {
+                    "effective_limit_price": Decimal("100"),
+                    "effective_expires_at": detected_at
+                    + timedelta(minutes=15),
+                },
+            },
+        },
     )
     await recorder.stop()
 
@@ -76,6 +92,17 @@ async def test_records_24h_quote_volume_and_signal_context() -> None:
     assert row["quote_volume_24h_age_ms"] == 1000
     assert row["filter_context"]["entry_enabled"] is True
     assert row["market_context"]["trade_notional"] == "100"
+    assert row["filter_context"]["universe"]["utc_day_return"] == "0.123"
+    assert (
+        row["filter_context"]["universe"]["snapshot_observed_at"]
+        == (detected_at - timedelta(seconds=5)).isoformat()
+    )
+    assert (
+        row["filter_context"]["effective_entry_candidates"]["candidate-1"][
+            "effective_limit_price"
+        ]
+        == "100"
+    )
 
 
 @pytest.mark.asyncio
@@ -118,4 +145,3 @@ async def test_recorder_is_best_effort_when_queue_is_full_or_persist_fails() -> 
     assert recorder.persist_failure_count == 1
     assert recorder.build_failure_count == 0
     await asyncio.sleep(0)
-

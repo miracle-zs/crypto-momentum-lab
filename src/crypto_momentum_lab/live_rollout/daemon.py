@@ -148,6 +148,9 @@ class LiveDaemonConfig:
     entry_filter_context_loader: (
         Callable[[MarketState15s], Awaitable["LiveEntryFilterContext | None"]] | None
     ) = None
+    entry_universe_context_provider: (
+        Callable[[str, datetime], Mapping[str, object] | None] | None
+    ) = None
     entry_order_type: EntryType = EntryType.LIMIT
     entry_limit_ttl_seconds: int = 900
 
@@ -1000,6 +1003,36 @@ class LiveStrategyDaemon:
                 "rejection_reason": rejection_reason,
             }
         details: dict[str, object] = dict(filter_context or {})
+        universe_context_provider = (
+            self._config.entry_universe_context_provider
+        )
+        if universe_context_provider is not None:
+            try:
+                universe_context = universe_context_provider(
+                    state.symbol,
+                    state.bucket_end,
+                )
+            except Exception as error:
+                log.warning(
+                    "live_strategy_signal_universe_context_failed",
+                    run_id=self._config.run_id,
+                    symbol=state.symbol,
+                    error_type=type(error).__name__,
+                )
+            else:
+                if universe_context is not None:
+                    details["universe"] = dict(universe_context)
+        effective_entry_candidates = {
+            candidate.candidate_id: _planned_entry_execution_context(
+                candidate,
+                state=state,
+                execution_now=recorded_at,
+                entry_order_type=self._config.entry_order_type,
+                limit_ttl_seconds=self._config.entry_limit_ttl_seconds,
+            )
+            for candidate in decision.candidates
+            if not candidate.reduce_only
+        }
         details.update(
             {
                 "entry_enabled": self._entry_enabled,
@@ -1039,6 +1072,7 @@ class LiveStrategyDaemon:
                     3,
                 ),
                 "candidate_filter_results": candidate_filter_results,
+                "effective_entry_candidates": effective_entry_candidates,
             }
         )
         try:
@@ -1872,20 +1906,12 @@ class LiveStrategyDaemon:
         state: MarketState15s,
         execution_now: datetime,
     ) -> OrderIntentCandidate:
-        if candidate.reduce_only or self._config.entry_order_type is EntryType.MARKET:
-            return candidate
-        signal_price = (
-            candidate.limit_price
-            or state.close_price
-            or state.mark_price
-            or state.midpoint
-        )
-        return replace(
+        return _prepare_entry_candidate_for_observation(
             candidate,
-            entry_type=EntryType.LIMIT,
-            limit_price=signal_price,
-            expires_at=execution_now
-            + timedelta(seconds=self._config.entry_limit_ttl_seconds),
+            state=state,
+            execution_now=execution_now,
+            entry_order_type=self._config.entry_order_type,
+            limit_ttl_seconds=self._config.entry_limit_ttl_seconds,
         )
 
     def _remember_pending_entry(
@@ -2255,6 +2281,68 @@ def _live_signal_account_context(
 
 def _enum_text(value: object) -> str:
     return str(getattr(value, "value", value))
+
+
+def _planned_entry_execution_context(
+    candidate: OrderIntentCandidate,
+    *,
+    state: MarketState15s,
+    execution_now: datetime,
+    entry_order_type: EntryType,
+    limit_ttl_seconds: int,
+) -> dict[str, object]:
+    prepared = _prepare_entry_candidate_for_observation(
+        candidate,
+        state=state,
+        execution_now=execution_now,
+        entry_order_type=entry_order_type,
+        limit_ttl_seconds=limit_ttl_seconds,
+    )
+    if prepared.entry_type is not EntryType.LIMIT:
+        price_source = None
+    elif candidate.limit_price is not None:
+        price_source = "candidate.limit_price"
+    elif state.close_price is not None:
+        price_source = "state.close_price"
+    elif state.mark_price is not None:
+        price_source = "state.mark_price"
+    elif state.midpoint is not None:
+        price_source = "state.midpoint"
+    else:
+        price_source = None
+    return {
+        "original_entry_type": _enum_text(candidate.entry_type),
+        "original_limit_price": candidate.limit_price,
+        "effective_entry_type": _enum_text(prepared.entry_type),
+        "effective_limit_price": prepared.limit_price,
+        "effective_limit_price_source": price_source,
+        "effective_expires_at": prepared.expires_at,
+        "desired_notional": candidate.desired_notional,
+    }
+
+
+def _prepare_entry_candidate_for_observation(
+    candidate: OrderIntentCandidate,
+    *,
+    state: MarketState15s,
+    execution_now: datetime,
+    entry_order_type: EntryType,
+    limit_ttl_seconds: int,
+) -> OrderIntentCandidate:
+    if candidate.reduce_only or entry_order_type is EntryType.MARKET:
+        return candidate
+    signal_price = (
+        candidate.limit_price
+        or state.close_price
+        or state.mark_price
+        or state.midpoint
+    )
+    return replace(
+        candidate,
+        entry_type=EntryType.LIMIT,
+        limit_price=signal_price,
+        expires_at=execution_now + timedelta(seconds=limit_ttl_seconds),
+    )
 
 
 def _strategy_max_gap_seconds(strategy: LiveRuntimeStrategy) -> int | None:

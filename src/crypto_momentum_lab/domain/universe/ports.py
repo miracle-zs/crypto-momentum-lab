@@ -43,6 +43,11 @@ class UniverseRepository(Protocol):
         observed_at: datetime,
     ) -> UniverseSnapshot | None: ...
 
+    async def load_snapshot_at(
+        self,
+        observed_at: datetime,
+    ) -> UniverseSnapshot | None: ...
+
 
 class UniverseMarketData(Protocol):
     async def fetch_active_usdt_perpetuals(

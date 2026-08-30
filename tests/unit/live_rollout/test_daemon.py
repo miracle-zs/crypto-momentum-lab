@@ -100,6 +100,44 @@ async def test_live_daemon_uses_signal_close_gtd_limit_for_entries() -> None:
     assert plan.expires_at == NOW + timedelta(minutes=15)
 
 
+async def test_live_signal_record_includes_universe_and_effective_entry_context(
+) -> None:
+    recorder = RecordingSignalRecorder()
+
+    def universe_context(
+        symbol: str,
+        observed_at: datetime,
+    ) -> dict[str, object]:
+        return {
+            "symbol": symbol,
+            "snapshot_observed_at": observed_at - timedelta(minutes=1),
+            "utc_day_return": Decimal("0.123"),
+            "gainer_rank": 7,
+            "in_entry_pool": True,
+        }
+
+    daemon = _daemon(
+        exchange=PlanAwareExchange(),
+        signal_recorder=recorder,
+        entry_universe_context_provider=universe_context,
+    )
+
+    result = await daemon.run(_states())
+
+    assert result.halt_reason is None
+    assert recorder.decision_filter_context is not None
+    universe = recorder.decision_filter_context["universe"]
+    assert universe["gainer_rank"] == 7
+    effective = recorder.decision_filter_context[
+        "effective_entry_candidates"
+    ]["candidate-1"]
+    assert effective["original_entry_type"] == "market"
+    assert effective["effective_entry_type"] == "limit"
+    assert effective["effective_limit_price"] == Decimal("30000")
+    assert effective["effective_limit_price_source"] == "state.close_price"
+    assert effective["effective_expires_at"] == NOW + timedelta(minutes=15)
+
+
 async def test_live_daemon_does_not_submit_expired_entry_candidate() -> None:
     exchange = PlanAwareExchange()
 
@@ -1096,6 +1134,8 @@ def _daemon(
     hedge_mode: bool = False,
     entry_symbol_loader=None,
     entry_filter_context_loader=None,
+    entry_universe_context_provider=None,
+    signal_recorder=None,
     require_price_above_ema5: bool = False,
     require_price_above_ema10: bool = False,
     entry_order_type: EntryType = EntryType.LIMIT,
@@ -1129,6 +1169,7 @@ def _daemon(
         repository=repository or FakeLiveRepository(),
         state_machine=machine,
         context_provider=context_provider or default_context,
+        signal_recorder=signal_recorder,
         config=LiveDaemonConfig(
             run_id="run-1",
             resize_tolerance=Decimal("0.20"),
@@ -1138,12 +1179,41 @@ def _daemon(
             require_price_above_ema5=require_price_above_ema5,
             require_price_above_ema10=require_price_above_ema10,
             entry_filter_context_loader=entry_filter_context_loader,
+            entry_universe_context_provider=entry_universe_context_provider,
             entry_order_type=entry_order_type,
         ),
         exit_manager=exit_manager,
         reconcile_orders=reconcile_orders,
         clock=clock or (lambda: NOW),
     )
+
+
+class RecordingSignalRecorder:
+    def __init__(self) -> None:
+        self.decision_filter_context: dict[str, object] | None = None
+
+    def record_decision(
+        self,
+        *,
+        decision,
+        state,
+        recorded_at,
+        account_context,
+        filter_context,
+    ) -> None:
+        del decision, state, recorded_at, account_context
+        self.decision_filter_context = filter_context
+
+    def record_candidate(
+        self,
+        *,
+        candidate,
+        state,
+        recorded_at,
+        account_context,
+        filter_context,
+    ) -> None:
+        del candidate, state, recorded_at, account_context, filter_context
 
 
 class PlanAwareExchange:

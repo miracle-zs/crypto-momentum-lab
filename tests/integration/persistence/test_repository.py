@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -71,10 +71,14 @@ async def test_save_snapshot_is_idempotent(
     await repository.save_snapshot(snapshot)
     await repository.save_snapshot(snapshot)
     loaded = await repository.load_snapshot(observed_at)
+    loaded_at = await repository.load_snapshot_at(
+        observed_at + timedelta(minutes=1)
+    )
 
     assert loaded is not None
     assert loaded.snapshot_id == snapshot.snapshot_id
     assert loaded.memberships == snapshot.memberships
+    assert loaded_at == loaded
 
 
 async def test_save_contract_metadata_rehydrates_after_retention_delete(
