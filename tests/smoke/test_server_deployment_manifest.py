@@ -29,6 +29,17 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert services["execution-account-live"]["mem_limit"] == "160m"
     assert services["live-strategy"]["mem_limit"] == "512m"
     assert services["dashboard"]["mem_limit"] == "320m"
+    assert services["execution-account-live"]["healthcheck"]["interval"] == "30s"
+    assert services["execution-account-live"]["healthcheck"]["retries"] == 4
+    assert services["dashboard"]["healthcheck"]["interval"] == "30s"
+    assert services["dashboard"]["healthcheck"]["retries"] == 4
+    for service in (
+        "paper-orderflow-pair",
+        "paper-b1-gainer100",
+        "paper-b1-gainer100-ema",
+    ):
+        assert services[service]["healthcheck"]["interval"] == "45s"
+        assert services[service]["healthcheck"]["retries"] == 2
     for service in (
         "paper-orderflow-pair",
     ):
