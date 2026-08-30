@@ -33,6 +33,12 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert services["execution-account-live"]["healthcheck"]["retries"] == 4
     assert services["dashboard"]["healthcheck"]["interval"] == "30s"
     assert services["dashboard"]["healthcheck"]["retries"] == 4
+    assert services["market-data"]["healthcheck"]["interval"] == "30s"
+    assert services["market-data"]["healthcheck"]["retries"] == 3
+    assert _option_value(
+        services["market-data"]["healthcheck"]["test"],
+        "-m",
+    ) == "crypto_momentum_lab.apps.healthcheck_fast"
     for service in (
         "paper-orderflow-pair",
         "paper-b1-gainer100",
@@ -40,6 +46,15 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     ):
         assert services[service]["healthcheck"]["interval"] == "60s"
         assert services[service]["healthcheck"]["retries"] == 2
+        assert _option_value(
+            services[service]["healthcheck"]["test"],
+            "-m",
+        ) == "crypto_momentum_lab.apps.healthcheck_fast"
+    for service in ("execution-account-live", "live-strategy"):
+        assert _option_value(
+            services[service]["healthcheck"]["test"],
+            "-m",
+        ) == "crypto_momentum_lab.apps.healthcheck_fast"
     for service in (
         "paper-orderflow-pair",
     ):
@@ -126,6 +141,9 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert services["live-strategy"]["profiles"] == ["live"]
     live_healthcheck = services["live-strategy"]["healthcheck"]["test"]
     assert _option_value(live_healthcheck, "--service") == "live"
+    assert _option_value(live_healthcheck, "-m") == (
+        "crypto_momentum_lab.apps.healthcheck_fast"
+    )
     assert "--ignore-age" not in live_healthcheck
     assert _option_value(live_healthcheck, "--session-id") == (
         "${CML_LIVE_SESSION_ID:-live-primary-v1}"
