@@ -10,7 +10,6 @@ from typing import Literal, cast
 from sqlalchemy import (
     Select,
     String,
-    and_,
     case,
     column,
     func,
@@ -121,6 +120,17 @@ class _PaperEquityPoint:
     unrealized_pnl: Decimal
 
 
+@dataclass(frozen=True, slots=True)
+class _PaperEquitySummaryPoint:
+    """Narrow latest paper-equity projection used by account summaries."""
+
+    balance: Decimal
+    equity: Decimal
+    realized_pnl: Decimal
+    unrealized_pnl: Decimal
+    total_fees: Decimal
+
+
 DEFAULT_LIVE_CASH_FLOW_ADJUSTMENTS = (
     LiveCashFlowAdjustment(
         account_label="primary",
@@ -168,6 +178,44 @@ def _paper_first_equity_statement(
     return (
         select(run_values.c.run_id, first_equity.c.first_at)
         .select_from(run_values.join(first_equity, true()))
+        .order_by(run_values.c.run_id)
+    )
+
+
+def _paper_latest_equity_statement(
+    run_ids: Sequence[str],
+) -> Select[tuple[str, Decimal, Decimal, Decimal, Decimal, Decimal]]:
+    """Fetch one narrow latest-equity row per run with an index probe.
+
+    The account-card summary only needs five scalar values. Avoid selecting the
+    full ORM row and a grouped ``MAX(observed_at)`` subquery, which otherwise
+    scans every historical snapshot on each dashboard refresh.
+    """
+    run_values = _paper_run_values(run_ids)
+    snapshot = aliased(PaperEquitySnapshotRow)
+    latest_equity = (
+        select(
+            snapshot.balance.label("balance"),
+            snapshot.equity.label("equity"),
+            snapshot.realized_pnl.label("realized_pnl"),
+            snapshot.unrealized_pnl.label("unrealized_pnl"),
+            snapshot.total_fees.label("total_fees"),
+        )
+        .where(snapshot.run_id == run_values.c.run_id)
+        .order_by(snapshot.observed_at.desc(), snapshot.snapshot_id.desc())
+        .limit(1)
+        .lateral("latest_equity")
+    )
+    return (
+        select(
+            run_values.c.run_id,
+            latest_equity.c.balance,
+            latest_equity.c.equity,
+            latest_equity.c.realized_pnl,
+            latest_equity.c.unrealized_pnl,
+            latest_equity.c.total_fees,
+        )
+        .select_from(run_values.join(latest_equity, true()))
         .order_by(run_values.c.run_id)
     )
 
@@ -1226,27 +1274,8 @@ class DashboardQueries:
                 .group_by(PaperPositionRow.run_id)
             )
         ).all()
-        latest_equity_times = (
-            select(
-                PaperEquitySnapshotRow.run_id.label("run_id"),
-                func.max(PaperEquitySnapshotRow.observed_at).label("observed_at"),
-            )
-            .where(PaperEquitySnapshotRow.run_id.in_(run_ids))
-            .group_by(PaperEquitySnapshotRow.run_id)
-            .subquery()
-        )
-        latest_equities = (
-            await session.scalars(
-                select(PaperEquitySnapshotRow).join(
-                    latest_equity_times,
-                    and_(
-                        PaperEquitySnapshotRow.run_id
-                        == latest_equity_times.c.run_id,
-                        PaperEquitySnapshotRow.observed_at
-                        == latest_equity_times.c.observed_at,
-                    ),
-                )
-            )
+        latest_equity_rows = (
+            await session.execute(_paper_latest_equity_statement(run_ids))
         ).all()
         checkpoint_by_run = {row.run_id: row.saved_at for row in checkpoints}
         open_count_by_run: dict[str, int] = {}
@@ -1256,7 +1285,16 @@ class DashboardQueries:
             row.run_id: (int(row.closed_count), int(row.winning_count or 0))
             for row in closed_stats
         }
-        latest_equity_by_run = {row.run_id: row for row in latest_equities}
+        latest_equity_by_run = {
+            row.run_id: _PaperEquitySummaryPoint(
+                balance=row.balance,
+                equity=row.equity,
+                realized_pnl=row.realized_pnl,
+                unrealized_pnl=row.unrealized_pnl,
+                total_fees=row.total_fees,
+            )
+            for row in latest_equity_rows
+        }
         return [
             _paper_account_summary(
                 run,
@@ -2279,7 +2317,7 @@ def _paper_account_summary(
     open_position_count: int,
     closed_trade_count: int,
     winning_trade_count: int,
-    latest_equity: PaperEquitySnapshotRow | None,
+    latest_equity: PaperEquitySnapshotRow | _PaperEquitySummaryPoint | None,
 ) -> PaperAccountSummaryResponse:
     exit_mode, exit_label = _paper_exit_details(run)
     return PaperAccountSummaryResponse(

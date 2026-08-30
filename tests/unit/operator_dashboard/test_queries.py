@@ -24,6 +24,7 @@ from crypto_momentum_lab.operator_dashboard.queries import (
     _paper_equity_statement,
     _paper_exit_label,
     _paper_first_equity_statement,
+    _paper_latest_equity_statement,
     _split_exchange_orders,
     _universe_membership,
     parse_live_cash_flow_adjustments,
@@ -134,6 +135,17 @@ def test_paper_equity_query_is_bounded_and_narrow() -> None:
     assert "LATERAL" in sql
     assert "raw_payload" not in sql
     assert "DISTINCT ON" not in sql
+
+
+def test_paper_latest_equity_query_uses_one_narrow_probe_per_run() -> None:
+    statement = _paper_latest_equity_statement(["paper-a", "paper-b"])
+
+    sql = str(statement.compile(dialect=postgresql_dialect()))
+
+    assert "LATERAL" in sql
+    assert "ORDER BY paper_equity_snapshots_1.observed_at DESC" in sql
+    assert "raw_payload" not in sql
+    assert "max(" not in sql.lower()
 
 
 def test_live_common_equity_query_aggregates_latest_timestamp_per_bucket() -> None:
