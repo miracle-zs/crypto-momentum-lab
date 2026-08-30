@@ -102,6 +102,84 @@ def test_prior_exit_does_not_suppress_a_reopened_position() -> None:
     assert managed[0].closing_order_filled is False
 
 
+def test_old_exit_filled_after_add_on_does_not_suppress_new_position() -> None:
+    old_entry_at = NOW
+    add_on_fill_at = NOW + timedelta(seconds=20)
+    old_exit_created_at = NOW + timedelta(seconds=10)
+    old_exit_filled_at = NOW + timedelta(seconds=30)
+
+    managed, unmanaged = _classify_live_positions(
+        [_position(position_amt=Decimal("0.5"))],
+        [
+            _order(
+                reduce_only=True,
+                side="SELL",
+                quantity=Decimal("0.4"),
+                executed_quantity=Decimal("0.4"),
+                created_at=old_exit_created_at,
+                updated_at=old_exit_filled_at,
+            ),
+            _order(
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("0.5"),
+                executed_quantity=Decimal("0.5"),
+                created_at=add_on_fill_at,
+                updated_at=add_on_fill_at,
+                exchange_order_id="add-on-entry",
+            ),
+            _order(
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("0.5"),
+                executed_quantity=Decimal("0.5"),
+                created_at=old_entry_at,
+                updated_at=old_entry_at,
+                exchange_order_id="old-entry",
+            ),
+        ],
+        entry_fill_times={
+            "old-entry": old_entry_at,
+            "add-on-entry": add_on_fill_at,
+        },
+    )
+
+    assert unmanaged == frozenset()
+    assert managed[0].opened_at == add_on_fill_at
+    assert managed[0].closing_order_filled is False
+
+
+def test_partial_close_does_not_suppress_remaining_position() -> None:
+    entry_fill_at = NOW + timedelta(seconds=20)
+
+    managed, unmanaged = _classify_live_positions(
+        [_position(position_amt=Decimal("0.5"))],
+        [
+            _order(
+                reduce_only=True,
+                side="SELL",
+                quantity=Decimal("0.25"),
+                executed_quantity=Decimal("0.25"),
+                created_at=entry_fill_at + timedelta(seconds=5),
+                updated_at=entry_fill_at + timedelta(seconds=6),
+            ),
+            _order(
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("0.5"),
+                executed_quantity=Decimal("0.5"),
+                created_at=entry_fill_at,
+                updated_at=entry_fill_at,
+                exchange_order_id="entry",
+            ),
+        ],
+        entry_fill_times={"entry": entry_fill_at},
+    )
+
+    assert unmanaged == frozenset()
+    assert managed[0].closing_order_filled is False
+
+
 def test_partial_entry_fill_is_managed_and_refreshes_latest_exit_anchor() -> None:
     old_entry_at = NOW
     partial_entry_fill_at = NOW + timedelta(seconds=25)
@@ -585,11 +663,11 @@ def _runtime_context() -> LiveDaemonRuntimeContext:
     )
 
 
-def _position():
+def _position(*, position_amt: Decimal = Decimal("0.5")):
     return SimpleNamespace(
         symbol="BTCUSDT",
         position_side="LONG",
-        position_amt=Decimal("0.5"),
+        position_amt=position_amt,
         entry_price=Decimal("100"),
     )
 
@@ -602,7 +680,13 @@ def _order(
     created_at: datetime | None = None,
     state: str = ExchangeOrderState.FILLED.value,
     exchange_order_id: str | None = None,
+    quantity: Decimal = Decimal("0.5"),
+    executed_quantity: Decimal | None = None,
 ):
+    if executed_quantity is None:
+        executed_quantity = (
+            quantity if state == ExchangeOrderState.FILLED.value else Decimal("0")
+        )
     return SimpleNamespace(
         state=state,
         reduce_only=reduce_only,
@@ -612,4 +696,6 @@ def _order(
         created_at=updated_at if created_at is None else created_at,
         updated_at=updated_at,
         exchange_order_id=exchange_order_id,
+        quantity=quantity,
+        executed_quantity=executed_quantity,
     )

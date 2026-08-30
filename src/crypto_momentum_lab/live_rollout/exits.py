@@ -202,10 +202,8 @@ class LiveExitManager:
                 or state.bucket_end <= position.opened_at
             ):
                 continue
-            if (
-                position.recovery_order_client_id is not None
-                and position.recovery_order_created_at is not None
-            ):
+            if _recovery_order_blocks_current_episode(position):
+                assert position.recovery_order_created_at is not None
                 timeout_at = position.recovery_order_created_at + timedelta(
                     minutes=15 * self._config.candle_grace_bars
                 )
@@ -252,7 +250,7 @@ class LiveExitManager:
             if (
                 position.symbol != candle.symbol
                 or position.closing_order_filled
-                or position.recovery_order_client_id is not None
+                or _recovery_order_blocks_current_episode(position)
             ):
                 continue
             key = (position.symbol, position.position_side, position.opened_at)
@@ -399,7 +397,7 @@ class LiveExitManager:
                 position.symbol != quote.symbol
                 or position.closing_order_filled
                 or quote.received_at <= position.opened_at
-                or position.recovery_order_client_id is not None
+                or _recovery_order_blocks_current_episode(position)
             ):
                 continue
             mark_price = _quote_exit_mark_price(quote, position.side)
@@ -688,6 +686,17 @@ def _recovery_price(
     if position.side is StrategySide.LONG:
         return position.entry_price * (Decimal("1") + profit_pct)
     return position.entry_price * (Decimal("1") - profit_pct)
+
+
+def _recovery_order_blocks_current_episode(
+    position: ManagedLivePosition,
+) -> bool:
+    recovery_created_at = position.recovery_order_created_at
+    return (
+        position.recovery_order_client_id is not None
+        and recovery_created_at is not None
+        and recovery_created_at >= position.opened_at
+    )
 
 
 def _recovery_target_touched(

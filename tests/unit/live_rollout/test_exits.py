@@ -341,6 +341,65 @@ async def test_closed_candle_path_does_not_require_a_rest_loader() -> None:
     )
 
 
+async def test_stale_recovery_limit_does_not_block_a_new_position_episode() -> None:
+    recovery_created_at = datetime(2026, 7, 4, 0, 15, tzinfo=UTC)
+    position = replace(
+        _long_position(),
+        opened_at=datetime(2026, 7, 4, 0, 20, tzinfo=UTC),
+        recovery_order_client_id="stale-recovery",
+        recovery_order_created_at=recovery_created_at,
+        recovery_order_plan=OrderExecutionPlan(
+            intent_id="recovery-intent",
+            run_id="run-1",
+            client_order_id="stale-recovery",
+            symbol="BTCUSDT",
+            side="SELL",
+            order_type="LIMIT",
+            quantity=Decimal("1.25"),
+            price=Decimal("100.88"),
+            reduce_only=True,
+            created_at=recovery_created_at,
+            position_side=FuturesPositionSide.LONG,
+            quantized=True,
+        ),
+    )
+    manager = LiveExitManager(
+        config=_config(
+            PositionExitMode.CANDLE_15M,
+            candle_grace_bars=1,
+            candle_grace_profit_pct=Decimal("0.0088"),
+        )
+    )
+    candle = ClosedCandle15m(
+        symbol="BTCUSDT",
+        candle_start=datetime(2026, 7, 4, 0, 30, tzinfo=UTC),
+        candle_end=datetime(2026, 7, 4, 0, 45, tzinfo=UTC),
+        open_price=Decimal("100"),
+        close_price=Decimal("99"),
+    )
+
+    requests = await manager.requests_for_closed_candle(candle, (position,))
+
+    assert len(requests) == 1
+    assert requests[0].candidate.reason.endswith("grace_limit_1")
+
+    timeout_requests = await manager.requests_for_grace_timeout(
+        now=datetime(2026, 7, 4, 0, 30, 1, tzinfo=UTC),
+        state=replace(
+            _state(),
+            bucket_end=datetime(2026, 7, 4, 0, 30, tzinfo=UTC),
+            last_bid_price=Decimal("99"),
+            mark_price=Decimal("99"),
+            close_price=Decimal("99"),
+        ),
+        positions=(position,),
+    )
+
+    assert len(timeout_requests) == 1
+    assert isinstance(timeout_requests[0], LiveExitCancellationRequest)
+    assert timeout_requests[0].cancel_plan.client_order_id == "stale-recovery"
+
+
 async def test_closed_candle_path_ignores_the_entry_candle() -> None:
     manager = LiveExitManager(config=_config(PositionExitMode.CANDLE_15M))
     entry_candle = ClosedCandle15m(

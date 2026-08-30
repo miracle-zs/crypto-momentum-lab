@@ -693,33 +693,33 @@ def _classify_live_positions(
             unmanaged.add(position.symbol)
             continue
         opening_fill_at = _entry_fill_at(opening, fill_times)
-        # Associate a close with the current position episode by the time the
-        # order actually filled when that timestamp is available.  A pending
-        # limit add-on may be created before an older exit fills; comparing
-        # only order.created_at would incorrectly attach that exit to the
-        # later position episode.  The created-at fallback preserves the
-        # legacy behavior for rows that predate fill-time persistence.
-        closing_filled = any(
-            order.reduce_only
-            and order.symbol == position.symbol
-            and FuturesPositionSide(order.position_side) is position_side
-            and (
-                (
-                    opening_fill_at is not None
-                    and order.updated_at >= opening_fill_at
-                )
-                or (
-                    opening_fill_at is None
-                    and order.created_at >= opening.created_at
-                )
-            )
-            for order in filled_orders
+        current_episode_started_at = opening_fill_at or opening.created_at
+        # A reduce-only order belongs to the current position episode when it
+        # was created after the current opening actually filled.  An older
+        # resting limit exit can fill after a later add-on entry; using its
+        # updated_at would then make that old exit suppress the new position.
+        closing_filled_quantity = sum(
+            (
+                _filled_order_quantity(order)
+                for order in filled_orders
+                if order.reduce_only
+                and order.symbol == position.symbol
+                and FuturesPositionSide(order.position_side) is position_side
+                and order.created_at >= current_episode_started_at
+            ),
+            start=Decimal("0"),
         )
+        # The account snapshot can still show a position briefly after a full
+        # reduce-only fill.  Suppress duplicate exits only when the filled
+        # quantity covers the current snapshot; a completed exit for an older
+        # or smaller lot must leave the remaining position eligible to exit.
+        closing_filled = closing_filled_quantity >= abs(position.position_amt)
         active_market_exit = any(
             item.plan.symbol == position.symbol
             and item.plan.reduce_only
             and item.plan.position_side is position_side
             and item.plan.order_type == "MARKET"
+            and item.plan.created_at >= current_episode_started_at
             and not item.state.terminal
             for item in unresolved
         )
@@ -782,6 +782,28 @@ def _strategy_side(
 
 def _opening_order_matches_side(order_side: str, side: StrategySide) -> bool:
     return (order_side == "BUY") is (side is StrategySide.LONG)
+
+
+def _filled_order_quantity(order: object) -> Decimal:
+    executed_quantity = getattr(order, "executed_quantity", None)
+    if executed_quantity is not None:
+        try:
+            executed = Decimal(str(executed_quantity))
+        except (ArithmeticError, TypeError, ValueError):
+            executed = Decimal("0")
+        if executed > 0:
+            return executed
+
+    # FILLED rows written before cumulative executed_quantity was persisted
+    # still carry the planned quantity, which is the safest fallback for the
+    # account-sync-lag suppression path.
+    quantity = getattr(order, "quantity", None)
+    if quantity is None:
+        return Decimal("0")
+    try:
+        return max(Decimal("0"), Decimal(str(quantity)))
+    except (ArithmeticError, TypeError, ValueError):
+        return Decimal("0")
 
 
 def _entry_fill_at(
