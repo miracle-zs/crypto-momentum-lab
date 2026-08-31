@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -15,6 +16,7 @@ from crypto_momentum_lab.execution_account.binance.client import (
     BinanceRateLimitError,
     BinanceUsdMPrivateReadClient,
     BinanceUsdMTradeClient,
+    _AsyncRequestPacer,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeCancellationUnknownError,
@@ -23,6 +25,55 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeSubmissionTimeoutError,
     LiveSubmissionDisabledError,
 )
+
+
+def test_private_client_uses_explicit_request_timeout() -> None:
+    client = BinanceUsdMPrivateReadClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        base_url="https://fapi.binance.com",
+    )
+
+    try:
+        assert client._client.timeout.read == 8.0
+        assert client._client.timeout.write == 8.0
+        assert client._client.timeout.connect == 2.0
+        assert client._client.timeout.pool == 1.0
+    finally:
+        asyncio.run(client.aclose())
+
+
+async def test_command_pacer_prioritizes_reduce_only_waiter() -> None:
+    pacer = _AsyncRequestPacer(0.001)
+    order: list[str] = []
+
+    async def reserve(label: str, *, priority: int) -> None:
+        await pacer.wait(priority=priority)
+        order.append(label)
+
+    first_entry = asyncio.create_task(reserve("entry-1", priority=10))
+    await asyncio.sleep(0)
+    queued_entry = asyncio.create_task(reserve("entry-2", priority=10))
+    queued_exit = asyncio.create_task(reserve("exit", priority=0))
+    try:
+        await asyncio.gather(first_entry, queued_entry, queued_exit)
+    finally:
+        await pacer.aclose()
+
+    assert order == ["entry-1", "exit", "entry-2"]
+
+
+async def test_command_pacer_closes_pending_waiter() -> None:
+    pacer = _AsyncRequestPacer(60.0)
+    waiter = asyncio.create_task(pacer.wait(priority=10))
+    await asyncio.sleep(0)
+
+    await pacer.aclose()
+
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
 
 
 async def test_signed_request_includes_timestamp_and_signature() -> None:
@@ -52,6 +103,7 @@ async def test_signed_request_includes_timestamp_and_signature() -> None:
         await client.aclose()
 
     assert "timestamp=1783123200000" in captured_query
+    assert "recvWindow=10000" in captured_query
     assert "signature=" in captured_query
 
 async def test_client_fetches_account_snapshot() -> None:
@@ -452,6 +504,79 @@ async def test_trade_client_submits_signed_binance_order() -> None:
     assert "positionSide=" not in captured_body
     assert "signature=" in captured_body
     assert snapshot.state is ExchangeOrderState.FILLED
+
+
+async def test_trade_client_prioritizes_reduce_only_submit_over_queued_entry() -> None:
+    requested_ids: list[str] = []
+    first_entry_started = asyncio.Event()
+    release_first_entry = asyncio.Event()
+    first_entry = replace(
+        _order_plan(),
+        client_order_id="cml_entry_1",
+    )
+    queued_entry = replace(
+        _order_plan(),
+        client_order_id="cml_entry_2",
+    )
+    queued_exit = replace(
+        _order_plan(),
+        client_order_id="cml_exit_1",
+        side="SELL",
+        reduce_only=True,
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        client_order_id = parse_qs(request.content.decode())["newClientOrderId"][0]
+        requested_ids.append(client_order_id)
+        if client_order_id == first_entry.client_order_id:
+            first_entry_started.set()
+            await release_first_entry.wait()
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": client_order_id,
+                "orderId": len(requested_ids),
+                "status": "FILLED",
+                "executedQty": "0.003",
+                "avgPrice": "30000",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        request_interval_seconds=0.01,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    first_task = asyncio.create_task(client.submit_order(first_entry))
+    try:
+        await first_entry_started.wait()
+        queued_entry_task = asyncio.create_task(client.submit_order(queued_entry))
+        queued_exit_task = asyncio.create_task(client.submit_order(queued_exit))
+        await asyncio.sleep(0.005)
+        release_first_entry.set()
+        await asyncio.gather(
+            first_task,
+            queued_entry_task,
+            queued_exit_task,
+        )
+    finally:
+        await client.aclose()
+
+    assert requested_ids == [
+        first_entry.client_order_id,
+        queued_exit.client_order_id,
+        queued_entry.client_order_id,
+    ]
 
 
 async def test_trade_client_submits_gtd_limit_entry() -> None:

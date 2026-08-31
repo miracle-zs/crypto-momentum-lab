@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import heapq
 import hmac
 import math
 from collections.abc import Callable, Iterable, Mapping
@@ -41,6 +42,13 @@ from crypto_momentum_lab.live_rollout.commands import (
 # /fapi/v3/account, /fapi/v3/balance, /fapi/v3/positionRisk,
 # /fapi/v1/openOrders, /fapi/v1/userTrades.
 
+_DEFAULT_REQUEST_TIMEOUT_SECONDS = 8.0
+_DEFAULT_CONNECT_TIMEOUT_SECONDS = 2.0
+_DEFAULT_POOL_TIMEOUT_SECONDS = 1.0
+_COMMAND_EXIT_PRIORITY = 0
+_COMMAND_ENTRY_PRIORITY = 10
+_COMMAND_BACKGROUND_PRIORITY = 20
+
 
 class BinanceRateLimitError(httpx.HTTPStatusError):
     """A Binance REST rate-limit response that callers should back off from."""
@@ -55,25 +63,106 @@ class BinanceRateLimitError(httpx.HTTPStatusError):
 
 
 class _AsyncRequestPacer:
+    """Rate-limit starts while allowing safety-critical work to jump ahead.
+
+    A lock-based pacer reserves future slots in arrival order.  That is unsafe
+    for a live trading client: a burst of entry requests can reserve every
+    upcoming slot while a reduce-only exit is waiting.  This pacer keeps the
+    same account-wide rate limit but chooses the next queued request by
+    priority.  The request itself is still never retried here; the order state
+    machine owns ambiguous-outcome reconciliation.
+    """
+
     def __init__(self, min_interval_seconds: float) -> None:
         if min_interval_seconds < 0:
             raise ValueError("min_interval_seconds must not be negative")
         self._min_interval_seconds = min_interval_seconds
-        self._lock = asyncio.Lock()
+        self._condition = asyncio.Condition()
+        self._queue: list[tuple[int, int, asyncio.Future[None]]] = []
+        self._sequence = 0
+        self._worker: asyncio.Task[None] | None = None
+        self._active_future: asyncio.Future[None] | None = None
+        self._closed = False
         self._next_allowed_at = 0.0
 
-    async def wait(self) -> None:
+    async def wait(self, *, priority: int = 10) -> None:
+        if self._closed:
+            raise RuntimeError("request pacer is closed")
         if self._min_interval_seconds == 0:
             return
         loop = asyncio.get_running_loop()
-        async with self._lock:
-            now = loop.time()
-            delay = max(0.0, self._next_allowed_at - now)
-            self._next_allowed_at = (
-                max(now, self._next_allowed_at) + self._min_interval_seconds
-            )
-        if delay > 0:
-            await asyncio.sleep(delay)
+        future = loop.create_future()
+        async with self._condition:
+            if self._closed:
+                raise RuntimeError("request pacer is closed")
+            sequence = self._sequence
+            self._sequence += 1
+            heapq.heappush(self._queue, (priority, sequence, future))
+            if self._worker is None:
+                self._worker = asyncio.create_task(
+                    self._run(),
+                    name="binance-request-pacer",
+                )
+            self._condition.notify()
+        try:
+            await future
+        except asyncio.CancelledError:
+            # The worker can safely discard a cancelled future when it reaches
+            # it; removing it from the heap here would require another O(n)
+            # scan and adds no latency benefit.
+            if not future.done():
+                future.cancel()
+            raise
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        queued = [future for _priority, _sequence, future in self._queue]
+        self._queue.clear()
+        for future in queued:
+            if not future.done():
+                future.cancel()
+        if self._active_future is not None and not self._active_future.done():
+            self._active_future.cancel()
+        worker = self._worker
+        if worker is None:
+            return
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+        self._worker = None
+
+    async def _run(self) -> None:
+        try:
+            while True:
+                async with self._condition:
+                    while not self._queue and not self._closed:
+                        await self._condition.wait()
+                    if self._closed:
+                        return
+                    _priority, _sequence, future = heapq.heappop(self._queue)
+                    if future.done():
+                        continue
+                    self._active_future = future
+                    now = asyncio.get_running_loop().time()
+                    delay = max(0.0, self._next_allowed_at - now)
+                    self._next_allowed_at = (
+                        max(now, self._next_allowed_at)
+                        + self._min_interval_seconds
+                    )
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                if not future.done():
+                    future.set_result(None)
+                self._active_future = None
+        except asyncio.CancelledError:
+            if self._active_future is not None and not self._active_future.done():
+                self._active_future.cancel()
+            self._active_future = None
+            return
 
 
 class BinanceUsdMPrivateReadClient:
@@ -87,9 +176,12 @@ class BinanceUsdMPrivateReadClient:
         base_url: str = "https://fapi.binance.com",
         http_client: httpx.AsyncClient | None = None,
         clock: Callable[[], datetime] | None = None,
-        recv_window_ms: int = 5000,
+        recv_window_ms: int = 10000,
         request_interval_seconds: float = 0.2,
         command_request_interval_seconds: float | None = None,
+        request_timeout_seconds: float = _DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        connect_timeout_seconds: float = _DEFAULT_CONNECT_TIMEOUT_SECONDS,
+        pool_timeout_seconds: float = _DEFAULT_POOL_TIMEOUT_SECONDS,
     ) -> None:
         if not api_key.strip():
             raise ValueError("api_key must not be empty")
@@ -109,6 +201,12 @@ class BinanceUsdMPrivateReadClient:
             raise ValueError(
                 "command_request_interval_seconds must not be negative"
             )
+        if request_timeout_seconds <= 0:
+            raise ValueError("request_timeout_seconds must be positive")
+        if connect_timeout_seconds <= 0:
+            raise ValueError("connect_timeout_seconds must be positive")
+        if pool_timeout_seconds <= 0:
+            raise ValueError("pool_timeout_seconds must be positive")
         self._api_key = api_key
         self._api_secret = api_secret
         self._environment = environment
@@ -123,6 +221,11 @@ class BinanceUsdMPrivateReadClient:
         )
         self._client = http_client or httpx.AsyncClient(
             base_url=base_url,
+            timeout=httpx.Timeout(
+                request_timeout_seconds,
+                connect=connect_timeout_seconds,
+                pool=pool_timeout_seconds,
+            ),
             trust_env=False,
         )
 
@@ -294,6 +397,8 @@ class BinanceUsdMPrivateReadClient:
         )
 
     async def aclose(self) -> None:
+        await self._read_request_pacer.aclose()
+        await self._command_request_pacer.aclose()
         await self._client.aclose()
 
     async def _signed_get(
@@ -301,8 +406,8 @@ class BinanceUsdMPrivateReadClient:
         path: str,
         params: dict[str, str | int | float | bool | None] | None = None,
     ) -> object:
-        signed_params = self._signed_params(params or {})
         await self._read_request_pacer.wait()
+        signed_params = self._signed_params(params or {})
         response = await self._client.get(
             path,
             params=signed_params,
@@ -315,9 +420,11 @@ class BinanceUsdMPrivateReadClient:
         self,
         path: str,
         params: dict[str, str | int | float | bool | None],
+        *,
+        priority: int = _COMMAND_BACKGROUND_PRIORITY,
     ) -> object:
+        await self._command_request_pacer.wait(priority=priority)
         signed_params = self._signed_params(params)
-        await self._command_request_pacer.wait()
         response = await self._client.post(
             path,
             data=signed_params,
@@ -330,9 +437,11 @@ class BinanceUsdMPrivateReadClient:
         self,
         path: str,
         params: dict[str, str | int | float | bool | None],
+        *,
+        priority: int = _COMMAND_BACKGROUND_PRIORITY,
     ) -> object:
+        await self._command_request_pacer.wait(priority=priority)
         signed_params = self._signed_params(params)
-        await self._command_request_pacer.wait()
         response = await self._client.delete(
             path,
             params=signed_params,
@@ -349,7 +458,7 @@ class BinanceUsdMPrivateReadClient:
         data: dict[str, str] | None = None,
     ) -> object:
         """Call an unsigned listen-key endpoint authenticated by API key."""
-        await self._command_request_pacer.wait()
+        await self._command_request_pacer.wait(priority=_COMMAND_BACKGROUND_PRIORITY)
         response = await self._client.request(
             method,
             path,
@@ -401,9 +510,12 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         base_url: str = "https://fapi.binance.com",
         http_client: httpx.AsyncClient | None = None,
         clock: Callable[[], datetime] | None = None,
-        recv_window_ms: int = 5000,
+        recv_window_ms: int = 10000,
         request_interval_seconds: float = 0.2,
         command_request_interval_seconds: float | None = None,
+        request_timeout_seconds: float = _DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        connect_timeout_seconds: float = _DEFAULT_CONNECT_TIMEOUT_SECONDS,
+        pool_timeout_seconds: float = _DEFAULT_POOL_TIMEOUT_SECONDS,
         entry_leverage: int | None = None,
     ) -> None:
         if entry_leverage is not None and not 1 <= entry_leverage <= 125:
@@ -419,6 +531,9 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             recv_window_ms=recv_window_ms,
             request_interval_seconds=request_interval_seconds,
             command_request_interval_seconds=command_request_interval_seconds,
+            request_timeout_seconds=request_timeout_seconds,
+            connect_timeout_seconds=connect_timeout_seconds,
+            pool_timeout_seconds=pool_timeout_seconds,
         )
         self._live_submit_enabled = live_submit_enabled
         self._entry_leverage = entry_leverage
@@ -471,7 +586,15 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     plan.expires_at.timestamp() * 1000
                 )
         try:
-            payload = await self._signed_post("/fapi/v1/order", params)
+            payload = await self._signed_post(
+                "/fapi/v1/order",
+                params,
+                priority=(
+                    _COMMAND_EXIT_PRIORITY
+                    if plan.reduce_only
+                    else _COMMAND_ENTRY_PRIORITY
+                ),
+            )
         except httpx.TimeoutException as exc:
             raise ExchangeSubmissionTimeoutError(
                 "Binance order submit timed out"
@@ -501,6 +624,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 payload = await self._signed_post(
                     "/fapi/v1/leverage",
                     {"symbol": symbol, "leverage": leverage},
+                    priority=_COMMAND_ENTRY_PRIORITY,
                 )
                 response = _require_mapping(payload)
                 if str(response.get("symbol", "")) != symbol or int(
@@ -584,6 +708,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     "symbol": symbol,
                     "origClientOrderId": client_order_id,
                 },
+                priority=_COMMAND_EXIT_PRIORITY,
             )
         except httpx.TimeoutException as exc:
             raise ExchangeCancellationUnknownError(
@@ -646,6 +771,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     "symbol": symbol,
                     "origClientOrderId": client_order_id,
                 },
+                priority=_COMMAND_EXIT_PRIORITY,
             )
         except httpx.TimeoutException as exc:
             raise ExchangeCancellationUnknownError(
