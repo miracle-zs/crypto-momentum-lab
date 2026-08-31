@@ -84,7 +84,7 @@ async def test_live_daemon_submits_strategy_candidate_after_all_gates() -> None:
     assert exchange.calls == ["submit"]
 
 
-async def test_live_daemon_uses_signal_close_gtd_limit_for_entries() -> None:
+async def test_live_daemon_uses_lower_of_ask_and_close_gtd_limit_for_entries() -> None:
     exchange = PlanAwareExchange()
     daemon = _daemon(exchange=exchange, entry_order_type=EntryType.LIMIT)
 
@@ -98,6 +98,30 @@ async def test_live_daemon_uses_signal_close_gtd_limit_for_entries() -> None:
     assert plan.price == Decimal("30000")
     assert plan.time_in_force == "GTD"
     assert plan.expires_at == NOW + timedelta(minutes=15)
+
+
+async def test_live_daemon_caps_entry_limit_at_lower_ask_when_ask_is_below_close(
+) -> None:
+    exchange = PlanAwareExchange()
+    state = replace(
+        _state(),
+        close_price=Decimal("30000"),
+        last_ask_price=Decimal("29950"),
+        midpoint=Decimal("29949.5"),
+    )
+
+    async def states() -> AsyncIterator[MarketState15s]:
+        yield state
+
+    daemon = _daemon(exchange=exchange, entry_order_type=EntryType.LIMIT)
+
+    result = await daemon.run(states())
+
+    assert result.halt_reason is None
+    assert result.submitted_order_count == 1
+    assert exchange.plans[0].order_type == "LIMIT"
+    assert exchange.plans[0].price == Decimal("29950")
+    assert exchange.plans[0].expires_at == NOW + timedelta(minutes=15)
 
 
 async def test_live_signal_record_includes_universe_and_effective_entry_context(
@@ -134,7 +158,10 @@ async def test_live_signal_record_includes_universe_and_effective_entry_context(
     assert effective["original_entry_type"] == "market"
     assert effective["effective_entry_type"] == "limit"
     assert effective["effective_limit_price"] == Decimal("30000")
-    assert effective["effective_limit_price_source"] == "state.close_price"
+    assert (
+        effective["effective_limit_price_source"]
+        == "min(state.last_ask_price,state.close_price)"
+    )
     assert effective["effective_expires_at"] == NOW + timedelta(minutes=15)
 
 

@@ -2314,16 +2314,8 @@ def _planned_entry_execution_context(
     )
     if prepared.entry_type is not EntryType.LIMIT:
         price_source = None
-    elif candidate.limit_price is not None:
-        price_source = "candidate.limit_price"
-    elif state.close_price is not None:
-        price_source = "state.close_price"
-    elif state.mark_price is not None:
-        price_source = "state.mark_price"
-    elif state.midpoint is not None:
-        price_source = "state.midpoint"
     else:
-        price_source = None
+        _, price_source = _entry_limit_price(candidate, state=state)
     return {
         "original_entry_type": _enum_text(candidate.entry_type),
         "original_limit_price": candidate.limit_price,
@@ -2333,6 +2325,42 @@ def _planned_entry_execution_context(
         "effective_expires_at": prepared.expires_at,
         "desired_notional": candidate.desired_notional,
     }
+
+
+def _entry_limit_price(
+    candidate: OrderIntentCandidate,
+    *,
+    state: MarketState15s,
+) -> tuple[Decimal | None, str | None]:
+    """Return the live entry limit and the price source used to derive it.
+
+    Production live entries are long-only, so the executable quote is the
+    current ask.  When both the ask and the state close are available, use the
+    lower of the two to keep a breakout signal from turning into an overly
+    aggressive limit.  Explicit strategy limits retain precedence.
+    """
+
+    if candidate.limit_price is not None:
+        return candidate.limit_price, "candidate.limit_price"
+
+    if (
+        _enum_text(candidate.side) == "long"
+        and state.last_ask_price is not None
+        and state.close_price is not None
+    ):
+        return (
+            min(state.last_ask_price, state.close_price),
+            "min(state.last_ask_price,state.close_price)",
+        )
+    if _enum_text(candidate.side) == "long" and state.last_ask_price is not None:
+        return state.last_ask_price, "state.last_ask_price"
+    if state.close_price is not None:
+        return state.close_price, "state.close_price"
+    if state.mark_price is not None:
+        return state.mark_price, "state.mark_price"
+    if state.midpoint is not None:
+        return state.midpoint, "state.midpoint"
+    return None, None
 
 
 def _prepare_entry_candidate_for_observation(
@@ -2345,12 +2373,7 @@ def _prepare_entry_candidate_for_observation(
 ) -> OrderIntentCandidate:
     if candidate.reduce_only or entry_order_type is EntryType.MARKET:
         return candidate
-    signal_price = (
-        candidate.limit_price
-        or state.close_price
-        or state.mark_price
-        or state.midpoint
-    )
+    signal_price, _ = _entry_limit_price(candidate, state=state)
     return replace(
         candidate,
         entry_type=EntryType.LIMIT,
