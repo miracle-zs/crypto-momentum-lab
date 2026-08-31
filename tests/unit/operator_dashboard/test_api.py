@@ -6,7 +6,10 @@ from crypto_momentum_lab.operator_dashboard.api import (
     _ResponseCache,
     create_dashboard_app,
 )
-from crypto_momentum_lab.operator_dashboard.schemas import SystemOverviewResponse
+from crypto_momentum_lab.operator_dashboard.schemas import (
+    PaperAccountHistoryResponse,
+    SystemOverviewResponse,
+)
 from tests.unit.apps.operator_dashboard.test_main import (
     DASHBOARD_AUTH_KWARGS,
     DASHBOARD_BASIC_AUTH,
@@ -63,6 +66,32 @@ def test_paper_accounts_starts_with_summary_and_loads_detail_separately() -> Non
     assert "open_positions" not in summary.json()["accounts"][0]
     assert detail.status_code == 200
     assert "equity_curve" in detail.json()
+
+
+def test_paper_history_full_flag_uses_separate_cache_entry() -> None:
+    class RecordingQueries(FakeQueries):
+        def __init__(self) -> None:
+            self.full_history_requests: list[bool] = []
+
+        async def paper_history(
+            self,
+            run_id: str,
+            *,
+            full: bool = False,
+        ) -> PaperAccountHistoryResponse:
+            self.full_history_requests.append(full)
+            return await super().paper_history(run_id)
+
+    queries = RecordingQueries()
+    with TestClient(create_dashboard_app(queries=queries)) as client:
+        assert client.get(
+            "/api/paper-accounts/paper-account-test/history"
+        ).status_code == 200
+        assert client.get(
+            "/api/paper-accounts/paper-account-test/history?full=true"
+        ).status_code == 200
+
+    assert queries.full_history_requests == [False, True]
 
 
 def test_dashboard_enables_gzip_for_large_static_responses() -> None:

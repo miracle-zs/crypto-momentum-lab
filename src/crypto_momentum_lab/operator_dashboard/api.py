@@ -87,7 +87,12 @@ class DashboardQueryProtocol(Protocol):
 
     async def paper_account(self, run_id: str) -> StrategyRunResponse: ...
 
-    async def paper_history(self, run_id: str) -> PaperAccountHistoryResponse: ...
+    async def paper_history(
+        self,
+        run_id: str,
+        *,
+        full: bool = False,
+    ) -> PaperAccountHistoryResponse: ...
 
     async def account(self, equity_range: str = "24h") -> AccountOverviewResponse: ...
 
@@ -274,10 +279,13 @@ def create_dashboard_app(
         response_model=PaperAccountHistoryResponse,
         dependencies=[Depends(require_dashboard_auth)],
     )
-    async def paper_history(run_id: str) -> PaperAccountHistoryResponse:
+    async def paper_history(
+        run_id: str,
+        full: bool = False,
+    ) -> PaperAccountHistoryResponse:
         return await response_cache.get(
-            f"paper-history:{run_id}",
-            lambda: query_service().paper_history(run_id),
+            f"paper-history:{run_id}:{'full' if full else 'recent'}",
+            lambda: query_service().paper_history(run_id, full=full),
         )
 
     @dashboard.get(

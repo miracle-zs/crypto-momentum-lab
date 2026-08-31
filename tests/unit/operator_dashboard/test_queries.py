@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from sqlalchemy.dialects.postgresql import dialect as postgresql_dialect
 
 from crypto_momentum_lab.operator_dashboard.queries import (
+    DashboardQueries,
     _account_equity_statement,
     _aggregate_account_fills,
     _build_common_equity_curve,
@@ -48,6 +49,68 @@ def test_downsample_equity_snapshots_keeps_latest_row_in_each_utc_bucket() -> No
         "latest-in-bucket",
         "next-bucket",
     ]
+
+
+async def test_recent_paper_history_keeps_open_rows_and_caps_closed_query() -> None:
+    opened_at = datetime(2026, 8, 1, tzinfo=UTC)
+    open_row = _paper_position_row(
+        position_id="open",
+        status="open",
+        opened_at=opened_at,
+    )
+    closed_row = _paper_position_row(
+        position_id="closed",
+        status="closed",
+        opened_at=opened_at - timedelta(days=1),
+        closed_at=opened_at,
+    )
+
+    class Session:
+        def __init__(self) -> None:
+            self.scalar_calls = 0
+            self.scalars_statements = []
+
+        async def scalar(self, _statement):
+            self.scalar_calls += 1
+            return "paper-run" if self.scalar_calls == 1 else 501
+
+        async def scalars(self, statement):
+            self.scalars_statements.append(statement)
+            return SimpleNamespace(
+                all=lambda: (
+                    (open_row,)
+                    if len(self.scalars_statements) == 1
+                    else (closed_row,)
+                )
+            )
+
+    class SessionContext:
+        def __init__(self, session: Session) -> None:
+            self.session = session
+
+        async def __aenter__(self) -> Session:
+            return self.session
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+    class SessionFactory:
+        def __init__(self, session: Session) -> None:
+            self.session = session
+
+        def __call__(self) -> SessionContext:
+            return SessionContext(self.session)
+
+    session = Session()
+    queries = DashboardQueries(SessionFactory(session))
+
+    result = await queries.paper_history("paper-run")
+
+    assert result.closed_trade_count == 501
+    assert result.history_complete is False
+    assert [item["position_id"] for item in result.closed_trades] == ["closed"]
+    assert len(result.trade_events) == 3
+    assert session.scalars_statements[1]._limit_clause.value == 500
 
 
 def test_downsample_equity_snapshots_caps_result_to_latest_240_buckets() -> None:
@@ -623,4 +686,32 @@ def _snapshot(
         unrealized_pnl=Decimal("0"),
         total_fees=Decimal("0"),
         open_position_count=0,
+    )
+
+
+def _paper_position_row(
+    *,
+    position_id: str,
+    status: str,
+    opened_at: datetime,
+    closed_at: datetime | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        position_id=position_id,
+        symbol="BTCUSDT",
+        side="long",
+        status=status,
+        opened_at=opened_at,
+        closed_at=closed_at,
+        entry_price=Decimal("100"),
+        exit_price=None if closed_at is None else Decimal("101"),
+        last_mark_price=Decimal("100"),
+        quantity=Decimal("1"),
+        entry_notional=Decimal("100"),
+        unrealized_pnl=Decimal("0"),
+        realized_pnl=None if closed_at is None else Decimal("1"),
+        return_pct=None if closed_at is None else Decimal("0.01"),
+        entry_fee=Decimal("0"),
+        exit_fee=Decimal("0"),
+        close_reason=None if closed_at is None else "take_profit",
     )

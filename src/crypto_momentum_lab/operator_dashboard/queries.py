@@ -76,6 +76,7 @@ _EQUITY_WINDOW = timedelta(hours=24)
 _EQUITY_BUCKET_SECONDS = 6 * 60
 _EQUITY_MAX_POINTS = 240
 _LIVE_SIGNAL_MAX_ROWS = 30
+_PAPER_HISTORY_RECENT_LIMIT = 500
 _COMMON_EQUITY_BUCKET_SECONDS = 15 * 60
 _ACCOUNT_EQUITY_RANGES: dict[str, tuple[timedelta, int]] = {
     "24h": (timedelta(hours=24), 6 * 60),
@@ -1365,21 +1366,62 @@ class DashboardQueries:
             for run in runs
         ]
 
-    async def paper_history(self, run_id: str) -> PaperAccountHistoryResponse:
+    async def paper_history(
+        self,
+        run_id: str,
+        *,
+        full: bool = False,
+    ) -> PaperAccountHistoryResponse:
         async with self._session_factory() as session:
             run_exists = await session.scalar(
                 select(StrategyRunRow.run_id).where(StrategyRunRow.run_id == run_id)
             )
-            positions = (
-                await session.scalars(
-                    select(PaperPositionRow)
-                    .where(PaperPositionRow.run_id == run_id)
-                    .order_by(
-                        PaperPositionRow.opened_at.desc(),
-                        PaperPositionRow.position_id,
-                    )
+            closed_trade_count = await session.scalar(
+                select(func.count(PaperPositionRow.position_id)).where(
+                    PaperPositionRow.run_id == run_id,
+                    PaperPositionRow.status == "closed",
                 )
-            ).all()
+            )
+            if full:
+                positions = (
+                    await session.scalars(
+                        select(PaperPositionRow)
+                        .where(PaperPositionRow.run_id == run_id)
+                        .order_by(
+                            PaperPositionRow.opened_at.desc(),
+                            PaperPositionRow.position_id,
+                        )
+                    )
+                ).all()
+            else:
+                open_positions = (
+                    await session.scalars(
+                        select(PaperPositionRow)
+                        .where(
+                            PaperPositionRow.run_id == run_id,
+                            PaperPositionRow.status == "open",
+                        )
+                        .order_by(
+                            PaperPositionRow.opened_at.desc(),
+                            PaperPositionRow.position_id,
+                        )
+                    )
+                ).all()
+                recent_closed_positions = (
+                    await session.scalars(
+                        select(PaperPositionRow)
+                        .where(
+                            PaperPositionRow.run_id == run_id,
+                            PaperPositionRow.status == "closed",
+                        )
+                        .order_by(
+                            PaperPositionRow.closed_at.desc().nullslast(),
+                            PaperPositionRow.position_id,
+                        )
+                        .limit(_PAPER_HISTORY_RECENT_LIMIT)
+                    )
+                ).all()
+                positions = [*open_positions, *recent_closed_positions]
         closed_positions = sorted(
             (row for row in positions if row.status == "closed"),
             key=lambda row: (row.closed_at or row.opened_at, row.position_id),
@@ -1400,7 +1442,11 @@ class DashboardQueries:
                 else OperationalStatus.NO_DATA
             ),
             run_id=run_id,
-            closed_trade_count=len(closed_positions),
+            closed_trade_count=int(closed_trade_count or 0),
+            history_complete=(
+                full
+                or int(closed_trade_count or 0) <= _PAPER_HISTORY_RECENT_LIMIT
+            ),
             closed_trades=[_paper_position(row) for row in closed_positions],
             trade_events=trade_events,
         )

@@ -387,6 +387,8 @@ def test_paper_detail_replacement_preserves_interaction_state() -> None:
 
     history_start = text.index("async function loadPaperAccountHistory")
     assert "replacePaperDetail(body," in text[history_start:]
+    assert "history.history_complete === true" in text
+    assert "?full=true" in text[history_start:]
 
 
 def test_scroll_state_restores_layout_before_page_position() -> None:

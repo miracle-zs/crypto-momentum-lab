@@ -114,7 +114,13 @@ class FakeQueries:
         response.run_id = run_id
         return response
 
-    async def paper_history(self, run_id: str) -> PaperAccountHistoryResponse:
+    async def paper_history(
+        self,
+        run_id: str,
+        *,
+        full: bool = False,
+    ) -> PaperAccountHistoryResponse:
+        del full
         return PaperAccountHistoryResponse(
             status=OperationalStatus.READY,
             run_id=run_id,

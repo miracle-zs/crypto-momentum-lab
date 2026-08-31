@@ -104,6 +104,7 @@ class PaperAccountHistoryResponse(DashboardSchema):
     status: OperationalStatus
     run_id: str
     closed_trade_count: int
+    history_complete: bool = True
     closed_trades: list[dict[str, JsonValue]] = Field(default_factory=list)
     trade_events: list[dict[str, JsonValue]] = Field(default_factory=list)
 

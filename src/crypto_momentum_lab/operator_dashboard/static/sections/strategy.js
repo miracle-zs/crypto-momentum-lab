@@ -413,7 +413,7 @@ function withPaperHistory(account) {
     ...account,
     closed_trades: history.closed_trades,
     trade_events: history.trade_events,
-    history_loaded: true,
+    history_loaded: history.history_complete === true,
   };
 }
 
@@ -558,7 +558,11 @@ async function loadPaperAccountHistory(body, account, index) {
   }
   try {
     const runId = encodeURIComponent(account.run_id);
-    const history = await requestJson(`api/paper-accounts/${runId}/history`);
+    const loadedHistory = paperHistoryByRun.get(account.run_id);
+    const fullHistory = loadedHistory?.history_complete === false;
+    const history = await requestJson(
+      `api/paper-accounts/${runId}/history${fullHistory ? "?full=true" : ""}`,
+    );
     paperHistoryByRun.set(account.run_id, history);
     const merged = withPaperHistory(withPaperDetail(account));
     replacePaperDetail(body, accountDetail(merged, index));
