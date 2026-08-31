@@ -52,6 +52,16 @@ class FakeClient:
                 observed_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
                 raw_payload={},
             ),
+            AccountBalanceSnapshot(
+                environment="live",
+                account_label="primary",
+                asset="BNB",
+                wallet_balance=Decimal("0"),
+                available_balance=Decimal("0"),
+                unrealized_pnl=Decimal("0"),
+                observed_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+                raw_payload={},
+            ),
         )
 
     async def fetch_positions(self):
@@ -141,7 +151,7 @@ async def test_sync_once_persists_snapshot_and_ready_state() -> None:
 
     assert result.status is ExecutionAccountStatus.READY_READONLY
     assert repository.snapshot_calls == 1
-    assert len(repository.balances) == 1
+    assert len(repository.balances) == 2
     assert repository.process_states[-1].state is ExecutionAccountStatus.READY_READONLY
     assert repository.reconciliation_runs[-1].status == "ready"
 
@@ -214,6 +224,11 @@ async def test_user_data_event_persists_merged_snapshot() -> None:
 
     assert result.status is ExecutionAccountStatus.READY_READONLY
     assert repository.snapshot_calls == 2
+    assert [item.asset for item in repository.balances] == [
+        "USDT",
+        "BNB",
+        "USDT",
+    ]
     assert repository.reconciliation_runs[-1].details["source"] == (
         "user_data_stream"
     )

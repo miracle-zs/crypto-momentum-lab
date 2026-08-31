@@ -2,6 +2,7 @@ from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
@@ -21,6 +22,7 @@ from crypto_momentum_lab.execution_account.binance.user_data import (
 )
 
 type FillKey = tuple[str, str]
+type BalanceValue = tuple[Decimal, Decimal, Decimal]
 
 _FILL_KEY_CACHE_SIZE = 8192
 _FILL_FETCH_OVERLAP_MS = 60_000
@@ -153,6 +155,7 @@ class ExecutionAccountSyncService:
         }
         self._active_position_keys: set[tuple[str, str]] = set()
         self._fill_cursors: dict[str, _FillCursor] = {}
+        self._last_balance_values: dict[str, BalanceValue] = {}
         self._known_fill_keys: set[FillKey] = set()
         self._known_fill_key_order: deque[FillKey] = deque(
             maxlen=_FILL_KEY_CACHE_SIZE
@@ -193,16 +196,19 @@ class ExecutionAccountSyncService:
                 )
             )
         )
+        normalized_balances = tuple(
+            replace(balance, observed_at=resolved_observed_at)
+            for balance in balances
+        )
+        persisted_balances = self._balances_to_persist(normalized_balances)
         await self._repository.save_balance_position_snapshot(
-            balances=tuple(
-                replace(balance, observed_at=resolved_observed_at)
-                for balance in balances
-            ),
+            balances=persisted_balances,
             positions=tuple(
                 replace(position, observed_at=resolved_observed_at)
                 for position in positions_to_save
             ),
         )
+        self._remember_balance_values(normalized_balances)
         self._active_position_keys = active_position_keys
 
     async def sync_once(
@@ -344,6 +350,7 @@ class ExecutionAccountSyncService:
                     fill_count=len(fills),
                 ),
             )
+            self._remember_balance_values(balances)
             self._fill_cursors = next_fill_cursors
             for key in fill_keys:
                 self._remember_fill_key(key)
@@ -383,7 +390,11 @@ class ExecutionAccountSyncService:
         event: BinanceUserDataEvent,
         fills: tuple[AccountFillEvent, ...] = (),
     ) -> ExecutionAccountSyncResult:
-        """Persist a fully merged WebSocket account observation atomically."""
+        """Persist a fully merged WebSocket account observation atomically.
+
+        The in-memory snapshot remains complete; only the high-frequency
+        balance history is stored sparsely.
+        """
         if snapshot.config.environment != self._config.environment:
             raise ValueError("account snapshot environment does not match sync config")
         if snapshot.config.account_label != self._config.account_label:
@@ -399,9 +410,10 @@ class ExecutionAccountSyncService:
             config,
             event.event_id,
         )
+        persisted_balances = self._balances_to_persist(snapshot.balances)
         await self._repository.save_reconciliation_snapshot(
             config=replace(snapshot.config, observed_at=event.received_at),
-            balances=snapshot.balances,
+            balances=persisted_balances,
             positions=snapshot.positions,
             open_orders=snapshot.open_orders,
             fills=fills,
@@ -422,6 +434,7 @@ class ExecutionAccountSyncService:
                 fill_count=len(fills),
             ),
         )
+        self._remember_balance_values(snapshot.balances)
         await self._save_state(
             ExecutionAccountStatus.READY_READONLY,
             config=config,
@@ -435,6 +448,33 @@ class ExecutionAccountSyncService:
             new_fill_keys=frozenset(_fill_keys(fills)),
             fill_count_by_symbol=_fill_counts_by_symbol(fills),
         )
+
+    def _balances_to_persist(
+        self,
+        balances: tuple[AccountBalanceSnapshot, ...],
+    ) -> tuple[AccountBalanceSnapshot, ...]:
+        """Keep high-frequency history sparse without losing zero transitions.
+
+        Non-zero balances are retained at every observation because they feed
+        the equity curve.  A zero balance is only retained when the previous
+        observation for that asset was non-zero; later unchanged zero values
+        add no information and only amplify database writes.
+        """
+        return tuple(
+            balance
+            for balance in balances
+            if _balance_has_value(balance)
+            or _balance_value_is_nonzero(
+                self._last_balance_values.get(balance.asset)
+            )
+        )
+
+    def _remember_balance_values(
+        self,
+        balances: tuple[AccountBalanceSnapshot, ...],
+    ) -> None:
+        for balance in balances:
+            self._last_balance_values[balance.asset] = _balance_value(balance)
 
     def _remember_fill_key(self, key: FillKey) -> None:
         if key in self._known_fill_keys:
@@ -474,6 +514,22 @@ class ExecutionAccountSyncService:
                 reason=reason,
             )
         )
+
+
+def _balance_value(balance: AccountBalanceSnapshot) -> BalanceValue:
+    return (
+        balance.wallet_balance,
+        balance.available_balance,
+        balance.unrealized_pnl,
+    )
+
+
+def _balance_has_value(balance: AccountBalanceSnapshot) -> bool:
+    return _balance_value_is_nonzero(_balance_value(balance))
+
+
+def _balance_value_is_nonzero(value: BalanceValue | None) -> bool:
+    return value is not None and any(item != 0 for item in value)
 
 
 def _fill_keys(fills: tuple[AccountFillEvent, ...]) -> set[FillKey]:
