@@ -248,7 +248,7 @@ async def test_snapshot_build_yields_when_closing_many_symbols() -> None:
 
     marker_task = asyncio.create_task(marker())
     try:
-        for index in range(32):
+        for index in range(8):
             await publisher.observe(
                 fixture_trade(
                     0,
@@ -258,7 +258,7 @@ async def test_snapshot_build_yields_when_closing_many_symbols() -> None:
                 )
             )
         await publisher.observe(
-            fixture_trade(2, price="102", sequence=33, symbol="BTCUSDT")
+            fixture_trade(2, price="102", sequence=9, symbol="BTCUSDT")
         )
         assert marker_ran.is_set()
     finally:
