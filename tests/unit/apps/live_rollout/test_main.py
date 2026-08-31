@@ -34,6 +34,7 @@ def test_live_cli_exposes_required_commands() -> None:
         "approve",
         "prepare",
         "preflight",
+        "resolve-missing-order",
         "run",
         "submit-plan",
         "status",
@@ -42,6 +43,75 @@ def test_live_cli_exposes_required_commands() -> None:
         "strategy-config-hash",
     ):
         assert command in result.stdout
+
+
+def test_resolve_missing_order_requires_exact_confirmation() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "resolve-missing-order",
+            "--client-order-id",
+            "cml_missing",
+            "--operator",
+            "operator",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "RESOLVE MISSING LIVE ORDER" in result.output
+
+
+def test_missing_order_resolution_guard_accepts_confirmed_absent_reduce_only_order(
+) -> None:
+    main._validate_missing_order_resolution(
+        state="unknown_pending_reconciliation",
+        reduce_only=True,
+        exchange_order_id=None,
+        created_at=datetime(2026, 8, 31, 4, 0, tzinfo=UTC),
+        now=datetime(2026, 8, 31, 4, 20, tzinfo=UTC),
+        order_quantity=Decimal("2159.3"),
+        executed_quantity=Decimal("0"),
+        position_quantity=Decimal("2159.3"),
+        exchange_order_found=False,
+        matching_open_order_found=False,
+        min_missing_age_seconds=600,
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"reduce_only": False}, "reduce-only"),
+        ({"exchange_order_found": True}, "still exists"),
+        ({"matching_open_order_found": True}, "open order"),
+        ({"position_quantity": Decimal("2000")}, "position quantity changed"),
+        (
+            {"now": datetime(2026, 8, 31, 4, 5, tzinfo=UTC)},
+            "younger than",
+        ),
+    ],
+)
+def test_missing_order_resolution_guard_fails_closed(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    values: dict[str, object] = {
+        "state": "unknown_pending_reconciliation",
+        "reduce_only": True,
+        "exchange_order_id": None,
+        "created_at": datetime(2026, 8, 31, 4, 0, tzinfo=UTC),
+        "now": datetime(2026, 8, 31, 4, 20, tzinfo=UTC),
+        "order_quantity": Decimal("2159.3"),
+        "executed_quantity": Decimal("0"),
+        "position_quantity": Decimal("2159.3"),
+        "exchange_order_found": False,
+        "matching_open_order_found": False,
+        "min_missing_age_seconds": 600,
+    }
+    values.update(overrides)
+
+    with pytest.raises(RuntimeError, match=message):
+        main._validate_missing_order_resolution(**values)  # type: ignore[arg-type]
 
 
 def test_strategy_config_hash_is_stable_for_selected_strategy() -> None:

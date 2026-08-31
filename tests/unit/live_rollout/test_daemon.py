@@ -534,6 +534,43 @@ async def test_live_daemon_keeps_running_while_reconciliation_is_pending() -> No
     assert exchange.calls == ["submit"]
 
 
+async def test_live_daemon_checkpoints_while_reconciliation_is_pending() -> None:
+    exchange = PlanAwareExchange()
+    repository = SignalingLiveRepository()
+    release_stream = asyncio.Event()
+    uncertain = ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+
+    async def blocked_context(state: object) -> LiveDaemonRuntimeContext:
+        del state
+        return replace(
+            _runtime_context(),
+            gate_context=replace(
+                gate_context(),
+                unresolved_order_states=(uncertain,),
+            ),
+            unresolved_order_states=(uncertain,),
+        )
+
+    async def states() -> AsyncIterator:
+        yield _state()
+        await release_stream.wait()
+
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=blocked_context,
+        repository=repository,
+        checkpoint_every_states=1,
+    )
+    run = asyncio.create_task(daemon.run(states()))
+    try:
+        await asyncio.wait_for(repository.checkpoint_saved.wait(), timeout=0.1)
+    finally:
+        release_stream.set()
+        await run
+
+    assert repository.saved_checkpoint_run_ids == ["run-1"]
+
+
 async def test_live_daemon_does_not_halt_after_order_outcome_stays_unknown() -> None:
     exchange = FakeExchange(
         submit_result=ExchangeSubmissionTimeoutError(),
@@ -1121,6 +1158,21 @@ class FakeLiveRepository:
             self.checkpoint_failures_remaining -= 1
             raise TimeoutError("checkpoint timeout")
         self.saved_checkpoint_run_ids.append(run_id)
+
+
+class SignalingLiveRepository(FakeLiveRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.checkpoint_saved = asyncio.Event()
+
+    async def save_checkpoint(
+        self,
+        run_id: str,
+        checkpoint: StrategyCheckpoint,
+        saved_at: datetime,
+    ) -> None:
+        await super().save_checkpoint(run_id, checkpoint, saved_at)
+        self.checkpoint_saved.set()
 
 
 def _daemon(

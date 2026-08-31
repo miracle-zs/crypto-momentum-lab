@@ -1232,6 +1232,13 @@ class LiveStrategyDaemon:
                 last_processed_at_by_symbol[state.symbol] = state.bucket_start
                 checkpoint_dirty = True
                 last_checkpoint_saved_at = state.bucket_end
+                if processed % self._config.checkpoint_every_states == 0:
+                    self._checkpoint_writer.submit(
+                        _checkpoint_for_persistence(self._strategy),
+                        state.bucket_end,
+                    )
+                    checkpoint_dirty = False
+                    last_checkpoint_saved_at = None
                 log.warning(
                     "live_runtime_context_degraded",
                     run_id=self._config.run_id,
@@ -1300,6 +1307,13 @@ class LiveStrategyDaemon:
                     last_processed_at_by_symbol[state.symbol] = state.bucket_start
                     checkpoint_dirty = True
                     last_checkpoint_saved_at = context.now
+                    if processed % self._config.checkpoint_every_states == 0:
+                        self._checkpoint_writer.submit(
+                            _checkpoint_for_persistence(self._strategy),
+                            context.now,
+                        )
+                        checkpoint_dirty = False
+                        last_checkpoint_saved_at = None
                     continue
                 self._last_transient_gate_reasons = None
                 await self._save_final_checkpoint(
