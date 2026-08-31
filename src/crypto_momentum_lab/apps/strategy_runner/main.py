@@ -450,7 +450,7 @@ def paper_live_source_command(
     poll_interval_seconds: Annotated[
         float,
         typer.Option("--poll-interval-seconds", min=0),
-    ] = 0.25,
+    ] = 1.0,
     idle_timeout_seconds: Annotated[
         float,
         typer.Option("--idle-timeout-seconds", min=0),
@@ -679,7 +679,7 @@ def paper_live_daemon_command(
     poll_interval_seconds: Annotated[
         float,
         typer.Option("--poll-interval-seconds", min=0),
-    ] = 0.25,
+    ] = 1.0,
     idle_timeout_seconds: Annotated[
         float,
         typer.Option("--idle-timeout-seconds", min=0),
@@ -1089,7 +1089,7 @@ def paper_live_pair_command(
     poll_interval_seconds: Annotated[
         float,
         typer.Option("--poll-interval-seconds", min=0),
-    ] = 0.25,
+    ] = 1.0,
     idle_timeout_seconds: Annotated[
         float,
         typer.Option("--idle-timeout-seconds", min=0),

@@ -59,6 +59,10 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         "paper-orderflow-pair",
     ):
         assert services[service]["entrypoint"] == ["cml-strategy-runner"]
+        assert _option_value(
+            services[service]["command"],
+            "--poll-interval-seconds",
+        ) == "1.0"
         assert (
             _option_value(
                 services[service]["command"],
@@ -124,6 +128,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert "--fixed-run-id" not in orderflow
     for service in ("paper-b1-gainer100", "paper-b1-gainer100-ema"):
         command = services[service]["command"]
+        assert _option_value(command, "--poll-interval-seconds") == "1.0"
         assert _option_value(command, "--entry-positive-gainer-top-count") == "100"
         assert "--entry-long-only" in command
     account14_command = services["paper-b1-gainer100"]["command"]

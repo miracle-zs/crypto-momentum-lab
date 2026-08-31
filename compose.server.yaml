@@ -218,7 +218,7 @@ services:
       - --idle-timeout-seconds
       - "86400"
       - --poll-interval-seconds
-      - "0.25"
+      - "1.0"
       - --checkpoint-every-states
       - "1000"
       - --checkpoint-every-seconds
@@ -265,7 +265,7 @@ services:
       - --idle-timeout-seconds
       - "86400"
       - --poll-interval-seconds
-      - "0.25"
+      - "1.0"
       - --checkpoint-every-states
       - "1000"
       - --checkpoint-every-seconds
@@ -309,7 +309,7 @@ services:
       - --idle-timeout-seconds
       - "86400"
       - --poll-interval-seconds
-      - "0.25"
+      - "1.0"
       - --checkpoint-every-states
       - "1000"
       - --checkpoint-every-seconds
