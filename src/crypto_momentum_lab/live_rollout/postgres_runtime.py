@@ -525,71 +525,78 @@ class PostgresLiveContextProvider:
                         )
                     ).all()
                 )
-            orders = list(
-                (
-                    await session.scalars(
-                        select(ExchangeOrderRow)
-                        .where(ExchangeOrderRow.run_id == self._run_id)
-                        .order_by(ExchangeOrderRow.updated_at.desc())
-                        .limit(1000)
-                    )
-                ).all()
-            )
-            entry_exchange_order_ids = tuple(
-                sorted(
-                    {
-                        row.exchange_order_id
-                        for row in orders
-                        if row.exchange_order_id is not None
-                        and not row.reduce_only
-                    }
-                )
-            )
-            entry_client_order_ids = tuple(
-                sorted(
-                    {
-                        row.client_order_id
-                        for row in orders
-                        if not row.reduce_only
-                    }
-                )
-            )
+            active = [row for row in rows if row.position_amt != 0]
+            orders: list[ExchangeOrderRow] = []
             entry_fill_times: dict[str, datetime] = {}
-            if entry_exchange_order_ids:
-                account_fills = (
-                    await session.scalars(
-                        select(AccountFillEventRow).where(
-                            AccountFillEventRow.environment == "live",
-                            AccountFillEventRow.account_label
-                            == self._account_label,
-                            AccountFillEventRow.order_id.in_(
-                                entry_exchange_order_ids
-                            ),
+            if active:
+                active_symbols = tuple(sorted({row.symbol for row in active}))
+                orders = list(
+                    (
+                        await session.scalars(
+                            select(ExchangeOrderRow)
+                            .where(
+                                ExchangeOrderRow.run_id == self._run_id,
+                                ExchangeOrderRow.symbol.in_(active_symbols),
+                            )
+                            .order_by(ExchangeOrderRow.updated_at.desc())
+                            .limit(1000)
                         )
+                    ).all()
+                )
+                entry_exchange_order_ids = tuple(
+                    sorted(
+                        {
+                            row.exchange_order_id
+                            for row in orders
+                            if row.exchange_order_id is not None
+                            and not row.reduce_only
+                        }
                     )
-                ).all()
-                for account_fill in account_fills:
-                    _record_earliest_fill(
-                        entry_fill_times,
-                        account_fill.order_id,
-                        account_fill.trade_at,
+                )
+                entry_client_order_ids = tuple(
+                    sorted(
+                        {
+                            row.client_order_id
+                            for row in orders
+                            if not row.reduce_only
+                        }
                     )
-            if entry_client_order_ids:
-                exchange_fills = (
-                    await session.scalars(
-                        select(ExchangeFillRow).where(
-                            ExchangeFillRow.client_order_id.in_(
-                                entry_client_order_ids
+                )
+                if entry_exchange_order_ids:
+                    account_fills = (
+                        await session.scalars(
+                            select(AccountFillEventRow).where(
+                                AccountFillEventRow.environment == "live",
+                                AccountFillEventRow.account_label
+                                == self._account_label,
+                                AccountFillEventRow.order_id.in_(
+                                    entry_exchange_order_ids
+                                ),
                             )
                         )
-                    )
-                ).all()
-                for exchange_fill in exchange_fills:
-                    _record_earliest_fill(
-                        entry_fill_times,
-                        exchange_fill.client_order_id,
-                        exchange_fill.filled_at,
-                    )
+                    ).all()
+                    for account_fill in account_fills:
+                        _record_earliest_fill(
+                            entry_fill_times,
+                            account_fill.order_id,
+                            account_fill.trade_at,
+                        )
+                if entry_client_order_ids:
+                    exchange_fills = (
+                        await session.scalars(
+                            select(ExchangeFillRow).where(
+                                ExchangeFillRow.client_order_id.in_(
+                                    entry_client_order_ids
+                                )
+                            )
+                        )
+                    ).all()
+                    for exchange_fill in exchange_fills:
+                        _record_earliest_fill(
+                            entry_fill_times,
+                            exchange_fill.client_order_id,
+                            exchange_fill.filled_at,
+                        )
         active = [row for row in rows if row.position_amt != 0]
         managed, unmanaged = _classify_live_positions(
             active,

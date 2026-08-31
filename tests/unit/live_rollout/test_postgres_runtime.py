@@ -348,6 +348,53 @@ async def test_symbol_rule_load_is_single_flight(monkeypatch) -> None:
     assert load_count == 1
 
 
+async def test_position_view_skips_order_history_when_account_is_flat() -> None:
+    class Session:
+        def __init__(self) -> None:
+            self.scalar_calls = 0
+            self.scalars_calls = 0
+
+        async def scalar(self, _statement):
+            self.scalar_calls += 1
+            if self.scalar_calls == 1:
+                return NOW
+            return SimpleNamespace(position_count=0)
+
+        async def scalars(self, _statement):
+            self.scalars_calls += 1
+            return SimpleNamespace(all=lambda: ())
+
+    class SessionContext:
+        def __init__(self, session: Session) -> None:
+            self.session = session
+
+        async def __aenter__(self) -> Session:
+            return self.session
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+    class SessionFactory:
+        def __init__(self, session: Session) -> None:
+            self.session = session
+
+        def __call__(self) -> SessionContext:
+            return SessionContext(self.session)
+
+    session = Session()
+    provider = object.__new__(PostgresLiveContextProvider)
+    provider._sessions = SessionFactory(session)
+    provider._account_label = "primary"
+    provider._run_id = "run-1"
+
+    result = await provider._account_position_view(())
+
+    assert result[1] == frozenset()
+    assert result[4] == ()
+    assert result[5] == frozenset()
+    assert session.scalars_calls == 0
+
+
 def test_context_invalidation_preserves_symbol_rules() -> None:
     provider = object.__new__(PostgresLiveContextProvider)
     expected = _runtime_context().trading_rules["BTCUSDT"]
