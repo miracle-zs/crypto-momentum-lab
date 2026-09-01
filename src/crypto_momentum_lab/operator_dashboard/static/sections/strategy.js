@@ -200,7 +200,7 @@ function paperComparisonBlock(accounts, meta = paperEquityMeta) {
   return `<div data-paper-comparison>
     <div class="block pair-section" data-comparison-count="${comparisonModels.length}">
       ${blockTitle("同期退出方式对比", "STRATEGY EXIT EQUITY · DAILY 08:00 ANCHOR · SHARED AXES",
-        '<span class="muted">模拟盘版本 + 实盘 B1 · 每日 08:00 UTC+8 起算</span>')}
+        '<span class="muted">模拟盘版本 + 实盘 Top10 · B8 · 每日 08:00 UTC+8 起算</span>')}
       ${content}
     </div>
     <div class="block pair-section common-equity-section" data-common-comparison-count="${latestStartModels.length}">

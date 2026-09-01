@@ -583,6 +583,9 @@ def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
             description="fake-source",
             load_active_symbols=lambda: frozenset({"BTCUSDT"}),
             load_active_symbols_at=lambda _observed_at: frozenset({"BTCUSDT"}),
+            load_positive_gainer_symbols_at=lambda _observed_at, top_count: frozenset(
+                {"BTCUSDT"}
+            ),
         ),
     )
     monkeypatch.setattr(
@@ -608,12 +611,19 @@ def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
             "paper-live-pair",
             "--strategy",
             "orderflow_impulse",
+            "--entry-positive-gainer-top-count",
+            "10",
             "--database-url",
             "postgresql+asyncpg://cml:cml@localhost:54329/cml",
             "--fixed-run-id",
             "fixed-run",
             "--candle-run-id",
             "candle-run",
+            "--candle-entry-long-only",
+            "--candle-grace-bars",
+            "8",
+            "--candle-grace-profit-pct",
+            "0.0088",
             "--third-run-id",
             "third-run",
             "--third-candle-minimum-holding-buckets",
@@ -661,6 +671,11 @@ def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
     assert accounts[4].config.run_id == "c1-run"
     assert accounts[0].config.portfolio.exit_mode.value == "fixed"
     assert accounts[1].config.portfolio.exit_mode.value == "candle_15m"
+    assert accounts[1].config.portfolio.candle_grace_bars == 8
+    assert accounts[1].config.portfolio.candle_grace_profit_pct == Decimal(
+        "0.0088"
+    )
+    assert accounts[1].config.entry_filter.allow_short is False
     assert accounts[2].config.portfolio.exit_mode.value == "candle_15m"
     assert accounts[3].config.portfolio.exit_mode.value == "candle_15m"
     assert accounts[4].config.portfolio.exit_mode.value == "candle_15m"
@@ -687,6 +702,10 @@ def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
         "0.0058"
     )
     assert accounts[6].config.entry_filter.allow_short is False
+    entry_symbols = calls[0]["entry_symbol_loader"]
+    assert entry_symbols(datetime(2026, 7, 4, 0, 0, tzinfo=UTC)) == frozenset(
+        {"BTCUSDT"}
+    )
     assert "Paper live pair completed: strategy=orderflow_impulse" in result.stdout
 
 

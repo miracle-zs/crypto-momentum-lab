@@ -4,6 +4,7 @@ import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal, Protocol, TypeVar, cast
 
@@ -16,6 +17,7 @@ from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from crypto_momentum_lab.operator_dashboard.queries import (
+    FIXED_COMMON_EQUITY_START_AT,
     DashboardQueries,
     LiveCashFlowAdjustment,
 )
@@ -109,6 +111,7 @@ def create_dashboard_app(
     auth_password: str | None = None,
     paper_run_ids: frozenset[str] | None = None,
     live_cash_flow_adjustments: Sequence[LiveCashFlowAdjustment] | None = None,
+    common_equity_start_at: datetime | None = FIXED_COMMON_EQUITY_START_AT,
     overview_cache_ttl_seconds: float = _OVERVIEW_CACHE_TTL_SECONDS,
     overview_query_timeout_seconds: float = _OVERVIEW_QUERY_TIMEOUT_SECONDS,
 ) -> FastAPI:
@@ -135,6 +138,7 @@ def create_dashboard_app(
             async_sessionmaker(engine, expire_on_commit=False),
             paper_run_ids=paper_run_ids,
             live_cash_flow_adjustments=live_cash_flow_adjustments,
+            common_equity_start_at=common_equity_start_at,
         )
 
     @asynccontextmanager

@@ -878,6 +878,14 @@ def paper_live_pair_command(
         str,
         typer.Option("--strategy", help="Strategy name."),
     ],
+    entry_positive_gainer_top_count: Annotated[
+        int | None,
+        typer.Option(
+            "--entry-positive-gainer-top-count",
+            min=1,
+            help="Use only positive UTC-day gainers within this ranking depth.",
+        ),
+    ] = None,
     fixed_run_id: Annotated[
         str | None,
         typer.Option(
@@ -892,6 +900,28 @@ def paper_live_pair_command(
             help="Run ID for the 15-minute candle-exit account.",
         ),
     ] = None,
+    candle_entry_long_only: Annotated[
+        bool,
+        typer.Option(
+            "--candle-entry-long-only/--candle-entry-all-sides",
+            help="Accept only long signals in the candle account.",
+        ),
+    ] = False,
+    candle_grace_bars: Annotated[
+        int,
+        typer.Option(
+            "--candle-grace-bars",
+            min=0,
+            help="Grace bars for the candle account.",
+        ),
+    ] = 0,
+    candle_grace_profit_pct: Annotated[
+        str,
+        typer.Option(
+            "--candle-grace-profit-pct",
+            help="Recovery limit for the candle account, e.g. 0.0088.",
+        ),
+    ] = "0",
     third_run_id: Annotated[
         str | None,
         typer.Option(
@@ -1264,7 +1294,10 @@ def paper_live_pair_command(
             initial_balance=Decimal(paper_initial_balance),
             max_holding_buckets=candle_max_holding_buckets,
             require_executable_quote=require_market_quote,
+            candle_grace_bars=candle_grace_bars,
+            candle_grace_profit_pct=Decimal(candle_grace_profit_pct),
         ),
+        entry_filter=_entry_filter_config(long_only=candle_entry_long_only),
     )
     accounts = []
     if fixed_run_id is not None:
@@ -1420,12 +1453,22 @@ def paper_live_pair_command(
             )
         )
     with BinanceRestClosedCandle15mSource(binance_base_url) as candle_source:
+        if entry_positive_gainer_top_count is None:
+            entry_symbol_loader = source.load_active_symbols_at
+        else:
+
+            def entry_symbol_loader(observed_at: datetime) -> frozenset[str]:
+                return source.load_positive_gainer_symbols_at(
+                    observed_at,
+                    top_count=entry_positive_gainer_top_count,
+                )
+
         result = run_paired_paper_live_daemon(
             source=source,
             strategy=strategy,
             accounts=tuple(accounts),
             clock=clock,
-            entry_symbol_loader=source.load_active_symbols_at,
+            entry_symbol_loader=entry_symbol_loader,
             candle_source=candle_source,
         )
     states_processed = result.account_results[0].processed_state_count

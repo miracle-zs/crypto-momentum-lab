@@ -11,17 +11,16 @@ Open `http://127.0.0.1:8765/`. The dashboard is anonymous unless both
 universe, selected strategy, read-only account state, risk/execution state,
 ambiguous orders, and paper/shadow/live reports.
 
-The paper-account section displays six accounts: one Compression account and
-five Orderflow accounts. Equity curves use a shared
+The paper-account section displays eight Orderflow accounts. Equity curves use a shared
 rolling 24-hour window and the latest snapshot from each UTC six-minute bucket,
 up to 240 points. Pair charts compare only buckets available to both accounts,
 normalize both accounts to zero at the common start, and use one y-axis. The
 closed-trade table shows the latest 30 rows; its total count and win rate are
 calculated from the full run history.
 
-The strategy section also exposes a `统一起点权益金额变化` panel. It uses the
-latest first valid 15-minute bucket among the selected accounts as the shared
-start, carries each account's latest observation forward on a common grid, and
+The strategy section also exposes a `统一起点权益金额变化` panel. Its shared
+start is fixed at 2026-08-21 02:45 UTC (北京时间 10:45), carries each account's
+latest observation forward on a common grid, and
 plots cash-flow-adjusted equity deltas in USDT from zero. The grid starts at
 15-minute resolution and widens as needed to keep the history within 240
 points. The known live-account deposit of 200 USDT on 2026-08-21 is excluded by

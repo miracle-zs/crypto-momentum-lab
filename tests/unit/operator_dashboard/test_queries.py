@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from sqlalchemy.dialects.postgresql import dialect as postgresql_dialect
 
 from crypto_momentum_lab.operator_dashboard.queries import (
+    FIXED_COMMON_EQUITY_START_AT,
     DashboardQueries,
     _account_equity_statement,
     _aggregate_account_fills,
@@ -29,6 +30,7 @@ from crypto_momentum_lab.operator_dashboard.queries import (
     _paper_latest_equity_statement,
     _split_exchange_orders,
     _universe_membership,
+    parse_common_equity_start_at,
     parse_live_cash_flow_adjustments,
 )
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
@@ -593,6 +595,23 @@ def test_live_cash_flow_parser_allows_explicit_empty_configuration() -> None:
     default = parse_live_cash_flow_adjustments("")
     assert len(default) == 1
     assert default[0].amount == Decimal("200")
+
+
+def test_common_equity_start_is_fixed_to_august_21_anchor() -> None:
+    assert parse_common_equity_start_at("") == FIXED_COMMON_EQUITY_START_AT
+    assert (
+        parse_common_equity_start_at("2026-08-21T10:45:00+08:00")
+        == FIXED_COMMON_EQUITY_START_AT
+    )
+
+
+def test_common_equity_start_rejects_moving_the_production_anchor() -> None:
+    try:
+        parse_common_equity_start_at("2026-08-22T00:00:00Z")
+    except ValueError as error:
+        assert "fixed" in str(error)
+    else:
+        raise AssertionError("expected fixed common-equity anchor validation")
 
 
 def test_account_fills_are_aggregated_to_one_row_per_order() -> None:

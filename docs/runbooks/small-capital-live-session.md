@@ -138,9 +138,9 @@ $COMPOSE --profile live run --rm --no-deps live-strategy preflight \
 
 ## 5. Start Live
 
-The checked-in live Compose profile is wired for the B1 long-only variant:
-`orderflow_impulse`, Hedge Mode, a minimum aggressive imbalance of `0.40`, no
-EMA5/EMA10 entry filters, one 15-minute grace candle, a `0.10%` first-candle
+The checked-in live Compose profile is wired for the Top10/B8 long-only variant:
+`orderflow_impulse`, the positive UTC-day gainers ranked 1-10, Hedge Mode, no
+EMA5/EMA10 entry filters, eight 15-minute grace candles, a `0.10%` first-candle
 direct-close threshold, and a `0.88%` recovery target. On the
 first adverse official closed candle, a long whose current executable bid has
 already reached `entry * (1 + 0.001)` is closed directly with a reduce-only
@@ -154,7 +154,7 @@ protective stop is placed after an entry fill.
 The following execution protections are intentionally absent from the live
 path: maximum holding time (including the old 24-hour fallback), spread
 threshold, same-symbol execution cooldown, and market/account data-age gates.
-The B1 strategy also sets its event cooldown to zero, so a same-symbol signal
+The Top10/B8 strategy also sets its event cooldown to zero, so a same-symbol signal
 is not suppressed by a hidden two-bucket strategy cooldown. Exchange quantity
 and price precision, Hedge Mode/leverage confirmation, the lease/approval
 binding, account readiness, and the fail-closed ambiguous-order guard remain
@@ -165,7 +165,7 @@ Omitting `--expires-in-minutes` records a non-expiring approval. It remains
 bound to the exact strategy config, risk config, Git commit, and migration
 revision, so any of those changes require a new approval. `unlimited` removes
 the execution-layer order, gross-notional, and open-position-count caps; the
-B1 strategy still emits a fixed 100 USDT desired notional for each entry.
+Top10/B8 strategy still emits a fixed 100 USDT desired notional for each entry.
 
 The live executor still accepts `fixed` or `candle_15m` for other local runs;
 set the corresponding `CML_LIVE_*` values before using a different profile.

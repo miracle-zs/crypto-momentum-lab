@@ -136,7 +136,9 @@ services:
         paper-account-12-orderflow-b1-long-candle15m-v1,
         paper-account-13-orderflow-b8-long-candle15m-v1,
         paper-account-14-orderflow-b1-gainer100-v1,
-        paper-account-15-orderflow-b1-gainer100-ema-v1
+        paper-account-15-orderflow-b1-gainer100-ema-v1,
+        paper-account-16-orderflow-b8-gainer10-v1,
+        paper-account-17-orderflow-b1-gainer10-v1
       # Market-data must protect the same live account used by the live
       # strategy and execution-account services. Fail closed if it is absent.
       CML_LIVE_POSITION_ACCOUNT_LABEL: ${CML_LIVE_ACCOUNT_LABEL:?set CML_LIVE_ACCOUNT_LABEL}
@@ -273,6 +275,62 @@ services:
       - --max-market-state-age-seconds
       - "120"
       - --require-market-quote
+
+  paper-orderflow-gainer10-pair:
+    <<: *paper
+    environment:
+      <<: *app-environment
+      CML_HEALTHCHECK_RUN_IDS: >-
+        paper-account-16-orderflow-b8-gainer10-v1,
+        paper-account-17-orderflow-b1-gainer10-v1
+    command:
+      - paper-live-pair
+      - --strategy
+      - orderflow_impulse
+      - --environment
+      - research
+      - --entry-positive-gainer-top-count
+      - "10"
+      - --candle-run-id
+      - paper-account-16-orderflow-b8-gainer10-v1
+      - --candle-entry-long-only
+      - --candle-grace-bars
+      - "8"
+      - --candle-grace-profit-pct
+      - "0.0088"
+      - --sixth-run-id
+      - paper-account-17-orderflow-b1-gainer10-v1
+      - --sixth-entry-long-only
+      - --sixth-candle-grace-bars
+      - "1"
+      - --sixth-candle-grace-profit-pct
+      - "0.0088"
+      - --candidate-notional
+      - "100"
+      - --paper-initial-balance
+      - "1000"
+      - --fixed-take-profit-pct
+      - "0.02"
+      - --fixed-stop-loss-pct
+      - "0.01"
+      - --fixed-max-holding-buckets
+      - "80"
+      - --candle-max-holding-buckets
+      - "5760"
+      - --max-states
+      - "100000000"
+      - --idle-timeout-seconds
+      - "86400"
+      - --poll-interval-seconds
+      - "1.0"
+      - --checkpoint-every-states
+      - "1000"
+      - --checkpoint-every-seconds
+      - "60"
+      - --max-market-state-age-seconds
+      - "120"
+      - --require-market-quote
+    mem_limit: 256m
 
   paper-b1-gainer100-ema:
     <<: *paper
@@ -429,7 +487,7 @@ services:
       - --hedge-mode
       - --entry-long-only
       - --entry-positive-gainer-top-count
-      - ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-100}
+      - ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-10}
       - --no-entry-price-above-ema5
       - --no-entry-price-above-ema10
       - --entry-leverage
@@ -441,7 +499,7 @@ services:
       - --stop-loss-pct
       - ${CML_LIVE_STOP_LOSS_PCT:-0.01}
       - --candle-grace-bars
-      - ${CML_LIVE_CANDLE_GRACE_BARS:-1}
+      - ${CML_LIVE_CANDLE_GRACE_BARS:-8}
       - --candle-grace-decision-profit-pct
       - ${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT:-0.001}
       - --candle-grace-profit-pct
@@ -479,6 +537,9 @@ services:
 
   dashboard:
     <<: *app
+    # Keep dashboard-only copy changes from forcing a live approval/code hash
+    # rotation. The default remains the single release image.
+    image: ${CML_DASHBOARD_IMAGE:-crypto-momentum-lab-app:${CML_CODE_COMMIT:?set CML_CODE_COMMIT}}
     environment:
       <<: *app-environment
       CML_PAPER_ACCOUNT_RUN_IDS: >-
@@ -487,8 +548,11 @@ services:
         paper-account-12-orderflow-b1-long-candle15m-v1,
         paper-account-13-orderflow-b8-long-candle15m-v1,
         paper-account-14-orderflow-b1-gainer100-v1,
-        paper-account-15-orderflow-b1-gainer100-ema-v1
+        paper-account-15-orderflow-b1-gainer100-ema-v1,
+        paper-account-16-orderflow-b8-gainer10-v1,
+        paper-account-17-orderflow-b1-gainer10-v1
       CML_DASHBOARD_LIVE_CASH_FLOWS_JSON: ${CML_DASHBOARD_LIVE_CASH_FLOWS_JSON:-}
+      CML_DASHBOARD_COMMON_EQUITY_START_AT: "2026-08-21T02:45:00Z"
     entrypoint: ["cml-operator-dashboard"]
     command: ["--host", "0.0.0.0", "--port", "8765"]
     depends_on:

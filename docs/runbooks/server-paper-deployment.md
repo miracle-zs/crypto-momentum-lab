@@ -22,14 +22,17 @@ monitoring, while entry signals use the frozen one-minute shadow profile:
 - two closed one-minute buckets for acceptance;
 - 60 one-minute buckets, or 60 minutes, of per-symbol cooldown.
 
-The five active virtual accounts are isolated by run ID and each starts with 1,000
-USDT:
+The eight active virtual accounts are isolated by run ID and each starts with
+1,000 USDT:
 
-- `paper-account-02-orderflow-v1`: `orderflow_impulse`, existing fixed TP/SL account;
 - `paper-account-05-orderflow-candle15m-v1`: `orderflow_impulse`, existing first adverse 15M close account;
 - `paper-account-10-orderflow-b2-long-candle15m-v1`: B2 long-only signals, first adverse 15M close;
 - `paper-account-12-orderflow-b1-long-candle15m-v1`: B1 long-only signals, entry-price limit for one 15M bar after the first adverse close;
 - `paper-account-13-orderflow-b8-long-candle15m-v1`: B8 long-only signals, entry-price limit for eight 15M bars after the first adverse close.
+- `paper-account-14-orderflow-b1-gainer100-v1`: positive Top100 gainer, long-only, B1 exit;
+- `paper-account-15-orderflow-b1-gainer100-ema-v1`: positive Top100 gainer, long-only, EMA5/EMA10 filter, B1 exit;
+- `paper-account-16-orderflow-b8-gainer10-v1`: positive Top10 gainer, long-only, B8 exit;
+- `paper-account-17-orderflow-b1-gainer10-v1`: positive Top10 gainer, long-only, B1 exit.
 
 For all `candle_15m` exits, the candle containing the entry is observation-only;
 the first eligible exit candle is the next complete 15-minute candle.
@@ -44,12 +47,14 @@ found no candidate that passed both train and validation gates; see
 The B1, B2, and B8 filters are applied after the shared baseline Orderflow decision.
 Rejected signals still advance the baseline strategy cooldown, so these accounts
 remain strict subsets of the same signal stream used by the historical filter
-study.
+study. Accounts 16 and 17 additionally share one positive Top10 gainer entry
+universe, which makes their B8-versus-B1 comparison synchronous.
 
 The standalone account 14 runner (`paper-account-14-orderflow-b1-gainer100-v1`)
 uses a `0.40` minimum aggressive imbalance and explicitly disables EMA5/EMA10
-entry filters. Its previous run metadata must be migrated or versioned when the
-strategy configuration hash changes; do not silently reuse a mismatched run.
+entry filters. Account 15 keeps the EMA5/EMA10 filters. Their previous run
+metadata must be migrated or versioned when the strategy configuration hash
+changes; do not silently reuse a mismatched run.
 
 ## Deploy
 

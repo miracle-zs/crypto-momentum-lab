@@ -5,6 +5,7 @@ import uvicorn
 
 from crypto_momentum_lab.operator_dashboard.api import create_dashboard_app
 from crypto_momentum_lab.operator_dashboard.queries import (
+    parse_common_equity_start_at,
     parse_live_cash_flow_adjustments,
 )
 
@@ -32,6 +33,7 @@ def main() -> None:
             auth_password=args.password,
             paper_run_ids=parse_paper_run_ids(),
             live_cash_flow_adjustments=parse_live_cash_flow_adjustments(),
+            common_equity_start_at=parse_common_equity_start_at(),
         ),
         host=args.host,
         port=args.port,

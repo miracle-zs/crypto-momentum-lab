@@ -66,7 +66,7 @@ function comparisonSeriesColor(account, index) {
 }
 
 function comparisonSeriesLabel(account, index, accounts) {
-  if (account.source === "live") return account.exit_label || "实盘 B1";
+  if (account.source === "live") return account.exit_label || "实盘 Top10 · B8";
   const base = account.exit_label || "15M 收线退出";
   const duplicateCount = accounts.filter((candidate) => (
     candidate.exit_label || "15M 收线退出"

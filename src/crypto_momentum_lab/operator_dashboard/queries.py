@@ -78,6 +78,7 @@ _EQUITY_MAX_POINTS = 240
 _LIVE_SIGNAL_MAX_ROWS = 30
 _PAPER_HISTORY_RECENT_LIMIT = 500
 _COMMON_EQUITY_BUCKET_SECONDS = 15 * 60
+FIXED_COMMON_EQUITY_START_AT = datetime(2026, 8, 21, 2, 45, tzinfo=UTC)
 _ACCOUNT_EQUITY_RANGES: dict[str, tuple[timedelta, int]] = {
     "24h": (timedelta(hours=24), 6 * 60),
     "7d": (timedelta(days=7), 60 * 60),
@@ -580,6 +581,36 @@ def parse_live_cash_flow_adjustments(
     return tuple(sorted(adjustments, key=lambda item: item.effective_at))
 
 
+def parse_common_equity_start_at(value: str | None = None) -> datetime:
+    """Return the production comparison origin, which is intentionally fixed."""
+    raw_value = (
+        os.environ.get("CML_DASHBOARD_COMMON_EQUITY_START_AT", "")
+        if value is None
+        else value
+    )
+    if not raw_value.strip():
+        return FIXED_COMMON_EQUITY_START_AT
+    try:
+        parsed_at = datetime.fromisoformat(
+            raw_value.strip().replace("Z", "+00:00")
+        )
+    except ValueError as error:
+        raise ValueError(
+            "CML_DASHBOARD_COMMON_EQUITY_START_AT must be an ISO-8601 timestamp"
+        ) from error
+    if parsed_at.tzinfo is None:
+        raise ValueError(
+            "CML_DASHBOARD_COMMON_EQUITY_START_AT must include a timezone"
+        )
+    parsed_at = parsed_at.astimezone(UTC)
+    if parsed_at != FIXED_COMMON_EQUITY_START_AT:
+        raise ValueError(
+            "CML_DASHBOARD_COMMON_EQUITY_START_AT is fixed at "
+            "2026-08-21T02:45:00Z"
+        )
+    return FIXED_COMMON_EQUITY_START_AT
+
+
 def _account_equity_range(value: str) -> tuple[timedelta, int]:
     try:
         return _ACCOUNT_EQUITY_RANGES[value]
@@ -717,6 +748,7 @@ class DashboardQueries:
         paper_run_ids: frozenset[str] | None = None,
         live_cash_flow_adjustments: Sequence[LiveCashFlowAdjustment]
         | None = None,
+        common_equity_start_at: datetime | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._clock = clock or (lambda: datetime.now(tz=UTC))
@@ -726,6 +758,11 @@ class DashboardQueries:
             DEFAULT_LIVE_CASH_FLOW_ADJUSTMENTS
             if live_cash_flow_adjustments is None
             else live_cash_flow_adjustments
+        )
+        self._common_equity_start_at = (
+            FIXED_COMMON_EQUITY_START_AT
+            if common_equity_start_at is None
+            else _as_utc(common_equity_start_at)
         )
 
     async def health(self) -> dict[str, str]:
@@ -1022,25 +1059,29 @@ class DashboardQueries:
                     live_first_at,
                     _COMMON_EQUITY_BUCKET_SECONDS,
                 )
-            if len(first_buckets) >= 2:
-                common_start_at = max(first_buckets.values())
+            if (
+                self._common_equity_start_at is not None
+                and self._common_equity_start_at <= window_end
+            ):
+                common_start_at = self._common_equity_start_at
                 common_equity_interval_seconds = _common_equity_interval_seconds(
                     common_start_at,
                     window_end,
                 )
-                common_paper_rows = [
-                    (run_id, observed_at, equity)
-                    for run_id, observed_at, equity in (
-                        await session.execute(
-                            _paper_common_equity_statement(
-                                run_ids,
-                                common_start_at,
-                                window_end,
-                                interval_seconds=common_equity_interval_seconds,
+                if run_ids:
+                    common_paper_rows = [
+                        (run_id, observed_at, equity)
+                        for run_id, observed_at, equity in (
+                            await session.execute(
+                                _paper_common_equity_statement(
+                                    run_ids,
+                                    common_start_at,
+                                    window_end,
+                                    interval_seconds=common_equity_interval_seconds,
+                                )
                             )
-                        )
-                    ).all()
-                ]
+                        ).all()
+                    ]
                 if live_process is not None:
                     common_live_equity_rows = [
                         (observed_at, equity)
@@ -1196,7 +1237,7 @@ class DashboardQueries:
                     strategy_name=live_strategy_name or "orderflow_impulse",
                     exit_mode="candle_15m",
                     exit_label=(
-                        "实盘 B1 · 反向后宽限 1 根 15M · 回收 +0.88%"
+                        "实盘 Top10 · 反向后宽限 8 根 15M · 回收 +0.88% · 仅多头"
                     ),
                     equity_window_start=window_start,
                     equity_window_end=window_end,
@@ -1238,7 +1279,7 @@ class DashboardQueries:
                 else None
             ),
             common_equity_anchor=(
-                "latest_first_valid_15m_bucket"
+                "fixed_2026-08-21T02:45:00Z"
                 if common_equity_by_run
                 else None
             ),
@@ -2453,7 +2494,7 @@ def _common_equity_note(
     interval_seconds: int | None = None,
 ) -> str:
     note = (
-        "统一起点为全部有效账号首个共同桶中的最晚时间；"
+        "统一起点固定为 2026-08-21 02:45 UTC（北京时间 10:45），"
         "共同曲线按历史跨度自适应采样并限制点数；"
         "曲线展示现金流校正后的权益金额变化（USDT），该时点各账号均归零。"
     )
