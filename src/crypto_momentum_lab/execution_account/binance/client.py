@@ -27,6 +27,7 @@ from crypto_momentum_lab.domain.live_rollout import RollbackCommand
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeCancellationUnknownError,
+    ExchangeOrderAlreadyAbsentError,
     ExchangeOrderQueryUnknownError,
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
@@ -734,6 +735,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     "Binance cancel request returned an unknown server outcome"
                 ) from exc
             if _exchange_error_code(exc) in {-2011, -2013}:
+                exchange_message = _exchange_error_message(exc)
                 try:
                     existing = await self.query_order_by_client_id(
                         symbol,
@@ -745,6 +747,44 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     ) from query_error
                 if existing is not None:
                     return existing
+                try:
+                    open_orders = await self.fetch_open_orders()
+                except httpx.TimeoutException as query_error:
+                    raise ExchangeCancellationUnknownError(
+                        "Binance open-order check timed out; "
+                        "order state must be reconciled"
+                    ) from query_error
+                except httpx.RequestError as query_error:
+                    raise ExchangeCancellationUnknownError(
+                        "Binance open-order check failed; "
+                        "order state must be reconciled"
+                    ) from query_error
+                except httpx.HTTPStatusError as query_error:
+                    raise ExchangeCancellationUnknownError(
+                        "Binance open-order check returned an error; "
+                        "order state must be reconciled",
+                        retry_after_seconds=getattr(
+                            query_error,
+                            "retry_after_seconds",
+                            None,
+                        ),
+                    ) from query_error
+                if any(
+                    order.symbol == symbol
+                    and order.client_order_id == client_order_id
+                    for order in open_orders
+                ):
+                    raise ExchangeCancellationUnknownError(
+                        "Binance cancel result is inconsistent; "
+                        "matching open order still exists"
+                    ) from exc
+                raise ExchangeOrderAlreadyAbsentError(
+                    exchange_message,
+                    exchange_code=_exchange_error_code(exc),
+                    exchange_message=exchange_message,
+                    http_status=exc.response.status_code,
+                    open_orders_checked=True,
+                ) from exc
             raise ExchangeOrderRejectedError(_exchange_error_message(exc)) from exc
         return self._order_snapshot(_require_mapping(payload))
 

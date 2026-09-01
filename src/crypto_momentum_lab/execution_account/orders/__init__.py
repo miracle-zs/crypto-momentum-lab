@@ -14,6 +14,7 @@ from crypto_momentum_lab.execution_account.orders.quantization import (
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeCancellationUnknownError,
+    ExchangeOrderAlreadyAbsentError,
     ExchangeOrderQueryUnknownError,
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
@@ -34,6 +35,7 @@ __all__ = [
     "OrderExecutionPort",
     "OrderExecutionKey",
     "ExchangeOrderRejectedError",
+    "ExchangeOrderAlreadyAbsentError",
     "ExchangeCancellationUnknownError",
     "ExchangeOrderQueryUnknownError",
     "ExchangeSubmissionTimeoutError",

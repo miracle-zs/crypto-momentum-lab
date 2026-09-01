@@ -31,6 +31,7 @@ from crypto_momentum_lab.domain.live_rollout import (
     LiveSessionTransition,
 )
 from crypto_momentum_lab.domain.market.models import (
+    JsonValue,
     MarketState15s,
     RealtimeMarketQuote,
 )
@@ -892,9 +893,9 @@ async def _resolve_missing_live_order(
     """Resolve one stale unknown order after read-only exchange verification.
 
     This command intentionally never calls a write endpoint on Binance.  It
-    records the evidence and then appends a terminal local REJECTED event only
-    when the exchange has no order, no matching open order, and the protected
-    position is unchanged.
+    records the evidence and then appends a terminal local
+    ABSENT_RECONCILED event only when the exchange has no order, no matching
+    open order, and the protected position is unchanged.
     """
     now = datetime.now(tz=UTC)
     engine = create_execution_database_engine(database_url)
@@ -976,7 +977,7 @@ async def _resolve_missing_live_order(
                 f"live-missing-order:{client_order_id}:{order.plan.created_at.isoformat()}",
             )
         )
-        evidence = {
+        evidence: dict[str, JsonValue] = {
             "action": "operator_confirmed_absent",
             "account_label": account_label,
             "client_order_id": client_order_id,
@@ -1006,9 +1007,9 @@ async def _resolve_missing_live_order(
         )
         inserted = await order_repository.append_order_event(
             ExchangeOrderEvent(
-                event_id=f"operator-rejected-{verification_id}",
+                event_id=f"operator-absent-{verification_id}",
                 client_order_id=client_order_id,
-                state=ExchangeOrderState.REJECTED,
+                state=ExchangeOrderState.ABSENT_RECONCILED,
                 occurred_at=now,
                 exchange_order_id=None,
                 details=evidence,
@@ -1022,7 +1023,7 @@ async def _resolve_missing_live_order(
             "resolved": True,
             "client_order_id": client_order_id,
             "symbol": order.plan.symbol,
-            "state": ExchangeOrderState.REJECTED.value,
+            "state": ExchangeOrderState.ABSENT_RECONCILED.value,
             "reason": "operator_confirmed_absent",
             "verified_at": now.isoformat(),
             "position_quantity": str(position_quantity),
@@ -1806,10 +1807,17 @@ async def _run_live_daemon(
         )
         market_state_available = market_state_source != "hub"
         market_state_unavailable_reason = "market_state_hub_connecting"
+        exit_failure_by_symbol: dict[str, str] = {}
 
         def refresh_entry_enabled() -> None:
             if draining:
                 daemon.set_entry_enabled(False, reason="session_draining")
+            elif exit_failure_by_symbol:
+                symbol, reason = next(iter(exit_failure_by_symbol.items()))
+                daemon.set_entry_enabled(
+                    False,
+                    reason=f"exit_failure:{symbol}:{reason}",
+                )
             elif not market_state_available:
                 daemon.set_entry_enabled(
                     False,
@@ -1825,6 +1833,13 @@ async def _run_live_daemon(
                     True,
                     reason="live_entry_prerequisites_ready",
                 )
+
+        def on_exit_failure(symbol: str, failure: str | None) -> None:
+            if failure is None:
+                exit_failure_by_symbol.pop(symbol, None)
+            else:
+                exit_failure_by_symbol[symbol] = failure
+            refresh_entry_enabled()
 
         def on_entry_filter_cache_ready(ready: bool) -> None:
             nonlocal entry_filter_cache_ready
@@ -1924,6 +1939,7 @@ async def _run_live_daemon(
                     source=closed_candle_feed,
                     daemon=daemon,
                     latest_market_quotes=latest_market_quotes,
+                    on_exit_failure=on_exit_failure,
                 ),
                 name=f"live-closed-candle:{session_id}",
             )
@@ -1932,6 +1948,7 @@ async def _run_live_daemon(
                     daemon=daemon,
                     latest_market_states=latest_market_states,
                     latest_market_quotes=latest_market_quotes,
+                    on_exit_failure=on_exit_failure,
                 ),
                 name=f"live-grace-timeout:{session_id}",
             )
@@ -1947,6 +1964,7 @@ async def _run_live_daemon(
                     daemon=daemon,
                     latest_market_quotes=latest_market_quotes,
                     latest_market_states=latest_market_states,
+                    on_exit_failure=on_exit_failure,
                 )
             )
         market_task = asyncio.create_task(
@@ -1962,6 +1980,7 @@ async def _run_live_daemon(
                 state_machine=execution_coordinator,
                 run_id=session_id,
                 telemetry=telemetry,
+                on_exit_failure=on_exit_failure,
             )
         )
         if entry_filter_cache is not None:
@@ -2319,8 +2338,14 @@ async def _run_quote_channel(
     daemon: LiveStrategyDaemon,
     latest_market_quotes: _LatestMarketQuoteCache,
     latest_market_states: _LatestMarketStateCache,
+    on_exit_failure: Callable[[str, str | None], None] | None = None,
 ) -> None:
+    retry_at_by_symbol: dict[str, float] = {}
+    retry_delay_by_symbol: dict[str, float] = {}
     async for quote in _resilient_market_quote_stream(source):
+        loop_time = asyncio.get_running_loop().time()
+        if loop_time < retry_at_by_symbol.get(quote.symbol, 0.0):
+            continue
         latest_market_quotes.observe(quote)
         for state in latest_market_states.for_symbols((quote.symbol,)):
             try:
@@ -2335,7 +2360,27 @@ async def _run_quote_channel(
                 )
                 continue
             if failure is not None:
-                raise RuntimeError(f"market_quote_exit_failed:{failure}")
+                if on_exit_failure is not None:
+                    on_exit_failure(quote.symbol, failure)
+                delay = min(
+                    retry_delay_by_symbol.get(quote.symbol, 1.0),
+                    60.0,
+                )
+                retry_delay_by_symbol[quote.symbol] = min(delay * 2, 60.0)
+                retry_at_by_symbol[quote.symbol] = (
+                    asyncio.get_running_loop().time() + delay
+                )
+                log.error(
+                    "live_market_quote_exit_retry_scheduled",
+                    symbol=quote.symbol,
+                    reason=failure,
+                    retry_delay_seconds=delay,
+                )
+                continue
+            retry_at_by_symbol.pop(quote.symbol, None)
+            retry_delay_by_symbol.pop(quote.symbol, None)
+            if on_exit_failure is not None:
+                on_exit_failure(quote.symbol, None)
 
 
 async def _run_closed_candle_channel(
@@ -2343,6 +2388,7 @@ async def _run_closed_candle_channel(
     source: BinanceClosedCandle15mFeed,
     daemon: LiveStrategyDaemon,
     latest_market_quotes: _LatestMarketQuoteCache,
+    on_exit_failure: Callable[[str, str | None], None] | None = None,
 ) -> None:
     async for event in source:
         quote = next(
@@ -2375,7 +2421,16 @@ async def _run_closed_candle_channel(
                 )
                 await asyncio.sleep(delay_seconds)
         if failure is not None:
-            raise RuntimeError(f"closed_candle_exit_failed:{failure}")
+            if on_exit_failure is not None:
+                on_exit_failure(event.candle.symbol, failure)
+            log.error(
+                "live_closed_candle_exit_degraded",
+                symbol=event.candle.symbol,
+                reason=failure,
+            )
+            continue
+        if on_exit_failure is not None:
+            on_exit_failure(event.candle.symbol, None)
 
 
 async def _run_grace_timeout_channel(
@@ -2384,14 +2439,20 @@ async def _run_grace_timeout_channel(
     latest_market_states: _LatestMarketStateCache,
     latest_market_quotes: _LatestMarketQuoteCache,
     interval_seconds: float = 1.0,
+    on_exit_failure: Callable[[str, str | None], None] | None = None,
 ) -> None:
     if interval_seconds <= 0:
         raise ValueError("interval_seconds must be positive")
+    retry_at_by_symbol: dict[str, float] = {}
+    retry_delay_by_symbol: dict[str, float] = {}
     while True:
         now = datetime.now(tz=UTC)
+        loop_time = asyncio.get_running_loop().time()
         for state in latest_market_states.for_symbols(
             tuple(sorted(daemon.managed_position_symbols))
         ):
+            if loop_time < retry_at_by_symbol.get(state.symbol, 0.0):
+                continue
             quote = next(
                 iter(latest_market_quotes.for_symbols((state.symbol,))),
                 None,
@@ -2414,7 +2475,27 @@ async def _run_grace_timeout_channel(
                 )
                 continue
             if failure is not None:
-                raise RuntimeError(f"grace_timeout_exit_failed:{failure}")
+                if on_exit_failure is not None:
+                    on_exit_failure(state.symbol, failure)
+                delay = min(
+                    retry_delay_by_symbol.get(state.symbol, 1.0),
+                    60.0,
+                )
+                retry_delay_by_symbol[state.symbol] = min(delay * 2, 60.0)
+                retry_at_by_symbol[state.symbol] = (
+                    asyncio.get_running_loop().time() + delay
+                )
+                log.error(
+                    "live_grace_timeout_exit_retry_scheduled",
+                    symbol=state.symbol,
+                    reason=failure,
+                    retry_delay_seconds=delay,
+                )
+                continue
+            retry_at_by_symbol.pop(state.symbol, None)
+            retry_delay_by_symbol.pop(state.symbol, None)
+            if on_exit_failure is not None:
+                on_exit_failure(state.symbol, None)
         await asyncio.sleep(interval_seconds)
 
 
@@ -2428,6 +2509,7 @@ async def _run_account_event_channel(
     state_machine: OrderExecutionPort,
     run_id: str,
     telemetry: LiveTelemetrySink | None = None,
+    on_exit_failure: Callable[[str, str | None], None] | None = None,
 ) -> None:
     async for event in _resilient_account_event_stream(source):
         try:
@@ -2453,7 +2535,16 @@ async def _run_account_event_channel(
                     quote=quote,
                 )
                 if failure is not None:
-                    raise RuntimeError(f"account_event_exit_failed:{failure}")
+                    if on_exit_failure is not None:
+                        on_exit_failure(state.symbol, failure)
+                    log.error(
+                        "live_account_event_exit_degraded",
+                        symbol=state.symbol,
+                        reason=failure,
+                    )
+                    continue
+                if on_exit_failure is not None:
+                    on_exit_failure(state.symbol, None)
         except asyncio.CancelledError:
             raise
         except Exception as error:

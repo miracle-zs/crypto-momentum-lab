@@ -26,6 +26,7 @@ from crypto_momentum_lab.execution_account.orders.quantization import (
     SymbolTradingRules,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
+    ExchangeOrderAlreadyAbsentError,
     ExchangeSubmissionTimeoutError,
     OrderExecutionStateMachine,
     SubmitPolicy,
@@ -688,6 +689,69 @@ async def test_market_unavailable_blocks_entries_but_keeps_exit_lane_enabled() -
     assert exchange.plans[1].reduce_only is True
 
 
+async def test_absent_recovery_order_falls_back_to_market_exit() -> None:
+    exchange = AbsentRecoveryExchange()
+    recovery_created_at = NOW - timedelta(minutes=15)
+    recovery_plan = OrderExecutionPlan(
+        intent_id="recovery-intent",
+        run_id="run-1",
+        client_order_id="recovery-client",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("0.001"),
+        price=Decimal("30000"),
+        reduce_only=True,
+        created_at=recovery_created_at,
+        position_side=FuturesPositionSide.LONG,
+        quantized=True,
+    )
+    position = ManagedLivePosition(
+        symbol="BTCUSDT",
+        side="long",
+        position_side=FuturesPositionSide.LONG,
+        quantity=Decimal("0.001"),
+        entry_price=Decimal("30000"),
+        opened_at=NOW - timedelta(minutes=30),
+        recovery_order_client_id=recovery_plan.client_order_id,
+        recovery_order_created_at=recovery_created_at,
+        recovery_order_plan=recovery_plan,
+    )
+
+    async def position_context(state: object) -> LiveDaemonRuntimeContext:
+        del state
+        return replace(
+            _runtime_context(),
+            open_position_symbols=frozenset({"BTCUSDT"}),
+            managed_positions=(position,),
+        )
+
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=position_context,
+        exit_manager=LiveExitManager(
+            config=LiveExitConfig(
+                run_id="run-1",
+                strategy_name="compression_breakout",
+                strategy_version="v0",
+                strategy_config_hash="a" * 64,
+                policy=PositionExitPolicy(mode=PositionExitMode.CANDLE_15M),
+                candle_grace_bars=1,
+                candle_grace_profit_pct=Decimal("0.0088"),
+            )
+        ),
+    )
+
+    failure = await daemon.process_grace_timeout(_state(), now=NOW)
+
+    assert failure is None
+    assert exchange.calls[0] == "cancel"
+    assert exchange.calls[-1] == "submit"
+    assert exchange.plans[-1].order_type == "MARKET"
+    assert exchange.plans[-1].reduce_only is True
+    assert exchange.plans[-1].quantity == Decimal("0.001")
+
+
 async def test_closed_candle_exit_uses_direct_event_without_rest_loader() -> None:
     exchange = PlanAwareExchange()
     position = ManagedLivePosition(
@@ -1319,6 +1383,22 @@ class PlanAwareExchange:
     ) -> ExchangeOrderSnapshot | None:
         self.calls.append("query")
         return None
+
+
+class AbsentRecoveryExchange(PlanAwareExchange):
+    async def cancel_order_by_client_id(
+        self,
+        symbol: str,
+        client_order_id: str,
+    ) -> ExchangeOrderSnapshot:
+        del symbol, client_order_id
+        self.calls.append("cancel")
+        raise ExchangeOrderAlreadyAbsentError(
+            "Unknown order sent.",
+            exchange_code=-2011,
+            exchange_message="Unknown order sent.",
+            http_status=400,
+        )
 
 
 class TwoCandidateStrategy(FakeStrategy):

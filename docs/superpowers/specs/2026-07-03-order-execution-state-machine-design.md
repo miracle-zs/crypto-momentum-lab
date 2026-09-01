@@ -93,6 +93,7 @@ INTENT_APPROVED
 -> PARTIALLY_FILLED
 -> FILLED
 -> CANCELED
+-> ABSENT_RECONCILED
 -> REJECTED
 -> EXPIRED
 -> UNKNOWN_PENDING_RECONCILIATION
@@ -102,6 +103,7 @@ Terminal states:
 
 - `FILLED`;
 - `CANCELED`;
+- `ABSENT_RECONCILED` (the exchange confirmed that no target order exists);
 - `REJECTED`;
 - `EXPIRED`.
 

@@ -31,6 +31,25 @@ class ExchangeOrderRejectedError(RuntimeError):
     pass
 
 
+class ExchangeOrderAlreadyAbsentError(RuntimeError):
+    """The exchange explicitly confirmed that the target order is absent."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        exchange_code: int | None = None,
+        exchange_message: str | None = None,
+        http_status: int | None = None,
+        open_orders_checked: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.exchange_code = exchange_code
+        self.exchange_message = exchange_message or message
+        self.http_status = http_status
+        self.open_orders_checked = open_orders_checked
+
+
 class ExchangeSubmissionTimeoutError(TimeoutError):
     pass
 
@@ -139,6 +158,7 @@ class _OrderQueryResult:
     snapshot: ExchangeOrderSnapshot | None
     reason: str | None
     attempts: int
+    confirmed_absent: bool = False
 
 
 class OrderExecutionStateMachine:
@@ -378,6 +398,58 @@ class OrderExecutionStateMachine:
                 ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
                 None,
             )
+        except ExchangeOrderAlreadyAbsentError as exc:
+            query_result = await self._query_order_with_retry(
+                plan,
+                not_found_reason="cancel_result_order_not_found",
+            )
+            if query_result.snapshot is not None:
+                return await self._apply_snapshot(plan, query_result.snapshot)
+            if query_result.confirmed_absent:
+                details: dict[str, JsonValue] = {
+                    "reason": str(exc) or "cancel_order_already_absent",
+                    "reconciliation_reason": query_result.reason
+                    or "cancel_result_order_not_found",
+                    "reconciliation_attempts": query_result.attempts,
+                    "confirmed_absent": True,
+                }
+                if exc.exchange_code is not None:
+                    details["exchange_code"] = exc.exchange_code
+                if exc.exchange_message is not None:
+                    details["exchange_message"] = exc.exchange_message
+                if exc.http_status is not None:
+                    details["http_status"] = exc.http_status
+                if exc.open_orders_checked:
+                    details["open_orders_checked"] = True
+                await self._append_event(
+                    plan,
+                    ExchangeOrderState.ABSENT_RECONCILED,
+                    details=details,
+                )
+                return OrderExecutionResult(
+                    plan.client_order_id,
+                    ExchangeOrderState.ABSENT_RECONCILED,
+                    None,
+                )
+            await self._append_event(
+                plan,
+                ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                details={
+                    "reason": str(exc) or "cancel_outcome_unknown",
+                    "exchange_code": exc.exchange_code,
+                    "exchange_message": exc.exchange_message,
+                    "http_status": exc.http_status,
+                    "reconciliation_reason": query_result.reason
+                    or "cancel_result_order_not_found",
+                    "reconciliation_attempts": query_result.attempts,
+                    "confirmed_absent": False,
+                },
+            )
+            return OrderExecutionResult(
+                plan.client_order_id,
+                ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                None,
+            )
         except ExchangeOrderRejectedError as exc:
             await self._append_event(
                 plan,
@@ -398,6 +470,7 @@ class OrderExecutionStateMachine:
         not_found_reason: str,
     ) -> _OrderQueryResult:
         last_reason: str | None = None
+        query_failed = False
         retry_delays = self._reconciliation_retry_delays
         for attempt in range(len(retry_delays) + 1):
             retry_after_seconds: float | None = None
@@ -411,6 +484,7 @@ class OrderExecutionStateMachine:
                     ),
                 )
             except ExchangeOrderQueryUnknownError as exc:
+                query_failed = True
                 last_reason = str(exc) or "order_query_unknown"
                 retry_after_seconds = exc.retry_after_seconds
             else:
@@ -426,6 +500,7 @@ class OrderExecutionStateMachine:
             snapshot=None,
             reason=last_reason or not_found_reason,
             attempts=len(retry_delays) + 1,
+            confirmed_absent=not query_failed,
         )
 
     async def _apply_snapshot(

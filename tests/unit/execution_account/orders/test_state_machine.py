@@ -11,6 +11,7 @@ from crypto_momentum_lab.domain.execution import (
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeCancellationUnknownError,
+    ExchangeOrderAlreadyAbsentError,
     ExchangeOrderQueryUnknownError,
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
@@ -222,6 +223,36 @@ async def test_cancel_timeout_reconciles_before_marking_order_unknown() -> None:
 
     assert exchange.calls == ["cancel", "query", "query"]
     assert result.state is ExchangeOrderState.CANCELED
+
+
+async def test_cancel_not_found_is_terminal_absent_and_not_rejected() -> None:
+    exchange = CancelExchange(
+        ExchangeOrderAlreadyAbsentError(
+            "Unknown order sent.",
+            exchange_code=-2011,
+            open_orders_checked=True,
+        ),
+        query_results=[None, None, None, None, None],
+    )
+    repository = FakeOrderRepository()
+
+    result = await _machine(exchange, repository).cancel_order(_plan())
+
+    assert result.state is ExchangeOrderState.ABSENT_RECONCILED
+    assert result.executed_quantity == Decimal("0")
+    assert [event.state for event in repository.events] == [
+        ExchangeOrderState.CANCELING,
+        ExchangeOrderState.ABSENT_RECONCILED,
+    ]
+    assert repository.events[-1].details == {
+        "reason": "Unknown order sent.",
+        "exchange_code": -2011,
+        "exchange_message": "Unknown order sent.",
+        "open_orders_checked": True,
+        "reconciliation_reason": "cancel_result_order_not_found",
+        "reconciliation_attempts": 5,
+        "confirmed_absent": True,
+    }
 
 
 class FakeExchange:

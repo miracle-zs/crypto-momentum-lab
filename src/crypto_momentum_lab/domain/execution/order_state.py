@@ -17,6 +17,7 @@ class ExchangeOrderState(StrEnum):
     PARTIALLY_FILLED = "partially_filled"
     FILLED = "filled"
     CANCELED = "canceled"
+    ABSENT_RECONCILED = "absent_reconciled"
     REJECTED = "rejected"
     EXPIRED = "expired"
     SUPPRESSED = "suppressed"
@@ -27,6 +28,7 @@ class ExchangeOrderState(StrEnum):
         return self in {
             self.FILLED,
             self.CANCELED,
+            self.ABSENT_RECONCILED,
             self.REJECTED,
             self.EXPIRED,
             self.SUPPRESSED,

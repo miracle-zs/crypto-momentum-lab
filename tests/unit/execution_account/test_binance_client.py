@@ -20,6 +20,7 @@ from crypto_momentum_lab.execution_account.binance.client import (
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeCancellationUnknownError,
+    ExchangeOrderAlreadyAbsentError,
     ExchangeOrderQueryUnknownError,
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
@@ -745,6 +746,48 @@ async def test_trade_client_treats_cancel_rate_limit_as_unknown_outcome() -> Non
         await client.aclose()
 
     assert error.value.retry_after_seconds == 4.0
+
+
+async def test_trade_client_classifies_missing_cancel_order_as_absent() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            return httpx.Response(
+                400,
+                request=request,
+                json={"code": -2011, "msg": "Unknown order sent."},
+            )
+        assert request.method == "GET"
+        if request.url.path == "/fapi/v1/openOrders":
+            return httpx.Response(200, request=request, json=[])
+        return httpx.Response(
+            400,
+            request=request,
+            json={"code": -2013, "msg": "Order does not exist."},
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        request_interval_seconds=0.0,
+    )
+
+    try:
+        with pytest.raises(ExchangeOrderAlreadyAbsentError) as error:
+            await client.cancel_order_by_client_id("BTCUSDT", "client-1")
+    finally:
+        await client.aclose()
+
+    assert error.value.exchange_code == -2011
+    assert error.value.exchange_message == "Unknown order sent."
 
 
 async def test_trade_client_treats_server_error_as_unknown_submit_outcome() -> None:

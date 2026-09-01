@@ -230,6 +230,7 @@ class _ExitLaneOutcome:
     approved_intent_count: int = 0
     submitted_order_count: int = 0
     failure: str | None = None
+    fatal_failure: bool = False
 
     def merge(self, other: "_ExitLaneOutcome") -> "_ExitLaneOutcome":
         return _ExitLaneOutcome(
@@ -240,6 +241,7 @@ class _ExitLaneOutcome:
                 self.submitted_order_count + other.submitted_order_count
             ),
             failure=self.failure or other.failure,
+            fatal_failure=self.fatal_failure or other.fatal_failure,
         )
 
 
@@ -304,6 +306,8 @@ class _ExitExecutionLane:
 
     @property
     def failure(self) -> str | None:
+        if not self._outcome.fatal_failure:
+            return None
         return self._outcome.failure
 
     async def start(self) -> None:
@@ -508,7 +512,8 @@ class _ExitExecutionLane:
                 error_type=type(error).__name__,
             )
             return _ExitLaneOutcome(
-                failure=f"exit_execution_failed:{type(error).__name__}"
+                failure=f"exit_execution_failed:{type(error).__name__}",
+                fatal_failure=True,
             )
 
     async def _run_quote_work(self, work: _QuoteLaneWork) -> _ExitLaneOutcome:
@@ -525,16 +530,23 @@ class _ExitExecutionLane:
                 error_type=type(error).__name__,
             )
             return _ExitLaneOutcome(
-                failure=f"quote_exit_execution_failed:{type(error).__name__}"
+                failure=f"quote_exit_execution_failed:{type(error).__name__}",
+                fatal_failure=True,
             )
 
     def _record_outcome(self, outcome: _ExitLaneOutcome) -> None:
         self._outcome = self._outcome.merge(outcome)
         if outcome.failure is not None:
-            log.error(
-                "live_exit_lane_failed_closed",
-                reason=outcome.failure,
-            )
+            if outcome.fatal_failure:
+                log.error(
+                    "live_exit_lane_failed_closed",
+                    reason=outcome.failure,
+                )
+            else:
+                log.warning(
+                    "live_exit_lane_recoverable_failure",
+                    reason=outcome.failure,
+                )
 
     def _mark_idle_if_ready(self) -> None:
         if (
@@ -880,7 +892,14 @@ class LiveStrategyDaemon:
                 result.submitted_order_count
                 + exit_outcome.submitted_order_count
             ),
-            halt_reason=result.halt_reason or exit_outcome.failure,
+            halt_reason=(
+                result.halt_reason
+                or (
+                    exit_outcome.failure
+                    if exit_outcome.fatal_failure
+                    else None
+                )
+            ),
         )
 
     async def _states_with_prefetched_context(
@@ -1678,15 +1697,54 @@ class LiveStrategyDaemon:
                     return approved, submitted, "cancel_not_confirmed"
                 if cancel_result.state is ExchangeOrderState.REJECTED:
                     return approved, submitted, "cancel_rejected"
+                if cancel_result.state is ExchangeOrderState.ABSENT_RECONCILED:
+                    # The cancel response proved that the old recovery order
+                    # is gone.  Refresh the account view before submitting a
+                    # market fallback so a late fill cannot make us reuse
+                    # the stale planned quantity.
+                    self._invalidate_context_cache()
+                    context = await self._context_provider(state)
+                    self._sync_pending_entry_plans(context)
+                    await self._publish_managed_position_symbols(context)
+                    if context.unmanaged_position_symbols:
+                        symbols = ",".join(
+                            sorted(context.unmanaged_position_symbols)
+                        )
+                        return approved, submitted, (
+                            f"unmanaged_live_positions:{symbols}"
+                        )
                 remaining = max(
                     Decimal("0"),
                     request.cancel_plan.quantity - cancel_result.executed_quantity,
                 )
                 if remaining <= 0:
                     continue
+                current_position_quantity = next(
+                    (
+                        position.quantity
+                        for position in context.managed_positions
+                        if position.symbol == request.cancel_plan.symbol
+                        and position.position_side
+                        is request.cancel_plan.position_side
+                    ),
+                    Decimal("0"),
+                )
+                fallback_quantity = min(
+                    request.fallback_quantity,
+                    remaining,
+                    current_position_quantity,
+                )
+                if fallback_quantity <= 0:
+                    log.info(
+                        "live_exit_fallback_skipped_position_flat",
+                        run_id=self._config.run_id,
+                        symbol=request.cancel_plan.symbol,
+                        client_order_id=request.cancel_plan.client_order_id,
+                    )
+                    continue
                 result = await self._execute_candidate(
                     request.fallback_candidate,
-                    requested_quantity=min(request.fallback_quantity, remaining),
+                    requested_quantity=fallback_quantity,
                     state=state,
                     context=context,
                     reference_price=reference_price,

@@ -568,6 +568,10 @@ class LiveExitManager:
             position=position,
             reason=f"candle_15m_grace_timeout_{self._config.candle_grace_bars}",
             trigger_at=trigger_at,
+            # The timer may retry this same fallback many times.  Keep the
+            # client order identity tied to the recovery episode rather than
+            # to wall-clock ``now`` so a retry remains idempotent.
+            identity_trigger_at=recovery_plan.created_at,
             reference_price=reference_price,
             created_at=created_at,
         )

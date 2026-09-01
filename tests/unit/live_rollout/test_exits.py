@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.execution import (
@@ -255,6 +255,7 @@ async def test_b1_grace_timeout_cancels_limit_before_market_close() -> None:
     assert requests[0].fallback_candidate.reason == "candle_15m_grace_timeout_1"
 
 
+
 async def test_grace_timeout_timer_does_not_need_a_new_market_state() -> None:
     created_at = datetime(2026, 7, 4, 0, 15, 15, tzinfo=UTC)
     recovery_plan = OrderExecutionPlan(
@@ -304,6 +305,16 @@ async def test_grace_timeout_timer_does_not_need_a_new_market_state() -> None:
     assert requests[0].fallback_candidate.created_at == now
     assert requests[0].fallback_candidate.features["trigger_at"] == (
         "2026-07-04T00:30:16+00:00"
+    )
+
+    retry_requests = await manager.requests_for_grace_timeout(
+        now=now + timedelta(seconds=1),
+        state=state,
+        positions=(position,),
+    )
+    assert isinstance(retry_requests[0], LiveExitCancellationRequest)
+    assert retry_requests[0].fallback_candidate.candidate_id == (
+        requests[0].fallback_candidate.candidate_id
     )
 
 
