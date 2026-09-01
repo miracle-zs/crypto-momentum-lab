@@ -1,4 +1,5 @@
 import argparse
+import urllib.parse
 from datetime import UTC, datetime
 
 from deploy.ops.cml_ops_monitor import (
@@ -7,6 +8,8 @@ from deploy.ops.cml_ops_monitor import (
     LogSignals,
     MonitorConfig,
     OpsMonitor,
+    _serverchan_endpoint,
+    _serverchan_form,
     build_config,
     evaluate_container,
     evaluate_database_state,
@@ -183,3 +186,61 @@ def test_build_config_reads_live_session_from_compose_env(
     assert config.live_run_id == "live-b1-long-100u-5x-v1"
     assert config.live_account_label == "primary-2"
     assert config.live_lease_owner == "worker-2"
+
+
+def test_serverchan_config_and_payload(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("SERVERCHAN_SENDKEY", "SCT-test-key")
+    args = argparse.Namespace(
+        project_directory=str(tmp_path),
+        compose_file=str(tmp_path / "compose.yaml"),
+        services="postgres",
+        live_run_id="live-session",
+        interval_seconds=60.0,
+        log_window_seconds=120.0,
+        telemetry_stale_after_seconds=900.0,
+        rss_warning_fraction=0.75,
+        rss_critical_fraction=0.90,
+        rss_growth_bytes=64 * 1024 * 1024,
+        rss_growth_window_seconds=1_800.0,
+        alert_cooldown_seconds=900.0,
+        command_timeout_seconds=15.0,
+        state_path=str(tmp_path / "state.json"),
+    )
+
+    config = build_config(args)
+    form = _serverchan_form(
+        {
+            "event": "ops_alert",
+            "alert_name": "container_unhealthy",
+            "severity": "critical",
+            "summary": "Live strategy is unhealthy",
+            "observed_at": "2026-09-01T12:00:00+00:00",
+            "details": {"service": "live-strategy"},
+        }
+    )
+
+    assert config.serverchan_sendkey == "SCT-test-key"
+    assert _serverchan_endpoint(config.serverchan_sendkey).endswith(
+        "/SCT-test-key.send"
+    )
+    assert form["title"] == "CML告警: container_unhealthy"
+    assert "Live strategy is unhealthy" in form["desp"]
+    assert "live-strategy" in form["desp"]
+
+
+def test_serverchan_form_is_url_encoded_for_post() -> None:
+    form = _serverchan_form(
+        {
+            "event": "ops_alert",
+            "alert_name": "live_checkpoint_stale",
+            "severity": "critical",
+            "summary": "检查失败：checkpoint stale",
+            "observed_at": "2026-09-01T12:00:00+00:00",
+            "details": {},
+        }
+    )
+
+    decoded = urllib.parse.parse_qs(urllib.parse.urlencode(form))
+
+    assert decoded["title"] == [form["title"]]
+    assert decoded["desp"] == [form["desp"]]

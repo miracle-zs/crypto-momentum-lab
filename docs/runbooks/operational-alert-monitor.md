@@ -18,6 +18,12 @@ The monitor alerts on:
 - missing `pg_stat_statements`, disabled I/O timing, or re-enabled parallel
   maintenance.
 
+To deliver the alert and recovery messages through Server酱, put the SendKey
+in `/etc/crypto-momentum-lab/ops-monitor.env` as `SERVERCHAN_SENDKEY`. The
+monitor supports both the `SCT...` Turbo key and the `sctp...` Server酱³ key;
+the key is never written to Git or logs. A configured Server酱 key takes
+precedence over `CML_ALERT_WEBHOOK_URL`.
+
 Install or refresh it after pulling a release:
 
 ```bash
@@ -26,7 +32,10 @@ install -D -m 0755 deploy/ops/cml_ops_monitor.py \
 install -D -m 0644 deploy/ops/cml-ops-monitor.service \
   /etc/systemd/system/cml-ops-monitor.service
 install -d -m 0750 /etc/crypto-momentum-lab
-# Copy the example to ops-monitor.env and add a webhook only if desired.
+# Copy the example to ops-monitor.env, set SERVERCHAN_SENDKEY, then protect it:
+install -D -m 0600 deploy/ops/ops-monitor.env.example \
+  /etc/crypto-momentum-lab/ops-monitor.env
+# Edit the installed file and add the SendKey; do not put it in Git.
 systemctl daemon-reload
 systemctl enable --now cml-ops-monitor.service
 ```
@@ -41,3 +50,9 @@ systemctl status cml-ops-monitor.service --no-pager
 The monitor keeps a small state file at
 `/var/lib/crypto-momentum-lab/ops-monitor.json` for alert de-duplication and
 RSS trend samples. It never changes Docker or PostgreSQL state.
+
+This monitor runs on the trading server itself. It can notify when the
+`live-strategy` container is missing, unhealthy, OOM-killed, or no longer
+producing a fresh live checkpoint. If the entire server loses power or network
+connectivity, a second monitor outside this host is required to send that
+notification.

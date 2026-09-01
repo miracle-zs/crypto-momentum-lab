@@ -16,12 +16,13 @@ import re
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 _DEFAULT_SERVICES = (
     "postgres",
@@ -331,6 +332,7 @@ class MonitorConfig:
     command_timeout_seconds: float = _DEFAULT_COMMAND_TIMEOUT_SECONDS
     state_path: Path = Path("/var/lib/crypto-momentum-lab/ops-monitor.json")
     webhook_url: str | None = None
+    serverchan_sendkey: str | None = None
 
 
 class OpsMonitor:
@@ -709,7 +711,11 @@ SELECT 'parallel_maintenance' || E'\\t' || current_setting(
             "details": dict(alert.details),
         }
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
-        _deliver_webhook(self._config.webhook_url, payload)
+        _deliver_notification(
+            self._config.webhook_url,
+            self._config.serverchan_sendkey,
+            payload,
+        )
 
     def _emit_resolutions(self, active_keys: set[str], *, now: float) -> None:
         active = self._state.setdefault("active_alerts", {})
@@ -722,7 +728,11 @@ SELECT 'parallel_maintenance' || E'\\t' || current_setting(
                 "alert_name": name,
             }
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
-            _deliver_webhook(self._config.webhook_url, payload)
+            _deliver_notification(
+                self._config.webhook_url,
+                self._config.serverchan_sendkey,
+                payload,
+            )
             active.pop(name, None)
 
 
@@ -799,7 +809,7 @@ def _sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _load_state(path: Path) -> dict[str, object]:
+def _load_state(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, json.JSONDecodeError):
@@ -830,6 +840,17 @@ def _save_state(path: Path, state: Mapping[str, object]) -> None:
         )
 
 
+def _deliver_notification(
+    webhook_url: str | None,
+    serverchan_sendkey: str | None,
+    payload: Mapping[str, object],
+) -> None:
+    if serverchan_sendkey:
+        _deliver_serverchan(serverchan_sendkey, payload)
+        return
+    _deliver_webhook(webhook_url, payload)
+
+
 def _deliver_webhook(url: str | None, payload: Mapping[str, object]) -> None:
     if not url:
         return
@@ -854,6 +875,85 @@ def _deliver_webhook(url: str | None, payload: Mapping[str, object]) -> None:
             file=sys.stderr,
             flush=True,
         )
+
+
+def _deliver_serverchan(
+    sendkey: str,
+    payload: Mapping[str, object],
+) -> None:
+    try:
+        request = urllib.request.Request(
+            _serverchan_endpoint(sendkey),
+            data=urllib.parse.urlencode(
+                _serverchan_form(payload),
+                doseq=False,
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        if not isinstance(result, dict) or result.get("code") not in {0, "0"}:
+            raise RuntimeError("Server酱 returned a non-zero response")
+    except Exception as error:  # pragma: no cover - external endpoint
+        print(
+            json.dumps(
+                {
+                    "event": "ops_alert_delivery_failed",
+                    "error_type": type(error).__name__,
+                    "provider": "serverchan",
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _serverchan_endpoint(sendkey: str) -> str:
+    key = sendkey.strip()
+    if not key:
+        raise ValueError("Server酱 SendKey must not be empty")
+    sc3_match = re.match(r"^sctp([0-9]+)t", key)
+    if sc3_match is not None:
+        uid = sc3_match.group(1)
+        return (
+            f"https://{uid}.push.ft07.com/send/"
+            f"{urllib.parse.quote(key, safe='')}.send"
+        )
+    return f"https://sctapi.ftqq.com/{urllib.parse.quote(key, safe='')}.send"
+
+
+def _serverchan_form(payload: Mapping[str, object]) -> dict[str, str]:
+    event = str(payload.get("event", "ops_alert"))
+    alert_name = str(payload.get("alert_name", "ops_monitor"))
+    if event == "ops_alert":
+        severity = str(payload.get("severity", "critical")).upper()
+        title = f"CML告警: {alert_name}"
+        summary = str(payload.get("summary", "Operational alert"))
+        details = payload.get("details", {})
+        body = [
+            f"## {summary}",
+            f"- **级别**：`{severity}`",
+            f"- **告警**：`{alert_name}`",
+            f"- **时间**：`{payload.get('observed_at', '')}",
+        ]
+        if details:
+            body.append(
+                "- **详情**：\n```json\n"
+                + json.dumps(details, ensure_ascii=False, sort_keys=True)
+                + "\n```"
+            )
+    else:
+        title = f"CML恢复: {alert_name}"
+        body = [
+            f"## 监控恢复：{alert_name}",
+            f"- **时间**：{payload.get('observed_at', '')}",
+        ]
+    return {
+        "title": " ".join(title.split())[:32],
+        "desp": "\n".join(body),
+    }
 
 
 def _env_path(name: str, default: Path | None) -> Path | None:
@@ -931,6 +1031,11 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         command_timeout_seconds=args.command_timeout_seconds,
         state_path=Path(args.state_path),
         webhook_url=os.environ.get("CML_ALERT_WEBHOOK_URL") or None,
+        serverchan_sendkey=(
+            os.environ.get("SERVERCHAN_SENDKEY")
+            or os.environ.get("CML_SERVERCHAN_SENDKEY")
+            or None
+        ),
     )
 
 
