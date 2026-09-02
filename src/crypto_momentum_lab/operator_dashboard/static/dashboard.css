@@ -686,6 +686,21 @@ details.secondary[open] summary { margin-bottom: 10px; }
 .live-signal-log .table-scroll { max-height: 440px; }
 .live-signal-log .data-table { min-width: 1120px; }
 .live-signal-log .data-table td { vertical-align: top; }
+.live-signal-rank-cell { min-width: 150px; white-space: normal !important; overflow: visible !important; }
+.live-signal-rank { display: flex; flex-wrap: wrap; gap: 4px; }
+.live-signal-rank-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 6px;
+  border: 1px solid currentColor;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.live-signal-rank-badge.gainer { color: var(--up); background: rgba(52, 211, 153, .09); }
+.live-signal-rank-badge.loser { color: var(--down); background: rgba(251, 113, 133, .09); }
+.live-signal-rank-badge.outside { color: var(--muted); background: rgba(165, 176, 195, .08); }
 
 .live-signal-kind {
   display: inline-flex;

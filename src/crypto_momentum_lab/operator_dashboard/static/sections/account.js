@@ -89,6 +89,26 @@ function liveSignalFilterSummary(row) {
     .join("")}</div>`;
 }
 
+function liveSignalRanking(row) {
+  const universe = row.filter_context?.universe;
+  if (!universe || typeof universe !== "object" || !universe.symbol) {
+    return "—";
+  }
+  const badges = [];
+  const rankBadge = (rank, label, className) => {
+    if (!Number.isFinite(Number(rank))) return;
+    badges.push(
+      `<span class="live-signal-rank-badge ${className}">${esc(label)}第${esc(num(rank, 0))}名</span>`,
+    );
+  };
+  rankBadge(universe.gainer_rank, "涨幅榜", "gainer");
+  rankBadge(universe.loser_rank, "跌幅榜", "loser");
+  if (!badges.length) {
+    return '<span class="live-signal-rank-badge outside">未进涨/跌榜 Top100</span>';
+  }
+  return `<div class="live-signal-rank">${badges.join("")}</div>`;
+}
+
 function liveSignalVolume(row) {
   if (row.quote_volume_24h == null) return "—";
   const asset = row.quote_volume_24h_quote_asset || "USDT";
@@ -320,6 +340,7 @@ export function renderAccount(data) {
     { label: "币种", key: "symbol", cls: "sym" },
     { label: "方向", value: (row) => sideTag(row.side), html: true },
     { label: "24H 成交额", value: liveSignalVolume, align: "right" },
+    { label: "信号时排名", value: liveSignalRanking, html: true, cls: "live-signal-rank-cell" },
     { label: "触发依据", value: signalEvidence, html: true, cls: "signal-evidence-cell" },
     { label: "过滤 / 门控", value: liveSignalFilterSummary, html: true, cls: "live-signal-filter-cell" },
     { label: "记录延迟", value: liveSignalRecordLag, align: "right", cls: "muted" },

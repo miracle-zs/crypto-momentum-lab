@@ -130,6 +130,22 @@ def test_strategy_panel_renders_portfolio_and_position_lifecycle() -> None:
         assert field in text_with_ui
 
 
+def test_account_panel_renders_historical_live_signal_ranking() -> None:
+    account = (STATIC / "sections" / "account.js").read_text(encoding="utf-8")
+    css = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+
+    for marker in (
+        "liveSignalRanking",
+        "信号时排名",
+        "gainer_rank",
+        "loser_rank",
+        "未进涨/跌榜 Top100",
+    ):
+        assert marker in account
+    assert ".live-signal-rank-badge.gainer" in css
+    assert ".live-signal-rank-badge.loser" in css
+
+
 def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
     text = (STATIC / "sections" / "strategy.js").read_text(encoding="utf-8")
     charts = (STATIC / "dashboard-charts.js").read_text(encoding="utf-8")
