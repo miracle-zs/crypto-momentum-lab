@@ -96,9 +96,10 @@ function liveSignalRanking(row) {
   }
   const badges = [];
   const rankBadge = (rank, label, className) => {
-    if (!Number.isFinite(Number(rank))) return;
+    const parsedRank = asNumber(rank);
+    if (parsedRank == null || !Number.isFinite(parsedRank)) return;
     badges.push(
-      `<span class="live-signal-rank-badge ${className}">${esc(label)}第${esc(num(rank, 0))}名</span>`,
+      `<span class="live-signal-rank-badge ${className}">${esc(label)}第${esc(num(parsedRank, 0))}名</span>`,
     );
   };
   rankBadge(universe.gainer_rank, "涨幅榜", "gainer");

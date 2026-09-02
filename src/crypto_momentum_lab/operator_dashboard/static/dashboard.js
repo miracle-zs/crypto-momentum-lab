@@ -24,7 +24,7 @@ import { renderRisk } from "./sections/risk.js";
 import {
   renderAccount,
   wireAccountEquityRanges,
-} from "./sections/account.js?v=20260828-live-signals-v1";
+} from "./sections/account.js?v=20260902-live-rank-null-fix-v1";
 import { renderReports } from "./sections/reports.js";
 import { createStrategySection } from "./sections/strategy.js?v=20260826-flight-deck-v2";
 

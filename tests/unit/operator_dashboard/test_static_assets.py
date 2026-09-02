@@ -33,7 +33,7 @@ def test_static_javascript_uses_relative_api_paths() -> None:
         in index
     )
     assert 'dashboard.css?v=20260828-live-signals-v1' in index
-    assert "dashboard.js?v=20260830-poll-budget-v1" in index
+    assert "dashboard.js?v=20260902-live-rank-null-fix-v1" in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(endpoint" in text
     assert "binance.com" not in text.lower()
@@ -140,6 +140,8 @@ def test_account_panel_renders_historical_live_signal_ranking() -> None:
         "gainer_rank",
         "loser_rank",
         "未进涨/跌榜 Top100",
+        "const parsedRank = asNumber(rank);",
+        "parsedRank == null",
     ):
         assert marker in account
     assert ".live-signal-rank-badge.gainer" in css
