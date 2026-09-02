@@ -93,6 +93,8 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         "paper-account-13-orderflow-b8-long-candle15m-v1",
         "paper-account-14-orderflow-b1-gainer100-v1",
         "paper-account-15-orderflow-b1-gainer100-ema-v1",
+        "paper-account-16-orderflow-b8-gainer10-v1",
+        "paper-account-17-orderflow-b1-gainer10-v1",
     }
     assert {
         item.strip()
@@ -109,6 +111,11 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         == "orderflow_impulse"
     )
     orderflow = services["paper-orderflow-pair"]["command"]
+    gainer10_orderflow = services["paper-orderflow-gainer10-pair"]["command"]
+    assert _option_value(
+        gainer10_orderflow,
+        "--orderflow-min-aggressive-imbalance",
+    ) == "0.40"
     assert _option_value(orderflow, "--fourth-run-id") == (
         "paper-account-10-orderflow-b2-long-candle15m-v1"
     )
@@ -155,7 +162,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     )
     live_command = services["live-strategy"]["command"]
     assert _option_value(live_command, "--entry-positive-gainer-top-count") == (
-        "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-100}"
+        "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-10}"
     )
     assert "--entry-long-only" in live_command
     assert "--no-entry-price-above-ema5" in live_command

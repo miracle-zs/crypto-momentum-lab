@@ -291,6 +291,8 @@ services:
       - research
       - --entry-positive-gainer-top-count
       - "10"
+      - --orderflow-min-aggressive-imbalance
+      - "0.40"
       - --candle-run-id
       - paper-account-16-orderflow-b8-gainer10-v1
       - --candle-entry-long-only

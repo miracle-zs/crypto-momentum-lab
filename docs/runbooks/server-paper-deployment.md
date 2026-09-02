@@ -31,8 +31,8 @@ The eight active virtual accounts are isolated by run ID and each starts with
 - `paper-account-13-orderflow-b8-long-candle15m-v1`: B8 long-only signals, entry-price limit for eight 15M bars after the first adverse close.
 - `paper-account-14-orderflow-b1-gainer100-v1`: positive Top100 gainer, long-only, B1 exit;
 - `paper-account-15-orderflow-b1-gainer100-ema-v1`: positive Top100 gainer, long-only, EMA5/EMA10 filter, B1 exit;
-- `paper-account-16-orderflow-b8-gainer10-v1`: positive Top10 gainer, long-only, B8 exit;
-- `paper-account-17-orderflow-b1-gainer10-v1`: positive Top10 gainer, long-only, B1 exit.
+- `paper-account-16-orderflow-b8-gainer10-v1`: positive Top10 gainer, long-only, minimum aggressive imbalance `0.40`, B8 exit;
+- `paper-account-17-orderflow-b1-gainer10-v1`: positive Top10 gainer, long-only, minimum aggressive imbalance `0.40`, B1 exit.
 
 For all `candle_15m` exits, the candle containing the entry is observation-only;
 the first eligible exit candle is the next complete 15-minute candle.
@@ -48,7 +48,8 @@ The B1, B2, and B8 filters are applied after the shared baseline Orderflow decis
 Rejected signals still advance the baseline strategy cooldown, so these accounts
 remain strict subsets of the same signal stream used by the historical filter
 study. Accounts 16 and 17 additionally share one positive Top10 gainer entry
-universe, which makes their B8-versus-B1 comparison synchronous.
+universe and a `0.40` minimum aggressive imbalance, which makes their
+B8-versus-B1 comparison synchronous.
 
 The standalone account 14 runner (`paper-account-14-orderflow-b1-gainer100-v1`)
 uses a `0.40` minimum aggressive imbalance and explicitly disables EMA5/EMA10

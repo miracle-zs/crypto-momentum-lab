@@ -562,6 +562,8 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
 
 def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
+    strategy_calls: list[dict[str, object]] = []
+    identity_calls: list[dict[str, object]] = []
     repository = object()
 
     def fake_run_pair(**kwargs) -> object:
@@ -588,10 +590,25 @@ def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
             ),
         ),
     )
+    def fake_build_runtime_strategy_for_cli(**kwargs) -> object:
+        strategy_calls.append(kwargs)
+        return object()
+
+    original_build_runtime_identity_for_cli = main.build_runtime_identity_for_cli
+
+    def capture_build_runtime_identity_for_cli(**kwargs):
+        identity_calls.append(kwargs)
+        return original_build_runtime_identity_for_cli(**kwargs)
+
     monkeypatch.setattr(
         main,
         "build_runtime_strategy_for_cli",
-        lambda **kwargs: object(),
+        fake_build_runtime_strategy_for_cli,
+    )
+    monkeypatch.setattr(
+        main,
+        "build_runtime_identity_for_cli",
+        capture_build_runtime_identity_for_cli,
     )
     monkeypatch.setattr(
         main,
@@ -613,6 +630,8 @@ def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
             "orderflow_impulse",
             "--entry-positive-gainer-top-count",
             "10",
+            "--orderflow-min-aggressive-imbalance",
+            "0.40",
             "--database-url",
             "postgresql+asyncpg://cml:cml@localhost:54329/cml",
             "--fixed-run-id",
@@ -658,6 +677,15 @@ def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
     assert result.exit_code == 0
     assert len(calls) == 1
     assert calls[0]["strategy"] is not None
+    assert len(strategy_calls) == 1
+    assert strategy_calls[0]["order_flow_min_aggressive_imbalance"] == Decimal(
+        "0.40"
+    )
+    assert len(identity_calls) == 7
+    assert all(
+        call["order_flow_min_aggressive_imbalance"] == Decimal("0.40")
+        for call in identity_calls
+    )
     accounts = calls[0]["accounts"]
     assert isinstance(accounts, tuple)
     assert len(accounts) == 7

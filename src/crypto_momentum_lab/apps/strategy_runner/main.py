@@ -982,6 +982,13 @@ def paper_live_pair_command(
         int,
         typer.Option("--signal-interval-seconds", min=15),
     ] = 15,
+    order_flow_min_aggressive_imbalance: Annotated[
+        str | None,
+        typer.Option(
+            "--orderflow-min-aggressive-imbalance",
+            help="Override the minimum aggressive imbalance for orderflow signals.",
+        ),
+    ] = None,
     candidate_notional: Annotated[
         str,
         typer.Option("--candidate-notional"),
@@ -1150,6 +1157,12 @@ def paper_live_pair_command(
     resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
     if not resolved_database_url:
         raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
+    order_flow_min_aggressive_imbalance_decimal = (
+        _parse_optional_non_negative_decimal(
+            order_flow_min_aggressive_imbalance,
+            "--orderflow-min-aggressive-imbalance",
+        )
+    )
     clock = _SystemClock()
     created_at = clock.now()
     source = build_postgres_paper_source(
@@ -1182,6 +1195,9 @@ def paper_live_pair_command(
             candidate_notional=candidate_notional_decimal,
             candidate_ttl_buckets=candidate_ttl_buckets,
             signal_interval_seconds=signal_interval_seconds,
+            order_flow_min_aggressive_imbalance=(
+                order_flow_min_aggressive_imbalance_decimal
+            ),
         )
     )
     candle_identity = build_runtime_identity_for_cli(
@@ -1193,6 +1209,9 @@ def paper_live_pair_command(
         candidate_notional=candidate_notional_decimal,
         candidate_ttl_buckets=candidate_ttl_buckets,
         signal_interval_seconds=signal_interval_seconds,
+        order_flow_min_aggressive_imbalance=(
+            order_flow_min_aggressive_imbalance_decimal
+        ),
     )
     third_identity = (
         None
@@ -1206,6 +1225,9 @@ def paper_live_pair_command(
             candidate_notional=candidate_notional_decimal,
             candidate_ttl_buckets=candidate_ttl_buckets,
             signal_interval_seconds=signal_interval_seconds,
+            order_flow_min_aggressive_imbalance=(
+                order_flow_min_aggressive_imbalance_decimal
+            ),
         )
     )
     fourth_identity = (
@@ -1220,6 +1242,9 @@ def paper_live_pair_command(
             candidate_notional=candidate_notional_decimal,
             candidate_ttl_buckets=candidate_ttl_buckets,
             signal_interval_seconds=signal_interval_seconds,
+            order_flow_min_aggressive_imbalance=(
+                order_flow_min_aggressive_imbalance_decimal
+            ),
         )
     )
     fifth_identity = (
@@ -1234,6 +1259,9 @@ def paper_live_pair_command(
             candidate_notional=candidate_notional_decimal,
             candidate_ttl_buckets=candidate_ttl_buckets,
             signal_interval_seconds=signal_interval_seconds,
+            order_flow_min_aggressive_imbalance=(
+                order_flow_min_aggressive_imbalance_decimal
+            ),
         )
     )
     sixth_identity = (
@@ -1248,6 +1276,9 @@ def paper_live_pair_command(
             candidate_notional=candidate_notional_decimal,
             candidate_ttl_buckets=candidate_ttl_buckets,
             signal_interval_seconds=signal_interval_seconds,
+            order_flow_min_aggressive_imbalance=(
+                order_flow_min_aggressive_imbalance_decimal
+            ),
         )
     )
     seventh_identity = (
@@ -1262,6 +1293,9 @@ def paper_live_pair_command(
             candidate_notional=candidate_notional_decimal,
             candidate_ttl_buckets=candidate_ttl_buckets,
             signal_interval_seconds=signal_interval_seconds,
+            order_flow_min_aggressive_imbalance=(
+                order_flow_min_aggressive_imbalance_decimal
+            ),
         )
     )
     strategy = build_runtime_strategy_for_cli(
@@ -1273,6 +1307,9 @@ def paper_live_pair_command(
         candidate_notional=candidate_notional_decimal,
         candidate_ttl_buckets=candidate_ttl_buckets,
         signal_interval_seconds=signal_interval_seconds,
+        order_flow_min_aggressive_imbalance=(
+            order_flow_min_aggressive_imbalance_decimal
+        ),
         identity=fixed_identity or candle_identity,
     )
     repository = build_paper_daemon_repository(resolved_database_url)
