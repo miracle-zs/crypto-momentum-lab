@@ -137,8 +137,8 @@ services:
         paper-account-13-orderflow-b8-long-candle15m-v1,
         paper-account-14-orderflow-b1-gainer100-v1,
         paper-account-15-orderflow-b1-gainer100-ema-v1,
-        paper-account-16-orderflow-b8-gainer10-v1,
-        paper-account-17-orderflow-b1-gainer10-v1
+        paper-account-16-orderflow-b8-gainer10-imbalance040-v1,
+        paper-account-17-orderflow-b1-gainer10-imbalance040-v1
       # Market-data must protect the same live account used by the live
       # strategy and execution-account services. Fail closed if it is absent.
       CML_LIVE_POSITION_ACCOUNT_LABEL: ${CML_LIVE_ACCOUNT_LABEL:?set CML_LIVE_ACCOUNT_LABEL}
@@ -281,8 +281,8 @@ services:
     environment:
       <<: *app-environment
       CML_HEALTHCHECK_RUN_IDS: >-
-        paper-account-16-orderflow-b8-gainer10-v1,
-        paper-account-17-orderflow-b1-gainer10-v1
+        paper-account-16-orderflow-b8-gainer10-imbalance040-v1,
+        paper-account-17-orderflow-b1-gainer10-imbalance040-v1
     command:
       - paper-live-pair
       - --strategy
@@ -294,14 +294,14 @@ services:
       - --orderflow-min-aggressive-imbalance
       - "0.40"
       - --candle-run-id
-      - paper-account-16-orderflow-b8-gainer10-v1
+      - paper-account-16-orderflow-b8-gainer10-imbalance040-v1
       - --candle-entry-long-only
       - --candle-grace-bars
       - "8"
       - --candle-grace-profit-pct
       - "0.0088"
       - --sixth-run-id
-      - paper-account-17-orderflow-b1-gainer10-v1
+      - paper-account-17-orderflow-b1-gainer10-imbalance040-v1
       - --sixth-entry-long-only
       - --sixth-candle-grace-bars
       - "1"
@@ -551,8 +551,8 @@ services:
         paper-account-13-orderflow-b8-long-candle15m-v1,
         paper-account-14-orderflow-b1-gainer100-v1,
         paper-account-15-orderflow-b1-gainer100-ema-v1,
-        paper-account-16-orderflow-b8-gainer10-v1,
-        paper-account-17-orderflow-b1-gainer10-v1
+        paper-account-16-orderflow-b8-gainer10-imbalance040-v1,
+        paper-account-17-orderflow-b1-gainer10-imbalance040-v1
       CML_DASHBOARD_LIVE_CASH_FLOWS_JSON: ${CML_DASHBOARD_LIVE_CASH_FLOWS_JSON:-}
       CML_DASHBOARD_COMMON_EQUITY_START_AT: "2026-08-21T02:45:00Z"
     entrypoint: ["cml-operator-dashboard"]

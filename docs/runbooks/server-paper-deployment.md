@@ -31,8 +31,12 @@ The eight active virtual accounts are isolated by run ID and each starts with
 - `paper-account-13-orderflow-b8-long-candle15m-v1`: B8 long-only signals, entry-price limit for eight 15M bars after the first adverse close.
 - `paper-account-14-orderflow-b1-gainer100-v1`: positive Top100 gainer, long-only, B1 exit;
 - `paper-account-15-orderflow-b1-gainer100-ema-v1`: positive Top100 gainer, long-only, EMA5/EMA10 filter, B1 exit;
-- `paper-account-16-orderflow-b8-gainer10-v1`: positive Top10 gainer, long-only, minimum aggressive imbalance `0.40`, B8 exit;
-- `paper-account-17-orderflow-b1-gainer10-v1`: positive Top10 gainer, long-only, minimum aggressive imbalance `0.40`, B1 exit.
+- `paper-account-16-orderflow-b8-gainer10-imbalance040-v1`: positive Top10 gainer, long-only, minimum aggressive imbalance `0.40`, B8 exit;
+- `paper-account-17-orderflow-b1-gainer10-imbalance040-v1`: positive Top10 gainer, long-only, minimum aggressive imbalance `0.40`, B1 exit.
+
+These versioned run IDs replace the previous `0.50`-threshold runs so their
+configuration hashes and performance histories remain separate. The previous
+run IDs are retained for historical analysis.
 
 For all `candle_15m` exits, the candle containing the entry is observation-only;
 the first eligible exit candle is the next complete 15-minute candle.
