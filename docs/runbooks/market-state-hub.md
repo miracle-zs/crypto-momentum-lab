@@ -39,7 +39,7 @@ REST               --> startup/periodic reconciliation
   reconnects without replaying the stale backlog, and keeps entries disabled
   until the first new batch has been processed.
 - Account events and realtime quotes use the same reader/processor split.
-  Account-event overflow is logged and coalesces to the latest event; quote
+  Account-event overflow is logged and forces a REST reconciliation; quote
   delivery keeps the latest pending value per symbol. Both are acceleration
   paths with PostgreSQL reconciliation as the recovery adapter.
 - The Hub keeps a bounded per-environment replay window. Reconnects carry the
@@ -60,10 +60,18 @@ REST               --> startup/periodic reconciliation
   the warmup state twice.
 - PostgreSQL persistence is best effort relative to the realtime fan-out: a
   slow database write cannot delay publishing a closed batch to live.
-- Account WebSocket events are published only after the merged account
-  observation is persisted. The live account lane can invalidate its context,
-  reconcile the matching order, and evaluate reduce-only exits without waiting
-  for the next market-state iteration.
+- The account WebSocket reader never waits for PostgreSQL. The ordered account
+  processor applies each event to the in-memory snapshot, while a separate
+  ordered worker persists the immutable snapshot. The live Hub notification is
+  emitted after that durable snapshot is visible, so the live account lane can
+  invalidate its context, reconcile the matching order, and evaluate
+  reduce-only exits without reading a stale account projection.
+- The account persistence queue is bounded. A queue overflow, processor
+  failure, or persistence failure disables account-event acceptance, requests a
+  stream reconnect, drains/skips the uncommitted backlog, and performs an
+  authoritative REST reconciliation before accepting events again. PostgreSQL
+  is not in the WebSocket receive path, but remains the durable boundary for
+  live account-event fan-out and the recovery sink.
 - The account lane never calls the entry strategy. It can only reconcile order
   state and submit reduce-only exit candidates.
 

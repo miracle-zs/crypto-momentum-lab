@@ -67,6 +67,9 @@ class BinanceUserDataStreamMetrics:
     last_event_received_at: datetime | None
     last_event_at: datetime | None
     last_event_type: str | None
+    pending_event_count: int = 0
+    event_queue_high_watermark: int = 0
+    event_queue_overflow_count: int = 0
 
 
 def parse_user_data_event(
@@ -152,6 +155,7 @@ class BinanceUsdMUserDataStream:
         open_timeout_seconds: float = 15.0,
         ping_interval_seconds: float = 20.0,
         ping_timeout_seconds: float = 20.0,
+        event_queue_size: int = 256,
     ) -> None:
         if not websocket_url.strip():
             raise ValueError("websocket_url must not be empty")
@@ -163,6 +167,8 @@ class BinanceUsdMUserDataStream:
             raise ValueError("open_timeout_seconds must be positive")
         if ping_interval_seconds <= 0 or ping_timeout_seconds <= 0:
             raise ValueError("ping intervals must be positive")
+        if event_queue_size <= 0:
+            raise ValueError("event_queue_size must be positive")
         self._listen_key_client = listen_key_client
         self._on_event = on_event
         self._websocket_url = websocket_url.rstrip("/")
@@ -171,6 +177,7 @@ class BinanceUsdMUserDataStream:
         self._open_timeout_seconds = open_timeout_seconds
         self._ping_interval_seconds = ping_interval_seconds
         self._ping_timeout_seconds = ping_timeout_seconds
+        self._event_queue_size = event_queue_size
         self._stopping = False
         self._connection: ClientConnection | None = None
         self._connection_lock = asyncio.Lock()
@@ -186,6 +193,9 @@ class BinanceUsdMUserDataStream:
         self._last_event_received_at: datetime | None = None
         self._last_event_at: datetime | None = None
         self._last_event_type: str | None = None
+        self._pending_event_count = 0
+        self._event_queue_high_watermark = 0
+        self._event_queue_overflow_count = 0
 
     @property
     def metrics(self) -> BinanceUserDataStreamMetrics:
@@ -201,6 +211,9 @@ class BinanceUsdMUserDataStream:
             last_event_received_at=self._last_event_received_at,
             last_event_at=self._last_event_at,
             last_event_type=self._last_event_type,
+            pending_event_count=self._pending_event_count,
+            event_queue_high_watermark=self._event_queue_high_watermark,
+            event_queue_overflow_count=self._event_queue_overflow_count,
         )
 
     def set_handler(self, on_event: UserDataEventSink) -> None:
@@ -287,6 +300,11 @@ class BinanceUsdMUserDataStream:
         keepalive_task = asyncio.create_task(
             self._keepalive_loop(listen_key, keepalive_failed)
         )
+        event_queue: asyncio.Queue[BinanceUserDataEvent] = asyncio.Queue(
+            maxsize=self._event_queue_size
+        )
+        dispatcher_task: asyncio.Task[None] | None = None
+        drain_dispatcher = True
         try:
             uri = f"{self._websocket_url}/{quote(listen_key, safe='')}"
             async with connect(
@@ -300,6 +318,10 @@ class BinanceUsdMUserDataStream:
                     self._connection = connection
                     self._connection_count += 1
                     self._last_connected_at = datetime.now(tz=UTC)
+                dispatcher_task = asyncio.create_task(
+                    self._dispatch_events(event_queue),
+                    name="binance-user-data-event-dispatcher",
+                )
                 log.info("binance_user_data_stream_connected")
                 while not self._stopping:
                     if keepalive_failed.is_set():
@@ -332,19 +354,37 @@ class BinanceUsdMUserDataStream:
                         fill_key = _fill_event_key(event)
                         if fill_key is not None:
                             self._remember_fill_event_key(fill_key)
-                    if self._on_event is not None:
-                        try:
-                            await self._on_event(event)
-                        except Exception as error:
-                            log.exception(
-                                "binance_user_data_event_handler_failed",
-                                event_type=event.event_type,
-                                reason=error.__class__.__name__,
-                                error=str(error),
-                            )
+                    try:
+                        event_queue.put_nowait(event)
+                    except asyncio.QueueFull:
+                        drain_dispatcher = False
+                        self._event_queue_overflow_count += 1
+                        log.error(
+                            "binance_user_data_event_queue_overflow",
+                            queue_size=self._event_queue_size,
+                            event_type=event.event_type,
+                            event_id=event.event_id,
+                            overflow_count=self._event_queue_overflow_count,
+                        )
+                        return "event_queue_overflow"
+                    self._pending_event_count = event_queue.qsize()
+                    self._event_queue_high_watermark = max(
+                        self._event_queue_high_watermark,
+                        self._pending_event_count,
+                    )
                     if event.event_type == "listenKeyExpired":
                         return "listen_key_expired"
+        except asyncio.CancelledError:
+            drain_dispatcher = False
+            raise
         finally:
+            if drain_dispatcher and dispatcher_task is not None:
+                await event_queue.join()
+            if dispatcher_task is not None and not dispatcher_task.done():
+                dispatcher_task.cancel()
+            if dispatcher_task is not None:
+                await asyncio.gather(dispatcher_task, return_exceptions=True)
+            self._pending_event_count = 0
             keepalive_task.cancel()
             try:
                 await keepalive_task
@@ -353,6 +393,28 @@ class BinanceUsdMUserDataStream:
             async with self._connection_lock:
                 self._connection = None
         return "closed"
+
+    async def _dispatch_events(
+        self,
+        event_queue: asyncio.Queue[BinanceUserDataEvent],
+    ) -> None:
+        while True:
+            event = await event_queue.get()
+            self._pending_event_count = event_queue.qsize()
+            try:
+                if self._on_event is not None:
+                    try:
+                        await self._on_event(event)
+                    except Exception as error:
+                        log.exception(
+                            "binance_user_data_event_handler_failed",
+                            event_type=event.event_type,
+                            reason=error.__class__.__name__,
+                            error=str(error),
+                        )
+            finally:
+                event_queue.task_done()
+                self._pending_event_count = event_queue.qsize()
 
     def _remember_fill_event_key(self, key: tuple[str, str]) -> None:
         if key in self._fill_event_key_set:

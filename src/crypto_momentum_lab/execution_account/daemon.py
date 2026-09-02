@@ -3,11 +3,14 @@ import inspect
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 import structlog
 
-from crypto_momentum_lab.domain.account import AccountFillEvent
+from crypto_momentum_lab.domain.account import (
+    AccountFillEvent,
+    ExecutionAccountStatus,
+)
 from crypto_momentum_lab.execution_account.binance.user_data import (
     BinanceUserDataEvent,
     UserDataEventSink,
@@ -19,9 +22,12 @@ from crypto_momentum_lab.execution_account.sync import (
 )
 from crypto_momentum_lab.execution_account.user_data_sync import (
     AccountUserDataState,
+    AccountUserDataUpdate,
 )
 
 log = structlog.get_logger(__name__)
+
+_QueueItem = TypeVar("_QueueItem")
 
 
 class AccountSyncCycle(Protocol):
@@ -180,6 +186,10 @@ UserDataAccountPersistedCallback = Callable[
     [BinanceUserDataEvent, ExecutionAccountSyncResult],
     None,
 ]
+UserDataAccountAppliedCallback = Callable[
+    [BinanceUserDataEvent, ExecutionAccountSyncResult],
+    None,
+]
 
 
 class UserDataAccountEventStream(Protocol):
@@ -207,6 +217,8 @@ class UserDataAccountSyncConfig:
     heartbeat_interval_seconds: float = 30.0
     failure_backoff_initial_seconds: float = 10.0
     failure_backoff_max_seconds: float = 300.0
+    event_queue_size: int = 256
+    persistence_queue_size: int = 256
 
     def __post_init__(self) -> None:
         if self.rest_reconciliation_interval_seconds <= 0:
@@ -227,6 +239,17 @@ class UserDataAccountSyncConfig:
                 "failure_backoff_max_seconds must not be below "
                 "failure_backoff_initial_seconds"
             )
+        if self.event_queue_size <= 0:
+            raise ValueError("event_queue_size must be positive")
+        if self.persistence_queue_size <= 0:
+            raise ValueError("persistence_queue_size must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingUserDataPersistence:
+    snapshot: AccountSnapshot
+    event: BinanceUserDataEvent
+    fills: tuple[AccountFillEvent, ...]
 
 
 class UserDataAccountSyncDaemon:
@@ -241,6 +264,7 @@ class UserDataAccountSyncDaemon:
         clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         on_error: Callable[[Exception], None] | None = None,
+        on_event_applied: UserDataAccountAppliedCallback | None = None,
         on_persisted: UserDataAccountPersistedCallback | None = None,
     ) -> None:
         self._service = service
@@ -250,17 +274,29 @@ class UserDataAccountSyncDaemon:
         self._sleep = sleep
         self._on_error = on_error
         self._on_persisted = on_persisted
+        self._on_event_applied = on_event_applied
         self._state: AccountUserDataState | None = None
         self._accept_events = False
         self._state_lock = asyncio.Lock()
         self._rest_sync_lock = asyncio.Lock()
         self._pending_missing_fill_keys: dict[FillKey, datetime] = {}
+        self._event_queue: asyncio.Queue[BinanceUserDataEvent] | None = None
+        self._persistence_queue: asyncio.Queue[
+            _PendingUserDataPersistence | None
+        ] | None = None
+        self._event_worker_task: asyncio.Task[None] | None = None
+        self._persistence_worker_task: asyncio.Task[None] | None = None
+        self._pipeline_recovery_event = asyncio.Event()
+        self._pipeline_recovery_reason: str | None = None
+        self._pipeline_recovery_origin_event: BinanceUserDataEvent | None = None
+        self._observed_stream_queue_overflow_count = 0
 
     async def run(self) -> None:
         stream_task: asyncio.Task[None] | None = None
         heartbeat_task: asyncio.Future[None] | None = None
         reconciliation_task: asyncio.Future[None] | None = None
         snapshot_task: asyncio.Future[None] | None = None
+        recovery_task: asyncio.Task[None] | None = None
         consecutive_failures = 0
         try:
             while True:
@@ -272,8 +308,12 @@ class UserDataAccountSyncDaemon:
                             await self._sleep_for_failure(consecutive_failures, None)
                             continue
                         consecutive_failures = 0
+                        self._start_pipeline()
                         self._stream.set_handler(self._on_event)
-                        stream_task = asyncio.create_task(self._stream.run())
+                        stream_task = asyncio.create_task(
+                            self._stream.run(),
+                            name="binance-user-data-stream",
+                        )
                     except Exception as error:
                         consecutive_failures += 1
                         self._report_error(error)
@@ -283,10 +323,14 @@ class UserDataAccountSyncDaemon:
                         )
                         continue
 
+                self._start_pipeline()
                 if stream_task is None or stream_task.done():
                     if stream_task is not None:
                         self._observe_stream_failure(stream_task)
-                    stream_task = asyncio.create_task(self._stream.run())
+                    stream_task = asyncio.create_task(
+                        self._stream.run(),
+                        name="binance-user-data-stream",
+                    )
 
                 if heartbeat_task is None or heartbeat_task.done():
                     heartbeat_task = asyncio.ensure_future(
@@ -302,15 +346,75 @@ class UserDataAccountSyncDaemon:
                     snapshot_task = asyncio.ensure_future(
                         self._sleep(self._config.snapshot_interval_seconds)
                     )
+                if recovery_task is None or recovery_task.done():
+                    recovery_task = asyncio.create_task(
+                        self._wait_for_pipeline_recovery(),
+                        name="binance-user-data-pipeline-recovery-waiter",
+                    )
+                wait_tasks: set[asyncio.Future[None]] = {
+                    heartbeat_task,
+                    reconciliation_task,
+                    snapshot_task,
+                    stream_task,
+                    recovery_task,
+                }
+                if self._event_worker_task is not None:
+                    wait_tasks.add(self._event_worker_task)
+                if self._persistence_worker_task is not None:
+                    wait_tasks.add(self._persistence_worker_task)
                 done, _ = await asyncio.wait(
-                    {
-                        heartbeat_task,
-                        reconciliation_task,
-                        snapshot_task,
-                        stream_task,
-                    },
+                    wait_tasks,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                if recovery_task in done:
+                    recovery_task = None
+                    if heartbeat_task is not None:
+                        await _cancel_task(heartbeat_task)
+                    if reconciliation_task is not None:
+                        await _cancel_task(reconciliation_task)
+                    if snapshot_task is not None:
+                        await _cancel_task(snapshot_task)
+                    heartbeat_task = None
+                    reconciliation_task = None
+                    snapshot_task = None
+                    try:
+                        result = await self._recover_pipeline()
+                        if _is_ready_result(result):
+                            consecutive_failures = 0
+                        else:
+                            consecutive_failures += 1
+                            await self._sleep_for_failure(
+                                consecutive_failures,
+                                None,
+                            )
+                    except Exception as error:
+                        consecutive_failures += 1
+                        if self._event_queue is not None:
+                            self._request_pipeline_recovery(
+                                f"reconciliation_failed:{type(error).__name__}"
+                            )
+                        self._report_error(error)
+                        await self._sleep_for_failure(
+                            consecutive_failures,
+                            _retry_after_seconds(error),
+                        )
+                    continue
+                if self._event_worker_task in done:
+                    self._observe_worker_failure(
+                        self._event_worker_task,
+                        worker_name="event",
+                    )
+                    self._event_worker_task = None
+                    self._request_pipeline_recovery("event_worker_stopped")
+                    continue
+                if self._persistence_worker_task in done:
+                    self._observe_worker_failure(
+                        self._persistence_worker_task,
+                        worker_name="persistence",
+                    )
+                    self._persistence_worker_task = None
+                    self._request_pipeline_recovery("persistence_worker_stopped")
+                    continue
                 if stream_task in done:
                     if heartbeat_task is not None:
                         await _cancel_task(heartbeat_task)
@@ -350,8 +454,13 @@ class UserDataAccountSyncDaemon:
                     try:
                         await self._snapshot()
                     except Exception as error:
+                        if self._event_queue is not None:
+                            self._request_pipeline_recovery(
+                                f"snapshot_failed:{type(error).__name__}"
+                            )
                         self._report_error(error)
         finally:
+            self._accept_events = False
             await self._stream.stop()
             if heartbeat_task is not None:
                 await _cancel_task(heartbeat_task)
@@ -359,6 +468,9 @@ class UserDataAccountSyncDaemon:
                 await _cancel_task(reconciliation_task)
             if snapshot_task is not None:
                 await _cancel_task(snapshot_task)
+            if recovery_task is not None:
+                await _cancel_task(recovery_task)
+            await self._stop_pipeline()
             if stream_task is not None and not stream_task.done():
                 stream_task.cancel()
                 try:
@@ -367,6 +479,21 @@ class UserDataAccountSyncDaemon:
                     pass
 
     async def _on_event(self, event: BinanceUserDataEvent) -> None:
+        event_queue = self._event_queue
+        if event_queue is None:
+            await self._process_event(event)
+            return
+        if not self._accept_events or self._state is None:
+            return
+        try:
+            event_queue.put_nowait(event)
+        except asyncio.QueueFull:
+            self._request_pipeline_recovery(
+                "event_queue_overflow",
+                origin_event=event,
+            )
+
+    async def _process_event(self, event: BinanceUserDataEvent) -> None:
         needs_reconciliation = False
         try:
             async with self._state_lock:
@@ -374,38 +501,311 @@ class UserDataAccountSyncDaemon:
                     return
                 update = self._state.apply(event)
                 if update.needs_reconciliation:
-                    needs_reconciliation = True
+                    self._accept_events = False
+                    needs_reconciliation = self._event_queue is None
+                    if not needs_reconciliation:
+                        self._request_pipeline_recovery(
+                            update.reason or "user_data_event_requires_reconciliation",
+                            origin_event=event,
+                        )
                 elif update.changed:
-                    result = await self._service.persist_user_data_event(
-                        snapshot=update.snapshot,
-                        event=event,
-                        fills=update.fills,
-                    )
-                    if self._on_persisted is not None:
-                        self._on_persisted(event, result)
+                    applied_result = _event_applied_result(update)
+                    persistence_queue = self._persistence_queue
+                    if persistence_queue is not None:
+                        if persistence_queue.full():
+                            self._accept_events = False
+                            self._request_pipeline_recovery(
+                                "persistence_queue_overflow",
+                                origin_event=event,
+                            )
+                            return
+                        self._notify_event_applied(event, applied_result)
+                        try:
+                            persistence_queue.put_nowait(
+                                _PendingUserDataPersistence(
+                                    snapshot=update.snapshot,
+                                    event=event,
+                                    fills=update.fills,
+                                )
+                            )
+                        except asyncio.QueueFull:
+                            self._accept_events = False
+                            self._request_pipeline_recovery(
+                                "persistence_queue_overflow",
+                                origin_event=event,
+                            )
+                    else:
+                        self._notify_event_applied(event, applied_result)
+                        result = await self._service.persist_user_data_event(
+                            snapshot=update.snapshot,
+                            event=event,
+                            fills=update.fills,
+                        )
+                        self._notify_persisted(event, result)
+        except asyncio.CancelledError:
+            raise
         except Exception as error:
             self._report_error(error)
-            needs_reconciliation = True
+            if self._event_queue is None:
+                needs_reconciliation = True
+            else:
+                self._request_pipeline_recovery(
+                    f"event_processing_failed:{type(error).__name__}",
+                    origin_event=event,
+                )
         if needs_reconciliation:
             try:
                 result = await self._reconcile(include_fills=True)
                 if self._on_persisted is not None and _is_ready_result(result):
-                    self._on_persisted(event, result)
+                    self._notify_persisted(event, result)
             except Exception as error:
                 self._report_error(error)
 
+    async def _event_worker(
+        self,
+        queue: asyncio.Queue[BinanceUserDataEvent],
+    ) -> None:
+        while True:
+            event = await queue.get()
+            try:
+                await self._process_event(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._report_error(error)
+                self._request_pipeline_recovery(
+                    f"event_worker_failed:{type(error).__name__}",
+                    origin_event=event,
+                )
+            finally:
+                queue.task_done()
+
+    async def _persistence_worker(
+        self,
+        queue: asyncio.Queue[_PendingUserDataPersistence | None],
+    ) -> None:
+        while True:
+            pending = await queue.get()
+            try:
+                if pending is None:
+                    return
+                if self._pipeline_recovery_event.is_set():
+                    continue
+                async with self._rest_sync_lock:
+                    result = await self._service.persist_user_data_event(
+                        snapshot=pending.snapshot,
+                        event=pending.event,
+                        fills=pending.fills,
+                    )
+                self._notify_persisted(pending.event, result)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._report_error(error)
+                self._request_pipeline_recovery(
+                    f"event_persistence_failed:{type(error).__name__}",
+                    origin_event=(None if pending is None else pending.event),
+                )
+            finally:
+                queue.task_done()
+
+    def _start_pipeline(self) -> None:
+        if self._event_queue is None:
+            self._event_queue = asyncio.Queue(
+                maxsize=self._config.event_queue_size
+            )
+        if self._persistence_queue is None:
+            self._persistence_queue = asyncio.Queue(
+                maxsize=self._config.persistence_queue_size
+            )
+        if self._event_worker_task is None:
+            self._event_worker_task = asyncio.create_task(
+                self._event_worker(self._event_queue),
+                name="binance-user-data-event-worker",
+            )
+        if self._persistence_worker_task is None:
+            self._persistence_worker_task = asyncio.create_task(
+                self._persistence_worker(self._persistence_queue),
+                name="binance-user-data-persistence-worker",
+            )
+
+    async def _stop_pipeline(self) -> None:
+        event_queue = self._event_queue
+        persistence_queue = self._persistence_queue
+        if event_queue is not None:
+            await self._wait_for_queue_drain(event_queue, "event")
+        if persistence_queue is not None:
+            await self._wait_for_queue_drain(persistence_queue, "persistence")
+        tasks = (
+            self._event_worker_task,
+            self._persistence_worker_task,
+        )
+        for task in tasks:
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in tasks if task is not None),
+            return_exceptions=True,
+        )
+        self._event_worker_task = None
+        self._persistence_worker_task = None
+        self._event_queue = None
+        self._persistence_queue = None
+
+    async def _recover_pipeline(self) -> ExecutionAccountSyncResult:
+        self._accept_events = False
+        reason = self._pipeline_recovery_reason or "unspecified"
+        request_reconnect = getattr(self._stream, "request_reconnect", None)
+        if callable(request_reconnect):
+            try:
+                reconnect_result = request_reconnect(
+                    f"account_event_pipeline_recovery:{reason}"
+                )
+                if inspect.isawaitable(reconnect_result):
+                    await reconnect_result
+            except Exception as error:
+                self._report_error(error)
+        if self._event_queue is not None and not await self._wait_for_queue_drain(
+            self._event_queue,
+            "event recovery",
+        ):
+            raise TimeoutError("account event queue did not drain for recovery")
+        if (
+            self._persistence_queue is not None
+            and not await self._wait_for_queue_drain(
+                self._persistence_queue,
+                "persistence recovery",
+            )
+        ):
+            raise TimeoutError(
+                "account persistence queue did not drain for recovery"
+            )
+        result = await self._reconcile(
+            include_fills=True,
+            wait_for_pipeline=False,
+        )
+        if _is_ready_result(result):
+            origin_event = self._pipeline_recovery_origin_event
+            async with self._state_lock:
+                self._pipeline_recovery_reason = None
+                self._pipeline_recovery_origin_event = None
+                self._pipeline_recovery_event.clear()
+                self._accept_events = True
+            if origin_event is not None and self._on_persisted is not None:
+                self._notify_persisted(origin_event, result)
+        return result
+
+    async def _wait_for_queue_drain(
+        self,
+        queue: asyncio.Queue[_QueueItem],
+        queue_name: str,
+    ) -> bool:
+        try:
+            await asyncio.wait_for(queue.join(), timeout=30.0)
+        except TimeoutError:
+            log.error(
+                "binance_user_data_queue_drain_timed_out",
+                queue=queue_name,
+                queue_size=queue.qsize(),
+            )
+            return False
+        return True
+
+    async def _wait_for_pipeline_recovery(self) -> None:
+        await self._pipeline_recovery_event.wait()
+
+    def _notify_event_applied(
+        self,
+        event: BinanceUserDataEvent,
+        result: ExecutionAccountSyncResult,
+    ) -> None:
+        if self._on_event_applied is None:
+            return
+        try:
+            self._on_event_applied(event, result)
+        except Exception as error:
+            self._report_error(error)
+
+    def _notify_persisted(
+        self,
+        event: BinanceUserDataEvent,
+        result: ExecutionAccountSyncResult,
+    ) -> None:
+        if self._on_persisted is None:
+            return
+        try:
+            self._on_persisted(event, result)
+        except Exception as error:
+            self._report_error(error)
+
+    def _request_pipeline_recovery(
+        self,
+        reason: str,
+        *,
+        origin_event: BinanceUserDataEvent | None = None,
+    ) -> None:
+        self._accept_events = False
+        if self._pipeline_recovery_reason is None:
+            self._pipeline_recovery_reason = reason
+        if (
+            origin_event is not None
+            and self._pipeline_recovery_origin_event is None
+        ):
+            self._pipeline_recovery_origin_event = origin_event
+        self._pipeline_recovery_event.set()
+        log.error(
+            "binance_user_data_pipeline_recovery_requested",
+            reason=reason,
+            queue_size=(
+                None
+                if self._event_queue is None
+                else self._event_queue.qsize()
+            ),
+            persistence_queue_size=(
+                None
+                if self._persistence_queue is None
+                else self._persistence_queue.qsize()
+            ),
+        )
+
     async def _publish_heartbeat(self) -> None:
+        self._check_stream_queue_health()
         async with self._state_lock:
             if self._accept_events and self._state is not None:
-                await self._service.publish_user_data_heartbeat(
-                    observed_at=self._now(),
-                )
+                async with self._rest_sync_lock:
+                    await self._service.publish_user_data_heartbeat(
+                        observed_at=self._now(),
+                    )
 
     async def _reconcile(
         self,
         *,
         include_fills: bool,
+        wait_for_pipeline: bool = True,
     ) -> ExecutionAccountSyncResult:
+        if wait_for_pipeline and self._event_queue is not None:
+            async with self._state_lock:
+                self._accept_events = False
+            if not await self._wait_for_queue_drain(
+                self._event_queue,
+                "event reconciliation",
+            ):
+                self._request_pipeline_recovery("event_queue_drain_timeout")
+                raise TimeoutError(
+                    "account event queue did not drain before reconciliation"
+                )
+            if self._persistence_queue is not None and not await (
+                self._wait_for_queue_drain(
+                    self._persistence_queue,
+                    "persistence reconciliation",
+                )
+            ):
+                self._request_pipeline_recovery(
+                    "persistence_queue_drain_timeout"
+                )
+                raise TimeoutError(
+                    "account persistence queue did not drain before reconciliation"
+                )
         async with self._state_lock:
             async with self._rest_sync_lock:
                 result = await self._service.sync_once(
@@ -419,15 +819,41 @@ class UserDataAccountSyncDaemon:
                     self._state = AccountUserDataState(snapshot)
                 else:
                     self._state.replace_snapshot(snapshot)
-                self._accept_events = True
+                self._accept_events = not self._pipeline_recovery_event.is_set()
             else:
                 self._accept_events = False
         await self._inspect_reconciliation(result)
         return result
 
     async def _snapshot(self) -> None:
-        async with self._rest_sync_lock:
-            await self._service.snapshot_once(observed_at=self._now())
+        pipeline_active = self._event_queue is not None
+        if pipeline_active:
+            async with self._state_lock:
+                self._accept_events = False
+            if self._event_queue is not None:
+                if not await self._wait_for_queue_drain(
+                    self._event_queue,
+                    "event snapshot",
+                ):
+                    self._request_pipeline_recovery("event_queue_drain_timeout")
+                    return
+            if self._persistence_queue is not None:
+                if not await self._wait_for_queue_drain(
+                    self._persistence_queue,
+                    "persistence snapshot",
+                ):
+                    self._request_pipeline_recovery(
+                        "persistence_queue_drain_timeout"
+                    )
+                    return
+        async with self._state_lock:
+            async with self._rest_sync_lock:
+                await self._service.snapshot_once(observed_at=self._now())
+            if pipeline_active:
+                self._accept_events = (
+                    self._state is not None
+                    and not self._pipeline_recovery_event.is_set()
+                )
 
     async def _inspect_reconciliation(
         self,
@@ -435,6 +861,7 @@ class UserDataAccountSyncDaemon:
     ) -> None:
         if not _is_ready_result(result):
             return
+        self._check_stream_queue_health()
         metrics = getattr(self._stream, "metrics", None)
         stream_event_count = _metric_int(metrics, "parsed_event_count")
         stream_fill_event_count = _metric_int(metrics, "fill_event_count")
@@ -507,12 +934,30 @@ class UserDataAccountSyncDaemon:
             rest_new_fill_count=len(result.new_fill_keys),
             rest_fill_counts_by_symbol=dict(result.fill_count_by_symbol),
             pending_fill_count=len(self._pending_missing_fill_keys),
+            event_queue_size=(
+                None if self._event_queue is None else self._event_queue.qsize()
+            ),
+            persistence_queue_size=(
+                None
+                if self._persistence_queue is None
+                else self._persistence_queue.qsize()
+            ),
             last_event_received_at=(
                 None
                 if not isinstance(last_event_received_at, datetime)
                 else last_event_received_at.isoformat()
             ),
         )
+
+    def _check_stream_queue_health(self) -> None:
+        metrics = getattr(self._stream, "metrics", None)
+        overflow_count = _metric_int(metrics, "event_queue_overflow_count")
+        if overflow_count is None:
+            return
+        if overflow_count <= self._observed_stream_queue_overflow_count:
+            return
+        self._observed_stream_queue_overflow_count = overflow_count
+        self._request_pipeline_recovery("stream_event_queue_overflow")
 
     async def _sleep_for_failure(
         self,
@@ -540,6 +985,26 @@ class UserDataAccountSyncDaemon:
     def _report_error(self, error: Exception) -> None:
         if self._on_error is not None:
             self._on_error(error)
+
+    def _observe_worker_failure(
+        self,
+        task: asyncio.Task[None] | None,
+        *,
+        worker_name: str,
+    ) -> None:
+        if task is None:
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            error = RuntimeError(f"{worker_name} worker was cancelled")
+        if error is None:
+            error = RuntimeError(f"{worker_name} worker stopped")
+        elif not isinstance(error, Exception):
+            error = RuntimeError(
+                f"{worker_name} worker failed with {type(error).__name__}"
+            )
+        self._report_error(error)
 
     def _observe_stream_failure(self, task: asyncio.Task[None]) -> None:
         try:
@@ -609,3 +1074,28 @@ async def _cancel_task(task: asyncio.Future[None]) -> None:
         await task
     except asyncio.CancelledError:
         pass
+
+
+def _event_applied_result(
+    update: AccountUserDataUpdate,
+) -> ExecutionAccountSyncResult:
+    event = update.event
+    fills = update.fills
+    return ExecutionAccountSyncResult(
+        status=ExecutionAccountStatus.READY_READONLY,
+        reconciliation_id=f"account-event:{event.event_id}",
+        mismatch_count=0,
+        snapshot=update.snapshot,
+        fill_count=len(fills),
+        new_fill_keys=frozenset((fill.symbol, fill.trade_id) for fill in fills),
+        fill_count_by_symbol=_fill_counts_by_symbol(fills),
+    )
+
+
+def _fill_counts_by_symbol(
+    fills: tuple[AccountFillEvent, ...],
+) -> tuple[tuple[str, int], ...]:
+    counts: dict[str, int] = {}
+    for fill in fills:
+        counts[fill.symbol] = counts.get(fill.symbol, 0) + 1
+    return tuple(sorted(counts.items()))

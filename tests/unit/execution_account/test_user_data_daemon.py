@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -124,6 +125,159 @@ async def test_user_data_daemon_persists_events_and_reconciles_unknown_state() -
 
     await daemon._publish_heartbeat()
     assert len(service.heartbeats) == 1
+
+
+class BlockingPersistService(FakeService):
+    def __init__(self, snapshot: AccountSnapshot) -> None:
+        super().__init__(snapshot)
+        self.persist_started = asyncio.Event()
+        self.release_persist = asyncio.Event()
+
+    async def persist_user_data_event(self, *, snapshot, event, fills=()):
+        self.persist_started.set()
+        await self.release_persist.wait()
+        return await super().persist_user_data_event(
+            snapshot=snapshot,
+            event=event,
+            fills=fills,
+        )
+
+
+class FailingPersistService(FakeService):
+    def __init__(self, snapshot: AccountSnapshot) -> None:
+        super().__init__(snapshot)
+        self.fail_next_persist = True
+
+    async def persist_user_data_event(self, *, snapshot, event, fills=()):
+        if self.fail_next_persist:
+            self.fail_next_persist = False
+            raise RuntimeError("persistence unavailable")
+        return await super().persist_user_data_event(
+            snapshot=snapshot,
+            event=event,
+            fills=fills,
+        )
+
+
+async def test_daemon_notifies_live_consumers_before_slow_persistence() -> None:
+    service = BlockingPersistService(_snapshot())
+    applied = []
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=FakeStream(),
+        config=UserDataAccountSyncConfig(),
+        on_event_applied=lambda event, result: applied.append((event, result)),
+    )
+    await daemon._reconcile(include_fills=True)
+
+    event = parse_user_data_event(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "E": 1783123201000,
+            "a": {
+                "B": [{"a": "USDT", "wb": "101", "cw": "81"}],
+                "P": [],
+            },
+        },
+        received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+    )
+    task = asyncio.create_task(daemon._on_event(event))
+    await service.persist_started.wait()
+
+    assert len(applied) == 1
+    assert applied[0][0] is event
+    assert not task.done()
+
+    service.release_persist.set()
+    await task
+
+
+async def test_daemon_returns_after_apply_while_persistence_runs_in_background(
+) -> None:
+    service = BlockingPersistService(_snapshot())
+    applied = []
+    applied_event = asyncio.Event()
+
+    def on_event_applied(event, result) -> None:
+        applied.append((event, result))
+        applied_event.set()
+
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=FakeStream(),
+        config=UserDataAccountSyncConfig(),
+        on_event_applied=on_event_applied,
+    )
+    await daemon._reconcile(include_fills=True)
+    daemon._start_pipeline()
+    event = parse_user_data_event(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "E": 1783123201000,
+            "a": {
+                "B": [{"a": "USDT", "wb": "101", "cw": "81"}],
+                "P": [],
+            },
+        },
+        received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+    )
+    try:
+        task = asyncio.create_task(daemon._on_event(event))
+        await task
+        await asyncio.wait_for(applied_event.wait(), timeout=1)
+        await service.persist_started.wait()
+
+        assert task.done()
+        assert len(applied) == 1
+        assert applied[0][0] is event
+        assert service.persisted == []
+
+        service.release_persist.set()
+        assert daemon._persistence_queue is not None
+        await daemon._persistence_queue.join()
+        assert len(service.persisted) == 1
+    finally:
+        service.release_persist.set()
+        await daemon._stop_pipeline()
+
+
+async def test_persistence_failure_fails_closed_and_recovers_from_rest() -> None:
+    service = FailingPersistService(_snapshot())
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=FakeStream(),
+        config=UserDataAccountSyncConfig(),
+    )
+    await daemon._reconcile(include_fills=True)
+    daemon._start_pipeline()
+    event = parse_user_data_event(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "E": 1783123201000,
+            "a": {
+                "B": [{"a": "USDT", "wb": "101", "cw": "81"}],
+                "P": [],
+            },
+        },
+        received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+    )
+    try:
+        await daemon._on_event(event)
+        assert daemon._event_queue is not None
+        assert daemon._persistence_queue is not None
+        await daemon._event_queue.join()
+        await daemon._persistence_queue.join()
+        assert daemon._pipeline_recovery_event.is_set()
+        assert daemon._accept_events is False
+
+        result = await daemon._recover_pipeline()
+
+        assert result.status is ExecutionAccountStatus.READY_READONLY
+        assert service.sync_calls == 2
+        assert daemon._accept_events is True
+        assert not daemon._pipeline_recovery_event.is_set()
+    finally:
+        await daemon._stop_pipeline()
 
 
 def _snapshot() -> AccountSnapshot:
