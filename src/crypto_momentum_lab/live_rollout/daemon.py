@@ -52,6 +52,7 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
     PreparedOrderSubmission,
 )
+from crypto_momentum_lab.execution_account.sync import AccountSnapshot
 from crypto_momentum_lab.live_rollout.checkpoint_writer import CheckpointWriter
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     ClosedCandle15mEvent,
@@ -197,6 +198,8 @@ class LiveDaemonRuntimeContext:
     managed_positions: tuple[ManagedLivePosition, ...] = ()
     unmanaged_position_symbols: frozenset[str] = frozenset()
     unresolved_orders: tuple[PersistedExchangeOrder, ...] = ()
+    account_snapshot: AccountSnapshot | None = None
+    account_snapshot_version: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2319,6 +2322,7 @@ def _live_signal_account_context(
         "context_available": True,
         "account_state": _enum_text(context.account_state),
         "account_observed_at": context.account_observed_at,
+        "account_snapshot_version": context.account_snapshot_version,
         "realized_pnl": context.realized_pnl,
         "unrealized_pnl": context.unrealized_pnl,
         "gross_exposure": context.gross_exposure,

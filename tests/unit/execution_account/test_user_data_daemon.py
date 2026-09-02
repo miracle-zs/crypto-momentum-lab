@@ -127,6 +127,23 @@ async def test_user_data_daemon_persists_events_and_reconciles_unknown_state() -
     assert len(service.heartbeats) == 1
 
 
+async def test_user_data_daemon_publishes_initial_full_snapshot() -> None:
+    snapshot = _snapshot()
+    service = FakeService(snapshot)
+    published: list[ExecutionAccountSyncResult] = []
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=FakeStream(),
+        config=UserDataAccountSyncConfig(),
+        on_snapshot=published.append,
+    )
+
+    result = await daemon._reconcile(include_fills=True)
+
+    assert published == [result]
+    assert published[0].snapshot == snapshot
+
+
 class BlockingPersistService(FakeService):
     def __init__(self, snapshot: AccountSnapshot) -> None:
         super().__init__(snapshot)

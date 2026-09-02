@@ -3,6 +3,10 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
+from crypto_momentum_lab.domain.account import (
+    AccountBalanceSnapshot,
+    AccountConfigSnapshot,
+)
 from crypto_momentum_lab.domain.execution import ExchangeOrderState
 from crypto_momentum_lab.domain.live_rollout import (
     LIVE_APPROVAL_CONFIRMATION,
@@ -13,6 +17,7 @@ from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.execution_account.orders.quantization import (
     SymbolTradingRules,
 )
+from crypto_momentum_lab.execution_account.sync import AccountSnapshot
 from crypto_momentum_lab.live_rollout.daemon import LiveDaemonRuntimeContext
 from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,
@@ -393,6 +398,59 @@ async def test_position_view_skips_order_history_when_account_is_flat() -> None:
     assert result[4] == ()
     assert result[5] == frozenset()
     assert session.scalars_calls == 0
+
+
+async def test_position_view_uses_hub_snapshot_without_account_queries() -> None:
+    class SessionFactory:
+        def __call__(self):
+            raise AssertionError(
+                "account snapshot path must not open an account-state session"
+            )
+
+    snapshot = AccountSnapshot(
+        config=AccountConfigSnapshot(
+            environment="live",
+            account_label="primary",
+            multi_assets_mode=False,
+            hedge_mode=False,
+            can_trade=True,
+            fee_tier=0,
+            observed_at=NOW,
+            raw_payload={},
+        ),
+        balances=(
+            AccountBalanceSnapshot(
+                environment="live",
+                account_label="primary",
+                asset="USDT",
+                wallet_balance=Decimal("100"),
+                available_balance=Decimal("80"),
+                unrealized_pnl=Decimal("0"),
+                observed_at=NOW,
+                raw_payload={},
+            ),
+        ),
+        positions=(),
+        open_orders=(),
+    )
+    provider = object.__new__(PostgresLiveContextProvider)
+    provider._sessions = SessionFactory()
+    provider._account_label = "primary"
+    provider._run_id = "run-1"
+
+    result = await provider._account_position_view(
+        (),
+        account_snapshot=snapshot,
+    )
+
+    assert result == (
+        NOW,
+        frozenset(),
+        Decimal("0"),
+        Decimal("0"),
+        (),
+        frozenset(),
+    )
 
 
 def test_context_invalidation_preserves_symbol_rules() -> None:

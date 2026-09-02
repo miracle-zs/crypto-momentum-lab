@@ -390,6 +390,19 @@ async def sync_continuously(
                     )
                 )
 
+            def publish_account_snapshot(
+                result: ExecutionAccountSyncResult,
+            ) -> None:
+                if result.snapshot is None:
+                    return
+                account_event_hub.publish(
+                    _account_event_from_snapshot(
+                        result,
+                        environment=environment,
+                        account_label=account_label,
+                    )
+                )
+
             daemon = UserDataAccountSyncDaemon(
                 service=service,
                 stream=stream,
@@ -403,7 +416,8 @@ async def sync_continuously(
                     f"Execution account sync failed: {type(error).__name__}",
                     err=True,
                 ),
-                on_persisted=publish_account_event,
+                on_event_applied=publish_account_event,
+                on_snapshot=publish_account_snapshot,
             )
             retention_task = asyncio.create_task(
                 run_account_snapshot_retention(
@@ -523,6 +537,42 @@ def _account_event_from_user_data(
         reason=result.status.value,
         has_fill=has_fill,
         trade_id=trade_id,
+        account_state=result.status,
+        account_snapshot=result.snapshot,
+        snapshot_kind=("delta" if result.delta is not None else "full"),
+        account_delta=result.delta,
+    )
+
+
+def _account_event_from_snapshot(
+    result: ExecutionAccountSyncResult,
+    *,
+    environment: str,
+    account_label: str,
+) -> AccountEvent:
+    if result.snapshot is None:
+        raise ValueError("account snapshot event requires a snapshot")
+    snapshot = result.snapshot
+    symbols = tuple(
+        sorted(
+            {
+                *(position.symbol for position in snapshot.positions),
+                *(order.symbol for order in snapshot.open_orders),
+            }
+        )
+    )
+    return AccountEvent(
+        environment=environment,
+        account_label=account_label,
+        event_type="ACCOUNT_SNAPSHOT",
+        event_id=f"snapshot:{result.reconciliation_id}",
+        event_at=snapshot.config.observed_at,
+        received_at=snapshot.config.observed_at,
+        symbols=symbols,
+        reason=result.status.value,
+        account_state=result.status,
+        snapshot_kind="full",
+        account_snapshot=snapshot,
     )
 
 

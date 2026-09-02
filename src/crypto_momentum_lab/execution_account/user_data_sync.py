@@ -14,7 +14,11 @@ from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.binance.user_data import (
     BinanceUserDataEvent,
 )
-from crypto_momentum_lab.execution_account.sync import AccountSnapshot
+from crypto_momentum_lab.execution_account.sync import (
+    AccountSnapshot,
+    AccountSnapshotDelta,
+    diff_account_snapshots,
+)
 
 
 class UserDataStateError(ValueError):
@@ -29,6 +33,7 @@ class AccountUserDataUpdate:
     needs_reconciliation: bool
     reason: str | None
     changed: bool
+    delta: AccountSnapshotDelta | None = None
 
 
 class AccountUserDataState:
@@ -66,14 +71,17 @@ class AccountUserDataState:
         }
 
     def apply(self, event: BinanceUserDataEvent) -> AccountUserDataUpdate:
+        previous_snapshot = self.snapshot(event.received_at)
         if event.event_id in self._seen_event_id_set:
+            snapshot = self.snapshot(event.received_at)
             return AccountUserDataUpdate(
                 event=event,
-                snapshot=self.snapshot(event.received_at),
+                snapshot=snapshot,
                 fills=(),
                 needs_reconciliation=False,
                 reason=None,
                 changed=False,
+                delta=diff_account_snapshots(previous_snapshot, snapshot),
             )
 
         needs_reconciliation = False
@@ -93,13 +101,15 @@ class AccountUserDataState:
             needs_reconciliation = True
             reason = "listen_key_expired"
         self._remember_event(event.event_id)
+        snapshot = self.snapshot(event.received_at)
         return AccountUserDataUpdate(
             event=event,
-            snapshot=self.snapshot(event.received_at),
+            snapshot=snapshot,
             fills=fills,
             needs_reconciliation=needs_reconciliation,
             reason=reason,
             changed=changed,
+            delta=diff_account_snapshots(previous_snapshot, snapshot),
         )
 
     def snapshot(self, observed_at: datetime) -> AccountSnapshot:

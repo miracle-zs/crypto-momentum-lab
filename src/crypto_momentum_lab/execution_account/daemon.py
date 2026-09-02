@@ -190,6 +190,10 @@ UserDataAccountAppliedCallback = Callable[
     [BinanceUserDataEvent, ExecutionAccountSyncResult],
     None,
 ]
+UserDataAccountSnapshotCallback = Callable[
+    [ExecutionAccountSyncResult],
+    None,
+]
 
 
 class UserDataAccountEventStream(Protocol):
@@ -265,6 +269,7 @@ class UserDataAccountSyncDaemon:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         on_error: Callable[[Exception], None] | None = None,
         on_event_applied: UserDataAccountAppliedCallback | None = None,
+        on_snapshot: UserDataAccountSnapshotCallback | None = None,
         on_persisted: UserDataAccountPersistedCallback | None = None,
     ) -> None:
         self._service = service
@@ -275,6 +280,7 @@ class UserDataAccountSyncDaemon:
         self._on_error = on_error
         self._on_persisted = on_persisted
         self._on_event_applied = on_event_applied
+        self._on_snapshot = on_snapshot
         self._state: AccountUserDataState | None = None
         self._accept_events = False
         self._state_lock = asyncio.Lock()
@@ -738,6 +744,14 @@ class UserDataAccountSyncDaemon:
         except Exception as error:
             self._report_error(error)
 
+    def _notify_snapshot(self, result: ExecutionAccountSyncResult) -> None:
+        if self._on_snapshot is None:
+            return
+        try:
+            self._on_snapshot(result)
+        except Exception as error:
+            self._report_error(error)
+
     def _request_pipeline_recovery(
         self,
         reason: str,
@@ -822,6 +836,11 @@ class UserDataAccountSyncDaemon:
                 self._accept_events = not self._pipeline_recovery_event.is_set()
             else:
                 self._accept_events = False
+        if _is_ready_result(result):
+            # Publish immediately after the in-memory state has been replaced.
+            # Reconciliation inspection is telemetry/recovery bookkeeping and
+            # must not delay the account-state handoff to live consumers.
+            self._notify_snapshot(result)
         await self._inspect_reconciliation(result)
         return result
 
@@ -1086,6 +1105,7 @@ def _event_applied_result(
         reconciliation_id=f"account-event:{event.event_id}",
         mismatch_count=0,
         snapshot=update.snapshot,
+        delta=update.delta,
         fill_count=len(fills),
         new_fill_keys=frozenset((fill.symbol, fill.trade_id) for fill in fills),
         fill_count_by_symbol=_fill_counts_by_symbol(fills),

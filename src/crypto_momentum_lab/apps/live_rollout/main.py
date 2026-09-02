@@ -1205,6 +1205,7 @@ async def _run_live_daemon(
     entry_leverage: int,
     market_websocket_url: str = _LIVE_MARKET_WEBSOCKET_URL,
 ) -> LiveDaemonResult:
+    account_snapshot_available = True
     if market_state_source not in {"hub", "postgres"}:
         raise ValueError("market_state_source must be 'hub' or 'postgres'")
     if market_state_source == "hub" and not market_state_hub_url.strip():
@@ -1670,6 +1671,41 @@ async def _run_live_daemon(
         latest_market_states = _LatestMarketStateCache()
         latest_market_quotes = _LatestMarketQuoteCache()
 
+        def on_account_snapshot(event: AccountEvent) -> None:
+            nonlocal account_snapshot_available
+            snapshot = event.account_snapshot
+            account_state = event.account_state
+            if snapshot is None or account_state is None:
+                # Older Hub publishers may still send notification-only
+                # events during a rolling deploy.  The provider will retain
+                # its database bootstrap view until a complete snapshot is
+                # received.
+                return
+            context_provider.update_account_snapshot(
+                snapshot,
+                sequence=event.sequence,
+                account_state=account_state,
+            )
+            heartbeat_context_provider.update_account_snapshot(
+                snapshot,
+                sequence=event.sequence,
+                account_state=account_state,
+            )
+            account_snapshot_available = True
+            refresh_entry_enabled()
+
+        def on_account_snapshot_recovery(reason: str) -> None:
+            nonlocal account_snapshot_available
+            account_snapshot_available = False
+            context_provider.invalidate_account_snapshot()
+            heartbeat_context_provider.invalidate_account_snapshot()
+            refresh_entry_enabled()
+            log.warning(
+                "live_account_snapshot_recovery_requested",
+                reason=reason,
+                session_id=session_id,
+            )
+
         async def recover_live_lease() -> TradingLease | None:
             states = latest_market_states.for_symbols(())
             if not states:
@@ -1823,6 +1859,11 @@ async def _run_live_daemon(
                     False,
                     reason=market_state_unavailable_reason,
                 )
+            elif not account_snapshot_available:
+                daemon.set_entry_enabled(
+                    False,
+                    reason="account_snapshot_recovering",
+                )
             elif not entry_filter_cache_ready:
                 daemon.set_entry_enabled(
                     False,
@@ -1928,6 +1969,7 @@ async def _run_live_daemon(
             environment="live",
             account_label=account_label,
             consumer_id=f"live-exit:{session_id}",
+            on_recovery=on_account_snapshot_recovery,
         )
         quote_task: asyncio.Task[None] | None = None
         closed_candle_task: asyncio.Task[None] | None = None
@@ -1981,6 +2023,7 @@ async def _run_live_daemon(
                 run_id=session_id,
                 telemetry=telemetry,
                 on_exit_failure=on_exit_failure,
+                on_account_snapshot=on_account_snapshot,
             )
         )
         if entry_filter_cache is not None:
@@ -2510,9 +2553,12 @@ async def _run_account_event_channel(
     run_id: str,
     telemetry: LiveTelemetrySink | None = None,
     on_exit_failure: Callable[[str, str | None], None] | None = None,
+    on_account_snapshot: Callable[[AccountEvent], None] | None = None,
 ) -> None:
     async for event in _resilient_account_event_stream(source):
         try:
+            if on_account_snapshot is not None:
+                on_account_snapshot(event)
             if telemetry is not None and event.has_fill:
                 await telemetry.account_fill(
                     event,

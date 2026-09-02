@@ -14,7 +14,10 @@ from crypto_momentum_lab.execution_account.binance.user_data import (
     BinancePayloadError,
     parse_user_data_event,
 )
-from crypto_momentum_lab.execution_account.sync import AccountSnapshot
+from crypto_momentum_lab.execution_account.sync import (
+    AccountSnapshot,
+    apply_account_snapshot_delta,
+)
 from crypto_momentum_lab.execution_account.user_data_sync import (
     AccountUserDataState,
 )
@@ -107,6 +110,12 @@ def test_account_user_data_state_merges_partial_account_update() -> None:
     assert position.mark_price == Decimal("51000")
     assert position.notional == Decimal("102")
     assert {item.observed_at for item in update.snapshot.positions} == {received_at}
+    assert update.delta is not None
+    assert update.delta.balances[0].wallet_balance == Decimal("120")
+    assert update.delta.positions[0].position_amt == Decimal("0.002")
+    assert apply_account_snapshot_delta(_initial_snapshot(), update.delta) == (
+        update.snapshot
+    )
 
 
 def test_account_user_data_state_deduplicates_trade_event_and_closes_order() -> None:
@@ -173,6 +182,8 @@ def test_account_user_data_state_deduplicates_trade_event_and_closes_order() -> 
         )
     )
     assert closed.snapshot.open_orders == ()
+    assert closed.delta is not None
+    assert closed.delta.removed_open_orders == (("BTCUSDT", "1001"),)
 
 
 def test_account_user_data_state_requests_reconcile_for_unknown_position() -> None:

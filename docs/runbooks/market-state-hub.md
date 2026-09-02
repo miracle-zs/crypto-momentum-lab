@@ -61,11 +61,27 @@ REST               --> startup/periodic reconciliation
 - PostgreSQL persistence is best effort relative to the realtime fan-out: a
   slow database write cannot delay publishing a closed batch to live.
 - The account WebSocket reader never waits for PostgreSQL. The ordered account
-  processor applies each event to the in-memory snapshot, while a separate
-  ordered worker persists the immutable snapshot. The live Hub notification is
-  emitted after that durable snapshot is visible, so the live account lane can
-  invalidate its context, reconcile the matching order, and evaluate
-  reduce-only exits without reading a stale account projection.
+  processor applies each event to the in-memory snapshot, and the Hub
+  immediately publishes that complete snapshot with an account-local sequence
+  number. A separate ordered worker persists the same snapshot asynchronously.
+  New subscribers receive the latest retained snapshot during the handshake,
+  so the live account lane can update its context, reconcile the matching
+  order, and evaluate reduce-only exits without querying PostgreSQL for the
+  current position or balance.
+- The account channel now uses the Stage 2 protocol: a new subscriber receives
+  one complete snapshot, then each ordinary user-data event carries only the
+  material balance/position/open-order delta. The live context keeps the
+  reconstructed effective snapshot and its account-local sequence in memory.
+- Every Hub process has a stream epoch. Consumers require contiguous sequences;
+  a sequence gap, queue overflow, replay-window miss, or epoch change clears
+  the local projection and reconnects with `require_full_snapshot`. The Hub
+  maintains the latest effective snapshot and can synthesize a current full
+  snapshot, so recovery does not need a PostgreSQL read in the live account
+  path.
+- PostgreSQL remains the durable source for startup/reconciliation authority,
+  order ownership/fill metadata, realized-PnL history, risk/lease state, audit,
+  and recovery verification. It is not the source used to fill a normal Hub
+  delta or a live consumer gap.
 - The account persistence queue is bounded. A queue overflow, processor
   failure, or persistence failure disables account-event acceptance, requests a
   stream reconnect, drains/skips the uncommitted backlog, and performs an

@@ -1,6 +1,6 @@
 import asyncio
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -12,6 +12,10 @@ from crypto_momentum_lab.apps.shadow_operation.main import (
     _latest_account_state,
     _latest_risk_config,
     _load_trading_rules,
+)
+from crypto_momentum_lab.domain.account import (
+    AccountPositionSnapshot,
+    ExecutionAccountStatus,
 )
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderState,
@@ -29,6 +33,7 @@ from crypto_momentum_lab.execution_account.orders.quantization import (
     SymbolTradingRules,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import SubmitPolicy
+from crypto_momentum_lab.execution_account.sync import AccountSnapshot
 from crypto_momentum_lab.live_rollout.daemon import LiveDaemonRuntimeContext
 from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext
@@ -105,6 +110,9 @@ class PostgresLiveContextProvider:
         self._cached_rules_at: dict[str, datetime] = {}
         self._context_load_lock = asyncio.Lock()
         self._rules_load_lock = asyncio.Lock()
+        self._realtime_account_snapshot: AccountSnapshot | None = None
+        self._realtime_account_state: ExecutionAccountStatus | None = None
+        self._realtime_account_sequence = 0
         self._rules_load_tasks: dict[
             str,
             asyncio.Task[SymbolTradingRules],
@@ -219,6 +227,16 @@ class PostgresLiveContextProvider:
             # returning the captured context here could make an entry decision
             # from stale positions or gate state.
         cache_epoch = getattr(self, "_cache_epoch", 0)
+        realtime_account_snapshot = getattr(
+            self,
+            "_realtime_account_snapshot",
+            None,
+        )
+        realtime_account_state = getattr(
+            self,
+            "_realtime_account_state",
+            None,
+        )
         approval_task = asyncio.create_task(
             self._live_repository.load_active_approval(
                 account_label=self._account_label,
@@ -245,37 +263,52 @@ class PostgresLiveContextProvider:
                 self._account_label,
             )
         )
-        unresolved_and_positions_task = asyncio.create_task(
-            self._load_unresolved_and_position_view()
-        )
-        account_state_task = asyncio.create_task(
-            _latest_account_state(
-                self._sessions,
-                self._account_label,
+        if realtime_account_snapshot is None:
+            unresolved_and_positions_task = asyncio.create_task(
+                self._load_unresolved_and_position_view()
             )
-        )
+        else:
+            unresolved_and_positions_task = asyncio.create_task(
+                self._load_unresolved_and_position_view(
+                    account_snapshot=realtime_account_snapshot,
+                )
+            )
+        account_state_task: asyncio.Task[ExecutionAccountStatus] | None = None
+        if realtime_account_state is None:
+            account_state_task = asyncio.create_task(
+                _latest_account_state(
+                    self._sessions,
+                    self._account_label,
+                )
+            )
         realized_task = asyncio.create_task(self._daily_realized_pnl(now))
         symbol_rules_task = asyncio.create_task(
             self._load_symbol_rules(state.symbol, now)
         )
         strategy_state_task = asyncio.create_task(self._strategy_live_state())
-        await asyncio.gather(
+        context_tasks: list[asyncio.Task[object]] = [
             approval_task,
             risk_config_task,
             lease_task,
             halts_task,
             unresolved_and_positions_task,
-            account_state_task,
             realized_task,
             symbol_rules_task,
             strategy_state_task,
-        )
+        ]
+        if account_state_task is not None:
+            context_tasks.append(account_state_task)
+        await asyncio.gather(*context_tasks)
         approval = approval_task.result()
         risk_config = risk_config_task.result()
         lease = lease_task.result()
         halts = halts_task.result()
         unresolved_and_positions = unresolved_and_positions_task.result()
-        account_state = account_state_task.result()
+        if realtime_account_state is not None:
+            account_state = realtime_account_state
+        else:
+            assert account_state_task is not None
+            account_state = account_state_task.result()
         realized = realized_task.result()
         symbol_rules = symbol_rules_task.result()
         strategy_state = strategy_state_task.result()
@@ -327,6 +360,12 @@ class PostgresLiveContextProvider:
             managed_positions=managed_positions,
             unmanaged_position_symbols=unmanaged_symbols,
             unresolved_orders=unresolved,
+            account_snapshot=realtime_account_snapshot,
+            account_snapshot_version=(
+                getattr(self, "_realtime_account_sequence", 0)
+                if realtime_account_snapshot is not None
+                else None
+            ),
         )
         if (
             self._cache_epoch == cache_epoch
@@ -339,6 +378,45 @@ class PostgresLiveContextProvider:
             self._cached_context = context
             self._cached_loaded_at = now
         return context
+
+    def update_account_snapshot(
+        self,
+        snapshot: AccountSnapshot,
+        *,
+        sequence: int,
+        account_state: ExecutionAccountStatus,
+    ) -> None:
+        """Publish the latest Hub snapshot into the live context seam.
+
+        The snapshot is already merged by the execution-account daemon.  This
+        method only validates its scope, swaps the in-memory view, and
+        invalidates the context cache; it performs no database I/O.
+        """
+        if snapshot.config.environment != "live":
+            raise ValueError("live account snapshot must use live environment")
+        if snapshot.config.account_label != self._account_label:
+            raise ValueError(
+                "account snapshot account label does not match live context"
+            )
+        if (
+            not isinstance(sequence, int)
+            or isinstance(sequence, bool)
+            or sequence <= 0
+        ):
+            raise ValueError("account snapshot sequence must be positive")
+        if not isinstance(account_state, ExecutionAccountStatus):
+            raise TypeError("account_state must be an ExecutionAccountStatus")
+        self._realtime_account_snapshot = snapshot
+        self._realtime_account_state = account_state
+        self._realtime_account_sequence = sequence
+        self.invalidate_cache()
+
+    def invalidate_account_snapshot(self) -> None:
+        """Drop a stale Hub projection while a full recovery is in flight."""
+        self._realtime_account_snapshot = None
+        self._realtime_account_state = None
+        self._realtime_account_sequence = 0
+        self.invalidate_cache()
 
     def update_lease(self, lease: TradingLease) -> None:
         """Publish a heartbeat renewal into the cached runtime context.
@@ -450,6 +528,8 @@ class PostgresLiveContextProvider:
 
     async def _load_unresolved_and_position_view(
         self,
+        *,
+        account_snapshot: AccountSnapshot | None = None,
     ) -> tuple[
         tuple[PersistedExchangeOrder, ...],
         tuple[
@@ -464,11 +544,16 @@ class PostgresLiveContextProvider:
         unresolved = await self._order_repository.load_unresolved_orders(
             self._run_id
         )
-        return unresolved, await self._account_position_view(unresolved)
+        return unresolved, await self._account_position_view(
+            unresolved,
+            account_snapshot=account_snapshot,
+        )
 
     async def _account_position_view(
         self,
         unresolved: tuple[PersistedExchangeOrder, ...],
+        *,
+        account_snapshot: AccountSnapshot | None = None,
     ) -> tuple[
         datetime | None,
         frozenset[str],
@@ -477,6 +562,11 @@ class PostgresLiveContextProvider:
         tuple[ManagedLivePosition, ...],
         frozenset[str],
     ]:
+        if account_snapshot is not None:
+            return await self._account_position_view_from_snapshot(
+                unresolved,
+                account_snapshot,
+            )
         async with self._sessions() as session:
             process_at = await session.scalar(
                 select(ExecutionAccountProcessStateRow.occurred_at)
@@ -613,6 +703,114 @@ class PostgresLiveContextProvider:
             unmanaged,
         )
 
+    async def _account_position_view_from_snapshot(
+        self,
+        unresolved: tuple[PersistedExchangeOrder, ...],
+        snapshot: AccountSnapshot,
+    ) -> tuple[
+        datetime | None,
+        frozenset[str],
+        Decimal,
+        Decimal,
+        tuple[ManagedLivePosition, ...],
+        frozenset[str],
+    ]:
+        """Build the hot account view from the Hub's complete snapshot.
+
+        The only remaining database reads are execution ownership/fill
+        metadata needed to distinguish managed positions from external ones.
+        Account balances, positions, and account process state are all taken
+        from ``snapshot``.
+        """
+        rows: list[AccountPositionSnapshot] = list(snapshot.positions)
+        active = [row for row in rows if row.position_amt != 0]
+        orders: list[ExchangeOrderRow] = []
+        entry_fill_times: dict[str, datetime] = {}
+        if active:
+            async with self._sessions() as session:
+                active_symbols = tuple(sorted({row.symbol for row in active}))
+                orders = list(
+                    (
+                        await session.scalars(
+                            select(ExchangeOrderRow)
+                            .where(
+                                ExchangeOrderRow.run_id == self._run_id,
+                                ExchangeOrderRow.symbol.in_(active_symbols),
+                            )
+                            .order_by(ExchangeOrderRow.updated_at.desc())
+                            .limit(1000)
+                        )
+                    ).all()
+                )
+                entry_exchange_order_ids = tuple(
+                    sorted(
+                        {
+                            row.exchange_order_id
+                            for row in orders
+                            if row.exchange_order_id is not None
+                            and not row.reduce_only
+                        }
+                    )
+                )
+                entry_client_order_ids = tuple(
+                    sorted(
+                        {
+                            row.client_order_id
+                            for row in orders
+                            if not row.reduce_only
+                        }
+                    )
+                )
+                if entry_exchange_order_ids:
+                    account_fills = (
+                        await session.scalars(
+                            select(AccountFillEventRow).where(
+                                AccountFillEventRow.environment == "live",
+                                AccountFillEventRow.account_label
+                                == self._account_label,
+                                AccountFillEventRow.order_id.in_(
+                                    entry_exchange_order_ids
+                                ),
+                            )
+                        )
+                    ).all()
+                    for account_fill in account_fills:
+                        _record_earliest_fill(
+                            entry_fill_times,
+                            account_fill.order_id,
+                            account_fill.trade_at,
+                        )
+                if entry_client_order_ids:
+                    exchange_fills = (
+                        await session.scalars(
+                            select(ExchangeFillRow).where(
+                                ExchangeFillRow.client_order_id.in_(
+                                    entry_client_order_ids
+                                )
+                            )
+                        )
+                    ).all()
+                    for exchange_fill in exchange_fills:
+                        _record_earliest_fill(
+                            entry_fill_times,
+                            exchange_fill.client_order_id,
+                            exchange_fill.filled_at,
+                        )
+        managed, unmanaged = _classify_live_positions(
+            active,
+            orders,
+            unresolved,
+            entry_fill_times=entry_fill_times,
+        )
+        return (
+            snapshot.config.observed_at,
+            frozenset(row.symbol for row in active),
+            sum((row.unrealized_pnl for row in active), start=Decimal("0")),
+            sum((abs(row.notional) for row in active), start=Decimal("0")),
+            managed,
+            unmanaged,
+        )
+
     async def _daily_realized_pnl(self, now: datetime) -> Decimal:
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         async with self._sessions() as session:
@@ -651,7 +849,7 @@ class PostgresLiveContextProvider:
 
 
 def _classify_live_positions(
-    positions: list[AccountPositionSnapshotRow],
+    positions: Sequence[AccountPositionSnapshot | AccountPositionSnapshotRow],
     orders: list[ExchangeOrderRow],
     unresolved: tuple[PersistedExchangeOrder, ...] = (),
     *,
@@ -777,7 +975,7 @@ def _classify_live_positions(
 
 
 def _strategy_side(
-    position: AccountPositionSnapshotRow,
+    position: AccountPositionSnapshot | AccountPositionSnapshotRow,
     position_side: FuturesPositionSide,
 ) -> StrategySide:
     if position_side is FuturesPositionSide.LONG:
