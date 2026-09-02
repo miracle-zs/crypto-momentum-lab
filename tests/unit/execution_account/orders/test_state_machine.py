@@ -16,6 +16,7 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
     OrderExecutionStateMachine,
+    OrderPreSubmissionError,
     PreparedOrderSubmission,
     SubmitPolicy,
 )
@@ -69,6 +70,65 @@ async def test_prepared_submission_does_not_duplicate_write_ahead_journal() -> N
         ExchangeOrderState.SUBMITTING,
         ExchangeOrderState.ACKNOWLEDGED,
     ]
+
+
+async def test_pre_submission_callback_runs_before_exchange_write() -> None:
+    exchange = FakeExchange(
+        submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED),
+    )
+    repository = FakeOrderRepository()
+    phases: list[str] = []
+
+    async def before_submit(_plan: OrderExecutionPlan, _occurred_at: datetime) -> None:
+        phases.append("pre_submission")
+
+    machine = OrderExecutionStateMachine(
+        exchange=exchange,
+        repository=repository,
+        submit_policy=SubmitPolicy.LIVE_SUBMIT,
+        live_submit_enabled=True,
+        clock=lambda: NOW,
+        on_before_submit=before_submit,
+        serialize_commands=False,
+    )
+
+    result = await machine.execute_approved_intent(_plan())
+
+    assert result.state is ExchangeOrderState.ACKNOWLEDGED
+    assert phases == ["pre_submission"]
+    assert exchange.calls == ["submit"]
+
+
+async def test_failed_pre_submission_callback_blocks_exchange_write() -> None:
+    exchange = FakeExchange(
+        submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED),
+    )
+    repository = FakeOrderRepository()
+
+    async def before_submit(
+        _plan: OrderExecutionPlan,
+        _occurred_at: datetime,
+    ) -> None:
+        raise OrderPreSubmissionError("account hub unavailable")
+
+    machine = OrderExecutionStateMachine(
+        exchange=exchange,
+        repository=repository,
+        submit_policy=SubmitPolicy.LIVE_SUBMIT,
+        live_submit_enabled=True,
+        clock=lambda: NOW,
+        on_before_submit=before_submit,
+        serialize_commands=False,
+    )
+
+    result = await machine.execute_approved_intent(_plan())
+
+    assert result.state is ExchangeOrderState.REJECTED
+    assert exchange.calls == []
+    assert repository.events[-1].details == {
+        "reason": "account hub unavailable",
+        "phase": "before_exchange_submit",
+    }
 
 
 async def test_timeout_queries_by_client_order_id_before_retry() -> None:

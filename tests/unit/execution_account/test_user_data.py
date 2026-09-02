@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -13,6 +13,10 @@ from crypto_momentum_lab.domain.account import (
 from crypto_momentum_lab.execution_account.binance.user_data import (
     BinancePayloadError,
     parse_user_data_event,
+)
+from crypto_momentum_lab.execution_account.expectations import (
+    AccountPositionExpectation,
+    AccountPositionExpectationRegistry,
 )
 from crypto_momentum_lab.execution_account.sync import (
     AccountSnapshot,
@@ -213,6 +217,116 @@ def test_account_user_data_state_requests_reconcile_for_unknown_position() -> No
 
     assert update.needs_reconciliation is True
     assert update.reason == "unknown_position"
+
+
+def test_account_user_data_state_accepts_registered_entry_position() -> None:
+    observed_at = datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC)
+    registry = AccountPositionExpectationRegistry(
+        environment="live",
+        account_label="primary",
+        clock=lambda: observed_at,
+    )
+    registry.register(
+        AccountPositionExpectation(
+            environment="live",
+            account_label="primary",
+            symbol="ETHUSDT",
+            position_side="BOTH",
+            client_order_id="entry-eth-1",
+            side="BUY",
+            quantity=Decimal("0.5"),
+            created_at=observed_at,
+            expires_at=datetime(2026, 7, 4, 0, 1, tzinfo=UTC),
+        )
+    )
+    state = AccountUserDataState(
+        _initial_snapshot(),
+        expected_position_registry=registry,
+    )
+
+    update = state.apply(
+        parse_user_data_event(
+            {
+                "e": "ACCOUNT_UPDATE",
+                "E": 1783123201000,
+                "a": {
+                    "B": [],
+                    "P": [
+                        {
+                            "s": "ETHUSDT",
+                            "pa": "0.5",
+                            "ep": "3000",
+                            "up": "0",
+                            "mt": "cross",
+                            "ps": "BOTH",
+                        }
+                    ],
+                },
+            },
+            received_at=observed_at,
+        )
+    )
+
+    assert update.needs_reconciliation is False
+    assert update.reason is None
+    position = next(
+        item for item in update.snapshot.positions if item.symbol == "ETHUSDT"
+    )
+    assert position.mark_price == Decimal("3000")
+    assert position.notional == Decimal("1500")
+
+
+def test_no_fill_terminal_order_discards_registered_entry() -> None:
+    observed_at = datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC)
+    registry = AccountPositionExpectationRegistry(
+        environment="live",
+        account_label="primary",
+        clock=lambda: observed_at,
+    )
+    registry.register(
+        AccountPositionExpectation(
+            environment="live",
+            account_label="primary",
+            symbol="ETHUSDT",
+            position_side="BOTH",
+            client_order_id="entry-cancelled",
+            side="BUY",
+            quantity=Decimal("0.5"),
+            created_at=observed_at,
+            expires_at=observed_at + timedelta(minutes=15),
+        )
+    )
+    state = AccountUserDataState(
+        _initial_snapshot(),
+        expected_position_registry=registry,
+    )
+
+    update = state.apply(
+        parse_user_data_event(
+            {
+                "e": "ORDER_TRADE_UPDATE",
+                "E": 1783123201000,
+                "a": {},
+                "o": {
+                    "s": "ETHUSDT",
+                    "i": 2001,
+                    "c": "entry-cancelled",
+                    "S": "BUY",
+                    "o": "LIMIT",
+                    "q": "0.5",
+                    "p": "3000",
+                    "x": "CANCELED",
+                    "X": "CANCELED",
+                    "z": "0",
+                    "R": False,
+                },
+            },
+            received_at=observed_at,
+        )
+    )
+
+    assert update.changed is True
+    assert registry.pending_count == 0
 
 
 def _initial_snapshot() -> AccountSnapshot:

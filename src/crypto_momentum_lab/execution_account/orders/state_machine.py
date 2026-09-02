@@ -27,6 +27,10 @@ class LiveSubmissionDisabledError(RuntimeError):
     pass
 
 
+class OrderPreSubmissionError(RuntimeError):
+    """A local precondition failed before an exchange write was attempted."""
+
+
 class ExchangeOrderRejectedError(RuntimeError):
     pass
 
@@ -124,6 +128,10 @@ ExchangeBoundaryCallback = Callable[
     [OrderExecutionPlan, str, datetime],
     Awaitable[None],
 ]
+OrderPreSubmissionCallback = Callable[
+    [OrderExecutionPlan, datetime],
+    Awaitable[None],
+]
 ExchangeCallResult = TypeVar("ExchangeCallResult")
 
 
@@ -171,6 +179,7 @@ class OrderExecutionStateMachine:
         live_submit_enabled: bool,
         clock: Callable[[], datetime] | None = None,
         on_event: OrderEventCallback | None = None,
+        on_before_submit: OrderPreSubmissionCallback | None = None,
         on_exchange_request: ExchangeBoundaryCallback | None = None,
         on_exchange_response: ExchangeBoundaryCallback | None = None,
         serialize_commands: bool = True,
@@ -190,6 +199,7 @@ class OrderExecutionStateMachine:
         self._live_submit_enabled = live_submit_enabled
         self._clock = clock or (lambda: datetime.now(tz=UTC))
         self._on_event = on_event
+        self._on_before_submit = on_before_submit
         self._on_exchange_request = on_exchange_request
         self._on_exchange_response = on_exchange_response
         self._reconciliation_retry_delays = tuple(reconciliation_retry_delays)
@@ -280,6 +290,20 @@ class OrderExecutionStateMachine:
                 plan,
                 ExchangeOrderState.REJECTED,
                 details={"reason": str(exc)},
+            )
+            return OrderExecutionResult(
+                plan.client_order_id,
+                ExchangeOrderState.REJECTED,
+                None,
+            )
+        except OrderPreSubmissionError as exc:
+            await self._append_event(
+                plan,
+                ExchangeOrderState.REJECTED,
+                details={
+                    "reason": str(exc),
+                    "phase": "before_exchange_submit",
+                },
             )
             return OrderExecutionResult(
                 plan.client_order_id,
@@ -574,6 +598,12 @@ class OrderExecutionStateMachine:
         operation: str,
         call: Callable[[], Awaitable[ExchangeCallResult]],
     ) -> ExchangeCallResult:
+        if (
+            operation == "submit"
+            and not plan.reduce_only
+            and self._on_before_submit is not None
+        ):
+            await self._on_before_submit(plan, self._now())
         await self._notify_exchange_boundary(
             plan,
             f"{operation}_request_started",

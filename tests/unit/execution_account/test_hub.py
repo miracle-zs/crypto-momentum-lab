@@ -15,14 +15,20 @@ from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
     ExecutionAccountStatus,
 )
+from crypto_momentum_lab.execution_account.expectations import (
+    AccountPositionExpectation,
+)
 from crypto_momentum_lab.execution_account.hub import (
     AccountEvent,
     AccountEventHub,
     AccountEventHubConfig,
     AccountEventHubSequenceGap,
     WebSocketAccountEventSource,
+    WebSocketAccountPositionExpectationPublisher,
     decode_account_event,
+    decode_account_position_expectation,
     encode_account_event,
+    encode_account_position_expectation,
 )
 from crypto_momentum_lab.execution_account.sync import (
     AccountSnapshot,
@@ -57,6 +63,26 @@ def test_account_event_round_trips() -> None:
     )
 
     assert decoded == event
+
+
+def test_account_position_expectation_round_trips() -> None:
+    expectation = AccountPositionExpectation(
+        environment="live",
+        account_label="primary",
+        symbol="ethusdt",
+        position_side="both",
+        client_order_id="entry-1",
+        side="buy",
+        quantity=Decimal("0.5"),
+        created_at=datetime(2026, 8, 21, 9, 0, tzinfo=UTC),
+        expires_at=datetime(2026, 8, 21, 9, 1, tzinfo=UTC),
+    )
+
+    decoded = decode_account_position_expectation(
+        encode_account_position_expectation(expectation)
+    )
+
+    assert decoded == expectation
 
 
 def test_account_event_round_trips_fill_identity() -> None:
@@ -242,6 +268,46 @@ def test_account_event_hub_bootstraps_latest_state_and_replays_delta() -> None:
     assert replay.sequence == 2
 
 
+def test_account_event_hub_deduplicates_reconciled_fill_replays() -> None:
+    hub = AccountEventHub()
+    live_fill = replace(_event(), has_fill=True, trade_id="trade-1")
+    hub.publish(live_fill)
+
+    hub.publish(
+        replace(
+            live_fill,
+            event_type="ACCOUNT_FILL_RECONCILED",
+            event_id="reconciled-fill-1",
+            client_order_id=None,
+            reason="rest_reconciliation",
+        )
+    )
+
+    assert hub._sequences[("live", "primary")] == 1
+    latest_message = hub._latest_messages[("live", "primary")]
+    latest = decode_account_event(
+        latest_message,
+        expected_environment="live",
+        expected_account_label="primary",
+    )
+    assert latest.has_fill is True
+
+    hub.publish(replace(live_fill, event_id="live-fill-replayed"))
+    replay_messages, _, _ = hub._subscription_messages(
+        ("live", "primary"),
+        requested_epoch=hub._stream_epoch,
+        last_sequence=1,
+        require_full_snapshot=False,
+    )
+    replayed = decode_account_event(
+        replay_messages[0],
+        expected_environment="live",
+        expected_account_label="primary",
+    )
+    assert replayed.has_fill is False
+    assert replayed.event_type == "ORDER_TRADE_UPDATE"
+
+
 def _snapshot() -> AccountSnapshot:
     observed_at = datetime(2026, 8, 21, 9, 0, tzinfo=UTC)
     return AccountSnapshot(
@@ -347,6 +413,51 @@ async def test_account_event_hub_fans_out_latest_event() -> None:
             next_event.cancel()
         await hub.stop()
         await asyncio.gather(next_event, return_exceptions=True)
+
+
+@pytest.mark.skipif(
+    os.environ.get("CML_RUN_HUB_NETWORK_TESTS") != "1",
+    reason="requires local loopback socket permission",
+)
+async def test_account_event_hub_registers_position_expectation() -> None:
+    registered = []
+    hub = AccountEventHub(
+        AccountEventHubConfig(
+            host="127.0.0.1",
+            port=0,
+            reconnect_delays=(0,),
+            unavailable_timeout_seconds=1,
+        ),
+        on_position_expectation=registered.append,
+    )
+    await hub.start()
+    expectation = AccountPositionExpectation(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        client_order_id="entry-1",
+        side="BUY",
+        quantity=Decimal("0.5"),
+        created_at=datetime(2026, 8, 21, 9, 0, tzinfo=UTC),
+        expires_at=datetime(2026, 8, 21, 9, 1, tzinfo=UTC),
+    )
+    publisher = WebSocketAccountPositionExpectationPublisher(
+        url=hub.url,
+        environment="live",
+        account_label="primary",
+        config=AccountEventHubConfig(
+            reconnect_delays=(0,),
+            unavailable_timeout_seconds=1,
+        ),
+    )
+
+    try:
+        await publisher.register(expectation)
+    finally:
+        await hub.stop()
+
+    assert registered == [expectation]
 
 
 @pytest.mark.skipif(

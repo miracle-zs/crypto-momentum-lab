@@ -3,7 +3,7 @@ import inspect
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol, TypeVar
+from typing import Protocol, TypeVar, cast
 
 import structlog
 
@@ -14,6 +14,9 @@ from crypto_momentum_lab.domain.account import (
 from crypto_momentum_lab.execution_account.binance.user_data import (
     BinanceUserDataEvent,
     UserDataEventSink,
+)
+from crypto_momentum_lab.execution_account.expectations import (
+    AccountPositionExpectationRegistry,
 )
 from crypto_momentum_lab.execution_account.sync import (
     AccountSnapshot,
@@ -194,6 +197,10 @@ UserDataAccountSnapshotCallback = Callable[
     [ExecutionAccountSyncResult],
     None,
 ]
+UserDataAccountReconciledFillCallback = Callable[
+    [AccountFillEvent, ExecutionAccountSyncResult],
+    None,
+]
 
 
 class UserDataAccountEventStream(Protocol):
@@ -271,6 +278,8 @@ class UserDataAccountSyncDaemon:
         on_event_applied: UserDataAccountAppliedCallback | None = None,
         on_snapshot: UserDataAccountSnapshotCallback | None = None,
         on_persisted: UserDataAccountPersistedCallback | None = None,
+        expected_position_registry: AccountPositionExpectationRegistry | None = None,
+        on_reconciled_fill: UserDataAccountReconciledFillCallback | None = None,
     ) -> None:
         self._service = service
         self._stream = stream
@@ -281,6 +290,8 @@ class UserDataAccountSyncDaemon:
         self._on_persisted = on_persisted
         self._on_event_applied = on_event_applied
         self._on_snapshot = on_snapshot
+        self._expected_position_registry = expected_position_registry
+        self._on_reconciled_fill = on_reconciled_fill
         self._state: AccountUserDataState | None = None
         self._accept_events = False
         self._state_lock = asyncio.Lock()
@@ -296,6 +307,7 @@ class UserDataAccountSyncDaemon:
         self._pipeline_recovery_reason: str | None = None
         self._pipeline_recovery_origin_event: BinanceUserDataEvent | None = None
         self._observed_stream_queue_overflow_count = 0
+        self._reconciliation_persistence_tasks: set[asyncio.Task[None]] = set()
 
     async def run(self) -> None:
         stream_task: asyncio.Task[None] | None = None
@@ -653,6 +665,19 @@ class UserDataAccountSyncDaemon:
             *(task for task in tasks if task is not None),
             return_exceptions=True,
         )
+        reconciliation_tasks = tuple(self._reconciliation_persistence_tasks)
+        self._reconciliation_persistence_tasks.clear()
+        if reconciliation_tasks:
+            done, pending = await asyncio.wait(
+                reconciliation_tasks,
+                timeout=30.0,
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if done:
+                await asyncio.gather(*done, return_exceptions=True)
         self._event_worker_task = None
         self._persistence_worker_task = None
         self._event_queue = None
@@ -752,6 +777,49 @@ class UserDataAccountSyncDaemon:
         except Exception as error:
             self._report_error(error)
 
+    def _notify_reconciled_fills(
+        self,
+        result: ExecutionAccountSyncResult,
+    ) -> None:
+        if self._on_reconciled_fill is None:
+            return
+        for fill in result.new_fills:
+            try:
+                self._on_reconciled_fill(fill, result)
+            except Exception as error:
+                self._report_error(error)
+
+    def _schedule_reconciliation_persistence(
+        self,
+        result: ExecutionAccountSyncResult,
+    ) -> None:
+        persist = getattr(
+            self._service,
+            "persist_reconciliation_result",
+            None,
+        )
+        if not callable(persist):
+            return
+        task = asyncio.create_task(
+            self._persist_reconciliation_result(persist, result),
+            name="account-reconciliation-persistence",
+        )
+        self._reconciliation_persistence_tasks.add(task)
+        task.add_done_callback(self._reconciliation_persistence_tasks.discard)
+
+    async def _persist_reconciliation_result(
+        self,
+        persist: Callable[[ExecutionAccountSyncResult], Awaitable[None]],
+        result: ExecutionAccountSyncResult,
+    ) -> None:
+        try:
+            async with self._rest_sync_lock:
+                await persist(result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._report_error(error)
+
     def _request_pipeline_recovery(
         self,
         reason: str,
@@ -822,15 +890,44 @@ class UserDataAccountSyncDaemon:
                 )
         async with self._state_lock:
             async with self._rest_sync_lock:
-                result = await self._service.sync_once(
-                    observed_at=self._now(),
-                    publish_transient_states=False,
-                    include_fills=include_fills,
+                realtime_sync = getattr(
+                    self._service,
+                    "sync_once_for_realtime",
+                    None,
                 )
+                realtime_sync_callable = (
+                    cast(
+                        Callable[..., Awaitable[ExecutionAccountSyncResult]],
+                        realtime_sync,
+                    )
+                    if callable(realtime_sync)
+                    else None
+                )
+                use_realtime_sync = (
+                    self._state is not None
+                    and realtime_sync_callable is not None
+                )
+                if realtime_sync_callable is not None and use_realtime_sync:
+                    result = await realtime_sync_callable(
+                        observed_at=self._now(),
+                        publish_transient_states=False,
+                        include_fills=include_fills,
+                    )
+                else:
+                    result = await self._service.sync_once(
+                        observed_at=self._now(),
+                        publish_transient_states=False,
+                        include_fills=include_fills,
+                    )
             if _is_ready_result(result):
                 snapshot = _ready_snapshot(result)
                 if self._state is None:
-                    self._state = AccountUserDataState(snapshot)
+                    self._state = AccountUserDataState(
+                        snapshot,
+                        expected_position_registry=(
+                            self._expected_position_registry
+                        ),
+                    )
                 else:
                     self._state.replace_snapshot(snapshot)
                 self._accept_events = not self._pipeline_recovery_event.is_set()
@@ -841,6 +938,9 @@ class UserDataAccountSyncDaemon:
             # Reconciliation inspection is telemetry/recovery bookkeeping and
             # must not delay the account-state handoff to live consumers.
             self._notify_snapshot(result)
+            self._notify_reconciled_fills(result)
+            if use_realtime_sync:
+                self._schedule_reconciliation_persistence(result)
         await self._inspect_reconciliation(result)
         return result
 
@@ -1107,6 +1207,8 @@ def _event_applied_result(
         snapshot=update.snapshot,
         delta=update.delta,
         fill_count=len(fills),
+        fills=fills,
+        new_fills=fills,
         new_fill_keys=frozenset((fill.symbol, fill.trade_id) for fill in fills),
         fill_count_by_symbol=_fill_counts_by_symbol(fills),
     )

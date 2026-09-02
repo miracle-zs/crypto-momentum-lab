@@ -7,6 +7,7 @@ from typing import Annotated
 import typer
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from crypto_momentum_lab.domain.account import AccountFillEvent
 from crypto_momentum_lab.execution_account.binance import (
     DEFAULT_BINANCE_USDM_USER_DATA_WEBSOCKET_URL,
     BinanceUsdMPrivateReadClient,
@@ -16,6 +17,9 @@ from crypto_momentum_lab.execution_account.binance import (
 from crypto_momentum_lab.execution_account.daemon import (
     UserDataAccountSyncConfig,
     UserDataAccountSyncDaemon,
+)
+from crypto_momentum_lab.execution_account.expectations import (
+    AccountPositionExpectationRegistry,
 )
 from crypto_momentum_lab.execution_account.hub import (
     AccountEvent,
@@ -334,11 +338,16 @@ async def sync_continuously(
 ) -> None:
     engine = create_execution_database_engine(database_url)
     retention_engine = create_maintenance_database_engine(database_url)
+    expected_position_registry = AccountPositionExpectationRegistry(
+        environment=environment,
+        account_label=account_label,
+    )
     account_event_hub = AccountEventHub(
         AccountEventHubConfig(
             host=account_event_hub_host,
             port=account_event_hub_port,
-        )
+        ),
+        on_position_expectation=expected_position_registry.register,
     )
     await account_event_hub.start()
     try:
@@ -403,6 +412,19 @@ async def sync_continuously(
                     )
                 )
 
+            def publish_reconciled_fill(
+                fill: AccountFillEvent,
+                result: ExecutionAccountSyncResult,
+            ) -> None:
+                account_event_hub.publish(
+                    _account_event_from_reconciled_fill(
+                        fill,
+                        result,
+                        environment=environment,
+                        account_label=account_label,
+                    )
+                )
+
             daemon = UserDataAccountSyncDaemon(
                 service=service,
                 stream=stream,
@@ -418,6 +440,8 @@ async def sync_continuously(
                 ),
                 on_event_applied=publish_account_event,
                 on_snapshot=publish_account_snapshot,
+                expected_position_registry=expected_position_registry,
+                on_reconciled_fill=publish_reconciled_fill,
             )
             retention_task = asyncio.create_task(
                 run_account_snapshot_retention(
@@ -573,6 +597,42 @@ def _account_event_from_snapshot(
         account_state=result.status,
         snapshot_kind="full",
         account_snapshot=snapshot,
+    )
+
+
+def _account_event_from_reconciled_fill(
+    fill: AccountFillEvent,
+    result: ExecutionAccountSyncResult,
+    *,
+    environment: str,
+    account_label: str,
+) -> AccountEvent:
+    if result.snapshot is None:
+        raise ValueError("reconciled fill event requires an account snapshot")
+    received_at = max(fill.trade_at, result.snapshot.config.observed_at)
+    client_order_id = _event_text(
+        fill.raw_payload.get("clientOrderId")
+        if isinstance(fill.raw_payload, dict)
+        else None
+    )
+    return AccountEvent(
+        environment=environment,
+        account_label=account_label,
+        event_type="ACCOUNT_FILL_RECONCILED",
+        event_id=(
+            f"reconciled-fill:{result.reconciliation_id}:"
+            f"{fill.symbol}:{fill.trade_id}"
+        ),
+        event_at=fill.trade_at,
+        received_at=received_at,
+        symbols=(fill.symbol,),
+        symbol=fill.symbol,
+        client_order_id=client_order_id,
+        order_status="FILLED",
+        reason="rest_reconciliation",
+        has_fill=True,
+        trade_id=fill.trade_id,
+        account_state=result.status,
     )
 
 

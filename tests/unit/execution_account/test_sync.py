@@ -5,6 +5,7 @@ from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
     AccountFillEvent,
+    AccountPositionSnapshot,
     ExecutionAccountStatus,
 )
 from crypto_momentum_lab.execution_account.binance.user_data import (
@@ -156,6 +157,33 @@ async def test_sync_once_persists_snapshot_and_ready_state() -> None:
     assert repository.reconciliation_runs[-1].status == "ready"
 
 
+async def test_realtime_sync_publishes_before_durable_persistence() -> None:
+    repository = FakeRepository()
+    service = ExecutionAccountSyncService(
+        client=FakeClient(),
+        repository=repository,
+        config=_config(),
+    )
+
+    result = await service.sync_once_for_realtime()
+
+    assert result.status is ExecutionAccountStatus.READY_READONLY
+    assert result.snapshot is not None
+    assert repository.snapshot_calls == 0
+    assert repository.process_states == []
+
+    await service.persist_reconciliation_result(
+        result,
+        source="rest_reconciliation",
+    )
+
+    assert repository.snapshot_calls == 1
+    assert repository.process_states[-1].state is ExecutionAccountStatus.READY_READONLY
+    assert repository.reconciliation_runs[-1].details == {
+        "source": "rest_reconciliation"
+    }
+
+
 async def test_sync_tracks_incremental_fill_keys_and_baselines_new_symbols() -> None:
     first_fill = _fill("BTCUSDT", "42")
     second_fill = _fill("BTCUSDT", "43")
@@ -190,6 +218,29 @@ async def test_sync_tracks_incremental_fill_keys_and_baselines_new_symbols() -> 
         ("BTCUSDT", 1),
         ("ETHUSDT", 1),
     )
+
+
+async def test_sync_replays_recent_fills_when_a_new_position_appears() -> None:
+    fill = _fill("ETHUSDT", "99")
+    client = NewPositionClient(responses=[(fill,)], positions=[(), (_position(),)])
+    service = ExecutionAccountSyncService(
+        client=client,
+        repository=FakeRepository(),
+        config=_config(),
+    )
+
+    await service.sync_once()
+    result = await service.sync_once()
+
+    assert result.new_fill_keys == frozenset({("ETHUSDT", "99")})
+    assert result.new_fills == (fill,)
+    assert client.calls == [
+        (
+            ("ETHUSDT",),
+            {},
+            {"ETHUSDT": 1783121400000},
+        )
+    ]
 
 
 async def test_user_data_event_persists_merged_snapshot() -> None:
@@ -318,6 +369,34 @@ class CursorClient(FakeClient):
             )
         )
         return self.responses.pop(0)
+
+
+class NewPositionClient(CursorClient):
+    def __init__(self, *, responses, positions) -> None:
+        super().__init__(responses=responses)
+        self.positions = list(positions)
+
+    async def fetch_positions(self):
+        return self.positions.pop(0)
+
+
+def _position() -> AccountPositionSnapshot:
+    observed_at = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+    return AccountPositionSnapshot(
+        environment="live",
+        account_label="primary",
+        symbol="ETHUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("1"),
+        entry_price=Decimal("3000"),
+        mark_price=Decimal("3000"),
+        unrealized_pnl=Decimal("0"),
+        notional=Decimal("3000"),
+        leverage=1,
+        margin_type="CROSSED",
+        observed_at=observed_at,
+        raw_payload={},
+    )
 
 
 def _fill(symbol: str, trade_id: str) -> AccountFillEvent:

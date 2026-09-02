@@ -5,6 +5,7 @@ from decimal import Decimal
 from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
+    AccountFillEvent,
     ExecutionAccountStatus,
 )
 from crypto_momentum_lab.execution_account.binance.user_data import (
@@ -68,6 +69,53 @@ class FakeService:
 
     async def publish_user_data_heartbeat(self, *, observed_at):
         self.heartbeats.append(observed_at)
+
+
+class RealtimeFakeService(FakeService):
+    def __init__(self, snapshot: AccountSnapshot) -> None:
+        super().__init__(snapshot)
+        self.realtime_calls = 0
+        self.realtime_persisted = []
+        self.realtime_persisted_event = asyncio.Event()
+        self.fill = AccountFillEvent(
+            environment="live",
+            account_label="primary",
+            symbol="ETHUSDT",
+            trade_id="trade-1",
+            order_id="order-1",
+            side="BUY",
+            price=Decimal("3000"),
+            quantity=Decimal("1"),
+            realized_pnl=Decimal("0"),
+            fee=Decimal("0.01"),
+            fee_asset="USDT",
+            trade_at=datetime(2026, 7, 4, 0, 0, 3, tzinfo=UTC),
+            raw_payload={},
+        )
+
+    async def sync_once_for_realtime(
+        self,
+        *,
+        observed_at,
+        publish_transient_states,
+        include_fills,
+    ):
+        del observed_at, publish_transient_states, include_fills
+        self.realtime_calls += 1
+        return ExecutionAccountSyncResult(
+            status=ExecutionAccountStatus.READY_READONLY,
+            reconciliation_id=f"realtime-{self.realtime_calls}",
+            mismatch_count=0,
+            snapshot=self.snapshot,
+            fill_count=1,
+            fills=(self.fill,),
+            new_fills=(self.fill,),
+            new_fill_keys=frozenset({("ETHUSDT", "trade-1")}),
+        )
+
+    async def persist_reconciliation_result(self, result):
+        self.realtime_persisted.append(result)
+        self.realtime_persisted_event.set()
 
 
 async def test_user_data_daemon_persists_events_and_reconciles_unknown_state() -> None:
@@ -142,6 +190,29 @@ async def test_user_data_daemon_publishes_initial_full_snapshot() -> None:
 
     assert published == [result]
     assert published[0].snapshot == snapshot
+
+
+async def test_user_data_daemon_uses_realtime_reconcile_and_replays_new_fills() -> None:
+    service = RealtimeFakeService(_snapshot())
+    reconciled_fills = []
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=FakeStream(),
+        config=UserDataAccountSyncConfig(),
+        on_reconciled_fill=lambda fill, result: reconciled_fills.append(
+            (fill, result)
+        ),
+    )
+
+    await daemon._reconcile(include_fills=True)
+    result = await daemon._reconcile(include_fills=True)
+
+    assert service.sync_calls == 1
+    assert service.realtime_calls == 1
+    assert reconciled_fills == [(service.fill, result)]
+    await asyncio.wait_for(service.realtime_persisted_event.wait(), timeout=1)
+    assert service.realtime_persisted == [result]
+    await daemon._stop_pipeline()
 
 
 class BlockingPersistService(FakeService):

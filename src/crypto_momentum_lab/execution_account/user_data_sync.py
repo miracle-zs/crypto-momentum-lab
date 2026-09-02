@@ -14,6 +14,9 @@ from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.binance.user_data import (
     BinanceUserDataEvent,
 )
+from crypto_momentum_lab.execution_account.expectations import (
+    AccountPositionExpectationRegistry,
+)
 from crypto_momentum_lab.execution_account.sync import (
     AccountSnapshot,
     AccountSnapshotDelta,
@@ -40,9 +43,18 @@ class AccountUserDataState:
     """Merge Binance partial account events onto the latest REST snapshot."""
 
     _OPEN_ORDER_STATUSES = frozenset({"NEW", "PARTIALLY_FILLED"})
+    _NO_FILL_TERMINAL_ORDER_STATUSES = frozenset(
+        {"CANCELED", "REJECTED", "EXPIRED", "EXPIRED_IN_MATCH"}
+    )
 
-    def __init__(self, snapshot: AccountSnapshot) -> None:
+    def __init__(
+        self,
+        snapshot: AccountSnapshot,
+        *,
+        expected_position_registry: AccountPositionExpectationRegistry | None = None,
+    ) -> None:
         self._config = snapshot.config
+        self._expected_position_registry = expected_position_registry
         self._balances = {item.asset: item for item in snapshot.balances}
         self._positions = {
             (item.symbol, item.position_side): item for item in snapshot.positions
@@ -180,32 +192,48 @@ class AccountUserDataState:
             position_amt = _decimal(row.get("pa"), "ACCOUNT_UPDATE position amount")
             existing_position = self._positions.get((symbol, position_side))
             if existing_position is None and position_amt != 0:
-                reason = reason or "unknown_position"
+                expected_position = None
+                if self._expected_position_registry is not None:
+                    expected_position = self._expected_position_registry.consume(
+                        symbol=symbol,
+                        position_side=position_side,
+                        position_amt=position_amt,
+                        observed_at=event.received_at,
+                    )
+                if expected_position is None:
+                    reason = reason or "unknown_position"
             if existing_position is None and position_amt == 0:
                 continue
+            entry_price = _decimal(
+                row.get("ep", "0"),
+                "ACCOUNT_UPDATE entry price",
+            )
+            unrealized_pnl = _decimal(
+                row.get("up", "0"),
+                "ACCOUNT_UPDATE unrealized pnl",
+            )
+            mark_price = (
+                existing_position.mark_price
+                if existing_position is not None
+                else _initial_mark_price(
+                    entry_price=entry_price,
+                    position_amt=position_amt,
+                    unrealized_pnl=unrealized_pnl,
+                )
+            )
             self._positions[(symbol, position_side)] = AccountPositionSnapshot(
                 environment=self._config.environment,
                 account_label=self._config.account_label,
                 symbol=symbol,
                 position_side=position_side,
                 position_amt=position_amt,
-                entry_price=_decimal(
-                    row.get("ep", "0"),
-                    "ACCOUNT_UPDATE entry price",
-                ),
-                mark_price=(
-                    existing_position.mark_price
-                    if existing_position is not None
-                    else Decimal("0")
-                ),
-                unrealized_pnl=_decimal(
-                    row.get("up", "0"),
-                    "ACCOUNT_UPDATE unrealized pnl",
-                ),
+                entry_price=entry_price,
+                mark_price=mark_price,
+                unrealized_pnl=unrealized_pnl,
                 notional=(
                     existing_position.notional
                     if existing_position is not None
-                    else Decimal("0")
+                    else abs(position_amt * mark_price)
                 ),
                 leverage=(
                     existing_position.leverage
@@ -265,6 +293,12 @@ class AccountUserDataState:
             observed_at=event.received_at,
             raw_payload=_event_raw_payload(event, "order", row),
         )
+        if (
+            self._expected_position_registry is not None
+            and status in self._NO_FILL_TERMINAL_ORDER_STATUSES
+            and order.executed_quantity == 0
+        ):
+            self._expected_position_registry.discard(order.client_order_id)
         if status in self._OPEN_ORDER_STATUSES:
             self._open_orders[key] = order
         else:
@@ -322,6 +356,26 @@ class AccountUserDataState:
             self._seen_event_id_set.discard(expired)
         self._seen_event_ids.append(event_id)
         self._seen_event_id_set.add(event_id)
+
+
+def _initial_mark_price(
+    *,
+    entry_price: Decimal,
+    position_amt: Decimal,
+    unrealized_pnl: Decimal,
+) -> Decimal:
+    """Build a safe provisional mark for a position-only account update.
+
+    Binance does not include mark price in ``ACCOUNT_UPDATE``.  Deriving it
+    from unrealized PnL is exact when PnL is non-zero; entry price is the
+    conservative provisional mark at a flat PnL boundary.  The next REST
+    snapshot replaces this value with the exchange mark.
+    """
+    if position_amt != 0 and unrealized_pnl != 0:
+        derived = entry_price + unrealized_pnl / position_amt
+        if derived > 0:
+            return derived
+    return entry_price if entry_price > 0 else Decimal("0")
 
 
 def _require_mapping(value: object, field_name: str) -> dict[str, object]:

@@ -21,6 +21,7 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     LiveSubmissionDisabledError,
     OrderExecutionResult,
     OrderExecutionStateMachine,
+    OrderPreSubmissionError,
     PreparedOrderSubmission,
     SubmitPolicy,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "ExchangeOrderQueryUnknownError",
     "ExchangeSubmissionTimeoutError",
     "LiveSubmissionDisabledError",
+    "OrderPreSubmissionError",
     "OrderExecutionResult",
     "OrderExecutionStateMachine",
     "PreparedOrderSubmission",

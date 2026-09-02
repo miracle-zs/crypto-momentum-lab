@@ -26,6 +26,7 @@ type BalanceValue = tuple[Decimal, Decimal, Decimal]
 
 _FILL_KEY_CACHE_SIZE = 8192
 _FILL_FETCH_OVERLAP_MS = 60_000
+_NEW_POSITION_FILL_LOOKBACK = timedelta(minutes=30)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +169,8 @@ class ExecutionAccountSyncResult:
     snapshot: AccountSnapshot | None = None
     delta: AccountSnapshotDelta | None = None
     fill_count: int = 0
+    fills: tuple[AccountFillEvent, ...] = ()
+    new_fills: tuple[AccountFillEvent, ...] = ()
     new_fill_keys: frozenset[FillKey] = frozenset()
     fill_count_by_symbol: tuple[tuple[str, int], ...] = ()
 
@@ -392,6 +395,8 @@ class ExecutionAccountSyncService:
         self._known_fill_key_order: deque[FillKey] = deque(
             maxlen=_FILL_KEY_CACHE_SIZE
         )
+        self._has_completed_sync = False
+        self._latest_observation_at: datetime | None = None
 
     async def snapshot_once(self, *, observed_at: datetime | None = None) -> None:
         """Persist a lightweight balance/position observation.
@@ -450,12 +455,47 @@ class ExecutionAccountSyncService:
         publish_transient_states: bool = True,
         include_fills: bool = True,
     ) -> ExecutionAccountSyncResult:
+        return await self._sync_once(
+            observed_at=observed_at,
+            publish_transient_states=publish_transient_states,
+            include_fills=include_fills,
+            persist=True,
+        )
+
+    async def sync_once_for_realtime(
+        self,
+        *,
+        observed_at: datetime | None = None,
+        publish_transient_states: bool = False,
+        include_fills: bool = True,
+    ) -> ExecutionAccountSyncResult:
+        """Fetch an authoritative snapshot without waiting on PostgreSQL.
+
+        The caller owns publication of the returned in-memory snapshot.  A
+        later call to :meth:`persist_reconciliation_result` writes the same
+        result to the durable database in the background.
+        """
+        return await self._sync_once(
+            observed_at=observed_at,
+            publish_transient_states=publish_transient_states,
+            include_fills=include_fills,
+            persist=False,
+        )
+
+    async def _sync_once(
+        self,
+        *,
+        observed_at: datetime | None,
+        publish_transient_states: bool,
+        include_fills: bool,
+        persist: bool,
+    ) -> ExecutionAccountSyncResult:
         config = (
             self._config
             if observed_at is None
             else replace(self._config, observed_at=observed_at)
         )
-        if publish_transient_states:
+        if publish_transient_states and persist:
             await self._save_state(
                 ExecutionAccountStatus.STARTING,
                 config=replace(
@@ -510,11 +550,13 @@ class ExecutionAccountSyncService:
                 )
 
             balances = await self._client.fetch_balances()
+            previous_active_position_keys = set(self._active_position_keys)
             positions = await self._client.fetch_positions()
             active_positions = tuple(
                 position for position in positions if position.position_amt != 0
             )
-            self._active_position_keys = _position_keys(active_positions)
+            active_position_keys = _position_keys(active_positions)
+            self._active_position_keys = active_position_keys
             open_orders = await self._client.fetch_open_orders()
             self._tracked_fill_symbols.update(
                 position.symbol.strip().upper() for position in active_positions
@@ -524,6 +566,34 @@ class ExecutionAccountSyncService:
             )
             tracked_fill_symbols = tuple(sorted(self._tracked_fill_symbols))
             previous_fill_cursors = dict(self._fill_cursors)
+            previous_active_symbols = {
+                symbol for symbol, _position_side in previous_active_position_keys
+            }
+            newly_active_symbols = (
+                {
+                    position.symbol for position in active_positions
+                }
+                - previous_active_symbols
+                if self._has_completed_sync
+                else set()
+            )
+            start_time_by_symbol = {
+                symbol: cursor.start_time_ms
+                for symbol, cursor in previous_fill_cursors.items()
+                if (
+                    cursor.from_id is None
+                    and cursor.start_time_ms is not None
+                )
+            }
+            new_position_start_at = int(
+                (
+                    config.observed_at - _NEW_POSITION_FILL_LOOKBACK
+                ).timestamp()
+                * 1000
+            )
+            for symbol in newly_active_symbols:
+                if symbol not in previous_fill_cursors:
+                    start_time_by_symbol[symbol] = max(0, new_position_start_at)
             fills = (
                 await self._client.fetch_recent_fills(
                     tracked_fill_symbols,
@@ -532,14 +602,7 @@ class ExecutionAccountSyncService:
                         for symbol, cursor in previous_fill_cursors.items()
                         if cursor.from_id is not None
                     },
-                    start_time_by_symbol={
-                        symbol: cursor.start_time_ms
-                        for symbol, cursor in previous_fill_cursors.items()
-                        if (
-                            cursor.from_id is None
-                            and cursor.start_time_ms is not None
-                        )
-                    },
+                    start_time_by_symbol=start_time_by_symbol,
                 )
                 if include_fills and tracked_fill_symbols
                 else ()
@@ -549,7 +612,10 @@ class ExecutionAccountSyncService:
                 key
                 for key in fill_keys
                 if (
-                    key[0] in previous_fill_cursors
+                    (
+                        key[0] in previous_fill_cursors
+                        or key[0] in newly_active_symbols
+                    )
                     and key not in self._known_fill_keys
                 )
             )
@@ -564,33 +630,18 @@ class ExecutionAccountSyncService:
                 if include_fills
                 else previous_fill_cursors
             )
-            await self._repository.save_reconciliation_snapshot(
-                config=account_config,
-                balances=balances,
-                positions=active_positions,
-                open_orders=open_orders,
-                fills=fills,
-                run=_reconciliation_run(
-                    config,
-                    reconciliation_id=reconciliation_id,
-                    status="ready",
-                    mismatch_count=0,
-                    details={},
-                    balance_count=len(balances),
-                    position_count=len(active_positions),
-                    open_order_count=len(open_orders),
-                    fill_count=len(fills),
-                ),
+            new_fills = tuple(
+                fill
+                for fill in fills
+                if (fill.symbol.strip().upper(), fill.trade_id.strip())
+                in new_fill_keys
             )
             self._remember_balance_values(balances)
             self._fill_cursors = next_fill_cursors
             for key in fill_keys:
                 self._remember_fill_key(key)
-            await self._save_state(
-                ExecutionAccountStatus.READY_READONLY,
-                config=config,
-            )
-            return ExecutionAccountSyncResult(
+            self._has_completed_sync = True
+            result = ExecutionAccountSyncResult(
                 status=ExecutionAccountStatus.READY_READONLY,
                 reconciliation_id=reconciliation_id,
                 mismatch_count=0,
@@ -601,9 +652,16 @@ class ExecutionAccountSyncService:
                     open_orders=open_orders,
                 ),
                 fill_count=len(fills),
+                fills=fills,
+                new_fills=new_fills,
                 new_fill_keys=new_fill_keys,
                 fill_count_by_symbol=fill_count_by_symbol,
             )
+            assert result.snapshot is not None
+            self._remember_observation(result.snapshot.config.observed_at)
+            if persist:
+                await self.persist_reconciliation_result(result, source=None)
+            return result
         except Exception as error:
             try:
                 await self._save_state(
@@ -614,6 +672,59 @@ class ExecutionAccountSyncService:
             except Exception:
                 pass
             raise
+
+    async def persist_reconciliation_result(
+        self,
+        result: ExecutionAccountSyncResult,
+        *,
+        source: str | None = "rest_reconciliation",
+    ) -> None:
+        """Persist a ready result after its real-time publication.
+
+        This method deliberately accepts an already materialized result so
+        the account daemon can publish the fresh state first and let a slow
+        database catch up independently.
+        """
+        if (
+            result.status is not ExecutionAccountStatus.READY_READONLY
+            or result.snapshot is None
+        ):
+            raise ValueError("only a ready account result can be persisted")
+        snapshot = result.snapshot
+        if (
+            self._latest_observation_at is not None
+            and snapshot.config.observed_at < self._latest_observation_at
+        ):
+            return
+        config = replace(
+            self._config,
+            observed_at=snapshot.config.observed_at,
+        )
+        details: dict[str, JsonValue] = {}
+        if source is not None:
+            details["source"] = source
+        await self._repository.save_reconciliation_snapshot(
+            config=snapshot.config,
+            balances=snapshot.balances,
+            positions=snapshot.positions,
+            open_orders=snapshot.open_orders,
+            fills=result.fills,
+            run=_reconciliation_run(
+                config,
+                reconciliation_id=result.reconciliation_id,
+                status="ready",
+                mismatch_count=result.mismatch_count,
+                details=details,
+                balance_count=len(snapshot.balances),
+                position_count=len(snapshot.positions),
+                open_order_count=len(snapshot.open_orders),
+                fill_count=result.fill_count,
+            ),
+        )
+        await self._save_state(
+            ExecutionAccountStatus.READY_READONLY,
+            config=config,
+        )
 
     async def persist_user_data_event(
         self,
@@ -634,6 +745,7 @@ class ExecutionAccountSyncService:
                 "account snapshot account label does not match sync config"
             )
         config = replace(self._config, observed_at=event.received_at)
+        self._remember_observation(event.received_at)
         active_positions = tuple(
             position for position in snapshot.positions if position.position_amt != 0
         )
@@ -677,6 +789,8 @@ class ExecutionAccountSyncService:
             mismatch_count=0,
             snapshot=snapshot,
             fill_count=len(fills),
+            fills=fills,
+            new_fills=fills,
             new_fill_keys=frozenset(_fill_keys(fills)),
             fill_count_by_symbol=_fill_counts_by_symbol(fills),
         )
@@ -707,6 +821,13 @@ class ExecutionAccountSyncService:
     ) -> None:
         for balance in balances:
             self._last_balance_values[balance.asset] = _balance_value(balance)
+
+    def _remember_observation(self, observed_at: datetime) -> None:
+        if (
+            self._latest_observation_at is None
+            or observed_at > self._latest_observation_at
+        ):
+            self._latest_observation_at = observed_at
 
     def _remember_fill_key(self, key: FillKey) -> None:
         if key in self._known_fill_keys:

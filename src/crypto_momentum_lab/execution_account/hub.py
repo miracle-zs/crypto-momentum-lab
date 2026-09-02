@@ -11,10 +11,11 @@ and account-balance lookup from the normal live order path.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -32,6 +33,9 @@ from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
     ExecutionAccountStatus,
 )
+from crypto_momentum_lab.execution_account.expectations import (
+    AccountPositionExpectation,
+)
 from crypto_momentum_lab.execution_account.sync import (
     AccountSnapshot,
     AccountSnapshotDelta,
@@ -44,8 +48,11 @@ _SCHEMA_VERSION = 1
 _SUBSCRIBE_MESSAGE = "subscribe_account_events"
 _READY_MESSAGE = "account_event_hub_ready"
 _EVENT_MESSAGE = "account_event"
+_REGISTER_EXPECTED_POSITION_MESSAGE = "register_expected_position"
+_EXPECTED_POSITION_READY_MESSAGE = "expected_position_registered"
 _CLIENT_RECEIVE_QUEUE_SIZE = 16
 _MAX_MESSAGE_SIZE = 1024 * 1024
+_FILL_KEY_CACHE_SIZE = 8192
 _SNAPSHOT_KIND_NOTIFICATION = "notification"
 _SNAPSHOT_KIND_FULL = "full"
 _SNAPSHOT_KIND_DELTA = "delta"
@@ -56,6 +63,10 @@ _SNAPSHOT_KINDS = frozenset(
         _SNAPSHOT_KIND_DELTA,
     }
 )
+
+AccountPositionExpectationCallback = Callable[
+    [AccountPositionExpectation], None | Awaitable[None]
+]
 
 
 class AccountEventHubError(RuntimeError):
@@ -229,8 +240,14 @@ class _ReplayEntry:
 class AccountEventHub:
     """Bounded latest-event fan-out owned by execution-account."""
 
-    def __init__(self, config: AccountEventHubConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: AccountEventHubConfig | None = None,
+        *,
+        on_position_expectation: AccountPositionExpectationCallback | None = None,
+    ) -> None:
         self._config = config or AccountEventHubConfig()
+        self._on_position_expectation = on_position_expectation
         self._server: Server | None = None
         self._bound_host: str | None = None
         self._bound_port: int | None = None
@@ -240,6 +257,10 @@ class AccountEventHub:
         self._latest_messages: dict[tuple[str, str], str] = {}
         self._latest_events: dict[tuple[str, str], AccountEvent] = {}
         self._latest_snapshots: dict[tuple[str, str], AccountSnapshot] = {}
+        self._seen_fill_keys: set[tuple[str, str]] = set()
+        self._seen_fill_key_order: deque[tuple[str, str]] = deque(
+            maxlen=_FILL_KEY_CACHE_SIZE
+        )
         self._replay_buffers: dict[
             tuple[str, str], deque[_ReplayEntry]
         ] = {}
@@ -267,6 +288,8 @@ class AccountEventHub:
             self._latest_events.clear()
             self._latest_snapshots.clear()
             self._replay_buffers.clear()
+            self._seen_fill_keys.clear()
+            self._seen_fill_key_order.clear()
         self._server = await serve(
             self._handle_connection,
             self._config.host,
@@ -313,6 +336,19 @@ class AccountEventHub:
 
     def publish(self, event: AccountEvent) -> None:
         """Publish without waiting on a consumer or database operation."""
+        if event.has_fill and event.symbol is not None and event.trade_id is not None:
+            fill_key = (event.symbol, event.trade_id)
+            if (
+                event.event_type == "ACCOUNT_FILL_RECONCILED"
+                and fill_key in self._seen_fill_keys
+            ):
+                return
+            duplicate_fill = fill_key in self._seen_fill_keys
+            self._remember_fill_key(fill_key)
+            if duplicate_fill:
+                # Keep the order/status notification for consumers, but do not
+                # count a REST-replayed fill twice in live latency telemetry.
+                event = replace(event, has_fill=False)
         scope = (event.environment, event.account_label)
         current_snapshot = self._next_snapshot(scope, event)
         sequence = self._sequences.get(scope, 0) + 1
@@ -346,6 +382,15 @@ class AccountEventHub:
                 and subscriber.account_label == event.account_label
             ):
                 self._enqueue_latest(subscriber, message)
+
+    def _remember_fill_key(self, key: tuple[str, str]) -> None:
+        if key in self._seen_fill_keys:
+            return
+        if len(self._seen_fill_key_order) == self._seen_fill_key_order.maxlen:
+            oldest = self._seen_fill_key_order.popleft()
+            self._seen_fill_keys.discard(oldest)
+        self._seen_fill_key_order.append(key)
+        self._seen_fill_keys.add(key)
 
     def _next_snapshot(
         self,
@@ -479,6 +524,9 @@ class AccountEventHub:
                 timeout=self._config.handshake_timeout_seconds,
             )
             request = _decode_object(raw_message)
+            if request.get("type") == _REGISTER_EXPECTED_POSITION_MESSAGE:
+                await self._handle_position_expectation(connection, request)
+                return
             if request.get("type") != _SUBSCRIBE_MESSAGE:
                 raise AccountEventHubProtocolError("invalid subscription message")
             environment = _require_string(request, "environment")
@@ -571,7 +619,38 @@ class AccountEventHub:
                     subscriber.writer_task,
                     return_exceptions=True,
                 )
-            log.info("account_event_hub_subscriber_disconnected")
+            log.info(
+                "account_event_hub_subscriber_disconnected"
+                if subscriber is not None
+                else "account_event_hub_control_disconnected"
+            )
+
+    async def _handle_position_expectation(
+        self,
+        connection: ServerConnection,
+        request: dict[str, object],
+    ) -> None:
+        callback = self._on_position_expectation
+        if callback is None:
+            raise AccountEventHubProtocolError(
+                "account position expectation registration is not enabled"
+            )
+        expectation = decode_account_position_expectation(request)
+        callback_result = callback(expectation)
+        if inspect.isawaitable(callback_result):
+            await callback_result
+        await connection.send(
+            json.dumps(
+                {
+                    "type": _EXPECTED_POSITION_READY_MESSAGE,
+                    "schema_version": _SCHEMA_VERSION,
+                    "environment": expectation.environment,
+                    "account_label": expectation.account_label,
+                    "client_order_id": expectation.client_order_id,
+                },
+                separators=(",", ":"),
+            )
+        )
 
     async def _write_messages(
         self,
@@ -862,6 +941,119 @@ class WebSocketAccountEventSource:
         while receive_queue.full():
             receive_queue.get_nowait()
         receive_queue.put_nowait(error)
+
+
+class WebSocketAccountPositionExpectationPublisher:
+    """Register an entry expectation over the Hub's low-volume control path."""
+
+    def __init__(
+        self,
+        *,
+        url: str,
+        environment: str,
+        account_label: str,
+        config: AccountEventHubConfig | None = None,
+    ) -> None:
+        for value, field_name in (
+            (url, "url"),
+            (environment, "environment"),
+            (account_label, "account_label"),
+        ):
+            if not value.strip():
+                raise ValueError(f"{field_name} must not be empty")
+        self._url = url
+        self._environment = environment
+        self._account_label = account_label
+        self._config = config or AccountEventHubConfig()
+
+    async def register(self, expectation: AccountPositionExpectation) -> None:
+        if (
+            expectation.environment != self._environment
+            or expectation.account_label != self._account_label
+        ):
+            raise ValueError(
+                "account position expectation scope does not match publisher"
+            )
+        async with connect(
+            self._url,
+            open_timeout=self._config.handshake_timeout_seconds,
+            ping_interval=20,
+            ping_timeout=20,
+            max_size=_MAX_MESSAGE_SIZE,
+            max_queue=16,
+            proxy=None,
+        ) as connection:
+            await connection.send(encode_account_position_expectation(expectation))
+            response = _decode_object(await connection.recv())
+            if response.get("type") != _EXPECTED_POSITION_READY_MESSAGE:
+                raise AccountEventHubProtocolError(
+                    "account-event hub did not acknowledge position expectation"
+                )
+            if response.get("schema_version") != _SCHEMA_VERSION:
+                raise AccountEventHubProtocolError(
+                    "unsupported account-event hub expectation acknowledgement"
+                )
+            if (
+                _require_string(response, "environment") != self._environment
+                or _require_string(response, "account_label")
+                != self._account_label
+                or _require_string(response, "client_order_id")
+                != expectation.client_order_id
+            ):
+                raise AccountEventHubProtocolError(
+                    "account-event hub expectation acknowledgement mismatch"
+                )
+
+
+def encode_account_position_expectation(
+    expectation: AccountPositionExpectation,
+) -> str:
+    return json.dumps(
+        {
+            "type": _REGISTER_EXPECTED_POSITION_MESSAGE,
+            "schema_version": _SCHEMA_VERSION,
+            "environment": expectation.environment,
+            "account_label": expectation.account_label,
+            "symbol": expectation.symbol,
+            "position_side": expectation.position_side,
+            "client_order_id": expectation.client_order_id,
+            "side": expectation.side,
+            "quantity": str(expectation.quantity),
+            "created_at": expectation.created_at.isoformat(),
+            "expires_at": expectation.expires_at.isoformat(),
+        },
+        separators=(",", ":"),
+    )
+
+
+def decode_account_position_expectation(
+    message: str | bytes | object,
+) -> AccountPositionExpectation:
+    payload = _decode_object(message)
+    if payload.get("type") != _REGISTER_EXPECTED_POSITION_MESSAGE:
+        raise AccountEventHubProtocolError(
+            "invalid account position expectation message type"
+        )
+    if payload.get("schema_version") != _SCHEMA_VERSION:
+        raise AccountEventHubProtocolError(
+            "unsupported account position expectation schema"
+        )
+    try:
+        return AccountPositionExpectation(
+            environment=_require_string(payload, "environment"),
+            account_label=_require_string(payload, "account_label"),
+            symbol=_require_string(payload, "symbol"),
+            position_side=_require_string(payload, "position_side"),
+            client_order_id=_require_string(payload, "client_order_id"),
+            side=_require_string(payload, "side"),
+            quantity=_required_decimal(payload, "quantity"),
+            created_at=_parse_datetime(payload, "created_at"),
+            expires_at=_parse_datetime(payload, "expires_at"),
+        )
+    except (TypeError, ValueError) as error:
+        raise AccountEventHubProtocolError(
+            "invalid account position expectation payload"
+        ) from error
 
 
 def encode_account_event(event: AccountEvent, *, sequence: int) -> str:
@@ -1591,6 +1783,9 @@ __all__ = [
     "AccountEventHubProtocolError",
     "AccountEventHubSequenceGap",
     "WebSocketAccountEventSource",
+    "WebSocketAccountPositionExpectationPublisher",
+    "decode_account_position_expectation",
     "decode_account_event",
+    "encode_account_position_expectation",
     "encode_account_event",
 ]
