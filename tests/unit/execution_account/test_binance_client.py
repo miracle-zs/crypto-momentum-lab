@@ -38,10 +38,10 @@ def test_private_client_uses_explicit_request_timeout() -> None:
     )
 
     try:
-        assert client._client.timeout.read == 8.0
-        assert client._client.timeout.write == 8.0
-        assert client._client.timeout.connect == 2.0
-        assert client._client.timeout.pool == 1.0
+        assert client._client.timeout.read == 5.0
+        assert client._client.timeout.write == 5.0
+        assert client._client.timeout.connect == 5.0
+        assert client._client.timeout.pool == 5.0
     finally:
         asyncio.run(client.aclose())
 
