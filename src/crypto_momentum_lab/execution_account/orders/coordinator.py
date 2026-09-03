@@ -14,9 +14,11 @@ from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 from crypto_momentum_lab.domain.execution import (
+    ExchangeOrderSnapshot,
     FuturesPositionSide,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
     PreparedOrderSubmission,
@@ -39,6 +41,19 @@ class OrderExecutionPort(Protocol):
     async def cancel_order(
         self,
         plan: OrderExecutionPlan,
+    ) -> OrderExecutionResult: ...
+
+    async def apply_observed_snapshot(
+        self,
+        plan: OrderExecutionPlan,
+        snapshot: ExchangeOrderSnapshot,
+    ) -> OrderExecutionResult: ...
+
+    async def mark_absent_reconciled(
+        self,
+        plan: OrderExecutionPlan,
+        *,
+        details: dict[str, JsonValue],
     ) -> OrderExecutionResult: ...
 
 
@@ -194,6 +209,49 @@ class OrderExecutionCoordinator:
                 plan,
                 priority=self._RECONCILE_PRIORITY,
                 operation=lambda: self._backend.reconcile_order(plan),
+            ),
+        )
+
+    async def apply_observed_snapshot(
+        self,
+        plan: OrderExecutionPlan,
+        snapshot: ExchangeOrderSnapshot,
+    ) -> OrderExecutionResult:
+        return cast(
+            OrderExecutionResult,
+            await self._schedule(
+                plan,
+                priority=(
+                    self._EXIT_PRIORITY
+                    if plan.reduce_only
+                    else self._RECONCILE_PRIORITY
+                ),
+                operation=lambda: self._backend.apply_observed_snapshot(
+                    plan,
+                    snapshot,
+                ),
+            ),
+        )
+
+    async def mark_absent_reconciled(
+        self,
+        plan: OrderExecutionPlan,
+        *,
+        details: dict[str, JsonValue],
+    ) -> OrderExecutionResult:
+        return cast(
+            OrderExecutionResult,
+            await self._schedule(
+                plan,
+                priority=(
+                    self._EXIT_PRIORITY
+                    if plan.reduce_only
+                    else self._RECONCILE_PRIORITY
+                ),
+                operation=lambda: self._backend.mark_absent_reconciled(
+                    plan,
+                    details=details,
+                ),
             ),
         )
 

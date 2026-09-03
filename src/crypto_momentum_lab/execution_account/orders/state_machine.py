@@ -143,6 +143,7 @@ class OrderExecutionResult:
     suppressed: bool = False
     executed_quantity: Decimal = Decimal("0")
     average_price: Decimal = Decimal("0")
+    plan: OrderExecutionPlan | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +271,7 @@ class OrderExecutionStateMachine:
                 state=ExchangeOrderState.SUPPRESSED,
                 exchange_order_id=None,
                 suppressed=True,
+                plan=plan,
             )
 
         if prepared_submission is None:
@@ -295,6 +297,7 @@ class OrderExecutionStateMachine:
                 plan.client_order_id,
                 ExchangeOrderState.REJECTED,
                 None,
+                plan=plan,
             )
         except OrderPreSubmissionError as exc:
             await self._append_event(
@@ -309,6 +312,7 @@ class OrderExecutionStateMachine:
                 plan.client_order_id,
                 ExchangeOrderState.REJECTED,
                 None,
+                plan=plan,
             )
         except ExchangeSubmissionTimeoutError:
             query_result = await self._query_order_with_retry(
@@ -329,6 +333,7 @@ class OrderExecutionStateMachine:
                     plan.client_order_id,
                     ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
                     None,
+                    plan=plan,
                 )
             snapshot = query_result.snapshot
         return await self._apply_snapshot(plan, snapshot)
@@ -364,8 +369,54 @@ class OrderExecutionStateMachine:
                 plan.client_order_id,
                 ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
                 None,
+                plan=plan,
             )
         return await self._apply_snapshot(plan, query_result.snapshot)
+
+    async def apply_observed_snapshot(
+        self,
+        plan: OrderExecutionPlan,
+        snapshot: ExchangeOrderSnapshot,
+    ) -> OrderExecutionResult:
+        """Persist a snapshot already obtained by an exit recovery read."""
+        if self._lock is None:
+            return await self._apply_snapshot(plan, snapshot)
+        async with self._lock:
+            return await self._apply_snapshot(plan, snapshot)
+
+    async def mark_absent_reconciled(
+        self,
+        plan: OrderExecutionPlan,
+        *,
+        details: dict[str, JsonValue],
+    ) -> OrderExecutionResult:
+        """Close an unknown order after an independent absence proof."""
+        if not plan.quantized:
+            raise ValueError(
+                "order plan must be quantized before absence resolution"
+            )
+        if self._lock is None:
+            return await self._mark_absent_reconciled(plan, details=details)
+        async with self._lock:
+            return await self._mark_absent_reconciled(plan, details=details)
+
+    async def _mark_absent_reconciled(
+        self,
+        plan: OrderExecutionPlan,
+        *,
+        details: dict[str, JsonValue],
+    ) -> OrderExecutionResult:
+        await self._append_event(
+            plan,
+            ExchangeOrderState.ABSENT_RECONCILED,
+            details=details,
+        )
+        return OrderExecutionResult(
+            plan.client_order_id,
+            ExchangeOrderState.ABSENT_RECONCILED,
+            None,
+            plan=plan,
+        )
 
     async def cancel_order(
         self,
@@ -421,6 +472,7 @@ class OrderExecutionStateMachine:
                 plan.client_order_id,
                 ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
                 None,
+                plan=plan,
             )
         except ExchangeOrderAlreadyAbsentError as exc:
             query_result = await self._query_order_with_retry(
@@ -454,6 +506,7 @@ class OrderExecutionStateMachine:
                     plan.client_order_id,
                     ExchangeOrderState.ABSENT_RECONCILED,
                     None,
+                    plan=plan,
                 )
             await self._append_event(
                 plan,
@@ -473,6 +526,7 @@ class OrderExecutionStateMachine:
                 plan.client_order_id,
                 ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
                 None,
+                plan=plan,
             )
         except ExchangeOrderRejectedError as exc:
             await self._append_event(
@@ -484,6 +538,7 @@ class OrderExecutionStateMachine:
                 plan.client_order_id,
                 ExchangeOrderState.REJECTED,
                 None,
+                plan=plan,
             )
         return await self._apply_snapshot(plan, snapshot)
 
@@ -553,6 +608,7 @@ class OrderExecutionStateMachine:
             snapshot.exchange_order_id,
             executed_quantity=snapshot.executed_quantity,
             average_price=snapshot.average_price,
+            plan=plan,
         )
 
     async def _append_event(

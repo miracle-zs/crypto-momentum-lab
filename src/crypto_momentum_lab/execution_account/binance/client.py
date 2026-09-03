@@ -21,10 +21,15 @@ from crypto_momentum_lab.domain.account import (
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderSnapshot,
     ExchangeOrderState,
+    FuturesPositionSide,
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.live_rollout import RollbackCommand
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.execution_account.orders.recovery import (
+    ExitRecoveryInspectionUnknownError,
+    ExitRecoveryObservation,
+)
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeCancellationUnknownError,
     ExchangeOrderAlreadyAbsentError,
@@ -291,8 +296,16 @@ class BinanceUsdMPrivateReadClient:
             for item in _require_sequence_of_mappings(payload)
         )
 
-    async def fetch_open_orders(self) -> tuple[AccountOpenOrderSnapshot, ...]:
-        payload = await self._signed_get("/fapi/v1/openOrders")
+    async def fetch_open_orders(
+        self,
+        symbol: str | None = None,
+    ) -> tuple[AccountOpenOrderSnapshot, ...]:
+        params: dict[str, str | int | float | bool | None] | None = None
+        if symbol is not None:
+            if not symbol.strip():
+                raise ValueError("symbol must not be empty")
+            params = {"symbol": symbol.strip().upper()}
+        payload = await self._signed_get("/fapi/v1/openOrders", params)
         observed_at = self._now()
         return tuple(
             AccountOpenOrderSnapshot(
@@ -611,6 +624,57 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             entry_leverage=entry_leverage,
         )
 
+    async def inspect_exit_order(
+        self,
+        plan: OrderExecutionPlan,
+    ) -> ExitRecoveryObservation:
+        """Read all exchange facts required before retrying an unknown exit."""
+        if not plan.reduce_only:
+            raise ValueError("exit recovery inspection requires a reduce-only plan")
+        try:
+            order, positions, open_orders = await asyncio.gather(
+                self.query_order_by_client_id(
+                    plan.symbol,
+                    plan.client_order_id,
+                ),
+                self.fetch_positions(),
+                self.fetch_open_orders(symbol=plan.symbol),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise ExitRecoveryInspectionUnknownError(
+                "Binance exit recovery inspection could not be completed"
+            ) from exc
+
+        try:
+            position_quantity = sum(
+                (
+                    _exit_position_quantity(position, plan)
+                    for position in positions
+                ),
+                start=Decimal("0"),
+            )
+            active_client_order_ids = {
+                open_order.client_order_id
+                for open_order in open_orders
+                if _open_order_matches_exit(open_order, plan)
+            }
+        except ExitRecoveryInspectionUnknownError:
+            raise
+        except Exception as exc:
+            raise ExitRecoveryInspectionUnknownError(
+                "Binance exit recovery observation could not be interpreted"
+            ) from exc
+        if order is not None and not order.state.terminal:
+            active_client_order_ids.add(order.client_order_id)
+        return ExitRecoveryObservation(
+            order=order,
+            position_quantity=position_quantity,
+            active_exit_order_client_ids=tuple(sorted(active_client_order_ids)),
+            observed_at=self._now(),
+        )
+
     async def _ensure_entry_leverage(self, symbol: str) -> int | None:
         if self._entry_leverage is None:
             return None
@@ -748,7 +812,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 if existing is not None:
                     return existing
                 try:
-                    open_orders = await self.fetch_open_orders()
+                    open_orders = await self.fetch_open_orders(symbol=symbol)
                 except httpx.TimeoutException as query_error:
                     raise ExchangeCancellationUnknownError(
                         "Binance open-order check timed out; "
@@ -857,6 +921,59 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
 
 def _decimal(value: object) -> Decimal:
     return Decimal(str(value))
+
+
+def _exit_position_quantity(
+    position: AccountPositionSnapshot,
+    plan: OrderExecutionPlan,
+) -> Decimal:
+    if position.symbol != plan.symbol:
+        return Decimal("0")
+    try:
+        position_side = FuturesPositionSide(position.position_side.upper())
+    except ValueError as exc:
+        raise ExitRecoveryInspectionUnknownError(
+            "Binance returned an unsupported position side"
+        ) from exc
+    if position_side is not plan.position_side:
+        return Decimal("0")
+    if position.position_amt == 0:
+        return Decimal("0")
+    if plan.position_side is FuturesPositionSide.BOTH:
+        if plan.side == "SELL" and position.position_amt <= 0:
+            return Decimal("0")
+        if plan.side == "BUY" and position.position_amt >= 0:
+            return Decimal("0")
+    return abs(position.position_amt)
+
+
+def _open_order_matches_exit(
+    order: AccountOpenOrderSnapshot,
+    plan: OrderExecutionPlan,
+) -> bool:
+    if order.symbol != plan.symbol or order.side.upper() != plan.side.upper():
+        return False
+    raw_position_side = order.raw_payload.get("positionSide")
+    if raw_position_side is None:
+        if plan.position_side is not FuturesPositionSide.BOTH:
+            raise ExitRecoveryInspectionUnknownError(
+                "Binance hedge-mode open order omitted positionSide"
+            )
+        position_side = FuturesPositionSide.BOTH
+    else:
+        try:
+            position_side = FuturesPositionSide(str(raw_position_side).upper())
+        except ValueError as exc:
+            raise ExitRecoveryInspectionUnknownError(
+                "Binance returned an unsupported open-order position side"
+            ) from exc
+    if position_side is not plan.position_side:
+        return False
+    # In one-way mode a matching side alone is not enough: an opposite-side
+    # opening order could otherwise suppress the recovery of a close order.
+    # Hedge mode scopes the order by positionSide because Binance does not
+    # accept reduceOnly there.
+    return plan.position_side is not FuturesPositionSide.BOTH or order.reduce_only
 
 
 def _entry_leverage_candidates(requested: int) -> tuple[int, ...]:

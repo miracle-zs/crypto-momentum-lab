@@ -12,6 +12,11 @@ from crypto_momentum_lab.execution_account.orders.quantization import (
     SymbolTradingRules,
     quantize_order_plan,
 )
+from crypto_momentum_lab.execution_account.orders.recovery import (
+    ExitRecoveryClient,
+    ExitRecoveryInspectionUnknownError,
+    ExitRecoveryObservation,
+)
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeCancellationUnknownError,
     ExchangeOrderAlreadyAbsentError,
@@ -32,6 +37,9 @@ __all__ = [
     "QuantizationRejection",
     "SymbolTradingRules",
     "quantize_order_plan",
+    "ExitRecoveryClient",
+    "ExitRecoveryInspectionUnknownError",
+    "ExitRecoveryObservation",
     "OrderExecutionCoordinator",
     "OrderExecutionPort",
     "OrderExecutionKey",

@@ -1894,6 +1894,7 @@ async def _run_live_daemon(
                 ),
                 candle_loader=None,
             ),
+            exit_recovery_client=client,
             on_managed_position_symbols=(
                 None
                 if closed_candle_feed is None

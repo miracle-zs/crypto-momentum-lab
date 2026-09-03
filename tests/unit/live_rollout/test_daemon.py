@@ -26,6 +26,7 @@ from crypto_momentum_lab.execution_account.orders.quantization import (
     SymbolTradingRules,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
+    ExchangeCancellationUnknownError,
     ExchangeOrderAlreadyAbsentError,
     ExchangeSubmissionTimeoutError,
     OrderExecutionStateMachine,
@@ -43,11 +44,16 @@ from crypto_momentum_lab.live_rollout.daemon import (
     _live_entry_candidate_passes,
 )
 from crypto_momentum_lab.live_rollout.exits import (
+    LiveExitCancellationRequest,
     LiveExitConfig,
     LiveExitManager,
+    LiveExitOrderRequest,
     ManagedLivePosition,
 )
 from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
+from crypto_momentum_lab.persistence.postgres.order_repository import (
+    PersistedExchangeOrder,
+)
 from crypto_momentum_lab.risk.gateway import RiskGateway
 from crypto_momentum_lab.strategy_runner.position_exit import (
     ClosedCandle15m,
@@ -611,6 +617,242 @@ async def test_live_daemon_does_not_halt_after_order_outcome_stays_unknown() -> 
     assert result.halt_reason is None
     assert result.approved_intent_count == 1
     assert exchange.calls == ["submit", "query", "query", "query", "query", "query"]
+
+
+async def test_unknown_reduce_only_exit_submits_recovery_for_current_position() -> None:
+    exchange = TimeoutThenAcknowledgedExitExchange()
+    recovery = CurrentPositionExitRecovery()
+    position = ManagedLivePosition(
+        symbol="BTCUSDT",
+        side="long",
+        position_side=FuturesPositionSide.LONG,
+        quantity=Decimal("0.001"),
+        entry_price=Decimal("31000"),
+        opened_at=NOW - timedelta(minutes=1),
+    )
+
+    async def position_context(state: object) -> LiveDaemonRuntimeContext:
+        del state
+        return replace(
+            _runtime_context(),
+            open_position_symbols=frozenset({"BTCUSDT"}),
+            managed_positions=(position,),
+        )
+
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=position_context,
+        exit_recovery_client=recovery,
+        exit_manager=LiveExitManager(
+            config=LiveExitConfig(
+                run_id="run-1",
+                strategy_name="compression_breakout",
+                strategy_version="v0",
+                strategy_config_hash="a" * 64,
+                policy=PositionExitPolicy(),
+            )
+        ),
+    )
+
+    failure = await daemon.process_account_event(_state())
+
+    assert failure is None
+    assert len(exchange.plans) == 2
+    assert exchange.plans[0].reduce_only is True
+    assert exchange.plans[1].reduce_only is True
+    assert exchange.plans[1].client_order_id != exchange.plans[0].client_order_id
+    assert exchange.plans[1].quantity == Decimal("0.0007")
+    assert recovery.plans == [exchange.plans[0]]
+
+
+async def test_candle_account_event_recovers_existing_unknown_exit() -> None:
+    exchange = PlanAwareExchange()
+    recovery = CurrentPositionExitRecovery()
+    position = ManagedLivePosition(
+        symbol="BTCUSDT",
+        side="long",
+        position_side=FuturesPositionSide.LONG,
+        quantity=Decimal("0.001"),
+        entry_price=Decimal("31000"),
+        opened_at=NOW - timedelta(minutes=1),
+    )
+    pending_plan = OrderExecutionPlan(
+        intent_id="pending-exit",
+        run_id="run-1",
+        client_order_id="cml_pending_exit_123456789012345678",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        price=None,
+        reduce_only=True,
+        created_at=NOW,
+        position_side=FuturesPositionSide.LONG,
+        quantity=Decimal("0.001"),
+        quantized=True,
+    )
+    pending = PersistedExchangeOrder(
+        plan=pending_plan,
+        state=ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+        exchange_order_id=None,
+        updated_at=NOW,
+    )
+
+    async def position_context(state: object) -> LiveDaemonRuntimeContext:
+        del state
+        return replace(
+            _runtime_context(),
+            open_position_symbols=frozenset({"BTCUSDT"}),
+            managed_positions=(position,),
+            unresolved_orders=(pending,),
+            unresolved_order_states=(
+                ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+            ),
+        )
+
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=position_context,
+        exit_recovery_client=recovery,
+        exit_manager=LiveExitManager(
+            config=LiveExitConfig(
+                run_id="run-1",
+                strategy_name="compression_breakout",
+                strategy_version="v0",
+                strategy_config_hash="a" * 64,
+                policy=PositionExitPolicy(mode=PositionExitMode.CANDLE_15M),
+            )
+        ),
+    )
+
+    failure = await daemon.process_account_event(_state())
+
+    assert failure is None
+    assert len(exchange.plans) == 1
+    assert exchange.plans[0].reduce_only is True
+    assert exchange.plans[0].quantity == Decimal("0.0007")
+    assert recovery.plans == [pending_plan]
+
+
+async def test_unknown_reduce_only_limit_exit_reuses_limit_recovery_type() -> None:
+    exchange = TimeoutThenAcknowledgedExitExchange()
+    recovery = CurrentPositionExitRecovery()
+    candidate = replace(
+        _intent(),
+        candidate_id="limit-exit",
+        entry_type=EntryType.LIMIT,
+        limit_price=Decimal("30000"),
+        desired_notional=Decimal("30"),
+        reduce_only=True,
+        expires_at=NOW + timedelta(minutes=1),
+    )
+    context = _runtime_context()
+    daemon = _daemon(
+        exchange=exchange,
+        exit_recovery_client=recovery,
+        hedge_mode=True,
+    )
+
+    approved, submitted, failure = await daemon._process_exit_requests(
+        (
+            LiveExitOrderRequest(
+                candidate=candidate,
+                quantity=Decimal("0.001"),
+            ),
+        ),
+        state=_state(),
+        context=context,
+    )
+
+    assert failure is None
+    assert approved == 2
+    assert submitted == 2
+    assert exchange.plans[0].order_type == "LIMIT"
+    assert exchange.plans[1].order_type == "LIMIT"
+    assert exchange.plans[1].price == Decimal("30000")
+    assert exchange.plans[1].quantity == Decimal("0.0007")
+
+
+async def test_unknown_reduce_only_exit_does_not_duplicate_active_exit() -> None:
+    exchange = TimeoutThenAcknowledgedExitExchange()
+    recovery = ActiveExitRecovery()
+    candidate = replace(
+        _intent(),
+        candidate_id="active-exit",
+        reduce_only=True,
+        desired_notional=Decimal("30"),
+    )
+    daemon = _daemon(
+        exchange=exchange,
+        exit_recovery_client=recovery,
+        hedge_mode=True,
+    )
+
+    approved, submitted, failure = await daemon._process_exit_requests(
+        (
+            LiveExitOrderRequest(
+                candidate=candidate,
+                quantity=Decimal("0.001"),
+            ),
+        ),
+        state=_state(),
+        context=_runtime_context(),
+    )
+
+    assert failure is None
+    assert approved == 1
+    assert submitted == 1
+    assert len(exchange.plans) == 1
+    assert recovery.plans == [exchange.plans[0]]
+
+
+async def test_unknown_grace_limit_cancel_falls_back_to_market() -> None:
+    exchange = UnknownCancelExchange()
+    recovery = CurrentPositionExitRecovery()
+    cancel_plan = OrderExecutionPlan(
+        intent_id="grace-limit",
+        run_id="run-1",
+        client_order_id="cml_grace_limit_123456789012345678",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("0.001"),
+        price=Decimal("30000"),
+        reduce_only=True,
+        created_at=NOW - timedelta(minutes=15),
+        position_side=FuturesPositionSide.LONG,
+        quantized=True,
+    )
+    fallback_candidate = replace(
+        _intent(),
+        candidate_id="market-fallback",
+        entry_type=EntryType.MARKET,
+        limit_price=None,
+        desired_notional=Decimal("30"),
+        reduce_only=True,
+    )
+    daemon = _daemon(
+        exchange=exchange,
+        exit_recovery_client=recovery,
+        hedge_mode=True,
+    )
+
+    approved, submitted, failure = await daemon._process_exit_requests(
+        (
+            LiveExitCancellationRequest(
+                cancel_plan=cancel_plan,
+                fallback_candidate=fallback_candidate,
+                fallback_quantity=Decimal("0.001"),
+            ),
+        ),
+        state=_state(),
+        context=_runtime_context(),
+    )
+
+    assert failure is None
+    assert approved == 1
+    assert submitted == 1
+    assert len(exchange.plans) == 1
+    assert exchange.plans[0].order_type == "MARKET"
 
 
 async def test_live_daemon_keeps_running_through_transient_database_error() -> None:
@@ -1284,6 +1526,7 @@ def _daemon(
     entry_order_type: EntryType = EntryType.LIMIT,
     max_gross_exposure: Decimal = Decimal("25"),
     reconcile_orders=None,
+    exit_recovery_client=None,
     clock=None,
 ) -> LiveStrategyDaemon:
     order_repository = FakeOrderRepository()
@@ -1326,6 +1569,7 @@ def _daemon(
             entry_order_type=entry_order_type,
         ),
         exit_manager=exit_manager,
+        exit_recovery_client=exit_recovery_client,
         reconcile_orders=reconcile_orders,
         clock=clock or (lambda: NOW),
     )
@@ -1398,6 +1642,71 @@ class AbsentRecoveryExchange(PlanAwareExchange):
             exchange_code=-2011,
             exchange_message="Unknown order sent.",
             http_status=400,
+        )
+
+
+class TimeoutThenAcknowledgedExitExchange(PlanAwareExchange):
+    async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
+        self.calls.append("submit")
+        self.plans.append(plan)
+        if len(self.plans) == 1:
+            raise ExchangeSubmissionTimeoutError("submit timed out")
+        return ExchangeOrderSnapshot(
+            client_order_id=plan.client_order_id,
+            exchange_order_id="exchange-recovery",
+            state=ExchangeOrderState.ACKNOWLEDGED,
+            observed_at=NOW,
+            executed_quantity=Decimal("0"),
+            average_price=Decimal("0"),
+        )
+
+
+class UnknownCancelExchange(TimeoutThenAcknowledgedExitExchange):
+    async def cancel_order_by_client_id(
+        self,
+        symbol: str,
+        client_order_id: str,
+    ) -> ExchangeOrderSnapshot:
+        del symbol, client_order_id
+        self.calls.append("cancel")
+        raise ExchangeCancellationUnknownError("cancel timed out")
+
+
+class CurrentPositionExitRecovery:
+    def __init__(self) -> None:
+        self.plans: list[OrderExecutionPlan] = []
+
+    async def inspect_exit_order(
+        self,
+        plan: OrderExecutionPlan,
+    ) -> SimpleNamespace:
+        self.plans.append(plan)
+        return SimpleNamespace(
+            order=None,
+            position_quantity=Decimal("0.0007"),
+            active_exit_order_client_ids=(),
+            observed_at=NOW,
+        )
+
+
+class ActiveExitRecovery(CurrentPositionExitRecovery):
+    async def inspect_exit_order(
+        self,
+        plan: OrderExecutionPlan,
+    ) -> SimpleNamespace:
+        self.plans.append(plan)
+        return SimpleNamespace(
+            order=ExchangeOrderSnapshot(
+                client_order_id=plan.client_order_id,
+                exchange_order_id="exchange-active",
+                state=ExchangeOrderState.ACKNOWLEDGED,
+                observed_at=NOW,
+                executed_quantity=Decimal("0"),
+                average_price=Decimal("0"),
+            ),
+            position_quantity=Decimal("0.0007"),
+            active_exit_order_client_ids=(plan.client_order_id,),
+            observed_at=NOW,
         )
 
 

@@ -507,6 +507,163 @@ async def test_trade_client_submits_signed_binance_order() -> None:
     assert snapshot.state is ExchangeOrderState.FILLED
 
 
+async def test_trade_client_inspects_exit_order_and_current_position() -> None:
+    plan = replace(
+        _order_plan(),
+        client_order_id="cml_exit_123456789012345678901234567890",
+        side="SELL",
+        reduce_only=True,
+        position_side=FuturesPositionSide.LONG,
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/fapi/v1/order":
+            return httpx.Response(
+                400,
+                request=request,
+                json={"code": -2013, "msg": "Order does not exist."},
+            )
+        if request.url.path == "/fapi/v3/positionRisk":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "symbol": "BTCUSDT",
+                        "positionSide": "LONG",
+                        "positionAmt": "0.0007",
+                        "entryPrice": "30000",
+                        "markPrice": "29900",
+                        "unRealizedProfit": "-0.07",
+                        "notional": "20.93",
+                        "leverage": "5",
+                        "marginType": "cross",
+                    }
+                ],
+            )
+        if request.url.path == "/fapi/v1/openOrders":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "symbol": "BTCUSDT",
+                        "orderId": "2",
+                        "clientOrderId": "cml_other_exit",
+                        "side": "SELL",
+                        "type": "LIMIT",
+                        "status": "NEW",
+                        "price": "29950",
+                        "origQty": "0.0007",
+                        "executedQty": "0",
+                        "reduceOnly": False,
+                        "positionSide": "LONG",
+                    }
+                ],
+            )
+        raise AssertionError(f"unexpected path: {request.url.path}")
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        request_interval_seconds=0.0,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        observation = await client.inspect_exit_order(plan)
+    finally:
+        await client.aclose()
+
+    assert observation.order is None
+    assert observation.position_quantity == Decimal("0.0007")
+    assert observation.active_exit_order_client_ids == ("cml_other_exit",)
+
+
+async def test_trade_client_does_not_treat_one_way_entry_as_exit() -> None:
+    plan = replace(
+        _order_plan(),
+        side="SELL",
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/fapi/v1/order":
+            return httpx.Response(
+                400,
+                request=request,
+                json={"code": -2013, "msg": "Order does not exist."},
+            )
+        if request.url.path == "/fapi/v3/positionRisk":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "symbol": "BTCUSDT",
+                        "positionSide": "BOTH",
+                        "positionAmt": "0.0007",
+                        "entryPrice": "30000",
+                        "markPrice": "29900",
+                        "unRealizedProfit": "-0.07",
+                        "notional": "20.93",
+                        "leverage": "5",
+                        "marginType": "cross",
+                    }
+                ],
+            )
+        if request.url.path == "/fapi/v1/openOrders":
+            assert request.url.params["symbol"] == "BTCUSDT"
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "symbol": "BTCUSDT",
+                        "orderId": "2",
+                        "clientOrderId": "cml_entry",
+                        "side": "SELL",
+                        "type": "LIMIT",
+                        "status": "NEW",
+                        "price": "29950",
+                        "origQty": "0.0007",
+                        "executedQty": "0",
+                        "reduceOnly": False,
+                        "positionSide": "BOTH",
+                    }
+                ],
+            )
+        raise AssertionError(f"unexpected path: {request.url.path}")
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        request_interval_seconds=0.0,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        observation = await client.inspect_exit_order(plan)
+    finally:
+        await client.aclose()
+
+    assert observation.position_quantity == Decimal("0.0007")
+    assert observation.active_exit_order_client_ids == ()
+
+
 async def test_trade_client_prioritizes_reduce_only_submit_over_queued_entry() -> None:
     requested_ids: list[str] = []
     first_entry_started = asyncio.Event()
