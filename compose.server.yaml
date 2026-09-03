@@ -120,9 +120,10 @@ services:
     <<: *app
     user: root
     entrypoint: ["sh", "-c"]
-    command: ["chown -R cml:cml /app/data"]
+    command: ["chown -R cml:cml /app/data /app/research-data"]
     volumes:
       - market-data:/app/data
+      - research-data:/app/research-data
     restart: "no"
 
   market-data:
@@ -168,6 +169,53 @@ services:
       retries: 3
       start_period: 15m
     mem_limit: 640m
+
+  research-collector:
+    <<: *app
+    entrypoint: ["cml-research-collector"]
+    command:
+      - run
+      - --hub-url
+      - ${CML_MARKET_STATE_HUB_URL:-ws://market-data:8766}
+      - --environment
+      - research
+      - --root
+      - /app/research-data
+      - --account-label
+      - ${CML_LIVE_ACCOUNT_LABEL:-primary}
+      - --position-environment
+      - live
+      - --top-count
+      - "30"
+      - --soft-limit-gib
+      - "6"
+      - --hard-limit-gib
+      - "8"
+      - --global-warning-free-gib
+      - "15"
+      - --global-pause-free-gib
+      - "10"
+    depends_on:
+      market-data:
+        condition: service_healthy
+    volumes:
+      - research-data:/app/research-data
+    healthcheck:
+      test:
+        - CMD
+        - cml-research-collector
+        - health
+        - --root
+        - /app/research-data
+        - --environment
+        - research
+        - --max-age-seconds
+        - "120"
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 2m
+    mem_limit: 192m
 
   paper-orderflow-pair:
     <<: *paper
@@ -580,3 +628,4 @@ services:
 volumes:
   postgres-data:
   market-data:
+  research-data:

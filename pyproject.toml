@@ -38,6 +38,7 @@ dev = [
 cml-market-data = "crypto_momentum_lab.apps.market_data.main:app"
 cml-execution-account = "crypto_momentum_lab.apps.execution_account.main:app"
 cml-research = "crypto_momentum_lab.apps.research.main:app"
+cml-research-collector = "crypto_momentum_lab.apps.research_collector.main:app"
 cml-strategy-runner = "crypto_momentum_lab.apps.strategy_runner.main:app"
 cml-shadow-operation = "crypto_momentum_lab.apps.shadow_operation.main:app"
 cml-live-rollout = "crypto_momentum_lab.apps.live_rollout.main:app"

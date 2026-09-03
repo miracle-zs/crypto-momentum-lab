@@ -10,6 +10,7 @@ from crypto_momentum_lab.market_data.hub import (
     MarketStateHub,
     MarketStateHubConfig,
     MarketStateHubError,
+    MarketStateHubReplayUnavailable,
     WebSocketMarketStateSource,
     decode_market_state_batch,
     decode_market_state_batch_envelope,
@@ -99,6 +100,60 @@ async def test_market_state_hub_replay_window_detects_unrecoverable_gap() -> Non
     assert oldest == 2
     assert latest == 3
     assert messages == ()
+
+
+async def test_batch_source_can_fail_closed_with_replay_metadata(monkeypatch) -> None:
+    messages = [
+        json.dumps(
+            {
+                "type": "market_state_hub_ready",
+                "schema_version": 1,
+                "environment": "research",
+                "stream_id": "stream-a",
+                "replay_available": False,
+                "oldest_sequence": 20,
+                "latest_sequence": 30,
+            }
+        )
+    ]
+
+    class FakeConnection:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, _message):
+            return None
+
+        async def recv(self):
+            return messages.pop(0)
+
+    monkeypatch.setattr(
+        hub_module,
+        "connect",
+        lambda *_args, **_kwargs: FakeConnection(),
+    )
+    source = WebSocketMarketStateSource(
+        url="ws://unused",
+        environment="research",
+        consumer_id="test-collector",
+        config=MarketStateHubConfig(reconnect_delays=(0,)),
+        fail_on_replay_unavailable=True,
+    )
+    source.set_resume_cursor(stream_id="stream-a", sequence=5)
+
+    with pytest.raises(
+        MarketStateHubReplayUnavailable,
+        match="replay is unavailable",
+    ) as raised:
+        await anext(source.batches())
+
+    assert raised.value.requested_sequence == 5
+    assert raised.value.oldest_sequence == 20
+    assert raised.value.latest_sequence == 30
+    assert raised.value.stream_id == "stream-a"
 
 
 @pytest.mark.skipif(

@@ -46,6 +46,21 @@ class MarketStateHubProtocolError(MarketStateHubError):
 class MarketStateHubReplayUnavailable(MarketStateHubError):
     """Raised when the requested sequence is older than the replay window."""
 
+    def __init__(
+        self,
+        message: str = "market-state replay is unavailable",
+        *,
+        requested_sequence: int | None = None,
+        oldest_sequence: int | None = None,
+        latest_sequence: int | None = None,
+        stream_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.requested_sequence = requested_sequence
+        self.oldest_sequence = oldest_sequence
+        self.latest_sequence = latest_sequence
+        self.stream_id = stream_id
+
 
 class MarketStateHubSequenceGap(MarketStateHubError):
     """Raised when a consumer receives a non-contiguous batch sequence."""
@@ -429,6 +444,8 @@ class WebSocketMarketStateSource:
         consumer_id: str,
         config: MarketStateHubConfig | None = None,
         on_connection_change: Callable[[bool, str | None], None] | None = None,
+        fail_on_replay_unavailable: bool = False,
+        preserve_sequence_on_overflow: bool = False,
     ) -> None:
         if not url.strip():
             raise ValueError("url must not be empty")
@@ -441,6 +458,8 @@ class WebSocketMarketStateSource:
         self._consumer_id = consumer_id
         self._config = config or MarketStateHubConfig()
         self._on_connection_change = on_connection_change
+        self._fail_on_replay_unavailable = fail_on_replay_unavailable
+        self._preserve_sequence_on_overflow = preserve_sequence_on_overflow
         self._connection_available: bool | None = None
         self._connection_reason: str | None = None
         self._stream_id: str | None = None
@@ -451,10 +470,66 @@ class WebSocketMarketStateSource:
     def stop(self) -> None:
         self._stopping = True
 
+    @property
+    def stream_id(self) -> str | None:
+        return self._stream_id
+
+    @property
+    def last_sequence(self) -> int | None:
+        return self._last_sequence
+
     def __aiter__(self) -> AsyncIterator[MarketState15s]:
         return self._iterate()
 
+    def batches(self) -> AsyncIterator[MarketStateBatch]:
+        """Return the batch-level view used by durable consumers."""
+
+        return self._iterate_batches()
+
+    def set_resume_cursor(
+        self,
+        *,
+        stream_id: str | None,
+        sequence: int | None,
+    ) -> None:
+        """Set a cursor loaded from the collector's local checkpoint."""
+
+        if stream_id is not None and not stream_id.strip():
+            raise ValueError("stream_id must not be empty when present")
+        if sequence is not None and sequence < 0:
+            raise ValueError("sequence must not be negative when present")
+        self._stream_id = stream_id
+        self._last_sequence = sequence
+        self._rewarm_required = False
+
+    def resume_after_recovery(
+        self,
+        *,
+        stream_id: str,
+        sequence: int,
+    ) -> None:
+        """Move the source cursor to a sequence restored by a durable adapter."""
+
+        if not stream_id.strip():
+            raise ValueError("stream_id must not be empty")
+        if sequence < 0:
+            raise ValueError("sequence must not be negative")
+        self._stream_id = stream_id
+        self._last_sequence = sequence
+        self._rewarm_required = True
+
     async def _iterate(self) -> AsyncIterator[MarketState15s]:
+        batches = self._iterate_batches()
+        try:
+            async for batch in batches:
+                for state in batch.states:
+                    yield state
+        finally:
+            close = getattr(batches, "aclose", None)
+            if callable(close):
+                await close()
+
+    async def _iterate_batches(self) -> AsyncIterator[MarketStateBatch]:
         self._notify_connection_change(False, "connecting")
         unavailable_since = time.monotonic()
         reconnect_attempt = 0
@@ -498,7 +573,17 @@ class WebSocketMarketStateSource:
                             "market-state replay is unavailable: "
                             f"requested={self._last_sequence}, "
                             f"oldest={ready.get('oldest_sequence')}, "
-                            f"latest={ready.get('latest_sequence')}"
+                            f"latest={ready.get('latest_sequence')}",
+                            requested_sequence=self._last_sequence,
+                            oldest_sequence=_optional_int(
+                                ready,
+                                "oldest_sequence",
+                            ),
+                            latest_sequence=_optional_int(
+                                ready,
+                                "latest_sequence",
+                            ),
+                            stream_id=self._stream_id,
                         )
                     ready_latest_sequence = _optional_int(
                         ready,
@@ -536,7 +621,8 @@ class WebSocketMarketStateSource:
                         while not self._stopping:
                             item = await receive_queue.get()
                             if isinstance(item, _MarketStateQueueOverflow):
-                                self._last_sequence = item.latest_sequence
+                                if not self._preserve_sequence_on_overflow:
+                                    self._last_sequence = item.latest_sequence
                                 self._rewarm_required = True
                                 self._notify_connection_change(
                                     False,
@@ -574,8 +660,7 @@ class WebSocketMarketStateSource:
                                         f"expected={expected_sequence}, "
                                         f"received={batch.sequence}"
                                     )
-                            for state in batch.states:
-                                yield state
+                            yield batch
                             self._last_sequence = batch.sequence
                             if self._rewarm_required:
                                 self._rewarm_required = False
@@ -600,6 +685,11 @@ class WebSocketMarketStateSource:
                 TimeoutError,
                 MarketStateHubError,
             ) as error:
+                if (
+                    isinstance(error, MarketStateHubReplayUnavailable)
+                    and self._fail_on_replay_unavailable
+                ):
+                    raise
                 self._notify_connection_change(
                     False,
                     f"{type(error).__name__}: {error}",
