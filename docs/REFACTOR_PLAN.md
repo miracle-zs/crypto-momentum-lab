@@ -457,29 +457,147 @@ operation 进入 durable queue”收敛成一个可替换的显式 seam，再依
    operation 都继续进入 durable queue。显式空集合表示不持久化 exchange boundary
    事件，显式集合可先只保留 `submit`/`cancel`，而内存 trace、延迟采样、
    `recorded_event_count` 和交易状态机均不变。
-3. operation 名称在构造时去除首尾空白并拒绝空值；未知或缺失 operation 在启用
-   allow-list 时不会落盘，避免把不完整的 boundary 事件误当成可审计数据。stop
-   日志会输出当前 allow-list，便于灰度期间确认配置形状。
+3. `cml-live-rollout run` 暴露 `--persist-exchange-operations`，以逗号分隔的值
+   在 composition root 解析后传入 telemetry；省略或传空值映射为 `None`。服务器
+   Compose 已预留同名的 `CML_LIVE_PERSIST_EXCHANGE_OPERATIONS` 插值，但默认传空，
+   不会改变现网行为。operation 名称在构造时去除首尾空白并拒绝空值；未知或缺失
+   operation 在启用 allow-list 时不会落盘，避免把不完整的 boundary 事件误当成可审计
+   数据。stop 日志会输出当前 allow-list，便于灰度期间确认配置形状。
 
 ### 验证与边界
 
-- telemetry、source、daemon 与 live app 定向测试共 **90 passed**；telemetry
+- telemetry、source、daemon 与 live app 定向测试共 **96 passed**；telemetry
   模块和新增测试通过 `ruff`，telemetry 严格 `mypy` 通过。
 - 排除既有 `tests/unit/ops/test_cml_ops_monitor.py` 的 `deploy` 导入路径问题后，
-  完整 `tests/unit` 为 **815 passed / 4 skipped**；全包严格 `mypy` 为 175 个源文件
+  完整 `tests/unit` 为 **821 passed / 4 skipped**；全包严格 `mypy` 为 175 个源文件
   全部通过。
 - 新测试同时证明：显式 allow-list 会保留 `submit`/`cancel` 的 request/response
   审计并过滤 `query`，而省略 allow-list 时仍持久化 `query`；所有事件仍保留在
   内存 trace 中。
-- 应用入口仍只传入 `PERSISTED_ORDER_TELEMETRY_EVENTS`，尚未启用该 allow-list；
-  因此本切片没有改变服务器的写入量，也没有把未验证配置部署到远端。
+- 应用入口和服务器 Compose 现在支持显式 allow-list，但服务器环境文件仍未设置该值，
+  默认仍为 `None`；因此本切片没有改变服务器的写入量，也没有把未验证配置部署到远端。
 
 ### 下一切片门槛
 
-1. 在隔离或影子环境把 source/terminal 汇总和该 allow-list 接到可观测配置，验证
+1. 在隔离或影子环境设置 `CML_LIVE_PERSIST_EXCHANGE_OPERATIONS=submit,cancel`，把
+   source/terminal 汇总和该 allow-list 接到可观测配置，验证
    `submit`/`cancel` 审计完整、`query` 过滤比例、批次耗时、dropped/persist
    failures 及重启窗口；不能只凭本地单测开启生产过滤。
 2. 若灰度数据支持过滤 query，再增加明确的配置字段和回滚开关，并把审计要求
    写入 ADR；若不支持，保留 `None` 默认并优先优化 sink/批次，而不是静默丢事件。
 3. 继续保持 `prepare_submission`、租约 Fail-Closed、退出锁和 reduce-only 执行
    seam 不变；凭证权限/重启对账演练完成后才推进 Policy compare-only。
+
+## 19. 直接生产上线后的运行验收记录（2026-09-04）
+
+按上线决策，未再等待隔离/影子环境，直接将 operation-aware durable telemetry
+配置部署到服务器。此次部署的 release 为 `c165a82944b3d9e0155f9fe197d34def86f2eabb`，
+服务器配置为 `CML_LIVE_PERSIST_EXCHANGE_OPERATIONS=submit,cancel`。这意味着
+`query` 请求仍会执行并留在内存 trace/日志中，但 exchange boundary 的 durable
+写入只保留 `submit`/`cancel`；候选、风险、意图、成交和对账事件不受该 allow-list
+影响。
+
+### 已观察到的结果
+
+- `live-strategy` 容器自 `2026-09-04 14:05:06 UTC` 启动后观察超过 1 小时；健康检查
+  持续为 healthy，观察窗口内 restart count 为 0，镜像 digest 与上述 commit 一致。
+- 接管初期旧 lease 尚未过期，出现 3 次 `missing_active_lease` 的 Fail-Closed 重试，
+  没有发起订单；旧 lease 过期后 `prepare` 成功，新的 lease 随后持续自动续租。这验证
+  了切换窗口不会因为租约不明而绕过下单前屏障。
+- 本次运行的 durable 事件形成了完整的下单前链路：
+  `candidate_accepted`、`risk_approved`、`intent_saved`、`submitting` 各 9 条；
+  `submit` 的 request/response 各 9 条，`exchange_filled` 7 条，`account_fill` 12 条。
+  观察窗口内没有 `query` durable 行，也没有 `cancel` 样本；这与当前流量和 allow-list
+  语义一致，不代表 query 调用被关闭。
+- 账户对账在 `2026-09-04 15:20:32 UTC` 为 `ready`，mismatch 为 0，包含 3 个持仓和
+  3 个 open orders。租约在成功接管后持续自动续租。
+- 发现 1 条孤立的
+  `live_strategy_signal_persist_failed (TimeoutError)`（约 `15:20:16 UTC`），同期
+  checkpoint 出现约 230 ms 的尖峰；随后日志恢复正常，未观察到 submit/cancel 审计缺失、
+  `live_latency_telemetry` 持久化失败、ERROR/CRITICAL 或租约续租失败。该异常属于
+  signal recorder 的 best-effort 旁路写入，暂不足以证明交易路径故障，但应纳入告警。
+
+### 当前结论与回滚条件
+
+本次上线可以作为 operation-aware seam 的初步生产验收：核心交易状态机、
+`prepare_submission`、租约 Fail-Closed、退出锁和 reduce-only seam 均保持不变，
+submit 审计和账户对账在观察窗口内成立。当前 release 先保持运行，不因为单次旁路
+写入超时回滚；但尚不能宣称长期数据库写入收益或重启后的 query 诊断完整性已经得到证明。
+
+出现以下任一情况应暂停开新单并回滚到上一镜像/配置：submit 或 cancel 的 request/response
+审计不成对、对账 mismatch 非零、租约续租失败或进入 Fail-Closed、容器重启/健康检查失败，
+或 signal/telemetry persistence timeout 连续出现并伴随 checkpoint/数据库延迟上升。回滚时
+先恢复上一镜像；若只需恢复旧写入形状，可清除
+`CML_LIVE_PERSIST_EXCHANGE_OPERATIONS` 后仅重建 `live-strategy`，不改动其他服务。
+
+### 下一步
+
+1. 保持当前 release，补充 signal persistence timeout、submit/cancel 审计成对率、对账
+   mismatch、租约续租和重启的告警阈值；在更长运行窗口收集趋势，不再扩大 live daemon
+   的改动面。
+2. 将凭证拆分（live read/write 权限、文件权限、轮换和回滚）写成 ADR，并先完成租约失效
+   与重启对账演练；这是进入 Policy compare-only 的前置条件。
+3. 在上述证据稳定后推进 Policy compare-only 的只读 seam；Supervisor/Daemon 拆分和
+   更大范围执行状态机重写继续后置。
+
+## 20. P0-A 凭证解析 seam（2026-09-04）
+
+在不改变任何服务默认参数或生产环境变量的前提下，先把凭证读取收敛到配置层的一个
+可测试 seam：[`config/credentials.py`](../src/crypto_momentum_lab/config/credentials.py)
+的 `resolve_binance_credentials()` 接收角色配置和注入的环境映射，负责选择 read/trade
+引用、拒绝缺失或空白值，并返回带安全 fingerprint 的 `ResolvedBinanceCredentials`。
+原始 key/secret 只用于构造 Binance adapter，`repr`、metadata 和异常文本均不包含 secret。
+
+### 验证结果与边界
+
+- 凭证角色选择、共享引用显式开关、部分重叠拒绝、缺失/空白 Fail-Closed 和 secret-free
+  diagnostics 共 **10 passed**；新增模块通过 `ruff` 和严格 `mypy`。
+- 当前 `live-strategy` 与 `execution-account-live` 仍由旧 CLI 参数直接读取
+  `BINANCE_API_KEY/BINANCE_API_SECRET`；本切片没有接管运行时，也没有改变线上配置。
+
+### 下一门槛
+
+1. 把两个长驻服务入口改为显式 role 配置，兼容旧变量的 fallback 必须是明确的迁移开关，
+   不能隐式重新启用共享凭证。
+2. 用假 Binance adapter/loopback 验证 read role 无法调用下单/撤单写接口，trade role
+   才能通过交易客户端构造；补齐缺失凭证和权限错误的 Fail-Closed 启动测试。
+3. 完成凭证轮换、租约失效和重启对账演练，并经 ADR 批准后，才为生产服务逐个切换变量；
+   在此之前不部署这一步的运行时接线。
+
+## 21. P0-A 长驻入口角色接入（2026-09-04）
+
+将凭证 seam 接入两个长驻服务的 composition root，但保持当前生产镜像不变：
+
+- `execution-account-live sync`/`sync-once` 默认解析 `read` role；
+- `live-strategy run` 默认解析 `trade` role；
+- `--api-key-env` 与 `--api-secret-env` 只有成对提供才接受自定义 secret store；
+- `--allow-legacy-credential-fallback` 是唯一允许回退到
+  `BINANCE_API_KEY/BINANCE_API_SECRET` 的显式迁移开关，默认关闭；部分角色变量不会
+  与旧变量混合。
+
+服务器 Compose 已将 `BINANCE_READ_*`/`BINANCE_TRADE_*` 变量接入对应容器，并暂时显式
+传入该兼容开关，以便未来发布新镜像时保持旧环境可回滚；角色 key 尚未 provision 时，
+这仍然是共享凭证兼容模式，不是目标安全状态。手动 `submit-plan`、`resolve-missing-order`
+等命令继续保留原有显式变量，避免把人工运维路径与长驻服务迁移混在一起。
+
+### 验证与发布边界
+
+- 凭证、两个长驻入口和服务器 manifest 定向测试共 **58 passed**；相关代码通过 `ruff`
+  和严格 `mypy`。
+- 本切片未把任何 secret 写入仓库，未执行远端重启，也未改变正在运行的
+  `c165a82` 服务。生产切换前仍必须完成两个角色的权限验证、假 adapter 写接口拒绝、
+  轮换回滚、租约失效与重启对账演练，并经 ADR 批准后删除 Compose 中的兼容开关。
+
+## 22. 双角色凭证生产预检（2026-09-05）
+
+用户已在服务器 `/opt/crypto-momentum-lab/.env.server` 配置
+`BINANCE_READ_API_KEY/SECRET` 与 `BINANCE_TRADE_API_KEY/SECRET`。只读检查确认文件权限为
+`0600`，四个变量均为非空；检查过程没有输出或持久化 secret 值。
+
+在服务器上分别使用两组凭证签名调用 Binance Futures `GET /fapi/v2/account`，两次均返回
+`HTTP 200`（`binance_code=ok`）。这证明网络、签名和账户读取路径可用，但没有、也不应通过
+真实下单来证明写权限；read role 的写接口拒绝仍需假 adapter/权限配置测试覆盖。
+
+本次预检没有重启生产服务，线上仍运行 `c165a82`；下一步是从当前工作区提取角色接入的
+聚焦提交并推送，然后先重启 `execution-account-live`、再重启 `live-strategy`，逐项检查健康、
+对账和租约，再保留观察窗口后移除兼容 fallback。

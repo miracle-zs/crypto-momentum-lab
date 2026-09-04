@@ -535,12 +535,14 @@ Gemini 的最新版已经接近可发布的架构基线，上一轮提出的路�
   显式空集合则关闭 exchange boundary 的 durable 写入，但不影响内存 trace 或延迟统计。
 - allow-list 在构造时规范化并拒绝空名称；缺失或未知 operation 在启用 allow-list 时
   不落盘。stop 日志输出当前配置，便于判断实际写入形状。
-- 应用入口尚未传入该参数，所以这只是本地 seam 和契约测试，不是服务器行为变更。
+- `cml-live-rollout run` 现在接受该参数并传入 daemon；服务器 Compose 也预留了
+  `CML_LIVE_PERSIST_EXCHANGE_OPERATIONS` 插值，环境文件未设置时仍为 `None`。因此
+  这只是本地 seam 和配置接线，不是服务器行为变更。
 
 ### 证据与边界
 
-- telemetry/source/daemon/live app 定向测试 **90 passed**；排除既有 `deploy` 导入路径
-  问题后的完整 `tests/unit` 为 **815 passed / 4 skipped**。新增测试证明 query 会被
+- telemetry/source/daemon/live app 定向测试 **96 passed**；排除既有 `deploy` 导入路径
+  问题后的完整 `tests/unit` 为 **821 passed / 4 skipped**。新增测试证明 query 会被
   过滤、submit/cancel 的 request/response 审计保留，且默认不传 allow-list 时 query
   仍会持久化；全包严格 `mypy`（175 个源文件）通过。
 - 该 seam 尚未证明过滤 query 会降低数据库超时；服务器灰度还必须同时观察批次耗时、
@@ -550,7 +552,80 @@ Gemini 的最新版已经接近可发布的架构基线，上一轮提出的路�
 
 ### 复核后的下一步
 
-在隔离或影子环境接入显式配置，先验证 `submit`/`cancel` 不丢、query 过滤比例与
+在隔离或影子环境设置 `CML_LIVE_PERSIST_EXCHANGE_OPERATIONS=submit,cancel`，先验证
+`submit`/`cancel` 不丢、query 过滤比例与
 telemetry failure 指标，再决定是否为生产增加配置字段和回滚开关。若写入超时不随
 operation 过滤改善，应回到 sink/批次/连接池证据，而不是扩大到 Supervisor 或执行状态
 机重写；凭证权限、租约失效和重启对账演练仍先于 Policy compare-only。
+
+## 直接生产上线后的复核（2026-09-04）
+
+上面的“先隔离/影子、尚未改变服务器行为”已被后续上线取代：用户选择直接部署，
+服务器现运行 release `c165a82944b3d9e0155f9fe197d34def86f2eabb`，并设置
+`CML_LIVE_PERSIST_EXCHANGE_OPERATIONS=submit,cancel`。这次变更没有关闭 query 调用，
+只是把 query 的 exchange boundary 从 durable queue 过滤掉；内存 trace、日志、延迟
+采样和订单状态机仍照常工作。
+
+### 生产证据
+
+- `live-strategy` 从 `2026-09-04 14:05:06 UTC` 起运行超过一小时，持续 healthy，
+  restart count 为 0；租约成功接管后按周期续租。
+- 接管时旧 lease 尚未过期，出现 3 次 `missing_active_lease` 的 Fail-Closed 重试，
+  没有发单；旧 lease 过期后才成功 `prepare` 并进入自动续租，说明部署切换没有绕过
+  租约安全门。
+- 观察窗口内 `submit` request/response 各 9 条，`exchange_filled` 7 条、`account_fill`
+  12 条，且 candidate/risk/intent/submitting 各 9 条；没有 query durable 行，符合
+  allow-list。没有 cancel 样本，因此 cancel 的完整性仍需真实撤单样本或故障注入覆盖。
+- 账户 reconciliation 为 `ready`、mismatch 0（3 positions、3 open orders）。
+- 观察到一条 `live_strategy_signal_persist_failed (TimeoutError)`，随后恢复；没有观察到
+  submit/cancel 审计断裂、live latency telemetry persist/drop failure、ERROR/CRITICAL 或
+  lease renewal failure。单次旁路超时是需要告警的信号，不足以把 PostgreSQL 判定为交易
+  路径根因。
+
+### 复核后的判断
+
+operation-aware seam 已获得初步生产证据，且没有改变交易不变量；因此不必再把“必须先
+影子验证才能开启过滤”作为当前 release 的阻塞项。但证据仍有边界：运行窗口短、没有
+cancel 样本，无法证明长期数据库收益、重启后 query 诊断完整性或凭证隔离已经完成。
+后续应先固定告警与回滚条件，继续观察写入超时趋势，再做凭证 ADR、租约失效/重启对账
+演练，最后才进入 Policy compare-only；不要借此提前拆分 Supervisor 或重写执行状态机。
+
+## P0-A 凭证解析 seam 的实施复核（2026-09-04）
+
+在生产观测稳定后，下一步已落成一个不改变运行态的配置模块：
+`resolve_binance_credentials()` 按显式角色解析环境变量，缺失或空白即 Fail-Closed，
+并通过 `ResolvedBinanceCredentials.metadata()` 提供不含 secret 的启动诊断。该接口把
+凭证选择和安全显示规则集中在一个可替换 seam，调用方不必各自复制环境读取逻辑。
+
+定向凭证测试 **10 passed**，`ruff` 和严格 `mypy` 通过。当前两个长驻服务尚未接入该 seam，
+服务器仍使用旧的 `BINANCE_API_KEY/BINANCE_API_SECRET` 映射；因此这一步不能宣称已经完成
+凭证隔离，也没有理由现在重启或重新部署线上服务。
+
+下一步应接入 `live-strategy` 与 `execution-account-live` 的显式 read/trade role，保留
+一个有名称且可审计的兼容开关，然后用假 adapter 验证 read role 的写接口拒绝、trade role
+的下单路径和权限错误 Fail-Closed。凭证轮换、租约失效、重启对账演练及 ADR 批准完成前，
+不把这部分运行时接线推到生产。
+
+## P0-A 长驻入口角色接入复核（2026-09-04）
+
+上述门槛已在本地实现：`execution-account-live` 的长驻同步入口默认使用 read role，
+`live-strategy run` 默认使用 trade role；旧共享变量只通过显式
+`--allow-legacy-credential-fallback` 兼容开关可用。Compose 仅把角色变量注入对应容器，
+并暂时保留该开关以维持迁移期间的可回滚性。
+
+相关配置、入口和 manifest 测试共 **58 passed**，`ruff` 与严格 `mypy` 通过。生产仍运行
+旧镜像/旧环境映射，本轮没有远端重启或凭证切换；因此还不能宣称双密钥隔离完成。下一步
+是用假 Binance adapter 验证 read role 的写接口拒绝、trade role 的交易路径和权限错误
+Fail-Closed，再完成密钥 provision、轮换回滚、租约失效和重启对账演练。ADR 批准后移除
+兼容开关，最后才逐个服务切换生产变量。
+
+## 双角色凭证生产预检（2026-09-05）
+
+服务器 `.env.server` 已配置四个角色变量，文件权限为 `0600`，且没有在检查输出中暴露
+secret。两组凭证分别签名调用 Binance Futures `GET /fapi/v2/account`，均返回
+`HTTP 200`/`binance_code=ok`；因此网络、签名和账户读取路径已具备上线前提。
+
+这不是写权限验收：本次没有发送真实 submit/cancel/order 请求，read role 是否拒绝写接口仍
+要靠假 adapter 和 Binance 权限配置验证。角色接入镜像也尚未部署，生产仍运行
+`c165a82`；应先做聚焦 commit/push，再按 execution-account → live-strategy 顺序滚动重启并
+观察健康、对账和租约，稳定后再删除兼容 fallback。
