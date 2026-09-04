@@ -542,6 +542,9 @@ services:
       - --no-entry-price-above-ema10
       - --entry-leverage
       - ${CML_LIVE_ENTRY_LEVERAGE:-5}
+      # Production rollout explicitly retains only auditable write boundaries.
+      - --persist-exchange-operations
+      - ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-}
       - --exit-mode
       - ${CML_LIVE_EXIT_MODE:-candle_15m}
       - --take-profit-pct

@@ -1,7 +1,13 @@
 import asyncio
 import json
 import os
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
+from collections.abc import (
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+)
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -652,6 +658,16 @@ def run_command(
     entry_leverage: Annotated[
         int, typer.Option("--entry-leverage", min=1, max=125)
     ] = 1,
+    persist_exchange_operations: Annotated[
+        str,
+        typer.Option(
+            "--persist-exchange-operations",
+            help=(
+                "Comma-separated exchange operations to persist; omit to "
+                "persist all operations."
+            ),
+        ),
+    ] = "",
     confirmation: Annotated[
         bool, typer.Option("--i-understand-this-places-real-orders")
     ] = False,
@@ -704,6 +720,9 @@ def run_command(
             api_key=api_key,
             api_secret=api_secret,
             entry_leverage=entry_leverage,
+            persist_exchange_operations=_parse_exchange_operations(
+                persist_exchange_operations
+            ),
         )
 
     result = asyncio.run(_run_with_live_startup_backoff(run_once))
@@ -1260,6 +1279,7 @@ async def _run_live_daemon(
     api_key: str,
     api_secret: str,
     entry_leverage: int,
+    persist_exchange_operations: Collection[str] | None = None,
     market_websocket_url: str = _LIVE_MARKET_WEBSOCKET_URL,
 ) -> LiveDaemonResult:
     account_snapshot_available = True
@@ -1342,6 +1362,7 @@ async def _run_live_daemon(
             run_id=session_id,
             persist=telemetry_repository.save_runtime_events,
             persist_event_types=PERSISTED_ORDER_TELEMETRY_EVENTS,
+            persist_exchange_operations=persist_exchange_operations,
         )
         await telemetry.start()
         volume_rest_client = BinanceUsdMRestClient(base_url)
@@ -3132,6 +3153,22 @@ async def _save_approval(
 
 
 _UNLIMITED_VALUES = frozenset({"none", "unlimited"})
+
+
+def _parse_exchange_operations(
+    raw_value: str,
+) -> frozenset[str] | None:
+    """Parse the explicit durable exchange telemetry allow-list."""
+
+    if not raw_value.strip():
+        return None
+    operations = tuple(operation.strip() for operation in raw_value.split(","))
+    if any(not operation for operation in operations):
+        raise typer.BadParameter(
+            "--persist-exchange-operations must be a comma-separated list "
+            "of non-empty operation names"
+        )
+    return frozenset(operations)
 
 
 def _parse_optional_decimal_limit(

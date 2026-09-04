@@ -5,6 +5,7 @@ from inspect import signature
 from types import SimpleNamespace
 
 import pytest
+from typer import BadParameter
 from typer.testing import CliRunner
 
 from crypto_momentum_lab.apps.live_rollout import main
@@ -43,6 +44,76 @@ def test_live_cli_exposes_required_commands() -> None:
         "strategy-config-hash",
     ):
         assert command in result.stdout
+
+
+def test_live_run_exposes_operation_aware_telemetry_option() -> None:
+    result = runner.invoke(app, ["run", "--help"])
+
+    assert result.exit_code == 0
+    assert "--persist-exchan" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        ("", None),
+        ("  ", None),
+        ("submit, cancel,submit", frozenset({"submit", "cancel"})),
+    ],
+)
+def test_live_exchange_operation_option_is_parsed_explicitly(
+    raw_value: str,
+    expected: frozenset[str] | None,
+) -> None:
+    assert main._parse_exchange_operations(raw_value) == expected
+
+
+def test_live_exchange_operation_option_rejects_empty_tokens() -> None:
+    with pytest.raises(BadParameter, match="comma-separated list"):
+        main._parse_exchange_operations("submit,,cancel")
+
+
+def test_live_run_passes_exchange_operation_allowlist_to_daemon(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_run_live_daemon(**kwargs: object):
+        captured.update(kwargs)
+        return main.LiveDaemonResult(
+            processed_state_count=0,
+            approved_intent_count=0,
+            submitted_order_count=0,
+            halt_reason=None,
+            final_state_at=None,
+        )
+
+    async def fake_startup_backoff(run_once):
+        return await run_once()
+
+    monkeypatch.setattr(main, "_run_live_daemon", fake_run_live_daemon)
+    monkeypatch.setattr(
+        main,
+        "_run_with_live_startup_backoff",
+        fake_startup_backoff,
+    )
+    monkeypatch.setenv("BINANCE_API_KEY", "test-key")
+    monkeypatch.setenv("BINANCE_API_SECRET", "test-secret")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--persist-exchange-operations",
+            "submit,cancel",
+            "--i-understand-this-places-real-orders",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["persist_exchange_operations"] == frozenset(
+        {"submit", "cancel"}
+    )
 
 
 def test_resolve_missing_order_requires_exact_confirmation() -> None:
