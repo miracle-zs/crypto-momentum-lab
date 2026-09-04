@@ -433,15 +433,11 @@ services:
       <<: *app-environment
       BINANCE_READ_API_KEY: ${BINANCE_READ_API_KEY:-}
       BINANCE_READ_API_SECRET: ${BINANCE_READ_API_SECRET:-}
-      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
-      BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
       CML_ACCOUNT_EVENT_HUB_HOST: ${CML_ACCOUNT_EVENT_HUB_HOST:-0.0.0.0}
       CML_ACCOUNT_EVENT_HUB_PORT: ${CML_ACCOUNT_EVENT_HUB_PORT:-8767}
     entrypoint: ["cml-execution-account"]
     command:
       - sync
-      # Temporary migration compatibility; remove after the read key is provisioned.
-      - --allow-legacy-credential-fallback
       - --environment
       - live
       - --account-label
@@ -499,8 +495,6 @@ services:
       <<: *app-environment
       BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY:-}
       BINANCE_TRADE_API_SECRET: ${BINANCE_TRADE_API_SECRET:-}
-      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
-      BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
       CML_HEALTHCHECK_RUN_ID: ${CML_LIVE_SESSION_ID:-live-primary-v1}
       CML_MARKET_STATE_HUB_URL: ${CML_MARKET_STATE_HUB_URL:-ws://market-data:8766}
       CML_MARKET_QUOTE_HUB_URL: ${CML_MARKET_QUOTE_HUB_URL:-ws://market-data:8768}
@@ -508,8 +502,6 @@ services:
     entrypoint: ["cml-live-rollout"]
     command:
       - run
-      # Temporary migration compatibility; remove after the trade key is provisioned.
-      - --allow-legacy-credential-fallback
       - --account-label
       - ${CML_LIVE_ACCOUNT_LABEL:-primary}
       - --strategy

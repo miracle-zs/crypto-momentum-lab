@@ -601,3 +601,14 @@ submit 审计和账户对账在观察窗口内成立。当前 release 先保持�
 本次预检没有重启生产服务，线上仍运行 `c165a82`；下一步是从当前工作区提取角色接入的
 聚焦提交并推送，然后先重启 `execution-account-live`、再重启 `live-strategy`，逐项检查健康、
 对账和租约，再保留观察窗口后移除兼容 fallback。
+
+## 23. 角色凭证迁移收口（2026-09-05）
+
+在 `00e09a6` 上线后观察窗口内，`execution-account-live` 与 `live-strategy` 持续 healthy，
+账户 User Data Stream、live lease 和 Top10 entry lane 均正常，无异常、熔断或对账错误日志。
+容器实际只注入对应的 `BINANCE_READ_*` 或 `BINANCE_TRADE_*` 变量。
+
+因此下一版 Compose 移除两个长驻服务的 `--allow-legacy-credential-fallback`，同时不再把
+`BINANCE_API_KEY/SECRET` 注入 live 容器；解析器仍保留显式 CLI fallback 作为人工迁移工具，
+但生产服务默认和实际运行态均为 role-only、Fail-Closed。此变更不发送真实订单测试；发布后
+仍需继续观察权限错误、账户对账和 lease 状态。
