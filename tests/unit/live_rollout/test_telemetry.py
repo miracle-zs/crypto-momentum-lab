@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderEvent,
     ExchangeOrderState,
@@ -8,6 +10,8 @@ from crypto_momentum_lab.domain.execution import (
 )
 from crypto_momentum_lab.execution_account.hub import AccountEvent
 from crypto_momentum_lab.live_rollout.telemetry import (
+    EXCHANGE_REQUEST_STARTED,
+    EXCHANGE_RESPONSE_RECEIVED,
     MARKET_STATE_RECEIVED,
     LiveRuntimeTelemetry,
 )
@@ -145,6 +149,113 @@ async def test_live_telemetry_persists_events_in_batches_without_blocking_record
     assert len(batches) == 1
     assert batches[0][0]["event_type"] == "market_state_received"
     assert batches[0][0]["details"]["lane"] == "entry"
+
+
+async def test_exchange_persistence_allowlist_keeps_submit_and_cancel_audit(
+) -> None:
+    batches: list[tuple[dict[str, object], ...]] = []
+
+    async def persist(events) -> None:
+        batches.append(tuple(dict(event) for event in events))
+
+    telemetry = LiveRuntimeTelemetry(
+        run_id="run-1",
+        persist=persist,
+        persist_event_types=frozenset(
+            {EXCHANGE_REQUEST_STARTED, EXCHANGE_RESPONSE_RECEIVED}
+        ),
+        persist_exchange_operations=frozenset({"submit", "cancel"}),
+    )
+    plan = OrderExecutionPlan(
+        intent_id="intent-1",
+        run_id="run-1",
+        client_order_id="cml_12345678901234567890123456789012",
+        symbol="BTCUSDT",
+        side="BUY",
+        order_type="MARKET",
+        quantity=Decimal("0.003"),
+        price=None,
+        reduce_only=False,
+        created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        quantized=True,
+    )
+    await telemetry.start()
+    for index, operation in enumerate(("query", "submit", "cancel")):
+        request_at = datetime(2026, 7, 4, 0, 0, index, tzinfo=UTC)
+        await telemetry.exchange_request_started(
+            plan,
+            f"{operation}_request_started",
+            request_at,
+        )
+        await telemetry.exchange_response_received(
+            plan,
+            f"{operation}_response_received",
+            request_at + timedelta(milliseconds=10),
+        )
+    await telemetry.stop()
+
+    persisted_operations = [
+        event["details"]["operation"]
+        for batch in batches
+        for event in batch
+    ]
+    assert persisted_operations == ["submit", "submit", "cancel", "cancel"]
+    assert telemetry.recorded_event_count == 6
+
+
+async def test_exchange_persistence_defaults_to_all_operations() -> None:
+    batches: list[tuple[dict[str, object], ...]] = []
+
+    async def persist(events) -> None:
+        batches.append(tuple(dict(event) for event in events))
+
+    telemetry = LiveRuntimeTelemetry(
+        run_id="run-1",
+        persist=persist,
+        persist_event_types=frozenset(
+            {EXCHANGE_REQUEST_STARTED, EXCHANGE_RESPONSE_RECEIVED}
+        ),
+    )
+    plan = OrderExecutionPlan(
+        intent_id="intent-1",
+        run_id="run-1",
+        client_order_id="cml_12345678901234567890123456789012",
+        symbol="BTCUSDT",
+        side="BUY",
+        order_type="MARKET",
+        quantity=Decimal("0.003"),
+        price=None,
+        reduce_only=False,
+        created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        quantized=True,
+    )
+    await telemetry.start()
+    await telemetry.exchange_request_started(
+        plan,
+        "query_request_started",
+        datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+    await telemetry.exchange_response_received(
+        plan,
+        "query_response_received",
+        datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+    )
+    await telemetry.stop()
+
+    persisted_operations = [
+        event["details"]["operation"]
+        for batch in batches
+        for event in batch
+    ]
+    assert persisted_operations == ["query", "query"]
+
+
+def test_exchange_persistence_allowlist_rejects_blank_operation_names() -> None:
+    with pytest.raises(ValueError, match="non-empty names"):
+        LiveRuntimeTelemetry(
+            run_id="run-1",
+            persist_exchange_operations=frozenset({"  "}),
+        )
 
 
 async def test_high_frequency_telemetry_stays_in_memory_when_not_persisted() -> None:

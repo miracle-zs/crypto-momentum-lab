@@ -12,7 +12,7 @@ from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
 import structlog
@@ -27,9 +27,33 @@ from crypto_momentum_lab.execution_account.hub import AccountEvent
 
 log = structlog.get_logger()
 
-LIVE_LANE_ENTRY = "entry"
-LIVE_LANE_EXIT = "exit"
-LIVE_LANE_UNKNOWN = "unknown"
+type LiveLane = Literal["entry", "exit", "unknown"]
+type LiveTriggerSource = Literal[
+    "account", "quote", "market", "candle", "grace"
+]
+type TerminalReasonSummary = dict[str, dict[str, dict[str, int]]]
+
+LIVE_LANE_ENTRY: LiveLane = "entry"
+LIVE_LANE_EXIT: LiveLane = "exit"
+LIVE_LANE_UNKNOWN: LiveLane = "unknown"
+
+SOURCE_RECEIVED = "source_received"
+TRACE_TERMINATED = "trace_terminated"
+
+LIVE_TRIGGER_SOURCE_ACCOUNT: LiveTriggerSource = "account"
+LIVE_TRIGGER_SOURCE_QUOTE: LiveTriggerSource = "quote"
+LIVE_TRIGGER_SOURCE_MARKET: LiveTriggerSource = "market"
+LIVE_TRIGGER_SOURCE_CANDLE: LiveTriggerSource = "candle"
+LIVE_TRIGGER_SOURCE_GRACE: LiveTriggerSource = "grace"
+LIVE_TRIGGER_SOURCES: frozenset[LiveTriggerSource] = frozenset(
+    {
+        LIVE_TRIGGER_SOURCE_ACCOUNT,
+        LIVE_TRIGGER_SOURCE_QUOTE,
+        LIVE_TRIGGER_SOURCE_MARKET,
+        LIVE_TRIGGER_SOURCE_CANDLE,
+        LIVE_TRIGGER_SOURCE_GRACE,
+    }
+)
 
 MARKET_STATE_RECEIVED = "market_state_received"
 CONTEXT_READY = "context_ready"
@@ -47,6 +71,7 @@ EXCHANGE_FILLED = "exchange_filled"
 ACCOUNT_FILL = "account_fill"
 
 _PHASE_ORDER = (
+    SOURCE_RECEIVED,
     MARKET_STATE_RECEIVED,
     CONTEXT_READY,
     GATE_EVALUATED,
@@ -61,8 +86,12 @@ _PHASE_ORDER = (
     EXCHANGE_RESPONSE_RECEIVED,
     EXCHANGE_FILLED,
     ACCOUNT_FILL,
+    TRACE_TERMINATED,
 )
 _REPEATABLE_PHASES = frozenset({ACCOUNT_FILL})
+_EXCHANGE_BOUNDARY_EVENTS = frozenset(
+    {EXCHANGE_REQUEST_STARTED, EXCHANGE_RESPONSE_RECEIVED}
+)
 _MAX_EVENT_BATCH = 128
 _PERSIST_BATCH_TIMEOUT_SECONDS = 0.25
 
@@ -86,12 +115,24 @@ PERSISTED_ORDER_TELEMETRY_EVENTS = frozenset(
 
 
 class LiveTelemetrySink(Protocol):
+    async def source_received(self, ingress: "SourceIngress") -> None: ...
+
+    async def trace_terminated(
+        self,
+        ingress: "SourceIngress",
+        *,
+        occurred_at: datetime,
+        reason: str,
+        details: Mapping[str, JsonValue] | None = None,
+    ) -> None: ...
+
     async def market_state_received(
         self,
         state: MarketState15s,
         *,
         occurred_at: datetime,
         lane: str = LIVE_LANE_ENTRY,
+        ingress: "SourceIngress | None" = None,
     ) -> None: ...
 
     async def context_ready(
@@ -101,6 +142,7 @@ class LiveTelemetrySink(Protocol):
         occurred_at: datetime,
         prefetched: bool,
         reloaded: bool,
+        ingress: "SourceIngress | None" = None,
     ) -> None: ...
 
     async def gate_evaluated(
@@ -146,6 +188,7 @@ class LiveTelemetrySink(Protocol):
         state: MarketState15s,
         occurred_at: datetime,
         lane: str,
+        ingress: "SourceIngress | None" = None,
     ) -> None: ...
 
     async def risk_approved(
@@ -156,6 +199,7 @@ class LiveTelemetrySink(Protocol):
         occurred_at: datetime,
         lane: str,
         evaluation_id: str,
+        ingress: "SourceIngress | None" = None,
     ) -> None: ...
 
     async def intent_saved(
@@ -165,6 +209,7 @@ class LiveTelemetrySink(Protocol):
         state: MarketState15s,
         occurred_at: datetime,
         lane: str,
+        ingress: "SourceIngress | None" = None,
     ) -> None: ...
 
     async def order_event(
@@ -199,6 +244,101 @@ RuntimeEventBatchSink = Callable[
     [tuple[Mapping[str, object], ...]],
     Awaitable[None],
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class TraceKey:
+    """Stable identity for one source event within a live run.
+
+    ``source_event_id`` must come from the ingress adapter (or its durable
+    envelope) and must not be regenerated when a message is retried.  Keeping
+    the pair as structured fields avoids treating a symbol/bucket as a unique
+    event: the same bucket can be produced by multiple source messages and by
+    both live lanes.
+    """
+
+    run_id: str
+    source_event_id: str
+
+    def __post_init__(self) -> None:
+        _require_non_empty_text(self.run_id, "run_id")
+        _require_non_empty_text(self.source_event_id, "source_event_id")
+
+    def as_id(self) -> str:
+        """Return a deterministic, collision-resistant string representation."""
+
+        # Length-prefix both components so ``("a:b", "c")`` cannot collide
+        # with ``("a", "b:c")`` when persisted as one text key.
+        return (
+            f"{len(self.run_id)}:{self.run_id}:"
+            f"{len(self.source_event_id)}:{self.source_event_id}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SourceIngress:
+    """Normalized source metadata captured at the first process boundary.
+
+    ``source_occurred_at`` is the source/exchange timestamp when available;
+    ``received_at`` is the local monotonic-wall-clock observation timestamp
+    used for latency accounting.  They are deliberately separate so event
+    time cannot be mistaken for local receive time.
+    """
+
+    run_id: str
+    source_event_id: str
+    lane: LiveLane
+    trigger_source: LiveTriggerSource | None
+    received_at: datetime
+    source_occurred_at: datetime | None = None
+    symbol: str | None = None
+    bucket_start: datetime | None = None
+
+    def __post_init__(self) -> None:
+        _require_non_empty_text(self.run_id, "run_id")
+        _require_non_empty_text(self.source_event_id, "source_event_id")
+        if self.lane not in {
+            LIVE_LANE_ENTRY,
+            LIVE_LANE_EXIT,
+            LIVE_LANE_UNKNOWN,
+        }:
+            raise ValueError(f"unsupported live lane: {self.lane!r}")
+        if (
+            self.trigger_source is not None
+            and self.trigger_source not in LIVE_TRIGGER_SOURCES
+        ):
+            raise ValueError(
+                f"unsupported trigger source: {self.trigger_source!r}"
+            )
+        if self.lane == LIVE_LANE_EXIT and self.trigger_source is None:
+            raise ValueError("exit ingress requires a trigger_source")
+        _require_aware(self.received_at, "received_at")
+        if self.source_occurred_at is not None:
+            _require_aware(self.source_occurred_at, "source_occurred_at")
+        if self.bucket_start is not None:
+            _require_aware(self.bucket_start, "bucket_start")
+        if self.symbol is not None:
+            _require_non_empty_text(self.symbol, "symbol")
+
+    @property
+    def trace_key(self) -> TraceKey:
+        return TraceKey(self.run_id, self.source_event_id)
+
+    @property
+    def trace_id(self) -> str:
+        return self.trace_key.as_id()
+
+    def details(self) -> dict[str, JsonValue]:
+        """Return safe, JSON-compatible metadata for a runtime event."""
+
+        return {
+            "source_event_id": self.source_event_id,
+            "source_occurred_at": _optional_iso(self.source_occurred_at),
+            "source_received_at": self.received_at.isoformat(),
+            "source_trace_id": self.trace_id,
+            "trigger_source": self.trigger_source,
+            "trace_id": self.trace_id,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +385,11 @@ class LiveRuntimeTelemetry:
     slow or unavailable database cannot hide the latency of the live lanes.
     ``persist_event_types`` only controls the durable stream; omitted values
     preserve the diagnostic behavior of persisting every event type.
+    ``persist_exchange_operations`` is an optional allow-list applied only to
+    exchange request/response boundary events.  ``None`` preserves the
+    existing behavior and persists every exchange operation; an explicit set
+    can be used to keep, for example, only ``submit`` and ``cancel`` while
+    leaving the in-memory trace unchanged.
     """
 
     def __init__(
@@ -253,6 +398,7 @@ class LiveRuntimeTelemetry:
         run_id: str,
         persist: RuntimeEventBatchSink | None = None,
         persist_event_types: Collection[str] | None = None,
+        persist_exchange_operations: Collection[str] | None = None,
         queue_size: int = 4096,
         max_trace_count: int = 8192,
         max_samples_per_metric: int = 4096,
@@ -272,12 +418,19 @@ class LiveRuntimeTelemetry:
             if persist_event_types is None
             else frozenset(persist_event_types)
         )
+        self._persist_exchange_operations = (
+            None
+            if persist_exchange_operations is None
+            else _normalize_exchange_operations(persist_exchange_operations)
+        )
         self._queue_size = queue_size
         self._max_trace_count = max_trace_count
         self._max_samples_per_metric = max_samples_per_metric
         self._queue: asyncio.Queue[LiveRuntimeEvent | None] | None = None
         self._writer_task: asyncio.Task[None] | None = None
         self._traces: dict[str, _Trace] = {}
+        self._source_ingress_by_trace: dict[str, SourceIngress] = {}
+        self._source_trace_order: deque[str] = deque()
         self._order_trace_by_client: dict[str, str] = {}
         self._order_lane_by_client: dict[str, str] = {}
         self._order_clients: deque[str] = deque()
@@ -285,6 +438,11 @@ class LiveRuntimeTelemetry:
             lambda: deque(maxlen=self._max_samples_per_metric)
         )
         self._recent_events: deque[LiveRuntimeEvent] = deque(maxlen=queue_size)
+        # Keep the production-facing aggregate intentionally low-cardinality:
+        # lane, trigger source and terminal reason only.  Source ids and
+        # symbols remain available on the bounded event trace, not in this
+        # counter map.
+        self._terminal_reason_counts: dict[tuple[str, str, str], int] = {}
         self._recorded_event_count = 0
         self._dropped_event_count = 0
         self._persist_failure_count = 0
@@ -304,6 +462,24 @@ class LiveRuntimeTelemetry:
     @property
     def recent_events(self) -> tuple[LiveRuntimeEvent, ...]:
         return tuple(self._recent_events)
+
+    def _trace_id_for_ingress(
+        self,
+        ingress: SourceIngress | None,
+        *,
+        lane: str,
+    ) -> str | None:
+        if ingress is None:
+            return None
+        if ingress.run_id != self._run_id:
+            raise ValueError(
+                "source ingress run_id does not match telemetry run_id"
+            )
+        if ingress.lane != lane:
+            raise ValueError(
+                "source ingress lane does not match telemetry lane"
+            )
+        return ingress.trace_id
 
     async def start(self) -> None:
         if self._persist is None or self._writer_task is not None:
@@ -329,7 +505,68 @@ class LiveRuntimeTelemetry:
             recorded_event_count=self._recorded_event_count,
             dropped_event_count=self._dropped_event_count,
             persist_failure_count=self._persist_failure_count,
+            persist_exchange_operations=(
+                None
+                if self._persist_exchange_operations is None
+                else sorted(self._persist_exchange_operations)
+            ),
             latency_summary=self.latency_summary(),
+            terminal_reason_summary=self.terminal_reason_summary(),
+        )
+
+    async def source_received(self, ingress: SourceIngress) -> None:
+        """Record the first normalized observation of a source event."""
+
+        if ingress.run_id != self._run_id:
+            raise ValueError(
+                "source ingress run_id does not match telemetry run_id"
+            )
+        await self._record_phase(
+            phase=SOURCE_RECEIVED,
+            trace_id=ingress.trace_id,
+            lane=ingress.lane,
+            symbol=ingress.symbol,
+            bucket_start=ingress.bucket_start,
+            occurred_at=ingress.received_at,
+            details=ingress.details(),
+        )
+
+    async def trace_terminated(
+        self,
+        ingress: SourceIngress,
+        *,
+        occurred_at: datetime,
+        reason: str,
+        details: Mapping[str, JsonValue] | None = None,
+    ) -> None:
+        """Record why a source trace stopped before another lifecycle phase.
+
+        Terminal reasons deliberately stay on the source trace instead of the
+        execution state machine.  This keeps rejection, disabled-path and
+        recovery outcomes observable without changing order semantics or
+        making a high-frequency source event durable by default.
+        """
+
+        self._trace_id_for_ingress(ingress, lane=ingress.lane)
+        _require_non_empty_text(reason, "reason")
+        event_details: dict[str, JsonValue] = {
+            **_ingress_details(ingress),
+            **(details or {}),
+            "reason": reason,
+        }
+        await self._record_phase(
+            phase=TRACE_TERMINATED,
+            trace_id=ingress.trace_id,
+            lane=ingress.lane,
+            symbol=ingress.symbol,
+            bucket_start=ingress.bucket_start,
+            occurred_at=occurred_at,
+            details=event_details,
+        )
+        source = ingress.trigger_source or LIVE_LANE_UNKNOWN
+        counter_key = (ingress.lane, source, reason)
+        self._terminal_reason_counts[counter_key] = (
+            self._terminal_reason_counts.get(counter_key, 0) + 1
         )
 
     async def market_state_received(
@@ -338,10 +575,12 @@ class LiveRuntimeTelemetry:
         *,
         occurred_at: datetime,
         lane: str = LIVE_LANE_ENTRY,
+        ingress: SourceIngress | None = None,
     ) -> None:
+        trace_id = self._trace_id_for_ingress(ingress, lane=lane)
         await self._record_phase(
             phase=MARKET_STATE_RECEIVED,
-            trace_id=state_trace_id(state, lane),
+            trace_id=trace_id or state_trace_id(state, lane),
             lane=lane,
             symbol=state.symbol,
             bucket_start=state.bucket_start,
@@ -350,6 +589,7 @@ class LiveRuntimeTelemetry:
                 "source_first_received_at": _optional_iso(state.first_received_at),
                 "source_last_received_at": _optional_iso(state.last_received_at),
                 "source_event_count": state.source_event_count,
+                **_ingress_details(ingress),
             },
         )
 
@@ -360,17 +600,21 @@ class LiveRuntimeTelemetry:
         occurred_at: datetime,
         prefetched: bool,
         reloaded: bool,
+        ingress: SourceIngress | None = None,
     ) -> None:
+        lane = LIVE_LANE_ENTRY if ingress is None else ingress.lane
+        trace_id = self._trace_id_for_ingress(ingress, lane=lane)
         await self._record_phase(
             phase=CONTEXT_READY,
-            trace_id=state_trace_id(state, LIVE_LANE_ENTRY),
-            lane=LIVE_LANE_ENTRY,
+            trace_id=trace_id or state_trace_id(state, lane),
+            lane=lane,
             symbol=state.symbol,
             bucket_start=state.bucket_start,
             occurred_at=occurred_at,
             details={
                 "prefetched": prefetched,
                 "reloaded": reloaded,
+                **_ingress_details(ingress),
             },
         )
 
@@ -460,12 +704,15 @@ class LiveRuntimeTelemetry:
         state: MarketState15s,
         occurred_at: datetime,
         lane: str,
+        ingress: SourceIngress | None = None,
     ) -> None:
         candidate_id = _required_text(candidate, "candidate_id")
+        trace_id = self._trace_id_for_ingress(ingress, lane=lane)
+        self._remember_source_ingress(candidate_id, ingress)
         await self._record_phase(
             phase=CANDIDATE_ACCEPTED,
             trace_id=candidate_id,
-            parent_trace_id=state_trace_id(state, lane),
+            parent_trace_id=trace_id or state_trace_id(state, lane),
             lane=lane,
             symbol=state.symbol,
             bucket_start=state.bucket_start,
@@ -474,6 +721,7 @@ class LiveRuntimeTelemetry:
                 "candidate_id": candidate_id,
                 "signal_id": _optional_text(candidate, "signal_id"),
                 "reduce_only": bool(getattr(candidate, "reduce_only", False)),
+                **_ingress_details(ingress),
             },
         )
 
@@ -485,8 +733,11 @@ class LiveRuntimeTelemetry:
         occurred_at: datetime,
         lane: str,
         evaluation_id: str,
+        ingress: SourceIngress | None = None,
     ) -> None:
         candidate_id = _required_text(candidate, "candidate_id")
+        self._trace_id_for_ingress(ingress, lane=lane)
+        self._remember_source_ingress(candidate_id, ingress)
         await self._record_phase(
             phase=RISK_APPROVED,
             trace_id=candidate_id,
@@ -497,6 +748,7 @@ class LiveRuntimeTelemetry:
             details={
                 "candidate_id": candidate_id,
                 "evaluation_id": evaluation_id,
+                **_ingress_details(ingress),
             },
         )
 
@@ -507,8 +759,11 @@ class LiveRuntimeTelemetry:
         state: MarketState15s,
         occurred_at: datetime,
         lane: str,
+        ingress: SourceIngress | None = None,
     ) -> None:
         candidate_id = _required_text(candidate, "candidate_id")
+        self._trace_id_for_ingress(ingress, lane=lane)
+        self._remember_source_ingress(candidate_id, ingress)
         await self._record_phase(
             phase=INTENT_SAVED,
             trace_id=candidate_id,
@@ -516,7 +771,10 @@ class LiveRuntimeTelemetry:
             symbol=state.symbol,
             bucket_start=state.bucket_start,
             occurred_at=occurred_at,
-            details={"candidate_id": candidate_id},
+            details={
+                "candidate_id": candidate_id,
+                **_ingress_details(ingress),
+            },
         )
 
     async def order_event(
@@ -539,6 +797,7 @@ class LiveRuntimeTelemetry:
             phase = EXCHANGE_FILLED
         else:
             return
+        source_ingress = self._source_ingress_by_trace.get(plan.intent_id)
         await self._record_phase(
             phase=phase,
             trace_id=plan.intent_id,
@@ -552,6 +811,7 @@ class LiveRuntimeTelemetry:
                 "exchange_order_id": event.exchange_order_id,
                 "order_state": event.state.value,
                 "reduce_only": plan.reduce_only,
+                **_ingress_details(source_ingress),
                 **event.details,
             },
         )
@@ -579,6 +839,7 @@ class LiveRuntimeTelemetry:
         occurred_at: datetime,
     ) -> None:
         lane = LIVE_LANE_EXIT if plan.reduce_only else LIVE_LANE_ENTRY
+        source_ingress = self._source_ingress_by_trace.get(plan.intent_id)
         await self._record_phase(
             phase=(
                 EXCHANGE_REQUEST_STARTED
@@ -597,6 +858,7 @@ class LiveRuntimeTelemetry:
                     "_response_received"
                 ),
                 "reduce_only": plan.reduce_only,
+                **_ingress_details(source_ingress),
             },
         )
 
@@ -621,6 +883,7 @@ class LiveRuntimeTelemetry:
         )
         symbol = event.symbol or (trace.symbol if trace is not None else None)
         bucket_start = trace.bucket_start if trace is not None else None
+        source_ingress = self._source_ingress_by_trace.get(trace_id)
         await self._record_phase(
             phase=ACCOUNT_FILL,
             trace_id=trace_id,
@@ -635,6 +898,7 @@ class LiveRuntimeTelemetry:
                 "order_status": event.order_status,
                 "source_event_at": event.event_at.isoformat(),
                 "source_received_at": event.received_at.isoformat(),
+                **_ingress_details(source_ingress),
             },
         )
 
@@ -655,6 +919,24 @@ class LiveRuntimeTelemetry:
                 "p95_ms": _percentile(sorted_values, 0.95),
                 "max_ms": sorted_values[-1],
             }
+        return summary
+
+    def terminal_reason_summary(self) -> TerminalReasonSummary:
+        """Return a detached run-scoped count by lane, source and reason.
+
+        The summary deliberately omits symbols and source event ids so it can
+        be sampled or exported as a low-cardinality operational metric.  Detailed
+        identity and context remain on ``recent_events`` while this method is
+        strictly observational and does not alter the recorder state.
+        """
+
+        summary: TerminalReasonSummary = {}
+        for (lane, source, reason), count in sorted(
+            self._terminal_reason_counts.items()
+        ):
+            lane_summary = summary.setdefault(lane, {})
+            source_summary = lane_summary.setdefault(source, {})
+            source_summary[reason] = count
         return summary
 
     async def _record_phase(
@@ -764,6 +1046,20 @@ class LiveRuntimeTelemetry:
             self._trim_traces()
         return trace
 
+    def _remember_source_ingress(
+        self,
+        trace_id: str,
+        ingress: SourceIngress | None,
+    ) -> None:
+        if ingress is None:
+            return
+        if trace_id not in self._source_ingress_by_trace:
+            self._source_trace_order.append(trace_id)
+        self._source_ingress_by_trace[trace_id] = ingress
+        while len(self._source_ingress_by_trace) > self._max_trace_count:
+            oldest_trace_id = self._source_trace_order.popleft()
+            self._source_ingress_by_trace.pop(oldest_trace_id, None)
+
     def _trace_bucket_start(self, trace_id: str) -> datetime | None:
         trace = self._traces.get(trace_id)
         return None if trace is None else trace.bucket_start
@@ -789,6 +1085,15 @@ class LiveRuntimeTelemetry:
         if (
             self._persist_event_types is not None
             and event.event_type not in self._persist_event_types
+        ):
+            return
+        if (
+            self._persist_exchange_operations is not None
+            and event.event_type in _EXCHANGE_BOUNDARY_EVENTS
+            and not _exchange_operation_is_allowed(
+                event.details.get("operation"),
+                self._persist_exchange_operations,
+            )
         ):
             return
         try:
@@ -861,6 +1166,31 @@ def _required_text(value: object, field_name: str) -> str:
     return result
 
 
+def _require_non_empty_text(value: str, field_name: str) -> None:
+    if not value.strip():
+        raise ValueError(f"{field_name} must not be empty")
+
+
+def _normalize_exchange_operations(
+    operations: Collection[str],
+) -> frozenset[str]:
+    normalized: set[str] = set()
+    for operation in operations:
+        if not isinstance(operation, str) or not operation.strip():
+            raise ValueError(
+                "persist_exchange_operations must contain non-empty names"
+            )
+        normalized.add(operation.strip())
+    return frozenset(normalized)
+
+
+def _exchange_operation_is_allowed(
+    operation: JsonValue,
+    allowed_operations: frozenset[str],
+) -> bool:
+    return isinstance(operation, str) and operation in allowed_operations
+
+
 def _optional_text(value: object, field_name: str) -> str | None:
     result = getattr(value, field_name, None)
     if result is None:
@@ -871,6 +1201,10 @@ def _optional_text(value: object, field_name: str) -> str | None:
 
 def _optional_iso(value: datetime | None) -> str | None:
     return None if value is None else value.isoformat()
+
+
+def _ingress_details(ingress: SourceIngress | None) -> dict[str, JsonValue]:
+    return {} if ingress is None else ingress.details()
 
 
 def _json_value(value: object) -> JsonValue:
@@ -901,14 +1235,27 @@ __all__ = [
     "LIVE_LANE_ENTRY",
     "LIVE_LANE_EXIT",
     "LIVE_LANE_UNKNOWN",
+    "LIVE_TRIGGER_SOURCE_ACCOUNT",
+    "LIVE_TRIGGER_SOURCE_CANDLE",
+    "LIVE_TRIGGER_SOURCE_GRACE",
+    "LIVE_TRIGGER_SOURCE_MARKET",
+    "LIVE_TRIGGER_SOURCE_QUOTE",
+    "LIVE_TRIGGER_SOURCES",
+    "LiveLane",
     "LiveRuntimeEvent",
     "LiveRuntimeTelemetry",
     "LiveTelemetrySink",
+    "LiveTriggerSource",
     "MARKET_STATE_RECEIVED",
     "PERSISTED_ORDER_TELEMETRY_EVENTS",
     "RISK_APPROVED",
     "SIGNAL_RECORDED",
+    "SOURCE_RECEIVED",
+    "SourceIngress",
     "STRATEGY_DECISION",
     "SUBMITTING",
+    "TerminalReasonSummary",
+    "TRACE_TERMINATED",
+    "TraceKey",
     "state_trace_id",
 ]
