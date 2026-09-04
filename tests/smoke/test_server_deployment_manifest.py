@@ -173,9 +173,19 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         live_command,
         "--candle-grace-decision-profit-pct",
     ) == "${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT:-0.001}"
+    assert "--allow-legacy-credential-fallback" in live_command
+    assert "--allow-legacy-credential-fallback" in services[
+        "execution-account-live"
+    ]["command"]
     assert services["execution-account-live"]["environment"][
         "BINANCE_API_KEY"
     ] == "${BINANCE_API_KEY:-}"
+    assert services["execution-account-live"]["environment"][
+        "BINANCE_READ_API_KEY"
+    ] == "${BINANCE_READ_API_KEY:-}"
+    assert services["live-strategy"]["environment"][
+        "BINANCE_TRADE_API_KEY"
+    ] == "${BINANCE_TRADE_API_KEY:-}"
     assert "BINANCE_API_KEY" not in str(services["market-data"])
     assert "BINANCE_API_KEY" not in str(services["paper-orderflow-pair"])
 

@@ -95,8 +95,8 @@ def test_live_run_passes_exchange_operation_allowlist_to_daemon(monkeypatch) -> 
         "_run_with_live_startup_backoff",
         fake_startup_backoff,
     )
-    monkeypatch.setenv("BINANCE_API_KEY", "test-key")
-    monkeypatch.setenv("BINANCE_API_SECRET", "test-secret")
+    monkeypatch.setenv("BINANCE_TRADE_API_KEY", "test-key")
+    monkeypatch.setenv("BINANCE_TRADE_API_SECRET", "test-secret")
 
     result = runner.invoke(
         app,
@@ -114,6 +114,28 @@ def test_live_run_passes_exchange_operation_allowlist_to_daemon(monkeypatch) -> 
     assert captured["persist_exchange_operations"] == frozenset(
         {"submit", "cancel"}
     )
+
+
+def test_live_cli_legacy_credentials_require_explicit_fallback(monkeypatch) -> None:
+    monkeypatch.delenv("BINANCE_TRADE_API_KEY", raising=False)
+    monkeypatch.delenv("BINANCE_TRADE_API_SECRET", raising=False)
+    monkeypatch.setenv("BINANCE_API_KEY", "legacy-key")
+    monkeypatch.setenv("BINANCE_API_SECRET", "legacy-secret")
+
+    with pytest.raises(BadParameter, match="BINANCE_TRADE_API_KEY"):
+        main._resolve_live_cli_credentials(
+            api_key_env=None,
+            api_secret_env=None,
+            allow_legacy_fallback=False,
+        )
+
+    resolved = main._resolve_live_cli_credentials(
+        api_key_env=None,
+        api_secret_env=None,
+        allow_legacy_fallback=True,
+    )
+    assert resolved.api_key == "legacy-key"
+    assert resolved.api_key_env == "BINANCE_API_KEY"
 
 
 def test_resolve_missing_order_requires_exact_confirmation() -> None:

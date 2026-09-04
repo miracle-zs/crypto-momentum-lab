@@ -1,3 +1,4 @@
+from enum import StrEnum
 from pathlib import Path
 
 from pydantic import (
@@ -9,6 +10,80 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+
+class BinanceCredentialRole(StrEnum):
+    """Permission role for a Binance credential pair."""
+
+    READ = "read"
+    TRADE = "trade"
+
+
+class BinanceCredentialRef(BaseModel):
+    """Names of environment variables holding one credential pair.
+
+    Secrets are deliberately not represented here; this model is safe to put
+    in configuration hashes and diagnostics.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    api_key_env: str
+    api_secret_env: str
+
+    @field_validator("api_key_env", "api_secret_env")
+    @classmethod
+    def validate_env_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("credential environment variable names must not be empty")
+        if not normalized.replace("_", "").isalnum():
+            raise ValueError(
+                "credential environment variable names must contain only "
+                "letters, digits, and underscores"
+            )
+        if not normalized[0].isalpha():
+            raise ValueError(
+                "credential environment variable names must start with a letter"
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_distinct_names(self) -> "BinanceCredentialRef":
+        if self.api_key_env == self.api_secret_env:
+            raise ValueError("api key and secret environment names must differ")
+        return self
+
+
+class BinanceCredentialConfig(BaseModel):
+    """Role-separated Binance credential references.
+
+    ``allow_shared`` is an explicit migration escape hatch.  It defaults to
+    false so a complete configuration cannot accidentally recreate the
+    current shared-key deployment.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    read: BinanceCredentialRef
+    trade: BinanceCredentialRef
+    allow_shared: bool = False
+
+    @model_validator(mode="after")
+    def validate_role_separation(self) -> "BinanceCredentialConfig":
+        referenced_names = {
+            self.read.api_key_env,
+            self.read.api_secret_env,
+            self.trade.api_key_env,
+            self.trade.api_secret_env,
+        }
+        has_overlap = len(referenced_names) < 4
+        if has_overlap and not self.allow_shared:
+            raise ValueError(
+                "read and trade credential references must not overlap unless "
+                "allow_shared is explicitly enabled"
+            )
+        return self
 
 
 class UniverseConfig(BaseModel):

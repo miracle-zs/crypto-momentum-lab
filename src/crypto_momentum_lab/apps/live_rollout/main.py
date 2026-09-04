@@ -25,6 +25,12 @@ from crypto_momentum_lab.apps.shadow_operation.main import (
     _latest_account_state,
     _latest_risk_config,
 )
+from crypto_momentum_lab.config import (
+    BinanceCredentialRole,
+    CredentialResolutionError,
+    ResolvedBinanceCredentials,
+    resolve_role_credentials,
+)
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderEvent,
     ExchangeOrderState,
@@ -651,10 +657,29 @@ def run_command(
         typer.Option("--candle-grace-profit-pct"),
     ] = "0.0088",
     base_url: Annotated[str, typer.Option("--base-url")] = "https://fapi.binance.com",
-    api_key_env: Annotated[str, typer.Option("--api-key-env")] = "BINANCE_API_KEY",
+    api_key_env: Annotated[
+        str | None,
+        typer.Option(
+            "--api-key-env",
+            help="Override the trade credential key environment variable.",
+        ),
+    ] = None,
     api_secret_env: Annotated[
-        str, typer.Option("--api-secret-env")
-    ] = "BINANCE_API_SECRET",
+        str | None,
+        typer.Option(
+            "--api-secret-env",
+            help="Override the trade credential secret environment variable.",
+        ),
+    ] = None,
+    allow_legacy_credential_fallback: Annotated[
+        bool,
+        typer.Option(
+            "--allow-legacy-credential-fallback/--no-allow-legacy-credential-fallback",
+            help=(
+                "Temporarily fall back to BINANCE_API_KEY/SECRET during migration."
+            ),
+        ),
+    ] = False,
     entry_leverage: Annotated[
         int, typer.Option("--entry-leverage", min=1, max=125)
     ] = 1,
@@ -674,10 +699,11 @@ def run_command(
 ) -> None:
     if not confirmation:
         raise typer.BadParameter("--i-understand-this-places-real-orders is required")
-    api_key = os.environ.get(api_key_env)
-    api_secret = os.environ.get(api_secret_env)
-    if not api_key or not api_secret:
-        raise typer.BadParameter(f"{api_key_env} and {api_secret_env} are required")
+    credentials = _resolve_live_cli_credentials(
+        api_key_env=api_key_env,
+        api_secret_env=api_secret_env,
+        allow_legacy_fallback=allow_legacy_credential_fallback,
+    )
 
     async def run_once() -> LiveDaemonResult:
         return await _run_live_daemon(
@@ -717,8 +743,8 @@ def run_command(
             ),
             candle_grace_profit_pct=Decimal(candle_grace_profit_pct),
             base_url=base_url,
-            api_key=api_key,
-            api_secret=api_secret,
+            api_key=credentials.api_key,
+            api_secret=credentials.api_secret,
             entry_leverage=entry_leverage,
             persist_exchange_operations=_parse_exchange_operations(
                 persist_exchange_operations
@@ -3343,6 +3369,23 @@ def _resolve_database_url(value: str | None, plane_env_var: str) -> str:
             f"--database-url or {plane_env_var} or CML_DATABASE_URL is required"
         )
     return resolved
+
+
+def _resolve_live_cli_credentials(
+    *,
+    api_key_env: str | None,
+    api_secret_env: str | None,
+    allow_legacy_fallback: bool,
+) -> ResolvedBinanceCredentials:
+    try:
+        return resolve_role_credentials(
+            BinanceCredentialRole.TRADE,
+            api_key_env=api_key_env,
+            api_secret_env=api_secret_env,
+            allow_legacy_fallback=allow_legacy_fallback,
+        )
+    except CredentialResolutionError as error:
+        raise typer.BadParameter(str(error)) from error
 
 
 def _database_url(value: str | None) -> str:
