@@ -59,7 +59,11 @@ from crypto_momentum_lab.domain.strategy import (
     RunMode,
     StrategyCheckpoint,
     StrategyRunIdentity,
+    UniverseRankingSnapshot,
     deterministic_config_hash,
+)
+from crypto_momentum_lab.domain.strategy.entry_policy_compare import (
+    universe_snapshot_for_symbols,
 )
 from crypto_momentum_lab.execution_account.binance import (
     BinanceRateLimitError,
@@ -683,6 +687,16 @@ def run_command(
     entry_leverage: Annotated[
         int, typer.Option("--entry-leverage", min=1, max=125)
     ] = 1,
+    entry_policy_compare_only: Annotated[
+        bool,
+        typer.Option(
+            "--entry-policy-compare-only/--no-entry-policy-compare-only",
+            help=(
+                "Record legacy-vs-Policy entry differences without changing "
+                "order decisions."
+            ),
+        ),
+    ] = False,
     persist_exchange_operations: Annotated[
         str,
         typer.Option(
@@ -746,6 +760,7 @@ def run_command(
             api_key=credentials.api_key,
             api_secret=credentials.api_secret,
             entry_leverage=entry_leverage,
+            entry_policy_compare_only=entry_policy_compare_only,
             persist_exchange_operations=_parse_exchange_operations(
                 persist_exchange_operations
             ),
@@ -1306,6 +1321,7 @@ async def _run_live_daemon(
     api_secret: str,
     entry_leverage: int,
     persist_exchange_operations: Collection[str] | None = None,
+    entry_policy_compare_only: bool = False,
     market_websocket_url: str = _LIVE_MARKET_WEBSOCKET_URL,
 ) -> LiveDaemonResult:
     account_snapshot_available = True
@@ -1750,6 +1766,9 @@ async def _run_live_daemon(
                     entry_price=entry_price,
                     ema5=snapshot.ema5,
                     ema10=snapshot.ema10,
+                    ema_observed_at=snapshot.observed_at,
+                    ema_snapshot_id=snapshot.snapshot_id,
+                    ema_config_hash=snapshot.config_hash,
                 )
 
             entry_filter_context_loader = load_entry_filter_context
@@ -1861,6 +1880,9 @@ async def _run_live_daemon(
         entry_universe_context_provider: (
             Callable[[str, datetime], dict[str, object] | None] | None
         ) = None
+        entry_universe_snapshot_provider: (
+            Callable[[datetime], UniverseRankingSnapshot | None] | None
+        ) = None
         if entry_positive_gainer_top_count is not None:
 
             def load_entry_universe_context(
@@ -1887,6 +1909,44 @@ async def _run_live_daemon(
                 )
 
             entry_universe_context_provider = load_entry_universe_context
+
+            def load_entry_universe_policy_snapshot(
+                observed_at: datetime,
+            ) -> UniverseRankingSnapshot | None:
+                universe_data: LiveEntryUniverseData | None = None
+                if entry_filter_cache is not None:
+                    universe_data = entry_filter_cache.universe_data_for(
+                        observed_at
+                    )
+                elif entry_symbol_cache is not None:
+                    universe_data = entry_symbol_cache.universe_data_for(
+                        observed_at
+                    )
+                if universe_data is None:
+                    return None
+                source_snapshot = universe_data.snapshot
+                return universe_snapshot_for_symbols(
+                    universe_data.symbols,
+                    observed_at=(
+                        observed_at
+                        if source_snapshot is None
+                        else source_snapshot.observed_at
+                    ),
+                    snapshot_id=(
+                        None
+                        if source_snapshot is None
+                        else str(source_snapshot.snapshot_id)
+                    ),
+                    config_hash=(
+                        None
+                        if source_snapshot is None
+                        else source_snapshot.config_hash
+                    ),
+                )
+
+            entry_universe_snapshot_provider = (
+                load_entry_universe_policy_snapshot
+            )
         daemon = LiveStrategyDaemon(
             strategy=strategy,
             risk_gateway=RiskGateway(),
@@ -1918,6 +1978,10 @@ async def _run_live_daemon(
                 entry_universe_context_provider=(
                     entry_universe_context_provider
                 ),
+                entry_universe_snapshot_provider=(
+                    entry_universe_snapshot_provider
+                ),
+                entry_policy_compare_only=entry_policy_compare_only,
                 entry_order_type=entry_order_type,
                 entry_limit_ttl_seconds=entry_limit_ttl_seconds,
             ),

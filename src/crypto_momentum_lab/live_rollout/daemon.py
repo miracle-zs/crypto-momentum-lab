@@ -37,11 +37,16 @@ from crypto_momentum_lab.domain.risk import (
     TradingLease,
 )
 from crypto_momentum_lab.domain.strategy import (
+    EntryPolicyComparison,
+    EntryPolicyComparisonRequest,
     EntryType,
     OrderIntentCandidate,
     StrategyCheckpoint,
     StrategyDecision,
     StrategySide,
+    UniverseRankingSnapshot,
+    compare_entry_policy_request,
+    summarize_entry_policy_comparisons,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
@@ -87,6 +92,7 @@ from crypto_momentum_lab.live_rollout.telemetry import (
     LIVE_LANE_ENTRY,
     LIVE_LANE_EXIT,
     LiveTelemetrySink,
+    state_trace_id,
 )
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PersistedExchangeOrder,
@@ -163,6 +169,10 @@ class LiveDaemonConfig:
     entry_universe_context_provider: (
         Callable[[str, datetime], Mapping[str, object] | None] | None
     ) = None
+    entry_universe_snapshot_provider: (
+        Callable[[datetime], UniverseRankingSnapshot | None] | None
+    ) = None
+    entry_policy_compare_only: bool = False
     entry_order_type: EntryType = EntryType.LIMIT
     entry_limit_ttl_seconds: int = 900
 
@@ -175,6 +185,8 @@ class LiveDaemonConfig:
             raise ValueError("checkpoint_every_states must be positive")
         if not isinstance(self.reconcile_once_per_bucket, bool):
             raise TypeError("reconcile_once_per_bucket must be a bool")
+        if not isinstance(self.entry_policy_compare_only, bool):
+            raise TypeError("entry_policy_compare_only must be a bool")
         if self.entry_symbol_refresh_seconds <= 0:
             raise ValueError("entry_symbol_refresh_seconds must be positive")
         if not isinstance(self.entry_order_type, EntryType):
@@ -188,6 +200,22 @@ class LiveEntryFilterContext:
     entry_price: Decimal | None
     ema5: Decimal | None = None
     ema10: Decimal | None = None
+    ema_observed_at: datetime | None = None
+    ema_snapshot_id: str | None = None
+    ema_config_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.ema_observed_at is not None and (
+            self.ema_observed_at.tzinfo is None
+            or self.ema_observed_at.utcoffset() is None
+        ):
+            raise ValueError("ema_observed_at must be timezone-aware")
+        for value, field_name in (
+            (self.ema_snapshot_id, "ema_snapshot_id"),
+            (self.ema_config_hash, "ema_config_hash"),
+        ):
+            if value is not None and not value.strip():
+                raise ValueError(f"{field_name} must not be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1022,6 +1050,7 @@ class LiveStrategyDaemon:
         if recorder is None:
             return
         candidate_filter_results: dict[str, object] = {}
+        legacy_rejection_reasons: dict[str, str | None] = {}
         for candidate in decision.candidates:
             rejection_reason = _live_entry_candidate_rejection_reason(
                 candidate,
@@ -1033,6 +1062,7 @@ class LiveStrategyDaemon:
                 require_price_above_ema10=self._config.require_price_above_ema10,
                 now=recorded_at,
             )
+            legacy_rejection_reasons[candidate.candidate_id] = rejection_reason
             candidate_filter_results[candidate.candidate_id] = {
                 "symbol": candidate.symbol,
                 "side": _enum_text(candidate.side),
@@ -1040,6 +1070,102 @@ class LiveStrategyDaemon:
                 "passed": rejection_reason is None,
                 "rejection_reason": rejection_reason,
             }
+        policy_comparisons: list[dict[str, object]] = []
+        policy_comparison_results: list[EntryPolicyComparison] = []
+        policy_comparison_summary: dict[str, object] | None = None
+        policy_compare_skip_reason: str | None = None
+        policy_universe_snapshot: UniverseRankingSnapshot | None = None
+        policy_universe_snapshot_error: str | None = None
+        if self._config.entry_policy_compare_only:
+            context_available = (filter_context or {}).get(
+                "context_available",
+                context is not None,
+            )
+            if context_available is False:
+                policy_compare_skip_reason = "context_unavailable"
+            else:
+                universe_snapshot_provider = (
+                    self._config.entry_universe_snapshot_provider
+                )
+                if universe_snapshot_provider is not None:
+                    try:
+                        policy_universe_snapshot = universe_snapshot_provider(
+                            state.bucket_end
+                        )
+                    except Exception as error:
+                        policy_universe_snapshot_error = type(error).__name__
+                        log.warning(
+                            "live_strategy_signal_universe_snapshot_failed",
+                            run_id=self._config.run_id,
+                            symbol=state.symbol,
+                            error_type=type(error).__name__,
+                        )
+                entry_price = (
+                    None
+                    if entry_filter_context is None
+                    else entry_filter_context.entry_price
+                )
+                ema5 = (
+                    None
+                    if entry_filter_context is None
+                    else entry_filter_context.ema5
+                )
+                ema10 = (
+                    None
+                    if entry_filter_context is None
+                    else entry_filter_context.ema10
+                )
+                source_trace = state_trace_id(state, LIVE_LANE_ENTRY)
+                for candidate in decision.candidates:
+                    if candidate.reduce_only:
+                        continue
+                    comparison = compare_entry_policy_request(
+                        EntryPolicyComparisonRequest(
+                            candidate=candidate,
+                            source_trace_id=source_trace,
+                            legacy_rejection_reason=legacy_rejection_reasons[
+                                candidate.candidate_id
+                            ],
+                            gate_reasons=gate_reasons,
+                            entry_enabled=self._entry_enabled,
+                            entry_long_only=self._config.entry_long_only,
+                            entry_symbols=entry_symbols,
+                            universe_snapshot=policy_universe_snapshot,
+                            entry_price=entry_price,
+                            ema5=ema5,
+                            ema10=ema10,
+                            require_price_above_ema5=(
+                                self._config.require_price_above_ema5
+                            ),
+                            require_price_above_ema10=(
+                                self._config.require_price_above_ema10
+                            ),
+                            observed_at=recorded_at,
+                            ema_observed_at=(
+                                None
+                                if entry_filter_context is None
+                                else entry_filter_context.ema_observed_at
+                            ),
+                            ema_snapshot_id=(
+                                None
+                                if entry_filter_context is None
+                                else entry_filter_context.ema_snapshot_id
+                            ),
+                            ema_config_hash=(
+                                None
+                                if entry_filter_context is None
+                                else entry_filter_context.ema_config_hash
+                            ),
+                        )
+                    )
+                    policy_comparison_results.append(comparison)
+                    policy_comparisons.append(comparison.as_details())
+                policy_comparison_summary = summarize_entry_policy_comparisons(
+                    policy_comparison_results,
+                    reduce_only_skipped=sum(
+                        candidate.reduce_only for candidate in decision.candidates
+                    ),
+                ).as_details()
         details: dict[str, object] = dict(filter_context or {})
         universe_context_provider = (
             self._config.entry_universe_context_provider
@@ -1110,6 +1236,15 @@ class LiveStrategyDaemon:
                     3,
                 ),
                 "candidate_filter_results": candidate_filter_results,
+                "entry_policy_compare_only": (
+                    self._config.entry_policy_compare_only
+                ),
+                "entry_policy_comparisons": policy_comparisons,
+                "entry_policy_comparison_summary": policy_comparison_summary,
+                "entry_policy_compare_skip_reason": policy_compare_skip_reason,
+                "entry_policy_universe_snapshot_error": (
+                    policy_universe_snapshot_error
+                ),
                 "effective_entry_candidates": effective_entry_candidates,
             }
         )
@@ -2652,11 +2787,17 @@ def _entry_filter_values(
             "entry_price": None,
             "ema5": None,
             "ema10": None,
+            "ema_observed_at": None,
+            "ema_snapshot_id": None,
+            "ema_config_hash": None,
         }
     return {
         "entry_price": context.entry_price,
         "ema5": context.ema5,
         "ema10": context.ema10,
+        "ema_observed_at": context.ema_observed_at,
+        "ema_snapshot_id": context.ema_snapshot_id,
+        "ema_config_hash": context.ema_config_hash,
     }
 
 

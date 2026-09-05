@@ -172,6 +172,42 @@ async def test_live_signal_record_includes_universe_and_effective_entry_context(
     assert effective["effective_expires_at"] == NOW + timedelta(minutes=15)
 
 
+async def test_live_signal_record_can_compare_entry_policy_without_submitting_change(
+) -> None:
+    recorder = RecordingSignalRecorder()
+    exchange = PlanAwareExchange()
+    daemon = _daemon(
+        exchange=exchange,
+        signal_recorder=recorder,
+        entry_policy_compare_only=True,
+    )
+
+    result = await daemon.run(_states())
+
+    assert result.halt_reason is None
+    assert result.submitted_order_count == 1
+    assert exchange.calls == ["submit"]
+    assert recorder.decision_filter_context is not None
+    assert recorder.decision_filter_context["entry_policy_compare_only"] is True
+    comparisons = recorder.decision_filter_context[
+        "entry_policy_comparisons"
+    ]
+    assert len(comparisons) == 1
+    assert comparisons[0]["matched"] is True
+    assert recorder.decision_filter_context[
+        "entry_policy_comparison_summary"
+    ] == {
+        "candidates": 1,
+        "matched": 1,
+        "mismatched": 0,
+        "legacy_eligible": 1,
+        "policy_eligible": 1,
+        "reduce_only_skipped": 0,
+        "policy_reasons": {},
+        "mismatch_reasons": {},
+    }
+
+
 async def test_live_daemon_does_not_submit_expired_entry_candidate() -> None:
     exchange = PlanAwareExchange()
 
@@ -1520,6 +1556,7 @@ def _daemon(
     entry_symbol_loader=None,
     entry_filter_context_loader=None,
     entry_universe_context_provider=None,
+    entry_policy_compare_only: bool = False,
     signal_recorder=None,
     require_price_above_ema5: bool = False,
     require_price_above_ema10: bool = False,
@@ -1566,6 +1603,7 @@ def _daemon(
             require_price_above_ema10=require_price_above_ema10,
             entry_filter_context_loader=entry_filter_context_loader,
             entry_universe_context_provider=entry_universe_context_provider,
+            entry_policy_compare_only=entry_policy_compare_only,
             entry_order_type=entry_order_type,
         ),
         exit_manager=exit_manager,

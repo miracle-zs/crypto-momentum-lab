@@ -106,6 +106,7 @@ def test_live_run_passes_exchange_operation_allowlist_to_daemon(monkeypatch) -> 
             "postgresql+asyncpg://unused",
             "--persist-exchange-operations",
             "submit,cancel",
+            "--entry-policy-compare-only",
             "--i-understand-this-places-real-orders",
         ],
     )
@@ -114,6 +115,7 @@ def test_live_run_passes_exchange_operation_allowlist_to_daemon(monkeypatch) -> 
     assert captured["persist_exchange_operations"] == frozenset(
         {"submit", "cancel"}
     )
+    assert captured["entry_policy_compare_only"] is True
 
 
 def test_live_cli_legacy_credentials_require_explicit_fallback(monkeypatch) -> None:
