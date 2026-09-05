@@ -21,8 +21,9 @@ Live 与未纳入灰度的服务必须保持默认关闭：
   `9ce5fb3`；修复保留 EMA snapshot 的 `observed_at`、snapshot id 和 config hash。
 - 阶段 A 修复版本只重启 Paper，Live/执行账户仍运行 `fa991f6`；随后两个 Paper daemon
   以 `0ad7250` 开启 compare-only，pair、Live 和 execution-account 未重启。
-- 首个窗口（约 9 分钟）报告：普通 Paper `candidates=5, matched=5, mismatched=0`；
-  EMA Paper `candidates=3, matched=3, mismatched=0`，两份报告均 `status=ok`、退出码 0。
+- 完整观察窗口（约 18 分钟，覆盖一个 15 分钟策略周期）报告：普通 Paper
+  `candidates=7, matched=7, mismatched=0`；EMA Paper
+  `candidates=4, matched=4, mismatched=0`，两份报告均 `status=ok`、严格零容忍退出码 0。
 - 两个灰度容器均 `running/0/healthy`；观测写入独立 JSONL，不改变 Paper simulated fill 或
   Live submit/cancel 路径。
 
