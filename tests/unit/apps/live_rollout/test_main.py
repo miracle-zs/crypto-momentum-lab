@@ -53,6 +53,23 @@ def test_live_run_exposes_operation_aware_telemetry_option() -> None:
     assert "--persist-exchan" in result.stdout
 
 
+def test_live_run_rejects_conflicting_entry_policy_modes() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--entry-policy-compare-only",
+            "--entry-policy-enforce",
+            "--i-understand-this-places-real-orders",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output
+
+
 @pytest.mark.parametrize(
     ("raw_value", "expected"),
     [
@@ -116,6 +133,46 @@ def test_live_run_passes_exchange_operation_allowlist_to_daemon(monkeypatch) -> 
         {"submit", "cancel"}
     )
     assert captured["entry_policy_compare_only"] is True
+
+
+def test_live_run_passes_entry_policy_enforce_to_daemon(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_run_live_daemon(**kwargs: object):
+        captured.update(kwargs)
+        return main.LiveDaemonResult(
+            processed_state_count=0,
+            approved_intent_count=0,
+            submitted_order_count=0,
+            halt_reason=None,
+            final_state_at=None,
+        )
+
+    async def fake_startup_backoff(run_once):
+        return await run_once()
+
+    monkeypatch.setattr(main, "_run_live_daemon", fake_run_live_daemon)
+    monkeypatch.setattr(
+        main,
+        "_run_with_live_startup_backoff",
+        fake_startup_backoff,
+    )
+    monkeypatch.setenv("BINANCE_TRADE_API_KEY", "test-key")
+    monkeypatch.setenv("BINANCE_TRADE_API_SECRET", "test-secret")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--entry-policy-enforce",
+            "--i-understand-this-places-real-orders",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["entry_policy_enforce"] is True
 
 
 def test_live_cli_legacy_credentials_require_explicit_fallback(monkeypatch) -> None:
@@ -236,8 +293,16 @@ def test_strategy_config_hash_includes_live_entry_filters() -> None:
         require_price_above_ema5=False,
         require_price_above_ema10=False,
     )
+    enforced = main._live_strategy_config_hash(
+        "orderflow_impulse",
+        entry_positive_gainer_top_count=None,
+        entry_policy_enforce=True,
+        require_price_above_ema5=False,
+        require_price_above_ema10=False,
+    )
 
     assert filtered != unfiltered
+    assert enforced != unfiltered
 
 
 def test_live_defaults_disable_ema_and_use_lower_orderflow_imbalance() -> None:

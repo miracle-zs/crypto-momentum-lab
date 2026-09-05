@@ -288,6 +288,13 @@ def strategy_config_hash_command(
         bool,
         typer.Option("--entry-price-above-ema10/--no-entry-price-above-ema10"),
     ] = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
+    entry_policy_enforce: Annotated[
+        bool,
+        typer.Option(
+            "--entry-policy-enforce/--no-entry-policy-enforce",
+            help="Use the shared Policy for real entry eligibility decisions.",
+        ),
+    ] = False,
     entry_order_type: Annotated[
         EntryType,
         typer.Option("--entry-order-type"),
@@ -303,6 +310,7 @@ def strategy_config_hash_command(
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=entry_price_above_ema5,
             require_price_above_ema10=entry_price_above_ema10,
+            entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
             entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         )
@@ -347,6 +355,13 @@ def prepare_command(
         bool,
         typer.Option("--entry-price-above-ema10/--no-entry-price-above-ema10"),
     ] = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
+    entry_policy_enforce: Annotated[
+        bool,
+        typer.Option(
+            "--entry-policy-enforce/--no-entry-policy-enforce",
+            help="Use the shared Policy for real entry eligibility decisions.",
+        ),
+    ] = False,
     entry_order_type: Annotated[
         EntryType,
         typer.Option("--entry-order-type"),
@@ -385,6 +400,7 @@ def prepare_command(
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=entry_price_above_ema5,
             require_price_above_ema10=entry_price_above_ema10,
+            entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
             entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         )
@@ -697,6 +713,13 @@ def run_command(
             ),
         ),
     ] = False,
+    entry_policy_enforce: Annotated[
+        bool,
+        typer.Option(
+            "--entry-policy-enforce/--no-entry-policy-enforce",
+            help="Use the shared Policy for real entry eligibility decisions.",
+        ),
+    ] = False,
     persist_exchange_operations: Annotated[
         str,
         typer.Option(
@@ -711,6 +734,11 @@ def run_command(
         bool, typer.Option("--i-understand-this-places-real-orders")
     ] = False,
 ) -> None:
+    if entry_policy_compare_only and entry_policy_enforce:
+        raise typer.BadParameter(
+            "--entry-policy-compare-only and "
+            "--entry-policy-enforce are mutually exclusive"
+        )
     if not confirmation:
         raise typer.BadParameter("--i-understand-this-places-real-orders is required")
     credentials = _resolve_live_cli_credentials(
@@ -761,6 +789,7 @@ def run_command(
             api_secret=credentials.api_secret,
             entry_leverage=entry_leverage,
             entry_policy_compare_only=entry_policy_compare_only,
+            entry_policy_enforce=entry_policy_enforce,
             persist_exchange_operations=_parse_exchange_operations(
                 persist_exchange_operations
             ),
@@ -1322,6 +1351,7 @@ async def _run_live_daemon(
     entry_leverage: int,
     persist_exchange_operations: Collection[str] | None = None,
     entry_policy_compare_only: bool = False,
+    entry_policy_enforce: bool = False,
     market_websocket_url: str = _LIVE_MARKET_WEBSOCKET_URL,
 ) -> LiveDaemonResult:
     account_snapshot_available = True
@@ -1549,6 +1579,7 @@ async def _run_live_daemon(
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=require_price_above_ema5,
             require_price_above_ema10=require_price_above_ema10,
+            entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
             entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         )
@@ -1982,6 +2013,7 @@ async def _run_live_daemon(
                     entry_universe_snapshot_provider
                 ),
                 entry_policy_compare_only=entry_policy_compare_only,
+                entry_policy_enforce=entry_policy_enforce,
                 entry_order_type=entry_order_type,
                 entry_limit_ttl_seconds=entry_limit_ttl_seconds,
             ),
@@ -3133,6 +3165,7 @@ def _live_strategy_config_hash(
     entry_positive_gainer_top_count: int | None = _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT,
     require_price_above_ema5: bool = _LIVE_ENTRY_PRICE_ABOVE_EMA5,
     require_price_above_ema10: bool = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
+    entry_policy_enforce: bool = False,
     entry_order_type: EntryType = _LIVE_ENTRY_ORDER_TYPE,
     entry_limit_ttl_seconds: int = _LIVE_ENTRY_LIMIT_TTL_SECONDS,
 ) -> str:
@@ -3143,6 +3176,8 @@ def _live_strategy_config_hash(
         raise ValueError("entry_positive_gainer_top_count must be positive")
     if not isinstance(entry_order_type, EntryType):
         raise TypeError("entry_order_type must be an EntryType")
+    if not isinstance(entry_policy_enforce, bool):
+        raise TypeError("entry_policy_enforce must be a bool")
     if entry_limit_ttl_seconds < 601:
         raise ValueError("entry_limit_ttl_seconds must be at least 601")
     return deterministic_config_hash(
@@ -3155,6 +3190,7 @@ def _live_strategy_config_hash(
                 "entry_positive_gainer_top_count": entry_positive_gainer_top_count,
                 "require_price_above_ema5": require_price_above_ema5,
                 "require_price_above_ema10": require_price_above_ema10,
+                "entry_policy_enforce": entry_policy_enforce,
             },
             "entry_execution": {
                 "order_type": entry_order_type.value,
@@ -3178,6 +3214,7 @@ async def _prepare_live_risk_gates(
     entry_positive_gainer_top_count: int | None,
     require_price_above_ema5: bool,
     require_price_above_ema10: bool,
+    entry_policy_enforce: bool,
     entry_order_type: EntryType,
     entry_limit_ttl_seconds: int,
 ) -> dict[str, str]:
@@ -3222,6 +3259,7 @@ async def _prepare_live_risk_gates(
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=require_price_above_ema5,
             require_price_above_ema10=require_price_above_ema10,
+            entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
             entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         ),

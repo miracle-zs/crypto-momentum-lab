@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy.exc import OperationalError
 
 from crypto_momentum_lab.domain.execution import (
@@ -21,6 +22,7 @@ from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     StrategyCheckpoint,
     StrategyDecision,
+    universe_snapshot_for_symbols,
 )
 from crypto_momentum_lab.execution_account.orders.quantization import (
     SymbolTradingRules,
@@ -206,6 +208,119 @@ async def test_live_signal_record_can_compare_entry_policy_without_submitting_ch
         "policy_reasons": {},
         "mismatch_reasons": {},
     }
+
+
+async def test_live_policy_enforce_uses_policy_eligible_candidate_for_submission(
+) -> None:
+    recorder = RecordingSignalRecorder()
+    exchange = PlanAwareExchange()
+    daemon = _daemon(
+        exchange=exchange,
+        signal_recorder=recorder,
+        entry_policy_enforce=True,
+    )
+
+    result = await daemon.run(_states())
+
+    assert result.halt_reason is None
+    assert result.submitted_order_count == 1
+    assert exchange.calls == ["submit"]
+    assert recorder.decision_filter_context is not None
+    assert recorder.decision_filter_context["entry_policy_enforce"] is True
+    assert recorder.decision_filter_context["entry_policy_mode"] == "enforce"
+    assert recorder.decision_filter_context[
+        "entry_policy_comparison_summary"
+    ] == {
+        "candidates": 1,
+        "matched": 1,
+        "mismatched": 0,
+        "legacy_eligible": 1,
+        "policy_eligible": 1,
+        "reduce_only_skipped": 0,
+        "policy_reasons": {},
+        "mismatch_reasons": {},
+    }
+
+
+async def test_live_policy_enforce_blocks_policy_ineligible_candidate() -> None:
+    recorder = RecordingSignalRecorder()
+    exchange = PlanAwareExchange()
+
+    async def load_symbols(observed_at: datetime) -> frozenset[str]:
+        del observed_at
+        return frozenset({"BTCUSDT"})
+
+    def empty_universe(observed_at: datetime):
+        return universe_snapshot_for_symbols(
+            frozenset(),
+            observed_at=observed_at,
+        )
+
+    daemon = _daemon(
+        exchange=exchange,
+        signal_recorder=recorder,
+        entry_symbol_loader=load_symbols,
+        entry_universe_snapshot_provider=empty_universe,
+        entry_policy_enforce=True,
+    )
+
+    result = await daemon.run(_states())
+
+    assert result.halt_reason is None
+    assert result.submitted_order_count == 0
+    assert exchange.calls == []
+    assert recorder.decision_filter_context is not None
+    summary = recorder.decision_filter_context[
+        "entry_policy_comparison_summary"
+    ]
+    assert summary["candidates"] == 1
+    assert summary["legacy_eligible"] == 1
+    assert summary["policy_eligible"] == 0
+    assert summary["mismatched"] == 1
+    assert summary["mismatch_reasons"] == {"outside_entry_universe": 1}
+
+
+async def test_live_policy_enforce_fails_closed_on_universe_snapshot_error() -> None:
+    recorder = RecordingSignalRecorder()
+    exchange = PlanAwareExchange()
+
+    async def load_symbols(observed_at: datetime) -> frozenset[str]:
+        del observed_at
+        return frozenset({"BTCUSDT"})
+
+    def broken_universe(observed_at: datetime):
+        del observed_at
+        raise RuntimeError("universe unavailable")
+
+    daemon = _daemon(
+        exchange=exchange,
+        signal_recorder=recorder,
+        entry_symbol_loader=load_symbols,
+        entry_universe_snapshot_provider=broken_universe,
+        entry_policy_enforce=True,
+    )
+
+    result = await daemon.run(_states())
+
+    assert result.halt_reason is None
+    assert result.submitted_order_count == 0
+    assert exchange.calls == []
+    assert recorder.decision_filter_context is not None
+    assert recorder.decision_filter_context[
+        "entry_policy_universe_snapshot_error"
+    ] == "RuntimeError"
+    assert recorder.decision_filter_context[
+        "entry_policy_enforce_skip_reason"
+    ] == "universe_snapshot_error"
+
+
+def test_live_policy_modes_are_mutually_exclusive() -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        _daemon(
+            exchange=PlanAwareExchange(),
+            entry_policy_compare_only=True,
+            entry_policy_enforce=True,
+        )
 
 
 async def test_live_daemon_does_not_submit_expired_entry_candidate() -> None:
@@ -1556,7 +1671,9 @@ def _daemon(
     entry_symbol_loader=None,
     entry_filter_context_loader=None,
     entry_universe_context_provider=None,
+    entry_universe_snapshot_provider=None,
     entry_policy_compare_only: bool = False,
+    entry_policy_enforce: bool = False,
     signal_recorder=None,
     require_price_above_ema5: bool = False,
     require_price_above_ema10: bool = False,
@@ -1603,7 +1720,9 @@ def _daemon(
             require_price_above_ema10=require_price_above_ema10,
             entry_filter_context_loader=entry_filter_context_loader,
             entry_universe_context_provider=entry_universe_context_provider,
+            entry_universe_snapshot_provider=entry_universe_snapshot_provider,
             entry_policy_compare_only=entry_policy_compare_only,
+            entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
         ),
         exit_manager=exit_manager,
