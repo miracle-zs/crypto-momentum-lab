@@ -1,0 +1,555 @@
+name: crypto-momentum-lab
+
+# Optional overlay for the three additional live accounts.  The base
+# compose.server.yaml keeps primary unchanged; this file adds account-2/3/4
+# while all four strategies consume the same market-data hubs.
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-live-account-app: &live-account-app
+  image: crypto-momentum-lab-app:${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
+  environment: &live-account-environment
+    CML_DATABASE_URL: postgresql+asyncpg://cml:${CML_POSTGRES_PASSWORD:?set CML_POSTGRES_PASSWORD}@postgres:5432/cml
+    CML_EXECUTION_DATABASE_URL: ${CML_EXECUTION_DATABASE_URL:-}
+    CML_MARKET_DATABASE_URL: ${CML_MARKET_DATABASE_URL:-}
+    CML_OBSERVABILITY_DATABASE_URL: ${CML_OBSERVABILITY_DATABASE_URL:-}
+    CML_CODE_COMMIT: ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
+  restart: unless-stopped
+  stop_grace_period: 60s
+  logging: *default-logging
+
+x-live-account-depends: &live-account-depends
+  migrate:
+    condition: service_completed_successfully
+
+services:
+  execution-account-live-account-2:
+    <<: *live-account-app
+    profiles: ["live"]
+    environment:
+      <<: *live-account-environment
+      BINANCE_READ_API_KEY: ${BINANCE_READ_API_KEY_ACCOUNT_2:?set BINANCE_READ_API_KEY_ACCOUNT_2}
+      BINANCE_READ_API_SECRET: ${BINANCE_READ_API_SECRET_ACCOUNT_2:?set BINANCE_READ_API_SECRET_ACCOUNT_2}
+      CML_ACCOUNT_EVENT_HUB_HOST: 0.0.0.0
+      CML_ACCOUNT_EVENT_HUB_PORT: "8767"
+    entrypoint: ["cml-execution-account"]
+    command:
+      - sync
+      - --environment
+      - live
+      - --hedge-mode
+      - --interval-seconds
+      - "15"
+      - --fill-interval-seconds
+      - "300"
+      - --rest-reconciliation-interval-seconds
+      - "300"
+      - --snapshot-retention-days
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
+      - --equity-retention-days
+      - ${CML_ACCOUNT_EQUITY_RETENTION_DAYS:-370}
+      - --snapshot-retention-interval-seconds
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_INTERVAL_SECONDS:-3600}
+      - --snapshot-retention-batch-size
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_BATCH_SIZE:-250}
+      - --snapshot-retention-max-rows-per-table
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_ROWS_PER_TABLE:-5000}
+      - --snapshot-retention-max-runtime-seconds
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_RUNTIME_SECONDS:-45}
+      - --account-event-hub-host
+      - 0.0.0.0
+      - --account-event-hub-port
+      - "8767"
+      - --account-label
+      - account-2
+    depends_on: *live-account-depends
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - crypto_momentum_lab.apps.healthcheck_fast
+        - --service
+        - execution-account
+        - --ignore-age
+        - --account-label
+        - account-2
+      interval: 30s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    mem_limit: 160m
+    memswap_limit: 320m
+
+  execution-account-live-account-3:
+    <<: *live-account-app
+    profiles: ["live"]
+    environment:
+      <<: *live-account-environment
+      BINANCE_READ_API_KEY: ${BINANCE_READ_API_KEY_ACCOUNT_3:?set BINANCE_READ_API_KEY_ACCOUNT_3}
+      BINANCE_READ_API_SECRET: ${BINANCE_READ_API_SECRET_ACCOUNT_3:?set BINANCE_READ_API_SECRET_ACCOUNT_3}
+      CML_ACCOUNT_EVENT_HUB_HOST: 0.0.0.0
+      CML_ACCOUNT_EVENT_HUB_PORT: "8767"
+    entrypoint: ["cml-execution-account"]
+    command:
+      - sync
+      - --environment
+      - live
+      - --hedge-mode
+      - --interval-seconds
+      - "15"
+      - --fill-interval-seconds
+      - "300"
+      - --rest-reconciliation-interval-seconds
+      - "300"
+      - --snapshot-retention-days
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
+      - --equity-retention-days
+      - ${CML_ACCOUNT_EQUITY_RETENTION_DAYS:-370}
+      - --snapshot-retention-interval-seconds
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_INTERVAL_SECONDS:-3600}
+      - --snapshot-retention-batch-size
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_BATCH_SIZE:-250}
+      - --snapshot-retention-max-rows-per-table
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_ROWS_PER_TABLE:-5000}
+      - --snapshot-retention-max-runtime-seconds
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_RUNTIME_SECONDS:-45}
+      - --account-event-hub-host
+      - 0.0.0.0
+      - --account-event-hub-port
+      - "8767"
+      - --account-label
+      - account-3
+    depends_on: *live-account-depends
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - crypto_momentum_lab.apps.healthcheck_fast
+        - --service
+        - execution-account
+        - --ignore-age
+        - --account-label
+        - account-3
+      interval: 30s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    mem_limit: 160m
+    memswap_limit: 320m
+
+  execution-account-live-account-4:
+    <<: *live-account-app
+    profiles: ["live"]
+    environment:
+      <<: *live-account-environment
+      BINANCE_READ_API_KEY: ${BINANCE_READ_API_KEY_ACCOUNT_4:?set BINANCE_READ_API_KEY_ACCOUNT_4}
+      BINANCE_READ_API_SECRET: ${BINANCE_READ_API_SECRET_ACCOUNT_4:?set BINANCE_READ_API_SECRET_ACCOUNT_4}
+      CML_ACCOUNT_EVENT_HUB_HOST: 0.0.0.0
+      CML_ACCOUNT_EVENT_HUB_PORT: "8767"
+    entrypoint: ["cml-execution-account"]
+    command:
+      - sync
+      - --environment
+      - live
+      - --hedge-mode
+      - --interval-seconds
+      - "15"
+      - --fill-interval-seconds
+      - "300"
+      - --rest-reconciliation-interval-seconds
+      - "300"
+      - --snapshot-retention-days
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
+      - --equity-retention-days
+      - ${CML_ACCOUNT_EQUITY_RETENTION_DAYS:-370}
+      - --snapshot-retention-interval-seconds
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_INTERVAL_SECONDS:-3600}
+      - --snapshot-retention-batch-size
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_BATCH_SIZE:-250}
+      - --snapshot-retention-max-rows-per-table
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_ROWS_PER_TABLE:-5000}
+      - --snapshot-retention-max-runtime-seconds
+      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_RUNTIME_SECONDS:-45}
+      - --account-event-hub-host
+      - 0.0.0.0
+      - --account-event-hub-port
+      - "8767"
+      - --account-label
+      - account-4
+    depends_on: *live-account-depends
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - crypto_momentum_lab.apps.healthcheck_fast
+        - --service
+        - execution-account
+        - --ignore-age
+        - --account-label
+        - account-4
+      interval: 30s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    mem_limit: 160m
+    memswap_limit: 320m
+
+  live-strategy-account-2:
+    <<: *live-account-app
+    profiles: ["live"]
+    environment:
+      <<: *live-account-environment
+      BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY_ACCOUNT_2:?set BINANCE_TRADE_API_KEY_ACCOUNT_2}
+      BINANCE_TRADE_API_SECRET: ${BINANCE_TRADE_API_SECRET_ACCOUNT_2:?set BINANCE_TRADE_API_SECRET_ACCOUNT_2}
+      CML_HEALTHCHECK_RUN_ID: ${CML_LIVE_SESSION_ID_ACCOUNT_2:-live-account-2-v1}
+      CML_LIVE_STRATEGY_CONFIG_HASH: ${CML_LIVE_STRATEGY_CONFIG_HASH_ACCOUNT_2:-unset}
+      CML_LIVE_ENTRY_POLICY_MODE: ${CML_LIVE_ENTRY_POLICY_MODE_ACCOUNT_2:-enforce}
+      CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT: ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_2:-10}
+      CML_LIVE_IMPULSE_WINDOW_BUCKETS: ${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_2:-4}
+      CML_LIVE_CONFIRMATION_BUCKETS: ${CML_LIVE_CONFIRMATION_BUCKETS_ACCOUNT_2:-1}
+      CML_LIVE_MIN_RETURN_PCT: ${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_2:-0.01}
+      CML_LIVE_MIN_IMBALANCE: ${CML_LIVE_MIN_IMBALANCE_ACCOUNT_2:-0.40}
+      CML_LIVE_MIN_INTENSITY: ${CML_LIVE_MIN_INTENSITY_ACCOUNT_2:-2}
+      CML_LIVE_COOLDOWN_BUCKETS: ${CML_LIVE_COOLDOWN_BUCKETS_ACCOUNT_2:-0}
+      CML_MARKET_STATE_HUB_URL: ws://market-data:8766
+      CML_MARKET_QUOTE_HUB_URL: ws://market-data:8768
+      CML_ACCOUNT_EVENT_HUB_URL: ws://execution-account-live-account-2:8767
+    entrypoint: ["cml-live-rollout"]
+    command:
+      - run
+      - --account-label
+      - account-2
+      - --strategy
+      - ${CML_LIVE_STRATEGY_ACCOUNT_2:-orderflow_impulse}
+      - --market-environment
+      - research
+      - --market-state-source
+      - hub
+      - --market-state-hub-url
+      - ws://market-data:8766
+      - --market-quote-hub-url
+      - ws://market-data:8768
+      - --account-event-hub-url
+      - ws://execution-account-live-account-2:8767
+      - --session-id
+      - ${CML_LIVE_SESSION_ID_ACCOUNT_2:-live-account-2-v1}
+      - --operator
+      - ${CML_LIVE_OPERATOR_ACCOUNT_2:-operator}
+      - --lease-owner
+      - ${CML_LIVE_LEASE_OWNER_ACCOUNT_2:-live-worker-account-2}
+      - --strategy-config-hash
+      - ${CML_LIVE_STRATEGY_CONFIG_HASH_ACCOUNT_2:-unset}
+      - --git-commit-hash
+      - ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
+      - --migration-revision
+      - ${CML_LIVE_MIGRATION_REVISION_ACCOUNT_2:-20260831_0029}
+      - --max-runtime-seconds
+      - "31536000"
+      - --poll-interval-seconds
+      - "0.25"
+      - --checkpoint-every-states
+      - "100"
+      - --hedge-mode
+      - --entry-long-only
+      - --entry-positive-gainer-top-count
+      - ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_2:-10}
+      - --no-entry-price-above-ema5
+      - --no-entry-price-above-ema10
+      - --impulse-window-buckets
+      - ${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_2:-4}
+      - --confirmation-buckets
+      - ${CML_LIVE_CONFIRMATION_BUCKETS_ACCOUNT_2:-1}
+      - --min-return-pct
+      - ${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_2:-0.01}
+      - --min-imbalance
+      - ${CML_LIVE_MIN_IMBALANCE_ACCOUNT_2:-0.40}
+      - --min-intensity
+      - ${CML_LIVE_MIN_INTENSITY_ACCOUNT_2:-2}
+      - --cooldown-buckets
+      - ${CML_LIVE_COOLDOWN_BUCKETS_ACCOUNT_2:-0}
+      - --entry-policy-enforce
+      - --acknowledge-missing-shadow-preflight
+      - --entry-leverage
+      - ${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_2:-5}
+      - --persist-exchange-operations
+      - ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS_ACCOUNT_2:-submit,cancel}
+      - --exit-mode
+      - ${CML_LIVE_EXIT_MODE_ACCOUNT_2:-candle_15m}
+      - --take-profit-pct
+      - ${CML_LIVE_TAKE_PROFIT_PCT_ACCOUNT_2:-0.02}
+      - --stop-loss-pct
+      - ${CML_LIVE_STOP_LOSS_PCT_ACCOUNT_2:-0.01}
+      - --candle-grace-bars
+      - ${CML_LIVE_CANDLE_GRACE_BARS_ACCOUNT_2:-8}
+      - --candle-grace-decision-profit-pct
+      - ${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT_ACCOUNT_2:-0.001}
+      - --candle-grace-profit-pct
+      - ${CML_LIVE_CANDLE_GRACE_PROFIT_PCT_ACCOUNT_2:-0.0088}
+      - --i-understand-this-places-real-orders
+    depends_on:
+      market-data:
+        condition: service_started
+      execution-account-live-account-2:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - crypto_momentum_lab.apps.healthcheck_fast
+        - --service
+        - live
+        - --account-label
+        - account-2
+        - --session-id
+        - ${CML_LIVE_SESSION_ID_ACCOUNT_2:-live-account-2-v1}
+        - --lease-owner
+        - ${CML_LIVE_LEASE_OWNER_ACCOUNT_2:-live-worker-account-2}
+      interval: 30s
+      timeout: 10s
+      retries: 6
+      start_period: 2m
+    mem_limit: 512m
+    memswap_limit: 768m
+
+  live-strategy-account-3:
+    <<: *live-account-app
+    profiles: ["live"]
+    environment:
+      <<: *live-account-environment
+      BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY_ACCOUNT_3:?set BINANCE_TRADE_API_KEY_ACCOUNT_3}
+      BINANCE_TRADE_API_SECRET: ${BINANCE_TRADE_API_SECRET_ACCOUNT_3:?set BINANCE_TRADE_API_SECRET_ACCOUNT_3}
+      CML_HEALTHCHECK_RUN_ID: ${CML_LIVE_SESSION_ID_ACCOUNT_3:-live-account-3-v1}
+      CML_LIVE_STRATEGY_CONFIG_HASH: ${CML_LIVE_STRATEGY_CONFIG_HASH_ACCOUNT_3:-unset}
+      CML_LIVE_ENTRY_POLICY_MODE: ${CML_LIVE_ENTRY_POLICY_MODE_ACCOUNT_3:-enforce}
+      CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT: ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_3:-10}
+      CML_LIVE_IMPULSE_WINDOW_BUCKETS: ${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_3:-2}
+      CML_LIVE_CONFIRMATION_BUCKETS: ${CML_LIVE_CONFIRMATION_BUCKETS_ACCOUNT_3:-1}
+      CML_LIVE_MIN_RETURN_PCT: ${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_3:-0.005}
+      CML_LIVE_MIN_IMBALANCE: ${CML_LIVE_MIN_IMBALANCE_ACCOUNT_3:-0.50}
+      CML_LIVE_MIN_INTENSITY: ${CML_LIVE_MIN_INTENSITY_ACCOUNT_3:-2}
+      CML_LIVE_COOLDOWN_BUCKETS: ${CML_LIVE_COOLDOWN_BUCKETS_ACCOUNT_3:-0}
+      CML_MARKET_STATE_HUB_URL: ws://market-data:8766
+      CML_MARKET_QUOTE_HUB_URL: ws://market-data:8768
+      CML_ACCOUNT_EVENT_HUB_URL: ws://execution-account-live-account-3:8767
+    entrypoint: ["cml-live-rollout"]
+    command:
+      - run
+      - --account-label
+      - account-3
+      - --strategy
+      - ${CML_LIVE_STRATEGY_ACCOUNT_3:-orderflow_impulse}
+      - --market-environment
+      - research
+      - --market-state-source
+      - hub
+      - --market-state-hub-url
+      - ws://market-data:8766
+      - --market-quote-hub-url
+      - ws://market-data:8768
+      - --account-event-hub-url
+      - ws://execution-account-live-account-3:8767
+      - --session-id
+      - ${CML_LIVE_SESSION_ID_ACCOUNT_3:-live-account-3-v1}
+      - --operator
+      - ${CML_LIVE_OPERATOR_ACCOUNT_3:-operator}
+      - --lease-owner
+      - ${CML_LIVE_LEASE_OWNER_ACCOUNT_3:-live-worker-account-3}
+      - --strategy-config-hash
+      - ${CML_LIVE_STRATEGY_CONFIG_HASH_ACCOUNT_3:-unset}
+      - --git-commit-hash
+      - ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
+      - --migration-revision
+      - ${CML_LIVE_MIGRATION_REVISION_ACCOUNT_3:-20260831_0029}
+      - --max-runtime-seconds
+      - "31536000"
+      - --poll-interval-seconds
+      - "0.25"
+      - --checkpoint-every-states
+      - "100"
+      - --hedge-mode
+      - --entry-long-only
+      - --entry-positive-gainer-top-count
+      - ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_3:-10}
+      - --no-entry-price-above-ema5
+      - --no-entry-price-above-ema10
+      - --impulse-window-buckets
+      - ${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_3:-2}
+      - --confirmation-buckets
+      - ${CML_LIVE_CONFIRMATION_BUCKETS_ACCOUNT_3:-1}
+      - --min-return-pct
+      - ${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_3:-0.005}
+      - --min-imbalance
+      - ${CML_LIVE_MIN_IMBALANCE_ACCOUNT_3:-0.50}
+      - --min-intensity
+      - ${CML_LIVE_MIN_INTENSITY_ACCOUNT_3:-2}
+      - --cooldown-buckets
+      - ${CML_LIVE_COOLDOWN_BUCKETS_ACCOUNT_3:-0}
+      - --entry-policy-enforce
+      - --acknowledge-missing-shadow-preflight
+      - --entry-leverage
+      - ${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_3:-5}
+      - --persist-exchange-operations
+      - ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS_ACCOUNT_3:-submit,cancel}
+      - --exit-mode
+      - ${CML_LIVE_EXIT_MODE_ACCOUNT_3:-candle_15m}
+      - --take-profit-pct
+      - ${CML_LIVE_TAKE_PROFIT_PCT_ACCOUNT_3:-0.02}
+      - --stop-loss-pct
+      - ${CML_LIVE_STOP_LOSS_PCT_ACCOUNT_3:-0.01}
+      - --candle-grace-bars
+      - ${CML_LIVE_CANDLE_GRACE_BARS_ACCOUNT_3:-8}
+      - --candle-grace-decision-profit-pct
+      - ${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT_ACCOUNT_3:-0.001}
+      - --candle-grace-profit-pct
+      - ${CML_LIVE_CANDLE_GRACE_PROFIT_PCT_ACCOUNT_3:-0.0088}
+      - --i-understand-this-places-real-orders
+    depends_on:
+      market-data:
+        condition: service_started
+      execution-account-live-account-3:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - crypto_momentum_lab.apps.healthcheck_fast
+        - --service
+        - live
+        - --account-label
+        - account-3
+        - --session-id
+        - ${CML_LIVE_SESSION_ID_ACCOUNT_3:-live-account-3-v1}
+        - --lease-owner
+        - ${CML_LIVE_LEASE_OWNER_ACCOUNT_3:-live-worker-account-3}
+      interval: 30s
+      timeout: 10s
+      retries: 6
+      start_period: 2m
+    mem_limit: 512m
+    memswap_limit: 768m
+
+  live-strategy-account-4:
+    <<: *live-account-app
+    profiles: ["live"]
+    environment:
+      <<: *live-account-environment
+      BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY_ACCOUNT_4:?set BINANCE_TRADE_API_KEY_ACCOUNT_4}
+      BINANCE_TRADE_API_SECRET: ${BINANCE_TRADE_API_SECRET_ACCOUNT_4:?set BINANCE_TRADE_API_SECRET_ACCOUNT_4}
+      CML_HEALTHCHECK_RUN_ID: ${CML_LIVE_SESSION_ID_ACCOUNT_4:-live-account-4-v1}
+      CML_LIVE_STRATEGY_CONFIG_HASH: ${CML_LIVE_STRATEGY_CONFIG_HASH_ACCOUNT_4:-unset}
+      CML_LIVE_ENTRY_POLICY_MODE: ${CML_LIVE_ENTRY_POLICY_MODE_ACCOUNT_4:-enforce}
+      CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT: ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_4:-10}
+      CML_LIVE_IMPULSE_WINDOW_BUCKETS: ${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_4:-2}
+      CML_LIVE_CONFIRMATION_BUCKETS: ${CML_LIVE_CONFIRMATION_BUCKETS_ACCOUNT_4:-1}
+      CML_LIVE_MIN_RETURN_PCT: ${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_4:-0.005}
+      CML_LIVE_MIN_IMBALANCE: ${CML_LIVE_MIN_IMBALANCE_ACCOUNT_4:-0.50}
+      CML_LIVE_MIN_INTENSITY: ${CML_LIVE_MIN_INTENSITY_ACCOUNT_4:-2}
+      CML_LIVE_COOLDOWN_BUCKETS: ${CML_LIVE_COOLDOWN_BUCKETS_ACCOUNT_4:-0}
+      CML_MARKET_STATE_HUB_URL: ws://market-data:8766
+      CML_MARKET_QUOTE_HUB_URL: ws://market-data:8768
+      CML_ACCOUNT_EVENT_HUB_URL: ws://execution-account-live-account-4:8767
+    entrypoint: ["cml-live-rollout"]
+    command:
+      - run
+      - --account-label
+      - account-4
+      - --strategy
+      - ${CML_LIVE_STRATEGY_ACCOUNT_4:-orderflow_impulse}
+      - --market-environment
+      - research
+      - --market-state-source
+      - hub
+      - --market-state-hub-url
+      - ws://market-data:8766
+      - --market-quote-hub-url
+      - ws://market-data:8768
+      - --account-event-hub-url
+      - ws://execution-account-live-account-4:8767
+      - --session-id
+      - ${CML_LIVE_SESSION_ID_ACCOUNT_4:-live-account-4-v1}
+      - --operator
+      - ${CML_LIVE_OPERATOR_ACCOUNT_4:-operator}
+      - --lease-owner
+      - ${CML_LIVE_LEASE_OWNER_ACCOUNT_4:-live-worker-account-4}
+      - --strategy-config-hash
+      - ${CML_LIVE_STRATEGY_CONFIG_HASH_ACCOUNT_4:-unset}
+      - --git-commit-hash
+      - ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
+      - --migration-revision
+      - ${CML_LIVE_MIGRATION_REVISION_ACCOUNT_4:-20260831_0029}
+      - --max-runtime-seconds
+      - "31536000"
+      - --poll-interval-seconds
+      - "0.25"
+      - --checkpoint-every-states
+      - "100"
+      - --hedge-mode
+      - --entry-long-only
+      - --entry-positive-gainer-top-count
+      - ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_4:-10}
+      - --no-entry-price-above-ema5
+      - --no-entry-price-above-ema10
+      - --impulse-window-buckets
+      - ${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_4:-2}
+      - --confirmation-buckets
+      - ${CML_LIVE_CONFIRMATION_BUCKETS_ACCOUNT_4:-1}
+      - --min-return-pct
+      - ${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_4:-0.005}
+      - --min-imbalance
+      - ${CML_LIVE_MIN_IMBALANCE_ACCOUNT_4:-0.50}
+      - --min-intensity
+      - ${CML_LIVE_MIN_INTENSITY_ACCOUNT_4:-2}
+      - --cooldown-buckets
+      - ${CML_LIVE_COOLDOWN_BUCKETS_ACCOUNT_4:-0}
+      - --entry-policy-enforce
+      - --acknowledge-missing-shadow-preflight
+      - --entry-leverage
+      - ${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_4:-5}
+      - --persist-exchange-operations
+      - ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS_ACCOUNT_4:-submit,cancel}
+      - --exit-mode
+      - ${CML_LIVE_EXIT_MODE_ACCOUNT_4:-candle_15m}
+      - --take-profit-pct
+      - ${CML_LIVE_TAKE_PROFIT_PCT_ACCOUNT_4:-0.02}
+      - --stop-loss-pct
+      - ${CML_LIVE_STOP_LOSS_PCT_ACCOUNT_4:-0.01}
+      - --candle-grace-bars
+      - ${CML_LIVE_CANDLE_GRACE_BARS_ACCOUNT_4:-8}
+      - --candle-grace-decision-profit-pct
+      - ${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT_ACCOUNT_4:-0.001}
+      - --candle-grace-profit-pct
+      - ${CML_LIVE_CANDLE_GRACE_PROFIT_PCT_ACCOUNT_4:-0.0088}
+      - --i-understand-this-places-real-orders
+    depends_on:
+      market-data:
+        condition: service_started
+      execution-account-live-account-4:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - crypto_momentum_lab.apps.healthcheck_fast
+        - --service
+        - live
+        - --account-label
+        - account-4
+        - --session-id
+        - ${CML_LIVE_SESSION_ID_ACCOUNT_4:-live-account-4-v1}
+        - --lease-owner
+        - ${CML_LIVE_LEASE_OWNER_ACCOUNT_4:-live-worker-account-4}
+      interval: 30s
+      timeout: 10s
+      retries: 6
+      start_period: 2m
+    mem_limit: 512m
+    memswap_limit: 768m

@@ -122,6 +122,7 @@ from crypto_momentum_lab.live_rollout.postgres_runtime import (
     live_limits_from_approval,
     poll_live_market_states,
 )
+from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
 from crypto_momentum_lab.live_rollout.session import (
     LiveRolloutSession,
     LiveSessionConfig,
@@ -220,7 +221,7 @@ _LIVE_ENTRY_PRICE_ABOVE_EMA5 = False
 _LIVE_ENTRY_PRICE_ABOVE_EMA10 = False
 _LIVE_ENTRY_ORDER_TYPE = EntryType.LIMIT
 _LIVE_ENTRY_LIMIT_TTL_SECONDS = 900
-_LIVE_ORDERFLOW_MIN_AGGRESSIVE_IMBALANCE = Decimal("0.40")
+_LIVE_ORDERFLOW_PROFILE = LiveOrderFlowImpulseProfile()
 _LIVE_MARKET_WEBSOCKET_URL = "wss://fstream.binance.com/market/ws"
 
 
@@ -228,6 +229,7 @@ _LIVE_MARKET_WEBSOCKET_URL = "wss://fstream.binance.com/market/ws"
 class _PreflightRuntimeStrategyConfig:
     """Runtime strategy inputs used by the preflight hash diagnostic."""
 
+    profile: LiveOrderFlowImpulseProfile
     entry_positive_gainer_top_count: int
     require_price_above_ema5: bool
     require_price_above_ema10: bool
@@ -293,6 +295,30 @@ def live_rollout_app() -> None:
 @app.command("strategy-config-hash")
 def strategy_config_hash_command(
     strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    impulse_window_buckets: Annotated[
+        int | None,
+        typer.Option("--impulse-window-buckets", min=2),
+    ] = None,
+    confirmation_buckets: Annotated[
+        int | None,
+        typer.Option("--confirmation-buckets", min=1),
+    ] = None,
+    min_return_pct: Annotated[
+        str | None,
+        typer.Option("--min-return-pct"),
+    ] = None,
+    min_imbalance: Annotated[
+        str | None,
+        typer.Option("--min-imbalance"),
+    ] = None,
+    min_intensity: Annotated[
+        str | None,
+        typer.Option("--min-intensity"),
+    ] = None,
+    cooldown_buckets: Annotated[
+        int | None,
+        typer.Option("--cooldown-buckets", min=0),
+    ] = None,
     entry_positive_gainer_top_count: Annotated[
         int,
         typer.Option("--entry-positive-gainer-top-count", min=1),
@@ -321,9 +347,18 @@ def strategy_config_hash_command(
         typer.Option("--entry-limit-ttl-seconds", min=601),
     ] = _LIVE_ENTRY_LIMIT_TTL_SECONDS,
 ) -> None:
+    profile = _resolve_live_profile_options(
+        impulse_window_buckets=impulse_window_buckets,
+        confirmation_buckets=confirmation_buckets,
+        min_return_pct=min_return_pct,
+        min_imbalance=min_imbalance,
+        min_intensity=min_intensity,
+        cooldown_buckets=cooldown_buckets,
+    )
     typer.echo(
         _live_strategy_config_hash(
             strategy,
+            profile=profile,
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=entry_price_above_ema5,
             require_price_above_ema10=entry_price_above_ema10,
@@ -339,6 +374,30 @@ def prepare_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
     strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    impulse_window_buckets: Annotated[
+        int | None,
+        typer.Option("--impulse-window-buckets", min=2),
+    ] = None,
+    confirmation_buckets: Annotated[
+        int | None,
+        typer.Option("--confirmation-buckets", min=1),
+    ] = None,
+    min_return_pct: Annotated[
+        str | None,
+        typer.Option("--min-return-pct"),
+    ] = None,
+    min_imbalance: Annotated[
+        str | None,
+        typer.Option("--min-imbalance"),
+    ] = None,
+    min_intensity: Annotated[
+        str | None,
+        typer.Option("--min-intensity"),
+    ] = None,
+    cooldown_buckets: Annotated[
+        int | None,
+        typer.Option("--cooldown-buckets", min=0),
+    ] = None,
     lease_owner: Annotated[str, typer.Option("--lease-owner")] = "live-worker",
     lease_ttl_seconds: Annotated[
         int,
@@ -391,6 +450,14 @@ def prepare_command(
 ) -> None:
     if confirmation != _PREPARE_CONFIRMATION:
         raise typer.BadParameter(f"--confirmation must equal '{_PREPARE_CONFIRMATION}'")
+    profile = _resolve_live_profile_options(
+        impulse_window_buckets=impulse_window_buckets,
+        confirmation_buckets=confirmation_buckets,
+        min_return_pct=min_return_pct,
+        min_imbalance=min_imbalance,
+        min_intensity=min_intensity,
+        cooldown_buckets=cooldown_buckets,
+    )
     payload = asyncio.run(
         _prepare_live_risk_gates(
             database_url=_database_url(database_url),
@@ -414,6 +481,7 @@ def prepare_command(
                 max_open_positions,
                 "--max-open-positions",
             ),
+            profile=profile,
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=entry_price_above_ema5,
             require_price_above_ema10=entry_price_above_ema10,
@@ -596,6 +664,30 @@ def run_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
     strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    impulse_window_buckets: Annotated[
+        int | None,
+        typer.Option("--impulse-window-buckets", min=2),
+    ] = None,
+    confirmation_buckets: Annotated[
+        int | None,
+        typer.Option("--confirmation-buckets", min=1),
+    ] = None,
+    min_return_pct: Annotated[
+        str | None,
+        typer.Option("--min-return-pct"),
+    ] = None,
+    min_imbalance: Annotated[
+        str | None,
+        typer.Option("--min-imbalance"),
+    ] = None,
+    min_intensity: Annotated[
+        str | None,
+        typer.Option("--min-intensity"),
+    ] = None,
+    cooldown_buckets: Annotated[
+        int | None,
+        typer.Option("--cooldown-buckets", min=0),
+    ] = None,
     market_environment: Annotated[
         str,
         typer.Option("--market-environment"),
@@ -768,6 +860,14 @@ def run_command(
         )
     if not confirmation:
         raise typer.BadParameter("--i-understand-this-places-real-orders is required")
+    profile = _resolve_live_profile_options(
+        impulse_window_buckets=impulse_window_buckets,
+        confirmation_buckets=confirmation_buckets,
+        min_return_pct=min_return_pct,
+        min_imbalance=min_imbalance,
+        min_intensity=min_intensity,
+        cooldown_buckets=cooldown_buckets,
+    )
     credentials = _resolve_live_cli_credentials(
         api_key_env=api_key_env,
         api_secret_env=api_secret_env,
@@ -793,6 +893,7 @@ def run_command(
             strategy_config_hash=strategy_config_hash,
             git_commit_hash=git_commit_hash,
             migration_revision=migration_revision,
+            profile=profile,
             max_runtime_seconds=max_runtime_seconds,
             poll_interval_seconds=poll_interval_seconds,
             checkpoint_every_states=checkpoint_every_states,
@@ -1357,6 +1458,7 @@ async def _run_live_daemon(
     strategy_config_hash: str,
     git_commit_hash: str,
     migration_revision: str,
+    profile: LiveOrderFlowImpulseProfile,
     max_runtime_seconds: int,
     poll_interval_seconds: float,
     checkpoint_every_states: int,
@@ -1602,9 +1704,10 @@ async def _run_live_daemon(
         if active_lease is None:
             raise RuntimeError("live lease is required")
 
-        strategy_config = _live_strategy_config()
+        strategy_config = _live_strategy_config(profile)
         computed_hash = _live_strategy_config_hash(
             strategy_name,
+            profile=profile,
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=require_price_above_ema5,
             require_price_above_ema10=require_price_above_ema10,
@@ -3181,21 +3284,34 @@ def _load_plan(path: Path) -> OrderExecutionPlan:
     return plan
 
 
-def _live_strategy_config() -> dict[str, object]:
+def _live_strategy_config(
+    profile: LiveOrderFlowImpulseProfile | None = None,
+) -> dict[str, object]:
+    resolved_profile = profile or _LIVE_ORDERFLOW_PROFILE
     return {
         "candidate_notional": Decimal("100"),
         "candidate_ttl_buckets": 4,
-        "order_flow_impulse_min_aggressive_imbalance": (
-            _LIVE_ORDERFLOW_MIN_AGGRESSIVE_IMBALANCE
+        "order_flow_impulse_impulse_window_buckets": (
+            resolved_profile.impulse_window_buckets
         ),
-        # B1 must not suppress a same-symbol signal for two 15-second buckets.
-        "cooldown_buckets": 0,
+        "order_flow_impulse_confirmation_buckets": (
+            resolved_profile.confirmation_buckets
+        ),
+        "order_flow_impulse_min_return_pct": resolved_profile.min_return_pct,
+        "order_flow_impulse_min_aggressive_imbalance": (
+            resolved_profile.min_aggressive_imbalance
+        ),
+        "order_flow_impulse_min_notional_intensity": (
+            resolved_profile.min_notional_intensity
+        ),
+        "cooldown_buckets": resolved_profile.cooldown_buckets,
     }
 
 
 def _live_strategy_config_hash(
     strategy_name: str,
     *,
+    profile: LiveOrderFlowImpulseProfile | None = None,
     entry_positive_gainer_top_count: int | None = _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT,
     require_price_above_ema5: bool = _LIVE_ENTRY_PRICE_ABOVE_EMA5,
     require_price_above_ema10: bool = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
@@ -3218,7 +3334,7 @@ def _live_strategy_config_hash(
         {
             "strategy": build_runtime_config(
                 strategy_name,
-                config=_live_strategy_config(),
+                config=_live_strategy_config(profile),
             ),
             "entry_filter": {
                 "entry_positive_gainer_top_count": entry_positive_gainer_top_count,
@@ -3245,6 +3361,7 @@ async def _prepare_live_risk_gates(
     max_gross_notional: Decimal | None,
     max_daily_loss: Decimal | None,
     max_open_positions: int | None,
+    profile: LiveOrderFlowImpulseProfile,
     entry_positive_gainer_top_count: int | None,
     require_price_above_ema5: bool,
     require_price_above_ema10: bool,
@@ -3290,6 +3407,7 @@ async def _prepare_live_risk_gates(
         "risk_config_hash": risk_config.config_hash,
         "strategy_config_hash": _live_strategy_config_hash(
             strategy_name,
+            profile=profile,
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=require_price_above_ema5,
             require_price_above_ema10=require_price_above_ema10,
@@ -3315,6 +3433,57 @@ async def _save_approval(
 
 
 _UNLIMITED_VALUES = frozenset({"none", "unlimited"})
+
+
+def _resolve_live_profile_options(
+    *,
+    impulse_window_buckets: int | None,
+    confirmation_buckets: int | None,
+    min_return_pct: str | None,
+    min_imbalance: str | None,
+    min_intensity: str | None,
+    cooldown_buckets: int | None,
+) -> LiveOrderFlowImpulseProfile:
+    """Build one account profile from all CLI values or the service env.
+
+    Partial overrides are rejected so a profile cannot accidentally combine
+    one account's values with another account's defaults.
+    """
+
+    values = (
+        impulse_window_buckets,
+        confirmation_buckets,
+        min_return_pct,
+        min_imbalance,
+        min_intensity,
+        cooldown_buckets,
+    )
+    if not any(value is not None for value in values):
+        try:
+            return LiveOrderFlowImpulseProfile.from_environment()
+        except ValueError as error:
+            raise typer.BadParameter(str(error)) from error
+    if not all(value is not None for value in values):
+        raise typer.BadParameter(
+            "all six order-flow profile options must be provided together"
+        )
+    assert impulse_window_buckets is not None
+    assert confirmation_buckets is not None
+    assert min_return_pct is not None
+    assert min_imbalance is not None
+    assert min_intensity is not None
+    assert cooldown_buckets is not None
+    try:
+        return LiveOrderFlowImpulseProfile(
+            impulse_window_buckets=impulse_window_buckets,
+            confirmation_buckets=confirmation_buckets,
+            min_return_pct=Decimal(min_return_pct),
+            min_aggressive_imbalance=Decimal(min_imbalance),
+            min_notional_intensity=Decimal(min_intensity),
+            cooldown_buckets=cooldown_buckets,
+        )
+    except (InvalidOperation, ValueError) as error:
+        raise typer.BadParameter(f"invalid live order-flow profile: {error}") from error
 
 
 def _parse_exchange_operations(
@@ -3413,6 +3582,7 @@ async def _preflight_summary(
         runtime_config = _preflight_runtime_strategy_config()
         runtime_strategy_config_hash = _live_strategy_config_hash(
             strategy_name,
+            profile=runtime_config.profile,
             entry_positive_gainer_top_count=(
                 runtime_config.entry_positive_gainer_top_count
             ),
@@ -3451,6 +3621,7 @@ async def _preflight_summary(
                 else runtime_strategy_config_hash == approved_strategy_config_hash
             ),
             "runtime_strategy_config_inputs": {
+                **runtime_config.profile.as_dict(),
                 "entry_positive_gainer_top_count": (
                     runtime_config.entry_positive_gainer_top_count
                 ),
@@ -3468,11 +3639,10 @@ async def _preflight_summary(
 def _preflight_runtime_strategy_config() -> _PreflightRuntimeStrategyConfig:
     """Resolve the Live hash inputs exposed to one-off preflight containers.
 
-    Compose passes the top-N and policy-mode values into the long-running Live
-    service environment.  The remaining values are the explicit production
-    defaults used by the service command.  Keeping this resolver beside the
-    diagnostic makes the reported hash explainable instead of silently using
-    the library defaults (which may describe a different lane).
+    Compose passes the account-scoped profile, top-N, and policy-mode values
+    into the long-running Live service environment. Keeping this resolver
+    beside the diagnostic makes the reported hash explainable instead of
+    silently using the library defaults (which may describe a different lane).
     """
 
     raw_top_count = os.environ.get(
@@ -3497,7 +3667,12 @@ def _preflight_runtime_strategy_config() -> _PreflightRuntimeStrategyConfig:
             "CML_LIVE_ENTRY_POLICY_MODE must be one of: "
             + ", ".join(sorted(_LIVE_ENTRY_POLICY_MODES))
         )
+    try:
+        profile = LiveOrderFlowImpulseProfile.from_environment()
+    except ValueError as error:
+        raise ValueError(str(error)) from error
     return _PreflightRuntimeStrategyConfig(
+        profile=profile,
         entry_positive_gainer_top_count=top_count,
         require_price_above_ema5=_LIVE_ENTRY_PRICE_ABOVE_EMA5,
         require_price_above_ema10=_LIVE_ENTRY_PRICE_ABOVE_EMA10,

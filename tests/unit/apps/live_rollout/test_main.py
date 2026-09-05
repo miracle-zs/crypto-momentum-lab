@@ -175,6 +175,59 @@ def test_live_run_passes_entry_policy_enforce_to_daemon(monkeypatch) -> None:
     assert captured["entry_policy_enforce"] is True
 
 
+def test_live_run_passes_account_scoped_profile_to_daemon(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_run_live_daemon(**kwargs: object):
+        captured.update(kwargs)
+        return main.LiveDaemonResult(
+            processed_state_count=0,
+            approved_intent_count=0,
+            submitted_order_count=0,
+            halt_reason=None,
+            final_state_at=None,
+        )
+
+    async def fake_startup_backoff(run_once):
+        return await run_once()
+
+    monkeypatch.setattr(main, "_run_live_daemon", fake_run_live_daemon)
+    monkeypatch.setattr(
+        main,
+        "_run_with_live_startup_backoff",
+        fake_startup_backoff,
+    )
+    monkeypatch.setenv("BINANCE_TRADE_API_KEY", "test-key")
+    monkeypatch.setenv("BINANCE_TRADE_API_SECRET", "test-secret")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--impulse-window-buckets",
+            "4",
+            "--confirmation-buckets",
+            "1",
+            "--min-return-pct",
+            "0.01",
+            "--min-imbalance",
+            "0.40",
+            "--min-intensity",
+            "2",
+            "--cooldown-buckets",
+            "0",
+            "--i-understand-this-places-real-orders",
+        ],
+    )
+
+    assert result.exit_code == 0
+    profile = captured["profile"]
+    assert isinstance(profile, main.LiveOrderFlowImpulseProfile)
+    assert profile.impulse_window_buckets == 4
+
+
 def test_live_run_passes_shadow_preflight_acknowledgment_to_daemon(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -353,14 +406,26 @@ def test_live_defaults_disable_ema_and_use_lower_orderflow_imbalance() -> None:
     ] == Decimal("0.40")
 
 
+def test_strategy_config_hash_includes_account_scoped_profile() -> None:
+    primary = main._live_strategy_config_hash("orderflow_impulse")
+    account_two = main._live_strategy_config_hash(
+        "orderflow_impulse",
+        profile=main.LiveOrderFlowImpulseProfile(impulse_window_buckets=4),
+    )
+
+    assert primary != account_two
+
+
 def test_preflight_runtime_strategy_config_reads_live_lane_environment(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT", "10")
     monkeypatch.setenv("CML_LIVE_ENTRY_POLICY_MODE", "enforce")
+    monkeypatch.setenv("CML_LIVE_IMPULSE_WINDOW_BUCKETS", "4")
 
     config = main._preflight_runtime_strategy_config()
 
+    assert config.profile.impulse_window_buckets == 4
     assert config.entry_positive_gainer_top_count == 10
     assert config.entry_policy_mode == "enforce"
     assert config.entry_policy_enforce is True

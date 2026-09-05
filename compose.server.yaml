@@ -143,6 +143,7 @@ services:
       # Market-data must protect the same live account used by the live
       # strategy and execution-account services. Fail closed if it is absent.
       CML_LIVE_POSITION_ACCOUNT_LABEL: ${CML_LIVE_ACCOUNT_LABEL:?set CML_LIVE_ACCOUNT_LABEL}
+      CML_LIVE_POSITION_ACCOUNT_LABELS: ${CML_LIVE_POSITION_ACCOUNT_LABELS:-}
       CML_MARKET_STATE_HUB_HOST: 0.0.0.0
       CML_MARKET_STATE_HUB_PORT: "8766"
     entrypoint: ["cml-market-data"]
@@ -509,6 +510,12 @@ services:
       CML_LIVE_STRATEGY_CONFIG_HASH: ${CML_LIVE_STRATEGY_CONFIG_HASH:-unset}
       CML_LIVE_ENTRY_POLICY_MODE: ${CML_LIVE_ENTRY_POLICY_MODE:-enforce}
       CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT: ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-10}
+      CML_LIVE_IMPULSE_WINDOW_BUCKETS: ${CML_LIVE_IMPULSE_WINDOW_BUCKETS:-3}
+      CML_LIVE_CONFIRMATION_BUCKETS: ${CML_LIVE_CONFIRMATION_BUCKETS:-1}
+      CML_LIVE_MIN_RETURN_PCT: ${CML_LIVE_MIN_RETURN_PCT:-0.01}
+      CML_LIVE_MIN_IMBALANCE: ${CML_LIVE_MIN_IMBALANCE:-0.40}
+      CML_LIVE_MIN_INTENSITY: ${CML_LIVE_MIN_INTENSITY:-2}
+      CML_LIVE_COOLDOWN_BUCKETS: ${CML_LIVE_COOLDOWN_BUCKETS:-0}
       CML_MARKET_STATE_HUB_URL: ${CML_MARKET_STATE_HUB_URL:-ws://market-data:8766}
       CML_MARKET_QUOTE_HUB_URL: ${CML_MARKET_QUOTE_HUB_URL:-ws://market-data:8768}
       CML_ACCOUNT_EVENT_HUB_URL: ${CML_ACCOUNT_EVENT_HUB_URL:-ws://execution-account-live:8767}
@@ -519,6 +526,18 @@ services:
       - ${CML_LIVE_ACCOUNT_LABEL:-primary}
       - --strategy
       - ${CML_LIVE_STRATEGY:-orderflow_impulse}
+      - --impulse-window-buckets
+      - ${CML_LIVE_IMPULSE_WINDOW_BUCKETS:-3}
+      - --confirmation-buckets
+      - ${CML_LIVE_CONFIRMATION_BUCKETS:-1}
+      - --min-return-pct
+      - ${CML_LIVE_MIN_RETURN_PCT:-0.01}
+      - --min-imbalance
+      - ${CML_LIVE_MIN_IMBALANCE:-0.40}
+      - --min-intensity
+      - ${CML_LIVE_MIN_INTENSITY:-2}
+      - --cooldown-buckets
+      - ${CML_LIVE_COOLDOWN_BUCKETS:-0}
       - --market-environment
       - research
       - --market-state-source

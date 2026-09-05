@@ -936,3 +936,26 @@ stale/future/missing EMA sink/report 链路和更长窗口，已在后续第 41 
 它验证的是 sink/report 的分类和告警链路，不是生产数据结论。至此清单中的长窗口、故障分类、
 阈值告警和关闭回滚门槛均已有本地证据。下一步是整理人工验收记录；在此之前不把 Policy
 接入主准入路径，不部署生产 Live。
+
+## 42. P1 多账户 Live 策略 profile seam（2026-09-06）
+
+根据四个账户的参数矩阵，新增了账户级 `LiveOrderFlowImpulseProfile` 深模块。它统一校验
+`impulse_window_buckets`、`confirmation_buckets`、`min_return_pct`、
+`min_aggressive_imbalance`、`min_notional_intensity` 和 `cooldown_buckets`，并让这些值同时
+进入 runtime strategy config、strategy hash 和 preflight 展示；部分 CLI 覆盖会 Fail-Closed，
+不能把一个账户的值与另一个账户的默认值静默混合。
+
+`market-data` 保持单实例。新增的 `CML_LIVE_POSITION_ACCOUNT_LABELS` 支持它把多个 Live
+账户的持仓标的取并集，旧的单账户变量仍可作为兼容回退。`compose.live.accounts.yaml` 为
+`account-2`、`account-3`、`account-4` 增加独立的 read/trade 凭证、execution-account、
+account-event hub、Live session、lease owner、风险审批和策略参数；四个 Live 策略仍消费同一
+market state/quote hub。
+
+本地验证：相关单元和部署 manifest 共 **80 passed**，修改文件通过 `ruff` 和严格 `mypy`，
+base compose 与 multi-account overlay 的合并配置验证通过。该切片尚未把三组凭证写入服务器、
+尚未生成账户审批/风险配置，也没有启动任何新增 Live 服务。
+
+进入生产预检前仍需：确认三组账户的 read/trade 权限、填写各账户风险上限、生成并核对各自策略
+hash、设置四账户持仓保护标签，并按 account-2 → account-3 → account-4 的顺序逐个执行
+prepare/approve/preflight/health 观察。服务器内存、数据库连接池和 telemetry 写入量也需要先
+做只读容量检查。

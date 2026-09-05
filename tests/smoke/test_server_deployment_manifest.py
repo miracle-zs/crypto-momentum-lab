@@ -191,6 +191,45 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert "BINANCE_API_KEY" not in str(services["paper-orderflow-pair"])
 
 
+def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> None:
+    manifest = yaml.safe_load(
+        Path("compose.live.accounts.yaml").read_text(encoding="utf-8")
+    )
+    services = manifest["services"]
+    assert set(services) == {
+        "execution-account-live-account-2",
+        "execution-account-live-account-3",
+        "execution-account-live-account-4",
+        "live-strategy-account-2",
+        "live-strategy-account-3",
+        "live-strategy-account-4",
+    }
+    for account_number in ("2", "3", "4"):
+        execution = services[f"execution-account-live-account-{account_number}"]
+        strategy = services[f"live-strategy-account-{account_number}"]
+        assert execution["profiles"] == ["live"]
+        assert strategy["profiles"] == ["live"]
+        assert f"account-{account_number}" in execution["command"]
+        assert f"account-{account_number}" in strategy["command"]
+        for option in (
+            "--entry-policy-enforce",
+            "--impulse-window-buckets",
+            "--confirmation-buckets",
+            "--min-return-pct",
+            "--min-imbalance",
+            "--min-intensity",
+            "--cooldown-buckets",
+        ):
+            assert option in strategy["command"]
+        assert "BINANCE_API_KEY" not in execution["environment"]
+        assert "BINANCE_API_SECRET" not in execution["environment"]
+        assert "BINANCE_API_KEY" not in strategy["environment"]
+        assert "BINANCE_API_SECRET" not in strategy["environment"]
+        assert strategy["depends_on"][
+            f"execution-account-live-account-{account_number}"
+        ]["condition"] == "service_healthy"
+
+
 def test_server_paper_capture_only_subscribes_to_strategy_required_streams() -> None:
     capture = yaml.safe_load(
         Path("configs/capture/server_paper.yaml").read_text(encoding="utf-8")

@@ -122,6 +122,26 @@ def test_parse_live_position_account_label_normalizes_optional_value() -> None:
     assert main.parse_live_position_account_label("  ") is None
 
 
+def test_parse_live_position_account_labels_supports_multiple_accounts() -> None:
+    assert main.parse_live_position_account_labels(
+        " primary, account-2,primary "
+    ) == frozenset({"primary", "account-2"})
+
+
+def test_parse_live_position_account_labels_falls_back_to_legacy_single_label(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("CML_LIVE_POSITION_ACCOUNT_LABELS", raising=False)
+    monkeypatch.setenv("CML_LIVE_POSITION_ACCOUNT_LABEL", " primary ")
+
+    assert main.parse_live_position_account_labels() == frozenset({"primary"})
+
+
+def test_parse_live_position_account_labels_rejects_empty_tokens() -> None:
+    with pytest.raises(ValueError, match="non-empty labels"):
+        main.parse_live_position_account_labels("primary,,account-2")
+
+
 async def test_operational_retention_uses_bounded_batches() -> None:
     class RecordingRetention:
         def __init__(self) -> None:
