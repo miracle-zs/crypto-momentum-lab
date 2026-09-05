@@ -5,11 +5,12 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from sqlalchemy import (
     Select,
     String,
+    and_,
     case,
     column,
     func,
@@ -26,6 +27,8 @@ from crypto_momentum_lab.domain.execution import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
+    LiveAccountsResponse,
+    LiveAccountSummaryResponse,
     PaperAccountEquityResponse,
     PaperAccountHistoryResponse,
     PaperAccountsEquityResponse,
@@ -91,6 +94,51 @@ _CONFIRMED_OPEN_ORDER_STATES = frozenset(
         ExchangeOrderState.PARTIALLY_FILLED.value,
     }
 )
+
+
+def _latest_live_account_process_statement() -> Select[Any]:
+    latest = (
+        select(
+            ExecutionAccountProcessStateRow.account_label,
+            func.max(ExecutionAccountProcessStateRow.occurred_at).label(
+                "latest_occurred_at"
+            ),
+        )
+        .where(ExecutionAccountProcessStateRow.environment == "live")
+        .group_by(ExecutionAccountProcessStateRow.account_label)
+        .subquery("latest_live_account_process")
+    )
+    return (
+        select(ExecutionAccountProcessStateRow)
+        .join(
+            latest,
+            and_(
+                ExecutionAccountProcessStateRow.account_label
+                == latest.c.account_label,
+                ExecutionAccountProcessStateRow.occurred_at
+                == latest.c.latest_occurred_at,
+                ExecutionAccountProcessStateRow.environment == "live",
+            ),
+        )
+        .order_by(ExecutionAccountProcessStateRow.account_label)
+    )
+
+
+def _account_label_sort_key(account_label: str) -> tuple[int, int | str]:
+    if account_label == "primary":
+        return (0, 0)
+    suffix = account_label.removeprefix("account-")
+    return (1, int(suffix)) if suffix.isdigit() else (2, account_label)
+
+
+def _live_account_status(state: str | None) -> OperationalStatus:
+    if state is None:
+        return OperationalStatus.UNKNOWN
+    return (
+        OperationalStatus.READY
+        if state == "ready_readonly"
+        else OperationalStatus.HALTED
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -770,6 +818,94 @@ class DashboardQueries:
             await session.execute(text("SELECT 1"))
         return {"app_status": "UP", "database_status": "UP"}
 
+    @staticmethod
+    def _live_account_summaries(
+        processes: Sequence[ExecutionAccountProcessStateRow],
+        strategy_states: Sequence[StrategyLiveStateRow],
+        leases: Sequence[TradingLeaseRow],
+    ) -> list[LiveAccountSummaryResponse]:
+        process_by_account = {row.account_label: row for row in processes}
+        strategy_by_account: dict[str, StrategyLiveStateRow] = {}
+        for row in sorted(
+            strategy_states,
+            key=lambda item: item.changed_at,
+            reverse=True,
+        ):
+            strategy_by_account.setdefault(row.account_label, row)
+        lease_by_account = {row.account_label: row for row in leases}
+        account_labels = sorted(
+            set(process_by_account)
+            | set(strategy_by_account)
+            | set(lease_by_account),
+            key=_account_label_sort_key,
+        )
+        summaries: list[LiveAccountSummaryResponse] = []
+        for account_label in account_labels:
+            process = process_by_account.get(account_label)
+            strategy = strategy_by_account.get(account_label)
+            lease = lease_by_account.get(account_label)
+            readiness = process.state if process is not None else "missing"
+            summaries.append(
+                LiveAccountSummaryResponse(
+                    account_label=account_label,
+                    environment=(
+                        process.environment if process is not None else "live"
+                    ),
+                    status=_live_account_status(
+                        None if process is None else process.state
+                    ),
+                    readiness=readiness,
+                    observed_at=(
+                        None if process is None else process.occurred_at
+                    ),
+                    strategy_name=(
+                        None if strategy is None else strategy.strategy_name
+                    ),
+                    strategy_state=(
+                        None if strategy is None else strategy.state
+                    ),
+                    lease_expires_at=(
+                        None if lease is None else lease.expires_at
+                    ),
+                )
+            )
+        return summaries
+
+    async def live_accounts(self) -> LiveAccountsResponse:
+        now = self._clock()
+        async with self._session_factory() as session:
+            processes = (
+                await session.scalars(_latest_live_account_process_statement())
+            ).all()
+            strategy_states = (
+                await session.scalars(
+                    select(StrategyLiveStateRow).where(
+                        StrategyLiveStateRow.environment == "live"
+                    )
+                )
+            ).all()
+            leases = (
+                await session.scalars(
+                    select(TradingLeaseRow).where(
+                        TradingLeaseRow.environment == "live",
+                        TradingLeaseRow.state == "active",
+                        TradingLeaseRow.expires_at > now,
+                    )
+                )
+            ).all()
+        accounts = self._live_account_summaries(
+            processes,
+            strategy_states,
+            leases,
+        )
+        if not accounts:
+            status = OperationalStatus.NO_DATA
+        elif all(account.status is OperationalStatus.READY for account in accounts):
+            status = OperationalStatus.READY
+        else:
+            status = OperationalStatus.HALTED
+        return LiveAccountsResponse(status=status, accounts=accounts)
+
     async def overview(self) -> SystemOverviewResponse:
         now = self._clock()
         async with self._session_factory() as session:
@@ -778,10 +914,13 @@ class DashboardQueries:
                 .order_by(RuntimeMarketState15sRow.bucket_start.desc())
                 .limit(1)
             )
-            account = await session.scalar(
-                select(ExecutionAccountProcessStateRow)
-                .order_by(ExecutionAccountProcessStateRow.occurred_at.desc())
-                .limit(1)
+            account_rows = (
+                await session.scalars(_latest_live_account_process_statement())
+            ).all()
+            account = max(
+                account_rows,
+                key=lambda row: row.occurred_at,
+                default=None,
             )
             strategy_at = await session.scalar(_latest_checkpoint_at_statement())
             halt_count = await session.scalar(
@@ -789,15 +928,25 @@ class DashboardQueries:
                     RiskHaltRow.active.is_(True)
                 )
             )
-            lease = await session.scalar(
-                select(TradingLeaseRow)
-                .where(
-                    TradingLeaseRow.state == "active",
-                    TradingLeaseRow.expires_at > now,
+            strategy_states = (
+                await session.scalars(
+                    select(StrategyLiveStateRow).where(
+                        StrategyLiveStateRow.environment == "live"
+                    )
                 )
-                .order_by(TradingLeaseRow.expires_at.desc())
-                .limit(1)
-            )
+            ).all()
+            leases = (
+                await session.scalars(
+                    select(TradingLeaseRow)
+                    .where(
+                        TradingLeaseRow.environment == "live",
+                        TradingLeaseRow.state == "active",
+                        TradingLeaseRow.expires_at > now,
+                    )
+                    .order_by(TradingLeaseRow.expires_at.desc())
+                )
+            ).all()
+            lease = leases[0] if leases else None
             live = await session.scalar(
                 select(LiveSessionTransitionRow)
                 .order_by(LiveSessionTransitionRow.occurred_at.desc())
@@ -825,6 +974,11 @@ class DashboardQueries:
                     .limit(1)
                 )
         account_at = None if account is None else account.occurred_at
+        account_statuses = self._live_account_summaries(
+            account_rows,
+            strategy_states=strategy_states,
+            leases=leases,
+        )
         services = [
             _service("market-data", now, market_at, self._stale_after_seconds),
             _service("execution-account", now, account_at, self._stale_after_seconds),
@@ -878,6 +1032,16 @@ class DashboardQueries:
                 "owner": lease.owner,
                 "expires_at": lease.expires_at.isoformat(),
             },
+            active_leases=[
+                {
+                    "account_label": item.account_label,
+                    "strategy_name": item.strategy_name,
+                    "owner": item.owner,
+                    "expires_at": item.expires_at.isoformat(),
+                }
+                for item in leases
+            ],
+            account_statuses=account_statuses,
         )
 
     async def universe(self) -> UniverseStatusResponse:
@@ -956,13 +1120,17 @@ class DashboardQueries:
     async def paper_account_equity(self) -> PaperAccountsEquityResponse:
         window_end = self._clock()
         window_start = window_end - _EQUITY_WINDOW
-        live_process: ExecutionAccountProcessStateRow | None = None
-        live_balance_rows: Sequence[_AccountEquityPoint] = ()
+        live_processes: Sequence[ExecutionAccountProcessStateRow] = ()
+        live_balance_rows_by_account: dict[
+            str, Sequence[_AccountEquityPoint]
+        ] = {}
         common_paper_rows: Sequence[tuple[str, datetime, Decimal]] = ()
-        common_live_equity_rows: list[tuple[datetime, Decimal]] = []
-        live_strategy_name: str | None = None
+        common_live_equity_rows_by_account: dict[
+            str, list[tuple[datetime, Decimal]]
+        ] = {}
+        live_strategy_names: dict[str, str] = {}
         paper_first_at_by_run: dict[str, datetime] = {}
-        live_first_at: datetime | None = None
+        live_first_at_by_account: dict[str, datetime] = {}
         common_start_at: datetime | None = None
         common_source_end_at: datetime | None = None
         common_equity_interval_seconds: int | None = None
@@ -993,24 +1161,28 @@ class DashboardQueries:
                         )
                     ).all()
                 ]
-            live_process = await session.scalar(
-                select(ExecutionAccountProcessStateRow)
-                .where(ExecutionAccountProcessStateRow.environment == "live")
-                .order_by(ExecutionAccountProcessStateRow.occurred_at.desc())
-                .limit(1)
-            )
-            if live_process is not None:
-                live_strategy_name = await session.scalar(
-                    select(StrategyLiveStateRow.strategy_name)
-                    .where(
-                        StrategyLiveStateRow.environment == "live",
-                        StrategyLiveStateRow.account_label
-                        == live_process.account_label,
+            live_processes = (
+                await session.scalars(_latest_live_account_process_statement())
+            ).all()
+            strategy_states = (
+                await session.scalars(
+                    select(StrategyLiveStateRow).where(
+                        StrategyLiveStateRow.environment == "live"
                     )
-                    .order_by(StrategyLiveStateRow.changed_at.desc())
-                    .limit(1)
                 )
-                live_balance_rows = [
+            ).all()
+            for strategy_state in sorted(
+                strategy_states,
+                key=lambda row: row.changed_at,
+                reverse=True,
+            ):
+                live_strategy_names.setdefault(
+                    strategy_state.account_label,
+                    strategy_state.strategy_name,
+                )
+            for live_process in live_processes:
+                account_label = live_process.account_label
+                live_balance_rows_by_account[account_label] = [
                     _AccountEquityPoint(
                         observed_at=row.observed_at,
                         wallet_balance=row.wallet_balance,
@@ -1020,7 +1192,7 @@ class DashboardQueries:
                         await session.execute(
                             _account_equity_statement(
                                 environment="live",
-                                account_label=live_process.account_label,
+                                account_label=account_label,
                                 asset="USDT",
                                 window_start=window_start,
                                 window_end=window_end,
@@ -1040,23 +1212,25 @@ class DashboardQueries:
                     for run_id, first_at in paper_first_rows
                 }
 
-            if live_process is not None:
-                live_first_at = await session.scalar(
+            for live_process in live_processes:
+                first_at = await session.scalar(
                     select(func.min(AccountBalanceSnapshotRow.observed_at)).where(
                         AccountBalanceSnapshotRow.environment == "live",
                         AccountBalanceSnapshotRow.account_label
                         == live_process.account_label,
                     )
                 )
+                if first_at is not None:
+                    live_first_at_by_account[live_process.account_label] = first_at
 
             first_buckets = {
                 run_id: _bucket_start(first_at, _COMMON_EQUITY_BUCKET_SECONDS)
                 for run_id, first_at in paper_first_at_by_run.items()
             }
-            if live_process is not None and live_first_at is not None:
-                live_run_id = f"live-{live_process.account_label or 'primary'}-b1"
+            for account_label, first_at in live_first_at_by_account.items():
+                live_run_id = f"live-{account_label}-b1"
                 first_buckets[live_run_id] = _bucket_start(
-                    live_first_at,
+                    first_at,
                     _COMMON_EQUITY_BUCKET_SECONDS,
                 )
             if (
@@ -1082,14 +1256,15 @@ class DashboardQueries:
                             )
                         ).all()
                     ]
-                if live_process is not None:
-                    common_live_equity_rows = [
+                for live_process in live_processes:
+                    account_label = live_process.account_label
+                    common_live_equity_rows_by_account[account_label] = [
                         (observed_at, equity)
                         for observed_at, equity in (
                             await session.execute(
                                 _live_common_equity_statement(
                                     environment="live",
-                                    account_label=live_process.account_label,
+                                    account_label=account_label,
                                     window_start=common_start_at,
                                     window_end=window_end,
                                     interval_seconds=common_equity_interval_seconds,
@@ -1117,13 +1292,14 @@ class DashboardQueries:
                 )
                 for run_id in run_ids
             }
-            if live_process is not None:
-                live_account_label = live_process.account_label or "primary"
-                live_run_id = f"live-{live_account_label}-b1"
+            for account_label, equity_rows in (
+                common_live_equity_rows_by_account.items()
+            ):
+                live_run_id = f"live-{account_label}-b1"
                 common_observations[live_run_id] = (
                     _live_aggregated_equity_observations(
-                        common_live_equity_rows,
-                        account_label=live_account_label,
+                        equity_rows,
+                        account_label=account_label,
                         cash_flow_adjustments=self._live_cash_flow_adjustments,
                     )
                 )
@@ -1166,23 +1342,14 @@ class DashboardQueries:
                     if run_id in common_equity_by_run
                     and first_at == common_start_at
                 ]
-                live_account_label = (
-                    live_process.account_label or "primary"
-                    if live_process is not None
-                    else None
-                )
-                if live_account_label is not None:
-                    common_cash_flows = [
-                        _live_cash_flow_payload(adjustment)
-                        for adjustment in self._live_cash_flow_adjustments
-                        if (
-                            adjustment.account_label == live_account_label
-                            and (
-                                common_end_at is not None
-                                and adjustment.effective_at <= common_end_at
-                            )
-                        )
-                    ]
+                common_cash_flows = [
+                    _live_cash_flow_payload(adjustment)
+                    for adjustment in self._live_cash_flow_adjustments
+                    if (
+                        common_end_at is not None
+                        and adjustment.effective_at <= common_end_at
+                    )
+                ]
                 common_note = _common_equity_note(
                     common_cash_flows,
                     interval_seconds=common_equity_interval_seconds,
@@ -1228,13 +1395,22 @@ class DashboardQueries:
                     ),
                 )
             )
-        if live_process is not None and len(live_balance_rows) >= 2:
-            live_account_label = live_process.account_label or "primary"
+        for live_process in live_processes:
+            live_account_label = live_process.account_label
+            live_balance_rows = live_balance_rows_by_account.get(
+                live_account_label,
+                (),
+            )
+            if len(live_balance_rows) < 2:
+                continue
             live_run_id = f"live-{live_account_label}-b1"
             accounts.append(
                 PaperAccountEquityResponse(
                     run_id=live_run_id,
-                    strategy_name=live_strategy_name or "orderflow_impulse",
+                    strategy_name=(
+                        live_strategy_names.get(live_account_label)
+                        or "orderflow_impulse"
+                    ),
                     exit_mode="candle_15m",
                     exit_label=(
                         "实盘 Top10 · 反向后宽限 8 根 15M · 回收 +0.88% · 仅多头"
@@ -1728,7 +1904,11 @@ class DashboardQueries:
             rejection_summary=_json_mapping(run.rejection_summary),
         )
 
-    async def account(self, equity_range: str = "24h") -> AccountOverviewResponse:
+    async def account(
+        self,
+        equity_range: str = "24h",
+        account_label: str | None = None,
+    ) -> AccountOverviewResponse:
         equity_window, equity_bucket_seconds = _account_equity_range(equity_range)
         equity_window_end = self._clock()
         equity_window_start = equity_window_end - equity_window
@@ -1743,11 +1923,45 @@ class DashboardQueries:
         live_signals: Sequence[LiveStrategySignalRow] = ()
         execution_orders: Sequence[ExchangeOrderRow] = ()
         intent_rows: Sequence[OrderIntentExecutionRow] = ()
+        available_accounts: list[LiveAccountSummaryResponse] = []
         async with self._session_factory() as session:
+            live_processes = (
+                await session.scalars(_latest_live_account_process_statement())
+            ).all()
+            strategy_states = (
+                await session.scalars(
+                    select(StrategyLiveStateRow).where(
+                        StrategyLiveStateRow.environment == "live"
+                    )
+                )
+            ).all()
+            leases = (
+                await session.scalars(
+                    select(TradingLeaseRow).where(
+                        TradingLeaseRow.environment == "live",
+                        TradingLeaseRow.state == "active",
+                        TradingLeaseRow.expires_at > equity_window_end,
+                    )
+                )
+            ).all()
+            available_accounts = self._live_account_summaries(
+                live_processes,
+                strategy_states,
+                leases,
+            )
+            process_query = select(ExecutionAccountProcessStateRow).where(
+                ExecutionAccountProcessStateRow.environment == "live"
+            )
+            if account_label is not None:
+                process_query = process_query.where(
+                    ExecutionAccountProcessStateRow.account_label
+                    == account_label
+                )
+            process_query = process_query.order_by(
+                ExecutionAccountProcessStateRow.occurred_at.desc()
+            ).limit(1)
             process = await session.scalar(
-                select(ExecutionAccountProcessStateRow)
-                .order_by(ExecutionAccountProcessStateRow.occurred_at.desc())
-                .limit(1)
+                process_query
             )
             if process is not None:
                 environment = process.environment
@@ -1979,6 +2193,7 @@ class DashboardQueries:
                     key=lambda row: row.observed_at,
                 )
             ],
+            available_accounts=available_accounts,
             summary={
                 "usdt_wallet_balance": (
                     None if usdt is None else str(usdt.wallet_balance)

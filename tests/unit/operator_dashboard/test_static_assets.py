@@ -32,8 +32,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
         'v18-equity-ranges"'
         in index
     )
-    assert 'dashboard.css?v=20260828-live-signals-v1' in index
-    assert "dashboard.js?v=20260902-live-rank-null-fix-v1" in index
+    assert "dashboard.css?v=20260906-multi-live-accounts-v1" in index
+    assert "dashboard.js?v=20260906-multi-live-accounts-v1" in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(endpoint" in text
     assert "binance.com" not in text.lower()
@@ -294,7 +294,8 @@ def test_live_account_equity_supports_longer_time_ranges() -> None:
         "equity-coverage-note",
     ):
         assert marker in render_code
-    assert "api/account?equity_range=" in dashboard
+    assert "api/live-accounts" in (STATIC / "index.html").read_text(encoding="utf-8")
+    assert "api/account?" in render_code
     assert "endpoint !== section.dataset.endpoint" in dashboard
     assert '.equity-range-switch button[aria-pressed="true"]' in stylesheet
 

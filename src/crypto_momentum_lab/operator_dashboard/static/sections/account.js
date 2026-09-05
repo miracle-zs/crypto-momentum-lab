@@ -1,4 +1,7 @@
 import {
+  replaceChildrenFromHtml,
+} from "../dashboard-dom.js";
+import {
   DEFAULT_EQUITY_BUCKET_SECONDS,
   DISPLAY_TIME_ZONE_LABEL,
 } from "../dashboard-config.js";
@@ -22,6 +25,7 @@ import {
   blockTitle,
   dataTable,
   disclosure,
+  emptyBox,
   pill,
   sideTag,
   signalEvidence,
@@ -47,6 +51,142 @@ const LIVE_SIGNAL_KIND_LABELS = {
   candidate: { label: "开仓候选", className: "candidate" },
   reduce_only_candidate: { label: "退出候选", className: "reduce" },
 };
+
+let selectedLiveAccount = "primary";
+let liveAccountDetailRequest = 0;
+
+async function defaultAccountRequestJson(url) {
+  const response = await fetch(url, {
+    headers: { "Accept": "application/json" },
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+function liveAccountCard(account, index) {
+  const active = account.account_label === selectedLiveAccount;
+  const status = account.status || "UNKNOWN";
+  const strategy = account.strategy_name || "orderflow_impulse";
+  const readiness = account.readiness || "missing";
+  const lease = account.lease_expires_at
+    ? `租约至 ${dayTime(account.lease_expires_at)}`
+    : "无有效租约";
+  return `<button class="live-account-card${active ? " is-active" : ""}" type="button"
+    role="tab" id="live-account-tab-${index}" aria-controls="live-account-detail"
+    aria-selected="${active}" tabindex="${active ? "0" : "-1"}"
+    data-live-account-label="${esc(account.account_label)}">
+    <div class="live-account-card-top"><span>LIVE ${String(index + 1).padStart(2, "0")}</span>${pill(status)}</div>
+    <strong>${esc(account.account_label)}</strong>
+    <span class="live-account-card-strategy">${esc(strategy)} · ${esc(account.strategy_state || "未知")}</span>
+    <small>${esc(readiness)} · ${esc(lease)}</small>
+    <small>最近同步 ${esc(relToNow(account.observed_at))}</small>
+  </button>`;
+}
+
+export function renderLiveAccounts(data) {
+  const accounts = data.accounts || [];
+  if (!accounts.length) {
+    return [data.status, emptyBox("等待实盘账户同步", "尚未发现 live execution-account")];
+  }
+  if (!accounts.some((account) => account.account_label === selectedLiveAccount)) {
+    selectedLiveAccount = accounts[0].account_label;
+  }
+  const selected = accounts.find(
+    (account) => account.account_label === selectedLiveAccount,
+  );
+  const cards = accounts.map(liveAccountCard).join("");
+  return [data.status, `<div class="live-account-directory" data-live-account-directory>
+    <div class="live-account-directory-head">
+      <div><strong>实盘账户矩阵</strong><small>ACCOUNT STATUS · SHARED MARKET-DATA · READ ONLY</small></div>
+      <span>${accounts.length} 个账户 · 同一 market-data</span>
+    </div>
+    <div class="live-account-grid" role="tablist" aria-label="实盘账户选择">${cards}</div>
+    <div class="live-account-detail" id="live-account-detail" data-live-account-detail
+      data-account-label="${esc(selected?.account_label || selectedLiveAccount)}">
+      <div class="lazy-detail"><strong>账户详情加载中…</strong><small>正在读取所选账户的余额、持仓、挂单和权益。</small></div>
+    </div>
+  </div>`];
+}
+
+function setLiveAccountTabState(root, accountLabel) {
+  root.querySelectorAll("[data-live-account-label]").forEach((button) => {
+    const active = button.dataset.liveAccountLabel === accountLabel;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.setAttribute("tabindex", active ? "0" : "-1");
+  });
+}
+
+async function loadLiveAccountDetail(root, accountLabel, requestJson, equityRange = "24h") {
+  const slot = root.querySelector("[data-live-account-detail]");
+  if (!slot) return;
+  const requestId = ++liveAccountDetailRequest;
+  selectedLiveAccount = accountLabel;
+  setLiveAccountTabState(root, accountLabel);
+  slot.dataset.accountLabel = accountLabel;
+  slot.setAttribute("aria-busy", "true");
+  replaceChildrenFromHtml(
+    slot,
+    `<div class="lazy-detail"><strong>账户详情加载中…</strong><small>${esc(accountLabel)} · 正在读取最新快照</small></div>`,
+  );
+  try {
+    const query = new URLSearchParams({
+      account_label: accountLabel,
+      equity_range: equityRange,
+    });
+    const detail = await requestJson(`api/account?${query.toString()}`);
+    if (requestId !== liveAccountDetailRequest || !slot.isConnected) return;
+    const [status, html] = renderAccount(detail);
+    replaceChildrenFromHtml(slot, html);
+    slot.dataset.accountStatus = status;
+    wireAccountEquityRanges(slot, (nextRange) => loadLiveAccountDetail(
+      root,
+      accountLabel,
+      requestJson,
+      nextRange,
+    ));
+  } catch (error) {
+    if (requestId !== liveAccountDetailRequest || !slot.isConnected) return;
+    replaceChildrenFromHtml(
+      slot,
+      emptyBox("账户详情加载失败", `${accountLabel} · ${error.message}`),
+    );
+  } finally {
+    slot.removeAttribute("aria-busy");
+  }
+}
+
+export function wireLiveAccounts(
+  root,
+  data,
+  { requestJson = defaultAccountRequestJson } = {},
+) {
+  const accounts = data.accounts || [];
+  root.querySelectorAll("[data-live-account-label]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const accountLabel = button.dataset.liveAccountLabel;
+      if (accountLabel) void loadLiveAccountDetail(root, accountLabel, requestJson);
+    });
+    button.addEventListener("keydown", (event) => {
+      const buttons = [...root.querySelectorAll("[data-live-account-label]")];
+      const current = buttons.indexOf(button);
+      if (current < 0) return;
+      let next = null;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") next = (current + 1) % buttons.length;
+      if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (current - 1 + buttons.length) % buttons.length;
+      if (event.key === "Home") next = 0;
+      if (event.key === "End") next = buttons.length - 1;
+      if (next == null) return;
+      buttons[next].focus();
+      buttons[next].click();
+      event.preventDefault();
+    });
+  });
+  const selected = accounts.find(
+    (account) => account.account_label === selectedLiveAccount,
+  ) || accounts[0];
+  if (selected) void loadLiveAccountDetail(root, selected.account_label, requestJson);
+}
 
 function liveSignalKind(row) {
   return LIVE_SIGNAL_KIND_LABELS[row.signal_kind]

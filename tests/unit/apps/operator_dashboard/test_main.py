@@ -5,6 +5,8 @@ from fastapi.testclient import TestClient
 from crypto_momentum_lab.operator_dashboard.api import create_dashboard_app
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
+    LiveAccountsResponse,
+    LiveAccountSummaryResponse,
     PaperAccountHistoryResponse,
     PaperAccountsEquityResponse,
     PaperAccountsResponse,
@@ -129,10 +131,28 @@ class FakeQueries:
             trade_events=[],
         )
 
-    async def account(self, equity_range: str = "24h") -> AccountOverviewResponse:
+    async def live_accounts(self) -> LiveAccountsResponse:
+        return LiveAccountsResponse(
+            status=OperationalStatus.READY,
+            accounts=[
+                LiveAccountSummaryResponse(
+                    account_label="primary",
+                    environment="live",
+                    status=OperationalStatus.READY,
+                    readiness="ready_readonly",
+                )
+            ],
+        )
+
+    async def account(
+        self,
+        equity_range: str = "24h",
+        account_label: str | None = None,
+    ) -> AccountOverviewResponse:
         return AccountOverviewResponse(
             status=OperationalStatus.UNKNOWN,
             observed_at=None,
+            account_label=account_label,
             equity_range=equity_range,
             balances=[],
             positions=[],

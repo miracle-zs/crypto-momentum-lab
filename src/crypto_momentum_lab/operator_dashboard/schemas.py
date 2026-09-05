@@ -19,12 +19,27 @@ class ServiceStatusResponse(DashboardSchema):
     details: dict[str, JsonValue] = Field(default_factory=dict)
 
 
+class LiveAccountSummaryResponse(DashboardSchema):
+    account_label: str
+    environment: str
+    status: OperationalStatus
+    readiness: str
+    observed_at: datetime | None = None
+    strategy_name: str | None = None
+    strategy_state: str | None = None
+    lease_expires_at: datetime | None = None
+
+
 class SystemOverviewResponse(DashboardSchema):
     generated_at: datetime
     database_status: OperationalStatus
     services: list[ServiceStatusResponse]
     active_halt_count: int
     active_lease: dict[str, JsonValue] | None
+    active_leases: list[dict[str, JsonValue]] = Field(default_factory=list)
+    account_statuses: list["LiveAccountSummaryResponse"] = Field(
+        default_factory=list
+    )
 
 
 class UniverseStatusResponse(DashboardSchema):
@@ -100,6 +115,11 @@ class PaperAccountsResponse(DashboardSchema):
     accounts: list[PaperAccountSummaryResponse] = Field(default_factory=list)
 
 
+class LiveAccountsResponse(DashboardSchema):
+    status: OperationalStatus
+    accounts: list[LiveAccountSummaryResponse] = Field(default_factory=list)
+
+
 class PaperAccountHistoryResponse(DashboardSchema):
     status: OperationalStatus
     run_id: str
@@ -127,6 +147,9 @@ class AccountOverviewResponse(DashboardSchema):
     equity_window_end: datetime | None = None
     equity_sample_interval_seconds: int | None = None
     equity_curve: list[dict[str, JsonValue]] = Field(default_factory=list)
+    available_accounts: list[LiveAccountSummaryResponse] = Field(
+        default_factory=list
+    )
 
 
 class RiskExecutionResponse(DashboardSchema):
