@@ -56,6 +56,10 @@ def test_closed_candle_ema_provider_uses_closed_prices_and_caches_boundary() -> 
     assert first == second
     assert first.ema5 == Decimal("8")
     assert first.ema10 == Decimal("5.5")
+    assert first.symbol == "BTCUSDT"
+    assert first.observed_at == datetime(2026, 8, 1, 14, 30, tzinfo=UTC)
+    assert first.snapshot_id == "ema-BTCUSDT-20260801T143000Z-200"
+    assert first.config_hash is not None
     assert source.calls == 1
 
 

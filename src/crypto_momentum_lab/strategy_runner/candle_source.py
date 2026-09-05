@@ -5,6 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 from typing import Protocol, Self
 
 import httpx
@@ -23,6 +24,28 @@ class ClosedCandleSourceError(RuntimeError):
 class ClosedCandleEmaSnapshot:
     ema5: Decimal | None
     ema10: Decimal | None
+    symbol: str | None = None
+    observed_at: datetime | None = None
+    snapshot_id: str | None = None
+    config_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.symbol is not None:
+            normalized_symbol = self.symbol.strip().upper()
+            if not normalized_symbol:
+                raise ValueError("symbol must not be empty")
+            object.__setattr__(self, "symbol", normalized_symbol)
+        if self.observed_at is not None and (
+            self.observed_at.tzinfo is None
+            or self.observed_at.utcoffset() is None
+        ):
+            raise ValueError("observed_at must be timezone-aware")
+        for value, field_name in (
+            (self.snapshot_id, "snapshot_id"),
+            (self.config_hash, "config_hash"),
+        ):
+            if value is not None and not value.strip():
+                raise ValueError(f"{field_name} must not be empty")
 
 
 class ClosedCandleEmaProvider:
@@ -62,6 +85,14 @@ class ClosedCandleEmaProvider:
         snapshot = ClosedCandleEmaSnapshot(
             ema5=_ema(closes, 5),
             ema10=_ema(closes, 10),
+            symbol=normalized_symbol,
+            observed_at=candle_end,
+            snapshot_id=(
+                f"ema-{normalized_symbol}-"
+                f"{candle_end.strftime('%Y%m%dT%H%M%SZ')}-"
+                f"{self._lookback_candles}"
+            ),
+            config_hash=_ema_config_hash(self._lookback_candles),
         )
         self._cache[cache_key] = snapshot
         return snapshot
@@ -75,6 +106,11 @@ class ClosedCandle15mSource(Protocol):
         start: datetime,
         end: datetime,
     ) -> tuple[ClosedCandle15m, ...]: ...
+
+
+def _ema_config_hash(lookback_candles: int) -> str:
+    payload = f"interval=15m;lookback_candles={lookback_candles}"
+    return sha256(payload.encode("utf-8")).hexdigest()
 
 
 class BinanceRestClosedCandle15mSource:
