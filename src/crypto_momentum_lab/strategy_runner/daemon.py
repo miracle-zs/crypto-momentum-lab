@@ -8,8 +8,12 @@ from inspect import Parameter, signature
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
+import structlog
+
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
+    EntryPolicyComparison,
+    EntryPolicyComparisonRequest,
     OrderIntentCandidate,
     RunMode,
     StrategyCheckpoint,
@@ -18,6 +22,9 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyRunIdentity,
     StrategySide,
     StrategySignal,
+    UniverseRankingSnapshot,
+    compare_entry_policy_request,
+    summarize_entry_policy_comparisons,
 )
 from crypto_momentum_lab.strategy_runner.candle_source import (
     ClosedCandle15mSource,
@@ -38,10 +45,18 @@ from crypto_momentum_lab.strategy_runner.portfolio import (
     mark_positions,
 )
 
+log = structlog.get_logger()
+
 
 class Clock(Protocol):
     def now(self) -> datetime:
         pass
+
+
+PaperEntryPolicyComparisonObserver = Callable[
+    [MarketState15s, tuple[EntryPolicyComparison, ...]],
+    None,
+]
 
 
 class RuntimeStrategy(Protocol):
@@ -153,6 +168,9 @@ class PaperEntryFilterContext:
     entry_price: Decimal | None
     ema5: Decimal | None = None
     ema10: Decimal | None = None
+    ema_observed_at: datetime | None = None
+    ema_snapshot_id: str | None = None
+    ema_config_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +191,7 @@ class PaperLiveDaemonConfig:
     entry_filter: PaperEntryFilterConfig = field(
         default_factory=PaperEntryFilterConfig
     )
+    entry_policy_compare_only: bool = False
 
     def __post_init__(self) -> None:
         _require_non_empty(self.run_id, "run_id")
@@ -186,6 +205,8 @@ class PaperLiveDaemonConfig:
             raise ValueError("max_market_state_age_seconds must be positive")
         if self.entry_symbol_refresh_seconds <= 0:
             raise ValueError("entry_symbol_refresh_seconds must be positive")
+        if not isinstance(self.entry_policy_compare_only, bool):
+            raise TypeError("entry_policy_compare_only must be a bool")
         if not self.source_description.strip():
             raise ValueError("source_description must not be empty")
         if self.run_identity is not None:
@@ -705,6 +726,186 @@ def _signal_passes_entry_filter(
     return True
 
 
+def _paper_signal_gate_reasons(
+    signal: StrategySignal | None,
+    entry_filter: PaperEntryFilterConfig,
+) -> tuple[str, ...]:
+    """Explain non-EMA paper filters for the shared Policy adapter."""
+
+    if signal is None:
+        return ("signal_missing",)
+    reasons: list[str] = []
+    if signal.side is StrategySide.LONG and not entry_filter.allow_long:
+        reasons.append("long_entries_disabled")
+    if signal.side is StrategySide.SHORT and not entry_filter.allow_short:
+        reasons.append("short_entries_disabled")
+    max_imbalance = entry_filter.max_abs_aggressive_imbalance
+    if max_imbalance is not None:
+        imbalance = _decimal_feature(signal, "aggressive_imbalance")
+        if imbalance is None:
+            reasons.append("aggressive_imbalance_unavailable")
+        elif abs(imbalance) > max_imbalance:
+            reasons.append("aggressive_imbalance_exceeded")
+    max_trade_count = entry_filter.max_cluster_trade_count
+    if max_trade_count is not None:
+        trade_count = _int_feature(signal, "cluster_trade_count")
+        if trade_count is None:
+            reasons.append("cluster_trade_count_unavailable")
+        elif trade_count > max_trade_count:
+            reasons.append("cluster_trade_count_exceeded")
+    return tuple(reasons)
+
+
+def _paper_ema_filter_passes(
+    entry_filter: PaperEntryFilterConfig,
+    context: PaperEntryFilterContext | None,
+) -> bool:
+    if entry_filter.require_price_above_ema5 and (
+        context is None
+        or context.entry_price is None
+        or context.ema5 is None
+        or context.entry_price <= context.ema5
+    ):
+        return False
+    if entry_filter.require_price_above_ema10 and (
+        context is None
+        or context.entry_price is None
+        or context.ema10 is None
+        or context.entry_price <= context.ema10
+    ):
+        return False
+    return True
+
+
+def _paper_policy_comparisons(
+    *,
+    decision: StrategyDecision,
+    state: MarketState15s,
+    observed_at: datetime,
+    entry_filter: PaperEntryFilterConfig,
+    entry_filter_context: PaperEntryFilterContext | None,
+    entry_symbols: frozenset[str] | None,
+    entry_allowed: bool,
+    universe_snapshot_provider: (
+        Callable[[datetime], UniverseRankingSnapshot | None] | None
+    ),
+) -> tuple[EntryPolicyComparison, ...]:
+    universe_snapshot: UniverseRankingSnapshot | None = None
+    if universe_snapshot_provider is not None:
+        try:
+            universe_snapshot = universe_snapshot_provider(state.bucket_end)
+        except Exception as error:
+            log.warning(
+                "paper_entry_policy_universe_snapshot_failed",
+                symbol=state.symbol,
+                error_type=type(error).__name__,
+            )
+    signals_by_id = {signal.signal_id: signal for signal in decision.signals}
+    source_trace_id = (
+        f"paper-entry:{state.symbol}:{state.bucket_start.isoformat()}"
+    )
+    comparisons: list[EntryPolicyComparison] = []
+    for candidate in decision.candidates:
+        if candidate.reduce_only:
+            continue
+        signal = signals_by_id.get(candidate.signal_id)
+        gate_reasons = _paper_signal_gate_reasons(signal, entry_filter)
+        if gate_reasons:
+            legacy_reason = gate_reasons[0]
+        elif not entry_allowed:
+            legacy_reason = "outside_entry_symbol_pool"
+        elif not _paper_ema_filter_passes(
+            entry_filter,
+            entry_filter_context,
+        ):
+            legacy_reason = "ema_filter_failed"
+        else:
+            legacy_reason = None
+        comparisons.append(
+            compare_entry_policy_request(
+                EntryPolicyComparisonRequest(
+                    candidate=candidate,
+                    source_trace_id=source_trace_id,
+                    legacy_rejection_reason=legacy_reason,
+                    gate_reasons=gate_reasons,
+                    entry_enabled=True,
+                    entry_long_only=not entry_filter.allow_short,
+                    entry_symbols=entry_symbols,
+                    universe_snapshot=universe_snapshot,
+                    entry_price=(
+                        None
+                        if entry_filter_context is None
+                        else entry_filter_context.entry_price
+                    ),
+                    ema5=(
+                        None
+                        if entry_filter_context is None
+                        else entry_filter_context.ema5
+                    ),
+                    ema10=(
+                        None
+                        if entry_filter_context is None
+                        else entry_filter_context.ema10
+                    ),
+                    require_price_above_ema5=(
+                        entry_filter.require_price_above_ema5
+                    ),
+                    require_price_above_ema10=(
+                        entry_filter.require_price_above_ema10
+                    ),
+                    observed_at=observed_at,
+                    ema_observed_at=(
+                        None
+                        if entry_filter_context is None
+                        else entry_filter_context.ema_observed_at
+                    ),
+                    ema_snapshot_id=(
+                        None
+                        if entry_filter_context is None
+                        else entry_filter_context.ema_snapshot_id
+                    ),
+                    ema_config_hash=(
+                        None
+                        if entry_filter_context is None
+                        else entry_filter_context.ema_config_hash
+                    ),
+                )
+            )
+        )
+    return tuple(comparisons)
+
+
+def _observe_paper_policy_comparisons(
+    *,
+    observer: PaperEntryPolicyComparisonObserver | None,
+    state: MarketState15s,
+    comparisons: tuple[EntryPolicyComparison, ...],
+) -> None:
+    if observer is not None:
+        try:
+            observer(state, comparisons)
+        except Exception as error:
+            log.warning(
+                "paper_entry_policy_comparison_observer_failed",
+                symbol=state.symbol,
+                error_type=type(error).__name__,
+            )
+        return
+    mismatch_count = sum(not comparison.matched for comparison in comparisons)
+    comparison_summary = summarize_entry_policy_comparisons(comparisons)
+    log.info(
+        "paper_entry_policy_compared",
+        symbol=state.symbol,
+        source_trace_id=(
+            comparisons[0].source_trace_id if comparisons else None
+        ),
+        candidate_count=len(comparisons),
+        mismatch_count=mismatch_count,
+        comparison_summary=comparison_summary.as_details(),
+        comparisons=[comparison.as_details() for comparison in comparisons],
+    )
+
+
 def _decimal_feature(
     signal: StrategySignal,
     field_name: str,
@@ -799,6 +1000,12 @@ def run_paper_live_daemon(
     candle_source: ClosedCandle15mSource | None = None,
     entry_filter_context_loader: (
         Callable[[MarketState15s], PaperEntryFilterContext | None] | None
+    ) = None,
+    entry_universe_snapshot_provider: (
+        Callable[[datetime], UniverseRankingSnapshot | None] | None
+    ) = None,
+    entry_policy_comparison_observer: (
+        PaperEntryPolicyComparisonObserver | None
     ) = None,
 ) -> PaperLiveDaemonResult:
     checkpoint = _run_async(repository.load_checkpoint(config.run_id))
@@ -977,6 +1184,22 @@ def run_paper_live_daemon(
         ):
             if entry_filter_context_loader is not None:
                 entry_filter_context = entry_filter_context_loader(state)
+        if config.entry_policy_compare_only:
+            comparisons = _paper_policy_comparisons(
+                decision=raw_decision,
+                state=state,
+                observed_at=now,
+                entry_filter=config.entry_filter,
+                entry_filter_context=entry_filter_context,
+                entry_symbols=entry_symbols,
+                entry_allowed=entry_allowed,
+                universe_snapshot_provider=entry_universe_snapshot_provider,
+            )
+            _observe_paper_policy_comparisons(
+                observer=entry_policy_comparison_observer,
+                state=state,
+                comparisons=comparisons,
+            )
         decision = _filter_decision(
             raw_decision,
             config.entry_filter,

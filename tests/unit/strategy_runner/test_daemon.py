@@ -558,6 +558,88 @@ def test_daemon_requires_entry_price_above_both_15m_emas() -> None:
     assert len(artifacts.fills) == 1
 
 
+def test_paper_compare_only_observes_without_changing_paper_fill() -> None:
+    state = fixture_state("BTCUSDT", 0)
+    identity = _identity()
+    artifacts = FakeArtifactRepository()
+    comparisons = []
+
+    run_paper_live_daemon(
+        source=(state,),
+        strategy=SignalStrategy(identity),
+        repository=FakeRepository(),
+        artifact_repository=artifacts,
+        config=_config(
+            run_identity=identity,
+            execution=ReplayExecutionConfig(latency_buckets=0),
+            entry_policy_compare_only=True,
+        ),
+        clock=FakeClock(state.bucket_end + timedelta(seconds=1)),
+        entry_policy_comparison_observer=lambda _state, values: comparisons.extend(
+            values
+        ),
+    )
+
+    assert len(artifacts.fills) == 1
+    assert len(comparisons) == 1
+    assert comparisons[0].matched is True
+    assert comparisons[0].policy_decision.eligible is True
+
+
+def test_paper_compare_only_disabled_does_not_call_observer() -> None:
+    state = fixture_state("BTCUSDT", 0)
+    identity = _identity()
+    observed: list[object] = []
+
+    run_paper_live_daemon(
+        source=(state,),
+        strategy=SignalStrategy(identity),
+        repository=FakeRepository(),
+        config=_config(),
+        clock=FakeClock(state.bucket_end + timedelta(seconds=1)),
+        entry_policy_comparison_observer=lambda _state, values: observed.extend(
+            values
+        ),
+    )
+
+    assert observed == []
+
+
+def test_paper_compare_only_exposes_missing_ema_snapshot_metadata() -> None:
+    state = fixture_state("BTCUSDT", 0)
+    identity = _identity()
+    artifacts = FakeArtifactRepository()
+    comparisons = []
+
+    run_paper_live_daemon(
+        source=(state,),
+        strategy=SignalStrategy(identity),
+        repository=FakeRepository(),
+        artifact_repository=artifacts,
+        config=_config(
+            run_identity=identity,
+            execution=ReplayExecutionConfig(latency_buckets=0),
+            entry_filter=PaperEntryFilterConfig(
+                require_price_above_ema5=True,
+            ),
+            entry_policy_compare_only=True,
+        ),
+        clock=FakeClock(state.bucket_end + timedelta(seconds=1)),
+        entry_filter_context_loader=lambda _state: PaperEntryFilterContext(
+            entry_price=Decimal("100.01"),
+            ema5=Decimal("100"),
+        ),
+        entry_policy_comparison_observer=lambda _state, values: comparisons.extend(
+            values
+        ),
+    )
+
+    assert len(artifacts.fills) == 1
+    assert len(comparisons) == 1
+    assert comparisons[0].matched is False
+    assert comparisons[0].policy_decision.reasons == ("ema_unavailable",)
+
+
 def test_daemon_rejects_equal_or_missing_ema_entry_filter_values() -> None:
     state = fixture_state("BTCUSDT", 0)
     identity = _identity()
@@ -981,6 +1063,7 @@ def _config(
     execution: ReplayExecutionConfig | None = None,
     portfolio: PaperExitConfig | None = None,
     entry_filter: PaperEntryFilterConfig | None = None,
+    entry_policy_compare_only: bool = False,
 ) -> PaperLiveDaemonConfig:
     return PaperLiveDaemonConfig(
         run_id=run_id,
@@ -994,6 +1077,7 @@ def _config(
         execution=execution or ReplayExecutionConfig(),
         portfolio=portfolio or PaperExitConfig(),
         entry_filter=entry_filter or PaperEntryFilterConfig(),
+        entry_policy_compare_only=entry_policy_compare_only,
     )
 
 

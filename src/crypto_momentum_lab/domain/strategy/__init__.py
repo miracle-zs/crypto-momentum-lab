@@ -1,3 +1,24 @@
+from crypto_momentum_lab.domain.strategy.entry_policy import (
+    DEFAULT_EMA_MAX_AGE,
+    EmaPolicyState,
+    EmaPolicyStatus,
+    EmaSnapshot,
+    EntryEligibilityDecision,
+    EntryEligibilityPolicy,
+    EntryGateResult,
+    PolicyInputSnapshot,
+    UniverseRankingEntry,
+    UniverseRankingSnapshot,
+)
+from crypto_momentum_lab.domain.strategy.entry_policy_compare import (
+    EntryPolicyComparison,
+    EntryPolicyComparisonRequest,
+    EntryPolicyComparisonSummary,
+    compare_entry_candidate,
+    compare_entry_policy_request,
+    summarize_entry_policy_comparisons,
+    universe_snapshot_for_symbols,
+)
 from crypto_momentum_lab.domain.strategy.models import (
     EntryType,
     OrderIntentCandidate,
@@ -17,8 +38,19 @@ from crypto_momentum_lab.domain.strategy.models import (
 )
 
 __all__ = [
+    "DEFAULT_EMA_MAX_AGE",
+    "EmaPolicyState",
+    "EmaPolicyStatus",
+    "EmaSnapshot",
     "EntryType",
+    "EntryEligibilityDecision",
+    "EntryEligibilityPolicy",
+    "EntryGateResult",
+    "EntryPolicyComparison",
+    "EntryPolicyComparisonRequest",
+    "EntryPolicyComparisonSummary",
     "OrderIntentCandidate",
+    "PolicyInputSnapshot",
     "RejectionReason",
     "RunMode",
     "StrategyCheckpoint",
@@ -29,7 +61,13 @@ __all__ = [
     "StrategyRunIdentity",
     "StrategySide",
     "StrategySignal",
+    "UniverseRankingEntry",
+    "UniverseRankingSnapshot",
+    "compare_entry_candidate",
+    "compare_entry_policy_request",
     "deterministic_candidate_id",
     "deterministic_config_hash",
     "deterministic_signal_id",
+    "summarize_entry_policy_comparisons",
+    "universe_snapshot_for_symbols",
 ]

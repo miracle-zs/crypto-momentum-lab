@@ -17,6 +17,16 @@ from crypto_momentum_lab.strategy_runner.daemon import (
     run_paired_paper_live_daemon,
     run_paper_live_daemon,
 )
+from crypto_momentum_lab.strategy_runner.entry_policy_observation import (
+    PaperEntryPolicyComparisonJsonlSink,
+    PaperEntryPolicyObservationError,
+    PaperEntryPolicyObservationRecord,
+    PaperEntryPolicyObservationReport,
+    PaperEntryPolicyObservationThreshold,
+    read_paper_entry_policy_observations,
+    summarize_paper_entry_policy_observations,
+    write_paper_entry_policy_observation_report,
+)
 from crypto_momentum_lab.strategy_runner.fills import (
     ReplayExecutionConfig,
     SimulatedFill,
@@ -52,16 +62,23 @@ from crypto_momentum_lab.strategy_runner.portfolio import (
     position_from_entry_fill,
 )
 from crypto_momentum_lab.strategy_runner.replay import (
+    EntryPolicyReplayError,
+    EntryPolicyReplayReport,
     ReplayConfig,
     ReplayError,
     StrategyReplayReport,
+    build_entry_policy_replay_report,
     build_strategy_replay_report,
+    read_entry_policy_comparison_requests,
     run_strategy_replay,
+    write_entry_policy_replay_report,
     write_strategy_replay_report,
 )
 
 __all__ = [
     "ReplayConfig",
+    "EntryPolicyReplayError",
+    "EntryPolicyReplayReport",
     "ReplayError",
     "ReplayExecutionConfig",
     "AsyncPostgresRuntimeStateLoader",
@@ -79,6 +96,11 @@ __all__ = [
     "PaperLiveDaemonResult",
     "PaperEntryFilterConfig",
     "PaperEntryFilterContext",
+    "PaperEntryPolicyComparisonJsonlSink",
+    "PaperEntryPolicyObservationError",
+    "PaperEntryPolicyObservationRecord",
+    "PaperEntryPolicyObservationReport",
+    "PaperEntryPolicyObservationThreshold",
     "PairedPaperLiveAccount",
     "PairedPaperLiveDaemonResult",
     "PaperExitConfig",
@@ -93,13 +115,17 @@ __all__ = [
     "PaperTradingRunReport",
     "RuntimeStrategy",
     "StrategyReplayReport",
+    "build_entry_policy_replay_report",
     "build_strategy_replay_report",
+    "read_entry_policy_comparison_requests",
     "deterministic_fill_id",
     "fill_summary",
     "pending_candidate_fill",
     "position_from_entry_fill",
     "PostgresPaperMarketStateSource",
     "run_paper_trading",
+    "read_paper_entry_policy_observations",
+    "summarize_paper_entry_policy_observations",
     "run_paper_live_daemon",
     "run_paired_paper_live_daemon",
     "run_strategy_replay",
@@ -107,5 +133,7 @@ __all__ = [
     "simulate_candidate_fill",
     "simulate_candidate_fills",
     "write_paper_trading_report",
+    "write_paper_entry_policy_observation_report",
+    "write_entry_policy_replay_report",
     "write_strategy_replay_report",
 ]
