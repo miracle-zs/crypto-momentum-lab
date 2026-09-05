@@ -283,6 +283,8 @@ services:
     environment:
       <<: *app-environment
       CML_HEALTHCHECK_RUN_ID: paper-account-14-orderflow-b1-gainer100-v1
+    volumes:
+      - research-data:/app/research-data
     command:
       - paper-live-daemon
       - --strategy
@@ -296,6 +298,9 @@ services:
       - "100"
       - --no-entry-price-above-ema5
       - --no-entry-price-above-ema10
+      - --entry-policy-compare-only
+      - --entry-policy-compare-output
+      - /app/research-data/entry-policy-observations/paper-account-14-entry-policy.jsonl
       - --orderflow-min-aggressive-imbalance
       - "0.40"
       - --candidate-notional
@@ -387,6 +392,8 @@ services:
     environment:
       <<: *app-environment
       CML_HEALTHCHECK_RUN_ID: paper-account-15-orderflow-b1-gainer100-ema-v1
+    volumes:
+      - research-data:/app/research-data
     command:
       - paper-live-daemon
       - --strategy
@@ -400,6 +407,9 @@ services:
       - "100"
       - --entry-price-above-ema5
       - --entry-price-above-ema10
+      - --entry-policy-compare-only
+      - --entry-policy-compare-output
+      - /app/research-data/entry-policy-observations/paper-account-15-entry-policy.jsonl
       - --candidate-notional
       - "100"
       - --paper-initial-balance
