@@ -27,7 +27,7 @@ The strategy parameters are 15-second buckets unless stated otherwise:
 | account | impulse window | confirmation | min return | min imbalance | min intensity | cooldown |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | primary | 3 | 1 | 0.01 | 0.40 | 2 | 0 |
-| account-2 | 4 | 1 | 0.01 | 0.40 | 2 | 0 |
+| account-2 | 2 | 1 | 0.005 | 0.50 | 3.0 | 0 |
 | account-3 | 2 | 1 | 0.005 | 0.50 | 2 | 0 |
 | account-4 | 2 | 1 | 0.005 | 0.50 | 2 | 0 |
 

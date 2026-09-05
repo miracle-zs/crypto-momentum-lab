@@ -945,6 +945,9 @@ stale/future/missing EMA sink/report 链路和更长窗口，已在后续第 41 
 进入 runtime strategy config、strategy hash 和 preflight 展示；部分 CLI 覆盖会 Fail-Closed，
 不能把一个账户的值与另一个账户的默认值静默混合。
 
+当前矩阵中 account-2 为 `2 / 1 / 0.005 / 0.50 / 3.0 / 0`；primary 保持
+`3 / 1 / 0.01 / 0.40 / 2 / 0`，account-3/4 保持 `2 / 1 / 0.005 / 0.50 / 2 / 0`。
+
 `market-data` 保持单实例。新增的 `CML_LIVE_POSITION_ACCOUNT_LABELS` 支持它把多个 Live
 账户的持仓标的取并集，旧的单账户变量仍可作为兼容回退。`compose.live.accounts.yaml` 为
 `account-2`、`account-3`、`account-4` 增加独立的 read/trade 凭证、execution-account、
