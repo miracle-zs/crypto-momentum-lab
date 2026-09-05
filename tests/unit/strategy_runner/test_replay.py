@@ -133,6 +133,34 @@ def test_run_strategy_replay_can_disable_simulated_fills() -> None:
     assert report.execution_config is None
     assert report.simulated_fills == ()
     assert report.fill_summary["fills_by_status"] == {}
+    assert report.replay_options == {
+        "reset_on_gap": True,
+        "max_gap_seconds": 30,
+    }
+
+
+def test_run_strategy_replay_resets_symbol_after_data_gap() -> None:
+    states = (
+        _state(0, close=Decimal("100"), high=Decimal("100.1"), low=Decimal("99.9")),
+        _state(1, close=Decimal("100"), high=Decimal("100.1"), low=Decimal("99.9")),
+        _state(2, close=Decimal("100"), high=Decimal("100.1"), low=Decimal("99.9")),
+        _state(10, close=Decimal("101")),
+        _state(11, close=Decimal("101.2")),
+    )
+
+    without_reset = run_strategy_replay(
+        states=states,
+        source_paths=("memory",),
+        config=_replay_config(reset_on_gap=False),
+    )
+    with_reset = run_strategy_replay(
+        states=states,
+        source_paths=("memory",),
+        config=_replay_config(reset_on_gap=True),
+    )
+
+    assert len(without_reset.candidates) == 1
+    assert with_reset.candidates == ()
 
 
 def test_build_strategy_replay_report_reads_parquet_states(tmp_path: Path) -> None:
@@ -238,6 +266,7 @@ def test_replay_rejects_naive_state_timestamp() -> None:
 def _replay_config(
     *,
     execution: ReplayExecutionConfig | None = _DEFAULT_EXECUTION,
+    reset_on_gap: bool = True,
 ) -> ReplayConfig:
     return ReplayConfig(
         strategy_name="compression_breakout",
@@ -256,6 +285,7 @@ def _replay_config(
         candidate_ttl_buckets=2,
         signal_interval_seconds=15,
         execution=execution,
+        reset_on_gap=reset_on_gap,
     )
 
 

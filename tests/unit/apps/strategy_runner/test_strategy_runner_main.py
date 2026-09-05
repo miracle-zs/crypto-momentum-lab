@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -157,6 +158,143 @@ def test_replay_command_generates_default_run_id(tmp_path: Path, monkeypatch) ->
     assert result.exit_code == 0
     assert configs[0].run_id.startswith("replay-")
     assert configs[0].generated_at.tzinfo is not None
+
+
+def test_entry_policy_observation_report_command_writes_alert_report(
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "entry-policy.jsonl"
+    input_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "observed_at": "2026-07-03T00:00:15+00:00",
+                "bucket_start": "2026-07-03T00:00:00+00:00",
+                "bucket_end": "2026-07-03T00:00:15+00:00",
+                "environment": "research",
+                "symbol": "BTCUSDT",
+                "source_trace_id": "paper-entry:BTCUSDT:2026-07-03T00:00:00+00:00",
+                "summary": {
+                    "candidates": 2,
+                    "matched": 1,
+                    "mismatched": 1,
+                    "legacy_eligible": 2,
+                    "policy_eligible": 1,
+                    "reduce_only_skipped": 0,
+                    "policy_reasons": {"ema_stale": 1},
+                    "mismatch_reasons": {"ema_stale": 1},
+                },
+                "comparison_detail_count": 1,
+                "comparisons_truncated": False,
+                "comparisons": [{}],
+            }
+        )
+        + "\n"
+    )
+    output_path = tmp_path / "observation-report.json"
+
+    result = runner.invoke(
+        main.app,
+        [
+            "entry-policy-observation-report",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--max-mismatches",
+            "0",
+            "--no-fail-on-alert",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "status=alert" in result.stdout
+    payload = json.loads(output_path.read_text())
+    assert payload["summary"]["mismatched"] == 1
+    assert payload["alert_reasons"]
+
+
+def test_replay_command_writes_entry_policy_comparison_report(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    states_root = tmp_path / "states"
+    states_root.mkdir()
+    output_path = tmp_path / "replay.json"
+    input_path = tmp_path / "policy-input.json"
+    compare_output = tmp_path / "entry-policy.json"
+    input_path.write_text("{}")
+    replay_report = SimpleNamespace(
+        input_state_count=5,
+        signals=(),
+        candidates=(),
+    )
+    comparison_report = SimpleNamespace(
+        summary={"matched": 2, "mismatched": 1},
+    )
+    request_marker = object()
+    comparison_calls: list[tuple[object, tuple[object, ...]]] = []
+    writes: list[tuple[object, Path]] = []
+
+    monkeypatch.setattr(
+        main,
+        "build_strategy_replay_report",
+        lambda *, state_paths, config: replay_report,
+    )
+    monkeypatch.setattr(
+        main,
+        "write_strategy_replay_report",
+        lambda report, path: None,
+    )
+
+    def fake_read_requests(*, input_path, candidates):
+        assert input_path == input_path_value
+        assert candidates == ()
+        return (request_marker,)
+
+    input_path_value = input_path
+    monkeypatch.setattr(
+        main,
+        "read_entry_policy_comparison_requests",
+        fake_read_requests,
+    )
+
+    def fake_build_comparison(*, replay_report, requests):
+        comparison_calls.append((replay_report, requests))
+        return comparison_report
+
+    monkeypatch.setattr(main, "build_entry_policy_replay_report", fake_build_comparison)
+
+    def fake_write_comparison(report, path):
+        writes.append((report, path))
+
+    monkeypatch.setattr(main, "write_entry_policy_replay_report", fake_write_comparison)
+
+    result = runner.invoke(
+        main.app,
+        [
+            "replay",
+            "--strategy",
+            "compression_breakout",
+            "--states-root",
+            str(states_root),
+            "--output",
+            str(output_path),
+            "--entry-policy-compare-only",
+            "--entry-policy-compare-input",
+            str(input_path),
+            "--entry-policy-compare-output",
+            str(compare_output),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert comparison_calls == [(replay_report, (request_marker,))]
+    assert writes == [(comparison_report, compare_output)]
+    assert (
+        "Entry Policy comparison completed: matched=2 mismatched=1"
+        in result.stdout
+    )
 
 
 def test_paper_command_writes_report(tmp_path: Path, monkeypatch) -> None:
@@ -471,7 +609,31 @@ def test_paper_live_daemon_requires_database_url(monkeypatch) -> None:
     assert "--database-url or CML_DATABASE_URL is required" in result.output
 
 
-def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
+def test_paper_live_daemon_compare_output_requires_compare_only(
+    tmp_path: Path,
+) -> None:
+    result = runner.invoke(
+        main.app,
+        [
+            "paper-live-daemon",
+            "--strategy",
+            "compression_breakout",
+            "--database-url",
+            "postgresql+asyncpg://cml:cml@localhost:54329/cml",
+            "--entry-policy-compare-output",
+            str(tmp_path / "entry-policy.jsonl"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "requires" in result.output
+    assert "--entry-policy-compare-only" in result.output
+
+
+def test_paper_live_daemon_builds_daemon_config(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     calls: list[dict[str, object]] = []
     source_calls: list[object] = []
     repository = object()
@@ -531,6 +693,9 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
             "90",
             "--entry-max-cluster-trade-count",
             "1000",
+            "--entry-policy-compare-only",
+            "--entry-policy-compare-output",
+            str(tmp_path / "entry-policy.jsonl"),
             "--max-states",
             "3",
             "--idle-timeout-seconds",
@@ -553,6 +718,9 @@ def test_paper_live_daemon_builds_daemon_config(monkeypatch) -> None:
     assert config.max_market_state_age_seconds == 90
     assert config.execution.latency_buckets == 0
     assert config.entry_filter.max_cluster_trade_count == 1000
+    assert config.entry_policy_compare_only is True
+    assert calls[0]["entry_policy_comparison_observer"] is not None
+    assert (tmp_path / "entry-policy.jsonl").exists()
     assert source_calls[0]["start_at"] == datetime(
         2026, 7, 4, 0, 5, tzinfo=UTC
     )

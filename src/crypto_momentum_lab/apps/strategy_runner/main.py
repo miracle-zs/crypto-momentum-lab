@@ -32,10 +32,14 @@ from crypto_momentum_lab.strategy_runner import (
     AsyncPostgresRuntimeStateLoader,
     BinanceRestClosedCandle15mSource,
     ClosedCandleEmaProvider,
+    EntryPolicyReplayError,
     InMemoryPaperMarketStateSource,
     PairedPaperLiveAccount,
     PaperEntryFilterConfig,
     PaperEntryFilterContext,
+    PaperEntryPolicyComparisonJsonlSink,
+    PaperEntryPolicyObservationError,
+    PaperEntryPolicyObservationThreshold,
     PaperExitConfig,
     PaperExitMode,
     PaperLiveDaemonConfig,
@@ -46,10 +50,16 @@ from crypto_momentum_lab.strategy_runner import (
     ReplayConfig,
     ReplayExecutionConfig,
     SimulatedFillStatus,
+    build_entry_policy_replay_report,
     build_strategy_replay_report,
+    read_entry_policy_comparison_requests,
+    read_paper_entry_policy_observations,
     run_paired_paper_live_daemon,
     run_paper_live_daemon,
     run_paper_trading,
+    summarize_paper_entry_policy_observations,
+    write_entry_policy_replay_report,
+    write_paper_entry_policy_observation_report,
     write_paper_trading_report,
     write_strategy_replay_report,
 )
@@ -153,7 +163,57 @@ def replay_command(
         str,
         typer.Option("--slippage-bps"),
     ] = "0",
+    reset_on_gap: Annotated[
+        bool,
+        typer.Option(
+            "--reset-on-gap/--no-reset-on-gap",
+            help=(
+                "Reset per-symbol strategy warmup after a gap larger than "
+                "the strategy max gap (matches Paper daemon semantics)."
+            ),
+        ),
+    ] = True,
+    entry_policy_compare_only: Annotated[
+        bool,
+        typer.Option(
+            "--entry-policy-compare-only/--no-entry-policy-compare-only",
+            help=(
+                "Compare prepared legacy-vs-Policy inputs without changing "
+                "replay fills."
+            ),
+        ),
+    ] = False,
+    entry_policy_compare_input: Annotated[
+        Path | None,
+        typer.Option(
+            "--entry-policy-compare-input",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="JSON Policy input rows keyed by replay candidate_id.",
+        ),
+    ] = None,
+    entry_policy_compare_output: Annotated[
+        Path | None,
+        typer.Option(
+            "--entry-policy-compare-output",
+            dir_okay=False,
+            help="JSON compare-only report output path.",
+        ),
+    ] = None,
 ) -> None:
+    if entry_policy_compare_only and entry_policy_compare_input is None:
+        raise typer.BadParameter(
+            "--entry-policy-compare-only requires --entry-policy-compare-input"
+        )
+    if not entry_policy_compare_only and (
+        entry_policy_compare_input is not None
+        or entry_policy_compare_output is not None
+    ):
+        raise typer.BadParameter(
+            "Policy compare input/output require --entry-policy-compare-only"
+        )
     created_at = _parse_generated_at(generated_at)
     execution = (
         ReplayExecutionConfig(
@@ -181,6 +241,7 @@ def replay_command(
         candidate_ttl_buckets=candidate_ttl_buckets,
         signal_interval_seconds=signal_interval_seconds,
         execution=execution,
+        reset_on_gap=reset_on_gap,
     )
     report = build_strategy_replay_report(
         state_paths=(states_root,),
@@ -209,6 +270,111 @@ def replay_command(
             f"total_cost={total_cost}"
         )
     typer.echo(output_path.as_posix())
+    if entry_policy_compare_only:
+        if entry_policy_compare_input is None:
+            raise AssertionError("comparison input validated above")
+        try:
+            requests = read_entry_policy_comparison_requests(
+                input_path=entry_policy_compare_input,
+                candidates=report.candidates,
+            )
+            comparison_report = build_entry_policy_replay_report(
+                replay_report=report,
+                requests=requests,
+            )
+        except EntryPolicyReplayError as error:
+            raise typer.BadParameter(
+                str(error),
+                param_hint="--entry-policy-compare-input",
+            ) from error
+        comparison_output = entry_policy_compare_output or output_path.with_name(
+            f"{output_path.stem}-entry-policy.json"
+        )
+        write_entry_policy_replay_report(comparison_report, comparison_output)
+        typer.echo(
+            "Entry Policy comparison completed: "
+            f"matched={comparison_report.summary['matched']} "
+            f"mismatched={comparison_report.summary['mismatched']}"
+        )
+        typer.echo(comparison_output.as_posix())
+
+
+@app.command("entry-policy-observation-report")
+def entry_policy_observation_report_command(
+    input_path: Annotated[
+        Path,
+        typer.Option(
+            "--input",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Paper compare-only observation JSONL file.",
+        ),
+    ],
+    output_path: Annotated[
+        Path,
+        typer.Option(
+            "--output",
+            dir_okay=False,
+            help="Aggregated observation report JSON output path.",
+        ),
+    ],
+    max_mismatches: Annotated[
+        int,
+        typer.Option(
+            "--max-mismatches",
+            min=0,
+            help="Maximum mismatched candidates allowed in the window.",
+        ),
+    ] = 0,
+    max_mismatch_rate: Annotated[
+        str,
+        typer.Option(
+            "--max-mismatch-rate",
+            help="Maximum mismatch ratio in [0, 1] allowed in the window.",
+        ),
+    ] = "0",
+    fail_on_alert: Annotated[
+        bool,
+        typer.Option(
+            "--fail-on-alert/--no-fail-on-alert",
+            help="Exit with code 2 when the aggregated window is in alert.",
+        ),
+    ] = False,
+) -> None:
+    try:
+        threshold = PaperEntryPolicyObservationThreshold(
+            max_mismatches=max_mismatches,
+            max_mismatch_rate=Decimal(max_mismatch_rate),
+        )
+    except (InvalidOperation, ValueError) as error:
+        raise typer.BadParameter(
+            f"invalid observation threshold: {error}",
+            param_hint="--max-mismatch-rate",
+        ) from error
+    try:
+        records = read_paper_entry_policy_observations(input_path)
+    except PaperEntryPolicyObservationError as error:
+        raise typer.BadParameter(
+            str(error),
+            param_hint="--input",
+        ) from error
+    report = summarize_paper_entry_policy_observations(
+        records,
+        threshold=threshold,
+    )
+    write_paper_entry_policy_observation_report(report, output_path)
+    typer.echo(
+        "Entry Policy observation report: "
+        f"records={report.record_count} "
+        f"candidates={report.summary.candidates} "
+        f"mismatched={report.summary.mismatched} "
+        f"status={report.status}"
+    )
+    typer.echo(output_path.as_posix())
+    if report.alert_reasons and fail_on_alert:
+        raise typer.Exit(code=2)
 
 
 @app.command("paper")
@@ -672,6 +838,27 @@ def paper_live_daemon_command(
             help="Require the entry price to be strictly above the closed 15m EMA10.",
         ),
     ] = False,
+    entry_policy_compare_only: Annotated[
+        bool,
+        typer.Option(
+            "--entry-policy-compare-only/--no-entry-policy-compare-only",
+            help=(
+                "Record legacy-vs-Policy entry differences without changing "
+                "paper fills."
+            ),
+        ),
+    ] = False,
+    entry_policy_compare_output: Annotated[
+        Path | None,
+        typer.Option(
+            "--entry-policy-compare-output",
+            dir_okay=False,
+            help=(
+                "Append bounded compare-only observations to this JSONL file. "
+                "Requires --entry-policy-compare-only."
+            ),
+        ),
+    ] = None,
     max_states: Annotated[
         int,
         typer.Option("--max-states", min=1),
@@ -705,6 +892,11 @@ def paper_live_daemon_command(
         typer.Option("--require-market-quote/--allow-close-fallback"),
     ] = False,
 ) -> None:
+    if entry_policy_compare_output is not None and not entry_policy_compare_only:
+        raise typer.BadParameter(
+            "--entry-policy-compare-output requires "
+            "--entry-policy-compare-only"
+        )
     resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
     if not resolved_database_url:
         raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
@@ -788,7 +980,18 @@ def paper_live_daemon_command(
         )
         else nullcontext(None)
     )
-    with candle_source_context as candle_source:
+    comparison_sink_context = (
+        PaperEntryPolicyComparisonJsonlSink(
+            entry_policy_compare_output,
+            run_id=resolved_run_id,
+        )
+        if entry_policy_compare_output is not None
+        else nullcontext(None)
+    )
+    with (
+        candle_source_context as candle_source,
+        comparison_sink_context as comparison_sink,
+    ):
         if entry_price_above_ema5 or entry_price_above_ema10:
             if candle_source is None:
                 raise RuntimeError(
@@ -824,6 +1027,9 @@ def paper_live_daemon_command(
                 entry_price=entry_price,
                 ema5=ema_snapshot.ema5,
                 ema10=ema_snapshot.ema10,
+                ema_observed_at=ema_snapshot.observed_at,
+                ema_snapshot_id=ema_snapshot.snapshot_id,
+                ema_config_hash=ema_snapshot.config_hash,
             )
 
         result = run_paper_live_daemon(
@@ -855,6 +1061,7 @@ def paper_live_daemon_command(
                     candle_grace_profit_pct=Decimal(candle_grace_profit_pct),
                 ),
                 entry_filter=entry_filter,
+                entry_policy_compare_only=entry_policy_compare_only,
             ),
             clock=clock,
             entry_symbol_loader=entry_symbol_loader,
@@ -864,12 +1071,20 @@ def paper_live_daemon_command(
                 if ema_provider is not None
                 else None
             ),
+            entry_policy_comparison_observer=(
+                None if comparison_sink is None else comparison_sink
+            ),
         )
     typer.echo(
         "Paper live daemon completed: "
         f"states={result.processed_state_count} "
         f"halt={result.halt_reason or 'none'}"
     )
+    if entry_policy_compare_output is not None:
+        typer.echo(
+            "Entry Policy observations written: "
+            f"{entry_policy_compare_output.as_posix()}"
+        )
 
 
 @app.command("paper-live-pair")
