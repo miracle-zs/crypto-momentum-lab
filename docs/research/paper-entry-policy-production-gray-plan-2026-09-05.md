@@ -28,6 +28,9 @@ Live 与未纳入灰度的服务必须保持默认关闭：
   `candidates=15, matched=15, mismatched=0`；EMA Paper 覆盖
   `11:24:45–11:58:30 UTC`，累计 `candidates=10, matched=10, mismatched=0`，
   两份严格报告仍为 `status=ok`、退出码 0。
+- 阶段 C 只读预验收：Live 最新对账为 `status=ready`、`mismatch_count=0`，执行账户进程为
+  `ready_readonly`；活动 lease 为 1 个。最近 2 小时的 exchange order event 审计持续存在，
+  未见待处理队列或 pending fill；Live/执行账户容器仍 `running/0/healthy`。
 - 两个灰度容器均 `running/0/healthy`；观测写入独立 JSONL，不改变 Paper simulated fill 或
   Live submit/cancel 路径。
 
