@@ -859,7 +859,9 @@ class DashboardQueries:
                         None if process is None else process.occurred_at
                     ),
                     strategy_name=(
-                        None if strategy is None else strategy.strategy_name
+                        strategy.strategy_name
+                        if strategy is not None
+                        else None if lease is None else lease.strategy_name
                     ),
                     strategy_state=(
                         None if strategy is None else strategy.state
