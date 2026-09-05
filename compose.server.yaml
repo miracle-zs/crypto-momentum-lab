@@ -506,6 +506,8 @@ services:
       BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY:-}
       BINANCE_TRADE_API_SECRET: ${BINANCE_TRADE_API_SECRET:-}
       CML_HEALTHCHECK_RUN_ID: ${CML_LIVE_SESSION_ID:-live-primary-v1}
+      CML_LIVE_ENTRY_POLICY_MODE: ${CML_LIVE_ENTRY_POLICY_MODE:-enforce}
+      CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT: ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-10}
       CML_MARKET_STATE_HUB_URL: ${CML_MARKET_STATE_HUB_URL:-ws://market-data:8766}
       CML_MARKET_QUOTE_HUB_URL: ${CML_MARKET_QUOTE_HUB_URL:-ws://market-data:8768}
       CML_ACCOUNT_EVENT_HUB_URL: ${CML_ACCOUNT_EVENT_HUB_URL:-ws://execution-account-live:8767}
@@ -551,6 +553,7 @@ services:
       - --no-entry-price-above-ema5
       - --no-entry-price-above-ema10
       - --entry-policy-enforce
+      - --acknowledge-missing-shadow-preflight
       - --entry-leverage
       - ${CML_LIVE_ENTRY_LEVERAGE:-5}
       # Production rollout explicitly retains only auditable write boundaries.

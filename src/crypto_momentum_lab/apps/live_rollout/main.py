@@ -8,7 +8,7 @@ from collections.abc import (
     Callable,
     Collection,
 )
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -199,6 +199,7 @@ app = typer.Typer(no_args_is_help=True)
 log = structlog.get_logger()
 _PREPARE_CONFIRMATION = "PREPARE LIVE RISK GATES"
 _RESOLVE_MISSING_ORDER_CONFIRMATION = "RESOLVE MISSING LIVE ORDER"
+_LIVE_ENTRY_POLICY_MODES = frozenset({"legacy", "compare_only", "enforce"})
 # These two columns are retained by the existing risk-config schema for paper
 # and shadow sessions. Live execution no longer enforces state-age limits; the
 # large compatibility value makes that explicit without a destructive schema
@@ -221,6 +222,22 @@ _LIVE_ENTRY_ORDER_TYPE = EntryType.LIMIT
 _LIVE_ENTRY_LIMIT_TTL_SECONDS = 900
 _LIVE_ORDERFLOW_MIN_AGGRESSIVE_IMBALANCE = Decimal("0.40")
 _LIVE_MARKET_WEBSOCKET_URL = "wss://fstream.binance.com/market/ws"
+
+
+@dataclass(frozen=True, slots=True)
+class _PreflightRuntimeStrategyConfig:
+    """Runtime strategy inputs used by the preflight hash diagnostic."""
+
+    entry_positive_gainer_top_count: int
+    require_price_above_ema5: bool
+    require_price_above_ema10: bool
+    entry_policy_mode: str
+    entry_order_type: EntryType
+    entry_limit_ttl_seconds: int
+
+    @property
+    def entry_policy_enforce(self) -> bool:
+        return self.entry_policy_mode == "enforce"
 
 
 class _LiveStartupRetryableError(RuntimeError):
@@ -720,6 +737,16 @@ def run_command(
             help="Use the shared Policy for real entry eligibility decisions.",
         ),
     ] = False,
+    acknowledge_missing_shadow_preflight: Annotated[
+        bool,
+        typer.Option(
+            "--acknowledge-missing-shadow-preflight",
+            help=(
+                "Acknowledge the advisory when no matching completed Shadow "
+                "session exists."
+            ),
+        ),
+    ] = False,
     persist_exchange_operations: Annotated[
         str,
         typer.Option(
@@ -790,6 +817,7 @@ def run_command(
             entry_leverage=entry_leverage,
             entry_policy_compare_only=entry_policy_compare_only,
             entry_policy_enforce=entry_policy_enforce,
+            acknowledge_missing_shadow_preflight=acknowledge_missing_shadow_preflight,
             persist_exchange_operations=_parse_exchange_operations(
                 persist_exchange_operations
             ),
@@ -1352,6 +1380,7 @@ async def _run_live_daemon(
     persist_exchange_operations: Collection[str] | None = None,
     entry_policy_compare_only: bool = False,
     entry_policy_enforce: bool = False,
+    acknowledge_missing_shadow_preflight: bool = False,
     market_websocket_url: str = _LIVE_MARKET_WEBSOCKET_URL,
 ) -> LiveDaemonResult:
     account_snapshot_available = True
@@ -1602,6 +1631,7 @@ async def _run_live_daemon(
             strategy_config_hash=strategy_config_hash,
             account_label=account_label,
             session_id=session_id,
+            acknowledged=acknowledge_missing_shadow_preflight,
         )
 
         strategy = build_runtime_strategy(
@@ -2948,6 +2978,7 @@ async def _warn_if_shadow_preflight_missing(
     strategy_config_hash: str,
     account_label: str,
     session_id: str,
+    acknowledged: bool = False,
 ) -> None:
     if await _has_matching_shadow_session(
         factory,
@@ -2955,13 +2986,16 @@ async def _warn_if_shadow_preflight_missing(
         strategy_config_hash=strategy_config_hash,
     ):
         return
-    log.warning(
-        "live_shadow_preflight_missing",
-        account_label=account_label,
-        session_id=session_id,
-        strategy_name=strategy_name,
-        strategy_config_hash=strategy_config_hash,
-    )
+    details = {
+        "account_label": account_label,
+        "session_id": session_id,
+        "strategy_name": strategy_name,
+        "strategy_config_hash": strategy_config_hash,
+    }
+    if acknowledged:
+        log.info("live_shadow_preflight_missing_acknowledged", **details)
+    else:
+        log.warning("live_shadow_preflight_missing", **details)
 
 
 async def _session_is_draining(
@@ -3376,7 +3410,25 @@ async def _preflight_summary(
         )
         unresolved = await PostgresOrderRepository(factory).load_unresolved_orders()
         risk_config = await _latest_risk_config(factory, account_label)
-        runtime_strategy_config_hash = _live_strategy_config_hash(strategy_name)
+        runtime_config = _preflight_runtime_strategy_config()
+        runtime_strategy_config_hash = _live_strategy_config_hash(
+            strategy_name,
+            entry_positive_gainer_top_count=(
+                runtime_config.entry_positive_gainer_top_count
+            ),
+            require_price_above_ema5=runtime_config.require_price_above_ema5,
+            require_price_above_ema10=runtime_config.require_price_above_ema10,
+            entry_policy_enforce=runtime_config.entry_policy_enforce,
+            entry_order_type=runtime_config.entry_order_type,
+            entry_limit_ttl_seconds=runtime_config.entry_limit_ttl_seconds,
+        )
+        configured_strategy_config_hash = (
+            os.environ.get("CML_LIVE_STRATEGY_CONFIG_HASH", "").strip()
+            or None
+        )
+        approved_strategy_config_hash = (
+            None if approval is None else approval.strategy_config_hash
+        )
         return {
             "approval_present": approval is not None,
             "lease_present": lease is not None,
@@ -3386,9 +3438,73 @@ async def _preflight_summary(
             "unresolved_order_count": len(unresolved),
             "risk_config_hash": risk_config.config_hash,
             "runtime_strategy_config_hash": runtime_strategy_config_hash,
+            "configured_strategy_config_hash": configured_strategy_config_hash,
+            "approved_strategy_config_hash": approved_strategy_config_hash,
+            "runtime_strategy_config_matches_configured": (
+                None
+                if configured_strategy_config_hash is None
+                else runtime_strategy_config_hash == configured_strategy_config_hash
+            ),
+            "runtime_strategy_config_matches_approval": (
+                None
+                if approved_strategy_config_hash is None
+                else runtime_strategy_config_hash == approved_strategy_config_hash
+            ),
+            "runtime_strategy_config_inputs": {
+                "entry_positive_gainer_top_count": (
+                    runtime_config.entry_positive_gainer_top_count
+                ),
+                "require_price_above_ema5": runtime_config.require_price_above_ema5,
+                "require_price_above_ema10": runtime_config.require_price_above_ema10,
+                "entry_policy_mode": runtime_config.entry_policy_mode,
+                "entry_order_type": runtime_config.entry_order_type.value,
+                "entry_limit_ttl_seconds": runtime_config.entry_limit_ttl_seconds,
+            },
         }
     finally:
         await engine.dispose()
+
+
+def _preflight_runtime_strategy_config() -> _PreflightRuntimeStrategyConfig:
+    """Resolve the Live hash inputs exposed to one-off preflight containers.
+
+    Compose passes the top-N and policy-mode values into the long-running Live
+    service environment.  The remaining values are the explicit production
+    defaults used by the service command.  Keeping this resolver beside the
+    diagnostic makes the reported hash explainable instead of silently using
+    the library defaults (which may describe a different lane).
+    """
+
+    raw_top_count = os.environ.get(
+        "CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT",
+        str(_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT),
+    ).strip()
+    try:
+        top_count = int(raw_top_count)
+    except ValueError as error:
+        raise ValueError(
+            "CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT must be an integer"
+        ) from error
+    if top_count <= 0:
+        raise ValueError("CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT must be positive")
+
+    policy_mode = (
+        os.environ.get("CML_LIVE_ENTRY_POLICY_MODE", "enforce").strip().lower()
+        or "enforce"
+    )
+    if policy_mode not in _LIVE_ENTRY_POLICY_MODES:
+        raise ValueError(
+            "CML_LIVE_ENTRY_POLICY_MODE must be one of: "
+            + ", ".join(sorted(_LIVE_ENTRY_POLICY_MODES))
+        )
+    return _PreflightRuntimeStrategyConfig(
+        entry_positive_gainer_top_count=top_count,
+        require_price_above_ema5=_LIVE_ENTRY_PRICE_ABOVE_EMA5,
+        require_price_above_ema10=_LIVE_ENTRY_PRICE_ABOVE_EMA10,
+        entry_policy_mode=policy_mode,
+        entry_order_type=_LIVE_ENTRY_ORDER_TYPE,
+        entry_limit_ttl_seconds=_LIVE_ENTRY_LIMIT_TTL_SECONDS,
+    )
 
 
 async def _approved_intent_notional(

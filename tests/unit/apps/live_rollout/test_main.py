@@ -175,6 +175,46 @@ def test_live_run_passes_entry_policy_enforce_to_daemon(monkeypatch) -> None:
     assert captured["entry_policy_enforce"] is True
 
 
+def test_live_run_passes_shadow_preflight_acknowledgment_to_daemon(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_run_live_daemon(**kwargs: object):
+        captured.update(kwargs)
+        return main.LiveDaemonResult(
+            processed_state_count=0,
+            approved_intent_count=0,
+            submitted_order_count=0,
+            halt_reason=None,
+            final_state_at=None,
+        )
+
+    async def fake_startup_backoff(run_once):
+        return await run_once()
+
+    monkeypatch.setattr(main, "_run_live_daemon", fake_run_live_daemon)
+    monkeypatch.setattr(
+        main,
+        "_run_with_live_startup_backoff",
+        fake_startup_backoff,
+    )
+    monkeypatch.setenv("BINANCE_TRADE_API_KEY", "test-key")
+    monkeypatch.setenv("BINANCE_TRADE_API_SECRET", "test-secret")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--acknowledge-missing-shadow-preflight",
+            "--i-understand-this-places-real-orders",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["acknowledge_missing_shadow_preflight"] is True
+
+
 def test_live_cli_legacy_credentials_require_explicit_fallback(monkeypatch) -> None:
     monkeypatch.delenv("BINANCE_TRADE_API_KEY", raising=False)
     monkeypatch.delenv("BINANCE_TRADE_API_SECRET", raising=False)
@@ -311,6 +351,28 @@ def test_live_defaults_disable_ema_and_use_lower_orderflow_imbalance() -> None:
     assert main._live_strategy_config()[
         "order_flow_impulse_min_aggressive_imbalance"
     ] == Decimal("0.40")
+
+
+def test_preflight_runtime_strategy_config_reads_live_lane_environment(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT", "10")
+    monkeypatch.setenv("CML_LIVE_ENTRY_POLICY_MODE", "enforce")
+
+    config = main._preflight_runtime_strategy_config()
+
+    assert config.entry_positive_gainer_top_count == 10
+    assert config.entry_policy_mode == "enforce"
+    assert config.entry_policy_enforce is True
+
+
+def test_preflight_runtime_strategy_config_rejects_unknown_policy_mode(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CML_LIVE_ENTRY_POLICY_MODE", "unexpected")
+
+    with pytest.raises(ValueError, match="CML_LIVE_ENTRY_POLICY_MODE"):
+        main._preflight_runtime_strategy_config()
 
 
 def test_unlimited_cli_values_map_to_absent_capacity_limits() -> None:
@@ -629,6 +691,58 @@ async def test_missing_shadow_preflight_only_logs_a_warning(
     assert warnings == [
         (
             "live_shadow_preflight_missing",
+            {
+                "account_label": "primary",
+                "session_id": "live-1",
+                "strategy_name": "orderflow_impulse",
+                "strategy_config_hash": "a" * 64,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_acknowledged_missing_shadow_preflight_logs_info(
+    monkeypatch,
+) -> None:
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def scalar(self, _statement):
+            return None
+
+    class FakeFactory:
+        def __call__(self):
+            return FakeSession()
+
+    events = []
+
+    class FakeLogger:
+        def info(self, event, **kwargs):
+            events.append(("info", event, kwargs))
+
+        def warning(self, event, **kwargs):
+            events.append(("warning", event, kwargs))
+
+    monkeypatch.setattr(main, "log", FakeLogger())
+
+    await main._warn_if_shadow_preflight_missing(
+        FakeFactory(),
+        strategy_name="orderflow_impulse",
+        strategy_config_hash="a" * 64,
+        account_label="primary",
+        session_id="live-1",
+        acknowledged=True,
+    )
+
+    assert events == [
+        (
+            "info",
+            "live_shadow_preflight_missing_acknowledged",
             {
                 "account_label": "primary",
                 "session_id": "live-1",
