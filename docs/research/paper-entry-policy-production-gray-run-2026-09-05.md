@@ -43,6 +43,18 @@ EMA 报告中的 `ema_filter_failed` 只是 Policy reason 统计，不是 mismat
 仍为 `9ce5fb3`、均 `running/0/healthy`；Live strategy 和 execution-account-live 仍为
 `fa991f6`、均 `running/0/healthy`。
 
+## 阶段 C 只读预验收
+
+服务器聚合检查显示：Live 最新 `account_reconciliation_runs` 为 `status=ready`、
+`mismatch_count=0`，包含 11 个 balance snapshot、0 个 position/open-order mismatch；
+`execution_account_process_states` 最新为 `ready_readonly`，活动 `trading_lease` 为 1 个。
+最近 2 小时的 exchange order event 仍有 submitting/acknowledged/filled/canceled 生命周期记录，
+执行账户健康日志的 queue 和 pending fill 均为 0。期间出现过 account event hub 的短暂重连，
+但随后恢复并持续输出健康状态；这不是 compare-only 容器引起的重启。
+
+此前将 `status=ready` 与观测报告的 `status=ok` 混为一谈是查询口径错误，已修正；真正的
+对账差异字段为 `mismatch_count`，当前为 0。
+
 ## 下一步与回滚
 
 阶段 B 已通过一个完整周期及延长基线的观测门槛，下一步是人工验收并决定是否扩大 Paper
