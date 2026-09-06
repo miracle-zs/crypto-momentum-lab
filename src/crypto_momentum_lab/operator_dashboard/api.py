@@ -23,6 +23,8 @@ from crypto_momentum_lab.operator_dashboard.queries import (
 )
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
+    LiveAccountMetricsResponse,
+    LiveAccountsResponse,
     PaperAccountHistoryResponse,
     PaperAccountsEquityResponse,
     PaperAccountsResponse,
@@ -172,7 +174,18 @@ class DashboardQueryProtocol(Protocol):
         full: bool = False,
     ) -> PaperAccountHistoryResponse: ...
 
-    async def account(self, equity_range: str = "24h") -> AccountOverviewResponse: ...
+    async def account(
+        self,
+        equity_range: str = "24h",
+        account_label: str | None = None,
+    ) -> AccountOverviewResponse: ...
+
+    async def live_accounts(self) -> LiveAccountsResponse: ...
+
+    async def live_account_metrics(
+        self,
+        equity_range: str = "24h",
+    ) -> LiveAccountMetricsResponse: ...
 
     async def risk_execution(self) -> RiskExecutionResponse: ...
 
@@ -399,16 +412,65 @@ def create_dashboard_app(
     )
     async def account(
         equity_range: Literal["24h", "7d", "30d", "1y"] = "24h",
+        account_label: str | None = None,
     ) -> AccountOverviewResponse:
         try:
+            cache_key = f"account:{account_label or 'latest'}:{equity_range}"
+
+            async def load_account() -> AccountOverviewResponse:
+                if account_label is None:
+                    return await query_service().account(equity_range)
+                return await query_service().account(
+                    equity_range,
+                    account_label=account_label,
+                )
+
             return await response_cache.get(
-                f"account:{equity_range}",
-                lambda: query_service().account(equity_range),
+                cache_key,
+                load_account,
             )
         except TimeoutError as exc:
             raise HTTPException(
                 status_code=504,
                 detail="dashboard account query timed out",
+            ) from exc
+
+    @dashboard.get(
+        "/api/live-accounts",
+        response_model=LiveAccountsResponse,
+        dependencies=[Depends(require_dashboard_auth)],
+    )
+    async def live_accounts() -> LiveAccountsResponse:
+        try:
+            return await response_cache.get(
+                "live-accounts",
+                query_service().live_accounts,
+            )
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=504,
+                detail="dashboard live account query timed out",
+            ) from exc
+
+    @dashboard.get(
+        "/api/live-account-metrics",
+        response_model=LiveAccountMetricsResponse,
+        dependencies=[Depends(require_dashboard_auth)],
+    )
+    async def live_account_metrics(
+        equity_range: Literal["24h", "7d", "30d", "1y"] = "24h",
+    ) -> LiveAccountMetricsResponse:
+        try:
+            return await response_cache.get(
+                f"live-account-metrics:{equity_range}",
+                lambda: query_service().live_account_metrics(equity_range),
+                ttl_seconds=_PAPER_EQUITY_CACHE_TTL_SECONDS,
+                stale_while_revalidate_seconds=_PAPER_EQUITY_STALE_GRACE_SECONDS,
+            )
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=504,
+                detail="dashboard live account metrics query timed out",
             ) from exc
 
     @dashboard.get(

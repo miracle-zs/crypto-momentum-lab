@@ -2,6 +2,7 @@ import {
   DEFAULT_EQUITY_BUCKET_SECONDS,
   DISPLAY_TIME_ZONE_LABEL,
 } from "../dashboard-config.js";
+import { replaceChildrenFromHtml } from "../dashboard-dom.js";
 import {
   asNumber,
   dayTime,
@@ -17,11 +18,16 @@ import {
   signedMoney,
   signedPercent,
 } from "../dashboard-formatters.js";
-import { accountWindowDelta, equityChart } from "../dashboard-charts.js";
+import {
+  accountWindowDelta,
+  equityChart,
+  liveAccountMetricChart,
+} from "../dashboard-charts.js";
 import {
   blockTitle,
   dataTable,
   disclosure,
+  emptyBox,
   pill,
   sideTag,
   signalEvidence,
@@ -34,6 +40,81 @@ const ACCOUNT_EQUITY_RANGES = [
   { key: "30d", label: "1月", shortLabel: "30D" },
   { key: "1y", label: "1年", shortLabel: "1Y" },
 ];
+
+const LIVE_ACCOUNT_METRIC_DEFINITIONS = [
+  {
+    key: "equity",
+    title: "资金权益金额变化",
+    subtitle: "USDT · 实际账户权益",
+  },
+  {
+    key: "equity_change_ratio",
+    title: "资金权益比例变化",
+    subtitle: "首个可用权益点 = 0%",
+  },
+  {
+    key: "margin_used",
+    title: "保证金占用金额对比",
+    subtitle: "USDT · 按名义价值 / 杠杆估算",
+  },
+  {
+    key: "margin_occupancy_ratio",
+    title: "保证金占用比例对比",
+    subtitle: "保证金占用 / 账户权益",
+  },
+  {
+    key: "drawdown",
+    title: "回撤金额对比",
+    subtitle: "USDT · 窗口内峰值到当前，负值表示回撤",
+  },
+  {
+    key: "drawdown_ratio",
+    title: "回撤比例对比",
+    subtitle: "窗口内峰值到当前，负值表示回撤",
+  },
+];
+
+function liveMetricsRangeControls(selectedRange) {
+  return `<span class="account-equity-actions">
+    <span class="equity-range-switch" role="group" aria-label="四账户时序时间范围">
+      ${ACCOUNT_EQUITY_RANGES.map((option) => `<button type="button" data-live-account-metrics-range="${option.key}" aria-pressed="${option.key === selectedRange ? "true" : "false"}" title="查看最近${option.label}的四账户时序">${option.label}</button>`).join("")}
+    </span>
+  </span>`;
+}
+
+export function renderLiveAccountMetrics(data) {
+  const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
+  const selectedRange = ACCOUNT_EQUITY_RANGES.find(
+    (option) => option.key === data?.equity_range,
+  ) || ACCOUNT_EQUITY_RANGES[0];
+  const interval = asNumber(data?.equity_sample_interval_seconds)
+    || DEFAULT_EQUITY_BUCKET_SECONDS;
+  const charts = LIVE_ACCOUNT_METRIC_DEFINITIONS.map((definition) => `
+    <article class="live-metric-card">
+      <div class="live-metric-card-head">
+        <div><span class="section-kicker">LIVE ACCOUNT FLEET</span><h4>${esc(definition.title)}</h4><p>${esc(definition.subtitle)}</p></div>
+      </div>
+      ${liveAccountMetricChart(
+        accounts,
+        definition.key,
+        `live-account-metric-${definition.key}`,
+        definition.title,
+        `${definition.title}，四个实盘账户对比`,
+        interval,
+        data?.equity_window_start,
+        data?.equity_window_end,
+      )}
+    </article>`).join("");
+  const windowText = data?.equity_window_start && data?.equity_window_end
+    ? `${selectedRange.key === "1y" ? fullDateTime(data.equity_window_start) : dayTime(data.equity_window_start)} → ${selectedRange.key === "1y" ? fullDateTime(data.equity_window_end) : dayTime(data.equity_window_end)} ${DISPLAY_TIME_ZONE_LABEL}`
+    : "等待时间窗口";
+  return `<div class="block live-account-metrics-block" data-live-account-metrics-selected="${selectedRange.key}">
+    ${blockTitle("四账户资金与风险时序", `LIVE ACCOUNT METRICS · ROLLING ${selectedRange.shortLabel} · ${equitySampleLabel(interval)} BUCKETS`, liveMetricsRangeControls(selectedRange.key))}
+    <div class="live-metrics-context"><span>${esc(windowText)}</span><span>${accounts.length} 个账户 · ${interval >= 86400 ? `${Math.round(interval / 86400)} 天` : `${Math.round(interval / 60)} 分钟`}采样</span></div>
+    <p class="live-metrics-note">权益比例以窗口首个可用权益点为基准；保证金占用按各时点持仓名义价值除以杠杆汇总，回撤金额与比例均相对窗口内历史峰值计算。</p>
+    <div class="live-metrics-grid">${charts}</div>
+  </div>`;
+}
 
 function equitySampleLabel(seconds) {
   const value = asNumber(seconds) || DEFAULT_EQUITY_BUCKET_SECONDS;
@@ -364,4 +445,297 @@ export function renderAccount(data) {
     ${disclosure("当前挂单", "OPEN ORDERS · EXCHANGE SOURCE OF TRUTH", ordersTable, `<strong class="num">${openOrders.length}</strong>`, { open: openOrders.length > 0, stateKey: "account-open-orders" })}
     ${disclosure("最近成交订单", "RECENT TRADES · ONE ORDER PER ROW", fillsTable, `<strong class="num">${fills.length}</strong>`, { stateKey: "account-fills" })}`;
   return [data.status, body];
+}
+
+let selectedLiveAccount = "primary";
+let liveAccountDetailRequest = 0;
+let selectedLiveAccountMetricsRange = "24h";
+let liveAccountMetricsRequest = 0;
+
+async function defaultAccountRequestJson(url) {
+  const response = await fetch(url, {
+    headers: { "Accept": "application/json" },
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+function liveAccountStatusLabel(status) {
+  const normalized = String(status || "UNKNOWN").toUpperCase();
+  return normalized === "READY"
+    ? "正常"
+    : normalized === "HALTED"
+      ? "已停止"
+      : "待确认";
+}
+
+function liveAccountStatusClass(status) {
+  const normalized = String(status || "UNKNOWN").toUpperCase();
+  return normalized === "READY"
+    ? "status-READY"
+    : normalized === "HALTED"
+      ? "status-HALTED"
+      : "status-UNKNOWN";
+}
+
+function accountFleetMetric(accounts, key) {
+  return accounts.reduce(
+    (total, account) => total + (asNumber(account.summary?.[key]) || 0),
+    0,
+  );
+}
+
+function liveAccountCard(account, index, selectedLabel) {
+  const summary = account.summary || {};
+  const selected = account.account_label === selectedLabel;
+  const statusClass = liveAccountStatusClass(account.status);
+  const readiness = account.readiness || "待确认";
+  const strategy = account.strategy_name || "未关联策略";
+  const lease = account.lease_expires_at
+    ? `租约至 ${dayTime(account.lease_expires_at)}`
+    : "无有效租约";
+  const financialSnapshot = Object.keys(summary).length > 0;
+  const reconciliation = account.reconciliation || {};
+  const mismatchCount = asNumber(reconciliation.mismatch_count);
+  const reconciliationLabel = mismatchCount != null && mismatchCount > 0
+    ? `${mismatchCount} 项差异`
+    : String(reconciliation.status || "").toUpperCase() === "READY"
+      ? "对账一致"
+      : "对账待确认";
+  const secondary = financialSnapshot
+    ? `<span class="live-account-card-kpis">
+      <span><small>USDT 钱包</small><b class="num">${esc(money(summary.usdt_wallet_balance))}</b></span>
+      <span><small>可用余额</small><b class="num">${esc(money(summary.usdt_available_balance))}</b></span>
+      <span><small>未实现盈亏</small><b class="num ${pnlClass(summary.total_unrealized_pnl)}">${esc(signedMoney(summary.total_unrealized_pnl))}</b></span>
+      <span><small>名义价值</small><b class="num">${esc(money(summary.gross_position_notional))}</b></span>
+    </span>`
+    : `<span class="live-account-card-state-detail"><span>${esc(strategy)} · ${esc(account.strategy_state || "状态未知")}</span><span>${esc(readiness)} · ${esc(lease)}</span></span>`;
+  const footer = financialSnapshot
+    ? `${summary.position_count ?? 0} 个持仓 · ${summary.open_order_count ?? 0} 个挂单`
+    : "进入账户详情";
+  const cardState = financialSnapshot ? reconciliationLabel : readiness;
+  return `<button type="button" class="live-account-card${selected ? " is-selected" : ""}" data-live-account-label="${esc(account.account_label || "")}" role="tab" id="live-account-tab-${index}" aria-selected="${selected ? "true" : "false"}" aria-controls="live-account-detail" tabindex="${selected ? "0" : "-1"}">
+    <span class="live-account-card-head">
+      <span>
+        <span class="live-account-card-kicker">LIVE ${String(index + 1).padStart(2, "0")} · ${esc(String(account.environment || "LIVE").toUpperCase())}</span>
+        <strong>${esc(account.account_label || "交易所账户")}</strong>
+      </span>
+      <span class="live-account-card-status ${statusClass}">${esc(liveAccountStatusLabel(account.status))}</span>
+    </span>
+    <span class="live-account-card-state"><span>同步 <b>${esc(relToNow(account.observed_at))}</b></span><span>${esc(cardState)}</span></span>
+    ${secondary}
+    <span class="live-account-card-footer">${esc(footer)}<span aria-hidden="true">→</span></span>
+  </button>`;
+}
+
+function liveAccountSummary(accounts, overallStatus) {
+  const readyCount = accounts.filter((account) => String(account.status).toUpperCase() === "READY").length;
+  const haltedCount = accounts.filter((account) => String(account.status).toUpperCase() === "HALTED").length;
+  const reviewCount = accounts.length - readyCount - haltedCount;
+  const financialSnapshots = accounts.some((account) => account.summary);
+  const tiles = [
+    tile("实盘账户", `${accounts.length} 个`, "execution-account 独立状态"),
+    tile("正常账户", `${readyCount} 个`, "可继续观察"),
+    tile("停止账户", `${haltedCount} 个`, "需要检查"),
+    tile("待确认", `${reviewCount} 个`, "缺少可靠状态"),
+  ];
+  if (financialSnapshots) {
+    tiles.push(
+      tile("USDT 钱包合计", money(accountFleetMetric(accounts, "usdt_wallet_balance")), "账户快照合计", "hero"),
+      tile("总未实现盈亏", signedMoney(accountFleetMetric(accounts, "total_unrealized_pnl")), "账户群当前浮动盈亏", pnlClass(accountFleetMetric(accounts, "total_unrealized_pnl"))),
+    );
+  }
+  return `<div class="live-account-fleet-summary">
+    <div class="live-account-fleet-title">
+      <div>
+        <span class="section-kicker">O3 · ACCOUNT FLEET / LIVE</span>
+        <h3>${esc(accounts.length === 4 ? "四账户实盘总览" : `${accounts.length} 个实盘账户总览`)}</h3>
+        <p>四个账户共享同一 market-data，运行状态先集中判断；余额、持仓、挂单和权益在选中账户详情中核对。</p>
+      </div>
+      <div class="live-account-fleet-status"><small>账户群状态</small>${pill(overallStatus)}<span>${readyCount} 正常 · ${haltedCount} 停止 · ${reviewCount} 待确认</span></div>
+    </div>
+    <div class="tile-grid live-account-fleet-kpis">${tiles.join("")}</div>
+  </div>`;
+}
+
+export function renderLiveAccounts(data) {
+  const sourceAccounts = Array.isArray(data?.accounts) ? data.accounts : [];
+  const accounts = sourceAccounts.length
+    ? sourceAccounts
+    : (data?.account_label || data?.summary ? [data] : []);
+  if (!accounts.length) {
+    return [data?.status || "UNKNOWN", `<div class="live-account-empty">${emptyBox("等待实盘账户同步", "尚未发现 live execution-account；写入状态后会显示四账户矩阵。")}</div>`];
+  }
+  const requestedLabel = data?.selected_account_label;
+  if (requestedLabel && accounts.some((account) => account.account_label === requestedLabel)) {
+    selectedLiveAccount = requestedLabel;
+  }
+  if (!accounts.some((account) => account.account_label === selectedLiveAccount)) {
+    selectedLiveAccount = accounts[0].account_label;
+  }
+  const selectedAccount = accounts.find(
+    (account) => account.account_label === selectedLiveAccount,
+  ) || accounts[0];
+  const readyCount = accounts.filter((account) => String(account.status).toUpperCase() === "READY").length;
+  const haltedCount = accounts.filter((account) => String(account.status).toUpperCase() === "HALTED").length;
+  const reviewCount = accounts.length - readyCount - haltedCount;
+  const overallStatus = data?.status || (haltedCount ? "HALTED" : reviewCount ? "UNKNOWN" : "READY");
+  const hasFullSnapshot = Boolean(selectedAccount.summary || selectedAccount.balances);
+  const selectedDetail = hasFullSnapshot
+    ? renderAccount(selectedAccount)[1]
+    : `<div class="lazy-detail"><strong>账户详情加载中…</strong><small>${esc(selectedAccount.account_label || "交易所账户")} · 正在读取余额、持仓、挂单和权益。</small></div>`;
+  const cards = `<div class="live-account-grid" role="tablist" aria-label="实盘账户选择">${accounts.map((account, index) => liveAccountCard(account, index, selectedLiveAccount)).join("")}</div>`;
+  const detail = `<div id="live-account-detail" class="live-account-detail" data-live-account-detail role="tabpanel" aria-labelledby="live-account-tab-${accounts.indexOf(selectedAccount)}" data-account-label="${esc(selectedAccount.account_label || "")}">
+    <div class="live-account-detail-head">
+      <div><span class="section-kicker">SELECTED ACCOUNT</span><h3>${esc(selectedAccount.account_label || "交易所账户")}</h3><p>选择账户卡片切换详情；详情请求按账户和权益区间单独缓存。</p></div>
+      <div class="live-account-detail-status">${pill(selectedAccount.status)}<span>${esc(dayTime(selectedAccount.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</span></div>
+    </div>
+    ${selectedDetail}
+  </div>`;
+  const metrics = `<div data-live-account-metrics aria-live="polite">${emptyBox("加载四账户时序", "正在读取权益、保证金和回撤历史")}</div>`;
+  return [overallStatus, `<div class="live-account-fleet" data-live-account-directory>${liveAccountSummary(accounts, overallStatus)}${cards}${metrics}${detail}</div>`];
+}
+
+function setLiveAccountTabState(root, accountLabel) {
+  root.querySelectorAll("[data-live-account-label]").forEach((button) => {
+    const active = button.dataset.liveAccountLabel === accountLabel;
+    button.classList.toggle("is-selected", active);
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.setAttribute("tabindex", active ? "0" : "-1");
+  });
+}
+
+async function loadLiveAccountDetail(root, accountLabel, requestJson, equityRange = "24h") {
+  const slot = root.querySelector("[data-live-account-detail]");
+  if (!slot) return;
+  const selectedCard = [...root.querySelectorAll("[data-live-account-label]")]
+    .find((button) => button.dataset.liveAccountLabel === accountLabel);
+  const accountData = selectedCard ? (root.__liveAccountData || []).find(
+    (account) => account.account_label === accountLabel,
+  ) : null;
+  const requestId = ++liveAccountDetailRequest;
+  selectedLiveAccount = accountLabel;
+  setLiveAccountTabState(root, accountLabel);
+  slot.dataset.accountLabel = accountLabel;
+  slot.setAttribute("aria-busy", "true");
+  if (accountData?.summary || accountData?.balances) {
+    const [status, html] = renderAccount({ ...accountData, equity_range: equityRange });
+    replaceChildrenFromHtml(slot, html);
+    slot.dataset.accountStatus = status;
+    wireAccountEquityRanges(slot, (nextRange) => loadLiveAccountDetail(root, accountLabel, requestJson, nextRange));
+    slot.removeAttribute("aria-busy");
+    return;
+  }
+  replaceChildrenFromHtml(
+    slot,
+    `<div class="lazy-detail"><strong>账户详情加载中…</strong><small>${esc(accountLabel)} · 正在读取最新快照</small></div>`,
+  );
+  try {
+    const query = new URLSearchParams({
+      account_label: accountLabel,
+      equity_range: equityRange,
+    });
+    const detail = await requestJson(`api/account?${query.toString()}`);
+    if (requestId !== liveAccountDetailRequest || !slot.isConnected) return;
+    const [status, html] = renderAccount(detail);
+    replaceChildrenFromHtml(slot, html);
+    slot.dataset.accountStatus = status;
+    wireAccountEquityRanges(slot, (nextRange) => loadLiveAccountDetail(root, accountLabel, requestJson, nextRange));
+  } catch (error) {
+    if (requestId !== liveAccountDetailRequest || !slot.isConnected) return;
+    replaceChildrenFromHtml(slot, emptyBox("账户详情加载失败", `${accountLabel} · ${error.message}`));
+  } finally {
+    slot.removeAttribute("aria-busy");
+  }
+}
+
+function wireLiveAccountMetricsRanges(root, onSelect) {
+  root.querySelectorAll("[data-live-account-metrics-range]").forEach((button) => {
+    if (button.dataset.liveMetricsRangeWired === "true") return;
+    button.dataset.liveMetricsRangeWired = "true";
+    button.addEventListener("click", async () => {
+      if (button.getAttribute("aria-pressed") === "true") return;
+      const range = button.dataset.liveAccountMetricsRange;
+      if (!range) return;
+      const controls = root.querySelectorAll("[data-live-account-metrics-range]");
+      controls.forEach((control) => { control.disabled = true; });
+      root.querySelector(".live-account-metrics-block")?.classList.add("is-range-loading");
+      try {
+        selectedLiveAccountMetricsRange = range;
+        await onSelect(range);
+      } finally {
+        if (root.isConnected) {
+          root.querySelectorAll("[data-live-account-metrics-range]").forEach((control) => { control.disabled = false; });
+          root.querySelector(".live-account-metrics-block")?.classList.remove("is-range-loading");
+        }
+      }
+    });
+  });
+}
+
+async function loadLiveAccountMetrics(root, requestJson, equityRange) {
+  const slot = root.querySelector("[data-live-account-metrics]");
+  if (!slot) return;
+  const requestId = ++liveAccountMetricsRequest;
+  selectedLiveAccountMetricsRange = equityRange;
+  slot.setAttribute("aria-busy", "true");
+  replaceChildrenFromHtml(
+    slot,
+    `<div class="live-account-metrics-loading">${emptyBox("加载四账户时序", "正在读取权益、保证金和回撤历史")}</div>`,
+  );
+  try {
+    const query = new URLSearchParams({ equity_range: equityRange });
+    const data = await requestJson(`api/live-account-metrics?${query.toString()}`);
+    if (requestId !== liveAccountMetricsRequest || !slot.isConnected) return;
+    replaceChildrenFromHtml(slot, renderLiveAccountMetrics(data));
+    wireLiveAccountMetricsRanges(slot, (nextRange) => loadLiveAccountMetrics(root, requestJson, nextRange));
+  } catch (error) {
+    if (requestId !== liveAccountMetricsRequest || !slot.isConnected) return;
+    replaceChildrenFromHtml(
+      slot,
+      emptyBox("账户时序加载失败", `${equityRange} · ${error.message}`),
+    );
+  } finally {
+    if (requestId === liveAccountMetricsRequest && slot.isConnected) {
+      slot.removeAttribute("aria-busy");
+    }
+  }
+}
+
+export function wireLiveAccounts(root, data, { requestJson = defaultAccountRequestJson } = {}) {
+  const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
+  root.__liveAccountData = accounts;
+  root.querySelectorAll("[data-live-account-label]").forEach((button) => {
+    if (button.dataset.liveAccountWired === "true") return;
+    button.dataset.liveAccountWired = "true";
+    button.addEventListener("click", () => {
+      const accountLabel = button.dataset.liveAccountLabel;
+      if (accountLabel) void loadLiveAccountDetail(root, accountLabel, requestJson);
+    });
+    button.addEventListener("keydown", (event) => {
+      const buttons = [...root.querySelectorAll("[data-live-account-label]")];
+      const current = buttons.indexOf(button);
+      if (current < 0) return;
+      let next = null;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") next = (current + 1) % buttons.length;
+      if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (current - 1 + buttons.length) % buttons.length;
+      if (event.key === "Home") next = 0;
+      if (event.key === "End") next = buttons.length - 1;
+      if (next == null) return;
+      buttons[next].focus();
+      buttons[next].click();
+      event.preventDefault();
+    });
+  });
+  const selected = accounts.find(
+    (account) => account.account_label === selectedLiveAccount,
+  ) || accounts[0];
+  if (selected && !(selected.summary || selected.balances)) {
+    void loadLiveAccountDetail(root, selected.account_label, requestJson);
+  } else if (selected) {
+    const slot = root.querySelector("[data-live-account-detail]");
+    if (slot) wireAccountEquityRanges(slot, (nextRange) => loadLiveAccountDetail(root, selected.account_label, requestJson, nextRange));
+  }
+  void loadLiveAccountMetrics(root, requestJson, selectedLiveAccountMetricsRange);
 }

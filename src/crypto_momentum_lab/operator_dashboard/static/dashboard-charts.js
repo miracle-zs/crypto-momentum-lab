@@ -457,6 +457,139 @@ export function latestStartEquityChart(model) {
   );
 }
 
+const LIVE_ACCOUNT_METRIC_COLORS = [
+  "var(--series-cyan)",
+  "var(--series-lime)",
+  "var(--series-amber)",
+  "var(--series-violet)",
+];
+
+function liveAccountMetricBucketMap(account, metricKey, intervalSeconds) {
+  const intervalMs = Math.max(1, intervalSeconds) * 1000;
+  const buckets = new Map();
+  for (const row of account.metrics_curve || []) {
+    const observedAt = new Date(row.observed_at || "").getTime();
+    const value = asNumber(row[metricKey]);
+    if (!Number.isFinite(observedAt) || value == null) continue;
+    buckets.set(Math.floor(observedAt / intervalMs) * intervalMs, value);
+  }
+  return buckets;
+}
+
+function metricValueFormat(metricKey) {
+  return metricKey.endsWith("_ratio")
+    ? metricKey === "margin_occupancy_ratio" ? "percent" : "signed-percent"
+    : metricKey === "equity" ? "money" : "signed-money";
+}
+
+export function liveAccountMetricModel(
+  accounts,
+  metricKey,
+  intervalSeconds = DEFAULT_EQUITY_BUCKET_SECONDS,
+  windowStart = null,
+  windowEnd = null,
+) {
+  const normalizedAccounts = (accounts || []).filter(
+    (account) => Array.isArray(account.metrics_curve),
+  );
+  if (!normalizedAccounts.length) return null;
+  const maps = normalizedAccounts.map((account) => (
+    liveAccountMetricBucketMap(account, metricKey, intervalSeconds)
+  ));
+  const buckets = [...new Set(maps.flatMap((map) => [...map.keys()]))]
+    .sort((left, right) => left - right)
+    .slice(-240);
+  const valueCount = maps.reduce(
+    (total, map) => total + buckets.filter((bucket) => map.has(bucket)).length,
+    0,
+  );
+  if (buckets.length < 2 || valueCount < 2) return null;
+  const series = normalizedAccounts.map((account, index) => ({
+    account,
+    label: account.account_label || `账户 ${index + 1}`,
+    color: LIVE_ACCOUNT_METRIC_COLORS[index % LIVE_ACCOUNT_METRIC_COLORS.length],
+    values: buckets.map((bucket) => maps[index].get(bucket) ?? null),
+    isLive: true,
+  }));
+  const values = series.flatMap((seriesItem) => (
+    seriesItem.values.filter((value) => value != null)
+  ));
+  const valueFormat = metricValueFormat(metricKey);
+  const includeZero = valueFormat !== "money";
+  let min = includeZero ? Math.min(0, ...values) : Math.min(...values);
+  let max = includeZero ? Math.max(0, ...values) : Math.max(...values);
+  if (min === max) {
+    const padding = Math.max(Math.abs(min) * 0.08, 0.01);
+    min -= padding;
+    max += padding;
+  } else {
+    const padding = Math.max((max - min) * 0.08, 0.01);
+    min -= padding;
+    max += padding;
+  }
+  const requestedStart = windowStart ? new Date(windowStart).getTime() : Number.NaN;
+  const requestedEnd = windowEnd ? new Date(windowEnd).getTime() : Number.NaN;
+  return {
+    metricKey,
+    valueFormat,
+    series,
+    points: buckets.map((bucket, index) => ({
+      at: bucket,
+      values: series.map((seriesItem) => seriesItem.values[index]),
+    })),
+    domainStart: Number.isFinite(requestedStart) ? requestedStart : buckets[0],
+    domainEnd: Number.isFinite(requestedEnd) && requestedEnd > requestedStart
+      ? requestedEnd
+      : buckets.at(-1),
+    min,
+    max,
+    intervalSeconds,
+  };
+}
+
+export function liveAccountMetricChart(
+  accounts,
+  metricKey,
+  chartId,
+  title,
+  ariaLabel,
+  intervalSeconds = DEFAULT_EQUITY_BUCKET_SECONDS,
+  windowStart = null,
+  windowEnd = null,
+) {
+  const model = liveAccountMetricModel(
+    accounts,
+    metricKey,
+    intervalSeconds,
+    windowStart,
+    windowEnd,
+  );
+  if (!model) return emptyBox("等待实盘时序数据", "至少需要两个有效采样点");
+  registerChartPayload(chartId, {
+    kind: "metric-comparison",
+    title,
+    valueFormat: model.valueFormat,
+    domainStart: model.domainStart,
+    domainEnd: model.domainEnd,
+    min: model.min,
+    max: model.max,
+    points: model.points,
+    series: model.series.map((series) => ({
+      label: series.label,
+      color: series.color,
+      values: series.values,
+      isLive: true,
+    })),
+  });
+  const legend = model.series.map((series) => (
+    `<span class="live-metric-legend-item"><i style="--series-color:${esc(series.color)}"></i>${esc(series.label)}</span>`
+  )).join("");
+  return `<div class="live-metric-chart echart-shell" data-echart-chart data-echart-kind="metric-comparison" data-echart-id="${esc(chartId)}" tabindex="0" role="group" aria-label="${esc(ariaLabel)}；使用左右方向键查看数据点">
+    <div class="live-metric-legend">${legend}</div>
+    <div class="echart-surface" aria-hidden="true"></div>
+  </div>`;
+}
+
 export function returnBar(value, maxAbs) {
   const parsed = asNumber(value);
   if (parsed == null) return '<span class="num">—</span>';

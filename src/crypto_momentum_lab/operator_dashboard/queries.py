@@ -7,11 +7,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from sqlalchemy import (
     Select,
     String,
+    and_,
     case,
     column,
     func,
@@ -32,6 +33,11 @@ from crypto_momentum_lab.operator_dashboard.collector_status import (
 )
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
+    LiveAccountMetricPointResponse,
+    LiveAccountMetricsAccountResponse,
+    LiveAccountMetricsResponse,
+    LiveAccountsResponse,
+    LiveAccountSummaryResponse,
     PaperAccountEquityResponse,
     PaperAccountHistoryResponse,
     PaperAccountsEquityResponse,
@@ -98,6 +104,70 @@ _CONFIRMED_OPEN_ORDER_STATES = frozenset(
         ExchangeOrderState.PARTIALLY_FILLED.value,
     }
 )
+
+
+def _latest_live_account_process_statement() -> Select[Any]:
+    """Load one current process state per live account.
+
+    The dashboard treats account labels as separate operational units.  A
+    grouped latest-row lookup keeps the fleet endpoint bounded even when the
+    append-only process-state table has accumulated a long history.
+    """
+    latest = (
+        select(
+            ExecutionAccountProcessStateRow.account_label,
+            func.max(ExecutionAccountProcessStateRow.occurred_at).label(
+                "latest_occurred_at"
+            ),
+        )
+        .where(ExecutionAccountProcessStateRow.environment == "live")
+        .group_by(ExecutionAccountProcessStateRow.account_label)
+        .subquery("latest_live_account_process")
+    )
+    return (
+        select(ExecutionAccountProcessStateRow)
+        .join(
+            latest,
+            and_(
+                ExecutionAccountProcessStateRow.account_label
+                == latest.c.account_label,
+                ExecutionAccountProcessStateRow.occurred_at
+                == latest.c.latest_occurred_at,
+                ExecutionAccountProcessStateRow.environment == "live",
+            ),
+        )
+        .order_by(ExecutionAccountProcessStateRow.account_label)
+    )
+
+
+def _account_label_sort_key(account_label: str) -> tuple[int, int | str]:
+    """Keep the canonical fleet order while allowing custom labels."""
+    if account_label == "primary":
+        return (0, 0)
+    suffix = account_label.removeprefix("account-")
+    return (1, int(suffix)) if suffix.isdigit() else (2, account_label)
+
+
+def _live_account_status(state: str | None) -> OperationalStatus:
+    if state is None:
+        return OperationalStatus.UNKNOWN
+    return (
+        OperationalStatus.READY
+        if state == "ready_readonly"
+        else OperationalStatus.HALTED
+    )
+
+
+def _live_account_fleet_status(
+    accounts: Sequence[LiveAccountSummaryResponse],
+) -> OperationalStatus:
+    if not accounts:
+        return OperationalStatus.NO_DATA
+    return (
+        OperationalStatus.READY
+        if all(account.status is OperationalStatus.READY for account in accounts)
+        else OperationalStatus.HALTED
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,6 +439,78 @@ def _account_equity_statement(
             latest_equity.c.unrealized_pnl,
         )
         .select_from(bucket_series.join(latest_equity, true()))
+        .order_by(bucket_start)
+    )
+
+
+def _account_margin_statement(
+    *,
+    environment: str,
+    account_label: str,
+    window_start: datetime,
+    window_end: datetime,
+    interval_seconds: int,
+    max_points: int = _EQUITY_MAX_POINTS,
+) -> Select[tuple[datetime, Decimal]]:
+    """Fetch one latest aggregate initial-margin observation per bucket.
+
+    Position snapshots do not persist a separate initial-margin column. For
+    the USDT-margined live contracts this is reconstructed as
+    ``abs(notional) / leverage``. A missing or zero leverage falls back to the
+    notional so the chart remains conservative instead of reporting zero
+    exposure.
+    """
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    if max_points <= 0:
+        raise ValueError("max_points must be positive")
+    if window_start > window_end:
+        raise ValueError("window_start must not be later than window_end")
+
+    bucket_interval = text(f"interval '{interval_seconds} seconds'")
+    end_bucket = _bucket_start(window_end, interval_seconds)
+    earliest_bucket = _bucket_start(window_start, interval_seconds)
+    latest_window_start = end_bucket - timedelta(
+        seconds=interval_seconds * (max_points - 1)
+    )
+    series_start = max(earliest_bucket, latest_window_start)
+    bucket_series = func.generate_series(
+        series_start,
+        end_bucket,
+        bucket_interval,
+    ).table_valued("bucket").render_derived(name="margin_buckets")
+    snapshot = aliased(AccountPositionSnapshotRow)
+    bucket_start = bucket_series.c.bucket
+    margin_per_position = case(
+        (
+            snapshot.leverage.is_not(None) & (snapshot.leverage > 0),
+            func.abs(snapshot.notional) / snapshot.leverage,
+        ),
+        else_=func.abs(snapshot.notional),
+    )
+    latest_margin = (
+        select(
+            snapshot.observed_at.label("observed_at"),
+            func.coalesce(func.sum(margin_per_position), 0).label(
+                "margin_used"
+            ),
+        )
+        .where(
+            snapshot.environment == environment,
+            snapshot.account_label == account_label,
+            snapshot.observed_at >= window_start,
+            snapshot.observed_at <= window_end,
+            snapshot.observed_at >= bucket_start,
+            snapshot.observed_at < bucket_start + bucket_interval,
+        )
+        .group_by(snapshot.observed_at)
+        .order_by(snapshot.observed_at.desc())
+        .limit(1)
+        .lateral("latest_margin")
+    )
+    return (
+        select(latest_margin.c.observed_at, latest_margin.c.margin_used)
+        .select_from(bucket_series.join(latest_margin, true()))
         .order_by(bucket_start)
     )
 
@@ -786,6 +928,195 @@ class DashboardQueries:
             now=self._clock(),
         )
 
+    @staticmethod
+    def _live_account_summaries(
+        processes: Sequence[ExecutionAccountProcessStateRow],
+        strategy_states: Sequence[StrategyLiveStateRow],
+        leases: Sequence[TradingLeaseRow],
+    ) -> list[LiveAccountSummaryResponse]:
+        """Join current process, strategy, and lease state by account label."""
+        process_by_account = {row.account_label: row for row in processes}
+        strategy_by_account: dict[str, StrategyLiveStateRow] = {}
+        for row in sorted(
+            strategy_states,
+            key=lambda item: item.changed_at,
+            reverse=True,
+        ):
+            strategy_by_account.setdefault(row.account_label, row)
+        lease_by_account = {row.account_label: row for row in leases}
+        account_labels = sorted(
+            set(process_by_account)
+            | set(strategy_by_account)
+            | set(lease_by_account),
+            key=_account_label_sort_key,
+        )
+        return [
+            LiveAccountSummaryResponse(
+                account_label=account_label,
+                environment=(
+                    process_by_account[account_label].environment
+                    if account_label in process_by_account
+                    else "live"
+                ),
+                status=_live_account_status(
+                    None
+                    if account_label not in process_by_account
+                    else process_by_account[account_label].state
+                ),
+                readiness=(
+                    process_by_account[account_label].state
+                    if account_label in process_by_account
+                    else "missing"
+                ),
+                observed_at=(
+                    process_by_account[account_label].occurred_at
+                    if account_label in process_by_account
+                    else None
+                ),
+                strategy_name=(
+                    strategy_by_account[account_label].strategy_name
+                    if account_label in strategy_by_account
+                    else None
+                ),
+                strategy_state=(
+                    strategy_by_account[account_label].state
+                    if account_label in strategy_by_account
+                    else None
+                ),
+                lease_expires_at=(
+                    lease_by_account[account_label].expires_at
+                    if account_label in lease_by_account
+                    else None
+                ),
+            )
+            for account_label in account_labels
+        ]
+
+    async def live_accounts(self) -> LiveAccountsResponse:
+        """Return a small, bounded operational snapshot for every live account."""
+        now = self._clock()
+        async with self._session_factory() as session:
+            processes = (
+                await session.scalars(_latest_live_account_process_statement())
+            ).all()
+            strategy_states = (
+                await session.scalars(
+                    select(StrategyLiveStateRow).where(
+                        StrategyLiveStateRow.environment == "live"
+                    )
+                )
+            ).all()
+            leases = (
+                await session.scalars(
+                    select(TradingLeaseRow)
+                    .where(
+                        TradingLeaseRow.environment == "live",
+                        TradingLeaseRow.state == "active",
+                        TradingLeaseRow.expires_at > now,
+                    )
+                    .order_by(TradingLeaseRow.expires_at.desc())
+                )
+            ).all()
+        accounts = self._live_account_summaries(processes, strategy_states, leases)
+        return LiveAccountsResponse(
+            status=_live_account_fleet_status(accounts),
+            accounts=accounts,
+        )
+
+    async def live_account_metrics(
+        self,
+        equity_range: str = "24h",
+    ) -> LiveAccountMetricsResponse:
+        """Return six comparable time-series metrics for every live account."""
+        equity_window, equity_bucket_seconds = _account_equity_range(equity_range)
+        equity_window_end = self._clock()
+        equity_window_start = equity_window_end - equity_window
+        async with self._session_factory() as session:
+            processes = (
+                await session.scalars(_latest_live_account_process_statement())
+            ).all()
+            strategy_states = (
+                await session.scalars(
+                    select(StrategyLiveStateRow).where(
+                        StrategyLiveStateRow.environment == "live"
+                    )
+                )
+            ).all()
+            leases = (
+                await session.scalars(
+                    select(TradingLeaseRow)
+                    .where(
+                        TradingLeaseRow.environment == "live",
+                        TradingLeaseRow.state == "active",
+                        TradingLeaseRow.expires_at > equity_window_end,
+                    )
+                    .order_by(TradingLeaseRow.expires_at.desc())
+                )
+            ).all()
+            accounts = self._live_account_summaries(
+                processes,
+                strategy_states,
+                leases,
+            )
+            metric_accounts: list[LiveAccountMetricsAccountResponse] = []
+            for account in accounts:
+                equity_rows = [
+                    _AccountEquityPoint(
+                        observed_at=row.observed_at,
+                        wallet_balance=row.wallet_balance,
+                        unrealized_pnl=row.unrealized_pnl,
+                    )
+                    for row in (
+                        await session.execute(
+                            _account_equity_statement(
+                                environment=account.environment,
+                                account_label=account.account_label,
+                                asset="USDT",
+                                window_start=equity_window_start,
+                                window_end=equity_window_end,
+                                interval_seconds=equity_bucket_seconds,
+                            )
+                        )
+                    ).all()
+                ]
+                margin_rows = [
+                    (row.observed_at, row.margin_used)
+                    for row in (
+                        await session.execute(
+                            _account_margin_statement(
+                                environment=account.environment,
+                                account_label=account.account_label,
+                                window_start=equity_window_start,
+                                window_end=equity_window_end,
+                                interval_seconds=equity_bucket_seconds,
+                            )
+                        )
+                    ).all()
+                ]
+                metric_accounts.append(
+                    LiveAccountMetricsAccountResponse(
+                        account_label=account.account_label,
+                        environment=account.environment,
+                        status=account.status,
+                        metrics_curve=_live_account_metric_points(
+                            equity_rows,
+                            margin_rows,
+                            interval_seconds=equity_bucket_seconds,
+                        ),
+                    )
+                )
+        return LiveAccountMetricsResponse(
+            status=_live_account_fleet_status(accounts),
+            equity_range=cast(
+                Literal["24h", "7d", "30d", "1y"],
+                equity_range,
+            ),
+            equity_window_start=equity_window_start,
+            equity_window_end=equity_window_end,
+            equity_sample_interval_seconds=equity_bucket_seconds,
+            accounts=metric_accounts,
+        )
+
     async def overview(self) -> SystemOverviewResponse:
         now = self._clock()
         async with self._session_factory() as session:
@@ -794,10 +1125,13 @@ class DashboardQueries:
                 .order_by(RuntimeMarketState15sRow.bucket_start.desc())
                 .limit(1)
             )
-            account = await session.scalar(
-                select(ExecutionAccountProcessStateRow)
-                .order_by(ExecutionAccountProcessStateRow.occurred_at.desc())
-                .limit(1)
+            account_rows = (
+                await session.scalars(_latest_live_account_process_statement())
+            ).all()
+            account = max(
+                account_rows,
+                key=lambda row: row.occurred_at,
+                default=None,
             )
             strategy_at = await session.scalar(_latest_checkpoint_at_statement())
             halt_count = await session.scalar(
@@ -805,15 +1139,25 @@ class DashboardQueries:
                     RiskHaltRow.active.is_(True)
                 )
             )
-            lease = await session.scalar(
-                select(TradingLeaseRow)
-                .where(
-                    TradingLeaseRow.state == "active",
-                    TradingLeaseRow.expires_at > now,
+            strategy_states = (
+                await session.scalars(
+                    select(StrategyLiveStateRow).where(
+                        StrategyLiveStateRow.environment == "live"
+                    )
                 )
-                .order_by(TradingLeaseRow.expires_at.desc())
-                .limit(1)
-            )
+            ).all()
+            leases = (
+                await session.scalars(
+                    select(TradingLeaseRow)
+                    .where(
+                        TradingLeaseRow.environment == "live",
+                        TradingLeaseRow.state == "active",
+                        TradingLeaseRow.expires_at > now,
+                    )
+                    .order_by(TradingLeaseRow.expires_at.desc())
+                )
+            ).all()
+            lease = leases[0] if leases else None
             live = await session.scalar(
                 select(LiveSessionTransitionRow)
                 .order_by(LiveSessionTransitionRow.occurred_at.desc())
@@ -841,6 +1185,11 @@ class DashboardQueries:
                     .limit(1)
                 )
         account_at = None if account is None else account.occurred_at
+        account_statuses = self._live_account_summaries(
+            account_rows,
+            strategy_states=strategy_states,
+            leases=leases,
+        )
         services = [
             _service("market-data", now, market_at, self._stale_after_seconds),
             _service("execution-account", now, account_at, self._stale_after_seconds),
@@ -894,6 +1243,16 @@ class DashboardQueries:
                 "owner": lease.owner,
                 "expires_at": lease.expires_at.isoformat(),
             },
+            active_leases=[
+                {
+                    "account_label": item.account_label,
+                    "strategy_name": item.strategy_name,
+                    "owner": item.owner,
+                    "expires_at": item.expires_at.isoformat(),
+                }
+                for item in leases
+            ],
+            account_statuses=account_statuses,
         )
 
     async def universe(self) -> UniverseStatusResponse:
@@ -1744,7 +2103,12 @@ class DashboardQueries:
             rejection_summary=_json_mapping(run.rejection_summary),
         )
 
-    async def account(self, equity_range: str = "24h") -> AccountOverviewResponse:
+    async def account(
+        self,
+        equity_range: str = "24h",
+        account_label: str | None = None,
+        environment: str | None = None,
+    ) -> AccountOverviewResponse:
         equity_window, equity_bucket_seconds = _account_equity_range(equity_range)
         equity_window_end = self._clock()
         equity_window_start = equity_window_end - equity_window
@@ -1759,11 +2123,50 @@ class DashboardQueries:
         live_signals: Sequence[LiveStrategySignalRow] = ()
         execution_orders: Sequence[ExchangeOrderRow] = ()
         intent_rows: Sequence[OrderIntentExecutionRow] = ()
+        available_accounts: list[LiveAccountSummaryResponse] = []
         async with self._session_factory() as session:
+            live_processes = (
+                await session.scalars(_latest_live_account_process_statement())
+            ).all()
+            strategy_states = (
+                await session.scalars(
+                    select(StrategyLiveStateRow).where(
+                        StrategyLiveStateRow.environment == "live"
+                    )
+                )
+            ).all()
+            leases = (
+                await session.scalars(
+                    select(TradingLeaseRow)
+                    .where(
+                        TradingLeaseRow.environment == "live",
+                        TradingLeaseRow.state == "active",
+                        TradingLeaseRow.expires_at > equity_window_end,
+                    )
+                )
+            ).all()
+            available_accounts = self._live_account_summaries(
+                live_processes,
+                strategy_states,
+                leases,
+            )
+            process_query = select(ExecutionAccountProcessStateRow)
+            if environment is None:
+                process_query = process_query.where(
+                    ExecutionAccountProcessStateRow.environment == "live"
+                )
+            if account_label is not None:
+                process_query = process_query.where(
+                    ExecutionAccountProcessStateRow.account_label == account_label
+                )
+            if environment is not None:
+                process_query = process_query.where(
+                    ExecutionAccountProcessStateRow.environment == environment
+                )
             process = await session.scalar(
-                select(ExecutionAccountProcessStateRow)
-                .order_by(ExecutionAccountProcessStateRow.occurred_at.desc())
-                .limit(1)
+                process_query.order_by(
+                    ExecutionAccountProcessStateRow.occurred_at.desc()
+                ).limit(1)
             )
             if process is not None:
                 environment = process.environment
@@ -1995,6 +2398,7 @@ class DashboardQueries:
                     key=lambda row: row.observed_at,
                 )
             ],
+            available_accounts=available_accounts,
             summary={
                 "usdt_wallet_balance": (
                     None if usdt is None else str(usdt.wallet_balance)
@@ -2152,7 +2556,6 @@ class DashboardQueries:
                 for row in live
             ],
         )
-
 
 def _downsample_equity_snapshots(
     rows: Sequence[PaperEquitySnapshotRow],
@@ -2539,6 +2942,63 @@ def _live_account_equity_point(
         "realized_pnl": None,
         "unrealized_pnl": str(row.unrealized_pnl),
     }
+
+
+def _live_account_metric_points(
+    equity_rows: Sequence[_AccountEquityPoint],
+    margin_rows: Sequence[tuple[datetime, Decimal]],
+    *,
+    interval_seconds: int,
+) -> list[LiveAccountMetricPointResponse]:
+    """Derive comparable equity, margin, and drawdown metrics per bucket."""
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    margin_by_bucket = {
+        _bucket_start(observed_at, interval_seconds): margin_used
+        for observed_at, margin_used in margin_rows
+    }
+    baseline: Decimal | None = None
+    peak: Decimal | None = None
+    latest_margin = Decimal("0")
+    points: list[LiveAccountMetricPointResponse] = []
+    for row in sorted(equity_rows, key=lambda item: item.observed_at):
+        equity = row.wallet_balance + row.unrealized_pnl
+        bucket = _bucket_start(row.observed_at, interval_seconds)
+        if bucket in margin_by_bucket:
+            latest_margin = max(Decimal("0"), margin_by_bucket[bucket])
+        if baseline is None:
+            baseline = equity
+        peak = equity if peak is None else max(peak, equity)
+        equity_change_ratio = (
+            None if baseline == 0 else (equity - baseline) / baseline
+        )
+        margin_occupancy_ratio = (
+            None if equity <= 0 else latest_margin / equity
+        )
+        drawdown = equity - peak
+        drawdown_ratio = None if peak <= 0 else drawdown / peak
+        points.append(
+            LiveAccountMetricPointResponse(
+                observed_at=row.observed_at,
+                equity=str(equity),
+                equity_change_ratio=(
+                    None
+                    if equity_change_ratio is None
+                    else str(equity_change_ratio)
+                ),
+                margin_used=str(latest_margin),
+                margin_occupancy_ratio=(
+                    None
+                    if margin_occupancy_ratio is None
+                    else str(margin_occupancy_ratio)
+                ),
+                drawdown=str(drawdown),
+                drawdown_ratio=(
+                    None if drawdown_ratio is None else str(drawdown_ratio)
+                ),
+            )
+        )
+    return points
 
 
 def _paper_exit_details(run: StrategyRunRow) -> tuple[str, str]:

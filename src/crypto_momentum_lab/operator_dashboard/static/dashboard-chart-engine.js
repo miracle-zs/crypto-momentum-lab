@@ -7,7 +7,9 @@ import {
   esc,
   fullDateTime,
   money,
+  percent,
   signedMoney,
+  signedPercent,
   timeOnly,
   yearMonth,
 } from "./dashboard-formatters.js";
@@ -115,6 +117,13 @@ function baseAxis(colors) {
   };
 }
 
+function chartValue(value, format = "signed-money") {
+  if (format === "percent") return percent(value);
+  if (format === "signed-percent") return signedPercent(value);
+  if (format === "money") return money(value);
+  return signedMoney(value);
+}
+
 function baseTooltip(colors) {
   return {
     trigger: "axis",
@@ -138,6 +147,8 @@ function baseTooltip(colors) {
 }
 
 function baseOption(payload, colors) {
+  const valueFormat = payload.valueFormat
+    || (payload.kind === "equity" ? "money" : "signed-money");
   return {
     animation: false,
     aria: {
@@ -170,7 +181,7 @@ function baseOption(payload, colors) {
       splitNumber: 4,
       axisLabel: {
         ...baseAxis(colors).axisLabel,
-        formatter: (value) => money(value),
+        formatter: (value) => chartValue(value, valueFormat),
       },
       splitLine: {
         show: true,
@@ -241,7 +252,7 @@ function comparisonOption(payload, colors) {
     const rows = entries.map((param) => {
       const value = tooltipValue(param);
       const color = param.color || colors.muted;
-      return `<div><span style="color:${esc(color)}">●</span> ${esc(param.seriesName)} <b>${esc(signedMoney(value))}</b></div>`;
+      return `<div><span style="color:${esc(color)}">●</span> ${esc(param.seriesName)} <b>${esc(chartValue(value, payload.valueFormat || "signed-money"))}</b></div>`;
     }).join("");
     return `<div>${esc(tooltipTime(params, payload))}</div>${rows}`;
   };
@@ -273,7 +284,7 @@ function comparisonOption(payload, colors) {
 }
 
 export function buildChartOption(payload, colors = chartColors()) {
-  return payload?.kind === "comparison"
+  return payload?.kind === "comparison" || payload?.kind === "metric-comparison"
     ? comparisonOption(payload, colors)
     : equityOption(payload, colors);
 }

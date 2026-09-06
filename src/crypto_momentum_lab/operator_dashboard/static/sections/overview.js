@@ -13,6 +13,7 @@ import { blockTitle, emptyBox, pill, tile } from "../dashboard-ui.js";
 export function renderOverview(data) {
   const lease = data.active_lease;
   const services = data.services || [];
+  const accountStatuses = data.account_statuses || [];
   const haltCount = data.active_halt_count || 0;
   const tiles = `<div class="tile-grid">
     ${tile("数据库", data.database_status || "UNKNOWN", "PostgreSQL 只读连接", statusSlug(data.database_status) === "READY" ? "pos" : "warn")}
@@ -30,7 +31,17 @@ export function renderOverview(data) {
       ${pill(service.status)}
     </div>`;
   }).join("");
+  const accountRows = accountStatuses.map((account, index) => `<a class="overview-account-status-card" href="#account" aria-label="查看${esc(account.account_label)}账户详情">
+    <span class="overview-account-status-top"><span>LIVE ${String(index + 1).padStart(2, "0")}</span>${pill(account.status)}</span>
+    <strong>${esc(account.account_label)}</strong>
+    <small>${esc(account.strategy_name || "未关联策略")} · ${esc(account.strategy_state || account.readiness || "状态未知")}</small>
+    <small>同步 ${esc(relToNow(account.observed_at))}</small>
+  </a>`).join("");
+  const accountBlock = accountStatuses.length
+    ? `${blockTitle("四账户实盘状态", "LIVE ACCOUNT STATUS · SHARED MARKET-DATA", `<span class="num muted">${accountStatuses.length} 个账户</span>`)}<div class="overview-account-status-grid">${accountRows}</div>`
+    : "";
   const body = `${tiles}
+    ${accountBlock}
     ${blockTitle("服务心跳", "SERVICE HEARTBEATS", `<span class="num muted">${services.length} 个进程</span>`)}
     <div class="service-list">${serviceRows || emptyBox("尚未观察到任何服务心跳")}</div>`;
   return [haltCount ? "HALTED" : data.database_status, body];

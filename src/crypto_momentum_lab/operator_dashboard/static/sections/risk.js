@@ -1,3 +1,4 @@
+import { DISPLAY_TIME_ZONE_LABEL } from "../dashboard-config.js";
 import { dayTime, esc } from "../dashboard-formatters.js";
 import { blockTitle, dataTable, pill } from "../dashboard-ui.js";
 
@@ -28,11 +29,17 @@ export function renderRisk(data) {
     { label: "原因", key: "reason", cls: "muted" },
     { label: "时间", value: (row) => dayTime(row.evaluated_at), align: "right", cls: "muted" },
   ], data.latest_risk_decisions, { emptyText: "暂无风控决策流水", tall: true });
-  const body = `<div class="block">${blockTitle("活跃停机", "ACTIVE HALTS")}${halts}</div>
-    <div class="block-split">
-      <div class="block">${blockTitle("待完成订单", "RESTING / PARTIALLY FILLED", `<strong class="num">${(data.pending_orders || []).length}</strong>`)}${pendingTable}</div>
-      <div class="block">${blockTitle("不确定订单", "AMBIGUOUS / UNRESOLVED", `<strong class="num">${(data.ambiguous_orders || []).length}</strong>`)}${ambiguousTable}</div>
+  const body = `<div class="risk-priority-grid">
+      <div class="block risk-halts">${blockTitle("活跃停机", "ACTIVE HALTS")}${halts}</div>
+      <div class="risk-decision-callout">${blockTitle("先看这里", "OPERATOR ORDER")}
+        <strong>阻断 → 未决 → 待完成</strong>
+        <p>任何不确定订单都先完成交易所对账，再判断是否恢复执行。</p>
+      </div>
     </div>
-    <div class="block">${blockTitle("风控决策", "RISK DECISIONS · LATEST 30")}${decisionsTable}</div>`;
+    <div class="block-split risk-order-grid">
+      <div class="block risk-ambiguous">${blockTitle("不确定订单", "AMBIGUOUS / UNRESOLVED", `<strong class="num">${(data.ambiguous_orders || []).length}</strong>`)}${ambiguousTable}</div>
+      <div class="block risk-pending">${blockTitle("待完成订单", "RESTING / PARTIALLY FILLED", `<strong class="num">${(data.pending_orders || []).length}</strong>`)}${pendingTable}</div>
+    </div>
+    <div class="block risk-decisions">${blockTitle("风控决策", "RISK DECISIONS · LATEST 30")}${decisionsTable}</div>`;
   return [data.status, body];
 }

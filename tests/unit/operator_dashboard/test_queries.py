@@ -9,6 +9,7 @@ from crypto_momentum_lab.operator_dashboard.queries import (
     FIXED_COMMON_EQUITY_START_AT,
     DashboardQueries,
     _account_equity_statement,
+    _account_margin_statement,
     _aggregate_account_fills,
     _build_common_equity_curve,
     _checkpoint_times_statement,
@@ -17,7 +18,9 @@ from crypto_momentum_lab.operator_dashboard.queries import (
     _EquityObservation,
     _is_dashboard_paper_run,
     _latest_checkpoint_at_statement,
+    _latest_live_account_process_statement,
     _live_account_equity_point,
+    _live_account_metric_points,
     _live_common_equity_statement,
     _live_equity_observations,
     _live_observation,
@@ -35,6 +38,130 @@ from crypto_momentum_lab.operator_dashboard.queries import (
 )
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
 from crypto_momentum_lab.persistence.postgres.models import PaperEquitySnapshotRow
+
+
+def test_live_account_summary_keeps_four_account_order_and_state_join() -> None:
+    observed_at = datetime(2026, 9, 6, 0, 0, tzinfo=UTC)
+    processes = [
+        SimpleNamespace(
+            account_label=label,
+            environment="live",
+            state="ready_readonly" if label != "account-3" else "halted",
+            occurred_at=observed_at,
+        )
+        for label in ("account-4", "account-3", "account-2", "primary")
+    ]
+    strategy_states = [
+        SimpleNamespace(
+            account_label=label,
+            strategy_name="orderflow_impulse",
+            state="running",
+            changed_at=observed_at,
+        )
+        for label in ("primary", "account-2", "account-3", "account-4")
+    ]
+    leases = [
+        SimpleNamespace(
+            account_label=label,
+            expires_at=observed_at + timedelta(minutes=10),
+        )
+        for label in ("primary", "account-2", "account-3", "account-4")
+    ]
+
+    summaries = DashboardQueries._live_account_summaries(
+        processes,
+        strategy_states,
+        leases,
+    )
+
+    assert [summary.account_label for summary in summaries] == [
+        "primary",
+        "account-2",
+        "account-3",
+        "account-4",
+    ]
+    assert [summary.status for summary in summaries] == [
+        OperationalStatus.READY,
+        OperationalStatus.READY,
+        OperationalStatus.HALTED,
+        OperationalStatus.READY,
+    ]
+    assert all(summary.lease_expires_at is not None for summary in summaries)
+
+
+def test_latest_live_account_process_query_excludes_non_live_states() -> None:
+    statement = _latest_live_account_process_statement()
+    sql = str(
+        statement.compile(
+            dialect=postgresql_dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).lower()
+
+    assert "environment = 'live'" in sql
+    assert "group by execution_account_process_states.account_label" in sql
+
+
+def test_live_account_metric_points_derive_equity_margin_and_drawdown_ratios() -> None:
+    start = datetime(2026, 9, 6, 0, 0, tzinfo=UTC)
+    equity_rows = [
+        SimpleNamespace(
+            observed_at=start,
+            wallet_balance=Decimal("1000"),
+            unrealized_pnl=Decimal("0"),
+        ),
+        SimpleNamespace(
+            observed_at=start + timedelta(minutes=6),
+            wallet_balance=Decimal("1010"),
+            unrealized_pnl=Decimal("0"),
+        ),
+        SimpleNamespace(
+            observed_at=start + timedelta(minutes=12),
+            wallet_balance=Decimal("990"),
+            unrealized_pnl=Decimal("0"),
+        ),
+    ]
+    points = _live_account_metric_points(
+        equity_rows,
+        [
+            (start, Decimal("100")),
+            (start + timedelta(minutes=6), Decimal("120")),
+            (start + timedelta(minutes=12), Decimal("80")),
+        ],
+        interval_seconds=6 * 60,
+    )
+
+    assert [point.equity for point in points] == ["1000", "1010", "990"]
+    assert [point.equity_change_ratio for point in points] == [
+        "0",
+        "0.01",
+        "-0.01",
+    ]
+    assert [point.margin_used for point in points] == ["100", "120", "80"]
+    assert points[1].margin_occupancy_ratio == str(Decimal("120") / Decimal("1010"))
+    assert [point.drawdown for point in points] == ["0", "0", "-20"]
+    assert points[2].drawdown_ratio == "-0.01980198019801980198019801980"
+
+
+def test_live_account_margin_query_aggregates_initial_margin_per_observation() -> None:
+    statement = _account_margin_statement(
+        environment="live",
+        account_label="account-2",
+        window_start=datetime(2026, 9, 5, tzinfo=UTC),
+        window_end=datetime(2026, 9, 6, tzinfo=UTC),
+        interval_seconds=6 * 60,
+    )
+    sql = str(
+        statement.compile(
+            dialect=postgresql_dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).lower()
+
+    assert "account_position_snapshots" in sql
+    assert "sum" in sql
+    assert "leverage" in sql
+    assert "group by account_position_snapshots_1.observed_at" in sql
 
 
 def test_downsample_equity_snapshots_keeps_latest_row_in_each_utc_bucket() -> None:

@@ -23,15 +23,16 @@ import { renderUniverse } from "./sections/universe.js";
 import { renderRisk } from "./sections/risk.js";
 import { renderCollector } from "./sections/collector.js";
 import {
-  renderAccount,
-  wireAccountEquityRanges,
-} from "./sections/account.js?v=20260902-live-rank-null-fix-v1";
+  renderLiveAccounts,
+  wireLiveAccounts,
+} from "./sections/account.js?v=20260906-live-metric-fleet-v1";
 import { renderReports } from "./sections/reports.js";
 import { createStrategySection } from "./sections/strategy.js?v=20260826-flight-deck-v2";
 
 // Legacy import markers retained for static asset manifests: from "./sections/account.js"
 // from "./sections/strategy.js" from "./sections/overview.js" from "./sections/universe.js"
 // from "./sections/risk.js" from "./sections/reports.js"
+// Legacy detail endpoint marker retained for account range clients: api/account?equity_range=
 
 let pollInFlight = false;
 const lastSectionPollAt = new Map();
@@ -114,20 +115,36 @@ function globalReadinessModel() {
     .length;
   const uncertainServices = services.filter((service) => hasUncertainStatus(service.status)).length;
   const uncertain = uncertainSections + uncertainServices;
+  const ambiguous = risk?.ambiguous_orders?.length || 0;
+  const accountSnapshots = Array.isArray(account?.accounts)
+    ? account.accounts
+    : account
+      ? [account]
+      : [];
+  const haltedAccounts = accountSnapshots.filter(
+    (snapshot) => normalizedStatus(snapshot.status) === "HALTED",
+  ).length;
   const activeHalts = Math.max(
     asNumber(overview?.active_halt_count) || 0,
     risk?.active_halts?.length || 0,
+    haltedAccounts,
   );
-  const ambiguous = risk?.ambiguous_orders?.length || 0;
-  const mismatch = asNumber(account?.reconciliation?.mismatch_count);
+  const mismatch = accountSnapshots.reduce(
+    (total, snapshot) => total + (asNumber(snapshot.reconciliation?.mismatch_count) || 0),
+    0,
+  );
   const accountStatus = normalizedStatus(account?.status);
   let reconciliation = "—";
   if (account) {
     reconciliation = hasUncertainStatus(accountStatus)
       ? "UNKNOWN"
-      : mismatch != null && mismatch > 0
-        ? `${mismatch} 差异`
-        : String(account.reconciliation?.status || "READY").toUpperCase();
+      : haltedAccounts > 0
+        ? `${haltedAccounts} 停止`
+        : mismatch != null && mismatch > 0
+          ? `${mismatch} 差异`
+          : accountSnapshots.length > 1
+            ? "READY"
+            : String(account.reconciliation?.status || "READY").toUpperCase();
   }
 
   let status = "READY";
@@ -194,7 +211,7 @@ const renderers = {
   universe: renderUniverse,
   collector: renderCollector,
   risk: renderRisk,
-  account: renderAccount,
+  account: renderLiveAccounts,
   reports: renderReports,
 };
 
@@ -236,6 +253,35 @@ function sectionRenderKey(id, data) {
   return JSON.stringify(snapshot);
 }
 
+function wireMarketTab(tab) {
+  if (!tab || tab.dataset.marketWired === "true") return;
+  tab.dataset.marketWired = "true";
+  tab.addEventListener("click", () => {
+    const board = tab.closest("[data-market-board]");
+    if (!board) return;
+    applyMarketView(board, tab.dataset.marketView);
+  });
+}
+
+function applyMarketView(board, view = "rankings") {
+  if (!board) return;
+  board.querySelectorAll("[data-market-view]").forEach((candidate) => {
+    const active = candidate.dataset.marketView === view;
+    candidate.classList.toggle("is-active", active);
+    candidate.setAttribute("aria-selected", String(active));
+  });
+  board.querySelectorAll("[data-market-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.marketPanel !== view;
+  });
+}
+
+function wireMarketViews(root, selectedView = null) {
+  const board = root?.querySelector("[data-market-board]");
+  if (!board) return;
+  board.querySelectorAll("[data-market-view]").forEach(wireMarketTab);
+  if (selectedView) applyMarketView(board, selectedView);
+}
+
 async function refreshSection(id) {
   const section = document.getElementById(id);
   const endpoint = section.dataset.endpoint;
@@ -245,6 +291,9 @@ async function refreshSection(id) {
     const data = await response.json();
     if (endpoint !== section.dataset.endpoint) return;
     const body = section.querySelector(".panel-body");
+    const selectedMarketView = id === "universe"
+      ? body.querySelector("[data-market-view].is-active")?.dataset.marketView
+      : null;
     const renderKey = sectionRenderKey(id, data);
     const shouldRender = sectionRenderKeys.get(id) !== renderKey;
     if (shouldRender) {
@@ -252,18 +301,12 @@ async function refreshSection(id) {
       setSectionStatus(id, status);
       replaceChildrenFromHtml(body, html);
       sectionRenderKeys.set(id, renderKey);
+      if (id === "universe") wireMarketViews(body, selectedMarketView);
     }
     body.classList.remove("loading");
     body.removeAttribute("aria-busy");
     if (id === "strategy" && shouldRender) strategySection.wire(body, data);
-    if (id === "account" && shouldRender) {
-      wireAccountEquityRanges(body, async (equityRange) => {
-        section.dataset.endpoint = `api/account?equity_range=${encodeURIComponent(equityRange)}`;
-        sectionRenderKeys.delete(id);
-        body.setAttribute("aria-busy", "true");
-        await refreshSection(id);
-      });
-    }
+    if (id === "account" && shouldRender) wireLiveAccounts(body, data);
     if (id === "overview") updateGlobalMode(data);
     updateGlobalState(id, data);
   } catch (error) {
@@ -323,11 +366,51 @@ function tick() {
 
 /* ---------- view navigation ---------- */
 
+const WORKSPACES = Object.freeze({
+  ops: {
+    label: "运行控制",
+    kicker: "OPERATIONS",
+    purpose: "安全 · 账户 · 命令",
+    defaultView: "overview",
+  },
+  data: {
+    label: "策略与数据",
+    kicker: "ANALYTICS",
+    purpose: "策略 · 市场 · 采集",
+    defaultView: "strategy",
+  },
+});
+
+const VIEW_PURPOSES = Object.freeze({
+  overview: "现在是否可信",
+  risk: "风险与未决订单",
+  account: "真实账户与暴露",
+  reports: "运行事件与迁移",
+  actions: "受控命令",
+  strategy: "策略版本与权益",
+  universe: "市场排名与监控池",
+  collector: "数据链路健康",
+});
+
 const navLinks = new Map(
   Array.from(document.querySelectorAll(".nav a")).map((link) => [link.dataset.nav, link]),
 );
+const workspaceTabs = Array.from(document.querySelectorAll("[data-workspace-tab]"));
+const workspaceNavs = Array.from(document.querySelectorAll("[data-workspace-nav]"));
 const viewCards = Array.from(document.querySelectorAll("main .card"));
 const viewIds = new Set(viewCards.map((card) => card.id));
+const workspaceForView = new Map(
+  viewCards.map((card) => [card.id, card.dataset.workspace || "ops"]),
+);
+
+function storedWorkspace() {
+  try {
+    const value = window.localStorage?.getItem("cml-dashboard-workspace");
+    return Object.prototype.hasOwnProperty.call(WORKSPACES, value) ? value : "ops";
+  } catch {
+    return "ops";
+  }
+}
 
 function normalizedView(value) {
   const id = String(value || "").replace(/^#/, "");
@@ -339,8 +422,54 @@ function viewLabel(id) {
   return card?.dataset.viewTitle || navLinks.get(id)?.dataset.label || id;
 }
 
+function syncWorkspace(workspace) {
+  const key = WORKSPACES[workspace] ? workspace : "ops";
+  const meta = WORKSPACES[key];
+  document.body.dataset.activeWorkspace = key;
+  document.body.dataset.workspace = key;
+  workspaceTabs.forEach((tab) => {
+    const active = tab.dataset.workspaceTab === key;
+    tab.classList.toggle("is-active", active);
+    tab.setAttribute("aria-selected", String(active));
+  });
+  workspaceNavs.forEach((nav) => {
+    const active = nav.dataset.workspaceNav === key;
+    nav.hidden = !active;
+    nav.setAttribute("aria-hidden", String(!active));
+  });
+  const kicker = document.getElementById("active-workspace-kicker");
+  if (kicker) kicker.textContent = `${meta.label} / ${meta.kicker}`;
+}
+
+function updateViewMeta(id) {
+  const meta = WORKSPACES[workspaceForView.get(id)] || WORKSPACES.ops;
+  const activeLabel = document.getElementById("active-view-label");
+  if (activeLabel) activeLabel.textContent = viewLabel(id);
+  const purpose = document.getElementById("active-view-purpose");
+  if (purpose) purpose.textContent = VIEW_PURPOSES[id] || meta.purpose;
+  const kicker = document.getElementById("active-workspace-kicker");
+  if (kicker) kicker.textContent = `${meta.label} / ${meta.kicker}`;
+}
+
+function setWorkspace(value, { selectDefault = true, updateHistory = true } = {}) {
+  const key = WORKSPACES[value] ? value : "ops";
+  syncWorkspace(key);
+  try {
+    window.localStorage?.setItem("cml-dashboard-workspace", key);
+  } catch {
+    // Storage can be unavailable in private or embedded browser contexts.
+  }
+  const current = normalizedView(document.body.dataset.activeView || window.location.hash);
+  if (selectDefault && workspaceForView.get(current) !== key) {
+    selectView(WORKSPACES[key].defaultView, { updateHistory });
+  } else if (current) {
+    updateViewMeta(current);
+  }
+}
+
 function selectView(value, { updateHistory = true } = {}) {
   const id = normalizedView(value);
+  syncWorkspace(workspaceForView.get(id) || "ops");
   viewCards.forEach((card) => {
     const active = card.id === id;
     card.hidden = !active;
@@ -352,10 +481,12 @@ function selectView(value, { updateHistory = true } = {}) {
     if (active) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   });
-  const activeLabel = document.getElementById("active-view-label");
-  if (activeLabel) activeLabel.textContent = viewLabel(id);
+  updateViewMeta(id);
   document.body.dataset.activeView = id;
-  document.title = `CML · ${viewLabel(id)} · Flight Deck`;
+  const skipLink = document.querySelector(".skip-link");
+  if (skipLink) skipLink.href = `#${id}`;
+  const workspace = WORKSPACES[workspaceForView.get(id)] || WORKSPACES.ops;
+  document.title = `CML · ${workspace.label} · ${viewLabel(id)} · Flight Deck`;
   if (updateHistory && window.location.hash !== `#${id}`) {
     window.history.pushState(null, "", `#${id}`);
   }
@@ -366,7 +497,7 @@ function selectView(value, { updateHistory = true } = {}) {
     });
   }
   const activeLink = navLinks.get(id);
-  if (activeLink && window.innerWidth <= 1023) {
+  if (activeLink && window.innerWidth <= 1023 && !activeLink.closest("[hidden]")) {
     activeLink.scrollIntoView({ block: "nearest", inline: "center" });
   }
   requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
@@ -380,10 +511,20 @@ navLinks.forEach((link, id) => {
   });
 });
 
+workspaceTabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    setWorkspace(tab.dataset.workspaceTab);
+  });
+});
+
 window.addEventListener("popstate", () => selectView(window.location.hash, { updateHistory: false }));
 window.addEventListener("hashchange", () => selectView(window.location.hash, { updateHistory: false }));
 
-selectView(window.location.hash, { updateHistory: false });
+const initialHash = String(window.location.hash || "").replace(/^#/, "");
+const initialView = viewIds.has(initialHash)
+  ? initialHash
+  : WORKSPACES[storedWorkspace()].defaultView;
+selectView(initialView, { updateHistory: false });
 
 wireEcharts(document);
 

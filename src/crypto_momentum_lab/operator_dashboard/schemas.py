@@ -19,12 +19,68 @@ class ServiceStatusResponse(DashboardSchema):
     details: dict[str, JsonValue] = Field(default_factory=dict)
 
 
+class LiveAccountSummaryResponse(DashboardSchema):
+    """Operational state for one configured live account."""
+
+    account_label: str
+    environment: str
+    status: OperationalStatus
+    readiness: str
+    observed_at: datetime | None = None
+    strategy_name: str | None = None
+    strategy_state: str | None = None
+    lease_expires_at: datetime | None = None
+
+
+class LiveAccountMetricPointResponse(DashboardSchema):
+    """One aligned live-account equity and margin observation.
+
+    Ratio fields are decimal ratios (``0.01`` means ``1%``) so callers can
+    render them without losing precision while keeping the API numeric shape
+    consistent with the existing dashboard payloads.
+    """
+
+    observed_at: datetime
+    equity: str
+    equity_change_ratio: str | None = None
+    margin_used: str
+    margin_occupancy_ratio: str | None = None
+    drawdown: str
+    drawdown_ratio: str | None = None
+
+
+class LiveAccountMetricsAccountResponse(DashboardSchema):
+    """Time-series metrics for one live account in the comparison fleet."""
+
+    account_label: str
+    environment: str
+    status: OperationalStatus
+    metrics_curve: list[LiveAccountMetricPointResponse] = Field(
+        default_factory=list
+    )
+
+
+class LiveAccountMetricsResponse(DashboardSchema):
+    """Comparable equity, margin, and drawdown curves for live accounts."""
+
+    status: OperationalStatus
+    equity_range: Literal["24h", "7d", "30d", "1y"] = "24h"
+    equity_window_start: datetime | None = None
+    equity_window_end: datetime | None = None
+    equity_sample_interval_seconds: int | None = None
+    accounts: list[LiveAccountMetricsAccountResponse] = Field(
+        default_factory=list
+    )
+
+
 class SystemOverviewResponse(DashboardSchema):
     generated_at: datetime
     database_status: OperationalStatus
     services: list[ServiceStatusResponse]
     active_halt_count: int
     active_lease: dict[str, JsonValue] | None
+    active_leases: list[dict[str, JsonValue]] = Field(default_factory=list)
+    account_statuses: list[LiveAccountSummaryResponse] = Field(default_factory=list)
 
 
 class ResearchCollectorResponse(DashboardSchema):
@@ -162,6 +218,12 @@ class AccountOverviewResponse(DashboardSchema):
     equity_window_end: datetime | None = None
     equity_sample_interval_seconds: int | None = None
     equity_curve: list[dict[str, JsonValue]] = Field(default_factory=list)
+    available_accounts: list[LiveAccountSummaryResponse] = Field(default_factory=list)
+
+
+class LiveAccountsResponse(DashboardSchema):
+    status: OperationalStatus
+    accounts: list[LiveAccountSummaryResponse] = Field(default_factory=list)
 
 
 class RiskExecutionResponse(DashboardSchema):

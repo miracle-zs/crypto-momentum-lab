@@ -40,6 +40,8 @@ def test_all_read_only_dashboard_routes_are_available() -> None:
             "/api/paper-accounts/paper-account-test",
             "/api/paper-accounts/paper-account-test/history",
             "/api/account",
+            "/api/live-accounts",
+            "/api/live-account-metrics",
             "/api/risk-execution",
             "/api/reports",
         ):
@@ -55,6 +57,35 @@ def test_equity_endpoint_exposes_unified_start_comparison_metadata() -> None:
     assert payload["common_equity_start_at"] is None
     assert payload["common_equity_account_count"] == 0
     assert payload["common_equity_cash_flows"] == []
+
+
+def test_live_accounts_endpoint_returns_account_collection() -> None:
+    with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
+        response = client.get("/api/live-accounts")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["accounts"]) == 1
+    assert payload["accounts"][0]["account_label"] == "primary"
+
+
+def test_live_account_metrics_endpoint_accepts_equity_range() -> None:
+    with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
+        response = client.get("/api/live-account-metrics?equity_range=7d")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["equity_range"] == "7d"
+    assert payload["accounts"] == []
+
+
+def test_account_endpoint_accepts_an_account_label() -> None:
+    with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
+        response = client.get("/api/account?account_label=account-3&equity_range=7d")
+
+    assert response.status_code == 200
+    assert response.json()["account_label"] == "account-3"
+    assert response.json()["equity_range"] == "7d"
 
 
 def test_paper_accounts_starts_with_summary_and_loads_detail_separately() -> None:

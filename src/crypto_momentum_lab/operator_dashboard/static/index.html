@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>CML · Execution Control Room</title>
-  <!-- Previous asset identifiers are kept in this marker for downstream cache manifests. dashboard.css?v=20260828-live-signals-v1 dashboard.js?v=20260902-live-rank-null-fix-v1 -->
+  <title>CML · 运行控制 · 总览 · Flight Deck</title>
+  <!-- Previous asset identifiers are kept in this marker for downstream cache manifests. dashboard.css?v=20260828-live-signals-v1 dashboard.js?v=20260902-live-rank-null-fix-v1 dashboard.css?v=20260903-research-collector-v1 dashboard.js?v=20260903-research-collector-v1 dashboard.css?v=20260906-multi-live-accounts-v1 dashboard.js?v=20260906-multi-live-accounts-v1 -->
   <!-- href="static/dashboard.css?v=20260824-control-room-v12-equity-ranges" -->
-  <link rel="stylesheet" href="static/dashboard.css?v=20260903-research-collector-v1">
+  <link rel="stylesheet" href="static/dashboard.css?v=20260906-live-metric-fleet-v1">
 </head>
 <body>
   <a class="skip-link" href="#overview">跳到当前工作视图</a>
@@ -20,23 +20,31 @@
         </div>
       </div>
 
+      <div class="workspace-switcher" role="tablist" aria-label="工作区">
+        <button type="button" class="workspace-tab is-active" data-workspace-tab="ops" role="tab" aria-selected="true">
+          <span class="workspace-tab-index">01</span>
+          <span class="workspace-tab-copy"><b>运行控制</b><small>OPERATIONS</small><em>安全 · 账户 · 命令</em></span>
+        </button>
+        <button type="button" class="workspace-tab" data-workspace-tab="data" role="tab" aria-selected="false">
+          <span class="workspace-tab-index">02</span>
+          <span class="workspace-tab-copy"><b>策略与数据</b><small>ANALYTICS</small><em>策略 · 市场 · 采集</em></span>
+        </button>
+      </div>
+
       <nav class="nav" aria-label="控制台分区">
-        <div class="nav-group">
-          <span class="nav-group-label">MONITOR · 运行</span>
-          <a href="#overview" data-nav="overview" data-label="总览"><i>01</i><span>总览<small>Overview</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="overview"></em></a>
-          <a href="#risk" data-nav="risk" data-label="执行"><i>02</i><span>执行<small>Risk / Orders</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="risk"></em></a>
-          <a href="#account" data-nav="account" data-label="账户"><i>03</i><span>账户<small>Exchange Account</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="account"></em></a>
-          <a href="#strategy" data-nav="strategy" data-label="策略"><i>04</i><span>策略<small>Strategies</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="strategy"></em></a>
+        <div class="nav-workspace" data-workspace-nav="ops">
+          <span class="nav-group-label">RUN CONTROL · 运行控制</span>
+          <a href="#overview" data-nav="overview" data-label="总览"><i>01</i><span>总览<small>System overview</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="overview"></em></a>
+          <a href="#risk" data-nav="risk" data-label="执行"><i>02</i><span>执行<small>Risk &amp; orders</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="risk"></em></a>
+          <a href="#account" data-nav="account" data-label="账户"><i>03</i><span>账户<small>Exchange account</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="account"></em></a>
+          <a href="#reports" data-nav="reports" data-label="台账"><i>04</i><span>台账<small>Run ledger</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="reports"></em></a>
+          <a href="#actions" data-nav="actions" data-label="操作"><i>05</i><span>操作<small>Audited commands</small></span><em class="nav-dot is-locked"></em></a>
         </div>
-        <div class="nav-group">
-          <span class="nav-group-label">ANALYSIS · 分析</span>
-          <a href="#universe" data-nav="universe" data-label="市场"><i>05</i><span>市场<small>Momentum Field</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="universe"></em></a>
-          <a href="#collector" data-nav="collector" data-label="数据采集"><i>06</i><span>数据采集<small>Research Capture</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="collector"></em></a>
-          <a href="#reports" data-nav="reports" data-label="台账"><i>07</i><span>台账<small>Run Ledger</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="reports"></em></a>
-        </div>
-        <div class="nav-group">
-          <span class="nav-group-label">CONTROL · 控制</span>
-          <a href="#actions" data-nav="actions" data-label="操作"><i>08</i><span>操作<small>Commands</small></span><em class="nav-dot is-locked"></em></a>
+        <div class="nav-workspace" data-workspace-nav="data" hidden>
+          <span class="nav-group-label">STRATEGY &amp; DATA · 策略与数据</span>
+          <a href="#strategy" data-nav="strategy" data-label="策略"><i>01</i><span>策略<small>Strategy versions</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="strategy"></em></a>
+          <a href="#universe" data-nav="universe" data-label="市场"><i>02</i><span>市场<small>Momentum field</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="universe"></em></a>
+          <a href="#collector" data-nav="collector" data-label="数据采集"><i>03</i><span>数据采集<small>Research capture</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="collector"></em></a>
         </div>
       </nav>
 
@@ -54,10 +62,16 @@
       <header class="topbar">
         <div class="topbar-primary">
           <div class="topbar-heading">
-            <p class="crumb">CML <span>//</span> EXECUTION FLIGHT DECK</p>
+            <p class="crumb">CML <span>//</span> EXECUTION FLIGHT DECK · Control Room</p>
+            <span id="active-workspace-kicker" class="topbar-workspace-kicker">运行控制 / OPERATIONS</span>
             <strong id="active-view-label">总览</strong>
+            <small id="active-view-purpose" class="topbar-view-purpose">现在是否可信</small>
           </div>
           <span class="topbar-scope">OPERATOR VIEW <i>·</i> READ ONLY</span>
+          <div class="mobile-workspace-switcher" role="tablist" aria-label="切换工作区">
+            <button type="button" class="workspace-tab is-active" data-workspace-tab="ops" role="tab" aria-selected="true">运行控制</button>
+            <button type="button" class="workspace-tab" data-workspace-tab="data" role="tab" aria-selected="false">策略与数据</button>
+          </div>
         </div>
         <div class="topbar-meta">
           <!-- Legacy labels remain documented while the visible shell uses separate mode and heartbeat fields: 实盘状态：UNKNOWN · 等待数据 / 实盘心跳：等待数据 -->
@@ -85,9 +99,9 @@
       </header>
 
       <main class="content" id="main-content" tabindex="-1">
-        <section id="overview" class="card is-active-view" data-view-title="总览" data-endpoint="api/overview" aria-labelledby="overview-title">
+        <section id="overview" class="card is-active-view" data-workspace="ops" data-view-title="总览" data-endpoint="api/overview" aria-labelledby="overview-title">
           <header class="card-head">
-            <div class="card-title"><i>01</i><div><h2 id="overview-title">总览</h2><small>SYSTEM HEALTH · REFRESH 15S</small><p>先确认安全态，再进入异常证据。</p></div></div>
+            <div class="card-title"><i>O1</i><div><h2 id="overview-title">总览</h2><small>SYSTEM HEALTH · REFRESH 15S</small><p>先确认安全态，再进入异常证据。</p></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -95,9 +109,9 @@
           </div>
         </section>
 
-        <section id="risk" class="card card-risk" data-view-title="执行" data-endpoint="api/risk-execution" aria-labelledby="risk-title" hidden>
+        <section id="risk" class="card card-risk" data-workspace="ops" data-view-title="执行" data-endpoint="api/risk-execution" aria-labelledby="risk-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>02</i><div><h2 id="risk-title">执行</h2><small>RISK GATES · ORDERS FIRST</small><p>先处理阻断和未决订单，再查看正常流水。</p></div></div>
+            <div class="card-title"><i>O2</i><div><h2 id="risk-title">执行</h2><small>RISK GATES · ORDERS FIRST</small><p>先处理阻断和未决订单，再查看正常流水。</p></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -105,9 +119,9 @@
           </div>
         </section>
 
-        <section id="account" class="card" data-view-title="账户" data-endpoint="api/account" aria-labelledby="account-title" hidden>
+        <section id="account" class="card" data-workspace="ops" data-view-title="账户" data-endpoint="api/live-accounts" aria-labelledby="account-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>03</i><div><h2 id="account-title">账户</h2><small>EXCHANGE ACCOUNT · SYNC / EXPOSURE</small><p>账户快照、对账和真实暴露集中在这里。</p></div></div>
+            <div class="card-title"><i>O3</i><div><h2 id="account-title">账户</h2><small>EXCHANGE ACCOUNT · SYNC / EXPOSURE</small><p>账户快照、对账和真实暴露集中在这里。</p></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -115,9 +129,9 @@
           </div>
         </section>
 
-        <section id="strategy" class="card" data-view-title="策略" data-endpoint="api/paper-accounts" aria-labelledby="strategy-title" hidden>
+        <section id="strategy" class="card" data-workspace="data" data-view-title="策略" data-endpoint="api/paper-accounts" aria-labelledby="strategy-title" hidden>
           <header class="card-head">
-          <div class="card-title"><i>04</i><div><h2 id="strategy-title">策略</h2><small>PAPER / LIVE COMPARISON · SUMMARY FIRST · DETAIL ON DEMAND</small><p>先比较账户版本，再打开单个账户证据。</p></div></div>
+          <div class="card-title"><i>D1</i><div><h2 id="strategy-title">策略</h2><small>PAPER / LIVE COMPARISON · SUMMARY FIRST · DETAIL ON DEMAND</small><p>先比较账户版本，再打开单个账户证据。</p></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -125,9 +139,9 @@
           </div>
         </section>
 
-        <section id="universe" class="card" data-view-title="市场" data-endpoint="api/universe" aria-labelledby="universe-title" hidden>
+        <section id="universe" class="card" data-workspace="data" data-view-title="市场" data-endpoint="api/universe" aria-labelledby="universe-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>05</i><div><h2 id="universe-title">市场</h2><small>UTC MOMENTUM FIELD · RANK / MONITOR</small><p>查看 UTC 排名、监控池和持仓保护成员。</p></div></div>
+            <div class="card-title"><i>D2</i><div><h2 id="universe-title">市场</h2><small>UTC MOMENTUM FIELD · RANK / MONITOR</small><p>查看 UTC 排名、监控池和持仓保护成员。</p></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -135,9 +149,9 @@
           </div>
         </section>
 
-        <section id="collector" class="card card-collector" data-view-title="数据采集" data-endpoint="api/research-collector" aria-labelledby="collector-title" hidden>
+        <section id="collector" class="card card-collector" data-workspace="data" data-view-title="数据采集" data-endpoint="api/research-collector" aria-labelledby="collector-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>06</i><div><h2 id="collector-title">数据采集</h2><small>RESEARCH CAPTURE · TOP30 / 15S STATES</small><p>确认 checkpoint 新鲜度、窗口连续性和容量保护，再开始寻优。</p></div></div>
+            <div class="card-title"><i>D3</i><div><h2 id="collector-title">数据采集</h2><small>RESEARCH CAPTURE · TOP30 / 15S STATES</small><p>确认 checkpoint 新鲜度、窗口连续性和容量保护，再开始寻优。</p></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -145,9 +159,9 @@
           </div>
         </section>
 
-        <section id="reports" class="card" data-view-title="台账" data-endpoint="api/reports" aria-labelledby="reports-title" hidden>
+        <section id="reports" class="card" data-workspace="ops" data-view-title="台账" data-endpoint="api/reports" aria-labelledby="reports-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>07</i><div><h2 id="reports-title">台账</h2><small>PAPER / SHADOW / LIVE SESSIONS</small><p>按时间回看运行会话和实盘状态迁移。</p></div></div>
+            <div class="card-title"><i>O4</i><div><h2 id="reports-title">台账</h2><small>PAPER / SHADOW / LIVE SESSIONS</small><p>按时间回看运行会话和实盘状态迁移。</p></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -155,9 +169,9 @@
           </div>
         </section>
 
-        <section id="actions" class="card card-actions" data-view-title="操作" aria-labelledby="actions-title" hidden>
+        <section id="actions" class="card card-actions" data-workspace="ops" data-view-title="操作" aria-labelledby="actions-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>08</i><div><h2 id="actions-title">操作</h2><small>CONTROLLED COMMANDS · AUDITED BACKEND ONLY</small><p>后端命令记录和审计链路就绪后才会解锁。</p></div></div>
+            <div class="card-title"><i>O5</i><div><h2 id="actions-title">操作</h2><small>CONTROLLED COMMANDS · AUDITED BACKEND ONLY</small><p>后端命令记录和审计链路就绪后才会解锁。</p></div></div>
             <span class="lock-badge">READ ONLY</span>
           </header>
           <div class="action-grid">
@@ -179,6 +193,6 @@
   </div>
   <script src="static/vendor/echarts.min.js?v=20260817-echarts-6.1.0"></script>
   <!-- type="module" src="static/dashboard.js?v=20260824-control-room-v18-equity-ranges" -->
-  <script type="module" src="static/dashboard.js?v=20260903-research-collector-v1" defer></script>
+  <script type="module" src="static/dashboard.js?v=20260906-live-metric-fleet-v1" defer></script>
 </body>
 </html>

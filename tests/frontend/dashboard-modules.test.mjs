@@ -12,6 +12,8 @@ import {
   equityChart,
   equityWindowMetrics,
   latestStartEquityChart,
+  liveAccountMetricChart,
+  liveAccountMetricModel,
   maxDrawdown,
   standaloneSparkline,
   strategyEquityChart,
@@ -462,6 +464,58 @@ test("equity charts register an ECharts payload with native metrics", () => {
   assert.deepEqual(comparisonPayload.series.map((series) => series.label), ["15M 收线退出", "实盘 B1"]);
   assert.equal(comparisonPayload.series[1].isLive, true);
   assert.equal(comparisonPayload.points.length, 2);
+});
+
+test("live account metric charts compare all four accounts with unit-aware axes", () => {
+  const labels = ["primary", "account-2", "account-3", "account-4"];
+  const accounts = labels.map((account_label, index) => ({
+    account_label,
+    metrics_curve: [
+      {
+        observed_at: "2026-08-16T00:00:00Z",
+        equity: String(1000 + index * 10),
+        equity_change_ratio: "0",
+        margin_used: String(100 + index),
+        margin_occupancy_ratio: "0.1",
+        drawdown: "0",
+        drawdown_ratio: "0",
+      },
+      {
+        observed_at: "2026-08-16T00:06:00Z",
+        equity: String(1010 + index * 10),
+        equity_change_ratio: "0.01",
+        margin_used: String(120 + index),
+        margin_occupancy_ratio: "0.12",
+        drawdown: "-2",
+        drawdown_ratio: "-0.002",
+      },
+    ],
+  }));
+  const model = liveAccountMetricModel(
+    accounts,
+    "margin_occupancy_ratio",
+    360,
+    "2026-08-16T00:00:00Z",
+    "2026-08-16T00:06:00Z",
+  );
+  assert.equal(model.series.length, 4);
+  assert.equal(model.points.length, 2);
+  assert.equal(model.valueFormat, "percent");
+  const html = liveAccountMetricChart(
+    accounts,
+    "drawdown_ratio",
+    "live-account-metric-drawdown-ratio-test",
+    "回撤比例对比",
+    "回撤比例对比，四个实盘账户",
+    360,
+  );
+  const payload = getChartPayload("live-account-metric-drawdown-ratio-test");
+  assert.match(html, /data-echart-kind="metric-comparison"/);
+  assert.equal(payload.series.length, 4);
+  assert.equal(payload.valueFormat, "signed-percent");
+  const option = buildChartOption(payload);
+  assert.equal(option.yAxis.axisLabel.formatter(0.01), "+1.00%");
+  assert.equal(option.series.length, 4);
 });
 
 test("live account renderer separates sync service from account permission", () => {

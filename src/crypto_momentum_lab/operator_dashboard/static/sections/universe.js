@@ -61,11 +61,22 @@ export function renderUniverse(data) {
     { label: "监控状态", value: (row) => membershipBadge(row.status), html: true },
   ], monitoringAdditions, { emptyText: "无补充监控成员", tall: monitoringAdditions.length > 24 });
   const monitoringNote = `<div class="monitor-note">榜单中的目标标的已计入监控池；此处只展示未出现在涨幅榜/跌幅榜中的保留和持仓保护成员。</div>`;
+  const viewTabs = `<div class="view-tabs market-view-tabs" role="tablist" aria-label="市场子视图">
+    <button type="button" class="view-tab is-active" data-market-view="rankings" role="tab" aria-selected="true">UTC 排名<small>TOP 20</small></button>
+    <button type="button" class="view-tab" data-market-view="monitoring" role="tab" aria-selected="false">监控池<small>PROTECTED UNIVERSE</small></button>
+  </div>`;
   const body = `<div class="detail-meta"><span>快照时间 <b class="num">${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</b></span><span>${esc(relToNow(data.observed_at))}</span></div>
-    <div class="block-split">
-      <div class="block">${blockTitle("涨幅榜 Top 20", "TOP GAINERS · UTC DAY")}${universeTable(data.gainers)}</div>
-      <div class="block">${blockTitle("跌幅榜 Top 20", "TOP LOSERS · UTC DAY")}${universeTable(data.losers)}</div>
-    </div>
-    <div class="block">${blockTitle(`监控池 ${monitored.length}`, "MONITORED UNIVERSE", summary)}${monitoringNote}${blockTitle(`补充监控 ${monitoringAdditions.length}`, "MONITORING ADDITIONS")}${monitoringTable}</div>`;
+    <div class="market-board" data-market-board>
+      ${viewTabs}
+      <div class="market-panel" data-market-panel="rankings" role="tabpanel">
+        <div class="block-split">
+          <div class="block">${blockTitle("涨幅榜 Top 20", "TOP GAINERS · UTC DAY")}${universeTable(data.gainers)}</div>
+          <div class="block">${blockTitle("跌幅榜 Top 20", "TOP LOSERS · UTC DAY")}${universeTable(data.losers)}</div>
+        </div>
+      </div>
+      <div class="market-panel" data-market-panel="monitoring" role="tabpanel" hidden>
+        <div class="block">${blockTitle(`监控池 ${monitored.length}`, "MONITORED UNIVERSE", summary)}${monitoringNote}${blockTitle(`补充监控 ${monitoringAdditions.length}`, "MONITORING ADDITIONS")}${monitoringTable}</div>
+      </div>
+    </div>`;
   return [data.status, body];
 }
