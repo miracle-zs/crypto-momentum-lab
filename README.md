@@ -37,8 +37,9 @@ together. Raw archives are written under `data/raw` through the Compose volume:
 find data/raw -name '*.jsonl.zst' -type f
 ```
 
-The UTC 00:01 universe snapshot is recorded but not activated. The previous
-day's 23:01 universe remains active until the 01:01 snapshot succeeds.
+Every successfully persisted universe snapshot is activated, including the
+UTC 00:01 rollover snapshot. The server refreshes the ranking every five
+minutes, so the active universe updates normally across UTC midnight.
 
 ## Live Smoke Test
 

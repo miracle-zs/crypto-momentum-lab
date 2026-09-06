@@ -92,7 +92,7 @@ class UniverseRefreshService:
             top_count=self._config.top_count,
             ranking_depth=self._config.ranking_depth,
         )
-        activated = observed_at.hour != 0
+        activated = True
         memberships: tuple[TrackedMembership, ...] = ()
         if activated:
             previous = await self._repository.load_active_memberships()

@@ -106,10 +106,10 @@ is the opening price of its first valid one-minute kline.
 `current_price` is the last valid traded price observed at the ranking cutoff.
 The snapshot records the exact source event and cutoff time.
 
-Ranking runs once per hour after the first complete minute following the hour.
-The 00:00 UTC snapshot is recorded but is not activated because its
-measurement horizon is effectively zero. The previous day's 23:00 target
-universe remains active until the 01:00 UTC snapshot is ready.
+Ranking runs after the first complete minute following the hour. Every
+successfully persisted snapshot is activated, including the UTC 00:00
+rollover snapshot; the active universe therefore follows the latest complete
+ranking across the UTC day boundary.
 
 Ties are resolved deterministically by symbol name.
 

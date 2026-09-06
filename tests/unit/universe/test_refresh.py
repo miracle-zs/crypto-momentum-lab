@@ -111,7 +111,7 @@ async def test_refresh_persists_top_bottom_and_fetches_only_missing_opens(
     assert fake_repository.saved_snapshot == snapshot
 
 
-async def test_midnight_snapshot_is_recorded_but_not_activated(
+async def test_midnight_snapshot_is_activated(
     fake_market_data,
     fake_repository,
 ) -> None:
@@ -121,8 +121,8 @@ async def test_midnight_snapshot_is_recorded_but_not_activated(
 
     snapshot = await service.refresh(observed_at=observed_at)
 
-    assert snapshot.activated is False
-    assert snapshot.memberships == ()
+    assert snapshot.activated is True
+    assert len(snapshot.memberships) == 1
 
 
 async def test_rejects_naive_refresh_time(
@@ -186,7 +186,7 @@ async def test_forced_symbol_outside_ranking_remains_monitored(
     assert forced.status is MembershipStatus.FORCED
 
 
-async def test_0101_activates_after_midnight_snapshot(
+async def test_midnight_and_0101_snapshots_are_activated(
     fake_market_data,
     fake_repository,
 ) -> None:
@@ -199,8 +199,9 @@ async def test_0101_activates_after_midnight_snapshot(
     fake_market_data.seed_single_symbol(one_am)
     second = await service.refresh(observed_at=one_am)
 
-    assert first.activated is False
+    assert first.activated is True
     assert second.activated is True
+    assert len(first.memberships) == 1
     assert len(second.memberships) == 1
 
 
@@ -222,7 +223,7 @@ async def test_activated_snapshot_updates_subscriptions(
     assert observer.snapshots == [snapshot]
 
 
-async def test_midnight_snapshot_does_not_update_subscriptions(
+async def test_midnight_snapshot_updates_subscriptions(
     fake_market_data,
     fake_repository,
 ) -> None:
@@ -235,6 +236,6 @@ async def test_midnight_snapshot_does_not_update_subscriptions(
         observer=observer,
     )
 
-    await service.refresh(observed_at=at)
+    snapshot = await service.refresh(observed_at=at)
 
-    assert observer.snapshots == []
+    assert observer.snapshots == [snapshot]
