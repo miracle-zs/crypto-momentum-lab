@@ -337,7 +337,6 @@ def _initial_snapshot() -> AccountSnapshot:
             account_label="primary",
             multi_assets_mode=False,
             hedge_mode=False,
-            can_trade=True,
             fee_tier=0,
             observed_at=observed_at,
             raw_payload={},

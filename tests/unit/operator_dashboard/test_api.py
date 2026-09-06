@@ -39,10 +39,20 @@ def test_all_read_only_dashboard_routes_are_available() -> None:
             "/api/paper-accounts/paper-account-test",
             "/api/paper-accounts/paper-account-test/history",
             "/api/account",
+            "/api/live-accounts",
             "/api/risk-execution",
             "/api/reports",
         ):
             assert client.get(route, auth=DASHBOARD_BASIC_AUTH).status_code == 200
+
+
+def test_account_endpoint_accepts_an_account_label() -> None:
+    with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
+        response = client.get("/api/account?account_label=account-3&equity_range=7d")
+
+    assert response.status_code == 200
+    assert response.json()["account_label"] == "account-3"
+    assert response.json()["equity_range"] == "7d"
 
 
 def test_equity_endpoint_exposes_unified_start_comparison_metadata() -> None:

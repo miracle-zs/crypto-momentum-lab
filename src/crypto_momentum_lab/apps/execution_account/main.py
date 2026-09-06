@@ -7,6 +7,12 @@ from typing import Annotated
 import typer
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from crypto_momentum_lab.config import (
+    BinanceCredentialRole,
+    CredentialResolutionError,
+    ResolvedBinanceCredentials,
+    resolve_role_credentials,
+)
 from crypto_momentum_lab.domain.account import AccountFillEvent
 from crypto_momentum_lab.execution_account.binance import (
     DEFAULT_BINANCE_USDM_USER_DATA_WEBSOCKET_URL,
@@ -63,13 +69,22 @@ def sync_once_command(
         typer.Option("--base-url"),
     ] = "https://fapi.binance.com",
     api_key_env: Annotated[
-        str,
+        str | None,
         typer.Option("--api-key-env"),
-    ] = "BINANCE_API_KEY",
+    ] = None,
     api_secret_env: Annotated[
-        str,
+        str | None,
         typer.Option("--api-secret-env"),
-    ] = "BINANCE_API_SECRET",
+    ] = None,
+    allow_legacy_credential_fallback: Annotated[
+        bool,
+        typer.Option(
+            "--allow-legacy-credential-fallback/--no-allow-legacy-credential-fallback",
+            help=(
+                "Temporarily fall back to BINANCE_API_KEY/SECRET during migration."
+            ),
+        ),
+    ] = False,
     expected_multi_assets_mode: Annotated[
         bool,
         typer.Option("--expected-multi-assets-mode/--single-asset-mode"),
@@ -92,20 +107,20 @@ def sync_once_command(
             "--database-url or CML_EXECUTION_DATABASE_URL or "
             "CML_DATABASE_URL is required"
         )
-    api_key = os.environ.get(api_key_env)
-    api_secret = os.environ.get(api_secret_env)
-    if not api_key or not api_secret:
-        raise typer.BadParameter(
-            f"{api_key_env} and {api_secret_env} are required"
-        )
+    credentials = _resolve_cli_credentials(
+        role=BinanceCredentialRole.READ,
+        api_key_env=api_key_env,
+        api_secret_env=api_secret_env,
+        allow_legacy_fallback=allow_legacy_credential_fallback,
+    )
     result = asyncio.run(
         sync_once(
             database_url=resolved_database_url,
             environment=environment,
             account_label=account_label,
             base_url=base_url,
-            api_key=api_key,
-            api_secret=api_secret,
+            api_key=credentials.api_key,
+            api_secret=credentials.api_secret,
             expected_multi_assets_mode=expected_multi_assets_mode,
             expected_hedge_mode=expected_hedge_mode,
             fill_symbols=_parse_symbols(fill_symbols),
@@ -131,13 +146,22 @@ def sync_command(
         typer.Option("--base-url"),
     ] = "https://fapi.binance.com",
     api_key_env: Annotated[
-        str,
+        str | None,
         typer.Option("--api-key-env"),
-    ] = "BINANCE_API_KEY",
+    ] = None,
     api_secret_env: Annotated[
-        str,
+        str | None,
         typer.Option("--api-secret-env"),
-    ] = "BINANCE_API_SECRET",
+    ] = None,
+    allow_legacy_credential_fallback: Annotated[
+        bool,
+        typer.Option(
+            "--allow-legacy-credential-fallback/--no-allow-legacy-credential-fallback",
+            help=(
+                "Temporarily fall back to BINANCE_API_KEY/SECRET during migration."
+            ),
+        ),
+    ] = False,
     expected_multi_assets_mode: Annotated[
         bool,
         typer.Option("--expected-multi-assets-mode/--single-asset-mode"),
@@ -228,20 +252,20 @@ def sync_command(
             "--database-url or CML_EXECUTION_DATABASE_URL or "
             "CML_DATABASE_URL is required"
         )
-    api_key = os.environ.get(api_key_env)
-    api_secret = os.environ.get(api_secret_env)
-    if not api_key or not api_secret:
-        raise typer.BadParameter(
-            f"{api_key_env} and {api_secret_env} are required"
-        )
+    credentials = _resolve_cli_credentials(
+        role=BinanceCredentialRole.READ,
+        api_key_env=api_key_env,
+        api_secret_env=api_secret_env,
+        allow_legacy_fallback=allow_legacy_credential_fallback,
+    )
     asyncio.run(
         sync_continuously(
             database_url=resolved_database_url,
             environment=environment,
             account_label=account_label,
             base_url=base_url,
-            api_key=api_key,
-            api_secret=api_secret,
+            api_key=credentials.api_key,
+            api_secret=credentials.api_secret,
             expected_multi_assets_mode=expected_multi_assets_mode,
             expected_hedge_mode=expected_hedge_mode,
             fill_symbols=_parse_symbols(fill_symbols),
@@ -496,6 +520,24 @@ def _parse_symbols(value: str) -> tuple[str, ...]:
             }
         )
     )
+
+
+def _resolve_cli_credentials(
+    *,
+    role: BinanceCredentialRole,
+    api_key_env: str | None,
+    api_secret_env: str | None,
+    allow_legacy_fallback: bool,
+) -> ResolvedBinanceCredentials:
+    try:
+        return resolve_role_credentials(
+            role,
+            api_key_env=api_key_env,
+            api_secret_env=api_secret_env,
+            allow_legacy_fallback=allow_legacy_fallback,
+        )
+    except CredentialResolutionError as error:
+        raise typer.BadParameter(str(error)) from error
 
 
 def _execution_database_url(value: str | None) -> str:

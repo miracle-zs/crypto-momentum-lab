@@ -1,4 +1,7 @@
 import {
+  replaceChildrenFromHtml,
+} from "../dashboard-dom.js";
+import {
   DEFAULT_EQUITY_BUCKET_SECONDS,
   DISPLAY_TIME_ZONE_LABEL,
 } from "../dashboard-config.js";
@@ -22,6 +25,7 @@ import {
   blockTitle,
   dataTable,
   disclosure,
+  emptyBox,
   pill,
   sideTag,
   signalEvidence,
@@ -47,6 +51,142 @@ const LIVE_SIGNAL_KIND_LABELS = {
   candidate: { label: "开仓候选", className: "candidate" },
   reduce_only_candidate: { label: "退出候选", className: "reduce" },
 };
+
+let selectedLiveAccount = "primary";
+let liveAccountDetailRequest = 0;
+
+async function defaultAccountRequestJson(url) {
+  const response = await fetch(url, {
+    headers: { "Accept": "application/json" },
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+function liveAccountCard(account, index) {
+  const active = account.account_label === selectedLiveAccount;
+  const status = account.status || "UNKNOWN";
+  const strategy = account.strategy_name || "orderflow_impulse";
+  const readiness = account.readiness || "missing";
+  const lease = account.lease_expires_at
+    ? `租约至 ${dayTime(account.lease_expires_at)}`
+    : "无有效租约";
+  return `<button class="live-account-card${active ? " is-active" : ""}" type="button"
+    role="tab" id="live-account-tab-${index}" aria-controls="live-account-detail"
+    aria-selected="${active}" tabindex="${active ? "0" : "-1"}"
+    data-live-account-label="${esc(account.account_label)}">
+    <div class="live-account-card-top"><span>LIVE ${String(index + 1).padStart(2, "0")}</span>${pill(status)}</div>
+    <strong>${esc(account.account_label)}</strong>
+    <span class="live-account-card-strategy">${esc(strategy)} · ${esc(account.strategy_state || "未知")}</span>
+    <small>${esc(readiness)} · ${esc(lease)}</small>
+    <small>最近同步 ${esc(relToNow(account.observed_at))}</small>
+  </button>`;
+}
+
+export function renderLiveAccounts(data) {
+  const accounts = data.accounts || [];
+  if (!accounts.length) {
+    return [data.status, emptyBox("等待实盘账户同步", "尚未发现 live execution-account")];
+  }
+  if (!accounts.some((account) => account.account_label === selectedLiveAccount)) {
+    selectedLiveAccount = accounts[0].account_label;
+  }
+  const selected = accounts.find(
+    (account) => account.account_label === selectedLiveAccount,
+  );
+  const cards = accounts.map(liveAccountCard).join("");
+  return [data.status, `<div class="live-account-directory" data-live-account-directory>
+    <div class="live-account-directory-head">
+      <div><strong>实盘账户矩阵</strong><small>ACCOUNT STATUS · SHARED MARKET-DATA · READ ONLY</small></div>
+      <span>${accounts.length} 个账户 · 同一 market-data</span>
+    </div>
+    <div class="live-account-grid" role="tablist" aria-label="实盘账户选择">${cards}</div>
+    <div class="live-account-detail" id="live-account-detail" data-live-account-detail
+      data-account-label="${esc(selected?.account_label || selectedLiveAccount)}">
+      <div class="lazy-detail"><strong>账户详情加载中…</strong><small>正在读取所选账户的余额、持仓、挂单和权益。</small></div>
+    </div>
+  </div>`];
+}
+
+function setLiveAccountTabState(root, accountLabel) {
+  root.querySelectorAll("[data-live-account-label]").forEach((button) => {
+    const active = button.dataset.liveAccountLabel === accountLabel;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.setAttribute("tabindex", active ? "0" : "-1");
+  });
+}
+
+async function loadLiveAccountDetail(root, accountLabel, requestJson, equityRange = "24h") {
+  const slot = root.querySelector("[data-live-account-detail]");
+  if (!slot) return;
+  const requestId = ++liveAccountDetailRequest;
+  selectedLiveAccount = accountLabel;
+  setLiveAccountTabState(root, accountLabel);
+  slot.dataset.accountLabel = accountLabel;
+  slot.setAttribute("aria-busy", "true");
+  replaceChildrenFromHtml(
+    slot,
+    `<div class="lazy-detail"><strong>账户详情加载中…</strong><small>${esc(accountLabel)} · 正在读取最新快照</small></div>`,
+  );
+  try {
+    const query = new URLSearchParams({
+      account_label: accountLabel,
+      equity_range: equityRange,
+    });
+    const detail = await requestJson(`api/account?${query.toString()}`);
+    if (requestId !== liveAccountDetailRequest || !slot.isConnected) return;
+    const [status, html] = renderAccount(detail);
+    replaceChildrenFromHtml(slot, html);
+    slot.dataset.accountStatus = status;
+    wireAccountEquityRanges(slot, (nextRange) => loadLiveAccountDetail(
+      root,
+      accountLabel,
+      requestJson,
+      nextRange,
+    ));
+  } catch (error) {
+    if (requestId !== liveAccountDetailRequest || !slot.isConnected) return;
+    replaceChildrenFromHtml(
+      slot,
+      emptyBox("账户详情加载失败", `${accountLabel} · ${error.message}`),
+    );
+  } finally {
+    slot.removeAttribute("aria-busy");
+  }
+}
+
+export function wireLiveAccounts(
+  root,
+  data,
+  { requestJson = defaultAccountRequestJson } = {},
+) {
+  const accounts = data.accounts || [];
+  root.querySelectorAll("[data-live-account-label]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const accountLabel = button.dataset.liveAccountLabel;
+      if (accountLabel) void loadLiveAccountDetail(root, accountLabel, requestJson);
+    });
+    button.addEventListener("keydown", (event) => {
+      const buttons = [...root.querySelectorAll("[data-live-account-label]")];
+      const current = buttons.indexOf(button);
+      if (current < 0) return;
+      let next = null;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") next = (current + 1) % buttons.length;
+      if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (current - 1 + buttons.length) % buttons.length;
+      if (event.key === "Home") next = 0;
+      if (event.key === "End") next = buttons.length - 1;
+      if (next == null) return;
+      buttons[next].focus();
+      buttons[next].click();
+      event.preventDefault();
+    });
+  });
+  const selected = accounts.find(
+    (account) => account.account_label === selectedLiveAccount,
+  ) || accounts[0];
+  if (selected) void loadLiveAccountDetail(root, selected.account_label, requestJson);
+}
 
 function liveSignalKind(row) {
   return LIVE_SIGNAL_KIND_LABELS[row.signal_kind]
@@ -177,16 +317,6 @@ export function renderAccount(data) {
   const accountEquityDelta = accountWindowDelta({ equity_curve: accountEquity });
   const latestAccountEquity = accountEquity.at(-1)?.equity;
   const normalized = (value) => String(value || "").trim().toLowerCase();
-  const permission = (value) => value == null
-    ? "未知"
-    : value ? "可交易" : "交易所快照：否";
-  const permissionDetail = (value) => value == null
-    ? "等待 Binance canTrade 快照"
-    : value ? "Binance canTrade = true"
-      : "仅代表账户快照字段，不代表页面只读";
-  const permissionClass = (value) => value == null
-    ? "status-UNKNOWN"
-    : value ? "status-READY" : "status-ATTENTION";
   const modeLabel = (value, yesLabel, noLabel) => value == null ? "—" : value ? yesLabel : noLabel;
   const reconciliationLabel = (value) => ({
     ready: "已完成",
@@ -200,10 +330,10 @@ export function renderAccount(data) {
     : syncStatus === "halted"
       ? { className: "status-HALTED", label: "同步已停止", detail: "execution-account · 需要检查" }
       : { className: "status-UNKNOWN", label: "等待同步", detail: "execution-account · 暂无可靠状态" };
-  const permissionState = {
-    className: permissionClass(config.can_trade),
-    label: permission(config.can_trade),
-    detail: permissionDetail(config.can_trade),
+  const configState = {
+    className: Object.keys(config).length > 0 ? "status-READY" : "status-UNKNOWN",
+    label: Object.keys(config).length > 0 ? "已同步" : "等待同步",
+    detail: "Binance V3 账户配置快照",
   };
   const reconciliationState = mismatchCount != null && mismatchCount > 0
     ? { className: "status-ATTENTION", label: `${mismatchCount} 项差异`, detail: "余额、持仓或订单快照需要核对" }
@@ -236,7 +366,7 @@ export function renderAccount(data) {
       <div>
       <div class="account-eyebrow">${esc(String(data.environment || "LIVE").toUpperCase())} · EXECUTION ACCOUNT</div>
       <h3>${esc(data.account_label || "交易所账户")}</h3>
-      <p>execution-account 负责只读同步，不代表账户不可交易；实盘订单由 live-strategy 执行并按客户端订单号回链。</p>
+      <p>execution-account 负责账户只读同步；实盘订单由 live-strategy 执行并按客户端订单号回链。</p>
     </div>
     <div class="account-hero-meta">
       <div class="account-hero-status"><small>同步状态</small>${pill(data.status)}</div>
@@ -246,7 +376,7 @@ export function renderAccount(data) {
   </div>`;
   const stateGrid = `<div class="account-state-grid" aria-label="实盘账户状态">
     ${stateCard("同步服务", syncState)}
-    ${stateCard("交易所权限", permissionState)}
+    ${stateCard("账户配置", configState)}
     ${stateCard("实盘执行", executionState)}
     ${stateCard("对账状态", reconciliationState)}
     ${stateCard("数据新鲜度", freshnessState)}
@@ -277,7 +407,6 @@ export function renderAccount(data) {
   </div>`;
   const accountFacts = `<div class="account-facts">
     <div><span>实盘下单通道</span><b class="pos">live-strategy</b></div>
-    <div><span>账户 API 交易权限快照</span><b class="${permissionClass(config.can_trade)}" title="Binance 账户快照 canTrade 字段">${esc(permission(config.can_trade))}</b></div>
     <div><span>同步服务模式</span><b class="muted">只读同步 · 不下单</b></div>
     <div><span>持仓模式</span><b>${esc(modeLabel(config.hedge_mode, "Hedge · 双向", "One-way · 单向"))}</b></div>
     <div><span>保证金模式</span><b>${esc(modeLabel(config.multi_assets_mode, "Multi-Assets · 多资产", "Single-Asset · 单资产"))}</b></div>
@@ -287,7 +416,7 @@ export function renderAccount(data) {
     <div><span>对账快照 资产 / 持仓</span><b>${esc(`${reconciliation.balance_count ?? "—"} / ${reconciliation.position_count ?? "—"}`)}</b></div>
     <div><span>对账快照 挂单 / 成交</span><b>${esc(`${reconciliation.open_order_count ?? "—"} / ${reconciliation.fill_count ?? "—"}`)}</b></div>
   </div>
-  <p class="account-facts-note"><b>怎么读：</b><code>只读同步</code>描述的是 execution-account 服务本身不会下单，不是交易所账户权限。账户 API 交易权限只显示 Binance 快照中的 <code>canTrade</code>；实盘是否提交订单由 <code>live-strategy</code> 的下单开关与风控闸门决定。对账会把余额、持仓、挂单和成交快照写入数据库并检查差异，<code>对账一致 / 0 项</code> 表示本次快照没有发现不一致。</p>`;
+  <p class="account-facts-note"><b>怎么读：</b><code>只读同步</code>描述的是 execution-account 服务本身不会下单；账户配置来自 Binance V3 快照，实盘是否提交订单由 <code>live-strategy</code> 的下单开关与风控闸门决定。对账会把余额、持仓、挂单和成交快照写入数据库并检查差异，<code>对账一致 / 0 项</code> 表示本次快照没有发现不一致。</p>`;
   const usdtBalances = (data.balances || []).filter((row) => String(row.asset || "").toUpperCase() === "USDT");
   const balancesTable = dataTable([
     { label: "资产", key: "asset", cls: "sym" },
@@ -358,7 +487,7 @@ export function renderAccount(data) {
     ${hero}${stateGrid}${kpis}${equityChartBlock}
     ${disclosure("实盘策略信号", "LIVE SIGNALS · NON-BLOCKING OBSERVATION · LATEST 30", liveSignalContent,
       `<strong class="num">${liveSignals.length}</strong>`, { open: liveSignals.length > 0, stateKey: "live-strategy-signals" })}
-    ${disclosure("账户权限与对账", "EXECUTION CHANNEL / RECONCILIATION", accountFacts, "", { open: accountNeedsReview, stateKey: "account-reconciliation" })}
+    ${disclosure("账户配置与对账", "EXECUTION CHANNEL / RECONCILIATION", accountFacts, "", { open: accountNeedsReview, stateKey: "account-reconciliation" })}
     ${disclosure("USDT 资产余额", "USDT BALANCE · ACCOUNT COLLATERAL", balancesTable, `<strong class="num">${usdtBalances.length}</strong>`, { open: usdtBalances.length > 0, stateKey: "account-balances" })}
     ${disclosure("交易所持仓", "EXCHANGE POSITIONS · STRATEGY ATTRIBUTION", positionsTable, `<strong class="num">${positions.length}</strong>`, { open: positions.length > 0, stateKey: "account-positions" })}
     ${disclosure("当前挂单", "OPEN ORDERS · EXCHANGE SOURCE OF TRUTH", ordersTable, `<strong class="num">${openOrders.length}</strong>`, { open: openOrders.length > 0, stateKey: "account-open-orders" })}

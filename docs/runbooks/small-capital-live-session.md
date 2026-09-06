@@ -119,6 +119,23 @@ Set `CML_LIVE_STRATEGY_CONFIG_HASH` in `.env.live` to the value from step 2.
 Use the exact Git commit and Alembic head from the deployed image. The approval
 confirmation is exactly `ENABLE SMALL LIVE TRADING`.
 
+The one-off `preflight` command resolves the Live lane's
+`CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT` and `CML_LIVE_ENTRY_POLICY_MODE`
+environment values and reports three separate fingerprints:
+`runtime_strategy_config_hash` (calculated from those inputs),
+`configured_strategy_config_hash` (the value passed to the long-running
+service), and `approved_strategy_config_hash` (the database approval). Review
+both `runtime_strategy_config_matches_configured` and
+`runtime_strategy_config_matches_approval`; do not treat the library defaults
+as the production runtime configuration.
+
+When a completed matching Shadow session is intentionally unavailable during
+an already-approved temporary rollout, pass
+`--acknowledge-missing-shadow-preflight` to the Live `run` command. This does
+not create a Shadow record or bypass the Live gate; it changes the advisory
+log to an explicit, auditable `info` event. Keep the acknowledgment temporary
+and still run a real Shadow preflight before the next rollout change.
+
 ```bash
 $COMPOSE --profile live run --rm --no-deps live-strategy approve \
   --account-label "$CML_LIVE_ACCOUNT_LABEL" \

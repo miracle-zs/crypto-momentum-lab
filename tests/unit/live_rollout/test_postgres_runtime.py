@@ -413,7 +413,6 @@ async def test_position_view_uses_hub_snapshot_without_account_queries() -> None
             account_label="primary",
             multi_assets_mode=False,
             hedge_mode=False,
-            can_trade=True,
             fee_tier=0,
             observed_at=NOW,
             raw_payload={},

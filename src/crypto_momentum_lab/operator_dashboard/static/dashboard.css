@@ -977,6 +977,109 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 /* ============ live exchange account ============ */
 
+.live-account-directory {
+  display: grid;
+  gap: 12px;
+}
+
+.live-account-directory-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 2px 0;
+}
+
+.live-account-directory-head > div {
+  display: grid;
+  gap: 4px;
+}
+
+.live-account-directory-head strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.live-account-directory-head small,
+.live-account-directory-head > span {
+  color: var(--faint);
+  font: 9px var(--mono);
+  letter-spacing: .06em;
+}
+
+.live-account-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.live-account-card {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease, transform .15s ease;
+}
+
+.live-account-card:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-3);
+  transform: translateY(-1px);
+}
+
+.live-account-card.is-active {
+  border-color: color-mix(in srgb, var(--live) 66%, var(--line));
+  background: linear-gradient(180deg, rgba(52, 211, 153, .1), var(--surface-2) 78%);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--live) 24%, transparent);
+}
+
+.live-account-card:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.live-account-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--faint);
+  font: 9px var(--mono);
+  letter-spacing: .12em;
+}
+
+.live-account-card strong {
+  overflow: hidden;
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-account-card-strategy,
+.live-account-card small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-account-card small {
+  color: var(--faint);
+}
+
+.live-account-detail {
+  min-width: 0;
+  margin-top: 4px;
+}
+
 .account-hero {
   display: flex;
   align-items: flex-start;
@@ -1509,6 +1612,8 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 @media (max-width: 760px) {
   .card { scroll-margin-top: 210px; }
+  .live-account-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .live-account-directory-head { align-items: flex-start; flex-direction: column; }
   .acct-cards {
     grid-template-columns: 1fr;
   }
@@ -1554,6 +1659,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 @media (max-width: 520px) {
   .card { padding: 16px 14px 18px; }
+  .live-account-grid { grid-template-columns: 1fr; }
   .kpi-grid, .action-grid { grid-template-columns: 1fr; }
   .account-kpi-grid { grid-template-columns: 1fr; }
   .account-state-grid { grid-template-columns: 1fr; }

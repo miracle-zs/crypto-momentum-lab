@@ -143,6 +143,7 @@ services:
       # Market-data must protect the same live account used by the live
       # strategy and execution-account services. Fail closed if it is absent.
       CML_LIVE_POSITION_ACCOUNT_LABEL: ${CML_LIVE_ACCOUNT_LABEL:?set CML_LIVE_ACCOUNT_LABEL}
+      CML_LIVE_POSITION_ACCOUNT_LABELS: ${CML_LIVE_POSITION_ACCOUNT_LABELS:-}
       CML_MARKET_STATE_HUB_HOST: 0.0.0.0
       CML_MARKET_STATE_HUB_PORT: "8766"
     entrypoint: ["cml-market-data"]
@@ -283,6 +284,8 @@ services:
     environment:
       <<: *app-environment
       CML_HEALTHCHECK_RUN_ID: paper-account-14-orderflow-b1-gainer100-v1
+    volumes:
+      - research-data:/app/research-data
     command:
       - paper-live-daemon
       - --strategy
@@ -296,6 +299,9 @@ services:
       - "100"
       - --no-entry-price-above-ema5
       - --no-entry-price-above-ema10
+      - --entry-policy-compare-only
+      - --entry-policy-compare-output
+      - /app/research-data/entry-policy-observations/paper-account-14-entry-policy.jsonl
       - --orderflow-min-aggressive-imbalance
       - "0.40"
       - --candidate-notional
@@ -387,6 +393,8 @@ services:
     environment:
       <<: *app-environment
       CML_HEALTHCHECK_RUN_ID: paper-account-15-orderflow-b1-gainer100-ema-v1
+    volumes:
+      - research-data:/app/research-data
     command:
       - paper-live-daemon
       - --strategy
@@ -400,6 +408,9 @@ services:
       - "100"
       - --entry-price-above-ema5
       - --entry-price-above-ema10
+      - --entry-policy-compare-only
+      - --entry-policy-compare-output
+      - /app/research-data/entry-policy-observations/paper-account-15-entry-policy.jsonl
       - --candidate-notional
       - "100"
       - --paper-initial-balance
@@ -431,8 +442,8 @@ services:
     profiles: ["live"]
     environment:
       <<: *app-environment
-      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
-      BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
+      BINANCE_READ_API_KEY: ${BINANCE_READ_API_KEY:-}
+      BINANCE_READ_API_SECRET: ${BINANCE_READ_API_SECRET:-}
       CML_ACCOUNT_EVENT_HUB_HOST: ${CML_ACCOUNT_EVENT_HUB_HOST:-0.0.0.0}
       CML_ACCOUNT_EVENT_HUB_PORT: ${CML_ACCOUNT_EVENT_HUB_PORT:-8767}
     entrypoint: ["cml-execution-account"]
@@ -482,7 +493,7 @@ services:
         - --account-label
         - ${CML_LIVE_ACCOUNT_LABEL:-primary}
       interval: 60s
-      timeout: 5s
+      timeout: 15s
       retries: 2
       start_period: 30s
     mem_limit: 160m
@@ -493,9 +504,18 @@ services:
     profiles: ["live"]
     environment:
       <<: *app-environment
-      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
-      BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
+      BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY:-}
+      BINANCE_TRADE_API_SECRET: ${BINANCE_TRADE_API_SECRET:-}
       CML_HEALTHCHECK_RUN_ID: ${CML_LIVE_SESSION_ID:-live-primary-v1}
+      CML_LIVE_STRATEGY_CONFIG_HASH: ${CML_LIVE_STRATEGY_CONFIG_HASH:-unset}
+      CML_LIVE_ENTRY_POLICY_MODE: ${CML_LIVE_ENTRY_POLICY_MODE:-enforce}
+      CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT: ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-10}
+      CML_LIVE_IMPULSE_WINDOW_BUCKETS: ${CML_LIVE_IMPULSE_WINDOW_BUCKETS:-3}
+      CML_LIVE_CONFIRMATION_BUCKETS: ${CML_LIVE_CONFIRMATION_BUCKETS:-1}
+      CML_LIVE_MIN_RETURN_PCT: ${CML_LIVE_MIN_RETURN_PCT:-0.01}
+      CML_LIVE_MIN_IMBALANCE: ${CML_LIVE_MIN_IMBALANCE:-0.40}
+      CML_LIVE_MIN_INTENSITY: ${CML_LIVE_MIN_INTENSITY:-2}
+      CML_LIVE_COOLDOWN_BUCKETS: ${CML_LIVE_COOLDOWN_BUCKETS:-0}
       CML_MARKET_STATE_HUB_URL: ${CML_MARKET_STATE_HUB_URL:-ws://market-data:8766}
       CML_MARKET_QUOTE_HUB_URL: ${CML_MARKET_QUOTE_HUB_URL:-ws://market-data:8768}
       CML_ACCOUNT_EVENT_HUB_URL: ${CML_ACCOUNT_EVENT_HUB_URL:-ws://execution-account-live:8767}
@@ -506,6 +526,18 @@ services:
       - ${CML_LIVE_ACCOUNT_LABEL:-primary}
       - --strategy
       - ${CML_LIVE_STRATEGY:-orderflow_impulse}
+      - --impulse-window-buckets
+      - ${CML_LIVE_IMPULSE_WINDOW_BUCKETS:-3}
+      - --confirmation-buckets
+      - ${CML_LIVE_CONFIRMATION_BUCKETS:-1}
+      - --min-return-pct
+      - ${CML_LIVE_MIN_RETURN_PCT:-0.01}
+      - --min-imbalance
+      - ${CML_LIVE_MIN_IMBALANCE:-0.40}
+      - --min-intensity
+      - ${CML_LIVE_MIN_INTENSITY:-2}
+      - --cooldown-buckets
+      - ${CML_LIVE_COOLDOWN_BUCKETS:-0}
       - --market-environment
       - research
       - --market-state-source
@@ -540,8 +572,13 @@ services:
       - ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-10}
       - --no-entry-price-above-ema5
       - --no-entry-price-above-ema10
+      - --entry-policy-enforce
+      - --acknowledge-missing-shadow-preflight
       - --entry-leverage
       - ${CML_LIVE_ENTRY_LEVERAGE:-5}
+      # Production rollout explicitly retains only auditable write boundaries.
+      - --persist-exchange-operations
+      - ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-}
       - --exit-mode
       - ${CML_LIVE_EXIT_MODE:-candle_15m}
       - --take-profit-pct

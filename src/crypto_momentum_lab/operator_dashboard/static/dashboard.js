@@ -22,9 +22,9 @@ import { renderOverview, updateOverviewDynamic } from "./sections/overview.js";
 import { renderUniverse } from "./sections/universe.js";
 import { renderRisk } from "./sections/risk.js";
 import {
-  renderAccount,
-  wireAccountEquityRanges,
-} from "./sections/account.js?v=20260902-live-rank-null-fix-v1";
+  renderLiveAccounts,
+  wireLiveAccounts,
+} from "./sections/account.js?v=20260906-multi-live-accounts-v1";
 import { renderReports } from "./sections/reports.js";
 import { createStrategySection } from "./sections/strategy.js?v=20260826-flight-deck-v2";
 
@@ -192,7 +192,7 @@ const renderers = {
   strategy: strategySection.render,
   universe: renderUniverse,
   risk: renderRisk,
-  account: renderAccount,
+  account: renderLiveAccounts,
   reports: renderReports,
 };
 
@@ -254,14 +254,7 @@ async function refreshSection(id) {
     body.classList.remove("loading");
     body.removeAttribute("aria-busy");
     if (id === "strategy" && shouldRender) strategySection.wire(body, data);
-    if (id === "account" && shouldRender) {
-      wireAccountEquityRanges(body, async (equityRange) => {
-        section.dataset.endpoint = `api/account?equity_range=${encodeURIComponent(equityRange)}`;
-        sectionRenderKeys.delete(id);
-        body.setAttribute("aria-busy", "true");
-        await refreshSection(id);
-      });
-    }
+    if (id === "account" && shouldRender) wireLiveAccounts(body, data);
     if (id === "overview") updateGlobalMode(data);
     updateGlobalState(id, data);
   } catch (error) {

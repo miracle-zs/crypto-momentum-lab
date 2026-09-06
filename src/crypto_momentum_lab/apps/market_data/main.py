@@ -115,6 +115,7 @@ _CONTRACT_METADATA_RETENTION_BATCH_SIZE = 250
 _RUNTIME_STATE_RETENTION_BATCH_SIZE = 250
 _PAPER_EXIT_RUN_IDS_ENV = "CML_PAPER_EXIT_RUN_IDS"
 _LIVE_POSITION_ACCOUNT_LABEL_ENV = "CML_LIVE_POSITION_ACCOUNT_LABEL"
+_LIVE_POSITION_ACCOUNT_LABELS_ENV = "CML_LIVE_POSITION_ACCOUNT_LABELS"
 _MARKET_STATE_HUB_HOST_ENV = "CML_MARKET_STATE_HUB_HOST"
 _MARKET_STATE_HUB_PORT_ENV = "CML_MARKET_STATE_HUB_PORT"
 _MARKET_STATE_HUB_DEFAULT_HOST = "0.0.0.0"
@@ -186,6 +187,30 @@ def parse_live_position_account_label(value: str | None = None) -> str | None:
     )
     normalized = raw_value.strip()
     return normalized or None
+
+
+def parse_live_position_account_labels(
+    value: str | None = None,
+) -> frozenset[str]:
+    """Parse the live accounts whose positions must remain market-protected.
+
+    The plural variable is additive and keeps the old singular variable as a
+    compatibility fallback for the one-account deployment.
+    """
+
+    if value is None:
+        raw_value = os.environ.get(_LIVE_POSITION_ACCOUNT_LABELS_ENV, "")
+        if not raw_value.strip():
+            single = parse_live_position_account_label()
+            return frozenset() if single is None else frozenset({single})
+    else:
+        raw_value = value
+    labels = tuple(item.strip() for item in raw_value.split(","))
+    if any(not item for item in labels):
+        raise ValueError(
+            f"{_LIVE_POSITION_ACCOUNT_LABELS_ENV} must contain non-empty labels"
+        )
+    return frozenset(labels)
 
 
 def parse_market_state_hub_port(value: str | None = None) -> int:
@@ -643,18 +668,20 @@ async def build_market_data_runtime(
         realtime_quote_sink=quote_hub.publish,
     )
     protected_run_ids = parse_paper_exit_run_ids()
-    live_position_account_label = parse_live_position_account_label()
+    live_position_account_labels = parse_live_position_account_labels()
 
     async def load_protected_symbols() -> frozenset[str]:
         paper_symbols = await paper_repository.load_open_position_symbols(
             protected_run_ids
         )
-        if live_position_account_label is None:
-            return paper_symbols
-        live_symbols = await account_repository.load_active_position_symbols(
-            environment="live",
-            account_label=live_position_account_label,
-        )
+        live_symbols: set[str] = set()
+        for account_label in live_position_account_labels:
+            live_symbols.update(
+                await account_repository.load_active_position_symbols(
+                    environment="live",
+                    account_label=account_label,
+                )
+            )
         return paper_symbols | live_symbols
 
     initial_memberships = await universe_repository.load_active_memberships()

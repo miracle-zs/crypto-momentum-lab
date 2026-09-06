@@ -602,7 +602,18 @@ submit 审计和账户对账在观察窗口内成立。当前 release 先保持�
 聚焦提交并推送，然后先重启 `execution-account-live`、再重启 `live-strategy`，逐项检查健康、
 对账和租约，再保留观察窗口后移除兼容 fallback。
 
-## 23. P1 `EntryEligibilityPolicy` compare-only 适配层（2026-09-05）
+## 23. 角色凭证迁移收口（2026-09-05）
+
+在 `00e09a6` 上线后观察窗口内，`execution-account-live` 与 `live-strategy` 持续 healthy，
+账户 User Data Stream、live lease 和 Top10 entry lane 均正常，无异常、熔断或对账错误日志。
+容器实际只注入对应的 `BINANCE_READ_*` 或 `BINANCE_TRADE_*` 变量。
+
+因此下一版 Compose 移除两个长驻服务的 `--allow-legacy-credential-fallback`，同时不再把
+`BINANCE_API_KEY/SECRET` 注入 live 容器；解析器仍保留显式 CLI fallback 作为人工迁移工具，
+但生产服务默认和实际运行态均为 role-only、Fail-Closed。此变更不发送真实订单测试；发布后
+仍需继续观察权限错误、账户对账和 lease 状态。
+
+## 24. P1 `EntryEligibilityPolicy` compare-only 适配层（2026-09-05）
 
 凭证迁移收口且生产观察窗口无异常后，开始推进下一条架构 seam。此次只实现本地、默认关闭的
 compare-only 适配，不改变生产镜像或 Live 的下单结果。
@@ -638,7 +649,7 @@ compare-only 适配，不改变生产镜像或 Live 的下单结果。
 3. 只有差异按原因归零、source trace 可追溯且不影响 submit/cancel 审计后，才允许评估让 Policy
    接管主路径；Supervisor/Daemon 拆分继续后置。
 
-## 24. P1 输入快照元数据接线（2026-09-05）
+## 25. P1 输入快照元数据接线（2026-09-05）
 
 为避免 compare-only 用当前时间伪造 EMA 新鲜度，输入快照现在保留来源身份：
 
@@ -659,7 +670,7 @@ Live daemon 和 Policy 定向回归 **66 passed**；连同两个应用入口回�
 下一步是把该开关以同样的默认关闭语义接入 Paper/Replay 运行入口，收集 source trace 下的差异；
 在确认 stale/future/universe snapshot 漂移均可解释前，不发布到生产 Live。
 
-## 25. P1 Paper/Replay compare-only 接入（2026-09-05）
+## 26. P1 Paper/Replay compare-only 接入（2026-09-05）
 
 为了避免 Live adapter 变成唯一实现，比较契约已下沉到
 [`domain/strategy/entry_policy_compare.py`](../src/crypto_momentum_lab/domain/strategy/entry_policy_compare.py)。
@@ -678,7 +689,7 @@ Paper CLI `paper-live-daemon` 已暴露 `--entry-policy-compare-only/--no-entry-
 下一步是用固定 Replay 窗口收集比较报告，按 `ema_unavailable`、`ema_stale`、universe 和 Paper
 专属 gate 原因分类；差异未解释前不把 Policy 结果接管主路径，也不部署生产 Live。
 
-## 26. P1 固定 Replay 窗口验证（2026-09-05）
+## 27. P1 固定 Replay 窗口验证（2026-09-05）
 
 已使用服务器导出的只读状态文件完成一个固定窗口验证，详细结果见
 [`docs/research/entry-policy-compare-replay-2026-09-05.md`](research/entry-policy-compare-replay-2026-09-05.md)。
@@ -698,7 +709,7 @@ candidate；没有连接网络、数据库或交易所，也没有改变任何 P
 universe/EMA/source-trace 输入契约，再增加可序列化比较报告和 CLI。差异未解释前，不让 Policy
 接管主路径，也不部署生产 Live。
 
-## 27. P1 Replay 比较输入契约与报告 seam（2026-09-05）
+## 28. P1 Replay 比较输入契约与报告 seam（2026-09-05）
 
 固定窗口验证暴露的“离线 Replay 只有策略核心、没有准入快照”的边界已收敛为显式接口：
 
@@ -721,7 +732,7 @@ universe/EMA/source-trace 输入契约，再增加可序列化比较报告和 CL
 固定窗口生成正式 JSON 报告；解析失败、快照缺失和 source-trace 不完整必须阻止报告生成，
 而不是静默降级。完成前不让 Policy 接管主路径，也不部署生产 Live。
 
-## 28. P1 Replay compare-only composition root 接入（2026-09-05）
+## 29. P1 Replay compare-only composition root 接入（2026-09-05）
 
 上一节定义的契约现已接入 `cml-strategy-runner replay`，但仍保持独立报告和默认关闭：
 
@@ -751,7 +762,7 @@ universe/EMA/source-trace 输入契约，再增加可序列化比较报告和 CL
 的低基数汇总；只有真实快照输入完整、差异都有解释且报告可重复后，才评估让 Policy 接管
 非 reduce-only 主路径。不把 compare-only 开关直接开到生产 Live。
 
-## 29. P1 Paper/Live 运行时输入契约收口（2026-09-05）
+## 30. P1 Paper/Live 运行时输入契约收口（2026-09-05）
 
 本切片把 Replay 已使用的 `EntryPolicyComparisonRequest` seam 接回真实运行时 adapter：
 
@@ -770,7 +781,7 @@ universe/EMA/source-trace 输入契约，再增加可序列化比较报告和 CL
 运行中持续收集该汇总，核对 source trace、快照新鲜度和差异原因，再决定是否扩大观测范围；
 在此之前不把 Policy 接管生产 Live 主路径。
 
-## 30. P1 Paper 非下单观测与候选集合边界（2026-09-05）
+## 31. P1 Paper 非下单观测与候选集合边界（2026-09-05）
 
 已用固定历史窗口实际运行 Paper daemon 的 compare-only 路径，结果见
 [`paper-entry-policy-observation-2026-09-05.md`](research/paper-entry-policy-observation-2026-09-05.md)。
@@ -787,7 +798,7 @@ universe/EMA/source-trace 输入契约，再增加可序列化比较报告和 CL
 读取），并在报告中显式标记 candidate-set mismatch。候选集合对齐后，再接入真实 EMA snapshot
 做 Paper 非下单观测；compare-only 仍默认关闭，不部署生产 Live。
 
-## 31. P1 Replay/Paper gap reset 对齐（2026-09-05）
+## 32. P1 Replay/Paper gap reset 对齐（2026-09-05）
 
 为消除上一节发现的候选集合差异，`ReplayConfig` 增加 `reset_on_gap`，默认开启。Replay 按
 symbol 记录上一个处理时间；当间隔超过策略 `max_gap_seconds` 时调用策略的
@@ -803,7 +814,7 @@ symbol 记录上一个处理时间；当间隔超过策略 `max_gap_seconds` 时
 下一步是为这 10 个共同候选接入真实闭合 EMA snapshot，验证 `ema_unavailable`、`ema_stale`
 和 `ema_snapshot_from_future` 的运行时分类；compare-only 仍默认关闭，不部署生产 Live。
 
-## 32. P1 Paper 真实 EMA snapshot 观测（2026-09-05）
+## 33. P1 Paper 真实 EMA snapshot 观测（2026-09-05）
 
 已在 gap-reset 对齐后的同一固定窗口运行 Paper compare-only，并接入历史闭合 EMA5/EMA10
 snapshot（含 observed_at、snapshot id 和 config hash）。100,000 条状态产生 10 个共同候选，
@@ -816,7 +827,7 @@ Policy reason 中有 5 个 `ema_filter_failed`，与对齐后的 Replay compare-
 `ema_snapshot_from_future` 和缺少来源时间时的 `ema_unavailable` 都能稳定区分；在这些原因
 有明确处置前，compare-only 不打开生产 Live，Policy 不接管主路径。
 
-## 33. P1 Paper EMA 时间语义故障注入（2026-09-05）
+## 34. P1 Paper EMA 时间语义故障注入（2026-09-05）
 
 同一 Paper 非下单窗口完成三组 EMA snapshot 时间故障注入：
 
@@ -835,7 +846,7 @@ observer，未连接交易所、数据库或订单路径。未来场景中 Polic
 差异告警阈值；在告警处置和回滚演练完成前，compare-only 仍不在生产 Live 默认开启，Policy
 不接管主路径。
 
-## 34. P1 Paper compare-only 非下单 JSONL sink（2026-09-05）
+## 35. P1 Paper compare-only 非下单 JSONL sink（2026-09-05）
 
 Paper observer 现在可以显式写入独立的本地 JSONL 文件：
 `PaperEntryPolicyComparisonJsonlSink` 为每个 state/candidate batch 追加一条观测记录，包含
@@ -855,7 +866,7 @@ repository，也不写订单、fill、position 或 submit/cancel 审计。observ
 是用该 sink 连续跑非下单 Paper 窗口，按低基数 mismatch reason 形成时间序列并设置告警阈值，
 再做告警/回滚演练；在此之前不让 Policy 接管生产主路径。
 
-## 35. P1 Paper 观测窗口汇总与阈值判定（2026-09-05）
+## 36. P1 Paper 观测窗口汇总与阈值判定（2026-09-05）
 
 在 JSONL sink 之上增加了只读的 `entry-policy-observation-report` 命令。它严格读取
 `schema_version=1` 的观测行，按窗口合并 `candidates`、`matched/mismatched`、资格数和
@@ -870,7 +881,7 @@ repository，也不写订单、fill、position 或 submit/cancel 审计。observ
 `mypy` 通过。下一步是用真实 Paper 非下单窗口持续生成 JSONL，按固定时间窗运行该汇总命令，
 记录正常基线，再进行告警触发和回滚演练；在演练通过前不把 Policy 接入主准入路径。
 
-## 36. P1 固定窗口 Paper sink 基线（2026-09-05）
+## 37. P1 固定窗口 Paper sink 基线（2026-09-05）
 
 已用本地固定窗口完成一次端到端观测：读取 100,000 条 15 秒状态、覆盖 116 个 symbol，运行
 内存 Paper daemon，`artifact_repository=None`，通过 JSONL sink 写出 10 个有候选 batch；随后
@@ -882,7 +893,7 @@ repository，也不写订单、fill、position 或 submit/cancel 审计。observ
 harness 自身的时间语义必须与 Replay/Paper 的 observed_at 对齐，否则会制造假告警。下一步
 应在相同时间语义下做故障注入告警和回滚演练，而不是直接把固定时钟的结果当成策略差异。
 
-## 37. P1 观测告警退出码演练（2026-09-05）
+## 38. P1 观测告警退出码演练（2026-09-05）
 
 用第一次固定 clock 造成的 10 个过期假 mismatch 作为受控故障输入运行汇总命令：在
 `--max-mismatches 0 --max-mismatch-rate 0 --fail-on-alert` 下报告状态为 `alert`，命令按约定
@@ -890,23 +901,23 @@ harness 自身的时间语义必须与 Replay/Paper 的 observed_at 对齐，否
 验证，但尚未接入任何生产调度器或通知系统。下一步是做 compare-only 开关关闭后的回滚演练，
 确认旧 Paper 路径仍可独立运行。
 
-## 38. P1 compare-only 关闭回滚 seam（2026-09-05）
+## 39. P1 compare-only 关闭回滚 seam（2026-09-05）
 
 补充了回滚 contract test：`entry_policy_compare_only=False` 时，即使传入 observer，Paper
 daemon 也不会调用它；旧 Paper decision/fill 路径保持独立。该测试只验证本地控制流，不打开
 生产配置。下一步是把基线、故障告警和关闭开关三项证据整理成验收清单，再由人工决定是否扩大
 到更长的非下单窗口。
 
-## 39. P1 Paper/Policy 观测验收清单（2026-09-05）
+## 40. P1 Paper/Policy 观测验收清单（2026-09-05）
 
 新增 [`paper-entry-policy-acceptance-checklist-2026-09-05.md`](research/paper-entry-policy-acceptance-checklist-2026-09-05.md)，
 把当前证据分成“已通过、部分通过、未完成”和明确禁止动作。当前固定窗口基线、时间语义、
 JSONL 有界性、告警退出码以及 compare-only 回滚 seam 已通过；当时尚未完成的
-stale/future/missing EMA sink/report 链路和更长窗口，已在后续第 40 节补齐。
+stale/future/missing EMA sink/report 链路和更长窗口，已在后续第 41 节补齐。
 
 因此下一步仍是本地非下单延长观测和故障报告复核，不是生产部署或 Policy 主路径切换。
 
-## 40. P1 长窗口与 EMA 故障链路验收（2026-09-05）
+## 41. P1 长窗口与 EMA 故障链路验收（2026-09-05）
 
 使用同一 state-aligned harness 读取本地历史 CSV 的前 200,000 条状态，覆盖约 36 小时和
 138 个 symbol；Paper daemon 仍使用内存 repository、`artifact_repository=None`。正常基线写出
@@ -925,3 +936,29 @@ stale/future/missing EMA sink/report 链路和更长窗口，已在后续第 40 
 它验证的是 sink/report 的分类和告警链路，不是生产数据结论。至此清单中的长窗口、故障分类、
 阈值告警和关闭回滚门槛均已有本地证据。下一步是整理人工验收记录；在此之前不把 Policy
 接入主准入路径，不部署生产 Live。
+
+## 42. P1 多账户 Live 策略 profile seam（2026-09-06）
+
+根据四个账户的参数矩阵，新增了账户级 `LiveOrderFlowImpulseProfile` 深模块。它统一校验
+`impulse_window_buckets`、`confirmation_buckets`、`min_return_pct`、
+`min_aggressive_imbalance`、`min_notional_intensity` 和 `cooldown_buckets`，并让这些值同时
+进入 runtime strategy config、strategy hash 和 preflight 展示；部分 CLI 覆盖会 Fail-Closed，
+不能把一个账户的值与另一个账户的默认值静默混合。
+
+当前矩阵中 account-2 为 `2 / 1 / 0.005 / 0.50 / 3.0 / 0`；primary 保持
+`3 / 1 / 0.01 / 0.40 / 2 / 0`，account-3/4 保持 `2 / 1 / 0.005 / 0.50 / 2 / 0`。
+
+`market-data` 保持单实例。新增的 `CML_LIVE_POSITION_ACCOUNT_LABELS` 支持它把多个 Live
+账户的持仓标的取并集，旧的单账户变量仍可作为兼容回退。`compose.live.accounts.yaml` 为
+`account-2`、`account-3`、`account-4` 增加独立的 read/trade 凭证、execution-account、
+account-event hub、Live session、lease owner、风险审批和策略参数；四个 Live 策略仍消费同一
+market state/quote hub。
+
+本地验证：相关单元和部署 manifest 共 **80 passed**，修改文件通过 `ruff` 和严格 `mypy`，
+base compose 与 multi-account overlay 的合并配置验证通过。该切片尚未把三组凭证写入服务器、
+尚未生成账户审批/风险配置，也没有启动任何新增 Live 服务。
+
+进入生产预检前仍需：确认三组账户的 read/trade 权限、填写各账户风险上限、生成并核对各自策略
+hash、设置四账户持仓保护标签，并按 account-2 → account-3 → account-4 的顺序逐个执行
+prepare/approve/preflight/health 观察。服务器内存、数据库连接池和 telemetry 写入量也需要先
+做只读容量检查。
