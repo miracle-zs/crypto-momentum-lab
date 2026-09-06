@@ -170,9 +170,9 @@ def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
         "strategyEquityChart",
         "buildLatestStartEquityModels",
         "latestStartEquityChart",
-        "STRATEGY EXIT EQUITY",
-        "DAILY 08:00 ANCHOR",
-        "SHARED AXES",
+        "STRATEGY COHORT",
+        "displayLabel",
+        "完整配置：",
         "LATEST START",
         "统一起点权益金额变化",
         "common_equity_curve",
@@ -181,7 +181,7 @@ def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
         "每日 08:00 UTC+8 起算",
         "comparisonAnchorText",
         "source === \"live\"",
-        "模拟盘版本 + 实盘 Top10 · B8",
+        "个模拟账户 + ${liveAccounts.length} 个实盘账户",
         "ROLLING 24H",
         "CLOSED TRADES · LATEST 30",
         "wirePaperAccountTabs",
@@ -191,7 +191,7 @@ def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
         "paperDetailsByRun",
     ):
         assert marker in text_with_charts
-    assert "SUMMARY FIRST · DETAIL ON DEMAND" in (
+    assert "PAPER / LIVE COHORT · ON-DEMAND DETAIL" in (
         STATIC / "index.html"
     ).read_text(encoding="utf-8")
 

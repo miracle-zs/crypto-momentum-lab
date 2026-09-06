@@ -133,6 +133,7 @@ test("strategy equity models align paper and live B1 on common buckets", () => {
   const [model] = buildStrategyEquityModels(accounts);
   assert.equal(model.strategyName, "orderflow_impulse");
   assert.deepEqual(model.series.map((series) => series.label), ["固定 TP / SL", "实盘 B1"]);
+  assert.deepEqual(model.series.map((series) => series.displayLabel), ["账户 1 · 固定 TP/SL", "实盘基准"]);
   assert.deepEqual(model.series.map((series) => series.values), [[0, 2, 5], [0, -1, 3]]);
   assert.equal(model.series[1].colorClass, "live");
   assert.equal(model.anchorAt, Date.parse("2026-08-16T00:00:00Z"));
@@ -165,6 +166,10 @@ test("strategy comparison labels duplicate live accounts by account label", () =
       "实盘 Top10 · B8 · account-3",
       "实盘 Top10 · B8 · account-4",
     ],
+  );
+  assert.deepEqual(
+    model.series.map((series) => series.displayLabel),
+    ["实盘 · primary", "实盘 · account-2", "实盘 · account-3", "实盘 · account-4"],
   );
 });
 
@@ -432,6 +437,8 @@ test("risk renderer separates confirmed pending orders from uncertain orders", (
   assert.match(html, /RESTING \/ PARTIALLY FILLED/);
   assert.match(html, /龙虾USDT/);
   assert.match(html, /无不确定订单/);
+  assert.match(html, /risk-order-grid-single/);
+  assert.match(html, /先完成交易所对账，再决定恢复执行或人工处理/);
 });
 
 test("strategy section owns paper-account rendering state", () => {

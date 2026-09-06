@@ -292,6 +292,13 @@ export function renderAccount(data) {
     : freshnessSeconds <= 120
       ? { className: "status-FRESH", label: "数据新鲜", detail: `${relToNow(data.observed_at)} · 最近一次同步` }
       : { className: "status-STALE", label: "数据过期", detail: `${relToNow(data.observed_at)} · 请检查同步服务` };
+  const accountHeroDescription = syncStatus === "ready" && freshnessSeconds != null && freshnessSeconds <= 120
+    ? "只读同步链路正常 · 实盘订单由 live-strategy 执行管控。"
+    : syncStatus === "ready" && freshnessSeconds != null
+      ? "只读同步数据已过期 · 实盘订单由 live-strategy 执行管控，请检查同步服务。"
+      : syncStatus === "halted"
+        ? "只读同步已停止 · 实盘订单由 live-strategy 执行管控，请检查同步服务。"
+        : "只读同步状态待确认 · 实盘订单由 live-strategy 执行管控。";
   const executionState = {
     className: "status-SHADOW",
     label: "live-strategy",
@@ -309,7 +316,7 @@ export function renderAccount(data) {
       <div>
       <div class="account-eyebrow">${esc(String(data.environment || "LIVE").toUpperCase())} · EXECUTION ACCOUNT</div>
       <h3>${esc(data.account_label || "交易所账户")}</h3>
-      <p>execution-account 负责账户只读同步；实盘订单由 live-strategy 执行并按客户端订单号回链。</p>
+      <p>${esc(accountHeroDescription)}</p>
     </div>
     <div class="account-hero-meta">
       <div class="account-hero-status"><small>同步状态</small>${pill(data.status)}</div>
@@ -339,7 +346,7 @@ export function renderAccount(data) {
     && Number.isFinite(dataStartMs)
     && dataStartMs - requestedStartMs > bucketMs * 2;
   const equityCoverage = hasPartialHistory
-    ? `<p class="equity-coverage-note">可用历史始于 <b class="num">${esc(fullDateTime(equityDataStart))} ${DISPLAY_TIME_ZONE_LABEL}</b>；更长区间会随实盘运行逐步积累。</p>`
+    ? `<p class="equity-coverage-note">可用历史始于 <b class="num">${esc(fullDateTime(equityDataStart))} ${DISPLAY_TIME_ZONE_LABEL}</b>（随实盘运行持续沉淀）。</p>`
     : "";
   const equityValue = `<span class="account-equity-value"><small>${esc(selectedEquityRange.shortLabel)} 期末权益</small><strong class="num ${pnlClass(accountEquityDelta)}">${esc(money(latestAccountEquity))}</strong></span>`;
   const equityChartBlock = `<div class="block account-equity-block" data-equity-range="${selectedEquityRange.key}">
@@ -359,7 +366,7 @@ export function renderAccount(data) {
     <div><span>对账快照 资产 / 持仓</span><b>${esc(`${reconciliation.balance_count ?? "—"} / ${reconciliation.position_count ?? "—"}`)}</b></div>
     <div><span>对账快照 挂单 / 成交</span><b>${esc(`${reconciliation.open_order_count ?? "—"} / ${reconciliation.fill_count ?? "—"}`)}</b></div>
   </div>
-  <p class="account-facts-note"><b>怎么读：</b><code>只读同步</code>描述的是 execution-account 服务本身不会下单；账户配置来自 Binance V3 快照，实盘是否提交订单由 <code>live-strategy</code> 的下单开关与风控闸门决定。对账会把余额、持仓、挂单和成交快照写入数据库并检查差异，<code>对账一致 / 0 项</code> 表示本次快照没有发现不一致。</p>`;
+  <p class="account-facts-note"><b>怎么读：</b><code>只读同步</code>不会下单；实盘订单由 <code>live-strategy</code> 与风控闸门共同决定。对账比较余额、持仓、挂单和成交快照；<code>对账一致 / 0 项</code>表示本次快照未发现差异。</p>`;
   const usdtBalances = (data.balances || []).filter((row) => String(row.asset || "").toUpperCase() === "USDT");
   const balancesTable = dataTable([
     { label: "资产", key: "asset", cls: "sym" },

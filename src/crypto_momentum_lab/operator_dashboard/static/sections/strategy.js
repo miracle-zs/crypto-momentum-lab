@@ -77,13 +77,17 @@ function comparisonAnchorText(model) {
   return "无 08:00 共同快照 · 已回退共同起点";
 }
 
+function comparisonLegend(series) {
+  const displayLabel = series.displayLabel || series.label;
+  return `<span class="${series.colorClass}" ${comparisonSeriesStyle(series)} title="完整配置：${esc(series.label)}" aria-label="完整配置：${esc(series.label)}"><i></i><em>${esc(displayLabel)}</em> <b class="num ${pnlClass(series.delta)}">${esc(signedMoney(series.delta))}</b></span>`;
+}
+
 function pairedComparisonPanel(model) {
   const bucketMinutes = Math.round(model.intervalSeconds / 60);
   const omittedNote = model.omittedAccounts?.length
     ? `<small class="muted">暂不纳入 ${model.omittedAccounts.length} 个滞后账户，待其产生新的共同快照</small>`
     : "";
-  const legend = model.series.map((series) =>
-    `<span class="${series.colorClass}" ${comparisonSeriesStyle(series)}><i></i><em>${esc(series.label)}</em> <b class="num ${pnlClass(series.delta)}">${esc(signedMoney(series.delta))}</b></span>`).join("");
+  const legend = model.series.map(comparisonLegend).join("");
   return `<article class="pair-panel">
     <div class="pair-head">
       <div><strong>${esc(model.strategyName)}</strong>
@@ -99,8 +103,7 @@ function pairedComparisonPanel(model) {
 
 function latestStartComparisonPanel(model) {
   const bucketMinutes = Math.round(model.intervalSeconds / 60);
-  const legend = model.series.map((series) =>
-    `<span class="${series.colorClass}" ${comparisonSeriesStyle(series)}><i></i><em>${esc(series.label)}</em> <b class="num ${pnlClass(series.delta)}">${esc(signedMoney(series.delta))}</b></span>`).join("");
+  const legend = model.series.map(comparisonLegend).join("");
   return `<article class="pair-panel common-equity-panel">
     <div class="pair-head">
       <div><strong>${esc(model.strategyName)}</strong>
@@ -185,6 +188,8 @@ function paperComparisonBlock(accounts, meta = paperEquityMeta) {
     comparisonAccounts,
     meta,
   );
+  const cohortLabel = `STRATEGY COHORT · ${paperAccounts.length} PAPER / ${liveAccounts.length} LIVE`;
+  const comparisonNote = `${paperAccounts.length} 个模拟账户 + ${liveAccounts.length} 个实盘账户 · 每日 08:00 UTC+8 起算`;
   const content = comparisonModels.length
     ? `<div class="pair-grid">${comparisonModels.map(pairedComparisonPanel).join("")}</div>`
     : emptyBox("同期权益曲线加载中", "账户摘要已就绪，曲线在后台批量加载");
@@ -199,8 +204,8 @@ function paperComparisonBlock(accounts, meta = paperEquityMeta) {
     : "";
   return `<div data-paper-comparison>
     <div class="block pair-section" data-comparison-count="${comparisonModels.length}">
-      ${blockTitle("同期退出方式对比", "STRATEGY EXIT EQUITY · DAILY 08:00 ANCHOR · SHARED AXES",
-        '<span class="muted">模拟盘版本 + 实盘 Top10 · B8 · 每日 08:00 UTC+8 起算</span>')}
+      ${blockTitle("同期退出方式对比", cohortLabel,
+        `<span class="muted">${esc(comparisonNote)}</span>`)}
       ${content}
     </div>
     <div class="block pair-section common-equity-section" data-common-comparison-count="${latestStartModels.length}">

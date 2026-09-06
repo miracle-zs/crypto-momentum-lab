@@ -85,6 +85,32 @@ function comparisonSeriesLabel(account, index, accounts) {
   return accountNumber ? `${base} · 账户 ${accountNumber}` : `${base} · 版本 ${index + 1}`;
 }
 
+function compactComparisonExitLabel(account) {
+  const label = String(account.exit_label || "").trim();
+  if (account.source === "live") {
+    return account.account_label ? `实盘 · ${account.account_label}` : "实盘基准";
+  }
+  if (!label) return "退出版本";
+  if (label.startsWith("反向后宽限 ")) {
+    const bars = label.match(/^反向后宽限\s+(\d+)\s+根\s+15M/)?.[1];
+    const direction = label.match(/仅多头|仅空头|无方向/)?.[0];
+    if (bars) return `宽限${bars}根${direction ? `/${direction.replace("仅", "")}` : ""}`;
+  }
+  if (label.startsWith("15M 收线退出")) {
+    const direction = label.match(/仅多头|仅空头|无方向/)?.[0];
+    return `收线${direction ? `/${direction.replace("仅", "")}` : ""}`;
+  }
+  if (label.startsWith("固定 TP / SL")) return "固定 TP/SL";
+  return label;
+}
+
+function comparisonSeriesDisplayLabel(account, index, accounts) {
+  const compact = compactComparisonExitLabel(account);
+  if (account.source === "live") return compact;
+  const accountNumber = String(account.run_id || "").match(/^paper-account-(\d+)/)?.[1];
+  return accountNumber ? `账户 ${accountNumber} · ${compact}` : compact;
+}
+
 function comparisonAccountOrder(account) {
   if (account.account_label === "primary") return 0;
   const match = String(account.account_label || "").match(/^account-(\d+)$/);
@@ -207,6 +233,7 @@ function strategyEquityModel(strategyName, accounts, omittedAccounts = []) {
     return {
       account,
       label: comparisonSeriesLabel(account, index, accounts),
+      displayLabel: comparisonSeriesDisplayLabel(account, index, accounts),
       colorClass: comparisonSeriesClass(account),
       color: comparisonSeriesColor(account, index),
       values,
@@ -269,6 +296,7 @@ function commonEquityComparisonModel(strategyName, accounts, meta = {}) {
     return {
       account,
       label: comparisonSeriesLabel(account, index, accounts),
+      displayLabel: comparisonSeriesDisplayLabel(account, index, accounts),
       colorClass: comparisonSeriesClass(account),
       color: comparisonSeriesColor(account, index),
       values,
@@ -446,6 +474,7 @@ function renderComparisonChart(model, chartId, title, ariaLabel) {
     points: model.points,
     series: model.series.map((series) => ({
       label: series.label,
+      displayLabel: series.displayLabel,
       color: series.color,
       colorClass: series.colorClass,
       values: series.values,

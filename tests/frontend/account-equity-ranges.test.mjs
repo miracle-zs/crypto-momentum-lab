@@ -35,7 +35,7 @@ test("live account renderer exposes equity range controls and yearly dates", () 
   assert.match(html, /data-account-equity-range="1y" aria-pressed="true"/);
   assert.match(html, /ROLLING 1Y · 2 DAY BUCKETS/);
   assert.match(html, /2025-08-24/);
-  assert.match(html, /更长区间会随实盘运行逐步积累/);
+  assert.match(html, /随实盘运行持续沉淀/);
 
   const payload = getChartPayload("live-account-equity");
   const option = buildChartOption(payload);

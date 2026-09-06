@@ -3,9 +3,11 @@ import { dayTime, esc } from "../dashboard-formatters.js";
 import { blockTitle, dataTable, pill } from "../dashboard-ui.js";
 
 export function renderRisk(data) {
+  const ambiguousOrders = data.ambiguous_orders || [];
+  const pendingOrders = data.pending_orders || [];
   const halts = data.active_halts?.length
     ? data.active_halts.map((halt) => `<div class="alert-box"><strong>HALT</strong><div>${esc(halt.reason)}<small>${esc(dayTime(halt.created_at))} ${DISPLAY_TIME_ZONE_LABEL}</small></div></div>`).join("")
-    : `<div class="ok-box"><i></i>无活跃停机 · 风控闸门畅通</div>`;
+    : `<div class="ok-box"><i></i>风控闸门畅通 · 0 活跃停机</div>`;
   const orderColumns = [
     { label: "币种", key: "symbol", cls: "sym" },
     { label: "客户端订单号", key: "client_order_id", cls: "num cut" },
@@ -15,12 +17,12 @@ export function renderRisk(data) {
   ];
   const pendingTable = dataTable(
     orderColumns,
-    data.pending_orders || [],
+    pendingOrders,
     { emptyText: "无待完成订单" },
   );
   const ambiguousTable = dataTable(
     orderColumns,
-    data.ambiguous_orders || [],
+    ambiguousOrders,
     { emptyText: "无不确定订单" },
   );
   const decisionsTable = dataTable([
@@ -29,16 +31,23 @@ export function renderRisk(data) {
     { label: "原因", key: "reason", cls: "muted" },
     { label: "时间", value: (row) => dayTime(row.evaluated_at), align: "right", cls: "muted" },
   ], data.latest_risk_decisions, { emptyText: "暂无风控决策流水", tall: true });
+  const ambiguousSummary = ambiguousOrders.length
+    ? ""
+    : `<div class="risk-empty-note"><span>不确定订单</span><strong class="num">0</strong><small>无不确定订单 · 可继续核对待完成订单</small></div>`;
+  const ambiguousBlock = ambiguousOrders.length
+    ? `<div class="block risk-ambiguous">${blockTitle("不确定订单", "AMBIGUOUS / UNRESOLVED", `<strong class="num">${ambiguousOrders.length}</strong>`)}${ambiguousTable}</div>`
+    : "";
   const body = `<div class="risk-priority-grid">
       <div class="block risk-halts">${blockTitle("活跃停机", "ACTIVE HALTS")}${halts}</div>
       <div class="risk-decision-callout">${blockTitle("先看这里", "OPERATOR ORDER")}
         <strong>阻断 → 未决 → 待完成</strong>
-        <p>任何不确定订单都先完成交易所对账，再判断是否恢复执行。</p>
+        <p>先完成交易所对账，再决定恢复执行或人工处理。</p>
       </div>
     </div>
-    <div class="block-split risk-order-grid">
-      <div class="block risk-ambiguous">${blockTitle("不确定订单", "AMBIGUOUS / UNRESOLVED", `<strong class="num">${(data.ambiguous_orders || []).length}</strong>`)}${ambiguousTable}</div>
-      <div class="block risk-pending">${blockTitle("待完成订单", "RESTING / PARTIALLY FILLED", `<strong class="num">${(data.pending_orders || []).length}</strong>`)}${pendingTable}</div>
+    ${ambiguousSummary}
+    <div class="block-split risk-order-grid${ambiguousOrders.length ? "" : " risk-order-grid-single"}">
+      ${ambiguousBlock}
+      <div class="block risk-pending">${blockTitle("待完成订单", "RESTING / PARTIALLY FILLED", `<strong class="num">${pendingOrders.length}</strong>`)}${pendingTable}</div>
     </div>
     <div class="block risk-decisions">${blockTitle("风控决策", "RISK DECISIONS · LATEST 30")}${decisionsTable}</div>`;
   return [data.status, body];

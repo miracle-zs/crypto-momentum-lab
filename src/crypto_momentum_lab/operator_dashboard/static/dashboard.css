@@ -1451,6 +1451,7 @@ details.secondary[open] summary { margin-bottom: 10px; }
 }
 
 .pair-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.pair-legend span[title] { cursor: help; }
 .pair-legend i { width: 12px; height: 2px; border-radius: 2px; background: var(--series-color, var(--faint)); }
 .pair-legend span em { color: var(--series-color, var(--muted)); font-style: normal; }
 .pair-legend .fixed i { background: var(--series-color, var(--brand)); }
@@ -2338,9 +2339,28 @@ body[data-active-workspace="data"] .topbar-workspace-kicker { color: var(--info)
 .risk-decision-callout p { margin: 8px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.6; }
 .risk-order-grid { align-items: start; }
 .risk-order-grid .block { margin-top: 20px; }
+.risk-order-grid-single { grid-template-columns: minmax(0, 1fr); }
+.risk-order-grid-single .risk-pending { grid-column: 1 / -1; }
 .risk-ambiguous .block-title strong { color: var(--warn); }
 .risk-pending .block-title strong { color: var(--muted); }
 .risk-decisions { margin-top: 18px; }
+
+.risk-empty-note {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 9px;
+  margin-top: 18px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.risk-empty-note strong { color: var(--up); font: 600 12px var(--mono); }
+.risk-empty-note small { color: var(--faint); }
 
 .view-tabs {
   display: flex;

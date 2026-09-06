@@ -54,7 +54,7 @@
           <div class="legend-row"><small>模式</small><span><i class="dot status-LIVE"></i>LIVE</span><span><i class="dot status-SHADOW"></i>SHADOW</span><span><i class="dot status-UNKNOWN"></i>OFF / UNKNOWN</span></div>
           <div class="legend-row"><small>新鲜度</small><span><i class="dot status-FRESH"></i>FRESH</span><span><i class="dot status-STALE"></i>STALE</span></div>
         </div>
-        <p>浏览器只访问本机 PostgreSQL 只读 API。交易所写入由后端闸门管控，本页面不含凭据字段。</p>
+        <p>只读控制台 · 仅访问本机 PG · 无凭据暴露；交易所写入由后端闸门管控。</p>
       </div>
     </aside>
 
@@ -131,7 +131,7 @@
 
         <section id="strategy" class="card" data-workspace="data" data-view-title="策略" data-endpoint="api/paper-accounts" aria-labelledby="strategy-title" hidden>
           <header class="card-head">
-          <div class="card-title"><i>D1</i><div><h2 id="strategy-title">策略</h2><small>PAPER / LIVE COMPARISON · SUMMARY FIRST · DETAIL ON DEMAND</small><p>先比较账户版本，再打开单个账户证据。</p></div></div>
+          <div class="card-title"><i>D1</i><div><h2 id="strategy-title">策略</h2><small>PAPER / LIVE COHORT · ON-DEMAND DETAIL</small><p>先比较账户版本，再打开单个账户证据。</p></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -181,7 +181,7 @@
             <button disabled><b>紧急平仓</b><span>Emergency Flatten</span><small>需要显式平仓确认</small></button>
             <button disabled><b>释放租约</b><span>Release Lease</span><small>需要持仓归零对账</small></button>
           </div>
-          <p class="action-note">本界面永不直连交易所。所有操作须经签名后端命令执行，其审计事件可在本页回查。</p>
+          <p class="action-note">本界面永不直连交易所；所有操作均由签名后端执行并留存审计事件。</p>
         </section>
       </main>
 
