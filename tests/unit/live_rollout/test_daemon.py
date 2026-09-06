@@ -1722,6 +1722,79 @@ async def test_live_daemon_halts_on_unmanaged_account_position() -> None:
     assert exchange.calls == []
 
 
+async def test_scheduled_risk_window_late_start_after_reopen_is_noop(
+    monkeypatch,
+) -> None:
+    exchange = PlanAwareExchange()
+    reopen_time = datetime(2026, 7, 4, 0, 2, tzinfo=UTC)
+    position = ManagedLivePosition(
+        symbol="BTCUSDT",
+        side="long",
+        position_side=FuturesPositionSide.LONG,
+        quantity=Decimal("0.001"),
+        entry_price=Decimal("30000"),
+        opened_at=reopen_time - timedelta(minutes=1),
+    )
+    cancellation_calls: list[tuple[OrderExecutionPlan, ...]] = []
+
+    async def cancel_entries(
+        plans: tuple[OrderExecutionPlan, ...],
+    ) -> int:
+        cancellation_calls.append(plans)
+        return 0
+
+    async def fetch_positions() -> tuple[AccountPositionSnapshot, ...]:
+        return ()
+
+    async def position_context(state: object) -> LiveDaemonRuntimeContext:
+        del state
+        return replace(
+            _runtime_context(),
+            open_position_symbols=frozenset({"BTCUSDT"}),
+            managed_positions=(position,),
+        )
+
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=position_context,
+        exit_manager=LiveExitManager(
+            config=LiveExitConfig(
+                run_id="run-1",
+                strategy_name="compression_breakout",
+                strategy_version="v0",
+                strategy_config_hash="a" * 64,
+                policy=PositionExitPolicy(),
+            ),
+        ),
+        clock=lambda: reopen_time,
+        scheduled_risk_window=ScheduledRiskWindowConfig(),
+        cancel_unfilled_entry_orders=cancel_entries,
+        fetch_exchange_positions=fetch_positions,
+    )
+    daemon._latest_market_states["BTCUSDT"] = _state()
+
+    gate_calls: list[tuple[bool, str]] = []
+    original_set_gate = daemon.set_scheduled_entry_blocked
+
+    def record_gate(blocked: bool, *, reason: str) -> None:
+        gate_calls.append((blocked, reason))
+        original_set_gate(blocked, reason=reason)
+
+    monkeypatch.setattr(daemon, "set_scheduled_entry_blocked", record_gate)
+
+    failure = await daemon.process_scheduled_risk_window(now=reopen_time)
+
+    assert failure is None
+    assert exchange.plans == []
+    assert cancellation_calls == []
+    assert daemon.entry_enabled is True
+    assert all(not blocked for blocked, _reason in gate_calls)
+    assert all(
+        reason != "scheduled_risk_window_complete"
+        for _blocked, reason in gate_calls
+    )
+
+
 async def test_scheduled_risk_window_flattens_verifies_and_reopens_entries() -> None:
     exchange = PlanAwareExchange()
     scheduled_now = datetime(2026, 7, 3, 23, 45, tzinfo=UTC)

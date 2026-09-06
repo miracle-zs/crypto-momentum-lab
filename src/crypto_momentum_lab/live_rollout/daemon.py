@@ -1079,8 +1079,33 @@ class LiveStrategyDaemon:
         local_observed_at = schedule.localize(observed_at)
         phase = schedule.phase(observed_at)
         async with self._scheduled_window_lock:
+            new_scheduled_window_day = (
+                self._scheduled_window_day != local_observed_at.date()
+            )
             self._reset_scheduled_window_day(local_observed_at.date())
             if phase is ScheduledRiskWindowPhase.PRE_WINDOW:
+                return None
+
+            # A daemon started after the window cannot tell whether current
+            # positions were opened before or after today's flattening window.
+            # Treat that already-reopened day as complete instead of replaying
+            # the previous window's forced flatten against normal positions.
+            if (
+                phase is ScheduledRiskWindowPhase.REOPENED
+                and new_scheduled_window_day
+            ):
+                self._scheduled_positions_verified = True
+                return None
+
+            if (
+                phase is ScheduledRiskWindowPhase.REOPENED
+                and self._scheduled_positions_verified
+            ):
+                if self._scheduled_entry_blocked:
+                    self.set_scheduled_entry_blocked(
+                        False,
+                        reason="scheduled_risk_window_complete",
+                    )
                 return None
 
             self.set_scheduled_entry_blocked(
