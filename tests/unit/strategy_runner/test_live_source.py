@@ -1,6 +1,7 @@
 import asyncio
 from datetime import UTC, datetime
 
+import crypto_momentum_lab.strategy_runner.live_source as live_source
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     RuntimeStateCursor,
 )
@@ -154,6 +155,38 @@ def test_postgres_paper_source_stops_after_idle_timeout() -> None:
             symbol="",
         )
     ]
+
+
+def test_postgres_paper_source_backs_off_only_while_idle(monkeypatch) -> None:
+    state = fixture_state("BTCUSDT", 0)
+    loader = FakeLoader([(), (), (), (state,)])
+    source = PostgresPaperMarketStateSource(
+        loader=loader,
+        config=PaperLiveSourceConfig(
+            environment="research",
+            start_at=None,
+            poll_interval_seconds=1.0,
+            idle_timeout_seconds=10.0,
+            max_states=1,
+            batch_size=1,
+        ),
+    )
+    now = 0.0
+    sleeps: list[float] = []
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    monkeypatch.setattr(live_source.time, "monotonic", monotonic)
+    monkeypatch.setattr(live_source.time, "sleep", sleep)
+
+    assert tuple(source) == (state,)
+    assert sleeps == [1.0, 2.0, 3.0]
 
 
 def test_paper_live_source_has_no_historical_resume_interface() -> None:

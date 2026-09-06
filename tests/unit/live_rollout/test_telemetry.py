@@ -151,6 +151,64 @@ async def test_live_telemetry_persists_events_in_batches_without_blocking_record
     assert batches[0][0]["details"]["lane"] == "entry"
 
 
+async def test_exchange_latency_pairs_each_operation_attempt() -> None:
+    telemetry = LiveRuntimeTelemetry(run_id="run-1")
+    plan = OrderExecutionPlan(
+        intent_id="intent-1",
+        run_id="run-1",
+        client_order_id="cml_12345678901234567890123456789012",
+        symbol="BTCUSDT",
+        side="BUY",
+        order_type="MARKET",
+        quantity=Decimal("0.003"),
+        price=None,
+        reduce_only=False,
+        created_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        quantized=True,
+    )
+    start = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+
+    await telemetry.exchange_request_started(
+        plan,
+        "submit_request_started",
+        start,
+    )
+    await telemetry.exchange_response_received(
+        plan,
+        "submit_response_received",
+        start + timedelta(milliseconds=20),
+    )
+    cancel_started = start + timedelta(minutes=10)
+    await telemetry.exchange_request_started(
+        plan,
+        "cancel_request_started",
+        cancel_started,
+    )
+    await telemetry.exchange_response_received(
+        plan,
+        "cancel_response_received",
+        cancel_started + timedelta(milliseconds=30),
+    )
+
+    cancel_response = next(
+        event
+        for event in telemetry.recent_events
+        if event.event_type == EXCHANGE_RESPONSE_RECEIVED
+        and event.details["operation"] == "cancel"
+    )
+    assert cancel_response.details["request_attempt"] == 1
+    assert cancel_response.details["request_paired"] is True
+    assert cancel_response.details["request_started_at"] == cancel_started.isoformat()
+    assert cancel_response.details["latency_ms_from_request"] == 30.0
+    assert "latency_ms_from_previous" not in cancel_response.details
+    assert (
+        telemetry.latency_summary()["BTCUSDT"]["entry"][
+            "cancel_request_started->cancel_response_received"
+        ]["p50_ms"]
+        == 30.0
+    )
+
+
 async def test_exchange_persistence_allowlist_keeps_submit_and_cancel_audit(
 ) -> None:
     batches: list[tuple[dict[str, object], ...]] = []

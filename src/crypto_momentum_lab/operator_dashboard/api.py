@@ -41,6 +41,7 @@ STATIC_DIR = Path(__file__).with_name("static")
 _BASIC_AUTH = HTTPBasic(auto_error=False)
 _PAPER_CACHE_TTL_SECONDS = 5.0
 _PAPER_EQUITY_CACHE_TTL_SECONDS = 30.0
+_PAPER_EQUITY_STALE_GRACE_SECONDS = 60.0
 _OVERVIEW_CACHE_TTL_SECONDS = 15.0
 _OVERVIEW_QUERY_TIMEOUT_SECONDS = 10.0
 _T = TypeVar("_T")
@@ -48,9 +49,12 @@ _T = TypeVar("_T")
 
 class _ResponseCache:
     def __init__(self, ttl_seconds: float) -> None:
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
         self._ttl_seconds = ttl_seconds
         self._entries: dict[str, tuple[float, object]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._refresh_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def get(
         self,
@@ -58,11 +62,22 @@ class _ResponseCache:
         loader: Callable[[], Awaitable[_T]],
         *,
         ttl_seconds: float | None = None,
+        stale_while_revalidate_seconds: float = 0.0,
     ) -> _T:
+        if stale_while_revalidate_seconds < 0:
+            raise ValueError("stale_while_revalidate_seconds must not be negative")
         now = time.monotonic()
         entry = self._entries.get(key)
-        if entry is not None and entry[0] > now:
-            return cast(_T, entry[1])
+        if entry is not None:
+            if entry[0] > now:
+                return cast(_T, entry[1])
+            if entry[0] + stale_while_revalidate_seconds > now:
+                self._schedule_refresh(
+                    key,
+                    loader,
+                    ttl_seconds=ttl_seconds,
+                )
+                return cast(_T, entry[1])
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             now = time.monotonic()
@@ -71,8 +86,66 @@ class _ResponseCache:
                 return cast(_T, entry[1])
             value = await loader()
             ttl = self._ttl_seconds if ttl_seconds is None else ttl_seconds
+            if ttl <= 0:
+                raise ValueError("ttl_seconds must be positive")
             self._entries[key] = (time.monotonic() + ttl, value)
             return value
+
+    def _schedule_refresh(
+        self,
+        key: str,
+        loader: Callable[[], Awaitable[_T]],
+        *,
+        ttl_seconds: float | None,
+    ) -> None:
+        task = self._refresh_tasks.get(key)
+        if task is not None and not task.done():
+            return
+        self._refresh_tasks[key] = asyncio.create_task(
+            self._refresh(
+                key,
+                loader,
+                ttl_seconds=ttl_seconds,
+            ),
+            name=f"dashboard-cache-refresh:{key}",
+        )
+
+    async def _refresh(
+        self,
+        key: str,
+        loader: Callable[[], Awaitable[_T]],
+        *,
+        ttl_seconds: float | None,
+    ) -> None:
+        try:
+            lock = self._locks.setdefault(key, asyncio.Lock())
+            async with lock:
+                entry = self._entries.get(key)
+                if entry is not None and entry[0] > time.monotonic():
+                    return
+                value = await loader()
+                ttl = self._ttl_seconds if ttl_seconds is None else ttl_seconds
+                if ttl <= 0:
+                    return
+                self._entries[key] = (time.monotonic() + ttl, value)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Keep serving the last value during the grace window. The next
+            # request after that window retries in the foreground.
+            return
+        finally:
+            current = asyncio.current_task()
+            if self._refresh_tasks.get(key) is current:
+                self._refresh_tasks.pop(key, None)
+
+    async def aclose(self) -> None:
+        tasks = tuple(self._refresh_tasks.values())
+        self._refresh_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class DashboardQueryProtocol(Protocol):
@@ -152,6 +225,7 @@ def create_dashboard_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         del app
         yield
+        await response_cache.aclose()
         if engine is not None:
             await engine.dispose()
 
@@ -272,6 +346,7 @@ def create_dashboard_app(
             "paper-accounts-equity",
             query_service().paper_account_equity,
             ttl_seconds=_PAPER_EQUITY_CACHE_TTL_SECONDS,
+            stale_while_revalidate_seconds=_PAPER_EQUITY_STALE_GRACE_SECONDS,
         )
 
     @dashboard.get(

@@ -32,6 +32,7 @@ from crypto_momentum_lab.persistence.postgres.runtime_telemetry_repository impor
     PostgresRuntimeTelemetryRepository,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
+    create_account_database_engine,
     create_async_database_engine,
     create_checkpoint_database_engine,
     create_execution_database_engine,
@@ -66,6 +67,7 @@ __all__ = [
     "LeaseAlreadyHeldError",
     "LeaseOwnershipError",
     "PersistedExchangeOrder",
+    "create_account_database_engine",
     "create_async_database_engine",
     "create_checkpoint_database_engine",
     "create_execution_database_engine",

@@ -14,6 +14,8 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     RuntimeStateCursor,
 )
 
+_MAX_IDLE_POLL_INTERVAL_SECONDS = 3.0
+
 
 class RuntimeStateLoader(Protocol):
     def load_after(
@@ -113,6 +115,7 @@ class PostgresPaperMarketStateSource:
         cursor = _initial_cursor(start_at)
         yielded = 0
         idle_started_at = time.monotonic()
+        idle_poll_interval = self.config.poll_interval_seconds
         try:
             while yielded < self.config.max_states:
                 limit = min(
@@ -122,6 +125,7 @@ class PostgresPaperMarketStateSource:
                 batch = self.loader.load_after(cursor=cursor, limit=limit)
                 if batch:
                     idle_started_at = time.monotonic()
+                    idle_poll_interval = self.config.poll_interval_seconds
                     for state in batch:
                         if state.environment != self.config.environment:
                             raise ValueError("runtime state environment mismatch")
@@ -139,7 +143,7 @@ class PostgresPaperMarketStateSource:
                 if elapsed_idle >= self.config.idle_timeout_seconds:
                     return
                 sleep_seconds = min(
-                    self.config.poll_interval_seconds,
+                    idle_poll_interval,
                     self.config.idle_timeout_seconds - elapsed_idle,
                 )
                 if sleep_seconds <= 0:
@@ -149,6 +153,13 @@ class PostgresPaperMarketStateSource:
                     )
                 if sleep_seconds > 0:
                     time.sleep(sleep_seconds)
+                    idle_poll_interval = min(
+                        _MAX_IDLE_POLL_INTERVAL_SECONDS,
+                        max(
+                            self.config.poll_interval_seconds,
+                            sleep_seconds * 2,
+                        ),
+                    )
         finally:
             self.loader.close()
 

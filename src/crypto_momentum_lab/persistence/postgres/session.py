@@ -14,6 +14,10 @@ _EXECUTION_POOL_SIZE = 4
 _EXECUTION_MAX_OVERFLOW = 0
 _EXECUTION_POOL_TIMEOUT_SECONDS = 3
 _EXECUTION_COMMAND_TIMEOUT_SECONDS = 5
+_ACCOUNT_POOL_SIZE = 2
+_ACCOUNT_MAX_OVERFLOW = 0
+_ACCOUNT_POOL_TIMEOUT_SECONDS = 3
+_ACCOUNT_COMMAND_TIMEOUT_SECONDS = 5
 _MAINTENANCE_POOL_SIZE = 1
 _MAINTENANCE_MAX_OVERFLOW = 0
 _MAINTENANCE_POOL_TIMEOUT_SECONDS = 3
@@ -94,6 +98,18 @@ def create_execution_database_engine(
         max_overflow=max_overflow,
         pool_timeout_seconds=pool_timeout_seconds,
         command_timeout_seconds=command_timeout_seconds,
+    )
+
+
+def create_account_database_engine(database_url: str) -> AsyncEngine:
+    """Create the small pool used by one serial account-sync daemon."""
+
+    return create_async_database_engine(
+        database_url,
+        pool_size=_ACCOUNT_POOL_SIZE,
+        max_overflow=_ACCOUNT_MAX_OVERFLOW,
+        pool_timeout_seconds=_ACCOUNT_POOL_TIMEOUT_SECONDS,
+        command_timeout_seconds=_ACCOUNT_COMMAND_TIMEOUT_SECONDS,
     )
 
 

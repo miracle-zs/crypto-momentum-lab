@@ -29,12 +29,12 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert services["execution-account-live"]["mem_limit"] == "160m"
     assert services["live-strategy"]["mem_limit"] == "512m"
     assert services["dashboard"]["mem_limit"] == "320m"
-    assert services["execution-account-live"]["healthcheck"]["interval"] == "30s"
-    assert services["execution-account-live"]["healthcheck"]["retries"] == 4
+    assert services["execution-account-live"]["healthcheck"]["interval"] == "60s"
+    assert services["execution-account-live"]["healthcheck"]["retries"] == 2
     assert services["dashboard"]["healthcheck"]["interval"] == "30s"
     assert services["dashboard"]["healthcheck"]["retries"] == 4
-    assert services["market-data"]["healthcheck"]["interval"] == "30s"
-    assert services["market-data"]["healthcheck"]["retries"] == 3
+    assert services["market-data"]["healthcheck"]["interval"] == "60s"
+    assert services["market-data"]["healthcheck"]["retries"] == 2
     assert _option_value(
         services["market-data"]["healthcheck"]["test"],
         "-m",
@@ -156,6 +156,12 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert _option_value(live_healthcheck, "-m") == (
         "crypto_momentum_lab.apps.healthcheck_fast"
     )
+    assert services["research-collector"]["healthcheck"]["interval"] == "90s"
+    assert services["research-collector"]["healthcheck"]["retries"] == 2
+    assert services["dashboard"]["healthcheck"]["test"] == [
+        "CMD-SHELL",
+        "curl --fail --silent --show-error --max-time 3 http://127.0.0.1:8765/api/health >/dev/null",
+    ]
     assert "--ignore-age" not in live_healthcheck
     assert _option_value(live_healthcheck, "--session-id") == (
         "${CML_LIVE_SESSION_ID:-live-primary-v1}"

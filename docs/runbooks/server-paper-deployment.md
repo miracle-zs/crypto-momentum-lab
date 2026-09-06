@@ -128,6 +128,17 @@ alive container that becomes `unhealthy` must be investigated and explicitly
 restarted. The application exits on its own watchdog failures so the restart
 policy can handle normal market-data stalls.
 
+Paper runtime-state readers keep the configured one-second poll interval while
+processing a batch and back off only when the durable table is idle, up to three
+seconds. This bounds the additional durable-state lag while avoiding repeated
+empty queries across the paper processes.
+
+The server Compose manifest runs the market-data, live-account, and live-strategy
+database probes every 60 seconds, the research collector probe every 90 seconds,
+and paper probes every 60 seconds. The dashboard probe uses the local HTTP
+endpoint through `curl`, so it does not start a Python interpreter for each
+check.
+
 The market-data process fails and lets Docker restart it when a 15-minute
 universe refresh exceeds 120 seconds, when no live market state arrives within
 120 seconds after startup, or when the latest market-state watermark becomes
