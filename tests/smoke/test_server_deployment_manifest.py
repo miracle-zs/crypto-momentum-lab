@@ -160,7 +160,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert services["research-collector"]["healthcheck"]["retries"] == 2
     assert services["dashboard"]["healthcheck"]["test"] == [
         "CMD-SHELL",
-        "curl --fail --silent --show-error --max-time 3 http://127.0.0.1:8765/api/health >/dev/null",
+        "python -S -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=3)\"",
     ]
     assert "--ignore-age" not in live_healthcheck
     assert _option_value(live_healthcheck, "--session-id") == (

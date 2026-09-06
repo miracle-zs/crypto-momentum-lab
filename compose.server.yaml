@@ -651,8 +651,7 @@ services:
       test:
         - CMD-SHELL
         - >-
-          curl --fail --silent --show-error --max-time 3
-          http://127.0.0.1:8765/api/health >/dev/null
+          python -S -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=3)"
       interval: 30s
       timeout: 5s
       retries: 4
