@@ -156,7 +156,7 @@ services:
       - market-data:/app/data
     healthcheck:
       # Preserve roughly the previous 2-minute failure-detection window while
-      # reducing the Python healthcheck CPU bursts from every 10 seconds.
+      # reducing the Python healthcheck CPU bursts from every 30 seconds.
       test:
         - CMD
         - python
@@ -164,9 +164,9 @@ services:
         - crypto_momentum_lab.apps.healthcheck_fast
         - --service
         - market-data
-      interval: 30s
+      interval: 60s
       timeout: 15s
-      retries: 3
+      retries: 2
       start_period: 15m
     mem_limit: 640m
 
@@ -211,9 +211,9 @@ services:
         - research
         - --max-age-seconds
         - "120"
-      interval: 60s
+      interval: 90s
       timeout: 15s
-      retries: 3
+      retries: 2
       start_period: 2m
     mem_limit: 192m
 
@@ -481,9 +481,9 @@ services:
         - --ignore-age
         - --account-label
         - ${CML_LIVE_ACCOUNT_LABEL:-primary}
-      interval: 30s
+      interval: 60s
       timeout: 5s
-      retries: 4
+      retries: 2
       start_period: 30s
     mem_limit: 160m
     memswap_limit: 320m
@@ -577,9 +577,9 @@ services:
         - ${CML_LIVE_SESSION_ID:-live-primary-v1}
         - --lease-owner
         - ${CML_LIVE_LEASE_OWNER:-live-worker}
-      interval: 30s
+      interval: 60s
       timeout: 10s
-      retries: 6
+      retries: 3
       start_period: 2m
     # Observed usage is below 200 MiB; 1 GiB was over-provisioned on this host.
     mem_limit: 512m
@@ -612,11 +612,10 @@ services:
       - "127.0.0.1:8765:8765"
     healthcheck:
       test:
-        - CMD
-        - python
-        - -c
+        - CMD-SHELL
         - >-
-          import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=3)
+          curl --fail --silent --show-error --max-time 3
+          http://127.0.0.1:8765/api/health >/dev/null
       interval: 30s
       timeout: 5s
       retries: 4

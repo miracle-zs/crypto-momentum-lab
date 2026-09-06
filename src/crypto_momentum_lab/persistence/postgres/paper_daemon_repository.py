@@ -543,8 +543,14 @@ class PostgresPaperDaemonRepository:
         )
         values_ready_at = perf_counter()
         async with self._session_factory() as session:
-            session_acquired_at = perf_counter()
             async with session.begin():
+                pool_acquire_started = perf_counter()
+                # AsyncSession construction is lazy; the pool checkout happens
+                # at the first connection/SQL use. Force that boundary before
+                # timing the UPSERT so pool wait and driver execution are
+                # reported separately.
+                await session.connection()
+                pool_acquired_at = perf_counter()
                 statement = insert(StrategyRuntimeCheckpointRow).values(values)
                 execute_started = perf_counter()
                 await session.execute(
@@ -564,7 +570,7 @@ class PostgresPaperDaemonRepository:
             run_id=run_id,
             prepare_ms=round((values_ready_at - started) * 1000, 3),
             pool_acquire_ms=round(
-                (session_acquired_at - values_ready_at) * 1000,
+                (pool_acquired_at - pool_acquire_started) * 1000,
                 3,
             ),
             sql_execute_ms=round(

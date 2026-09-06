@@ -94,6 +94,7 @@ _EXCHANGE_BOUNDARY_EVENTS = frozenset(
 )
 _MAX_EVENT_BATCH = 128
 _PERSIST_BATCH_TIMEOUT_SECONDS = 0.25
+_MAX_PENDING_EXCHANGE_REQUESTS = 32
 
 # Market-state and strategy-decision events remain available in the in-memory
 # trace, but are intentionally not durable by default.  Persisting those
@@ -369,6 +370,10 @@ class _Trace:
     symbol: str | None
     bucket_start: datetime | None
     phase_at: dict[str, datetime] = field(default_factory=dict)
+    exchange_requests: dict[str, deque[tuple[int, datetime]]] = field(
+        default_factory=dict
+    )
+    exchange_attempts: dict[str, int] = field(default_factory=dict)
 
 
 def state_trace_id(state: MarketState15s, lane: str) -> str:
@@ -838,29 +843,91 @@ class LiveRuntimeTelemetry:
         phase: str,
         occurred_at: datetime,
     ) -> None:
+        operation, is_request = _parse_exchange_phase(phase)
         lane = LIVE_LANE_EXIT if plan.reduce_only else LIVE_LANE_ENTRY
         source_ingress = self._source_ingress_by_trace.get(plan.intent_id)
+        trace = self._ensure_trace(
+            trace_id=plan.intent_id,
+            parent_trace_id=None,
+            lane=lane,
+            symbol=plan.symbol,
+            bucket_start=self._trace_bucket_start(plan.intent_id),
+        )
+        request_started_at: datetime | None = None
+        request_attempt: int | None = None
+        if is_request:
+            request_attempt = trace.exchange_attempts.get(operation, 0) + 1
+            trace.exchange_attempts[operation] = request_attempt
+            pending = trace.exchange_requests.setdefault(
+                operation,
+                deque(maxlen=_MAX_PENDING_EXCHANGE_REQUESTS),
+            )
+            pending.append((request_attempt, occurred_at))
+        else:
+            pending = trace.exchange_requests.get(operation)
+            if pending:
+                request_attempt, request_started_at = pending.popleft()
+                if not pending:
+                    trace.exchange_requests.pop(operation, None)
+        canonical_phase = (
+            EXCHANGE_REQUEST_STARTED
+            if is_request
+            else EXCHANGE_RESPONSE_RECEIVED
+        )
+        # Keep the original lifecycle phases for the first submit operation so
+        # existing end-to-end summaries remain compatible. Subsequent exchange
+        # operations use their own request/response pairing and must not reuse
+        # the first request timestamp stored on the order trace.
+        preserve_lifecycle_phase = (
+            operation == "submit" and request_attempt == 1
+        )
+        event_details: dict[str, JsonValue] = {
+            "client_order_id": plan.client_order_id,
+            "intent_id": plan.intent_id,
+            "operation": operation,
+            "request_attempt": request_attempt,
+            "reduce_only": plan.reduce_only,
+            **_ingress_details(source_ingress),
+        }
+        if not is_request:
+            event_details["request_paired"] = request_started_at is not None
+            event_details["request_started_at"] = _optional_iso(
+                request_started_at
+            )
+            if request_started_at is not None:
+                latency_ms = (
+                    occurred_at - request_started_at
+                ).total_seconds() * 1000
+                event_details["latency_ms_from_request"] = latency_ms
         await self._record_phase(
-            phase=(
-                EXCHANGE_REQUEST_STARTED
-                if phase.endswith("request_started")
-                else EXCHANGE_RESPONSE_RECEIVED
-            ),
+            phase=canonical_phase,
             trace_id=plan.intent_id,
             lane=lane,
             symbol=plan.symbol,
             bucket_start=self._trace_bucket_start(plan.intent_id),
             occurred_at=occurred_at,
-            details={
-                "client_order_id": plan.client_order_id,
-                "intent_id": plan.intent_id,
-                "operation": phase.removesuffix("_request_started").removesuffix(
-                    "_response_received"
-                ),
-                "reduce_only": plan.reduce_only,
-                **_ingress_details(source_ingress),
-            },
+            details=event_details,
+            include_derived_latency=preserve_lifecycle_phase,
+            update_phase=preserve_lifecycle_phase,
+            event_identity=(
+                f"{operation}:{request_attempt}:"
+                f"{'request' if is_request else 'response'}"
+            ),
         )
+        if (
+            not is_request
+            and request_started_at is not None
+            and occurred_at >= request_started_at
+        ):
+            self._add_sample(
+                symbol=plan.symbol,
+                lane=lane,
+                transition=(
+                    f"{operation}_request_started->"
+                    f"{operation}_response_received"
+                ),
+                value=(occurred_at - request_started_at).total_seconds() * 1000,
+            )
 
     async def account_fill(
         self,
@@ -950,6 +1017,9 @@ class LiveRuntimeTelemetry:
         occurred_at: datetime,
         details: Mapping[str, JsonValue],
         parent_trace_id: str | None = None,
+        include_derived_latency: bool = True,
+        update_phase: bool = True,
+        event_identity: str | None = None,
     ) -> None:
         _require_aware(occurred_at, "occurred_at")
         trace = self._ensure_trace(
@@ -969,45 +1039,49 @@ class LiveRuntimeTelemetry:
                 "trace_id": trace_id,
             }
         )
-        previous_phase = _previous_phase(phase, trace.phase_at)
-        if previous_phase is not None:
-            previous_at = trace.phase_at[previous_phase]
-            delta_ms = (occurred_at - previous_at).total_seconds() * 1000
-            event_details["previous_phase"] = previous_phase
-            event_details["latency_ms_from_previous"] = delta_ms
-            if delta_ms >= 0 and (
-                phase not in trace.phase_at or phase in _REPEATABLE_PHASES
+        if include_derived_latency:
+            previous_phase = _previous_phase(phase, trace.phase_at)
+            if previous_phase is not None:
+                previous_at = trace.phase_at[previous_phase]
+                delta_ms = (occurred_at - previous_at).total_seconds() * 1000
+                event_details["previous_phase"] = previous_phase
+                event_details["latency_ms_from_previous"] = delta_ms
+                if delta_ms >= 0 and (
+                    phase not in trace.phase_at or phase in _REPEATABLE_PHASES
+                ):
+                    self._add_sample(
+                        symbol=symbol or trace.symbol or "UNKNOWN",
+                        lane=lane,
+                        transition=f"{previous_phase}->{phase}",
+                        value=delta_ms,
+                    )
+            if (
+                MARKET_STATE_RECEIVED in trace.phase_at
+                and phase != MARKET_STATE_RECEIVED
+                and (phase not in trace.phase_at or phase in _REPEATABLE_PHASES)
             ):
-                self._add_sample(
-                    symbol=symbol or trace.symbol or "UNKNOWN",
-                    lane=lane,
-                    transition=f"{previous_phase}->{phase}",
-                    value=delta_ms,
-                )
-        if (
-            MARKET_STATE_RECEIVED in trace.phase_at
-            and phase != MARKET_STATE_RECEIVED
-            and (phase not in trace.phase_at or phase in _REPEATABLE_PHASES)
+                origin_delta_ms = (
+                    occurred_at - trace.phase_at[MARKET_STATE_RECEIVED]
+                ).total_seconds() * 1000
+                event_details["latency_ms_from_market_state"] = origin_delta_ms
+                if origin_delta_ms >= 0:
+                    self._add_sample(
+                        symbol=symbol or trace.symbol or "UNKNOWN",
+                        lane=lane,
+                        transition=f"{MARKET_STATE_RECEIVED}->{phase}",
+                        value=origin_delta_ms,
+                    )
+        if update_phase and (
+            phase not in trace.phase_at or phase in _REPEATABLE_PHASES
         ):
-            origin_delta_ms = (
-                occurred_at - trace.phase_at[MARKET_STATE_RECEIVED]
-            ).total_seconds() * 1000
-            event_details["latency_ms_from_market_state"] = origin_delta_ms
-            if origin_delta_ms >= 0:
-                self._add_sample(
-                    symbol=symbol or trace.symbol or "UNKNOWN",
-                    lane=lane,
-                    transition=f"{MARKET_STATE_RECEIVED}->{phase}",
-                    value=origin_delta_ms,
-                )
-        if phase not in trace.phase_at or phase in _REPEATABLE_PHASES:
             trace.phase_at[phase] = occurred_at
         event = LiveRuntimeEvent(
             event_id=str(
                 uuid5(
                     NAMESPACE_URL,
                     f"live-runtime:{self._run_id}:{phase}:{trace_id}:"
-                    f"{occurred_at.isoformat()}",
+                    f"{occurred_at.isoformat()}"
+                    f"{':' + event_identity if event_identity else ''}",
                 )
             ),
             run_id=self._run_id,
@@ -1182,6 +1256,19 @@ def _normalize_exchange_operations(
             )
         normalized.add(operation.strip())
     return frozenset(normalized)
+
+
+def _parse_exchange_phase(phase: str) -> tuple[str, bool]:
+    for suffix, is_request in (
+        ("_request_started", True),
+        ("_response_received", False),
+    ):
+        if phase.endswith(suffix):
+            operation = phase[: -len(suffix)].strip()
+            if not operation:
+                raise ValueError("exchange phase must include an operation")
+            return operation, is_request
+    raise ValueError(f"unsupported exchange phase: {phase!r}")
 
 
 def _exchange_operation_is_allowed(

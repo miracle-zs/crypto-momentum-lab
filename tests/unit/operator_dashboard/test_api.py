@@ -125,6 +125,37 @@ async def test_response_cache_deduplicates_concurrent_loads_and_expires() -> Non
     assert await cache.get("paper-accounts", loader) == 2
 
 
+async def test_response_cache_serves_stale_equity_while_refreshing() -> None:
+    cache = _ResponseCache(ttl_seconds=0.05)
+    calls = 0
+
+    async def loader() -> int:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.005)
+        return calls
+
+    try:
+        assert await cache.get("paper-accounts-equity", loader) == 1
+        await asyncio.sleep(0.06)
+
+        # An expired response is immediately available while one refresh runs
+        # in the background, so a cold database query does not block the UI.
+        assert (
+            await cache.get(
+                "paper-accounts-equity",
+                loader,
+                stale_while_revalidate_seconds=0.2,
+            )
+            == 1
+        )
+        await asyncio.sleep(0.02)
+        assert calls == 2
+        assert await cache.get("paper-accounts-equity", loader) == 2
+    finally:
+        await cache.aclose()
+
+
 def test_overview_timeout_returns_gateway_timeout() -> None:
     class SlowQueries(FakeQueries):
         async def overview(self) -> SystemOverviewResponse:

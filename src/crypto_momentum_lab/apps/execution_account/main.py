@@ -38,7 +38,7 @@ from crypto_momentum_lab.execution_account.sync import (
 from crypto_momentum_lab.persistence.postgres import (
     PostgresAccountRepository,
     PostgresOperationalRetentionRepository,
-    create_execution_database_engine,
+    create_account_database_engine,
     create_maintenance_database_engine,
 )
 
@@ -281,7 +281,7 @@ async def sync_once(
     expected_hedge_mode: bool = False,
     fill_symbols: tuple[str, ...] = (),
 ) -> ExecutionAccountSyncResult:
-    engine = create_execution_database_engine(database_url)
+    engine = create_account_database_engine(database_url)
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         repository = PostgresAccountRepository(factory)
@@ -336,7 +336,7 @@ async def sync_continuously(
     snapshot_retention_max_rows_per_table: int,
     snapshot_retention_max_runtime_seconds: float,
 ) -> None:
-    engine = create_execution_database_engine(database_url)
+    engine = create_account_database_engine(database_url)
     retention_engine = create_maintenance_database_engine(database_url)
     expected_position_registry = AccountPositionExpectationRegistry(
         environment=environment,
