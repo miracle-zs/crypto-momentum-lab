@@ -325,7 +325,6 @@ def _config_signature(config: AccountConfigSnapshot) -> tuple[object, ...]:
         config.account_label,
         config.multi_assets_mode,
         config.hedge_mode,
-        config.can_trade,
         config.fee_tier,
     )
 

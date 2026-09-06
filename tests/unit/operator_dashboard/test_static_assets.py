@@ -245,14 +245,12 @@ def test_exchange_account_panel_exposes_reconciliation_and_execution_detail() ->
     text = (STATIC / "sections" / "account.js").read_text(encoding="utf-8")
 
     for marker in (
-        "账户权限与对账",
+        "账户配置与对账",
         "EXECUTION ACCOUNT",
         "live-strategy",
         "execution-account · 只读同步",
-        "交易所权限",
+        "账户配置",
         "数据新鲜度",
-        "账户 API 交易权限",
-        "canTrade",
         "怎么读",
         "对账状态",
         "可用余额",

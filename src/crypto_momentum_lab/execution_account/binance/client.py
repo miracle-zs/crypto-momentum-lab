@@ -251,7 +251,6 @@ class BinanceUsdMPrivateReadClient:
             account_label=self._account_label,
             multi_assets_mode=bool(data.get("multiAssetsMargin", False)),
             hedge_mode=hedge_mode,
-            can_trade=bool(data.get("canTrade", False)),
             fee_tier=_optional_int(data.get("feeTier")),
             observed_at=observed_at,
             raw_payload=raw_payload,
