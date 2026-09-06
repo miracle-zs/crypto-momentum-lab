@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import random
 import time
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
+from threading import Lock
 from typing import Protocol, Self
 
 import httpx
@@ -139,7 +142,8 @@ class BinanceRestClosedCandle15mSource:
         self._clock = clock
         self._candles: dict[tuple[str, datetime], ClosedCandle15m] = {}
         self._coverage: dict[str, tuple[datetime, datetime]] = {}
-        self._retry_delays = (0.25, 0.5, 1.0)
+        self._symbol_locks: defaultdict[str, Lock] = defaultdict(Lock)
+        self._retry_delays = (1.0, 2.0, 4.0, 8.0)
 
     def __enter__(self) -> Self:
         return self
@@ -166,28 +170,21 @@ class BinanceRestClosedCandle15mSource:
             return ()
         fetch_end = max(aligned_end, _candle_start_15m(self._clock()))
 
-        coverage = self._coverage.get(normalized_symbol)
-        if coverage is None:
-            self._fetch_range(normalized_symbol, aligned_start, fetch_end)
-            coverage = (aligned_start, fetch_end)
-        else:
-            covered_start, covered_end = coverage
-            if aligned_start < covered_start:
-                self._fetch_range(
-                    normalized_symbol,
-                    aligned_start,
-                    covered_start,
-                )
-                covered_start = aligned_start
-            if fetch_end > covered_end:
-                self._fetch_range(
-                    normalized_symbol,
-                    covered_end,
-                    fetch_end,
-                )
-                covered_end = fetch_end
-            coverage = (covered_start, covered_end)
-        self._coverage[normalized_symbol] = coverage
+        with self._symbol_locks[normalized_symbol]:
+            coverage = self._coverage.get(normalized_symbol)
+            if coverage is None:
+                self._fetch_range(normalized_symbol, aligned_start, fetch_end)
+                coverage = (aligned_start, fetch_end)
+            else:
+                covered_start, covered_end = coverage
+                if aligned_start < covered_start:
+                    self._fetch_range(normalized_symbol, aligned_start, covered_start)
+                    covered_start = aligned_start
+                if fetch_end > covered_end:
+                    self._fetch_range(normalized_symbol, covered_end, fetch_end)
+                    covered_end = fetch_end
+                coverage = (covered_start, covered_end)
+            self._coverage[normalized_symbol] = coverage
 
         candles = tuple(
             candle
@@ -289,12 +286,17 @@ class BinanceRestClosedCandle15mSource:
                 response.raise_for_status()
                 return response
             except httpx.HTTPStatusError as error:
-                retryable = (
-                    error.response.status_code == 429
-                    or error.response.status_code >= 500
-                )
+                retryable = error.response.status_code in {418, 429} or error.response.status_code >= 500
                 if not retryable or attempt == len(self._retry_delays):
                     raise
+                retry_after = error.response.headers.get("Retry-After")
+                try:
+                    server_delay = float(retry_after) if retry_after else 0.0
+                except ValueError:
+                    server_delay = 0.0
+                delay = max(self._retry_delays[attempt], server_delay)
+                time.sleep(delay + random.uniform(0.0, delay * 0.25))
+                continue
             except (
                 httpx.ConnectError,
                 httpx.ReadError,
@@ -303,7 +305,8 @@ class BinanceRestClosedCandle15mSource:
             ):
                 if attempt == len(self._retry_delays):
                     raise
-            time.sleep(self._retry_delays[attempt])
+            delay = self._retry_delays[attempt]
+            time.sleep(delay + random.uniform(0.0, delay * 0.25))
         raise AssertionError("retry loop exhausted")
 
     def _prune(
