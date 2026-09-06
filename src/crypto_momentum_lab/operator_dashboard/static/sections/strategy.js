@@ -34,7 +34,7 @@ import {
   latestStartEquityChart,
   standaloneSparkline,
   strategyEquityChart,
-} from "../dashboard-charts.js";
+} from "../dashboard-charts.js?v=20260906-live-account-labels-v1";
 import {
   blockTitle,
   dataTable,

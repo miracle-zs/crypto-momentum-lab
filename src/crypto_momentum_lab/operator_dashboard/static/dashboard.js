@@ -28,7 +28,7 @@ import {
   wireLiveAccounts,
 } from "./sections/account.js?v=20260906-live-metric-fleet-v1";
 import { renderReports } from "./sections/reports.js";
-import { createStrategySection } from "./sections/strategy.js?v=20260826-flight-deck-v2";
+import { createStrategySection } from "./sections/strategy.js?v=20260906-live-account-labels-v1";
 
 // Legacy import markers retained for static asset manifests: from "./sections/account.js"
 // from "./sections/strategy.js" from "./sections/overview.js" from "./sections/universe.js"
