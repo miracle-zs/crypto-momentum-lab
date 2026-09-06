@@ -903,6 +903,9 @@ def _classify_live_positions(
         # was created after the current opening actually filled.  An older
         # resting limit exit can fill after a later add-on entry; using its
         # updated_at would then make that old exit suppress the new position.
+        # Keep its remaining quantity on the managed position as the rollover
+        # boundary: the timeout fallback owns that quantity, and a new limit
+        # owns only the uncovered remainder.
         closing_filled_quantity = sum(
             (
                 _filled_order_quantity(order)
@@ -965,6 +968,15 @@ def _classify_live_positions(
                 ),
                 recovery_order_plan=(
                     None if recovery_order is None else recovery_order.plan
+                ),
+                recovery_order_remaining_quantity=(
+                    None
+                    if recovery_order is None
+                    else max(
+                        Decimal("0"),
+                        recovery_order.plan.quantity
+                        - recovery_order.executed_quantity,
+                    )
                 ),
             )
         )

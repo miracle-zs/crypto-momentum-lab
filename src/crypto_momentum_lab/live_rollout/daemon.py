@@ -2326,8 +2326,12 @@ class LiveStrategyDaemon:
                         client_order_id=request.cancel_plan.client_order_id,
                     )
                     continue
-                result = await self._execute_candidate(
+                fallback_candidate = _resize_reduce_only_candidate(
                     request.fallback_candidate,
+                    fallback_quantity,
+                )
+                result = await self._execute_candidate(
+                    fallback_candidate,
                     requested_quantity=fallback_quantity,
                     state=state,
                     context=context,
@@ -2347,7 +2351,7 @@ class LiveStrategyDaemon:
                         recovery_result = await self._recover_unknown_exit(
                             plan=result.plan,
                             known_executed_quantity=result.executed_quantity,
-                            source_candidate=request.fallback_candidate,
+                            source_candidate=fallback_candidate,
                             state=state,
                             context=context,
                             reference_price=reference_price,
@@ -3095,6 +3099,34 @@ def _build_exit_recovery_candidate(
         expires_at=now + timedelta(seconds=60),
         created_at=now,
         reason=f"exit_recovery_{order_type.lower()}_attempt_{attempt}",
+        features=features,
+    )
+
+
+def _resize_reduce_only_candidate(
+    candidate: OrderIntentCandidate,
+    quantity: Decimal,
+) -> OrderIntentCandidate:
+    """Keep fallback intent metadata aligned with its final quantity."""
+
+    if not candidate.reduce_only:
+        raise ValueError("only reduce-only candidates may be resized here")
+    if quantity <= 0:
+        raise ValueError("reduce-only candidate quantity must be positive")
+    features = dict(candidate.features)
+    features["quantity"] = str(quantity)
+    desired_notional = candidate.desired_notional
+    raw_reference_price = features.get("reference_price")
+    if desired_notional is not None and isinstance(raw_reference_price, str):
+        try:
+            reference_price = Decimal(raw_reference_price)
+        except ArithmeticError:
+            reference_price = None
+        if reference_price is not None and reference_price > 0:
+            desired_notional = quantity * reference_price
+    return replace(
+        candidate,
+        desired_notional=desired_notional,
         features=features,
     )
 

@@ -1006,6 +1006,104 @@ async def test_unknown_grace_limit_cancel_falls_back_to_market() -> None:
     assert exchange.plans[0].order_type == "MARKET"
 
 
+async def test_grace_timeout_resizes_intent_after_cancel_fill() -> None:
+    class PartiallyFilledCancelExchange(PlanAwareExchange):
+        async def cancel_order_by_client_id(
+            self,
+            symbol: str,
+            client_order_id: str,
+        ) -> ExchangeOrderSnapshot:
+            del symbol
+            self.calls.append("cancel")
+            return ExchangeOrderSnapshot(
+                client_order_id=client_order_id,
+                exchange_order_id="exchange-cancel",
+                state=ExchangeOrderState.CANCELED,
+                observed_at=NOW,
+                executed_quantity=Decimal("0.0003"),
+                average_price=Decimal("30000"),
+            )
+
+    class RecordingRepository(FakeLiveRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.intents: list[OrderIntentCandidate] = []
+
+        async def save_approved_intent(
+            self,
+            intent: OrderIntentCandidate,
+            evaluation: RiskEvaluation,
+        ) -> None:
+            del evaluation
+            self.intents.append(intent)
+
+    exchange = PartiallyFilledCancelExchange()
+    repository = RecordingRepository()
+    cancel_plan = OrderExecutionPlan(
+        intent_id="grace-limit",
+        run_id="run-1",
+        client_order_id="cml_grace_limit_123456789012345678",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("0.001"),
+        price=Decimal("30000"),
+        reduce_only=True,
+        created_at=NOW - timedelta(minutes=15),
+        position_side=FuturesPositionSide.LONG,
+        quantized=True,
+    )
+    fallback_candidate = replace(
+        _intent(),
+        candidate_id="market-fallback",
+        entry_type=EntryType.MARKET,
+        limit_price=None,
+        desired_notional=Decimal("30"),
+        reduce_only=True,
+        features={
+            "quantity": "0.001",
+            "reference_price": "30000",
+        },
+    )
+    position = ManagedLivePosition(
+        symbol="BTCUSDT",
+        side="long",
+        position_side=FuturesPositionSide.LONG,
+        quantity=Decimal("0.001"),
+        entry_price=Decimal("30000"),
+        opened_at=NOW - timedelta(minutes=30),
+    )
+    context = replace(
+        _runtime_context(),
+        open_position_symbols=frozenset({"BTCUSDT"}),
+        managed_positions=(position,),
+    )
+    daemon = _daemon(
+        exchange=exchange,
+        repository=repository,
+        hedge_mode=True,
+    )
+
+    approved, submitted, failure = await daemon._process_exit_requests(
+        (
+            LiveExitCancellationRequest(
+                cancel_plan=cancel_plan,
+                fallback_candidate=fallback_candidate,
+                fallback_quantity=Decimal("0.001"),
+            ),
+        ),
+        state=_state(),
+        context=context,
+    )
+
+    assert failure is None
+    assert approved == 1
+    assert submitted == 1
+    assert exchange.plans[-1].quantity == Decimal("0.0007")
+    assert repository.intents[-1].features["quantity"] == "0.0007"
+    assert repository.intents[-1].desired_notional == Decimal("21.0000")
+
+
 async def test_live_daemon_keeps_running_through_transient_database_error() -> None:
     exchange = PlanAwareExchange()
     calls = 0

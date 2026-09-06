@@ -7,7 +7,11 @@ from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
 )
-from crypto_momentum_lab.domain.execution import ExchangeOrderState
+from crypto_momentum_lab.domain.execution import (
+    ExchangeOrderState,
+    FuturesPositionSide,
+    OrderExecutionPlan,
+)
 from crypto_momentum_lab.domain.live_rollout import (
     LIVE_APPROVAL_CONFIRMATION,
     LiveOperatorApproval,
@@ -25,6 +29,9 @@ from crypto_momentum_lab.live_rollout.postgres_runtime import (
     _resolve_strategy_live_state,
     live_limits_from_approval,
     poll_live_market_states,
+)
+from crypto_momentum_lab.persistence.postgres.order_repository import (
+    PersistedExchangeOrder,
 )
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     RuntimeStateCursor,
@@ -183,6 +190,46 @@ def test_partial_close_does_not_suppress_remaining_position() -> None:
 
     assert unmanaged == frozenset()
     assert managed[0].closing_order_filled is False
+
+
+def test_classifies_remaining_recovery_quantity_after_partial_fill() -> None:
+    recovery_plan = OrderExecutionPlan(
+        intent_id="recovery-intent",
+        run_id="run-1",
+        client_order_id="recovery-client",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("1.127"),
+        price=Decimal("100.88"),
+        reduce_only=True,
+        created_at=NOW + timedelta(minutes=15),
+        position_side=FuturesPositionSide.LONG,
+        quantized=True,
+    )
+    unresolved = PersistedExchangeOrder(
+        plan=recovery_plan,
+        state=ExchangeOrderState.PARTIALLY_FILLED,
+        exchange_order_id="exchange-recovery",
+        updated_at=NOW + timedelta(minutes=16),
+        executed_quantity=Decimal("0.400"),
+    )
+
+    managed, unmanaged = _classify_live_positions(
+        [_position(position_amt=Decimal("0.727"))],
+        [
+            _order(
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("0.727"),
+                executed_quantity=Decimal("0.727"),
+            )
+        ],
+        unresolved=(unresolved,),
+    )
+
+    assert unmanaged == frozenset()
+    assert managed[0].recovery_order_remaining_quantity == Decimal("0.727")
 
 
 def test_partial_entry_fill_is_managed_and_refreshes_latest_exit_anchor() -> None:

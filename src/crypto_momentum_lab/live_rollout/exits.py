@@ -69,6 +69,10 @@ class ManagedLivePosition:
     recovery_order_client_id: str | None = None
     recovery_order_created_at: datetime | None = None
     recovery_order_plan: OrderExecutionPlan | None = None
+    # A prior recovery limit is the boundary for later add-ons.  Its
+    # remaining quantity stays assigned to the timeout fallback while a new
+    # recovery limit covers only the uncovered position.
+    recovery_order_remaining_quantity: Decimal | None = None
 
     def __post_init__(self) -> None:
         if not self.symbol.strip():
@@ -94,6 +98,11 @@ class ManagedLivePosition:
                 value.tzinfo is None or value.utcoffset() is None
             ):
                 raise ValueError(f"{field_name} must be timezone-aware")
+        if (
+            self.recovery_order_remaining_quantity is not None
+            and self.recovery_order_remaining_quantity < 0
+        ):
+            raise ValueError("recovery_order_remaining_quantity must not be negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +284,10 @@ class LiveExitManager:
             if reason is None:
                 self._checked_until[key] = candle.candle_end
                 continue
+            uncovered_quantity = _uncovered_position_quantity(position)
+            if uncovered_quantity <= 0:
+                self._checked_until[key] = candle.candle_end
+                continue
             reference_price = _candle_reference_price(
                 candle=candle,
                 quote=latest_quote,
@@ -298,6 +311,7 @@ class LiveExitManager:
                             identity_trigger_at=candle.candle_end,
                             created_at=received_at,
                             reference_price=reference_price,
+                            quantity=uncovered_quantity,
                         )
                     )
                 else:
@@ -309,6 +323,7 @@ class LiveExitManager:
                             trigger_at=candle.candle_end,
                             reference_price=reference_price,
                             created_at=received_at,
+                            quantity=uncovered_quantity,
                         )
                     )
                 continue
@@ -321,6 +336,7 @@ class LiveExitManager:
                     identity_trigger_at=candle.candle_end,
                     created_at=received_at,
                     reference_price=reference_price,
+                    quantity=uncovered_quantity,
                 )
             )
         return tuple(requests)
@@ -368,6 +384,9 @@ class LiveExitManager:
                 and latest_quote.symbol == position.symbol
                 else _exit_mark_price(state, position.side)
             ) or position.entry_price
+            timeout_quantity = _recovery_timeout_quantity(position)
+            if timeout_quantity <= 0:
+                continue
             requests.append(
                 self._build_grace_timeout_request(
                     state=state,
@@ -398,6 +417,7 @@ class LiveExitManager:
                 or position.closing_order_filled
                 or quote.received_at <= position.opened_at
                 or _recovery_order_blocks_current_episode(position)
+                or _uncovered_position_quantity(position) <= 0
             ):
                 continue
             mark_price = _quote_exit_mark_price(quote, position.side)
@@ -427,6 +447,8 @@ class LiveExitManager:
         state: MarketState15s,
         position: ManagedLivePosition,
     ) -> LiveExitOrderRequest | None:
+        if _uncovered_position_quantity(position) <= 0:
+            return None
         mark_price = _exit_mark_price(state, position.side)
         if mark_price is None:
             return None
@@ -467,6 +489,8 @@ class LiveExitManager:
     ) -> LiveExitOrderRequest | None:
         if self._candles is None:
             raise AssertionError("candle loader was validated at construction")
+        if _uncovered_position_quantity(position) <= 0:
+            return None
         closed_boundary = _candle_start_15m(state.bucket_end)
         key = (position.symbol, position.position_side, position.opened_at)
         start = self._checked_until.get(key, _candle_start_15m(position.opened_at))
@@ -534,6 +558,7 @@ class LiveExitManager:
         trigger_at: datetime,
         reference_price: Decimal,
         created_at: datetime | None = None,
+        quantity: Decimal | None = None,
     ) -> LiveExitOrderRequest:
         target_price = _recovery_price(
             position,
@@ -548,6 +573,7 @@ class LiveExitManager:
             created_at=created_at,
             entry_type=EntryType.LIMIT,
             limit_price=target_price,
+            quantity=quantity,
         )
 
     def _build_grace_timeout_request(
@@ -562,6 +588,9 @@ class LiveExitManager:
         recovery_plan = position.recovery_order_plan
         if recovery_plan is None:
             raise AssertionError("grace timeout requires a recovery order")
+        fallback_quantity = _recovery_timeout_quantity(position)
+        if fallback_quantity <= 0:
+            raise AssertionError("grace timeout requires a positive quantity")
         trigger_at = trigger_at or state.bucket_end
         fallback = self._build_order_request(
             state=state,
@@ -574,11 +603,12 @@ class LiveExitManager:
             identity_trigger_at=recovery_plan.created_at,
             reference_price=reference_price,
             created_at=created_at,
+            quantity=fallback_quantity,
         )
         return LiveExitCancellationRequest(
             cancel_plan=recovery_plan,
             fallback_candidate=fallback.candidate,
-            fallback_quantity=fallback.quantity,
+            fallback_quantity=fallback_quantity,
         )
 
     def _build_order_request(
@@ -593,6 +623,7 @@ class LiveExitManager:
         identity_trigger_at: datetime | None = None,
         entry_type: EntryType = EntryType.MARKET,
         limit_price: Decimal | None = None,
+        quantity: Decimal | None = None,
     ) -> LiveExitOrderRequest:
         identity_trigger_at = identity_trigger_at or trigger_at
         identity = (
@@ -606,6 +637,13 @@ class LiveExitManager:
             if state is None:
                 raise ValueError("state or created_at is required")
             created_at = state.bucket_end
+        order_quantity = (
+            _uncovered_position_quantity(position)
+            if quantity is None
+            else quantity
+        )
+        if order_quantity <= 0:
+            raise ValueError("exit order quantity must be positive")
         return LiveExitOrderRequest(
             candidate=OrderIntentCandidate(
                 candidate_id=candidate_id,
@@ -618,7 +656,7 @@ class LiveExitManager:
                 side=position.side,
                 entry_type=entry_type,
                 limit_price=limit_price,
-                desired_notional=position.quantity * reference_price,
+                desired_notional=order_quantity * reference_price,
                 reduce_only=True,
                 expires_at=created_at
                 + timedelta(seconds=self._config.candidate_ttl_seconds),
@@ -626,7 +664,7 @@ class LiveExitManager:
                 reason=reason,
                 features={
                     "position_side": position.position_side.value,
-                    "quantity": str(position.quantity),
+                    "quantity": str(order_quantity),
                     "entry_price": str(position.entry_price),
                     "reference_price": str(reference_price),
                     "opened_at": position.opened_at.astimezone(UTC).isoformat(),
@@ -634,7 +672,7 @@ class LiveExitManager:
                     "exit_order_type": entry_type.value,
                 },
             ),
-            quantity=position.quantity,
+            quantity=order_quantity,
         )
 
     def _build_request(
@@ -701,6 +739,54 @@ def _recovery_order_blocks_current_episode(
         and recovery_created_at is not None
         and recovery_created_at >= position.opened_at
     )
+
+
+def _recovery_remaining_quantity(
+    position: ManagedLivePosition,
+) -> Decimal:
+    plan = position.recovery_order_plan
+    if plan is None:
+        return Decimal("0")
+    remaining = position.recovery_order_remaining_quantity
+    if remaining is None:
+        remaining = plan.quantity
+    return min(plan.quantity, max(Decimal("0"), remaining))
+
+
+def _stale_recovery_boundary_quantity(
+    position: ManagedLivePosition,
+) -> Decimal:
+    plan = position.recovery_order_plan
+    recovery_created_at = position.recovery_order_created_at
+    if (
+        plan is None
+        or recovery_created_at is None
+        or recovery_created_at >= position.opened_at
+    ):
+        return Decimal("0")
+    return min(position.quantity, _recovery_remaining_quantity(position))
+
+
+def _uncovered_position_quantity(
+    position: ManagedLivePosition,
+) -> Decimal:
+    """Return the position not already covered by a prior recovery order.
+
+    A prior recovery limit is the boundary between the old position episode
+    and later add-ons.  Its quantity remains managed by the timeout fallback
+    while a new limit is created only for the uncovered remainder.
+    """
+
+    return max(
+        Decimal("0"),
+        position.quantity - _stale_recovery_boundary_quantity(position),
+    )
+
+
+def _recovery_timeout_quantity(
+    position: ManagedLivePosition,
+) -> Decimal:
+    return min(position.quantity, _recovery_remaining_quantity(position))
 
 
 def _recovery_target_touched(
