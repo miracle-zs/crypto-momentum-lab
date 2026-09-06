@@ -424,7 +424,6 @@ def create_dashboard_app(
                     equity_range,
                     account_label=account_label,
                 )
-
             return await response_cache.get(
                 cache_key,
                 load_account,
@@ -445,6 +444,7 @@ def create_dashboard_app(
             return await response_cache.get(
                 "live-accounts",
                 query_service().live_accounts,
+                ttl_seconds=_OVERVIEW_CACHE_TTL_SECONDS,
             )
         except TimeoutError as exc:
             raise HTTPException(

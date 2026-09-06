@@ -68,6 +68,27 @@ def test_registry_allows_orderflow_imbalance_override() -> None:
     assert runtime_config.event_config.min_aggressive_imbalance == Decimal("0.40")
 
 
+def test_registry_allows_account_scoped_orderflow_profile_overrides() -> None:
+    runtime_config = build_runtime_config(
+        "orderflow_impulse",
+        config={
+            "order_flow_impulse_impulse_window_buckets": 4,
+            "order_flow_impulse_confirmation_buckets": 1,
+            "order_flow_impulse_min_return_pct": Decimal("0.01"),
+            "order_flow_impulse_min_aggressive_imbalance": Decimal("0.40"),
+            "order_flow_impulse_min_notional_intensity": Decimal("2"),
+            "cooldown_buckets": 0,
+        },
+    )
+
+    assert runtime_config.event_config.impulse_window_buckets == 4
+    assert runtime_config.event_config.confirmation_buckets == 1
+    assert runtime_config.event_config.min_return_pct == Decimal("0.01")
+    assert runtime_config.event_config.min_aggressive_imbalance == Decimal("0.40")
+    assert runtime_config.event_config.min_notional_intensity == Decimal("2")
+    assert runtime_config.event_config.cooldown_buckets == 0
+
+
 def _identity(strategy_name: str) -> StrategyRunIdentity:
     return StrategyRunIdentity(
         run_id="run-1",

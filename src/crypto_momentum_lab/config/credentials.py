@@ -102,7 +102,7 @@ def resolve_binance_credentials(
         _raise_missing(role, reference, missing)
 
     # The guard above proves the optional fallback reference is present; keep a
-    # local non-optional binding so the invariant is clear to type checkers.
+    # local non-optional binding so the invariant is clear for type checkers.
     fallback_ref = legacy_ref
     legacy_missing = _missing_names(fallback_ref, values)
     if legacy_missing:

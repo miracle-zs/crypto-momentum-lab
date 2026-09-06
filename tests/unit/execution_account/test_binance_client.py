@@ -187,7 +187,6 @@ async def test_client_fetches_account_and_position_modes() -> None:
                 200,
                 json={
                     "multiAssetsMargin": False,
-                    "canTrade": True,
                     "feeTier": 0,
                 },
             )

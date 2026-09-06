@@ -14,7 +14,7 @@ const populatedAccount = {
   observed_at: "2026-08-26T08:00:00Z",
   environment: "live",
   account_label: "primary",
-  account_config: { can_trade: true, hedge_mode: false, multi_assets_mode: false, fee_tier: 0 },
+  account_config: { hedge_mode: false, multi_assets_mode: false, fee_tier: 0 },
   reconciliation: {
     status: "ready",
     mismatch_count: 0,

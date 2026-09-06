@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy.exc import OperationalError
 
 from crypto_momentum_lab.domain.execution import (
@@ -21,6 +22,7 @@ from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     StrategyCheckpoint,
     StrategyDecision,
+    universe_snapshot_for_symbols,
 )
 from crypto_momentum_lab.execution_account.orders.quantization import (
     SymbolTradingRules,
@@ -51,15 +53,6 @@ from crypto_momentum_lab.live_rollout.exits import (
     ManagedLivePosition,
 )
 from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
-from crypto_momentum_lab.live_rollout.telemetry import (
-    CONTEXT_READY,
-    LIVE_TRIGGER_SOURCE_MARKET,
-    MARKET_STATE_RECEIVED,
-    SOURCE_RECEIVED,
-    TRACE_TERMINATED,
-    LiveRuntimeTelemetry,
-    SourceIngress,
-)
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PersistedExchangeOrder,
 )
@@ -215,6 +208,119 @@ async def test_live_signal_record_can_compare_entry_policy_without_submitting_ch
         "policy_reasons": {},
         "mismatch_reasons": {},
     }
+
+
+async def test_live_policy_enforce_uses_policy_eligible_candidate_for_submission(
+) -> None:
+    recorder = RecordingSignalRecorder()
+    exchange = PlanAwareExchange()
+    daemon = _daemon(
+        exchange=exchange,
+        signal_recorder=recorder,
+        entry_policy_enforce=True,
+    )
+
+    result = await daemon.run(_states())
+
+    assert result.halt_reason is None
+    assert result.submitted_order_count == 1
+    assert exchange.calls == ["submit"]
+    assert recorder.decision_filter_context is not None
+    assert recorder.decision_filter_context["entry_policy_enforce"] is True
+    assert recorder.decision_filter_context["entry_policy_mode"] == "enforce"
+    assert recorder.decision_filter_context[
+        "entry_policy_comparison_summary"
+    ] == {
+        "candidates": 1,
+        "matched": 1,
+        "mismatched": 0,
+        "legacy_eligible": 1,
+        "policy_eligible": 1,
+        "reduce_only_skipped": 0,
+        "policy_reasons": {},
+        "mismatch_reasons": {},
+    }
+
+
+async def test_live_policy_enforce_blocks_policy_ineligible_candidate() -> None:
+    recorder = RecordingSignalRecorder()
+    exchange = PlanAwareExchange()
+
+    async def load_symbols(observed_at: datetime) -> frozenset[str]:
+        del observed_at
+        return frozenset({"BTCUSDT"})
+
+    def empty_universe(observed_at: datetime):
+        return universe_snapshot_for_symbols(
+            frozenset(),
+            observed_at=observed_at,
+        )
+
+    daemon = _daemon(
+        exchange=exchange,
+        signal_recorder=recorder,
+        entry_symbol_loader=load_symbols,
+        entry_universe_snapshot_provider=empty_universe,
+        entry_policy_enforce=True,
+    )
+
+    result = await daemon.run(_states())
+
+    assert result.halt_reason is None
+    assert result.submitted_order_count == 0
+    assert exchange.calls == []
+    assert recorder.decision_filter_context is not None
+    summary = recorder.decision_filter_context[
+        "entry_policy_comparison_summary"
+    ]
+    assert summary["candidates"] == 1
+    assert summary["legacy_eligible"] == 1
+    assert summary["policy_eligible"] == 0
+    assert summary["mismatched"] == 1
+    assert summary["mismatch_reasons"] == {"outside_entry_universe": 1}
+
+
+async def test_live_policy_enforce_fails_closed_on_universe_snapshot_error() -> None:
+    recorder = RecordingSignalRecorder()
+    exchange = PlanAwareExchange()
+
+    async def load_symbols(observed_at: datetime) -> frozenset[str]:
+        del observed_at
+        return frozenset({"BTCUSDT"})
+
+    def broken_universe(observed_at: datetime):
+        del observed_at
+        raise RuntimeError("universe unavailable")
+
+    daemon = _daemon(
+        exchange=exchange,
+        signal_recorder=recorder,
+        entry_symbol_loader=load_symbols,
+        entry_universe_snapshot_provider=broken_universe,
+        entry_policy_enforce=True,
+    )
+
+    result = await daemon.run(_states())
+
+    assert result.halt_reason is None
+    assert result.submitted_order_count == 0
+    assert exchange.calls == []
+    assert recorder.decision_filter_context is not None
+    assert recorder.decision_filter_context[
+        "entry_policy_universe_snapshot_error"
+    ] == "RuntimeError"
+    assert recorder.decision_filter_context[
+        "entry_policy_enforce_skip_reason"
+    ] == "universe_snapshot_error"
+
+
+def test_live_policy_modes_are_mutually_exclusive() -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        _daemon(
+            exchange=PlanAwareExchange(),
+            entry_policy_compare_only=True,
+            entry_policy_enforce=True,
+        )
 
 
 async def test_live_daemon_does_not_submit_expired_entry_candidate() -> None:
@@ -708,126 +814,6 @@ async def test_unknown_reduce_only_exit_submits_recovery_for_current_position() 
     assert exchange.plans[1].client_order_id != exchange.plans[0].client_order_id
     assert exchange.plans[1].quantity == Decimal("0.0007")
     assert recovery.plans == [exchange.plans[0]]
-
-
-async def test_exit_source_ingress_flows_through_context_and_worker_telemetry() -> None:
-    telemetry = LiveRuntimeTelemetry(run_id="run-1")
-    daemon = _daemon(
-        exchange=PlanAwareExchange(),
-        telemetry=telemetry,
-        exit_manager=LiveExitManager(
-            config=LiveExitConfig(
-                run_id="run-1",
-                strategy_name="compression_breakout",
-                strategy_version="v0",
-                strategy_config_hash="a" * 64,
-                policy=PositionExitPolicy(),
-            )
-        ),
-    )
-    state = _state()
-    ingress = SourceIngress(
-        run_id="run-1",
-        source_event_id="account-event-1:BTCUSDT",
-        lane="exit",
-        trigger_source="account",
-        received_at=NOW - timedelta(seconds=1),
-        source_occurred_at=NOW - timedelta(seconds=2),
-        symbol=state.symbol,
-        bucket_start=state.bucket_start,
-    )
-
-    assert await daemon.process_account_event(
-        state,
-        source_ingress=ingress,
-    ) is None
-
-    trace_events = [
-        event
-        for event in telemetry.recent_events
-        if event.details["trace_id"] == ingress.trace_id
-    ]
-    assert [event.event_type for event in trace_events] == [
-        SOURCE_RECEIVED,
-        CONTEXT_READY,
-        MARKET_STATE_RECEIVED,
-        TRACE_TERMINATED,
-    ]
-    assert all(event.details["lane"] == "exit" for event in trace_events)
-    assert trace_events[-1].details["reason"] == "no_exit_request"
-
-
-async def test_market_coalescing_terminates_the_replaced_source_trace() -> None:
-    telemetry = LiveRuntimeTelemetry(run_id="run-1")
-    daemon = _daemon(
-        exchange=PlanAwareExchange(),
-        telemetry=telemetry,
-        exit_manager=LiveExitManager(
-            config=LiveExitConfig(
-                run_id="run-1",
-                strategy_name="compression_breakout",
-                strategy_version="v0",
-                strategy_config_hash="a" * 64,
-                policy=PositionExitPolicy(),
-            )
-        ),
-    )
-    first_state = _state()
-    second_state = replace(
-        first_state,
-        bucket_start=first_state.bucket_start + timedelta(seconds=15),
-        bucket_end=first_state.bucket_end + timedelta(seconds=15),
-    )
-    first_ingress = SourceIngress(
-        run_id="run-1",
-        source_event_id="market-1",
-        lane="exit",
-        trigger_source=LIVE_TRIGGER_SOURCE_MARKET,
-        received_at=NOW,
-        symbol=first_state.symbol,
-        bucket_start=first_state.bucket_start,
-    )
-    second_ingress = SourceIngress(
-        run_id="run-1",
-        source_event_id="market-2",
-        lane="exit",
-        trigger_source=LIVE_TRIGGER_SOURCE_MARKET,
-        received_at=NOW,
-        symbol=second_state.symbol,
-        bucket_start=second_state.bucket_start,
-    )
-
-    await telemetry.source_received(first_ingress)
-    await telemetry.source_received(second_ingress)
-    await daemon._exit_lane.start()
-    await daemon._exit_lane.submit_market(
-        first_state,
-        _runtime_context(),
-        ingress=first_ingress,
-    )
-    await daemon._exit_lane.submit_market(
-        second_state,
-        _runtime_context(),
-        ingress=second_ingress,
-    )
-    await daemon._exit_lane.drain()
-    await daemon._exit_lane.stop()
-
-    first_trace_events = [
-        event
-        for event in telemetry.recent_events
-        if event.details["trace_id"] == first_ingress.trace_id
-    ]
-    assert [event.event_type for event in first_trace_events] == [
-        SOURCE_RECEIVED,
-        TRACE_TERMINATED,
-    ]
-    assert first_trace_events[-1].details["reason"] == (
-        "coalesced_by_newer_source"
-    )
-    assert first_trace_events[-1].details["replacement_trace_id"] == (
-        second_ingress.trace_id
-    )
 
 
 async def test_candle_account_event_recovers_existing_unknown_exit() -> None:
@@ -1685,7 +1671,9 @@ def _daemon(
     entry_symbol_loader=None,
     entry_filter_context_loader=None,
     entry_universe_context_provider=None,
-    entry_policy_compare_only=False,
+    entry_universe_snapshot_provider=None,
+    entry_policy_compare_only: bool = False,
+    entry_policy_enforce: bool = False,
     signal_recorder=None,
     require_price_above_ema5: bool = False,
     require_price_above_ema10: bool = False,
@@ -1694,7 +1682,6 @@ def _daemon(
     reconcile_orders=None,
     exit_recovery_client=None,
     clock=None,
-    telemetry=None,
 ) -> LiveStrategyDaemon:
     order_repository = FakeOrderRepository()
     machine = OrderExecutionStateMachine(
@@ -1733,13 +1720,14 @@ def _daemon(
             require_price_above_ema10=require_price_above_ema10,
             entry_filter_context_loader=entry_filter_context_loader,
             entry_universe_context_provider=entry_universe_context_provider,
+            entry_universe_snapshot_provider=entry_universe_snapshot_provider,
             entry_policy_compare_only=entry_policy_compare_only,
+            entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
         ),
         exit_manager=exit_manager,
         exit_recovery_client=exit_recovery_client,
         reconcile_orders=reconcile_orders,
-        telemetry=telemetry,
         clock=clock or (lambda: NOW),
     )
 

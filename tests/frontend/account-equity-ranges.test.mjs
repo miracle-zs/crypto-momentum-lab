@@ -5,7 +5,10 @@ import {
   buildChartOption,
   getChartPayload,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-chart-engine.js";
-import { renderAccount } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/account.js";
+import {
+  renderAccount,
+  renderLiveAccounts,
+} from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/account.js";
 
 
 test("live account renderer exposes equity range controls and yearly dates", () => {
@@ -40,4 +43,28 @@ test("live account renderer exposes equity range controls and yearly dates", () 
     option.xAxis.axisLabel.formatter(Date.parse("2026-08-01T00:00:00Z")),
     "2026-08",
   );
+});
+
+test("live account directory renders every account against shared market data", () => {
+  const [status, html] = renderLiveAccounts({
+    status: "READY",
+    accounts: ["primary", "account-2", "account-3", "account-4"].map(
+      (account_label) => ({
+        account_label,
+        environment: "live",
+        status: "READY",
+        readiness: "ready_readonly",
+        strategy_name: "orderflow_impulse",
+        strategy_state: "running",
+      }),
+    ),
+  });
+
+  assert.equal(status, "READY");
+  assert.match(html, /实盘账户矩阵/);
+  assert.match(html, /同一 market-data/);
+  for (const accountLabel of ["primary", "account-2", "account-3", "account-4"]) {
+    assert.match(html, new RegExp(`>${accountLabel}<`));
+  }
+  assert.match(html, /data-live-account-detail/);
 });

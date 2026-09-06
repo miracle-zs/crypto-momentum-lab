@@ -32,7 +32,6 @@ class FakeClient:
             account_label="primary",
             multi_assets_mode=multi_assets_mode,
             hedge_mode=hedge_mode,
-            can_trade=True,
             fee_tier=0,
             observed_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
             raw_payload={},

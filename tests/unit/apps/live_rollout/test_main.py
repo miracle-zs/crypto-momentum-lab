@@ -9,16 +9,8 @@ from typer import BadParameter
 from typer.testing import CliRunner
 
 from crypto_momentum_lab.apps.live_rollout import main
-from crypto_momentum_lab.domain.market.models import RealtimeMarketQuote
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
-from crypto_momentum_lab.execution_account.hub import AccountEvent
-from crypto_momentum_lab.live_rollout.closed_candle_feed import (
-    ClosedCandle15mEvent,
-)
-from crypto_momentum_lab.live_rollout.daemon import LiveDaemonResult
 from crypto_momentum_lab.market_data.hub import MarketStateHubError
-from crypto_momentum_lab.strategy_runner.position_exit import ClosedCandle15m
-from tests.unit.shadow_operation.test_service import _state
 
 app = main.app
 
@@ -58,8 +50,24 @@ def test_live_run_exposes_operation_aware_telemetry_option() -> None:
     result = runner.invoke(app, ["run", "--help"])
 
     assert result.exit_code == 0
-    # Rich help truncates long option labels to the terminal width.
     assert "--persist-exchan" in result.stdout
+
+
+def test_live_run_rejects_conflicting_entry_policy_modes() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--entry-policy-compare-only",
+            "--entry-policy-enforce",
+            "--i-understand-this-places-real-orders",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output
 
 
 @pytest.mark.parametrize(
@@ -85,9 +93,9 @@ def test_live_exchange_operation_option_rejects_empty_tokens() -> None:
 def test_live_run_passes_exchange_operation_allowlist_to_daemon(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    async def fake_run_live_daemon(**kwargs: object) -> LiveDaemonResult:
+    async def fake_run_live_daemon(**kwargs: object):
         captured.update(kwargs)
-        return LiveDaemonResult(
+        return main.LiveDaemonResult(
             processed_state_count=0,
             approved_intent_count=0,
             submitted_order_count=0,
@@ -95,7 +103,7 @@ def test_live_run_passes_exchange_operation_allowlist_to_daemon(monkeypatch) -> 
             final_state_at=None,
         )
 
-    async def fake_startup_backoff(run_once) -> LiveDaemonResult:
+    async def fake_startup_backoff(run_once):
         return await run_once()
 
     monkeypatch.setattr(main, "_run_live_daemon", fake_run_live_daemon)
@@ -125,6 +133,139 @@ def test_live_run_passes_exchange_operation_allowlist_to_daemon(monkeypatch) -> 
         {"submit", "cancel"}
     )
     assert captured["entry_policy_compare_only"] is True
+
+
+def test_live_run_passes_entry_policy_enforce_to_daemon(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_run_live_daemon(**kwargs: object):
+        captured.update(kwargs)
+        return main.LiveDaemonResult(
+            processed_state_count=0,
+            approved_intent_count=0,
+            submitted_order_count=0,
+            halt_reason=None,
+            final_state_at=None,
+        )
+
+    async def fake_startup_backoff(run_once):
+        return await run_once()
+
+    monkeypatch.setattr(main, "_run_live_daemon", fake_run_live_daemon)
+    monkeypatch.setattr(
+        main,
+        "_run_with_live_startup_backoff",
+        fake_startup_backoff,
+    )
+    monkeypatch.setenv("BINANCE_TRADE_API_KEY", "test-key")
+    monkeypatch.setenv("BINANCE_TRADE_API_SECRET", "test-secret")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--entry-policy-enforce",
+            "--i-understand-this-places-real-orders",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["entry_policy_enforce"] is True
+
+
+def test_live_run_passes_account_scoped_profile_to_daemon(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_run_live_daemon(**kwargs: object):
+        captured.update(kwargs)
+        return main.LiveDaemonResult(
+            processed_state_count=0,
+            approved_intent_count=0,
+            submitted_order_count=0,
+            halt_reason=None,
+            final_state_at=None,
+        )
+
+    async def fake_startup_backoff(run_once):
+        return await run_once()
+
+    monkeypatch.setattr(main, "_run_live_daemon", fake_run_live_daemon)
+    monkeypatch.setattr(
+        main,
+        "_run_with_live_startup_backoff",
+        fake_startup_backoff,
+    )
+    monkeypatch.setenv("BINANCE_TRADE_API_KEY", "test-key")
+    monkeypatch.setenv("BINANCE_TRADE_API_SECRET", "test-secret")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--impulse-window-buckets",
+            "4",
+            "--confirmation-buckets",
+            "1",
+            "--min-return-pct",
+            "0.01",
+            "--min-imbalance",
+            "0.40",
+            "--min-intensity",
+            "2",
+            "--cooldown-buckets",
+            "0",
+            "--i-understand-this-places-real-orders",
+        ],
+    )
+
+    assert result.exit_code == 0
+    profile = captured["profile"]
+    assert isinstance(profile, main.LiveOrderFlowImpulseProfile)
+    assert profile.impulse_window_buckets == 4
+
+
+def test_live_run_passes_shadow_preflight_acknowledgment_to_daemon(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_run_live_daemon(**kwargs: object):
+        captured.update(kwargs)
+        return main.LiveDaemonResult(
+            processed_state_count=0,
+            approved_intent_count=0,
+            submitted_order_count=0,
+            halt_reason=None,
+            final_state_at=None,
+        )
+
+    async def fake_startup_backoff(run_once):
+        return await run_once()
+
+    monkeypatch.setattr(main, "_run_live_daemon", fake_run_live_daemon)
+    monkeypatch.setattr(
+        main,
+        "_run_with_live_startup_backoff",
+        fake_startup_backoff,
+    )
+    monkeypatch.setenv("BINANCE_TRADE_API_KEY", "test-key")
+    monkeypatch.setenv("BINANCE_TRADE_API_SECRET", "test-secret")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--acknowledge-missing-shadow-preflight",
+            "--i-understand-this-places-real-orders",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["acknowledge_missing_shadow_preflight"] is True
 
 
 def test_live_cli_legacy_credentials_require_explicit_fallback(monkeypatch) -> None:
@@ -245,8 +386,16 @@ def test_strategy_config_hash_includes_live_entry_filters() -> None:
         require_price_above_ema5=False,
         require_price_above_ema10=False,
     )
+    enforced = main._live_strategy_config_hash(
+        "orderflow_impulse",
+        entry_positive_gainer_top_count=None,
+        entry_policy_enforce=True,
+        require_price_above_ema5=False,
+        require_price_above_ema10=False,
+    )
 
     assert filtered != unfiltered
+    assert enforced != unfiltered
 
 
 def test_live_defaults_disable_ema_and_use_lower_orderflow_imbalance() -> None:
@@ -255,6 +404,40 @@ def test_live_defaults_disable_ema_and_use_lower_orderflow_imbalance() -> None:
     assert main._live_strategy_config()[
         "order_flow_impulse_min_aggressive_imbalance"
     ] == Decimal("0.40")
+
+
+def test_strategy_config_hash_includes_account_scoped_profile() -> None:
+    primary = main._live_strategy_config_hash("orderflow_impulse")
+    account_two = main._live_strategy_config_hash(
+        "orderflow_impulse",
+        profile=main.LiveOrderFlowImpulseProfile(impulse_window_buckets=4),
+    )
+
+    assert primary != account_two
+
+
+def test_preflight_runtime_strategy_config_reads_live_lane_environment(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT", "10")
+    monkeypatch.setenv("CML_LIVE_ENTRY_POLICY_MODE", "enforce")
+    monkeypatch.setenv("CML_LIVE_IMPULSE_WINDOW_BUCKETS", "4")
+
+    config = main._preflight_runtime_strategy_config()
+
+    assert config.profile.impulse_window_buckets == 4
+    assert config.entry_positive_gainer_top_count == 10
+    assert config.entry_policy_mode == "enforce"
+    assert config.entry_policy_enforce is True
+
+
+def test_preflight_runtime_strategy_config_rejects_unknown_policy_mode(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CML_LIVE_ENTRY_POLICY_MODE", "unexpected")
+
+    with pytest.raises(ValueError, match="CML_LIVE_ENTRY_POLICY_MODE"):
+        main._preflight_runtime_strategy_config()
 
 
 def test_unlimited_cli_values_map_to_absent_capacity_limits() -> None:
@@ -287,75 +470,6 @@ def test_live_startup_retry_delay_uses_exchange_retry_after() -> None:
     assert main._live_startup_retry_delay(1, retry_after_seconds=17) == 17
     assert main._live_startup_retry_delay(2, retry_after_seconds=None) == 30
     assert main._live_startup_retry_delay(10, retry_after_seconds=None) == 300
-
-
-def test_exit_ingress_adapters_keep_source_identity_and_timestamps() -> None:
-    state = _state()
-    event_at = datetime(2026, 9, 4, 0, 0, tzinfo=UTC)
-    received_at = event_at + timedelta(milliseconds=125)
-    account_event = AccountEvent(
-        environment="live",
-        account_label="primary",
-        event_type="ORDER_TRADE_UPDATE",
-        event_id="account-event-1",
-        event_at=event_at,
-        received_at=received_at,
-        symbols=(state.symbol,),
-        symbol=state.symbol,
-    )
-    quote = RealtimeMarketQuote(
-        exchange="binance-usdm",
-        environment="live",
-        symbol=state.symbol,
-        event_at=event_at,
-        received_at=received_at,
-        bid_price=Decimal("29999"),
-        ask_price=Decimal("30001"),
-    )
-    candle_event = ClosedCandle15mEvent(
-        candle=ClosedCandle15m(
-            symbol=state.symbol,
-            candle_start=event_at,
-            candle_end=event_at + timedelta(minutes=15),
-            open_price=Decimal("30000"),
-            close_price=Decimal("30001"),
-        ),
-        exchange_event_at=event_at + timedelta(minutes=15),
-        received_at=received_at,
-    )
-
-    account = main._account_exit_ingress(
-        run_id="run-1",
-        event=account_event,
-        state=state,
-    )
-    quote_ingress = main._quote_exit_ingress(
-        run_id="run-1",
-        quote=quote,
-        state=state,
-    )
-    candle = main._candle_exit_ingress(
-        run_id="run-1",
-        event=candle_event,
-    )
-    grace = main._grace_exit_ingress(
-        run_id="run-1",
-        state=state,
-        now=received_at,
-    )
-
-    assert account.trigger_source == main.LIVE_TRIGGER_SOURCE_ACCOUNT
-    assert account.source_event_id == "account-event-1:BTCUSDT"
-    assert account.source_occurred_at == event_at
-    assert quote_ingress.trigger_source == main.LIVE_TRIGGER_SOURCE_QUOTE
-    assert quote_ingress.source_occurred_at == event_at
-    assert candle.trigger_source == main.LIVE_TRIGGER_SOURCE_CANDLE
-    assert candle.bucket_start == candle_event.candle.candle_end - timedelta(
-        seconds=15
-    )
-    assert grace.trigger_source == main.LIVE_TRIGGER_SOURCE_GRACE
-    assert grace.source_occurred_at is None
-    assert len({item.trace_id for item in (account, quote_ingress, candle, grace)}) == 4
 
 
 def test_only_transient_live_startup_errors_are_retryable() -> None:
@@ -642,6 +756,58 @@ async def test_missing_shadow_preflight_only_logs_a_warning(
     assert warnings == [
         (
             "live_shadow_preflight_missing",
+            {
+                "account_label": "primary",
+                "session_id": "live-1",
+                "strategy_name": "orderflow_impulse",
+                "strategy_config_hash": "a" * 64,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_acknowledged_missing_shadow_preflight_logs_info(
+    monkeypatch,
+) -> None:
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def scalar(self, _statement):
+            return None
+
+    class FakeFactory:
+        def __call__(self):
+            return FakeSession()
+
+    events = []
+
+    class FakeLogger:
+        def info(self, event, **kwargs):
+            events.append(("info", event, kwargs))
+
+        def warning(self, event, **kwargs):
+            events.append(("warning", event, kwargs))
+
+    monkeypatch.setattr(main, "log", FakeLogger())
+
+    await main._warn_if_shadow_preflight_missing(
+        FakeFactory(),
+        strategy_name="orderflow_impulse",
+        strategy_config_hash="a" * 64,
+        account_label="primary",
+        session_id="live-1",
+        acknowledged=True,
+    )
+
+    assert events == [
+        (
+            "info",
+            "live_shadow_preflight_missing_acknowledged",
             {
                 "account_label": "primary",
                 "session_id": "live-1",

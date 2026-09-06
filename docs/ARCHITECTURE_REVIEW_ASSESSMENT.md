@@ -629,3 +629,13 @@ secret。两组凭证分别签名调用 Binance Futures `GET /fapi/v2/account`�
 要靠假 adapter 和 Binance 权限配置验证。角色接入镜像也尚未部署，生产仍运行
 `c165a82`；应先做聚焦 commit/push，再按 execution-account → live-strategy 顺序滚动重启并
 观察健康、对账和租约，稳定后再删除兼容 fallback。
+
+## 双角色凭证迁移收口（2026-09-05）
+
+`00e09a6` 发布后的观察窗口显示两个 live 服务均 healthy，账户流、lease 续租和 entry lane
+正常，未见异常或对账错误；容器环境也确认 read/trade 变量没有交叉注入。
+
+收口提交将从 Compose 移除 `--allow-legacy-credential-fallback`，并停止向两个 live 容器注入
+旧的 `BINANCE_API_KEY/SECRET`。CLI 解析器仍保留显式 fallback 以支持人工迁移，但生产组合根不再
+启用它，凭证缺失将 Fail-Closed。未发送真实订单来验证权限，后续仍需持续观察 Binance 权限错误、
+账户对账和 lease 状态。

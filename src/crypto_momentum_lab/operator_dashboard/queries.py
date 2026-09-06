@@ -2358,7 +2358,6 @@ class DashboardQueries:
             else {
                 "multi_assets_mode": account_config.multi_assets_mode,
                 "hedge_mode": account_config.hedge_mode,
-                "can_trade": account_config.can_trade,
                 "fee_tier": account_config.fee_tier,
                 "observed_at": account_config.observed_at.isoformat(),
             }

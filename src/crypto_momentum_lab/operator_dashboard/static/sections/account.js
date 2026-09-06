@@ -1,8 +1,10 @@
 import {
+  replaceChildrenFromHtml,
+} from "../dashboard-dom.js";
+import {
   DEFAULT_EQUITY_BUCKET_SECONDS,
   DISPLAY_TIME_ZONE_LABEL,
 } from "../dashboard-config.js";
-import { replaceChildrenFromHtml } from "../dashboard-dom.js";
 import {
   asNumber,
   dayTime,
@@ -258,16 +260,6 @@ export function renderAccount(data) {
   const accountEquityDelta = accountWindowDelta({ equity_curve: accountEquity });
   const latestAccountEquity = accountEquity.at(-1)?.equity;
   const normalized = (value) => String(value || "").trim().toLowerCase();
-  const permission = (value) => value == null
-    ? "未知"
-    : value ? "可交易" : "交易所快照：否";
-  const permissionDetail = (value) => value == null
-    ? "等待 Binance canTrade 快照"
-    : value ? "Binance canTrade = true"
-      : "仅代表账户快照字段，不代表页面只读";
-  const permissionClass = (value) => value == null
-    ? "status-UNKNOWN"
-    : value ? "status-READY" : "status-ATTENTION";
   const modeLabel = (value, yesLabel, noLabel) => value == null ? "—" : value ? yesLabel : noLabel;
   const reconciliationLabel = (value) => ({
     ready: "已完成",
@@ -281,10 +273,10 @@ export function renderAccount(data) {
     : syncStatus === "halted"
       ? { className: "status-HALTED", label: "同步已停止", detail: "execution-account · 需要检查" }
       : { className: "status-UNKNOWN", label: "等待同步", detail: "execution-account · 暂无可靠状态" };
-  const permissionState = {
-    className: permissionClass(config.can_trade),
-    label: permission(config.can_trade),
-    detail: permissionDetail(config.can_trade),
+  const configState = {
+    className: Object.keys(config).length > 0 ? "status-READY" : "status-UNKNOWN",
+    label: Object.keys(config).length > 0 ? "已同步" : "等待同步",
+    detail: "Binance V3 账户配置快照",
   };
   const reconciliationState = mismatchCount != null && mismatchCount > 0
     ? { className: "status-ATTENTION", label: `${mismatchCount} 项差异`, detail: "余额、持仓或订单快照需要核对" }
@@ -317,7 +309,7 @@ export function renderAccount(data) {
       <div>
       <div class="account-eyebrow">${esc(String(data.environment || "LIVE").toUpperCase())} · EXECUTION ACCOUNT</div>
       <h3>${esc(data.account_label || "交易所账户")}</h3>
-      <p>execution-account 负责只读同步，不代表账户不可交易；实盘订单由 live-strategy 执行并按客户端订单号回链。</p>
+      <p>execution-account 负责账户只读同步；实盘订单由 live-strategy 执行并按客户端订单号回链。</p>
     </div>
     <div class="account-hero-meta">
       <div class="account-hero-status"><small>同步状态</small>${pill(data.status)}</div>
@@ -327,7 +319,7 @@ export function renderAccount(data) {
   </div>`;
   const stateGrid = `<div class="account-state-grid" aria-label="实盘账户状态">
     ${stateCard("同步服务", syncState)}
-    ${stateCard("交易所权限", permissionState)}
+    ${stateCard("账户配置", configState)}
     ${stateCard("实盘执行", executionState)}
     ${stateCard("对账状态", reconciliationState)}
     ${stateCard("数据新鲜度", freshnessState)}
@@ -358,7 +350,6 @@ export function renderAccount(data) {
   </div>`;
   const accountFacts = `<div class="account-facts">
     <div><span>实盘下单通道</span><b class="pos">live-strategy</b></div>
-    <div><span>账户 API 交易权限快照</span><b class="${permissionClass(config.can_trade)}" title="Binance 账户快照 canTrade 字段">${esc(permission(config.can_trade))}</b></div>
     <div><span>同步服务模式</span><b class="muted">只读同步 · 不下单</b></div>
     <div><span>持仓模式</span><b>${esc(modeLabel(config.hedge_mode, "Hedge · 双向", "One-way · 单向"))}</b></div>
     <div><span>保证金模式</span><b>${esc(modeLabel(config.multi_assets_mode, "Multi-Assets · 多资产", "Single-Asset · 单资产"))}</b></div>
@@ -368,7 +359,7 @@ export function renderAccount(data) {
     <div><span>对账快照 资产 / 持仓</span><b>${esc(`${reconciliation.balance_count ?? "—"} / ${reconciliation.position_count ?? "—"}`)}</b></div>
     <div><span>对账快照 挂单 / 成交</span><b>${esc(`${reconciliation.open_order_count ?? "—"} / ${reconciliation.fill_count ?? "—"}`)}</b></div>
   </div>
-  <p class="account-facts-note"><b>怎么读：</b><code>只读同步</code>描述的是 execution-account 服务本身不会下单，不是交易所账户权限。账户 API 交易权限只显示 Binance 快照中的 <code>canTrade</code>；实盘是否提交订单由 <code>live-strategy</code> 的下单开关与风控闸门决定。对账会把余额、持仓、挂单和成交快照写入数据库并检查差异，<code>对账一致 / 0 项</code> 表示本次快照没有发现不一致。</p>`;
+  <p class="account-facts-note"><b>怎么读：</b><code>只读同步</code>描述的是 execution-account 服务本身不会下单；账户配置来自 Binance V3 快照，实盘是否提交订单由 <code>live-strategy</code> 的下单开关与风控闸门决定。对账会把余额、持仓、挂单和成交快照写入数据库并检查差异，<code>对账一致 / 0 项</code> 表示本次快照没有发现不一致。</p>`;
   const usdtBalances = (data.balances || []).filter((row) => String(row.asset || "").toUpperCase() === "USDT");
   const balancesTable = dataTable([
     { label: "资产", key: "asset", cls: "sym" },
@@ -439,7 +430,7 @@ export function renderAccount(data) {
     ${hero}${stateGrid}${kpis}${equityChartBlock}
     ${disclosure("实盘策略信号", "LIVE SIGNALS · NON-BLOCKING OBSERVATION · LATEST 30", liveSignalContent,
       `<strong class="num">${liveSignals.length}</strong>`, { open: liveSignals.length > 0, stateKey: "live-strategy-signals" })}
-    ${disclosure("账户权限与对账", "EXECUTION CHANNEL / RECONCILIATION", accountFacts, "", { open: accountNeedsReview, stateKey: "account-reconciliation" })}
+    ${disclosure("账户配置与对账", "EXECUTION CHANNEL / RECONCILIATION", accountFacts, "", { open: accountNeedsReview, stateKey: "account-reconciliation" })}
     ${disclosure("USDT 资产余额", "USDT BALANCE · ACCOUNT COLLATERAL", balancesTable, `<strong class="num">${usdtBalances.length}</strong>`, { open: usdtBalances.length > 0, stateKey: "account-balances" })}
     ${disclosure("交易所持仓", "EXCHANGE POSITIONS · STRATEGY ATTRIBUTION", positionsTable, `<strong class="num">${positions.length}</strong>`, { open: positions.length > 0, stateKey: "account-positions" })}
     ${disclosure("当前挂单", "OPEN ORDERS · EXCHANGE SOURCE OF TRUTH", ordersTable, `<strong class="num">${openOrders.length}</strong>`, { open: openOrders.length > 0, stateKey: "account-open-orders" })}
@@ -549,7 +540,7 @@ function liveAccountSummary(accounts, overallStatus) {
     <div class="live-account-fleet-title">
       <div>
         <span class="section-kicker">O3 · ACCOUNT FLEET / LIVE</span>
-        <h3>${esc(accounts.length === 4 ? "四账户实盘总览" : `${accounts.length} 个实盘账户总览`)}</h3>
+        <h3>${esc(accounts.length === 4 ? "实盘账户矩阵 · 四账户实盘总览" : `${accounts.length} 个实盘账户总览`)}</h3>
         <p>四个账户共享同一 market-data，运行状态先集中判断；余额、持仓、挂单和权益在选中账户详情中核对。</p>
       </div>
       <div class="live-account-fleet-status"><small>账户群状态</small>${pill(overallStatus)}<span>${readyCount} 正常 · ${haltedCount} 停止 · ${reviewCount} 待确认</span></div>

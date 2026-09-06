@@ -8,7 +8,7 @@ from collections.abc import (
     Callable,
     Collection,
 )
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -90,7 +90,6 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 )
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     BinanceClosedCandle15mFeed,
-    ClosedCandle15mEvent,
     ClosedCandle15mFeedConfig,
 )
 from crypto_momentum_lab.live_rollout.daemon import (
@@ -123,6 +122,7 @@ from crypto_momentum_lab.live_rollout.postgres_runtime import (
     live_limits_from_approval,
     poll_live_market_states,
 )
+from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
 from crypto_momentum_lab.live_rollout.session import (
     LiveRolloutSession,
     LiveSessionConfig,
@@ -132,14 +132,9 @@ from crypto_momentum_lab.live_rollout.signal_recorder import (
     LiveStrategySignalRecorder,
 )
 from crypto_momentum_lab.live_rollout.telemetry import (
-    LIVE_TRIGGER_SOURCE_ACCOUNT,
-    LIVE_TRIGGER_SOURCE_CANDLE,
-    LIVE_TRIGGER_SOURCE_GRACE,
-    LIVE_TRIGGER_SOURCE_QUOTE,
     PERSISTED_ORDER_TELEMETRY_EVENTS,
     LiveRuntimeTelemetry,
     LiveTelemetrySink,
-    SourceIngress,
 )
 from crypto_momentum_lab.live_rollout.volume import Binance24hQuoteVolumeCache
 from crypto_momentum_lab.market_data.binance.rest import BinanceUsdMRestClient
@@ -205,6 +200,7 @@ app = typer.Typer(no_args_is_help=True)
 log = structlog.get_logger()
 _PREPARE_CONFIRMATION = "PREPARE LIVE RISK GATES"
 _RESOLVE_MISSING_ORDER_CONFIRMATION = "RESOLVE MISSING LIVE ORDER"
+_LIVE_ENTRY_POLICY_MODES = frozenset({"legacy", "compare_only", "enforce"})
 # These two columns are retained by the existing risk-config schema for paper
 # and shadow sessions. Live execution no longer enforces state-age limits; the
 # large compatibility value makes that explicit without a destructive schema
@@ -225,8 +221,25 @@ _LIVE_ENTRY_PRICE_ABOVE_EMA5 = False
 _LIVE_ENTRY_PRICE_ABOVE_EMA10 = False
 _LIVE_ENTRY_ORDER_TYPE = EntryType.LIMIT
 _LIVE_ENTRY_LIMIT_TTL_SECONDS = 900
-_LIVE_ORDERFLOW_MIN_AGGRESSIVE_IMBALANCE = Decimal("0.40")
+_LIVE_ORDERFLOW_PROFILE = LiveOrderFlowImpulseProfile()
 _LIVE_MARKET_WEBSOCKET_URL = "wss://fstream.binance.com/market/ws"
+
+
+@dataclass(frozen=True, slots=True)
+class _PreflightRuntimeStrategyConfig:
+    """Runtime strategy inputs used by the preflight hash diagnostic."""
+
+    profile: LiveOrderFlowImpulseProfile
+    entry_positive_gainer_top_count: int
+    require_price_above_ema5: bool
+    require_price_above_ema10: bool
+    entry_policy_mode: str
+    entry_order_type: EntryType
+    entry_limit_ttl_seconds: int
+
+    @property
+    def entry_policy_enforce(self) -> bool:
+        return self.entry_policy_mode == "enforce"
 
 
 class _LiveStartupRetryableError(RuntimeError):
@@ -282,6 +295,30 @@ def live_rollout_app() -> None:
 @app.command("strategy-config-hash")
 def strategy_config_hash_command(
     strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    impulse_window_buckets: Annotated[
+        int | None,
+        typer.Option("--impulse-window-buckets", min=2),
+    ] = None,
+    confirmation_buckets: Annotated[
+        int | None,
+        typer.Option("--confirmation-buckets", min=1),
+    ] = None,
+    min_return_pct: Annotated[
+        str | None,
+        typer.Option("--min-return-pct"),
+    ] = None,
+    min_imbalance: Annotated[
+        str | None,
+        typer.Option("--min-imbalance"),
+    ] = None,
+    min_intensity: Annotated[
+        str | None,
+        typer.Option("--min-intensity"),
+    ] = None,
+    cooldown_buckets: Annotated[
+        int | None,
+        typer.Option("--cooldown-buckets", min=0),
+    ] = None,
     entry_positive_gainer_top_count: Annotated[
         int,
         typer.Option("--entry-positive-gainer-top-count", min=1),
@@ -294,6 +331,13 @@ def strategy_config_hash_command(
         bool,
         typer.Option("--entry-price-above-ema10/--no-entry-price-above-ema10"),
     ] = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
+    entry_policy_enforce: Annotated[
+        bool,
+        typer.Option(
+            "--entry-policy-enforce/--no-entry-policy-enforce",
+            help="Use the shared Policy for real entry eligibility decisions.",
+        ),
+    ] = False,
     entry_order_type: Annotated[
         EntryType,
         typer.Option("--entry-order-type"),
@@ -303,12 +347,22 @@ def strategy_config_hash_command(
         typer.Option("--entry-limit-ttl-seconds", min=601),
     ] = _LIVE_ENTRY_LIMIT_TTL_SECONDS,
 ) -> None:
+    profile = _resolve_live_profile_options(
+        impulse_window_buckets=impulse_window_buckets,
+        confirmation_buckets=confirmation_buckets,
+        min_return_pct=min_return_pct,
+        min_imbalance=min_imbalance,
+        min_intensity=min_intensity,
+        cooldown_buckets=cooldown_buckets,
+    )
     typer.echo(
         _live_strategy_config_hash(
             strategy,
+            profile=profile,
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=entry_price_above_ema5,
             require_price_above_ema10=entry_price_above_ema10,
+            entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
             entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         )
@@ -320,6 +374,30 @@ def prepare_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
     strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    impulse_window_buckets: Annotated[
+        int | None,
+        typer.Option("--impulse-window-buckets", min=2),
+    ] = None,
+    confirmation_buckets: Annotated[
+        int | None,
+        typer.Option("--confirmation-buckets", min=1),
+    ] = None,
+    min_return_pct: Annotated[
+        str | None,
+        typer.Option("--min-return-pct"),
+    ] = None,
+    min_imbalance: Annotated[
+        str | None,
+        typer.Option("--min-imbalance"),
+    ] = None,
+    min_intensity: Annotated[
+        str | None,
+        typer.Option("--min-intensity"),
+    ] = None,
+    cooldown_buckets: Annotated[
+        int | None,
+        typer.Option("--cooldown-buckets", min=0),
+    ] = None,
     lease_owner: Annotated[str, typer.Option("--lease-owner")] = "live-worker",
     lease_ttl_seconds: Annotated[
         int,
@@ -353,6 +431,13 @@ def prepare_command(
         bool,
         typer.Option("--entry-price-above-ema10/--no-entry-price-above-ema10"),
     ] = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
+    entry_policy_enforce: Annotated[
+        bool,
+        typer.Option(
+            "--entry-policy-enforce/--no-entry-policy-enforce",
+            help="Use the shared Policy for real entry eligibility decisions.",
+        ),
+    ] = False,
     entry_order_type: Annotated[
         EntryType,
         typer.Option("--entry-order-type"),
@@ -365,6 +450,14 @@ def prepare_command(
 ) -> None:
     if confirmation != _PREPARE_CONFIRMATION:
         raise typer.BadParameter(f"--confirmation must equal '{_PREPARE_CONFIRMATION}'")
+    profile = _resolve_live_profile_options(
+        impulse_window_buckets=impulse_window_buckets,
+        confirmation_buckets=confirmation_buckets,
+        min_return_pct=min_return_pct,
+        min_imbalance=min_imbalance,
+        min_intensity=min_intensity,
+        cooldown_buckets=cooldown_buckets,
+    )
     payload = asyncio.run(
         _prepare_live_risk_gates(
             database_url=_database_url(database_url),
@@ -388,9 +481,11 @@ def prepare_command(
                 max_open_positions,
                 "--max-open-positions",
             ),
+            profile=profile,
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=entry_price_above_ema5,
             require_price_above_ema10=entry_price_above_ema10,
+            entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
             entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         )
@@ -569,6 +664,30 @@ def run_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
     strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    impulse_window_buckets: Annotated[
+        int | None,
+        typer.Option("--impulse-window-buckets", min=2),
+    ] = None,
+    confirmation_buckets: Annotated[
+        int | None,
+        typer.Option("--confirmation-buckets", min=1),
+    ] = None,
+    min_return_pct: Annotated[
+        str | None,
+        typer.Option("--min-return-pct"),
+    ] = None,
+    min_imbalance: Annotated[
+        str | None,
+        typer.Option("--min-imbalance"),
+    ] = None,
+    min_intensity: Annotated[
+        str | None,
+        typer.Option("--min-intensity"),
+    ] = None,
+    cooldown_buckets: Annotated[
+        int | None,
+        typer.Option("--cooldown-buckets", min=0),
+    ] = None,
     market_environment: Annotated[
         str,
         typer.Option("--market-environment"),
@@ -693,16 +812,6 @@ def run_command(
     entry_leverage: Annotated[
         int, typer.Option("--entry-leverage", min=1, max=125)
     ] = 1,
-    persist_exchange_operations: Annotated[
-        str,
-        typer.Option(
-            "--persist-exchange-operations",
-            help=(
-                "Comma-separated exchange operations to persist; omit to "
-                "persist all operations."
-            ),
-        ),
-    ] = "",
     entry_policy_compare_only: Annotated[
         bool,
         typer.Option(
@@ -713,12 +822,52 @@ def run_command(
             ),
         ),
     ] = False,
+    entry_policy_enforce: Annotated[
+        bool,
+        typer.Option(
+            "--entry-policy-enforce/--no-entry-policy-enforce",
+            help="Use the shared Policy for real entry eligibility decisions.",
+        ),
+    ] = False,
+    acknowledge_missing_shadow_preflight: Annotated[
+        bool,
+        typer.Option(
+            "--acknowledge-missing-shadow-preflight",
+            help=(
+                "Acknowledge the advisory when no matching completed Shadow "
+                "session exists."
+            ),
+        ),
+    ] = False,
+    persist_exchange_operations: Annotated[
+        str,
+        typer.Option(
+            "--persist-exchange-operations",
+            help=(
+                "Comma-separated exchange operations to persist; omit to "
+                "persist all operations."
+            ),
+        ),
+    ] = "",
     confirmation: Annotated[
         bool, typer.Option("--i-understand-this-places-real-orders")
     ] = False,
 ) -> None:
+    if entry_policy_compare_only and entry_policy_enforce:
+        raise typer.BadParameter(
+            "--entry-policy-compare-only and "
+            "--entry-policy-enforce are mutually exclusive"
+        )
     if not confirmation:
         raise typer.BadParameter("--i-understand-this-places-real-orders is required")
+    profile = _resolve_live_profile_options(
+        impulse_window_buckets=impulse_window_buckets,
+        confirmation_buckets=confirmation_buckets,
+        min_return_pct=min_return_pct,
+        min_imbalance=min_imbalance,
+        min_intensity=min_intensity,
+        cooldown_buckets=cooldown_buckets,
+    )
     credentials = _resolve_live_cli_credentials(
         api_key_env=api_key_env,
         api_secret_env=api_secret_env,
@@ -744,6 +893,7 @@ def run_command(
             strategy_config_hash=strategy_config_hash,
             git_commit_hash=git_commit_hash,
             migration_revision=migration_revision,
+            profile=profile,
             max_runtime_seconds=max_runtime_seconds,
             poll_interval_seconds=poll_interval_seconds,
             checkpoint_every_states=checkpoint_every_states,
@@ -766,10 +916,12 @@ def run_command(
             api_key=credentials.api_key,
             api_secret=credentials.api_secret,
             entry_leverage=entry_leverage,
+            entry_policy_compare_only=entry_policy_compare_only,
+            entry_policy_enforce=entry_policy_enforce,
+            acknowledge_missing_shadow_preflight=acknowledge_missing_shadow_preflight,
             persist_exchange_operations=_parse_exchange_operations(
                 persist_exchange_operations
             ),
-            entry_policy_compare_only=entry_policy_compare_only,
         )
 
     result = asyncio.run(_run_with_live_startup_backoff(run_once))
@@ -1306,6 +1458,7 @@ async def _run_live_daemon(
     strategy_config_hash: str,
     git_commit_hash: str,
     migration_revision: str,
+    profile: LiveOrderFlowImpulseProfile,
     max_runtime_seconds: int,
     poll_interval_seconds: float,
     checkpoint_every_states: int,
@@ -1328,6 +1481,8 @@ async def _run_live_daemon(
     entry_leverage: int,
     persist_exchange_operations: Collection[str] | None = None,
     entry_policy_compare_only: bool = False,
+    entry_policy_enforce: bool = False,
+    acknowledge_missing_shadow_preflight: bool = False,
     market_websocket_url: str = _LIVE_MARKET_WEBSOCKET_URL,
 ) -> LiveDaemonResult:
     account_snapshot_available = True
@@ -1549,12 +1704,14 @@ async def _run_live_daemon(
         if active_lease is None:
             raise RuntimeError("live lease is required")
 
-        strategy_config = _live_strategy_config()
+        strategy_config = _live_strategy_config(profile)
         computed_hash = _live_strategy_config_hash(
             strategy_name,
+            profile=profile,
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=require_price_above_ema5,
             require_price_above_ema10=require_price_above_ema10,
+            entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
             entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         )
@@ -1577,6 +1734,7 @@ async def _run_live_daemon(
             strategy_config_hash=strategy_config_hash,
             account_label=account_label,
             session_id=session_id,
+            acknowledged=acknowledge_missing_shadow_preflight,
         )
 
         strategy = build_runtime_strategy(
@@ -1988,6 +2146,7 @@ async def _run_live_daemon(
                     entry_universe_snapshot_provider
                 ),
                 entry_policy_compare_only=entry_policy_compare_only,
+                entry_policy_enforce=entry_policy_enforce,
                 entry_order_type=entry_order_type,
                 entry_limit_ttl_seconds=entry_limit_ttl_seconds,
             ),
@@ -2160,7 +2319,6 @@ async def _run_live_daemon(
                 _run_closed_candle_channel(
                     source=closed_candle_feed,
                     daemon=daemon,
-                    run_id=session_id,
                     latest_market_quotes=latest_market_quotes,
                     on_exit_failure=on_exit_failure,
                 ),
@@ -2169,7 +2327,6 @@ async def _run_live_daemon(
             grace_timeout_task = asyncio.create_task(
                 _run_grace_timeout_channel(
                     daemon=daemon,
-                    run_id=session_id,
                     latest_market_states=latest_market_states,
                     latest_market_quotes=latest_market_quotes,
                     on_exit_failure=on_exit_failure,
@@ -2186,7 +2343,6 @@ async def _run_live_daemon(
                 _run_quote_channel(
                     source=quote_source,
                     daemon=daemon,
-                    run_id=session_id,
                     latest_market_quotes=latest_market_quotes,
                     latest_market_states=latest_market_states,
                     on_exit_failure=on_exit_failure,
@@ -2558,92 +2714,10 @@ async def _resilient_account_event_stream(
             return
 
 
-def _account_exit_ingress(
-    *,
-    run_id: str,
-    event: AccountEvent,
-    state: MarketState15s,
-) -> SourceIngress:
-    return SourceIngress(
-        run_id=run_id,
-        source_event_id=f"{event.event_id}:{state.symbol}",
-        lane="exit",
-        trigger_source=LIVE_TRIGGER_SOURCE_ACCOUNT,
-        received_at=event.received_at,
-        source_occurred_at=event.event_at,
-        symbol=state.symbol,
-        bucket_start=state.bucket_start,
-    )
-
-
-def _quote_exit_ingress(
-    *,
-    run_id: str,
-    quote: RealtimeMarketQuote,
-    state: MarketState15s,
-) -> SourceIngress:
-    return SourceIngress(
-        run_id=run_id,
-        source_event_id=(
-            f"quote:{quote.symbol}:{quote.event_at.isoformat()}:"
-            f"{quote.bid_price}:{quote.ask_price}:"
-            f"{state.bucket_start.isoformat()}"
-        ),
-        lane="exit",
-        trigger_source=LIVE_TRIGGER_SOURCE_QUOTE,
-        received_at=quote.received_at,
-        source_occurred_at=quote.event_at,
-        symbol=state.symbol,
-        bucket_start=state.bucket_start,
-    )
-
-
-def _candle_exit_ingress(
-    *,
-    run_id: str,
-    event: ClosedCandle15mEvent,
-) -> SourceIngress:
-    bucket_start = event.candle.candle_end - timedelta(seconds=15)
-    return SourceIngress(
-        run_id=run_id,
-        source_event_id=(
-            f"candle:{event.candle.symbol}:"
-            f"{event.candle.candle_start.isoformat()}"
-        ),
-        lane="exit",
-        trigger_source=LIVE_TRIGGER_SOURCE_CANDLE,
-        received_at=event.received_at,
-        source_occurred_at=event.exchange_event_at,
-        symbol=event.candle.symbol,
-        bucket_start=bucket_start,
-    )
-
-
-def _grace_exit_ingress(
-    *,
-    run_id: str,
-    state: MarketState15s,
-    now: datetime,
-) -> SourceIngress:
-    return SourceIngress(
-        run_id=run_id,
-        source_event_id=(
-            f"grace:{state.symbol}:{state.bucket_start.isoformat()}:"
-            f"{now.isoformat()}"
-        ),
-        lane="exit",
-        trigger_source=LIVE_TRIGGER_SOURCE_GRACE,
-        received_at=now,
-        symbol=state.symbol,
-        bucket_start=state.bucket_start,
-    )
-
-
 async def _run_quote_channel(
     *,
     source: WebSocketMarketQuoteSource,
     daemon: LiveStrategyDaemon,
-    run_id: str,
     latest_market_quotes: _LatestMarketQuoteCache,
     latest_market_states: _LatestMarketStateCache,
     on_exit_failure: Callable[[str, str | None], None] | None = None,
@@ -2657,15 +2731,7 @@ async def _run_quote_channel(
         latest_market_quotes.observe(quote)
         for state in latest_market_states.for_symbols((quote.symbol,)):
             try:
-                failure = await daemon.process_market_quote(
-                    quote,
-                    state,
-                    source_ingress=_quote_exit_ingress(
-                        run_id=run_id,
-                        quote=quote,
-                        state=state,
-                    ),
-                )
+                failure = await daemon.process_market_quote(quote, state)
             except Exception as error:
                 if not _is_transient_live_runtime_error(error):
                     raise
@@ -2703,7 +2769,6 @@ async def _run_closed_candle_channel(
     *,
     source: BinanceClosedCandle15mFeed,
     daemon: LiveStrategyDaemon,
-    run_id: str,
     latest_market_quotes: _LatestMarketQuoteCache,
     on_exit_failure: Callable[[str, str | None], None] | None = None,
 ) -> None:
@@ -2718,10 +2783,6 @@ async def _run_closed_candle_channel(
                 failure = await daemon.process_closed_candle(
                     event,
                     latest_quote=quote,
-                    source_ingress=_candle_exit_ingress(
-                        run_id=run_id,
-                        event=event,
-                    ),
                 )
                 break
             except asyncio.CancelledError:
@@ -2757,7 +2818,6 @@ async def _run_closed_candle_channel(
 async def _run_grace_timeout_channel(
     *,
     daemon: LiveStrategyDaemon,
-    run_id: str,
     latest_market_states: _LatestMarketStateCache,
     latest_market_quotes: _LatestMarketQuoteCache,
     interval_seconds: float = 1.0,
@@ -2784,11 +2844,6 @@ async def _run_grace_timeout_channel(
                     state,
                     now=now,
                     latest_quote=quote,
-                    source_ingress=_grace_exit_ingress(
-                        run_id=run_id,
-                        state=state,
-                        now=now,
-                    ),
                 )
             except asyncio.CancelledError:
                 raise
@@ -2863,11 +2918,6 @@ async def _run_account_event_channel(
                 failure = await daemon.process_account_event(
                     state,
                     quote=quote,
-                    source_ingress=_account_exit_ingress(
-                        run_id=run_id,
-                        event=event,
-                        state=state,
-                    ),
                 )
                 if failure is not None:
                     if on_exit_failure is not None:
@@ -3031,6 +3081,7 @@ async def _warn_if_shadow_preflight_missing(
     strategy_config_hash: str,
     account_label: str,
     session_id: str,
+    acknowledged: bool = False,
 ) -> None:
     if await _has_matching_shadow_session(
         factory,
@@ -3038,13 +3089,16 @@ async def _warn_if_shadow_preflight_missing(
         strategy_config_hash=strategy_config_hash,
     ):
         return
-    log.warning(
-        "live_shadow_preflight_missing",
-        account_label=account_label,
-        session_id=session_id,
-        strategy_name=strategy_name,
-        strategy_config_hash=strategy_config_hash,
-    )
+    details = {
+        "account_label": account_label,
+        "session_id": session_id,
+        "strategy_name": strategy_name,
+        "strategy_config_hash": strategy_config_hash,
+    }
+    if acknowledged:
+        log.info("live_shadow_preflight_missing_acknowledged", **details)
+    else:
+        log.warning("live_shadow_preflight_missing", **details)
 
 
 async def _session_is_draining(
@@ -3230,24 +3284,38 @@ def _load_plan(path: Path) -> OrderExecutionPlan:
     return plan
 
 
-def _live_strategy_config() -> dict[str, object]:
+def _live_strategy_config(
+    profile: LiveOrderFlowImpulseProfile | None = None,
+) -> dict[str, object]:
+    resolved_profile = profile or _LIVE_ORDERFLOW_PROFILE
     return {
         "candidate_notional": Decimal("100"),
         "candidate_ttl_buckets": 4,
-        "order_flow_impulse_min_aggressive_imbalance": (
-            _LIVE_ORDERFLOW_MIN_AGGRESSIVE_IMBALANCE
+        "order_flow_impulse_impulse_window_buckets": (
+            resolved_profile.impulse_window_buckets
         ),
-        # B1 must not suppress a same-symbol signal for two 15-second buckets.
-        "cooldown_buckets": 0,
+        "order_flow_impulse_confirmation_buckets": (
+            resolved_profile.confirmation_buckets
+        ),
+        "order_flow_impulse_min_return_pct": resolved_profile.min_return_pct,
+        "order_flow_impulse_min_aggressive_imbalance": (
+            resolved_profile.min_aggressive_imbalance
+        ),
+        "order_flow_impulse_min_notional_intensity": (
+            resolved_profile.min_notional_intensity
+        ),
+        "cooldown_buckets": resolved_profile.cooldown_buckets,
     }
 
 
 def _live_strategy_config_hash(
     strategy_name: str,
     *,
+    profile: LiveOrderFlowImpulseProfile | None = None,
     entry_positive_gainer_top_count: int | None = _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT,
     require_price_above_ema5: bool = _LIVE_ENTRY_PRICE_ABOVE_EMA5,
     require_price_above_ema10: bool = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
+    entry_policy_enforce: bool = False,
     entry_order_type: EntryType = _LIVE_ENTRY_ORDER_TYPE,
     entry_limit_ttl_seconds: int = _LIVE_ENTRY_LIMIT_TTL_SECONDS,
 ) -> str:
@@ -3258,18 +3326,21 @@ def _live_strategy_config_hash(
         raise ValueError("entry_positive_gainer_top_count must be positive")
     if not isinstance(entry_order_type, EntryType):
         raise TypeError("entry_order_type must be an EntryType")
+    if not isinstance(entry_policy_enforce, bool):
+        raise TypeError("entry_policy_enforce must be a bool")
     if entry_limit_ttl_seconds < 601:
         raise ValueError("entry_limit_ttl_seconds must be at least 601")
     return deterministic_config_hash(
         {
             "strategy": build_runtime_config(
                 strategy_name,
-                config=_live_strategy_config(),
+                config=_live_strategy_config(profile),
             ),
             "entry_filter": {
                 "entry_positive_gainer_top_count": entry_positive_gainer_top_count,
                 "require_price_above_ema5": require_price_above_ema5,
                 "require_price_above_ema10": require_price_above_ema10,
+                "entry_policy_enforce": entry_policy_enforce,
             },
             "entry_execution": {
                 "order_type": entry_order_type.value,
@@ -3290,9 +3361,11 @@ async def _prepare_live_risk_gates(
     max_gross_notional: Decimal | None,
     max_daily_loss: Decimal | None,
     max_open_positions: int | None,
+    profile: LiveOrderFlowImpulseProfile,
     entry_positive_gainer_top_count: int | None,
     require_price_above_ema5: bool,
     require_price_above_ema10: bool,
+    entry_policy_enforce: bool,
     entry_order_type: EntryType,
     entry_limit_ttl_seconds: int,
 ) -> dict[str, str]:
@@ -3334,9 +3407,11 @@ async def _prepare_live_risk_gates(
         "risk_config_hash": risk_config.config_hash,
         "strategy_config_hash": _live_strategy_config_hash(
             strategy_name,
+            profile=profile,
             entry_positive_gainer_top_count=entry_positive_gainer_top_count,
             require_price_above_ema5=require_price_above_ema5,
             require_price_above_ema10=require_price_above_ema10,
+            entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
             entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         ),
@@ -3360,16 +3435,61 @@ async def _save_approval(
 _UNLIMITED_VALUES = frozenset({"none", "unlimited"})
 
 
+def _resolve_live_profile_options(
+    *,
+    impulse_window_buckets: int | None,
+    confirmation_buckets: int | None,
+    min_return_pct: str | None,
+    min_imbalance: str | None,
+    min_intensity: str | None,
+    cooldown_buckets: int | None,
+) -> LiveOrderFlowImpulseProfile:
+    """Build one account profile from all CLI values or the service env.
+
+    Partial overrides are rejected so a profile cannot accidentally combine
+    one account's values with another account's defaults.
+    """
+
+    values = (
+        impulse_window_buckets,
+        confirmation_buckets,
+        min_return_pct,
+        min_imbalance,
+        min_intensity,
+        cooldown_buckets,
+    )
+    if not any(value is not None for value in values):
+        try:
+            return LiveOrderFlowImpulseProfile.from_environment()
+        except ValueError as error:
+            raise typer.BadParameter(str(error)) from error
+    if not all(value is not None for value in values):
+        raise typer.BadParameter(
+            "all six order-flow profile options must be provided together"
+        )
+    assert impulse_window_buckets is not None
+    assert confirmation_buckets is not None
+    assert min_return_pct is not None
+    assert min_imbalance is not None
+    assert min_intensity is not None
+    assert cooldown_buckets is not None
+    try:
+        return LiveOrderFlowImpulseProfile(
+            impulse_window_buckets=impulse_window_buckets,
+            confirmation_buckets=confirmation_buckets,
+            min_return_pct=Decimal(min_return_pct),
+            min_aggressive_imbalance=Decimal(min_imbalance),
+            min_notional_intensity=Decimal(min_intensity),
+            cooldown_buckets=cooldown_buckets,
+        )
+    except (InvalidOperation, ValueError) as error:
+        raise typer.BadParameter(f"invalid live order-flow profile: {error}") from error
+
+
 def _parse_exchange_operations(
     raw_value: str,
 ) -> frozenset[str] | None:
-    """Parse the explicit durable exchange telemetry allow-list.
-
-    An empty option preserves the legacy all-operations behavior.  Once a
-    value is supplied, every comma-separated token must be non-empty; the
-    telemetry module remains responsible for deciding whether a named
-    operation is present on a concrete boundary event.
-    """
+    """Parse the explicit durable exchange telemetry allow-list."""
 
     if not raw_value.strip():
         return None
@@ -3380,23 +3500,6 @@ def _parse_exchange_operations(
             "of non-empty operation names"
         )
     return frozenset(operations)
-
-
-def _resolve_live_cli_credentials(
-    *,
-    api_key_env: str | None,
-    api_secret_env: str | None,
-    allow_legacy_fallback: bool,
-) -> ResolvedBinanceCredentials:
-    try:
-        return resolve_role_credentials(
-            BinanceCredentialRole.TRADE,
-            api_key_env=api_key_env,
-            api_secret_env=api_secret_env,
-            allow_legacy_fallback=allow_legacy_fallback,
-        )
-    except CredentialResolutionError as error:
-        raise typer.BadParameter(str(error)) from error
 
 
 def _parse_optional_decimal_limit(
@@ -3476,7 +3579,26 @@ async def _preflight_summary(
         )
         unresolved = await PostgresOrderRepository(factory).load_unresolved_orders()
         risk_config = await _latest_risk_config(factory, account_label)
-        runtime_strategy_config_hash = _live_strategy_config_hash(strategy_name)
+        runtime_config = _preflight_runtime_strategy_config()
+        runtime_strategy_config_hash = _live_strategy_config_hash(
+            strategy_name,
+            profile=runtime_config.profile,
+            entry_positive_gainer_top_count=(
+                runtime_config.entry_positive_gainer_top_count
+            ),
+            require_price_above_ema5=runtime_config.require_price_above_ema5,
+            require_price_above_ema10=runtime_config.require_price_above_ema10,
+            entry_policy_enforce=runtime_config.entry_policy_enforce,
+            entry_order_type=runtime_config.entry_order_type,
+            entry_limit_ttl_seconds=runtime_config.entry_limit_ttl_seconds,
+        )
+        configured_strategy_config_hash = (
+            os.environ.get("CML_LIVE_STRATEGY_CONFIG_HASH", "").strip()
+            or None
+        )
+        approved_strategy_config_hash = (
+            None if approval is None else approval.strategy_config_hash
+        )
         return {
             "approval_present": approval is not None,
             "lease_present": lease is not None,
@@ -3486,9 +3608,78 @@ async def _preflight_summary(
             "unresolved_order_count": len(unresolved),
             "risk_config_hash": risk_config.config_hash,
             "runtime_strategy_config_hash": runtime_strategy_config_hash,
+            "configured_strategy_config_hash": configured_strategy_config_hash,
+            "approved_strategy_config_hash": approved_strategy_config_hash,
+            "runtime_strategy_config_matches_configured": (
+                None
+                if configured_strategy_config_hash is None
+                else runtime_strategy_config_hash == configured_strategy_config_hash
+            ),
+            "runtime_strategy_config_matches_approval": (
+                None
+                if approved_strategy_config_hash is None
+                else runtime_strategy_config_hash == approved_strategy_config_hash
+            ),
+            "runtime_strategy_config_inputs": {
+                **runtime_config.profile.as_dict(),
+                "entry_positive_gainer_top_count": (
+                    runtime_config.entry_positive_gainer_top_count
+                ),
+                "require_price_above_ema5": runtime_config.require_price_above_ema5,
+                "require_price_above_ema10": runtime_config.require_price_above_ema10,
+                "entry_policy_mode": runtime_config.entry_policy_mode,
+                "entry_order_type": runtime_config.entry_order_type.value,
+                "entry_limit_ttl_seconds": runtime_config.entry_limit_ttl_seconds,
+            },
         }
     finally:
         await engine.dispose()
+
+
+def _preflight_runtime_strategy_config() -> _PreflightRuntimeStrategyConfig:
+    """Resolve the Live hash inputs exposed to one-off preflight containers.
+
+    Compose passes the account-scoped profile, top-N, and policy-mode values
+    into the long-running Live service environment. Keeping this resolver
+    beside the diagnostic makes the reported hash explainable instead of
+    silently using the library defaults (which may describe a different lane).
+    """
+
+    raw_top_count = os.environ.get(
+        "CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT",
+        str(_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT),
+    ).strip()
+    try:
+        top_count = int(raw_top_count)
+    except ValueError as error:
+        raise ValueError(
+            "CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT must be an integer"
+        ) from error
+    if top_count <= 0:
+        raise ValueError("CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT must be positive")
+
+    policy_mode = (
+        os.environ.get("CML_LIVE_ENTRY_POLICY_MODE", "enforce").strip().lower()
+        or "enforce"
+    )
+    if policy_mode not in _LIVE_ENTRY_POLICY_MODES:
+        raise ValueError(
+            "CML_LIVE_ENTRY_POLICY_MODE must be one of: "
+            + ", ".join(sorted(_LIVE_ENTRY_POLICY_MODES))
+        )
+    try:
+        profile = LiveOrderFlowImpulseProfile.from_environment()
+    except ValueError as error:
+        raise ValueError(str(error)) from error
+    return _PreflightRuntimeStrategyConfig(
+        profile=profile,
+        entry_positive_gainer_top_count=top_count,
+        require_price_above_ema5=_LIVE_ENTRY_PRICE_ABOVE_EMA5,
+        require_price_above_ema10=_LIVE_ENTRY_PRICE_ABOVE_EMA10,
+        entry_policy_mode=policy_mode,
+        entry_order_type=_LIVE_ENTRY_ORDER_TYPE,
+        entry_limit_ttl_seconds=_LIVE_ENTRY_LIMIT_TTL_SECONDS,
+    )
 
 
 async def _approved_intent_notional(
@@ -3571,6 +3762,23 @@ def _resolve_database_url(value: str | None, plane_env_var: str) -> str:
             f"--database-url or {plane_env_var} or CML_DATABASE_URL is required"
         )
     return resolved
+
+
+def _resolve_live_cli_credentials(
+    *,
+    api_key_env: str | None,
+    api_secret_env: str | None,
+    allow_legacy_fallback: bool,
+) -> ResolvedBinanceCredentials:
+    try:
+        return resolve_role_credentials(
+            BinanceCredentialRole.TRADE,
+            api_key_env=api_key_env,
+            api_secret_env=api_secret_env,
+            allow_legacy_fallback=allow_legacy_fallback,
+        )
+    except CredentialResolutionError as error:
+        raise typer.BadParameter(str(error)) from error
 
 
 def _database_url(value: str | None) -> str:
