@@ -415,13 +415,13 @@ test("equity charts register an ECharts payload with native metrics", () => {
   assert.equal(comparisonPayload.points.length, 2);
 });
 
-test("live account renderer separates sync service from account permission", () => {
+test("live account renderer separates sync service from account configuration", () => {
   const [status, html] = renderAccount({
     status: "READY",
     observed_at: new Date().toISOString(),
     environment: "live",
     account_label: "primary",
-    account_config: { can_trade: true, hedge_mode: false, multi_assets_mode: false, fee_tier: 0 },
+    account_config: { hedge_mode: false, multi_assets_mode: false, fee_tier: 0 },
     reconciliation: {
       status: "ready",
       mismatch_count: 0,
@@ -453,9 +453,8 @@ test("live account renderer separates sync service from account permission", () 
   });
   assert.equal(status, "READY");
   assert.match(html, /execution-account · 只读同步/);
-  assert.match(html, /不代表账户不可交易/);
-  assert.match(html, /交易所权限/);
-  assert.match(html, /可交易/);
+  assert.match(html, /账户配置/);
+  assert.match(html, /Binance V3 账户配置快照/);
   assert.match(html, /live-strategy/);
   assert.match(html, /对账一致/);
   assert.match(html, /数据新鲜度/);

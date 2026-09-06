@@ -736,7 +736,6 @@ class AccountConfigSnapshotRow(Base):
     account_label: Mapped[str] = mapped_column(String(64))
     multi_assets_mode: Mapped[bool] = mapped_column(Boolean)
     hedge_mode: Mapped[bool] = mapped_column(Boolean, default=False)
-    can_trade: Mapped[bool] = mapped_column(Boolean)
     fee_tier: Mapped[int | None] = mapped_column(Integer)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     raw_payload: Mapped[dict[str, object]] = mapped_column(JSONB)

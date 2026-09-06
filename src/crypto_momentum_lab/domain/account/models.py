@@ -144,7 +144,6 @@ class AccountConfigSnapshot:
     account_label: str
     multi_assets_mode: bool
     hedge_mode: bool
-    can_trade: bool
     fee_tier: int | None
     observed_at: datetime
     raw_payload: dict[str, JsonValue]

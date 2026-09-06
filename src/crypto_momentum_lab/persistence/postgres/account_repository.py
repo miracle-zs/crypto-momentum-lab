@@ -315,7 +315,6 @@ def config_snapshot_row(snapshot: AccountConfigSnapshot) -> dict[str, object]:
         **_snapshot_base(snapshot, "account-config", "config"),
         "multi_assets_mode": snapshot.multi_assets_mode,
         "hedge_mode": snapshot.hedge_mode,
-        "can_trade": snapshot.can_trade,
         "fee_tier": snapshot.fee_tier,
         "raw_payload": _jsonable(snapshot.raw_payload),
     }
