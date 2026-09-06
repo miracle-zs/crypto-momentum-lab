@@ -1,5 +1,6 @@
 import argparse
 import os
+from pathlib import Path
 
 import uvicorn
 
@@ -34,6 +35,9 @@ def main() -> None:
             paper_run_ids=parse_paper_run_ids(),
             live_cash_flow_adjustments=parse_live_cash_flow_adjustments(),
             common_equity_start_at=parse_common_equity_start_at(),
+            research_collector_root=Path(
+                os.environ.get("CML_RESEARCH_COLLECTOR_ROOT", "/app/research-data")
+            ),
         ),
         host=args.host,
         port=args.port,

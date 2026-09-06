@@ -6,6 +6,7 @@ class OperationalStatus(StrEnum):
     UNKNOWN = "UNKNOWN"
     FRESH = "FRESH"
     STALE = "STALE"
+    DEGRADED = "DEGRADED"
     READY = "READY"
     HALTED = "HALTED"
     SHADOW = "SHADOW"

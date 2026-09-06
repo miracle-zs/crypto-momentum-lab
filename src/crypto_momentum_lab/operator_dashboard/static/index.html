@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>CML · Execution Control Room</title>
-  <!-- Previous asset identifiers are kept in this marker for downstream cache manifests. -->
+  <!-- Previous asset identifiers are kept in this marker for downstream cache manifests. dashboard.css?v=20260828-live-signals-v1 dashboard.js?v=20260902-live-rank-null-fix-v1 -->
   <!-- href="static/dashboard.css?v=20260824-control-room-v12-equity-ranges" -->
-  <link rel="stylesheet" href="static/dashboard.css?v=20260828-live-signals-v1">
+  <link rel="stylesheet" href="static/dashboard.css?v=20260903-research-collector-v1">
 </head>
 <body>
   <a class="skip-link" href="#overview">跳到当前工作视图</a>
@@ -31,11 +31,12 @@
         <div class="nav-group">
           <span class="nav-group-label">ANALYSIS · 分析</span>
           <a href="#universe" data-nav="universe" data-label="市场"><i>05</i><span>市场<small>Momentum Field</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="universe"></em></a>
-          <a href="#reports" data-nav="reports" data-label="台账"><i>06</i><span>台账<small>Run Ledger</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="reports"></em></a>
+          <a href="#collector" data-nav="collector" data-label="数据采集"><i>06</i><span>数据采集<small>Research Capture</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="collector"></em></a>
+          <a href="#reports" data-nav="reports" data-label="台账"><i>07</i><span>台账<small>Run Ledger</small></span><em class="nav-dot status-UNKNOWN" data-nav-dot="reports"></em></a>
         </div>
         <div class="nav-group">
           <span class="nav-group-label">CONTROL · 控制</span>
-          <a href="#actions" data-nav="actions" data-label="操作"><i>07</i><span>操作<small>Commands</small></span><em class="nav-dot is-locked"></em></a>
+          <a href="#actions" data-nav="actions" data-label="操作"><i>08</i><span>操作<small>Commands</small></span><em class="nav-dot is-locked"></em></a>
         </div>
       </nav>
 
@@ -134,9 +135,19 @@
           </div>
         </section>
 
+        <section id="collector" class="card card-collector" data-view-title="数据采集" data-endpoint="api/research-collector" aria-labelledby="collector-title" hidden>
+          <header class="card-head">
+            <div class="card-title"><i>06</i><div><h2 id="collector-title">数据采集</h2><small>RESEARCH CAPTURE · TOP30 / 15S STATES</small><p>确认 checkpoint 新鲜度、窗口连续性和容量保护，再开始寻优。</p></div></div>
+            <span class="section-state status-UNKNOWN">UNKNOWN</span>
+          </header>
+          <div class="panel-body loading" aria-busy="true">
+            <div class="skeleton"><s style="width:38%"></s><s style="width:92%"></s><s style="width:74%"></s><s style="width:83%"></s></div>
+          </div>
+        </section>
+
         <section id="reports" class="card" data-view-title="台账" data-endpoint="api/reports" aria-labelledby="reports-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>06</i><div><h2 id="reports-title">台账</h2><small>PAPER / SHADOW / LIVE SESSIONS</small><p>按时间回看运行会话和实盘状态迁移。</p></div></div>
+            <div class="card-title"><i>07</i><div><h2 id="reports-title">台账</h2><small>PAPER / SHADOW / LIVE SESSIONS</small><p>按时间回看运行会话和实盘状态迁移。</p></div></div>
             <span class="section-state status-UNKNOWN">UNKNOWN</span>
           </header>
           <div class="panel-body loading" aria-busy="true">
@@ -146,7 +157,7 @@
 
         <section id="actions" class="card card-actions" data-view-title="操作" aria-labelledby="actions-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>07</i><div><h2 id="actions-title">操作</h2><small>CONTROLLED COMMANDS · AUDITED BACKEND ONLY</small><p>后端命令记录和审计链路就绪后才会解锁。</p></div></div>
+            <div class="card-title"><i>08</i><div><h2 id="actions-title">操作</h2><small>CONTROLLED COMMANDS · AUDITED BACKEND ONLY</small><p>后端命令记录和审计链路就绪后才会解锁。</p></div></div>
             <span class="lock-badge">READ ONLY</span>
           </header>
           <div class="action-grid">
@@ -168,6 +179,6 @@
   </div>
   <script src="static/vendor/echarts.min.js?v=20260817-echarts-6.1.0"></script>
   <!-- type="module" src="static/dashboard.js?v=20260824-control-room-v18-equity-ranges" -->
-  <script type="module" src="static/dashboard.js?v=20260902-live-rank-null-fix-v1" defer></script>
+  <script type="module" src="static/dashboard.js?v=20260903-research-collector-v1" defer></script>
 </body>
 </html>

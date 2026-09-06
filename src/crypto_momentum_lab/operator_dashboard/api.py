@@ -26,6 +26,7 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     PaperAccountHistoryResponse,
     PaperAccountsEquityResponse,
     PaperAccountsResponse,
+    ResearchCollectorResponse,
     RiskExecutionResponse,
     RunReportSummaryResponse,
     StrategyRunResponse,
@@ -152,6 +153,8 @@ class DashboardQueryProtocol(Protocol):
 
     async def overview(self) -> SystemOverviewResponse: ...
 
+    async def research_collector(self) -> ResearchCollectorResponse: ...
+
     async def universe(self) -> UniverseStatusResponse: ...
 
     async def strategy_run(self) -> StrategyRunResponse: ...
@@ -185,6 +188,7 @@ def create_dashboard_app(
     paper_run_ids: frozenset[str] | None = None,
     live_cash_flow_adjustments: Sequence[LiveCashFlowAdjustment] | None = None,
     common_equity_start_at: datetime | None = FIXED_COMMON_EQUITY_START_AT,
+    research_collector_root: Path | None = None,
     overview_cache_ttl_seconds: float = _OVERVIEW_CACHE_TTL_SECONDS,
     overview_query_timeout_seconds: float = _OVERVIEW_QUERY_TIMEOUT_SECONDS,
 ) -> FastAPI:
@@ -212,6 +216,15 @@ def create_dashboard_app(
             paper_run_ids=paper_run_ids,
             live_cash_flow_adjustments=live_cash_flow_adjustments,
             common_equity_start_at=common_equity_start_at,
+            research_collector_root=(
+                research_collector_root
+                or Path(
+                    os.environ.get(
+                        "CML_RESEARCH_COLLECTOR_ROOT",
+                        "/app/research-data",
+                    )
+                )
+            ),
         )
 
     @asynccontextmanager
@@ -301,6 +314,18 @@ def create_dashboard_app(
                 status_code=504,
                 detail="dashboard overview query timed out",
             ) from exc
+
+    @dashboard.get(
+        "/api/research-collector",
+        response_model=ResearchCollectorResponse,
+        dependencies=[Depends(require_dashboard_auth)],
+    )
+    async def research_collector() -> ResearchCollectorResponse:
+        return await response_cache.get(
+            "research-collector",
+            query_service().research_collector,
+            ttl_seconds=15.0,
+        )
 
     @dashboard.get(
         "/api/universe",

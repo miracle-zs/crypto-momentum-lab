@@ -2,7 +2,7 @@ import {
   SECTIONS,
   POLL_MS,
   SECTION_POLL_MS,
-} from "./dashboard-config.js?v=20260830-poll-budget-v1";
+} from "./dashboard-config.js?v=20260903-research-collector-v1";
 import {
   statusClass,
   normalizedStatus,
@@ -21,6 +21,7 @@ import { emptyBox } from "./dashboard-ui.js?v=20260826-flight-deck-v2";
 import { renderOverview, updateOverviewDynamic } from "./sections/overview.js";
 import { renderUniverse } from "./sections/universe.js";
 import { renderRisk } from "./sections/risk.js";
+import { renderCollector } from "./sections/collector.js";
 import {
   renderAccount,
   wireAccountEquityRanges,
@@ -191,6 +192,7 @@ const renderers = {
   overview: renderOverview,
   strategy: strategySection.render,
   universe: renderUniverse,
+  collector: renderCollector,
   risk: renderRisk,
   account: renderAccount,
   reports: renderReports,

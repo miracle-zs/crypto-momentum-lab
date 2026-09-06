@@ -32,6 +32,7 @@ def test_all_read_only_dashboard_routes_are_available() -> None:
         create_dashboard_app(queries=FakeQueries(), **DASHBOARD_AUTH_KWARGS)
     ) as client:
         for route in (
+            "/api/research-collector",
             "/api/universe",
             "/api/strategy-runs/current",
             "/api/paper-accounts",

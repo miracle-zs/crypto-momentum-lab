@@ -431,6 +431,8 @@ services:
     profiles: ["live"]
     environment:
       <<: *app-environment
+      BINANCE_READ_API_KEY: ${BINANCE_READ_API_KEY:-}
+      BINANCE_READ_API_SECRET: ${BINANCE_READ_API_SECRET:-}
       BINANCE_API_KEY: ${BINANCE_API_KEY:-}
       BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
       CML_ACCOUNT_EVENT_HUB_HOST: ${CML_ACCOUNT_EVENT_HUB_HOST:-0.0.0.0}
@@ -440,6 +442,8 @@ services:
       - sync
       - --environment
       - live
+      # Temporary migration compatibility; remove after the read key is provisioned.
+      - --allow-legacy-credential-fallback
       - --account-label
       - ${CML_LIVE_ACCOUNT_LABEL:-primary}
       - --hedge-mode
@@ -493,6 +497,8 @@ services:
     profiles: ["live"]
     environment:
       <<: *app-environment
+      BINANCE_TRADE_API_KEY: ${BINANCE_TRADE_API_KEY:-}
+      BINANCE_TRADE_API_SECRET: ${BINANCE_TRADE_API_SECRET:-}
       BINANCE_API_KEY: ${BINANCE_API_KEY:-}
       BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
       CML_HEALTHCHECK_RUN_ID: ${CML_LIVE_SESSION_ID:-live-primary-v1}
@@ -502,6 +508,8 @@ services:
     entrypoint: ["cml-live-rollout"]
     command:
       - run
+      # Temporary migration compatibility; remove after the trade key is provisioned.
+      - --allow-legacy-credential-fallback
       - --account-label
       - ${CML_LIVE_ACCOUNT_LABEL:-primary}
       - --strategy
@@ -542,6 +550,10 @@ services:
       - --no-entry-price-above-ema10
       - --entry-leverage
       - ${CML_LIVE_ENTRY_LEVERAGE:-5}
+      # Leave blank to preserve all exchange telemetry operations.  Shadow
+      # validation may set submit,cancel before any production rollout.
+      - --persist-exchange-operations
+      - ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-}
       - --exit-mode
       - ${CML_LIVE_EXIT_MODE:-candle_15m}
       - --take-profit-pct
@@ -610,6 +622,8 @@ services:
         condition: service_completed_successfully
     ports:
       - "127.0.0.1:8765:8765"
+    volumes:
+      - research-data:/app/research-data:ro
     healthcheck:
       test:
         - CMD-SHELL

@@ -1,7 +1,13 @@
 import asyncio
 import json
 import os
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
+from collections.abc import (
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+)
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -18,6 +24,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from crypto_momentum_lab.apps.shadow_operation.main import (
     _latest_account_state,
     _latest_risk_config,
+)
+from crypto_momentum_lab.config import (
+    BinanceCredentialRole,
+    CredentialResolutionError,
+    ResolvedBinanceCredentials,
+    resolve_role_credentials,
 )
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderEvent,
@@ -47,7 +59,11 @@ from crypto_momentum_lab.domain.strategy import (
     RunMode,
     StrategyCheckpoint,
     StrategyRunIdentity,
+    UniverseRankingSnapshot,
     deterministic_config_hash,
+)
+from crypto_momentum_lab.domain.strategy.entry_policy_compare import (
+    universe_snapshot_for_symbols,
 )
 from crypto_momentum_lab.execution_account.binance import (
     BinanceRateLimitError,
@@ -74,6 +90,7 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 )
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     BinanceClosedCandle15mFeed,
+    ClosedCandle15mEvent,
     ClosedCandle15mFeedConfig,
 )
 from crypto_momentum_lab.live_rollout.daemon import (
@@ -115,9 +132,14 @@ from crypto_momentum_lab.live_rollout.signal_recorder import (
     LiveStrategySignalRecorder,
 )
 from crypto_momentum_lab.live_rollout.telemetry import (
+    LIVE_TRIGGER_SOURCE_ACCOUNT,
+    LIVE_TRIGGER_SOURCE_CANDLE,
+    LIVE_TRIGGER_SOURCE_GRACE,
+    LIVE_TRIGGER_SOURCE_QUOTE,
     PERSISTED_ORDER_TELEMETRY_EVENTS,
     LiveRuntimeTelemetry,
     LiveTelemetrySink,
+    SourceIngress,
 )
 from crypto_momentum_lab.live_rollout.volume import Binance24hQuoteVolumeCache
 from crypto_momentum_lab.market_data.binance.rest import BinanceUsdMRestClient
@@ -645,23 +667,63 @@ def run_command(
         typer.Option("--candle-grace-profit-pct"),
     ] = "0.0088",
     base_url: Annotated[str, typer.Option("--base-url")] = "https://fapi.binance.com",
-    api_key_env: Annotated[str, typer.Option("--api-key-env")] = "BINANCE_API_KEY",
+    api_key_env: Annotated[
+        str | None,
+        typer.Option(
+            "--api-key-env",
+            help="Override the trade credential key environment variable.",
+        ),
+    ] = None,
     api_secret_env: Annotated[
-        str, typer.Option("--api-secret-env")
-    ] = "BINANCE_API_SECRET",
+        str | None,
+        typer.Option(
+            "--api-secret-env",
+            help="Override the trade credential secret environment variable.",
+        ),
+    ] = None,
+    allow_legacy_credential_fallback: Annotated[
+        bool,
+        typer.Option(
+            "--allow-legacy-credential-fallback/--no-allow-legacy-credential-fallback",
+            help=(
+                "Temporarily fall back to BINANCE_API_KEY/SECRET during migration."
+            ),
+        ),
+    ] = False,
     entry_leverage: Annotated[
         int, typer.Option("--entry-leverage", min=1, max=125)
     ] = 1,
+    persist_exchange_operations: Annotated[
+        str,
+        typer.Option(
+            "--persist-exchange-operations",
+            help=(
+                "Comma-separated exchange operations to persist; omit to "
+                "persist all operations."
+            ),
+        ),
+    ] = "",
+    entry_policy_compare_only: Annotated[
+        bool,
+        typer.Option(
+            "--entry-policy-compare-only/--no-entry-policy-compare-only",
+            help=(
+                "Record legacy-vs-Policy entry differences without changing "
+                "order decisions."
+            ),
+        ),
+    ] = False,
     confirmation: Annotated[
         bool, typer.Option("--i-understand-this-places-real-orders")
     ] = False,
 ) -> None:
     if not confirmation:
         raise typer.BadParameter("--i-understand-this-places-real-orders is required")
-    api_key = os.environ.get(api_key_env)
-    api_secret = os.environ.get(api_secret_env)
-    if not api_key or not api_secret:
-        raise typer.BadParameter(f"{api_key_env} and {api_secret_env} are required")
+    credentials = _resolve_live_cli_credentials(
+        api_key_env=api_key_env,
+        api_secret_env=api_secret_env,
+        allow_legacy_fallback=allow_legacy_credential_fallback,
+    )
 
     async def run_once() -> LiveDaemonResult:
         return await _run_live_daemon(
@@ -701,9 +763,13 @@ def run_command(
             ),
             candle_grace_profit_pct=Decimal(candle_grace_profit_pct),
             base_url=base_url,
-            api_key=api_key,
-            api_secret=api_secret,
+            api_key=credentials.api_key,
+            api_secret=credentials.api_secret,
             entry_leverage=entry_leverage,
+            persist_exchange_operations=_parse_exchange_operations(
+                persist_exchange_operations
+            ),
+            entry_policy_compare_only=entry_policy_compare_only,
         )
 
     result = asyncio.run(_run_with_live_startup_backoff(run_once))
@@ -1260,6 +1326,8 @@ async def _run_live_daemon(
     api_key: str,
     api_secret: str,
     entry_leverage: int,
+    persist_exchange_operations: Collection[str] | None = None,
+    entry_policy_compare_only: bool = False,
     market_websocket_url: str = _LIVE_MARKET_WEBSOCKET_URL,
 ) -> LiveDaemonResult:
     account_snapshot_available = True
@@ -1342,6 +1410,7 @@ async def _run_live_daemon(
             run_id=session_id,
             persist=telemetry_repository.save_runtime_events,
             persist_event_types=PERSISTED_ORDER_TELEMETRY_EVENTS,
+            persist_exchange_operations=persist_exchange_operations,
         )
         await telemetry.start()
         volume_rest_client = BinanceUsdMRestClient(base_url)
@@ -1703,6 +1772,9 @@ async def _run_live_daemon(
                     entry_price=entry_price,
                     ema5=snapshot.ema5,
                     ema10=snapshot.ema10,
+                    ema_observed_at=snapshot.observed_at,
+                    ema_snapshot_id=snapshot.snapshot_id,
+                    ema_config_hash=snapshot.config_hash,
                 )
 
             entry_filter_context_loader = load_entry_filter_context
@@ -1814,6 +1886,9 @@ async def _run_live_daemon(
         entry_universe_context_provider: (
             Callable[[str, datetime], dict[str, object] | None] | None
         ) = None
+        entry_universe_snapshot_provider: (
+            Callable[[datetime], UniverseRankingSnapshot | None] | None
+        ) = None
         if entry_positive_gainer_top_count is not None:
 
             def load_entry_universe_context(
@@ -1840,6 +1915,44 @@ async def _run_live_daemon(
                 )
 
             entry_universe_context_provider = load_entry_universe_context
+
+            def load_entry_universe_policy_snapshot(
+                observed_at: datetime,
+            ) -> UniverseRankingSnapshot | None:
+                universe_data: LiveEntryUniverseData | None = None
+                if entry_filter_cache is not None:
+                    universe_data = entry_filter_cache.universe_data_for(
+                        observed_at
+                    )
+                elif entry_symbol_cache is not None:
+                    universe_data = entry_symbol_cache.universe_data_for(
+                        observed_at
+                    )
+                if universe_data is None:
+                    return None
+                source_snapshot = universe_data.snapshot
+                return universe_snapshot_for_symbols(
+                    universe_data.symbols,
+                    observed_at=(
+                        observed_at
+                        if source_snapshot is None
+                        else source_snapshot.observed_at
+                    ),
+                    snapshot_id=(
+                        None
+                        if source_snapshot is None
+                        else str(source_snapshot.snapshot_id)
+                    ),
+                    config_hash=(
+                        None
+                        if source_snapshot is None
+                        else source_snapshot.config_hash
+                    ),
+                )
+
+            entry_universe_snapshot_provider = (
+                load_entry_universe_policy_snapshot
+            )
         daemon = LiveStrategyDaemon(
             strategy=strategy,
             risk_gateway=RiskGateway(),
@@ -1871,6 +1984,10 @@ async def _run_live_daemon(
                 entry_universe_context_provider=(
                     entry_universe_context_provider
                 ),
+                entry_universe_snapshot_provider=(
+                    entry_universe_snapshot_provider
+                ),
+                entry_policy_compare_only=entry_policy_compare_only,
                 entry_order_type=entry_order_type,
                 entry_limit_ttl_seconds=entry_limit_ttl_seconds,
             ),
@@ -2043,6 +2160,7 @@ async def _run_live_daemon(
                 _run_closed_candle_channel(
                     source=closed_candle_feed,
                     daemon=daemon,
+                    run_id=session_id,
                     latest_market_quotes=latest_market_quotes,
                     on_exit_failure=on_exit_failure,
                 ),
@@ -2051,6 +2169,7 @@ async def _run_live_daemon(
             grace_timeout_task = asyncio.create_task(
                 _run_grace_timeout_channel(
                     daemon=daemon,
+                    run_id=session_id,
                     latest_market_states=latest_market_states,
                     latest_market_quotes=latest_market_quotes,
                     on_exit_failure=on_exit_failure,
@@ -2067,6 +2186,7 @@ async def _run_live_daemon(
                 _run_quote_channel(
                     source=quote_source,
                     daemon=daemon,
+                    run_id=session_id,
                     latest_market_quotes=latest_market_quotes,
                     latest_market_states=latest_market_states,
                     on_exit_failure=on_exit_failure,
@@ -2438,10 +2558,92 @@ async def _resilient_account_event_stream(
             return
 
 
+def _account_exit_ingress(
+    *,
+    run_id: str,
+    event: AccountEvent,
+    state: MarketState15s,
+) -> SourceIngress:
+    return SourceIngress(
+        run_id=run_id,
+        source_event_id=f"{event.event_id}:{state.symbol}",
+        lane="exit",
+        trigger_source=LIVE_TRIGGER_SOURCE_ACCOUNT,
+        received_at=event.received_at,
+        source_occurred_at=event.event_at,
+        symbol=state.symbol,
+        bucket_start=state.bucket_start,
+    )
+
+
+def _quote_exit_ingress(
+    *,
+    run_id: str,
+    quote: RealtimeMarketQuote,
+    state: MarketState15s,
+) -> SourceIngress:
+    return SourceIngress(
+        run_id=run_id,
+        source_event_id=(
+            f"quote:{quote.symbol}:{quote.event_at.isoformat()}:"
+            f"{quote.bid_price}:{quote.ask_price}:"
+            f"{state.bucket_start.isoformat()}"
+        ),
+        lane="exit",
+        trigger_source=LIVE_TRIGGER_SOURCE_QUOTE,
+        received_at=quote.received_at,
+        source_occurred_at=quote.event_at,
+        symbol=state.symbol,
+        bucket_start=state.bucket_start,
+    )
+
+
+def _candle_exit_ingress(
+    *,
+    run_id: str,
+    event: ClosedCandle15mEvent,
+) -> SourceIngress:
+    bucket_start = event.candle.candle_end - timedelta(seconds=15)
+    return SourceIngress(
+        run_id=run_id,
+        source_event_id=(
+            f"candle:{event.candle.symbol}:"
+            f"{event.candle.candle_start.isoformat()}"
+        ),
+        lane="exit",
+        trigger_source=LIVE_TRIGGER_SOURCE_CANDLE,
+        received_at=event.received_at,
+        source_occurred_at=event.exchange_event_at,
+        symbol=event.candle.symbol,
+        bucket_start=bucket_start,
+    )
+
+
+def _grace_exit_ingress(
+    *,
+    run_id: str,
+    state: MarketState15s,
+    now: datetime,
+) -> SourceIngress:
+    return SourceIngress(
+        run_id=run_id,
+        source_event_id=(
+            f"grace:{state.symbol}:{state.bucket_start.isoformat()}:"
+            f"{now.isoformat()}"
+        ),
+        lane="exit",
+        trigger_source=LIVE_TRIGGER_SOURCE_GRACE,
+        received_at=now,
+        symbol=state.symbol,
+        bucket_start=state.bucket_start,
+    )
+
+
 async def _run_quote_channel(
     *,
     source: WebSocketMarketQuoteSource,
     daemon: LiveStrategyDaemon,
+    run_id: str,
     latest_market_quotes: _LatestMarketQuoteCache,
     latest_market_states: _LatestMarketStateCache,
     on_exit_failure: Callable[[str, str | None], None] | None = None,
@@ -2455,7 +2657,15 @@ async def _run_quote_channel(
         latest_market_quotes.observe(quote)
         for state in latest_market_states.for_symbols((quote.symbol,)):
             try:
-                failure = await daemon.process_market_quote(quote, state)
+                failure = await daemon.process_market_quote(
+                    quote,
+                    state,
+                    source_ingress=_quote_exit_ingress(
+                        run_id=run_id,
+                        quote=quote,
+                        state=state,
+                    ),
+                )
             except Exception as error:
                 if not _is_transient_live_runtime_error(error):
                     raise
@@ -2493,6 +2703,7 @@ async def _run_closed_candle_channel(
     *,
     source: BinanceClosedCandle15mFeed,
     daemon: LiveStrategyDaemon,
+    run_id: str,
     latest_market_quotes: _LatestMarketQuoteCache,
     on_exit_failure: Callable[[str, str | None], None] | None = None,
 ) -> None:
@@ -2507,6 +2718,10 @@ async def _run_closed_candle_channel(
                 failure = await daemon.process_closed_candle(
                     event,
                     latest_quote=quote,
+                    source_ingress=_candle_exit_ingress(
+                        run_id=run_id,
+                        event=event,
+                    ),
                 )
                 break
             except asyncio.CancelledError:
@@ -2542,6 +2757,7 @@ async def _run_closed_candle_channel(
 async def _run_grace_timeout_channel(
     *,
     daemon: LiveStrategyDaemon,
+    run_id: str,
     latest_market_states: _LatestMarketStateCache,
     latest_market_quotes: _LatestMarketQuoteCache,
     interval_seconds: float = 1.0,
@@ -2568,6 +2784,11 @@ async def _run_grace_timeout_channel(
                     state,
                     now=now,
                     latest_quote=quote,
+                    source_ingress=_grace_exit_ingress(
+                        run_id=run_id,
+                        state=state,
+                        now=now,
+                    ),
                 )
             except asyncio.CancelledError:
                 raise
@@ -2642,6 +2863,11 @@ async def _run_account_event_channel(
                 failure = await daemon.process_account_event(
                     state,
                     quote=quote,
+                    source_ingress=_account_exit_ingress(
+                        run_id=run_id,
+                        event=event,
+                        state=state,
+                    ),
                 )
                 if failure is not None:
                     if on_exit_failure is not None:
@@ -3132,6 +3358,45 @@ async def _save_approval(
 
 
 _UNLIMITED_VALUES = frozenset({"none", "unlimited"})
+
+
+def _parse_exchange_operations(
+    raw_value: str,
+) -> frozenset[str] | None:
+    """Parse the explicit durable exchange telemetry allow-list.
+
+    An empty option preserves the legacy all-operations behavior.  Once a
+    value is supplied, every comma-separated token must be non-empty; the
+    telemetry module remains responsible for deciding whether a named
+    operation is present on a concrete boundary event.
+    """
+
+    if not raw_value.strip():
+        return None
+    operations = tuple(operation.strip() for operation in raw_value.split(","))
+    if any(not operation for operation in operations):
+        raise typer.BadParameter(
+            "--persist-exchange-operations must be a comma-separated list "
+            "of non-empty operation names"
+        )
+    return frozenset(operations)
+
+
+def _resolve_live_cli_credentials(
+    *,
+    api_key_env: str | None,
+    api_secret_env: str | None,
+    allow_legacy_fallback: bool,
+) -> ResolvedBinanceCredentials:
+    try:
+        return resolve_role_credentials(
+            BinanceCredentialRole.TRADE,
+            api_key_env=api_key_env,
+            api_secret_env=api_secret_env,
+            allow_legacy_fallback=allow_legacy_fallback,
+        )
+    except CredentialResolutionError as error:
+        raise typer.BadParameter(str(error)) from error
 
 
 def _parse_optional_decimal_limit(

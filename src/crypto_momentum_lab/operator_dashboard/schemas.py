@@ -27,6 +27,41 @@ class SystemOverviewResponse(DashboardSchema):
     active_lease: dict[str, JsonValue] | None
 
 
+class ResearchCollectorResponse(DashboardSchema):
+    status: OperationalStatus
+    status_detail: str
+    generated_at: datetime
+    environment: str
+    checkpoint_at: datetime | None
+    checkpoint_age_seconds: float | None
+    last_bucket_start: datetime | None
+    last_sequence: int | None
+    last_symbol: str | None
+    stream_id: str | None
+    stale: bool
+    capacity_state: str
+    collector_bytes: int
+    collector_soft_limit_bytes: int
+    collector_hard_limit_bytes: int
+    disk_free_bytes: int
+    disk_warning_free_bytes: int
+    disk_pause_free_bytes: int
+    pending_spool_files: int
+    pending_spool_bytes: int
+    parquet_file_count: int
+    parquet_first_window_start: datetime | None
+    parquet_latest_window_start: datetime | None
+    parquet_latest_written_at: datetime | None
+    parquet_latest_age_seconds: float | None
+    parquet_window_seconds: int
+    parquet_gap_count: int
+    top_count: int
+    late_tolerance_seconds: int
+    max_spool_bytes: int
+    alerts: list[str] = Field(default_factory=list)
+    recent_windows: list[dict[str, JsonValue]] = Field(default_factory=list)
+
+
 class UniverseStatusResponse(DashboardSchema):
     status: OperationalStatus
     observed_at: datetime | None

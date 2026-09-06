@@ -13,6 +13,7 @@ def test_static_index_contains_dashboard_mount() -> None:
         "account",
         "risk",
         "reports",
+        "collector",
     ):
         assert f'id="{section_id}"' in text
 
@@ -32,8 +33,8 @@ def test_static_javascript_uses_relative_api_paths() -> None:
         'v18-equity-ranges"'
         in index
     )
-    assert 'dashboard.css?v=20260828-live-signals-v1' in index
-    assert "dashboard.js?v=20260902-live-rank-null-fix-v1" in index
+    assert "dashboard.css?v=20260903-research-collector-v1" in index
+    assert "dashboard.js?v=20260903-research-collector-v1" in index
     assert 'data-endpoint="/api/' not in index
     assert "fetch(endpoint" in text
     assert "binance.com" not in text.lower()
@@ -45,7 +46,7 @@ def test_dashboard_loads_stable_frontend_modules() -> None:
 
     assert 'type="module"' in index
     for module in (
-        "from \"./dashboard-config.js?v=20260830-poll-budget-v1\"",
+        "from \"./dashboard-config.js?v=20260903-research-collector-v1\"",
         'from "./dashboard-formatters.js"',
         'from "./dashboard-dom.js"',
         'from "./dashboard-readiness.js"',
@@ -56,6 +57,7 @@ def test_dashboard_loads_stable_frontend_modules() -> None:
         'from "./sections/account.js"',
         'from "./sections/reports.js"',
         'from "./sections/strategy.js"',
+        'from "./sections/collector.js"',
     ):
         assert module in javascript
     assert (STATIC / "dashboard-config.js").exists()
@@ -67,7 +69,15 @@ def test_dashboard_loads_stable_frontend_modules() -> None:
     assert (STATIC / "dashboard-ui.js").exists()
     assert (STATIC / "vendor" / "echarts.min.js").exists()
     assert (STATIC / "package.json").exists()
-    for section in ("overview", "universe", "risk", "account", "reports", "strategy"):
+    for section in (
+        "overview",
+        "universe",
+        "risk",
+        "account",
+        "reports",
+        "strategy",
+        "collector",
+    ):
         assert (STATIC / "sections" / f"{section}.js").exists()
 
 

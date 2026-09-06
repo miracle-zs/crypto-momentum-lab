@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
@@ -5,6 +6,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Literal, cast
 
 from sqlalchemy import (
@@ -24,6 +26,10 @@ from sqlalchemy.sql.selectable import Values
 
 from crypto_momentum_lab.domain.execution import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.operator_dashboard.collector_status import (
+    DEFAULT_RESEARCH_COLLECTOR_ROOT,
+    read_research_collector_status,
+)
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
     PaperAccountEquityResponse,
@@ -31,6 +37,7 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     PaperAccountsEquityResponse,
     PaperAccountsResponse,
     PaperAccountSummaryResponse,
+    ResearchCollectorResponse,
     RiskExecutionResponse,
     RunReportSummaryResponse,
     ServiceStatusResponse,
@@ -749,6 +756,7 @@ class DashboardQueries:
         live_cash_flow_adjustments: Sequence[LiveCashFlowAdjustment]
         | None = None,
         common_equity_start_at: datetime | None = None,
+        research_collector_root: Path = DEFAULT_RESEARCH_COLLECTOR_ROOT,
     ) -> None:
         self._session_factory = session_factory
         self._clock = clock or (lambda: datetime.now(tz=UTC))
@@ -764,11 +772,19 @@ class DashboardQueries:
             if common_equity_start_at is None
             else _as_utc(common_equity_start_at)
         )
+        self._research_collector_root = research_collector_root
 
     async def health(self) -> dict[str, str]:
         async with self._session_factory() as session:
             await session.execute(text("SELECT 1"))
         return {"app_status": "UP", "database_status": "UP"}
+
+    async def research_collector(self) -> ResearchCollectorResponse:
+        return await asyncio.to_thread(
+            read_research_collector_status,
+            self._research_collector_root,
+            now=self._clock(),
+        )
 
     async def overview(self) -> SystemOverviewResponse:
         now = self._clock()

@@ -24,6 +24,7 @@ import { readinessStatusForSection } from "../../src/crypto_momentum_lab/operato
 import { renderOverview } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/overview.js";
 import { renderRisk } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/risk.js";
 import { renderAccount } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/account.js";
+import { renderCollector } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/collector.js";
 import { createStrategySection } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/strategy.js";
 import { renderUniverse } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/universe.js";
 import {
@@ -39,6 +40,7 @@ test("dashboard polling keeps safety sections fresh and backs off cold sections"
     account: 15000,
     strategy: 30000,
     universe: 30000,
+    collector: 30000,
     reports: 30000,
   });
 });
@@ -227,6 +229,53 @@ test("overview renderer exposes local heartbeat update hooks", () => {
   assert.equal(status, "READY");
   assert.match(html, /data-service-age="live-rollout"/);
   assert.match(html, /data-service-meter="live-rollout"/);
+});
+
+test("collector renderer exposes freshness, continuity, and capacity evidence", () => {
+  const [status, html] = renderCollector({
+    status: "FRESH",
+    status_detail: "checkpoint 与 Parquet 窗口持续更新",
+    environment: "research",
+    top_count: 30,
+    checkpoint_at: "2026-09-03T15:16:00Z",
+    checkpoint_age_seconds: 12,
+    last_bucket_start: "2026-09-03T15:14:45Z",
+    last_sequence: 1814,
+    last_symbol: "龙虾USDT",
+    stream_id: "stream-id",
+    collector_bytes: 4 * 1024 * 1024,
+    collector_soft_limit_bytes: 6 * 1024 ** 3,
+    collector_hard_limit_bytes: 8 * 1024 ** 3,
+    disk_free_bytes: 43 * 1024 ** 3,
+    disk_warning_free_bytes: 15 * 1024 ** 3,
+    disk_pause_free_bytes: 10 * 1024 ** 3,
+    pending_spool_files: 0,
+    pending_spool_bytes: 0,
+    parquet_file_count: 32,
+    parquet_first_window_start: "2026-09-03T07:15:00Z",
+    parquet_latest_window_start: "2026-09-03T15:00:00Z",
+    parquet_latest_written_at: "2026-09-03T15:15:46Z",
+    parquet_latest_age_seconds: 14,
+    parquet_window_seconds: 900,
+    parquet_gap_count: 0,
+    late_tolerance_seconds: 30,
+    max_spool_bytes: 1024 ** 3,
+    capacity_state: "healthy",
+    alerts: [],
+    recent_windows: [{
+      window_start: "2026-09-03T15:00:00Z",
+      written_at: "2026-09-03T15:15:46Z",
+      size_bytes: 143740,
+    }],
+  });
+
+  assert.equal(status, "FRESH");
+  assert.match(html, /Top30 数据采集/);
+  assert.match(html, /连续性未发现缺口/);
+  assert.match(html, /容量保护/);
+  assert.match(html, /最近封存窗口/);
+  assert.match(html, /龙虾USDT/);
+  assert.match(html, /collector-recent-windows/);
 });
 
 test("universe renderer includes relative snapshot age", () => {

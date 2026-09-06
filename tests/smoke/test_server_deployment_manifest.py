@@ -160,7 +160,11 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert services["research-collector"]["healthcheck"]["retries"] == 2
     assert services["dashboard"]["healthcheck"]["test"] == [
         "CMD-SHELL",
-        "python -S -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=3)\"",
+        (
+            'python -S -c "import urllib.request; '
+            "urllib.request.urlopen('http://127.0.0.1:8765/api/health', "
+            'timeout=3)"'
+        ),
     ]
     assert "--ignore-age" not in live_healthcheck
     assert _option_value(live_healthcheck, "--session-id") == (
@@ -179,9 +183,19 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         live_command,
         "--candle-grace-decision-profit-pct",
     ) == "${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT:-0.001}"
+    assert "--allow-legacy-credential-fallback" in live_command
+    assert "--allow-legacy-credential-fallback" in services[
+        "execution-account-live"
+    ]["command"]
     assert services["execution-account-live"]["environment"][
         "BINANCE_API_KEY"
     ] == "${BINANCE_API_KEY:-}"
+    assert services["execution-account-live"]["environment"][
+        "BINANCE_READ_API_KEY"
+    ] == "${BINANCE_READ_API_KEY:-}"
+    assert services["live-strategy"]["environment"][
+        "BINANCE_TRADE_API_KEY"
+    ] == "${BINANCE_TRADE_API_KEY:-}"
     assert "BINANCE_API_KEY" not in str(services["market-data"])
     assert "BINANCE_API_KEY" not in str(services["paper-orderflow-pair"])
 

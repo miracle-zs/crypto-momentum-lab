@@ -37,11 +37,16 @@ from crypto_momentum_lab.domain.risk import (
     TradingLease,
 )
 from crypto_momentum_lab.domain.strategy import (
+    EntryPolicyComparison,
+    EntryPolicyComparisonRequest,
     EntryType,
     OrderIntentCandidate,
     StrategyCheckpoint,
     StrategyDecision,
     StrategySide,
+    UniverseRankingSnapshot,
+    compare_entry_policy_request,
+    summarize_entry_policy_comparisons,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
@@ -86,7 +91,10 @@ from crypto_momentum_lab.live_rollout.signal_recorder import (
 from crypto_momentum_lab.live_rollout.telemetry import (
     LIVE_LANE_ENTRY,
     LIVE_LANE_EXIT,
+    LIVE_TRIGGER_SOURCE_MARKET,
     LiveTelemetrySink,
+    SourceIngress,
+    state_trace_id,
 )
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PersistedExchangeOrder,
@@ -163,6 +171,10 @@ class LiveDaemonConfig:
     entry_universe_context_provider: (
         Callable[[str, datetime], Mapping[str, object] | None] | None
     ) = None
+    entry_universe_snapshot_provider: (
+        Callable[[datetime], UniverseRankingSnapshot | None] | None
+    ) = None
+    entry_policy_compare_only: bool = False
     entry_order_type: EntryType = EntryType.LIMIT
     entry_limit_ttl_seconds: int = 900
 
@@ -175,6 +187,8 @@ class LiveDaemonConfig:
             raise ValueError("checkpoint_every_states must be positive")
         if not isinstance(self.reconcile_once_per_bucket, bool):
             raise TypeError("reconcile_once_per_bucket must be a bool")
+        if not isinstance(self.entry_policy_compare_only, bool):
+            raise TypeError("entry_policy_compare_only must be a bool")
         if self.entry_symbol_refresh_seconds <= 0:
             raise ValueError("entry_symbol_refresh_seconds must be positive")
         if not isinstance(self.entry_order_type, EntryType):
@@ -188,6 +202,22 @@ class LiveEntryFilterContext:
     entry_price: Decimal | None
     ema5: Decimal | None = None
     ema10: Decimal | None = None
+    ema_observed_at: datetime | None = None
+    ema_snapshot_id: str | None = None
+    ema_config_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.ema_observed_at is not None and (
+            self.ema_observed_at.tzinfo is None
+            or self.ema_observed_at.utcoffset() is None
+        ):
+            raise ValueError("ema_observed_at must be timezone-aware")
+        for value, field_name in (
+            (self.ema_snapshot_id, "ema_snapshot_id"),
+            (self.ema_config_hash, "ema_config_hash"),
+        ):
+            if value is not None and not value.strip():
+                raise ValueError(f"{field_name} must not be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +294,7 @@ class _ExitLaneWork:
     state: MarketState15s
     context: LiveDaemonRuntimeContext
     completion: asyncio.Future[_ExitLaneOutcome] | None = None
+    ingress: SourceIngress | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +303,7 @@ class _QuoteLaneWork:
     state: MarketState15s
     context: LiveDaemonRuntimeContext
     completion: asyncio.Future[_ExitLaneOutcome] | None = None
+    ingress: SourceIngress | None = None
 
 
 class _ExitExecutionLane:
@@ -288,16 +320,26 @@ class _ExitExecutionLane:
     def __init__(
         self,
         processor: Callable[
-            [MarketState15s, LiveDaemonRuntimeContext],
+            [MarketState15s, LiveDaemonRuntimeContext, SourceIngress | None],
             Awaitable[_ExitLaneOutcome],
         ],
         quote_processor: Callable[
-            [RealtimeMarketQuote, MarketState15s, LiveDaemonRuntimeContext],
+            [
+                RealtimeMarketQuote,
+                MarketState15s,
+                LiveDaemonRuntimeContext,
+                SourceIngress | None,
+            ],
             Awaitable[_ExitLaneOutcome],
         ],
+        on_coalesced: Callable[
+            [SourceIngress, SourceIngress | None],
+            Awaitable[None],
+        ] | None = None,
     ) -> None:
         self._processor = processor
         self._quote_processor = quote_processor
+        self._on_coalesced = on_coalesced
         self._started = False
         self._account_queue: asyncio.Queue[_ExitLaneWork | None] | None = None
         self._market_queue: asyncio.Queue[str | None] | None = None
@@ -363,6 +405,8 @@ class _ExitExecutionLane:
         self,
         state: MarketState15s,
         context: LiveDaemonRuntimeContext,
+        *,
+        ingress: SourceIngress | None = None,
     ) -> _ExitLaneOutcome:
         if not self._started or self._account_queue is None or self._idle is None:
             raise RuntimeError("exit lane is not started")
@@ -371,13 +415,17 @@ class _ExitExecutionLane:
         )
         self._outstanding_work += 1
         self._idle.clear()
-        await self._account_queue.put(_ExitLaneWork(state, context, completion))
+        await self._account_queue.put(
+            _ExitLaneWork(state, context, completion, ingress)
+        )
         return await completion
 
     async def submit_market(
         self,
         state: MarketState15s,
         context: LiveDaemonRuntimeContext,
+        *,
+        ingress: SourceIngress | None = None,
     ) -> None:
         if (
             not self._started
@@ -386,14 +434,24 @@ class _ExitExecutionLane:
             or self._idle is None
         ):
             raise RuntimeError("exit lane is not started")
+        replaced_ingress: SourceIngress | None = None
         async with self._market_state_lock:
+            previous = self._market_latest.get(state.symbol)
+            if previous is not None:
+                replaced_ingress = previous.ingress
             if state.symbol not in self._market_latest:
                 self._outstanding_work += 1
             self._idle.clear()
-            self._market_latest[state.symbol] = _ExitLaneWork(state, context)
+            self._market_latest[state.symbol] = _ExitLaneWork(
+                state,
+                context,
+                ingress=ingress,
+            )
             if state.symbol not in self._market_enqueued:
                 self._market_enqueued.add(state.symbol)
                 self._market_queue.put_nowait(state.symbol)
+        if replaced_ingress is not None and self._on_coalesced is not None:
+            await self._on_coalesced(replaced_ingress, ingress)
 
     async def submit_quote(
         self,
@@ -402,6 +460,7 @@ class _ExitExecutionLane:
         context: LiveDaemonRuntimeContext,
         *,
         wait: bool = False,
+        ingress: SourceIngress | None = None,
     ) -> _ExitLaneOutcome | None:
         if (
             not self._started
@@ -413,7 +472,11 @@ class _ExitExecutionLane:
         completion: asyncio.Future[_ExitLaneOutcome] | None = None
         if wait:
             completion = asyncio.get_running_loop().create_future()
+        replaced_ingress: SourceIngress | None = None
         async with self._market_state_lock:
+            previous = self._quote_latest.get(quote.symbol)
+            if previous is not None:
+                replaced_ingress = previous.ingress
             if quote.symbol not in self._quote_latest:
                 self._outstanding_work += 1
             self._idle.clear()
@@ -422,10 +485,13 @@ class _ExitExecutionLane:
                 state,
                 context,
                 completion,
+                ingress,
             )
             if quote.symbol not in self._quote_enqueued:
                 self._quote_enqueued.add(quote.symbol)
                 self._quote_queue.put_nowait(quote.symbol)
+        if replaced_ingress is not None and self._on_coalesced is not None:
+            await self._on_coalesced(replaced_ingress, ingress)
         if completion is None:
             return None
         return await completion
@@ -518,7 +584,11 @@ class _ExitExecutionLane:
 
     async def _run_work(self, work: _ExitLaneWork) -> _ExitLaneOutcome:
         try:
-            return await self._processor(work.state, work.context)
+            return await self._processor(
+                work.state,
+                work.context,
+                work.ingress,
+            )
         except Exception as error:
             log.exception(
                 "live_exit_lane_work_failed",
@@ -536,6 +606,7 @@ class _ExitExecutionLane:
                 work.quote,
                 work.state,
                 work.context,
+                work.ingress,
             )
         except Exception as error:
             log.exception(
@@ -613,6 +684,7 @@ class LiveStrategyDaemon:
         self._exit_lane = _ExitExecutionLane(
             self._process_exit_work,
             self._process_quote_work,
+            self._record_exit_trace_coalesced,
         )
         self._checkpoint_writer = CheckpointWriter(
             run_id=config.run_id,
@@ -651,6 +723,152 @@ class LiveStrategyDaemon:
         invalidate = getattr(self._context_provider, "invalidate_cache", None)
         if callable(invalidate):
             invalidate()
+
+    async def _record_source_ingress(
+        self,
+        ingress: SourceIngress | None,
+    ) -> None:
+        if self._telemetry is not None and ingress is not None:
+            await self._telemetry.source_received(ingress)
+
+    async def _record_exit_context_ready(
+        self,
+        state: MarketState15s,
+        *,
+        ingress: SourceIngress | None,
+        reloaded: bool = True,
+    ) -> None:
+        if self._telemetry is None or ingress is None:
+            return
+        await self._telemetry.context_ready(
+            state,
+            occurred_at=self._clock(),
+            prefetched=False,
+            reloaded=reloaded,
+            ingress=ingress,
+        )
+
+    async def _record_exit_trace_termination(
+        self,
+        ingress: SourceIngress | None,
+        *,
+        reason: str,
+        occurred_at: datetime | None = None,
+        details: Mapping[str, JsonValue] | None = None,
+    ) -> None:
+        """Best-effort terminal telemetry for one source-triggered exit.
+
+        The source trace is an observability seam.  A recorder failure must
+        never turn a rejected or already-completed exit into a new execution
+        failure, so this helper deliberately contains sink errors.
+        """
+
+        if self._telemetry is None or ingress is None:
+            return
+        try:
+            await self._telemetry.trace_terminated(
+                ingress,
+                occurred_at=occurred_at or self._clock(),
+                reason=reason,
+                details=details,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            log.warning(
+                "live_exit_terminal_telemetry_failed",
+                run_id=self._config.run_id,
+                symbol=ingress.symbol,
+                trigger_source=ingress.trigger_source,
+                reason=reason,
+                error_type=type(error).__name__,
+            )
+
+    async def _record_exit_trace_coalesced(
+        self,
+        replaced_ingress: SourceIngress,
+        replacement_ingress: SourceIngress | None,
+    ) -> None:
+        await self._record_exit_trace_termination(
+            replaced_ingress,
+            reason="coalesced_by_newer_source",
+            details={
+                "replacement_trace_id": (
+                    None
+                    if replacement_ingress is None
+                    else replacement_ingress.trace_id
+                ),
+            },
+        )
+
+    async def _record_exit_outcome_termination(
+        self,
+        *,
+        ingress: SourceIngress | None,
+        request_count: int,
+        outcome: _ExitLaneOutcome,
+        no_request_reason: str = "no_exit_request",
+    ) -> None:
+        """Close a source trace after one exit work item completes."""
+
+        if outcome.failure is not None:
+            await self._record_exit_trace_termination(
+                ingress,
+                reason="exit_processing_failed",
+                details={"failure": outcome.failure},
+            )
+            return
+        if outcome.approved_intent_count > 0:
+            await self._record_exit_trace_termination(
+                ingress,
+                reason="exit_intent_processed",
+                details={
+                    "approved_intent_count": outcome.approved_intent_count,
+                    "submitted_order_count": outcome.submitted_order_count,
+                },
+            )
+            return
+        await self._record_exit_trace_termination(
+            ingress,
+            reason=no_request_reason
+            if request_count == 0
+            else "exit_request_not_processed",
+            details={"request_count": request_count},
+        )
+
+    async def _record_exit_processing_error(
+        self,
+        ingress: SourceIngress | None,
+        *,
+        stage: str,
+        error: Exception,
+    ) -> None:
+        await self._record_exit_trace_termination(
+            ingress,
+            reason="exit_processing_failed",
+            details={
+                "stage": stage,
+                "error_type": type(error).__name__,
+            },
+        )
+
+    async def _load_exit_context(
+        self,
+        state: MarketState15s,
+        *,
+        source_ingress: SourceIngress | None,
+    ) -> LiveDaemonRuntimeContext:
+        try:
+            return await self._context_provider(state)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await self._record_exit_trace_termination(
+                source_ingress,
+                reason="context_load_failed",
+                details={"error_type": type(error).__name__},
+            )
+            raise
 
     @property
     def entry_enabled(self) -> bool:
@@ -738,6 +956,7 @@ class LiveStrategyDaemon:
         state: MarketState15s,
         *,
         quote: RealtimeMarketQuote | None = None,
+        source_ingress: SourceIngress | None = None,
     ) -> str | None:
         """Run the exit lane from the latest account event.
 
@@ -748,29 +967,71 @@ class LiveStrategyDaemon:
         function and therefore cannot create a new position.
         """
         if self._exit_manager is None or not self._exit_enabled:
+            await self._record_source_ingress(source_ingress)
+            await self._record_exit_trace_termination(
+                source_ingress,
+                reason=(
+                    "exit_manager_unavailable"
+                    if self._exit_manager is None
+                    else "exit_disabled"
+                ),
+            )
             return None
+        await self._record_source_ingress(source_ingress)
         self._invalidate_context_cache()
-        context = await self._context_provider(state)
+        context = await self._load_exit_context(
+            state,
+            source_ingress=source_ingress,
+        )
+        await self._record_exit_context_ready(
+            state,
+            ingress=source_ingress,
+        )
         self._sync_pending_entry_plans(context)
         await self._publish_managed_position_symbols(context)
         if context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
+            await self._record_exit_trace_termination(
+                source_ingress,
+                reason="unmanaged_live_positions",
+                details={
+                    "symbols": symbols,
+                },
+            )
             return f"unmanaged_live_positions:{symbols}"
         if self._run_active:
             await self._exit_lane.start()
             if quote is None:
-                outcome = await self._exit_lane.submit_account(state, context)
+                outcome = await self._exit_lane.submit_account(
+                    state,
+                    context,
+                    ingress=source_ingress,
+                )
             else:
                 # Account events already have their own channel.  Execute the
                 # quote-triggered check directly here so an account update
                 # cannot be replaced by a newer ticker in the coalescing
                 # quote queue.
-                outcome = await self._process_quote_work(quote, state, context)
+                outcome = await self._process_quote_work(
+                    quote,
+                    state,
+                    context,
+                    source_ingress=source_ingress,
+                )
         else:
             outcome = (
-                await self._process_exit_work(state, context)
+                await self._process_exit_work(
+                    state,
+                    context,
+                    source_ingress=source_ingress,
+                )
                 if quote is None
-                else await self._process_quote_work(quote, state, context)
+                else await self._process_quote_work(
+                    quote,
+                    state,
+                    context,
+                    source_ingress=source_ingress,
+                )
             )
         self._invalidate_context_cache()
         if outcome.failure is not None:
@@ -785,26 +1046,70 @@ class LiveStrategyDaemon:
         self,
         quote: RealtimeMarketQuote,
         state: MarketState15s,
+        *,
+        source_ingress: SourceIngress | None = None,
     ) -> str | None:
         """Submit a latest-value quote to the reduce-only exit lane."""
+        await self._record_source_ingress(source_ingress)
         if self._exit_manager is None or not self._exit_enabled:
+            await self._record_exit_trace_termination(
+                source_ingress,
+                reason=(
+                    "exit_manager_unavailable"
+                    if self._exit_manager is None
+                    else "exit_disabled"
+                ),
+            )
             return None
         if state.symbol != quote.symbol:
+            await self._record_exit_trace_termination(
+                source_ingress,
+                reason="state_symbol_mismatch",
+                details={
+                    "state_symbol": state.symbol,
+                    "quote_symbol": quote.symbol,
+                },
+            )
             return None
         # The provider caches the account/risk view for the current state
         # bucket.  No invalidation happens on ticker arrival; account events
         # are the explicit cache-refresh seam.
-        context = await self._context_provider(state)
+        context = await self._load_exit_context(
+            state,
+            source_ingress=source_ingress,
+        )
+        await self._record_exit_context_ready(
+            state,
+            ingress=source_ingress,
+            reloaded=False,
+        )
         self._sync_pending_entry_plans(context)
         await self._publish_managed_position_symbols(context)
         if context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
+            await self._record_exit_trace_termination(
+                source_ingress,
+                reason="unmanaged_live_positions",
+                details={
+                    "symbols": symbols,
+                },
+            )
             return f"unmanaged_live_positions:{symbols}"
         if self._run_active:
             await self._exit_lane.start()
-            await self._exit_lane.submit_quote(quote, state, context)
+            await self._exit_lane.submit_quote(
+                quote,
+                state,
+                context,
+                ingress=source_ingress,
+            )
             return None
-        outcome = await self._process_quote_work(quote, state, context)
+        outcome = await self._process_quote_work(
+            quote,
+            state,
+            context,
+            source_ingress=source_ingress,
+        )
         if outcome.failure is not None:
             log.error(
                 "live_quote_exit_failed",
@@ -818,10 +1123,20 @@ class LiveStrategyDaemon:
         event: ClosedCandle15mEvent,
         *,
         latest_quote: RealtimeMarketQuote | None = None,
+        source_ingress: SourceIngress | None = None,
     ) -> str | None:
         """Process one final 15m candle on the independent exit path."""
 
+        await self._record_source_ingress(source_ingress)
         if self._exit_manager is None or not self._exit_enabled:
+            await self._record_exit_trace_termination(
+                source_ingress,
+                reason=(
+                    "exit_manager_unavailable"
+                    if self._exit_manager is None
+                    else "exit_disabled"
+                ),
+            )
             return None
         state = _market_state_for_closed_candle(
             event.candle,
@@ -831,17 +1146,33 @@ class LiveStrategyDaemon:
         # All symbols closing at the same boundary share one synthetic state
         # bucket.  Reuse the provider's snapshot across that burst; account
         # events and order execution remain the explicit invalidation seams.
-        context = await self._context_provider(state)
+        context = await self._load_exit_context(
+            state,
+            source_ingress=source_ingress,
+        )
+        await self._record_exit_context_ready(
+            state,
+            ingress=source_ingress,
+            reloaded=False,
+        )
         self._sync_pending_entry_plans(context)
         await self._publish_managed_position_symbols(context)
         if context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
+            await self._record_exit_trace_termination(
+                source_ingress,
+                reason="unmanaged_live_positions",
+                details={
+                    "symbols": symbols,
+                },
+            )
             return f"unmanaged_live_positions:{symbols}"
         outcome = await self._process_closed_candle_work(
             event,
             state,
             context,
             latest_quote,
+            source_ingress=source_ingress,
         )
         if outcome.failure is not None:
             log.error(
@@ -857,22 +1188,48 @@ class LiveStrategyDaemon:
         *,
         now: datetime,
         latest_quote: RealtimeMarketQuote | None = None,
+        source_ingress: SourceIngress | None = None,
     ) -> str | None:
         """Run the wall-clock fallback for an expired candle grace order."""
 
+        await self._record_source_ingress(source_ingress)
         if self._exit_manager is None or not self._exit_enabled:
+            await self._record_exit_trace_termination(
+                source_ingress,
+                reason=(
+                    "exit_manager_unavailable"
+                    if self._exit_manager is None
+                    else "exit_disabled"
+                ),
+            )
             return None
-        context = await self._context_provider(state)
+        context = await self._load_exit_context(
+            state,
+            source_ingress=source_ingress,
+        )
+        await self._record_exit_context_ready(
+            state,
+            ingress=source_ingress,
+            reloaded=False,
+        )
         self._sync_pending_entry_plans(context)
         await self._publish_managed_position_symbols(context)
         if context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
+            await self._record_exit_trace_termination(
+                source_ingress,
+                reason="unmanaged_live_positions",
+                details={
+                    "symbols": symbols,
+                },
+            )
             return f"unmanaged_live_positions:{symbols}"
         outcome = await self._process_grace_timeout_work(
             state,
             now,
             context,
             latest_quote,
+            source_ingress=source_ingress,
         )
         if outcome.failure is not None:
             log.error(
@@ -1022,6 +1379,7 @@ class LiveStrategyDaemon:
         if recorder is None:
             return
         candidate_filter_results: dict[str, object] = {}
+        legacy_rejection_reasons: dict[str, str | None] = {}
         for candidate in decision.candidates:
             rejection_reason = _live_entry_candidate_rejection_reason(
                 candidate,
@@ -1033,6 +1391,7 @@ class LiveStrategyDaemon:
                 require_price_above_ema10=self._config.require_price_above_ema10,
                 now=recorded_at,
             )
+            legacy_rejection_reasons[candidate.candidate_id] = rejection_reason
             candidate_filter_results[candidate.candidate_id] = {
                 "symbol": candidate.symbol,
                 "side": _enum_text(candidate.side),
@@ -1040,6 +1399,102 @@ class LiveStrategyDaemon:
                 "passed": rejection_reason is None,
                 "rejection_reason": rejection_reason,
             }
+        policy_comparisons: list[dict[str, object]] = []
+        policy_comparison_results: list[EntryPolicyComparison] = []
+        policy_comparison_summary: dict[str, object] | None = None
+        policy_compare_skip_reason: str | None = None
+        policy_universe_snapshot: UniverseRankingSnapshot | None = None
+        policy_universe_snapshot_error: str | None = None
+        if self._config.entry_policy_compare_only:
+            context_available = (filter_context or {}).get(
+                "context_available",
+                context is not None,
+            )
+            if context_available is False:
+                policy_compare_skip_reason = "context_unavailable"
+            else:
+                universe_snapshot_provider = (
+                    self._config.entry_universe_snapshot_provider
+                )
+                if universe_snapshot_provider is not None:
+                    try:
+                        policy_universe_snapshot = universe_snapshot_provider(
+                            state.bucket_end
+                        )
+                    except Exception as error:
+                        policy_universe_snapshot_error = type(error).__name__
+                        log.warning(
+                            "live_strategy_signal_universe_snapshot_failed",
+                            run_id=self._config.run_id,
+                            symbol=state.symbol,
+                            error_type=type(error).__name__,
+                        )
+                entry_price = (
+                    None
+                    if entry_filter_context is None
+                    else entry_filter_context.entry_price
+                )
+                ema5 = (
+                    None
+                    if entry_filter_context is None
+                    else entry_filter_context.ema5
+                )
+                ema10 = (
+                    None
+                    if entry_filter_context is None
+                    else entry_filter_context.ema10
+                )
+                source_trace = state_trace_id(state, LIVE_LANE_ENTRY)
+                for candidate in decision.candidates:
+                    if candidate.reduce_only:
+                        continue
+                    comparison = compare_entry_policy_request(
+                        EntryPolicyComparisonRequest(
+                            candidate=candidate,
+                            source_trace_id=source_trace,
+                            legacy_rejection_reason=legacy_rejection_reasons[
+                                candidate.candidate_id
+                            ],
+                            gate_reasons=gate_reasons,
+                            entry_enabled=self._entry_enabled,
+                            entry_long_only=self._config.entry_long_only,
+                            entry_symbols=entry_symbols,
+                            universe_snapshot=policy_universe_snapshot,
+                            entry_price=entry_price,
+                            ema5=ema5,
+                            ema10=ema10,
+                            require_price_above_ema5=(
+                                self._config.require_price_above_ema5
+                            ),
+                            require_price_above_ema10=(
+                                self._config.require_price_above_ema10
+                            ),
+                            observed_at=recorded_at,
+                            ema_observed_at=(
+                                None
+                                if entry_filter_context is None
+                                else entry_filter_context.ema_observed_at
+                            ),
+                            ema_snapshot_id=(
+                                None
+                                if entry_filter_context is None
+                                else entry_filter_context.ema_snapshot_id
+                            ),
+                            ema_config_hash=(
+                                None
+                                if entry_filter_context is None
+                                else entry_filter_context.ema_config_hash
+                            ),
+                        )
+                    )
+                    policy_comparison_results.append(comparison)
+                    policy_comparisons.append(comparison.as_details())
+                policy_comparison_summary = summarize_entry_policy_comparisons(
+                    policy_comparison_results,
+                    reduce_only_skipped=sum(
+                        candidate.reduce_only for candidate in decision.candidates
+                    ),
+                ).as_details()
         details: dict[str, object] = dict(filter_context or {})
         universe_context_provider = (
             self._config.entry_universe_context_provider
@@ -1110,6 +1565,15 @@ class LiveStrategyDaemon:
                     3,
                 ),
                 "candidate_filter_results": candidate_filter_results,
+                "entry_policy_compare_only": (
+                    self._config.entry_policy_compare_only
+                ),
+                "entry_policy_comparisons": policy_comparisons,
+                "entry_policy_comparison_summary": policy_comparison_summary,
+                "entry_policy_compare_skip_reason": policy_compare_skip_reason,
+                "entry_policy_universe_snapshot_error": (
+                    policy_universe_snapshot_error
+                ),
                 "effective_entry_candidates": effective_entry_candidates,
             }
         )
@@ -1157,8 +1621,25 @@ class LiveStrategyDaemon:
                     occurred_at=prefetched.received_at,
                     lane=LIVE_LANE_ENTRY,
                 )
+            market_ingress: SourceIngress | None = None
+            if (
+                self._exit_manager is not None
+                and self._exit_enabled
+                and self._exit_manager.uses_market_state_exit
+            ):
+                market_ingress = _market_exit_ingress(
+                    run_id=self._config.run_id,
+                    state=state,
+                    received_at=prefetched.received_at,
+                )
+                await self._record_source_ingress(market_ingress)
             exit_lane_failure = self._exit_lane.failure
             if exit_lane_failure is not None:
+                await self._record_exit_trace_termination(
+                    market_ingress,
+                    reason="exit_lane_failed",
+                    details={"failure": exit_lane_failure},
+                )
                 await self._save_final_checkpoint(
                     dirty=checkpoint_dirty,
                     saved_at=last_checkpoint_saved_at,
@@ -1189,7 +1670,17 @@ class LiveStrategyDaemon:
                             run_id=self._config.run_id,
                             error_type=type(error).__name__,
                         )
+                        await self._record_exit_trace_termination(
+                            market_ingress,
+                            reason="reconciliation_degraded",
+                            details={"error_type": type(error).__name__},
+                        )
                         continue
+                    await self._record_exit_trace_termination(
+                        market_ingress,
+                        reason="reconciliation_failed",
+                        details={"error_type": type(error).__name__},
+                    )
                     await self._save_final_checkpoint(
                         dirty=checkpoint_dirty,
                         saved_at=last_checkpoint_saved_at,
@@ -1283,6 +1774,11 @@ class LiveStrategyDaemon:
                     symbol=state.symbol,
                     error_type=type(error).__name__,
                 )
+                await self._record_exit_trace_termination(
+                    market_ingress,
+                    reason="context_unavailable",
+                    details={"error_type": type(error).__name__},
+                )
                 continue
             self._sync_pending_entry_plans(context)
             if self._telemetry is not None:
@@ -1352,8 +1848,18 @@ class LiveStrategyDaemon:
                         )
                         checkpoint_dirty = False
                         last_checkpoint_saved_at = None
+                    await self._record_exit_trace_termination(
+                        market_ingress,
+                        reason="entry_gate_temporarily_blocked",
+                        details={"gate_reasons": ",".join(gate.reasons)},
+                    )
                     continue
                 self._last_transient_gate_reasons = None
+                await self._record_exit_trace_termination(
+                    market_ingress,
+                    reason="entry_gate_blocked",
+                    details={"gate_reasons": ",".join(gate.reasons)},
+                )
                 await self._save_final_checkpoint(
                     dirty=checkpoint_dirty,
                     saved_at=last_checkpoint_saved_at,
@@ -1372,6 +1878,11 @@ class LiveStrategyDaemon:
                     saved_at=last_checkpoint_saved_at,
                 )
                 symbols = ",".join(sorted(context.unmanaged_position_symbols))
+                await self._record_exit_trace_termination(
+                    market_ingress,
+                    reason="unmanaged_live_positions",
+                    details={"symbols": symbols},
+                )
                 return LiveDaemonResult(
                     processed,
                     approved,
@@ -1381,6 +1892,11 @@ class LiveStrategyDaemon:
                 )
             orphan_cancel_reason = await self._cancel_orphan_exit_orders(context)
             if orphan_cancel_reason is not None:
+                await self._record_exit_trace_termination(
+                    market_ingress,
+                    reason="orphan_exit_cleanup_failed",
+                    details={"failure": orphan_cancel_reason},
+                )
                 await self._save_final_checkpoint(
                     dirty=checkpoint_dirty,
                     saved_at=last_checkpoint_saved_at,
@@ -1397,12 +1913,28 @@ class LiveStrategyDaemon:
                 and self._exit_enabled
                 and self._exit_manager.uses_market_state_exit
             ):
-                await self._exit_lane.submit_market(state, context)
+                if market_ingress is None:
+                    raise RuntimeError("market exit ingress is missing")
+                await self._record_exit_context_ready(
+                    state,
+                    ingress=market_ingress,
+                    reloaded=context_reloaded,
+                )
+                await self._exit_lane.submit_market(
+                    state,
+                    context,
+                    ingress=market_ingress,
+                )
                 # Give the independent exit worker a scheduling opportunity
                 # without waiting for network-backed candle evaluation.
                 await asyncio.sleep(0)
                 exit_lane_failure = self._exit_lane.failure
                 if exit_lane_failure is not None:
+                    await self._record_exit_trace_termination(
+                        market_ingress,
+                        reason="exit_lane_failed",
+                        details={"failure": exit_lane_failure},
+                    )
                     await self._save_final_checkpoint(
                         dirty=checkpoint_dirty,
                         saved_at=last_checkpoint_saved_at,
@@ -1555,39 +2087,100 @@ class LiveStrategyDaemon:
         self,
         state: MarketState15s,
         context: LiveDaemonRuntimeContext,
+        source_ingress: SourceIngress | None = None,
     ) -> _ExitLaneOutcome:
         if self._exit_manager is None or not self._exit_enabled:
+            await self._record_exit_trace_termination(
+                source_ingress,
+                reason=(
+                    "exit_manager_unavailable"
+                    if self._exit_manager is None
+                    else "exit_disabled"
+                ),
+            )
             return _ExitLaneOutcome()
         if self._telemetry is not None:
             await self._telemetry.market_state_received(
                 state,
                 occurred_at=self._clock(),
                 lane=LIVE_LANE_EXIT,
+                ingress=source_ingress,
             )
         lock = self._exit_symbol_locks.setdefault(state.symbol, asyncio.Lock())
         async with lock:
-            recovery_outcome = await self._recover_pending_exit_orders(
-                state=state,
-                context=context,
-            )
+            try:
+                recovery_outcome = await self._recover_pending_exit_orders(
+                    state=state,
+                    context=context,
+                    source_ingress=source_ingress,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self._record_exit_processing_error(
+                    source_ingress,
+                    stage="recovery",
+                    error=error,
+                )
+                raise
             if recovery_outcome is not None:
+                await self._record_exit_outcome_termination(
+                    ingress=source_ingress,
+                    request_count=0,
+                    outcome=recovery_outcome,
+                    no_request_reason="exit_recovery_pending",
+                )
                 return recovery_outcome
             if not self._exit_manager.uses_market_state_exit:
-                return _ExitLaneOutcome()
-            requests = await self._exit_manager.requests_for_state(
-                state,
-                context.managed_positions,
-            )
-            approved, submitted, failure = await self._process_exit_requests(
-                requests,
-                state=state,
-                context=context,
-            )
-        return _ExitLaneOutcome(
+                outcome = _ExitLaneOutcome()
+                await self._record_exit_outcome_termination(
+                    ingress=source_ingress,
+                    request_count=0,
+                    outcome=outcome,
+                    no_request_reason="exit_mode_not_market_state",
+                )
+                return outcome
+            try:
+                requests = await self._exit_manager.requests_for_state(
+                    state,
+                    context.managed_positions,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self._record_exit_processing_error(
+                    source_ingress,
+                    stage="request_evaluation",
+                    error=error,
+                )
+                raise
+            try:
+                approved, submitted, failure = await self._process_exit_requests(
+                    requests,
+                    state=state,
+                    context=context,
+                    source_ingress=source_ingress,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self._record_exit_processing_error(
+                    source_ingress,
+                    stage="execution",
+                    error=error,
+                )
+                raise
+        outcome = _ExitLaneOutcome(
             approved_intent_count=approved,
             submitted_order_count=submitted,
             failure=failure,
         )
+        await self._record_exit_outcome_termination(
+            ingress=source_ingress,
+            request_count=len(requests),
+            outcome=outcome,
+        )
+        return outcome
 
     async def _process_closed_candle_work(
         self,
@@ -1595,43 +2188,97 @@ class LiveStrategyDaemon:
         state: MarketState15s,
         context: LiveDaemonRuntimeContext,
         latest_quote: RealtimeMarketQuote | None,
+        source_ingress: SourceIngress | None = None,
     ) -> _ExitLaneOutcome:
         if self._exit_manager is None or not self._exit_enabled:
+            await self._record_exit_trace_termination(
+                source_ingress,
+                reason=(
+                    "exit_manager_unavailable"
+                    if self._exit_manager is None
+                    else "exit_disabled"
+                ),
+            )
             return _ExitLaneOutcome()
         if self._telemetry is not None:
             await self._telemetry.market_state_received(
                 state,
                 occurred_at=event.received_at,
                 lane=LIVE_LANE_EXIT,
+                ingress=source_ingress,
             )
         lock = self._exit_symbol_locks.setdefault(
             event.candle.symbol,
             asyncio.Lock(),
         )
         async with lock:
-            recovery_outcome = await self._recover_pending_exit_orders(
-                state=state,
-                context=context,
-            )
+            try:
+                recovery_outcome = await self._recover_pending_exit_orders(
+                    state=state,
+                    context=context,
+                    source_ingress=source_ingress,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self._record_exit_processing_error(
+                    source_ingress,
+                    stage="recovery",
+                    error=error,
+                )
+                raise
             if recovery_outcome is not None:
+                await self._record_exit_outcome_termination(
+                    ingress=source_ingress,
+                    request_count=0,
+                    outcome=recovery_outcome,
+                    no_request_reason="exit_recovery_pending",
+                )
                 return recovery_outcome
-            requests = await self._exit_manager.requests_for_closed_candle(
-                event.candle,
-                context.managed_positions,
-                latest_quote=latest_quote,
-                received_at=event.received_at,
-            )
-            approved, submitted, failure = await self._process_exit_requests(
-                requests,
-                state=state,
-                context=context,
-                invalidate_context=False,
-            )
-        return _ExitLaneOutcome(
+            try:
+                requests = await self._exit_manager.requests_for_closed_candle(
+                    event.candle,
+                    context.managed_positions,
+                    latest_quote=latest_quote,
+                    received_at=event.received_at,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self._record_exit_processing_error(
+                    source_ingress,
+                    stage="request_evaluation",
+                    error=error,
+                )
+                raise
+            try:
+                approved, submitted, failure = await self._process_exit_requests(
+                    requests,
+                    state=state,
+                    context=context,
+                    invalidate_context=False,
+                    source_ingress=source_ingress,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self._record_exit_processing_error(
+                    source_ingress,
+                    stage="execution",
+                    error=error,
+                )
+                raise
+        outcome = _ExitLaneOutcome(
             approved_intent_count=approved,
             submitted_order_count=submitted,
             failure=failure,
         )
+        await self._record_exit_outcome_termination(
+            ingress=source_ingress,
+            request_count=len(requests),
+            outcome=outcome,
+        )
+        return outcome
 
     async def _process_grace_timeout_work(
         self,
@@ -1639,41 +2286,103 @@ class LiveStrategyDaemon:
         now: datetime,
         context: LiveDaemonRuntimeContext,
         latest_quote: RealtimeMarketQuote | None,
+        source_ingress: SourceIngress | None = None,
     ) -> _ExitLaneOutcome:
         if self._exit_manager is None or not self._exit_enabled:
+            await self._record_exit_trace_termination(
+                source_ingress,
+                reason=(
+                    "exit_manager_unavailable"
+                    if self._exit_manager is None
+                    else "exit_disabled"
+                ),
+            )
             return _ExitLaneOutcome()
         lock = self._exit_symbol_locks.setdefault(state.symbol, asyncio.Lock())
         async with lock:
-            recovery_outcome = await self._recover_pending_exit_orders(
-                state=state,
-                context=context,
-            )
+            try:
+                recovery_outcome = await self._recover_pending_exit_orders(
+                    state=state,
+                    context=context,
+                    source_ingress=source_ingress,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self._record_exit_processing_error(
+                    source_ingress,
+                    stage="recovery",
+                    error=error,
+                )
+                raise
             if recovery_outcome is not None:
+                await self._record_exit_outcome_termination(
+                    ingress=source_ingress,
+                    request_count=0,
+                    outcome=recovery_outcome,
+                    no_request_reason="exit_recovery_pending",
+                )
                 return recovery_outcome
-            requests = await self._exit_manager.requests_for_grace_timeout(
-                now=now,
-                state=state,
-                positions=context.managed_positions,
-                latest_quote=latest_quote,
-            )
-            approved, submitted, failure = await self._process_exit_requests(
-                requests,
-                state=state,
-                context=context,
-            )
-        return _ExitLaneOutcome(
+            try:
+                requests = await self._exit_manager.requests_for_grace_timeout(
+                    now=now,
+                    state=state,
+                    positions=context.managed_positions,
+                    latest_quote=latest_quote,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self._record_exit_processing_error(
+                    source_ingress,
+                    stage="request_evaluation",
+                    error=error,
+                )
+                raise
+            try:
+                approved, submitted, failure = await self._process_exit_requests(
+                    requests,
+                    state=state,
+                    context=context,
+                    source_ingress=source_ingress,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self._record_exit_processing_error(
+                    source_ingress,
+                    stage="execution",
+                    error=error,
+                )
+                raise
+        outcome = _ExitLaneOutcome(
             approved_intent_count=approved,
             submitted_order_count=submitted,
             failure=failure,
         )
+        await self._record_exit_outcome_termination(
+            ingress=source_ingress,
+            request_count=len(requests),
+            outcome=outcome,
+        )
+        return outcome
 
     async def _process_quote_work(
         self,
         quote: RealtimeMarketQuote,
         state: MarketState15s,
         context: LiveDaemonRuntimeContext,
+        source_ingress: SourceIngress | None = None,
     ) -> _ExitLaneOutcome:
         if self._exit_manager is None or not self._exit_enabled:
+            await self._record_exit_trace_termination(
+                source_ingress,
+                reason=(
+                    "exit_manager_unavailable"
+                    if self._exit_manager is None
+                    else "exit_disabled"
+                ),
+            )
             return _ExitLaneOutcome()
         # This lock is intentionally separate from the 15-minute candle exit
         # lock.  A slow REST candle lookup must never hold the realtime quote
@@ -1684,32 +2393,77 @@ class LiveStrategyDaemon:
             asyncio.Lock(),
         )
         async with lock:
-            recovery_outcome = await self._recover_pending_exit_orders(
-                state=state,
-                context=context,
-            )
+            try:
+                recovery_outcome = await self._recover_pending_exit_orders(
+                    state=state,
+                    context=context,
+                    source_ingress=source_ingress,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self._record_exit_processing_error(
+                    source_ingress,
+                    stage="recovery",
+                    error=error,
+                )
+                raise
             if recovery_outcome is not None:
+                await self._record_exit_outcome_termination(
+                    ingress=source_ingress,
+                    request_count=0,
+                    outcome=recovery_outcome,
+                    no_request_reason="exit_recovery_pending",
+                )
                 return recovery_outcome
-            requests = await self._exit_manager.requests_for_quote(
-                quote,
-                context.managed_positions,
-            )
-            approved, submitted, failure = await self._process_exit_requests(
-                requests,
-                state=state,
-                context=context,
-            )
-        return _ExitLaneOutcome(
+            try:
+                requests = await self._exit_manager.requests_for_quote(
+                    quote,
+                    context.managed_positions,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self._record_exit_processing_error(
+                    source_ingress,
+                    stage="request_evaluation",
+                    error=error,
+                )
+                raise
+            try:
+                approved, submitted, failure = await self._process_exit_requests(
+                    requests,
+                    state=state,
+                    context=context,
+                    source_ingress=source_ingress,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self._record_exit_processing_error(
+                    source_ingress,
+                    stage="execution",
+                    error=error,
+                )
+                raise
+        outcome = _ExitLaneOutcome(
             approved_intent_count=approved,
             submitted_order_count=submitted,
             failure=failure,
         )
+        await self._record_exit_outcome_termination(
+            ingress=source_ingress,
+            request_count=len(requests),
+            outcome=outcome,
+        )
+        return outcome
 
     async def _recover_pending_exit_orders(
         self,
         *,
         state: MarketState15s,
         context: LiveDaemonRuntimeContext,
+        source_ingress: SourceIngress | None = None,
     ) -> _ExitLaneOutcome | None:
         """Act on unknown reduce-only orders before evaluating new exits."""
         if self._exit_recovery_client is None:
@@ -1737,6 +2491,7 @@ class LiveStrategyDaemon:
                 known_executed_quantity=order.executed_quantity,
                 state=state,
                 context=context,
+                source_ingress=source_ingress,
             )
             if result is not None:
                 return _exit_recovery_outcome(
@@ -1759,6 +2514,7 @@ class LiveStrategyDaemon:
         reference_price: Decimal | None = None,
         recovery_entry_type: EntryType | None = None,
         recovery_limit_price: Decimal | None = None,
+        source_ingress: SourceIngress | None = None,
     ) -> OrderExecutionResult | None:
         """Confirm an unknown exit and submit at most one safe next attempt."""
         recovery_client = self._exit_recovery_client
@@ -1944,6 +2700,7 @@ class LiveStrategyDaemon:
                 state=state,
                 context=context,
                 reference_price=reference_price,
+                source_ingress=source_ingress,
             )
             if recovery_result is None:
                 log.error(
@@ -1979,6 +2736,7 @@ class LiveStrategyDaemon:
         context: LiveDaemonRuntimeContext,
         reference_price: Decimal | None = None,
         invalidate_context: bool = True,
+        source_ingress: SourceIngress | None = None,
     ) -> tuple[int, int, str | None]:
         approved = 0
         submitted = 0
@@ -2003,6 +2761,7 @@ class LiveStrategyDaemon:
                             reference_price=reference_price,
                             recovery_entry_type=request.fallback_candidate.entry_type,
                             recovery_limit_price=request.fallback_candidate.limit_price,
+                            source_ingress=source_ingress,
                         )
                         if (
                             recovery_result is not None
@@ -2017,6 +2776,13 @@ class LiveStrategyDaemon:
                         symbol=request.cancel_plan.symbol,
                         client_order_id=request.cancel_plan.client_order_id,
                     )
+                    await self._record_exit_trace_termination(
+                        source_ingress,
+                        reason="exit_recovery_pending",
+                        details={
+                            "client_order_id": request.cancel_plan.client_order_id,
+                        },
+                    )
                     return approved, submitted, None
                 if not cancel_result.state.terminal:
                     return approved, submitted, "cancel_not_confirmed"
@@ -2028,7 +2794,10 @@ class LiveStrategyDaemon:
                     # market fallback so a late fill cannot make us reuse
                     # the stale planned quantity.
                     self._invalidate_context_cache()
-                    context = await self._context_provider(state)
+                    context = await self._load_exit_context(
+                        state,
+                        source_ingress=source_ingress,
+                    )
                     self._sync_pending_entry_plans(context)
                     await self._publish_managed_position_symbols(context)
                     if context.unmanaged_position_symbols:
@@ -2066,6 +2835,13 @@ class LiveStrategyDaemon:
                         symbol=request.cancel_plan.symbol,
                         client_order_id=request.cancel_plan.client_order_id,
                     )
+                    await self._record_exit_trace_termination(
+                        source_ingress,
+                        reason="exit_position_flat",
+                        details={
+                            "client_order_id": request.cancel_plan.client_order_id,
+                        },
+                    )
                     continue
                 result = await self._execute_candidate(
                     request.fallback_candidate,
@@ -2073,6 +2849,7 @@ class LiveStrategyDaemon:
                     state=state,
                     context=context,
                     reference_price=reference_price,
+                    source_ingress=source_ingress,
                 )
                 if result is None:
                     continue
@@ -2092,6 +2869,7 @@ class LiveStrategyDaemon:
                             state=state,
                             context=context,
                             reference_price=reference_price,
+                            source_ingress=source_ingress,
                         )
                         if (
                             recovery_result is not None
@@ -2106,8 +2884,23 @@ class LiveStrategyDaemon:
                         symbol=request.fallback_candidate.symbol,
                         client_order_id=result.client_order_id,
                     )
+                    await self._record_exit_trace_termination(
+                        source_ingress,
+                        reason="exit_recovery_pending",
+                        details={
+                            "client_order_id": result.client_order_id,
+                        },
+                    )
                     return approved, submitted, None
                 if result.state is ExchangeOrderState.REJECTED:
+                    await self._record_exit_trace_termination(
+                        source_ingress,
+                        reason="exchange_order_rejected",
+                        details={
+                            "client_order_id": result.client_order_id,
+                            "candidate_id": request.fallback_candidate.candidate_id,
+                        },
+                    )
                     return approved, submitted, "grace_timeout_market_close_rejected"
                 continue
             result = await self._execute_candidate(
@@ -2116,6 +2909,7 @@ class LiveStrategyDaemon:
                 state=state,
                 context=context,
                 reference_price=reference_price,
+                source_ingress=source_ingress,
             )
             if result is None:
                 continue
@@ -2132,6 +2926,7 @@ class LiveStrategyDaemon:
                         state=state,
                         context=context,
                         reference_price=reference_price,
+                        source_ingress=source_ingress,
                     )
                     if (
                         recovery_result is not None
@@ -2145,7 +2940,21 @@ class LiveStrategyDaemon:
                     symbol=request.candidate.symbol,
                     client_order_id=result.client_order_id,
                 )
+                await self._record_exit_trace_termination(
+                    source_ingress,
+                    reason="exit_recovery_pending",
+                    details={"client_order_id": result.client_order_id},
+                )
                 return approved, submitted, None
+            if result.state is ExchangeOrderState.REJECTED:
+                await self._record_exit_trace_termination(
+                    source_ingress,
+                    reason="exchange_order_rejected",
+                    details={
+                        "client_order_id": result.client_order_id,
+                        "candidate_id": request.candidate.candidate_id,
+                    },
+                )
         return approved, submitted, None
 
     async def _execute_candidate(
@@ -2156,6 +2965,7 @@ class LiveStrategyDaemon:
         state: MarketState15s,
         context: LiveDaemonRuntimeContext,
         reference_price: Decimal | None = None,
+        source_ingress: SourceIngress | None = None,
     ) -> OrderExecutionResult | None:
         execution_now = self._clock()
         if not candidate.reduce_only and candidate.expires_at <= execution_now:
@@ -2203,6 +3013,14 @@ class LiveStrategyDaemon:
                 ),
             )
             if not limit_decision.allowed:
+                await self._record_exit_trace_termination(
+                    source_ingress,
+                    reason="live_limit_rejected",
+                    details={
+                        "candidate_id": executable_candidate.candidate_id,
+                        "limit_reason": limit_decision.reason,
+                    },
+                )
                 return None
             executable_candidate = replace(
                 executable_candidate,
@@ -2222,6 +3040,7 @@ class LiveStrategyDaemon:
                 state=state,
                 occurred_at=self._clock(),
                 lane=lane,
+                ingress=source_ingress,
             )
         evaluation = self._risk_gateway.evaluate(
             executable_candidate,
@@ -2238,6 +3057,16 @@ class LiveStrategyDaemon:
             ),
         )
         if evaluation.decision is not RiskDecision.APPROVED:
+            await self._record_exit_trace_termination(
+                source_ingress,
+                reason="risk_rejected",
+                details={
+                    "candidate_id": executable_candidate.candidate_id,
+                    "evaluation_id": evaluation.evaluation_id,
+                    "risk_decision": _enum_text(evaluation.decision),
+                    "risk_reason": evaluation.reason,
+                },
+            )
             return None
         if self._telemetry is not None:
             await self._telemetry.risk_approved(
@@ -2246,6 +3075,7 @@ class LiveStrategyDaemon:
                 occurred_at=self._clock(),
                 lane=lane,
                 evaluation_id=evaluation.evaluation_id,
+                ingress=source_ingress,
             )
         rules = context.trading_rules.get(candidate.symbol)
         execution_reference_price = reference_price
@@ -2261,6 +3091,17 @@ class LiveStrategyDaemon:
         if execution_reference_price is None:
             execution_reference_price = state.mark_price or state.close_price
         if rules is None or execution_reference_price is None:
+            await self._record_exit_trace_termination(
+                source_ingress,
+                reason="execution_context_unavailable",
+                details={
+                    "candidate_id": executable_candidate.candidate_id,
+                    "trading_rules_available": rules is not None,
+                    "reference_price_available": (
+                        execution_reference_price is not None
+                    ),
+                },
+            )
             return None
         plan = quantize_order_plan(
             executable_candidate,
@@ -2271,6 +3112,15 @@ class LiveStrategyDaemon:
             requested_quantity=requested_quantity,
         )
         if isinstance(plan, QuantizationRejection):
+            await self._record_exit_trace_termination(
+                source_ingress,
+                reason="quantization_rejected",
+                details={
+                    "candidate_id": executable_candidate.candidate_id,
+                    "quantization_reason": plan.reason,
+                    "quantization_details": str(plan.details),
+                },
+            )
             return None
         if (
             not executable_candidate.reduce_only
@@ -2303,6 +3153,7 @@ class LiveStrategyDaemon:
                 state=state,
                 occurred_at=intent_saved_at,
                 lane=lane,
+                ingress=source_ingress,
             )
         result = await self._state_machine.execute_approved_intent(
             plan,
@@ -2521,6 +3372,26 @@ def _market_state_for_closed_candle(
     )
 
 
+def _market_exit_ingress(
+    *,
+    run_id: str,
+    state: MarketState15s,
+    received_at: datetime,
+) -> SourceIngress:
+    return SourceIngress(
+        run_id=run_id,
+        source_event_id=(
+            f"market:{state.symbol}:{state.bucket_start.isoformat()}"
+        ),
+        lane=LIVE_LANE_EXIT,
+        trigger_source=LIVE_TRIGGER_SOURCE_MARKET,
+        received_at=received_at,
+        source_occurred_at=state.last_received_at or state.bucket_end,
+        symbol=state.symbol,
+        bucket_start=state.bucket_start,
+    )
+
+
 def _checkpoint_for_persistence(strategy: LiveRuntimeStrategy) -> StrategyCheckpoint:
     """Build a compact checkpoint without breaking lightweight test adapters."""
     started = perf_counter()
@@ -2652,11 +3523,17 @@ def _entry_filter_values(
             "entry_price": None,
             "ema5": None,
             "ema10": None,
+            "ema_observed_at": None,
+            "ema_snapshot_id": None,
+            "ema_config_hash": None,
         }
     return {
         "entry_price": context.entry_price,
         "ema5": context.ema5,
         "ema10": context.ema10,
+        "ema_observed_at": context.ema_observed_at,
+        "ema_snapshot_id": context.ema_snapshot_id,
+        "ema_config_hash": context.ema_config_hash,
     }
 
 

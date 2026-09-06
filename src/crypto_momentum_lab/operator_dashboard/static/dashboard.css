@@ -841,6 +841,104 @@ details.secondary[open] summary { margin-bottom: 10px; }
 
 .service-age { color: var(--faint); font-size: 10.5px; text-align: right; }
 
+/* ============ research collector ============ */
+
+.collector-hero {
+  --collector-accent: var(--s, var(--brand));
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 20px;
+  border: 1px solid color-mix(in srgb, var(--collector-accent) 34%, var(--line));
+  border-left: 3px solid var(--collector-accent);
+  border-radius: 13px;
+  background:
+    radial-gradient(560px 170px at 0% 0%, color-mix(in srgb, var(--collector-accent) 13%, transparent), transparent 72%),
+    var(--surface-2);
+}
+
+.collector-hero-copy { min-width: 0; }
+
+.collector-kicker {
+  color: var(--collector-accent);
+  font: 9px var(--mono);
+  letter-spacing: .16em;
+}
+
+.collector-hero h3 { margin: 7px 0 4px; font-size: 19px; }
+.collector-hero p { margin: 0; color: var(--muted); font-size: 11px; }
+
+.collector-state-rail {
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  gap: 3px 8px;
+  flex: none;
+  min-width: 190px;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--collector-accent) 32%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--collector-accent) 7%, var(--surface));
+}
+
+.collector-state-dot {
+  grid-row: span 2;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--collector-accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--collector-accent) 12%, transparent);
+}
+
+.collector-state-rail strong { color: var(--collector-accent); font: 700 12px var(--mono); letter-spacing: .1em; }
+.collector-state-rail small { color: var(--muted); font-size: 10px; }
+
+.collector-kpi-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); margin-top: 14px; }
+
+.collector-meter-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+
+.collector-meter-card {
+  min-width: 0;
+  padding: 13px 15px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface-2);
+}
+
+.collector-meter-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.collector-meter-head span { color: var(--muted); font-size: 11px; }
+.collector-meter-head b { color: var(--text); font-size: 11px; font-weight: 500; white-space: nowrap; }
+
+.collector-progress { height: 7px; margin: 11px 0 8px; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
+.collector-progress i { display: block; height: 100%; border-radius: inherit; background: var(--brand); transition: width .35s ease; }
+.collector-progress.good i { background: var(--up); }
+.collector-progress.warning i { background: var(--warn); }
+.collector-progress.danger i { background: var(--down); }
+.collector-meter-card small { color: var(--faint); font-size: 10px; }
+
+.collector-alert { margin-bottom: 0; }
+.collector-alert > div { display: grid; gap: 3px; }
+.collector-alert small { margin-top: 0; }
+.collector-ok { min-height: 0; }
+
+.collector-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.collector-facts > div {
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+
+.collector-facts small { display: block; color: var(--faint); font-size: 9px; letter-spacing: .05em; }
+.collector-facts b { display: block; margin-top: 3px; overflow: hidden; color: var(--muted); font-size: 11px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ============ paper account cards ============ */
 
 .acct-cards {
@@ -2012,4 +2110,21 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .skip-link, .card.is-active-view { animation: none; transition: none; }
+}
+
+@media (max-width: 1100px) {
+  .collector-kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 760px) {
+  .collector-hero { align-items: stretch; flex-direction: column; gap: 14px; padding: 16px; }
+  .collector-state-rail { min-width: 0; }
+  .collector-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .collector-meter-grid { grid-template-columns: 1fr; }
+  .collector-facts { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 520px) {
+  .collector-kpi-grid { grid-template-columns: 1fr 1fr; }
+  .collector-facts { grid-template-columns: 1fr; }
 }
