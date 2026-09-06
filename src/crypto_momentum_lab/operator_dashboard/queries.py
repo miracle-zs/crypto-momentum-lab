@@ -1331,13 +1331,16 @@ class DashboardQueries:
     async def paper_account_equity(self) -> PaperAccountsEquityResponse:
         window_end = self._clock()
         window_start = window_end - _EQUITY_WINDOW
-        live_process: ExecutionAccountProcessStateRow | None = None
-        live_balance_rows: Sequence[_AccountEquityPoint] = ()
+        live_processes: Sequence[ExecutionAccountProcessStateRow] = ()
+        live_balance_rows_by_account: dict[str, Sequence[_AccountEquityPoint]] = {}
         common_paper_rows: Sequence[tuple[str, datetime, Decimal]] = ()
-        common_live_equity_rows: list[tuple[datetime, Decimal]] = []
-        live_strategy_name: str | None = None
+        common_live_equity_rows_by_account: dict[
+            str,
+            list[tuple[datetime, Decimal]],
+        ] = {}
+        live_strategy_names_by_account: dict[str, str | None] = {}
         paper_first_at_by_run: dict[str, datetime] = {}
-        live_first_at: datetime | None = None
+        live_first_at_by_account: dict[str, datetime | None] = {}
         common_start_at: datetime | None = None
         common_source_end_at: datetime | None = None
         common_equity_interval_seconds: int | None = None
@@ -1368,24 +1371,31 @@ class DashboardQueries:
                         )
                     ).all()
                 ]
-            live_process = await session.scalar(
-                select(ExecutionAccountProcessStateRow)
-                .where(ExecutionAccountProcessStateRow.environment == "live")
-                .order_by(ExecutionAccountProcessStateRow.occurred_at.desc())
-                .limit(1)
-            )
-            if live_process is not None:
-                live_strategy_name = await session.scalar(
-                    select(StrategyLiveStateRow.strategy_name)
-                    .where(
-                        StrategyLiveStateRow.environment == "live",
-                        StrategyLiveStateRow.account_label
-                        == live_process.account_label,
+            live_processes = (
+                await session.scalars(_latest_live_account_process_statement())
+            ).all()
+            strategy_states = (
+                await session.scalars(
+                    select(StrategyLiveStateRow).where(
+                        StrategyLiveStateRow.environment == "live"
                     )
-                    .order_by(StrategyLiveStateRow.changed_at.desc())
-                    .limit(1)
                 )
-                live_balance_rows = [
+            ).all()
+            strategy_by_account: dict[str, StrategyLiveStateRow] = {}
+            for state in sorted(
+                strategy_states,
+                key=lambda item: item.changed_at,
+                reverse=True,
+            ):
+                strategy_by_account.setdefault(state.account_label, state)
+            for process in live_processes:
+                account_label = process.account_label or "primary"
+                live_strategy_names_by_account[account_label] = (
+                    None
+                    if account_label not in strategy_by_account
+                    else strategy_by_account[account_label].strategy_name
+                )
+                live_balance_rows_by_account[account_label] = [
                     _AccountEquityPoint(
                         observed_at=row.observed_at,
                         wallet_balance=row.wallet_balance,
@@ -1395,7 +1405,7 @@ class DashboardQueries:
                         await session.execute(
                             _account_equity_statement(
                                 environment="live",
-                                account_label=live_process.account_label,
+                                account_label=process.account_label,
                                 asset="USDT",
                                 window_start=window_start,
                                 window_end=window_end,
@@ -1415,12 +1425,13 @@ class DashboardQueries:
                     for run_id, first_at in paper_first_rows
                 }
 
-            if live_process is not None:
-                live_first_at = await session.scalar(
+            for process in live_processes:
+                account_label = process.account_label or "primary"
+                live_first_at_by_account[account_label] = await session.scalar(
                     select(func.min(AccountBalanceSnapshotRow.observed_at)).where(
                         AccountBalanceSnapshotRow.environment == "live",
                         AccountBalanceSnapshotRow.account_label
-                        == live_process.account_label,
+                        == process.account_label,
                     )
                 )
 
@@ -1428,8 +1439,10 @@ class DashboardQueries:
                 run_id: _bucket_start(first_at, _COMMON_EQUITY_BUCKET_SECONDS)
                 for run_id, first_at in paper_first_at_by_run.items()
             }
-            if live_process is not None and live_first_at is not None:
-                live_run_id = f"live-{live_process.account_label or 'primary'}-b1"
+            for account_label, live_first_at in live_first_at_by_account.items():
+                if live_first_at is None:
+                    continue
+                live_run_id = f"live-{account_label}-b1"
                 first_buckets[live_run_id] = _bucket_start(
                     live_first_at,
                     _COMMON_EQUITY_BUCKET_SECONDS,
@@ -1457,14 +1470,15 @@ class DashboardQueries:
                             )
                         ).all()
                     ]
-                if live_process is not None:
-                    common_live_equity_rows = [
+                for process in live_processes:
+                    account_label = process.account_label or "primary"
+                    common_live_equity_rows_by_account[account_label] = [
                         (observed_at, equity)
                         for observed_at, equity in (
                             await session.execute(
                                 _live_common_equity_statement(
                                     environment="live",
-                                    account_label=live_process.account_label,
+                                    account_label=process.account_label,
                                     window_start=common_start_at,
                                     window_end=window_end,
                                     interval_seconds=common_equity_interval_seconds,
@@ -1492,13 +1506,15 @@ class DashboardQueries:
                 )
                 for run_id in run_ids
             }
-            if live_process is not None:
-                live_account_label = live_process.account_label or "primary"
-                live_run_id = f"live-{live_account_label}-b1"
+            for (
+                account_label,
+                equity_rows,
+            ) in common_live_equity_rows_by_account.items():
+                live_run_id = f"live-{account_label}-b1"
                 common_observations[live_run_id] = (
                     _live_aggregated_equity_observations(
-                        common_live_equity_rows,
-                        account_label=live_account_label,
+                        equity_rows,
+                        account_label=account_label,
                         cash_flow_adjustments=self._live_cash_flow_adjustments,
                     )
                 )
@@ -1541,23 +1557,17 @@ class DashboardQueries:
                     if run_id in common_equity_by_run
                     and first_at == common_start_at
                 ]
-                live_account_label = (
-                    live_process.account_label or "primary"
-                    if live_process is not None
-                    else None
-                )
-                if live_account_label is not None:
-                    common_cash_flows = [
-                        _live_cash_flow_payload(adjustment)
-                        for adjustment in self._live_cash_flow_adjustments
-                        if (
-                            adjustment.account_label == live_account_label
-                            and (
-                                common_end_at is not None
-                                and adjustment.effective_at <= common_end_at
-                            )
+                common_cash_flows = [
+                    _live_cash_flow_payload(adjustment)
+                    for adjustment in self._live_cash_flow_adjustments
+                    if (
+                        adjustment.account_label in live_balance_rows_by_account
+                        and (
+                            common_end_at is not None
+                            and adjustment.effective_at <= common_end_at
                         )
-                    ]
+                    )
+                ]
                 common_note = _common_equity_note(
                     common_cash_flows,
                     interval_seconds=common_equity_interval_seconds,
@@ -1603,13 +1613,21 @@ class DashboardQueries:
                     ),
                 )
             )
-        if live_process is not None and len(live_balance_rows) >= 2:
-            live_account_label = live_process.account_label or "primary"
-            live_run_id = f"live-{live_account_label}-b1"
+        for account_label in sorted(
+            live_balance_rows_by_account,
+            key=_account_label_sort_key,
+        ):
+            live_balance_rows = live_balance_rows_by_account[account_label]
+            if len(live_balance_rows) < 2:
+                continue
+            live_run_id = f"live-{account_label}-b1"
             accounts.append(
                 PaperAccountEquityResponse(
                     run_id=live_run_id,
-                    strategy_name=live_strategy_name or "orderflow_impulse",
+                    strategy_name=(
+                        live_strategy_names_by_account.get(account_label)
+                        or "orderflow_impulse"
+                    ),
                     exit_mode="candle_15m",
                     exit_label=(
                         "实盘 Top10 · 反向后宽限 8 根 15M · 回收 +0.88% · 仅多头"
@@ -1618,7 +1636,7 @@ class DashboardQueries:
                     equity_window_end=window_end,
                     equity_sample_interval_seconds=_EQUITY_BUCKET_SECONDS,
                     source="live",
-                    account_label=live_account_label,
+                    account_label=account_label,
                     equity_curve=[
                         _live_account_equity_point(row)
                         for row in sorted(
