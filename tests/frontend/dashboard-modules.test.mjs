@@ -33,6 +33,7 @@ import {
   POLL_MS,
   SECTION_POLL_MS,
 } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-config.js";
+import { sectionRenderKey } from "../../src/crypto_momentum_lab/operator_dashboard/static/dashboard-rendering.js";
 
 test("dashboard polling keeps safety sections fresh and backs off cold sections", () => {
   assert.equal(POLL_MS, 15000);
@@ -45,6 +46,49 @@ test("dashboard polling keeps safety sections fresh and backs off cold sections"
     collector: 30000,
     reports: 30000,
   });
+});
+
+test("heartbeat-only account updates do not rebuild the active section", () => {
+  const first = {
+    status: "READY",
+    accounts: [{
+      account_label: "primary",
+      status: "READY",
+      observed_at: "2026-09-06T11:00:00Z",
+      lease_expires_at: "2026-09-06T11:02:00Z",
+    }],
+  };
+  const second = {
+    ...first,
+    accounts: [{
+      ...first.accounts[0],
+      observed_at: "2026-09-06T11:00:15Z",
+      lease_expires_at: "2026-09-06T11:02:15Z",
+    }],
+  };
+
+  assert.equal(sectionRenderKey("account", first), sectionRenderKey("account", second));
+});
+
+test("strategy account heartbeats refresh cards without rebuilding the page", () => {
+  const first = {
+    status: "READY",
+    accounts: [{
+      run_id: "paper-account-1",
+      checkpoint_at: "2026-09-06T11:00:00Z",
+      portfolio_summary: { equity: "1000" },
+    }],
+  };
+  const second = {
+    ...first,
+    accounts: [{
+      ...first.accounts[0],
+      checkpoint_at: "2026-09-06T11:00:30Z",
+      portfolio_summary: { equity: "1001" },
+    }],
+  };
+
+  assert.equal(sectionRenderKey("strategy", first), sectionRenderKey("strategy", second));
 });
 
 test("operator formatters keep status and money output stable", () => {
@@ -94,6 +138,34 @@ test("strategy equity models align paper and live B1 on common buckets", () => {
   assert.equal(model.anchorAt, Date.parse("2026-08-16T00:00:00Z"));
   assert.equal(model.startAt, Date.parse("2026-08-16T00:00:00Z"));
   assert.equal(model.anchorMode, "daily-anchor");
+});
+
+test("strategy comparison labels duplicate live accounts by account label", () => {
+  const equityCurve = (values) => values.map((equity, index) => ({
+    observed_at: `2026-08-16T00:${String(index * 6).padStart(2, "0")}:00Z`,
+    equity,
+  }));
+  const accounts = ["primary", "account-2", "account-3", "account-4"].map(
+    (account_label, index) => ({
+      run_id: `live-${account_label}`,
+      account_label,
+      strategy_name: "orderflow_impulse",
+      source: "live",
+      exit_label: "实盘 Top10 · B8",
+      equity_curve: equityCurve([1000 + index, 1001 + index, 1002 + index]),
+    }),
+  );
+
+  const [model] = buildStrategyEquityModels(accounts);
+  assert.deepEqual(
+    model.series.map((series) => series.label),
+    [
+      "实盘 Top10 · B8 · primary",
+      "实盘 Top10 · B8 · account-2",
+      "实盘 Top10 · B8 · account-3",
+      "实盘 Top10 · B8 · account-4",
+    ],
+  );
 });
 
 test("strategy equity comparison starts at the first common bucket after 08:00", () => {

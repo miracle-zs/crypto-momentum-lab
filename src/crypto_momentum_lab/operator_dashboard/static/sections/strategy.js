@@ -335,6 +335,22 @@ function renderStrategy(data) {
   return [data.status, cards + paperComparisonBlock(accounts) + detail];
 }
 
+function refreshStrategy(body, data) {
+  const accounts = visiblePaperAccounts(data);
+  latestPaperAccounts = accounts;
+  if (!accounts.length) return;
+  selectedPaperAccount = Math.min(selectedPaperAccount, accounts.length - 1);
+  const cards = body.querySelector(".acct-cards");
+  if (!cards) return;
+  const focusedIndex = body.ownerDocument.activeElement?.dataset.accountIndex;
+  replaceElementFromHtml(cards, paperCards(accounts.map(withPaperEquity)));
+  wirePaperAccountTabs(body, { accounts });
+  if (focusedIndex == null) return;
+  const focusedTab = [...body.querySelectorAll("[data-account-index]")]
+    .find((tab) => tab.dataset.accountIndex === focusedIndex);
+  focusedTab?.focus();
+}
+
 function setPaperAccountTabState(body, selectedIndex) {
   body.querySelectorAll("[data-account-index]").forEach((candidate) => {
     const isSelected = Number(candidate.dataset.accountIndex) === selectedIndex;
@@ -521,6 +537,7 @@ async function loadPaperEquityComparison(body) {
       };
       paperEquityCacheKey = cacheKey;
       paperEquityLoadedAt = Date.now();
+      if (body.isConnected === false) return;
       const comparison = body.querySelector("[data-paper-comparison]");
       if (comparison) replaceElementFromHtml(comparison, paperComparisonBlock(latestPaperAccounts));
       const cards = body.querySelector(".acct-cards");
@@ -577,6 +594,7 @@ async function loadPaperAccountHistory(body, account, index) {
 
   return {
     render: renderStrategy,
+    refresh: refreshStrategy,
     wire: wirePaperAccountTabs,
   };
 }

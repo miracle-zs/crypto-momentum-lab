@@ -15,6 +15,7 @@ import {
   liveHeartbeatStatus,
 } from "./dashboard-formatters.js";
 import { replaceChildrenFromHtml } from "./dashboard-dom.js";
+import { sectionRenderKey as buildSectionRenderKey } from "./dashboard-rendering.js";
 import { readinessStatusForSection } from "./dashboard-readiness.js";
 import { wireEcharts } from "./dashboard-chart-engine.js";
 import { emptyBox } from "./dashboard-ui.js?v=20260826-flight-deck-v2";
@@ -42,6 +43,10 @@ let lastRuntimeAnnouncement = "";
 const latestSectionData = new Map();
 const sectionRenderKeys = new Map();
 const SAFETY_SECTIONS = new Set(["overview", "risk", "account", "strategy", "universe"]);
+function sectionRenderKey(id, data) {
+  return buildSectionRenderKey(id, data);
+}
+
 function renderLiveRuntime() {
   // Compatibility wording retained for consumers that still recognize:
   // 实盘状态：${mode} · ${duration} / 实盘心跳：${relAge(age)} · ${freshness}
@@ -242,17 +247,6 @@ function updateGlobalMode(data) {
   renderGlobalReadiness();
 }
 
-function sectionRenderKey(id, data) {
-  if (id !== "overview") return JSON.stringify(data);
-  const snapshot = JSON.parse(JSON.stringify(data));
-  delete snapshot.generated_at;
-  for (const service of snapshot.services || []) {
-    delete service.age_seconds;
-    delete service.observed_at;
-  }
-  return JSON.stringify(snapshot);
-}
-
 function wireMarketTab(tab) {
   if (!tab || tab.dataset.marketWired === "true") return;
   tab.dataset.marketWired = "true";
@@ -305,7 +299,10 @@ async function refreshSection(id) {
     }
     body.classList.remove("loading");
     body.removeAttribute("aria-busy");
-    if (id === "strategy" && shouldRender) strategySection.wire(body, data);
+    if (id === "strategy") {
+      if (shouldRender) strategySection.wire(body, data);
+      else strategySection.refresh(body, data);
+    }
     if (id === "account" && shouldRender) wireLiveAccounts(body, data);
     if (id === "overview") updateGlobalMode(data);
     updateGlobalState(id, data);

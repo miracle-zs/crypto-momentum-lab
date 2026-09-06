@@ -66,7 +66,16 @@ function comparisonSeriesColor(account, index) {
 }
 
 function comparisonSeriesLabel(account, index, accounts) {
-  if (account.source === "live") return account.exit_label || "实盘 Top10 · B8";
+  if (account.source === "live") {
+    const base = account.exit_label || "实盘 Top10 · B8";
+    const liveAccounts = accounts.filter((candidate) => candidate.source === "live");
+    const duplicateCount = liveAccounts.filter((candidate) => (
+      candidate.exit_label || "实盘 Top10 · B8"
+    ) === base).length;
+    return duplicateCount > 1 && account.account_label
+      ? `${base} · ${account.account_label}`
+      : base;
+  }
   const base = account.exit_label || "15M 收线退出";
   const duplicateCount = accounts.filter((candidate) => (
     candidate.exit_label || "15M 收线退出"
@@ -74,6 +83,12 @@ function comparisonSeriesLabel(account, index, accounts) {
   if (duplicateCount < 2) return base;
   const accountNumber = String(account.run_id || "").match(/^paper-account-(\d+)/)?.[1];
   return accountNumber ? `${base} · 账户 ${accountNumber}` : `${base} · 版本 ${index + 1}`;
+}
+
+function comparisonAccountOrder(account) {
+  if (account.account_label === "primary") return 0;
+  const match = String(account.account_label || "").match(/^account-(\d+)$/);
+  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
 }
 
 export function comparisonSeriesStyle(series) {
@@ -302,7 +317,11 @@ export function buildStrategyEquityModels(accounts) {
       .sort((left, right) => {
         const leftLive = left.source === "live" ? 1 : 0;
         const rightLive = right.source === "live" ? 1 : 0;
-        return leftLive - rightLive || String(left.run_id).localeCompare(String(right.run_id));
+        return leftLive - rightLive
+          || (leftLive && rightLive
+            ? comparisonAccountOrder(left) - comparisonAccountOrder(right)
+            : 0)
+          || String(left.run_id).localeCompare(String(right.run_id));
       });
     const synchronized = synchronizedComparisonAccounts(strategyAccounts);
     const model = strategyEquityModel(
@@ -324,7 +343,11 @@ export function buildLatestStartEquityModels(accounts, meta = {}) {
       .sort((left, right) => {
         const leftLive = left.source === "live" ? 1 : 0;
         const rightLive = right.source === "live" ? 1 : 0;
-        return leftLive - rightLive || String(left.run_id).localeCompare(String(right.run_id));
+        return leftLive - rightLive
+          || (leftLive && rightLive
+            ? comparisonAccountOrder(left) - comparisonAccountOrder(right)
+            : 0)
+          || String(left.run_id).localeCompare(String(right.run_id));
       });
     const model = commonEquityComparisonModel(
       strategyName,
