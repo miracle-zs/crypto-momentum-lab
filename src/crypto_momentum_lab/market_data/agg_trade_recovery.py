@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+import httpx
+
 from crypto_momentum_lab.domain.market.models import (
     AggTradeGap,
     CaptureRoute,
@@ -105,6 +107,7 @@ class AggTradeGapRecoverer:
         self._recovered_trade_count = 0
         self._missing_trade_count = 0
         self._duplicate_trade_count = 0
+        self._rate_limited_until = 0.0
 
     @property
     def metrics(self) -> AggTradeRecoveryMetrics:
@@ -221,6 +224,8 @@ class AggTradeGapRecoverer:
         return AggTradeRecoveryBatch(tuple(envelopes), tuple(gaps))
 
     async def _recover(self, request: _GapRequest) -> _RecoveryResult:
+        if time.monotonic() < self._rate_limited_until:
+            return _RecoveryResult(request, (), "rate_limit_cooldown")
         if request.missing_count > self._max_gap_trades:
             return _RecoveryResult(request, (), "gap_too_large")
         assert request.current.symbol is not None
@@ -258,6 +263,20 @@ class AggTradeGapRecoverer:
                         next_id = page[-1].aggregate_trade_id + 1
         except TimeoutError:
             return _RecoveryResult(request, (), "history_timeout")
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in {418, 429}:
+                retry_after = error.response.headers.get("Retry-After")
+                try:
+                    cooldown = max(30.0, float(retry_after or 60.0))
+                except ValueError:
+                    cooldown = 60.0
+                self._rate_limited_until = time.monotonic() + cooldown
+                return _RecoveryResult(request, (), "rate_limit_cooldown")
+            return _RecoveryResult(
+                request,
+                (),
+                f"history_error:{error.__class__.__name__}",
+            )
         except Exception as error:
             return _RecoveryResult(
                 request,

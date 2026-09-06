@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import random
 import time
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
+from threading import Lock
 from typing import Protocol, Self
 
 import httpx
@@ -23,6 +27,28 @@ class ClosedCandleSourceError(RuntimeError):
 class ClosedCandleEmaSnapshot:
     ema5: Decimal | None
     ema10: Decimal | None
+    symbol: str | None = None
+    observed_at: datetime | None = None
+    snapshot_id: str | None = None
+    config_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.symbol is not None:
+            normalized_symbol = self.symbol.strip().upper()
+            if not normalized_symbol:
+                raise ValueError("symbol must not be empty")
+            object.__setattr__(self, "symbol", normalized_symbol)
+        if self.observed_at is not None and (
+            self.observed_at.tzinfo is None
+            or self.observed_at.utcoffset() is None
+        ):
+            raise ValueError("observed_at must be timezone-aware")
+        for value, field_name in (
+            (self.snapshot_id, "snapshot_id"),
+            (self.config_hash, "config_hash"),
+        ):
+            if value is not None and not value.strip():
+                raise ValueError(f"{field_name} must not be empty")
 
 
 class ClosedCandleEmaProvider:
@@ -62,6 +88,14 @@ class ClosedCandleEmaProvider:
         snapshot = ClosedCandleEmaSnapshot(
             ema5=_ema(closes, 5),
             ema10=_ema(closes, 10),
+            symbol=normalized_symbol,
+            observed_at=candle_end,
+            snapshot_id=(
+                f"ema-{normalized_symbol}-"
+                f"{candle_end.strftime('%Y%m%dT%H%M%SZ')}-"
+                f"{self._lookback_candles}"
+            ),
+            config_hash=_ema_config_hash(self._lookback_candles),
         )
         self._cache[cache_key] = snapshot
         return snapshot
@@ -75,6 +109,11 @@ class ClosedCandle15mSource(Protocol):
         start: datetime,
         end: datetime,
     ) -> tuple[ClosedCandle15m, ...]: ...
+
+
+def _ema_config_hash(lookback_candles: int) -> str:
+    payload = f"interval=15m;lookback_candles={lookback_candles}"
+    return sha256(payload.encode("utf-8")).hexdigest()
 
 
 class BinanceRestClosedCandle15mSource:
@@ -103,7 +142,10 @@ class BinanceRestClosedCandle15mSource:
         self._clock = clock
         self._candles: dict[tuple[str, datetime], ClosedCandle15m] = {}
         self._coverage: dict[str, tuple[datetime, datetime]] = {}
-        self._retry_delays = (0.25, 0.5, 1.0)
+        # Calls for the same symbol are single-flight: a second strategy
+        # request waits for the first range fill, then serves from coverage.
+        self._symbol_locks: defaultdict[str, Lock] = defaultdict(Lock)
+        self._retry_delays = (1.0, 2.0, 4.0, 8.0)
 
     def __enter__(self) -> Self:
         return self
@@ -130,28 +172,29 @@ class BinanceRestClosedCandle15mSource:
             return ()
         fetch_end = max(aligned_end, _candle_start_15m(self._clock()))
 
-        coverage = self._coverage.get(normalized_symbol)
-        if coverage is None:
-            self._fetch_range(normalized_symbol, aligned_start, fetch_end)
-            coverage = (aligned_start, fetch_end)
-        else:
-            covered_start, covered_end = coverage
-            if aligned_start < covered_start:
-                self._fetch_range(
-                    normalized_symbol,
-                    aligned_start,
-                    covered_start,
-                )
-                covered_start = aligned_start
-            if fetch_end > covered_end:
-                self._fetch_range(
-                    normalized_symbol,
-                    covered_end,
-                    fetch_end,
-                )
-                covered_end = fetch_end
-            coverage = (covered_start, covered_end)
-        self._coverage[normalized_symbol] = coverage
+        with self._symbol_locks[normalized_symbol]:
+            coverage = self._coverage.get(normalized_symbol)
+            if coverage is None:
+                self._fetch_range(normalized_symbol, aligned_start, fetch_end)
+                coverage = (aligned_start, fetch_end)
+            else:
+                covered_start, covered_end = coverage
+                if aligned_start < covered_start:
+                    self._fetch_range(
+                        normalized_symbol,
+                        aligned_start,
+                        covered_start,
+                    )
+                    covered_start = aligned_start
+                if fetch_end > covered_end:
+                    self._fetch_range(
+                        normalized_symbol,
+                        covered_end,
+                        fetch_end,
+                    )
+                    covered_end = fetch_end
+                coverage = (covered_start, covered_end)
+            self._coverage[normalized_symbol] = coverage
 
         candles = tuple(
             candle
@@ -254,11 +297,19 @@ class BinanceRestClosedCandle15mSource:
                 return response
             except httpx.HTTPStatusError as error:
                 retryable = (
-                    error.response.status_code == 429
+                    error.response.status_code in {418, 429}
                     or error.response.status_code >= 500
                 )
                 if not retryable or attempt == len(self._retry_delays):
                     raise
+                retry_after = error.response.headers.get("Retry-After")
+                try:
+                    server_delay = float(retry_after) if retry_after else 0.0
+                except ValueError:
+                    server_delay = 0.0
+                delay = max(self._retry_delays[attempt], server_delay)
+                time.sleep(delay + random.uniform(0.0, delay * 0.25))
+                continue
             except (
                 httpx.ConnectError,
                 httpx.ReadError,
@@ -267,7 +318,8 @@ class BinanceRestClosedCandle15mSource:
             ):
                 if attempt == len(self._retry_delays):
                     raise
-            time.sleep(self._retry_delays[attempt])
+            delay = self._retry_delays[attempt]
+            time.sleep(delay + random.uniform(0.0, delay * 0.25))
         raise AssertionError("retry loop exhausted")
 
     def _prune(

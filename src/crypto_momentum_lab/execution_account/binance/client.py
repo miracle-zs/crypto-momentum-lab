@@ -3,6 +3,7 @@ import hashlib
 import heapq
 import hmac
 import math
+import time
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -234,6 +235,37 @@ class BinanceUsdMPrivateReadClient:
             ),
             trust_env=False,
         )
+        self._endpoint_metrics: dict[str, dict[str, object]] = {}
+
+    @property
+    def endpoint_metrics(self) -> dict[str, dict[str, object]]:
+        """Return request counts and latency totals without credentials."""
+        return {
+            path: {
+                "count": int(values["count"]),
+                "error_count": int(values["error_count"]),
+                "total_ms": round(float(values["total_ms"]), 3),
+                "last_status": values["last_status"],
+            }
+            for path, values in self._endpoint_metrics.items()
+        }
+
+    def _record_endpoint(
+        self,
+        path: str,
+        *,
+        elapsed_ms: float,
+        status: int | None,
+        error: bool,
+    ) -> None:
+        values = self._endpoint_metrics.setdefault(
+            path,
+            {"count": 0, "error_count": 0, "total_ms": 0.0, "last_status": None},
+        )
+        values["count"] = int(values["count"]) + 1
+        values["error_count"] = int(values["error_count"]) + int(error)
+        values["total_ms"] = float(values["total_ms"]) + elapsed_ms
+        values["last_status"] = status
 
     async def fetch_account_config(self) -> AccountConfigSnapshot:
         payload = await self._signed_get("/fapi/v3/account")
@@ -422,13 +454,25 @@ class BinanceUsdMPrivateReadClient:
     ) -> object:
         await self._read_request_pacer.wait()
         signed_params = self._signed_params(params or {})
-        response = await self._client.get(
-            path,
-            params=signed_params,
-            headers={"X-MBX-APIKEY": self._api_key},
-        )
-        _raise_for_status(response)
-        return response.json()
+        started = time.perf_counter()
+        response: httpx.Response | None = None
+        try:
+            response = await self._client.get(
+                path,
+                params=signed_params,
+                headers={"X-MBX-APIKEY": self._api_key},
+            )
+            _raise_for_status(response)
+            return response.json()
+        except Exception:
+            raise
+        finally:
+            self._record_endpoint(
+                path,
+                elapsed_ms=(time.perf_counter() - started) * 1000,
+                status=response.status_code if response is not None else None,
+                error=response is None or response.status_code >= 400,
+            )
 
     async def _signed_post(
         self,

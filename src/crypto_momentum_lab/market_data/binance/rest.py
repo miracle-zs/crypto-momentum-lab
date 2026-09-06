@@ -1,4 +1,5 @@
 import asyncio
+import random
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -16,6 +17,46 @@ from crypto_momentum_lab.domain.universe.models import (
 
 def _utc_from_ms(value: int) -> datetime:
     return datetime.fromtimestamp(value / 1000, tz=UTC)
+
+
+class _PublicRequestPacer:
+    """Serialize public REST request starts for one Binance origin."""
+
+    def __init__(self, min_interval_seconds: float = 0.1) -> None:
+        self._min_interval_seconds = min_interval_seconds
+        self._lock = asyncio.Lock()
+        self._next_allowed_at = 0.0
+
+    async def wait(self) -> None:
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            delay = max(0.0, self._next_allowed_at - now)
+            self._next_allowed_at = (
+                max(now, self._next_allowed_at) + self._min_interval_seconds
+            )
+        if delay:
+            await asyncio.sleep(delay)
+
+
+_PUBLIC_PACERS: dict[str, _PublicRequestPacer] = {}
+_PUBLIC_PACERS_LOCK = asyncio.Lock()
+
+
+async def _public_pacer(base_url: str) -> _PublicRequestPacer:
+    key = base_url.rstrip("/")
+    async with _PUBLIC_PACERS_LOCK:
+        return _PUBLIC_PACERS.setdefault(key, _PublicRequestPacer())
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    value = response.headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +117,8 @@ class BinanceUsdMRestClient:
             trust_env=False,
         )
         self._daily_open_concurrency = daily_open_concurrency
-        self._retry_delays = (0.25, 0.5, 1.0)
+        self._retry_delays = (1.0, 2.0, 4.0, 8.0)
+        self._pacer: _PublicRequestPacer | None = None
 
     async def __aenter__(self) -> Self:
         return self
@@ -93,23 +135,32 @@ class BinanceUsdMRestClient:
         *,
         params: dict[str, str | int | float | bool | None] | None = None,
     ) -> httpx.Response:
+        if self._pacer is None:
+            self._pacer = await _public_pacer(str(self._client.base_url))
         for attempt in range(len(self._retry_delays) + 1):
             try:
+                await self._pacer.wait()
                 response = await self._client.get(path, params=params)
                 response.raise_for_status()
                 return response
             except httpx.HTTPStatusError as error:
                 retryable = (
-                    error.response.status_code == 429
+                    error.response.status_code in {418, 429}
                     or error.response.status_code >= 500
                 )
                 if not retryable or attempt == len(self._retry_delays):
                     raise
-                await asyncio.sleep(self._retry_delays[attempt])
+                retry_after = _retry_after_seconds(error.response)
+                delay = self._retry_delays[attempt]
+                if retry_after is not None:
+                    delay = max(delay, retry_after)
+                delay += random.uniform(0.0, delay * 0.25)
+                await asyncio.sleep(delay)
             except (httpx.ConnectError, httpx.ReadTimeout):
                 if attempt == len(self._retry_delays):
                     raise
-                await asyncio.sleep(self._retry_delays[attempt])
+                delay = self._retry_delays[attempt]
+                await asyncio.sleep(delay + random.uniform(0.0, delay * 0.25))
         raise AssertionError("retry loop exhausted")
 
     async def fetch_active_usdt_perpetuals(
