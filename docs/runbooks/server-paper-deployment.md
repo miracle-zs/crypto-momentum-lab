@@ -136,8 +136,8 @@ empty queries across the paper processes.
 The server Compose manifest runs the market-data, live-account, and live-strategy
 database probes every 60 seconds, the research collector probe every 90 seconds,
 and paper probes every 60 seconds. The dashboard probe uses the local HTTP
-endpoint through `curl`, so it does not start a Python interpreter for each
-check.
+endpoint through Python's standard library with `-S`, so it does not import
+the application or database driver for each check.
 
 The market-data process fails and lets Docker restart it when a 15-minute
 universe refresh exceeds 120 seconds, when no live market state arrives within
