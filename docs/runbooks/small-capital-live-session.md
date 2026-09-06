@@ -89,6 +89,19 @@ worker restart lets that lease expire, a session that has already reached
 still pass; a first startup still requires `prepare`, and an operator-draining
 session is never auto-restarted.
 
+Before a planned restart, extend the existing lease for one hour. This command
+checks the account, owner, and strategy binding and fails closed if any value is
+wrong or the lease is missing:
+
+```bash
+$COMPOSE --profile live run --rm --no-deps -T live-strategy renew-lease \
+  --account-label "$CML_LIVE_ACCOUNT_LABEL" \
+  --strategy "$CML_LIVE_STRATEGY" \
+  --lease-owner "$CML_LIVE_LEASE_OWNER" \
+  --lease-ttl-seconds 3600 \
+  --confirmation "RENEW LIVE RISK LEASE" </dev/null
+```
+
 ## 3. Run Matching Shadow
 
 The shadow run reads the same `research` states, generates Hedge Mode plans,

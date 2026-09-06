@@ -19,11 +19,13 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     } <= services.keys()
     assert "paper-liquidation-optimized" not in services
     assert services["dashboard"]["ports"] == ["127.0.0.1:8765:8765"]
-    assert manifest["x-app"]["stop_grace_period"] == "60s"
+    assert manifest["x-app"]["stop_grace_period"] == "20s"
     assert "build" not in manifest["x-app"]
     assert services["migrate"]["build"]["context"] == "."
     assert services["migrate"]["image"] == manifest["x-app"]["image"]
     assert services["market-data"]["healthcheck"]["start_period"] == "15m"
+    assert services["market-data"]["healthcheck"]["start_interval"] == "15s"
+    assert services["market-data"]["stop_grace_period"] == "60s"
     assert services["postgres"]["mem_limit"] == "1g"
     assert services["postgres"]["memswap_limit"] == "1536m"
     assert services["execution-account-live"]["mem_limit"] == "160m"
@@ -31,6 +33,10 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert services["dashboard"]["mem_limit"] == "320m"
     assert services["execution-account-live"]["healthcheck"]["interval"] == "60s"
     assert services["execution-account-live"]["healthcheck"]["retries"] == 2
+    assert services["execution-account-live"]["healthcheck"]["start_interval"] == "5s"
+    assert services["execution-account-live"]["stop_grace_period"] == "60s"
+    assert services["live-strategy"]["healthcheck"]["start_interval"] == "5s"
+    assert services["live-strategy"]["stop_grace_period"] == "60s"
     assert services["dashboard"]["healthcheck"]["interval"] == "30s"
     assert services["dashboard"]["healthcheck"]["retries"] == 4
     assert services["market-data"]["healthcheck"]["interval"] == "60s"
@@ -46,6 +52,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     ):
         assert services[service]["healthcheck"]["interval"] == "60s"
         assert services[service]["healthcheck"]["retries"] == 2
+        assert services[service]["healthcheck"]["start_interval"] == "5s"
         assert _option_value(
             services[service]["healthcheck"]["test"],
             "-m",
@@ -158,6 +165,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     )
     assert services["research-collector"]["healthcheck"]["interval"] == "90s"
     assert services["research-collector"]["healthcheck"]["retries"] == 2
+    assert services["research-collector"]["healthcheck"]["start_interval"] == "5s"
     assert services["dashboard"]["healthcheck"]["test"] == [
         "CMD-SHELL",
         (
@@ -218,6 +226,10 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
         strategy = services[f"live-strategy-account-{account_number}"]
         assert execution["profiles"] == ["live"]
         assert strategy["profiles"] == ["live"]
+        assert execution["stop_grace_period"] == "60s"
+        assert strategy["stop_grace_period"] == "60s"
+        assert execution["healthcheck"]["start_interval"] == "5s"
+        assert strategy["healthcheck"]["start_interval"] == "5s"
         assert f"account-{account_number}" in execution["command"]
         assert f"account-{account_number}" in strategy["command"]
         for option in (

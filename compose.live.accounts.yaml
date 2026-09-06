@@ -78,6 +78,7 @@ services:
         - --account-label
         - account-2
       interval: 60s
+      start_interval: 5s
       timeout: 15s
       retries: 2
       start_period: 30s
@@ -136,6 +137,7 @@ services:
         - --account-label
         - account-3
       interval: 60s
+      start_interval: 5s
       timeout: 15s
       retries: 2
       start_period: 30s
@@ -194,6 +196,7 @@ services:
         - --account-label
         - account-4
       interval: 60s
+      start_interval: 5s
       timeout: 15s
       retries: 2
       start_period: 30s
@@ -312,6 +315,7 @@ services:
         - --lease-owner
         - ${CML_LIVE_LEASE_OWNER_ACCOUNT_2:-live-worker-account-2}
       interval: 60s
+      start_interval: 5s
       timeout: 10s
       retries: 3
       start_period: 2m
@@ -430,6 +434,7 @@ services:
         - --lease-owner
         - ${CML_LIVE_LEASE_OWNER_ACCOUNT_3:-live-worker-account-3}
       interval: 60s
+      start_interval: 5s
       timeout: 10s
       retries: 3
       start_period: 2m
@@ -548,6 +553,7 @@ services:
         - --lease-owner
         - ${CML_LIVE_LEASE_OWNER_ACCOUNT_4:-live-worker-account-4}
       interval: 60s
+      start_interval: 5s
       timeout: 10s
       retries: 3
       start_period: 2m

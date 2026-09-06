@@ -9,12 +9,19 @@ leases, reconciliation, or the fail-closed entry gate.
 ## Why an update can take several minutes
 
 The application image is built on the server. A cold dependency build is the
-largest variable cost; normal updates reuse BuildKit layers. Each Compose
-service also has a 60-second stop grace period so it can flush telemetry and
-close exchange connections cleanly. The execution healthcheck has a 30-second
-startup period, while Live strategy services have a two-minute startup period
-and a 60-second probe interval. Updating eight Live containers one by one
-therefore adds several minutes even when the code build is cached.
+largest variable cost; the Dockerfile keeps third-party dependencies in a layer
+keyed only by `pyproject.toml`, so source-only changes rebuild a small local
+wheel. Healthchecks retain their 60/90-second steady-state intervals to keep
+probe CPU low, but use a 5-second `start_interval` (15 seconds for the long
+market-data recovery window) while a container is starting. Stateless
+research, paper, and dashboard services stop after 20 seconds; market-data and
+Live services retain a 60-second grace period for state and exchange cleanup.
+Updating eight Live containers one by one used to add several minutes even
+when the code build was cached.
+
+The host must have the Ubuntu `docker-buildx` package installed once so Compose
+can use BuildKit/Bake and retain the dependency cache. The package install does
+not restart Docker or any application container.
 
 Approval and lease preparation is a separate safety operation. Run it before
 restarting Live containers. If approval or lease state is wrong, a Live worker
@@ -34,13 +41,15 @@ deploy/ops/update_server.sh 43.167.191.253 <commit-sha>
 The script:
 
 1. fetches the target and requires a clean `main` checkout on the server;
-2. updates the runtime-only `CML_CODE_COMMIT` and dashboard image in
+2. classifies the changed paths and skips the build/restart when a commit only
+   changes docs, tests, or operator tooling;
+3. updates the runtime-only `CML_CODE_COMMIT` and dashboard image in
    `.env.server`;
-3. validates the merged Compose graph;
-4. builds the image once using the existing cache;
-5. waits for `market-data`, then updates research, paper, and dashboard
-   consumers in one Compose invocation;
-6. prints the deployed commit and container health summary.
+4. validates the merged Compose graph;
+5. builds the image once using the dependency cache;
+6. waits for `market-data`, then updates only the affected research, paper, and
+   dashboard consumers;
+7. prints phase timings, the deployed commit, and the container health summary.
 
 It uses `docker compose up -d --wait`. Compose recreates a service when its
 image or configuration changed, so the normal path does not need
@@ -57,13 +66,21 @@ explicit Live flag:
 deploy/ops/update_server.sh 43.167.191.253 <commit-sha> --live
 ```
 
-The Live path first runs `preflight` for every currently running strategy. If
-any approval, hash, migration, account readiness, or lease check fails, no Live
-container is restarted. It then updates each active account in this order:
+Set `CML_LIVE_CONCURRENCY=1` before the command for a serialized rollout, or
+leave the default `2` to use two bounded restart waves.
 
-1. execution service;
-2. matching strategy service;
-3. wait for both services to report healthy before moving on.
+The Live path first renews every active lease to one hour, checking its owner
+and strategy binding, then runs `preflight` for every currently running
+strategy. If any approval, hash, migration, account readiness, or lease check
+fails, no Live container is restarted. It then updates the active execution
+services in a bounded parallel wave and the strategies in a second bounded
+wave. The default concurrency is two; set `CML_LIVE_CONCURRENCY=1` for a more
+conservative rollout or `=4` when the host has headroom:
+
+1. execution services (up to two at a time);
+2. matching strategy services (up to two at a time);
+3. wait for every service in each wave to report healthy before starting the
+   next wave.
 
 Services that are not currently running are skipped, so the script does not
 enable a disabled Live account accidentally. Do not remove the `--live` flag to
@@ -116,8 +133,9 @@ rollback still requires approvals whose commit hash matches that previous
 image; the script intentionally stops before restarting Live services when
 that preflight does not pass.
 
-Do not shorten the service stop grace period or health startup windows as a
-generic speed fix. They protect exchange connection cleanup and state
-recovery. Healthcheck frequency controls failure detection and Docker wait
-time; it does not determine the freshness of the market data consumed by the
-strategies.
+Healthcheck frequency controls failure detection and Docker wait time; it does
+not determine the freshness of the market data consumed by the strategies.
+Lease renewal is only for a planned restart and cannot create a missing lease
+or change its account/strategy owner. The script uses `-T` and a closed stdin
+for one-off Compose commands so a batch SSH session cannot consume input and
+silently skip later accounts.

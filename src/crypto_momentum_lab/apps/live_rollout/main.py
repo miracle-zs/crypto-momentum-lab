@@ -202,6 +202,7 @@ from crypto_momentum_lab.strategy_runner.registry import (
 app = typer.Typer(no_args_is_help=True)
 log = structlog.get_logger()
 _PREPARE_CONFIRMATION = "PREPARE LIVE RISK GATES"
+_RENEW_LEASE_CONFIRMATION = "RENEW LIVE RISK LEASE"
 _RESOLVE_MISSING_ORDER_CONFIRMATION = "RESOLVE MISSING LIVE ORDER"
 _LIVE_ENTRY_POLICY_MODES = frozenset({"legacy", "compare_only", "enforce"})
 # These two columns are retained by the existing risk-config schema for paper
@@ -491,6 +492,34 @@ def prepare_command(
             entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
             entry_limit_ttl_seconds=entry_limit_ttl_seconds,
+        )
+    )
+    typer.echo(json.dumps(payload, sort_keys=True))
+
+
+@app.command("renew-lease")
+def renew_lease_command(
+    database_url: Annotated[str | None, typer.Option("--database-url")] = None,
+    account_label: Annotated[str, typer.Option("--account-label")] = "primary",
+    strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    lease_owner: Annotated[str, typer.Option("--lease-owner")] = "live-worker",
+    lease_ttl_seconds: Annotated[
+        int,
+        typer.Option("--lease-ttl-seconds", min=300),
+    ] = 3600,
+    confirmation: Annotated[str, typer.Option("--confirmation")] = "",
+) -> None:
+    if confirmation != _RENEW_LEASE_CONFIRMATION:
+        raise typer.BadParameter(
+            f"--confirmation must equal '{_RENEW_LEASE_CONFIRMATION}'"
+        )
+    payload = asyncio.run(
+        _renew_live_lease(
+            database_url=_database_url(database_url),
+            account_label=account_label,
+            strategy_name=strategy,
+            lease_owner=lease_owner,
+            lease_ttl_seconds=lease_ttl_seconds,
         )
     )
     typer.echo(json.dumps(payload, sort_keys=True))
@@ -3469,6 +3498,50 @@ async def _prepare_live_risk_gates(
             entry_order_type=entry_order_type,
             entry_limit_ttl_seconds=entry_limit_ttl_seconds,
         ),
+    }
+
+
+async def _renew_live_lease(
+    *,
+    database_url: str,
+    account_label: str,
+    strategy_name: str,
+    lease_owner: str,
+    lease_ttl_seconds: int,
+) -> dict[str, str]:
+    if lease_ttl_seconds < 300:
+        raise ValueError("lease_ttl_seconds must be at least 300")
+    now = datetime.now(tz=UTC)
+    engine = create_execution_database_engine(database_url)
+    try:
+        repository = PostgresRiskRepository(
+            async_sessionmaker(engine, expire_on_commit=False)
+        )
+        lease = await repository.load_active_lease("live", account_label, now)
+        if lease is None:
+            raise RuntimeError(
+                f"active live lease is missing for account {account_label}"
+            )
+        if lease.owner != lease_owner:
+            raise RuntimeError(
+                f"live lease owner mismatch for account {account_label}"
+            )
+        if lease.strategy_name != strategy_name:
+            raise RuntimeError(
+                f"live lease strategy mismatch for account {account_label}"
+            )
+        renewed = await repository.renew_lease(
+            lease_id=lease.lease_id,
+            owner=lease_owner,
+            expires_at=now + timedelta(seconds=lease_ttl_seconds),
+        )
+    finally:
+        await engine.dispose()
+    return {
+        "account_label": renewed.account_label,
+        "lease_id": renewed.lease_id,
+        "lease_owner": renewed.owner,
+        "lease_expires_at": renewed.expires_at.isoformat(),
     }
 
 

@@ -9,6 +9,7 @@ from typer import BadParameter
 from typer.testing import CliRunner
 
 from crypto_momentum_lab.apps.live_rollout import main
+from crypto_momentum_lab.domain.risk import TradingLease, TradingLeaseState
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
 from crypto_momentum_lab.market_data.hub import MarketStateHubError
 
@@ -34,6 +35,7 @@ def test_live_cli_exposes_required_commands() -> None:
     for command in (
         "approve",
         "prepare",
+        "renew-lease",
         "preflight",
         "resolve-missing-order",
         "run",
@@ -44,6 +46,105 @@ def test_live_cli_exposes_required_commands() -> None:
         "strategy-config-hash",
     ):
         assert command in result.stdout
+
+
+def test_renew_lease_requires_explicit_confirmation() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "renew-lease",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "RENEW LIVE RISK LEASE" in result.output
+
+
+def test_renew_live_lease_checks_owner_and_extends_expiration(monkeypatch) -> None:
+    now = datetime.now(tz=UTC)
+    lease = TradingLease(
+        lease_id="lease-1",
+        environment="live",
+        account_label="account-2",
+        strategy_name="orderflow_impulse",
+        owner="live-worker-account-2",
+        state=TradingLeaseState.ACTIVE,
+        acquired_at=now - timedelta(minutes=5),
+        expires_at=now + timedelta(minutes=5),
+    )
+    renewed_calls: list[tuple[str, str, datetime]] = []
+
+    class FakeEngine:
+        async def dispose(self) -> None:
+            return None
+
+    class FakeRepository:
+        def __init__(self, factory) -> None:
+            del factory
+
+        async def load_active_lease(self, environment, account_label, current):
+            assert environment == "live"
+            assert account_label == "account-2"
+            assert current.tzinfo is not None
+            return lease
+
+        async def renew_lease(self, *, lease_id, owner, expires_at):
+            renewed_calls.append((lease_id, owner, expires_at))
+            return TradingLease(
+                lease_id=lease.lease_id,
+                environment=lease.environment,
+                account_label=lease.account_label,
+                strategy_name=lease.strategy_name,
+                owner=lease.owner,
+                state=lease.state,
+                acquired_at=lease.acquired_at,
+                expires_at=expires_at,
+            )
+
+    monkeypatch.setattr(
+        main,
+        "create_execution_database_engine",
+        lambda _: FakeEngine(),
+    )
+    monkeypatch.setattr(main, "PostgresRiskRepository", FakeRepository)
+
+    with pytest.raises(RuntimeError, match="owner mismatch"):
+        asyncio.run(
+            main._renew_live_lease(
+                database_url="postgresql+asyncpg://unused",
+                account_label="account-2",
+                strategy_name="orderflow_impulse",
+                lease_owner="wrong-owner",
+                lease_ttl_seconds=3600,
+            )
+        )
+    with pytest.raises(RuntimeError, match="strategy mismatch"):
+        asyncio.run(
+            main._renew_live_lease(
+                database_url="postgresql+asyncpg://unused",
+                account_label="account-2",
+                strategy_name="other_strategy",
+                lease_owner="live-worker-account-2",
+                lease_ttl_seconds=3600,
+            )
+        )
+
+    payload = asyncio.run(
+        main._renew_live_lease(
+            database_url="postgresql+asyncpg://unused",
+            account_label="account-2",
+            strategy_name="orderflow_impulse",
+            lease_owner="live-worker-account-2",
+            lease_ttl_seconds=3600,
+        )
+    )
+
+    assert payload["account_label"] == "account-2"
+    assert payload["lease_id"] == "lease-1"
+    assert renewed_calls[0][0:2] == ("lease-1", "live-worker-account-2")
+    assert renewed_calls[0][2] > lease.expires_at
 
 
 def test_live_run_exposes_operation_aware_telemetry_option() -> None:

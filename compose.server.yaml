@@ -18,7 +18,9 @@ x-app: &app
     CML_OBSERVABILITY_DATABASE_URL: ${CML_OBSERVABILITY_DATABASE_URL:-}
     CML_CODE_COMMIT: ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
   restart: unless-stopped
-  stop_grace_period: 60s
+  # Short-lived/stateless services can restart quickly. Services that flush
+  # exchange or market state override this with an explicit 60-second grace.
+  stop_grace_period: 20s
   logging: *default-logging
 
 x-paper: &paper
@@ -40,6 +42,7 @@ x-paper: &paper
       - --service
       - paper
     interval: 60s
+    start_interval: 5s
     timeout: 15s
     retries: 2
     start_period: 90s
@@ -166,9 +169,11 @@ services:
         - --service
         - market-data
       interval: 60s
+      start_interval: 15s
       timeout: 15s
       retries: 2
       start_period: 15m
+    stop_grace_period: 60s
     mem_limit: 640m
 
   research-collector:
@@ -213,6 +218,7 @@ services:
         - --max-age-seconds
         - "120"
       interval: 90s
+      start_interval: 5s
       timeout: 15s
       retries: 2
       start_period: 2m
@@ -493,9 +499,11 @@ services:
         - --account-label
         - ${CML_LIVE_ACCOUNT_LABEL:-primary}
       interval: 60s
+      start_interval: 5s
       timeout: 15s
       retries: 2
       start_period: 30s
+    stop_grace_period: 60s
     mem_limit: 160m
     memswap_limit: 320m
 
@@ -615,9 +623,11 @@ services:
         - --lease-owner
         - ${CML_LIVE_LEASE_OWNER:-live-worker}
       interval: 60s
+      start_interval: 5s
       timeout: 10s
       retries: 3
       start_period: 2m
+    stop_grace_period: 60s
     # Observed usage is below 200 MiB; 1 GiB was over-provisioned on this host.
     mem_limit: 512m
     memswap_limit: 768m
