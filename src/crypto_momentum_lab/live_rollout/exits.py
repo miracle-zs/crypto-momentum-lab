@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -166,6 +166,7 @@ class LiveExitCancellationRequest:
     cancel_plan: OrderExecutionPlan
     fallback_candidate: OrderIntentCandidate
     fallback_quantity: Decimal
+    fallback_to_current_position: bool = False
 
 
 LiveExitRequest = LiveExitOrderRequest | LiveExitCancellationRequest
@@ -396,6 +397,68 @@ class LiveExitManager:
                     created_at=now,
                 )
             )
+        return tuple(requests)
+
+    async def requests_for_scheduled_flatten(
+        self,
+        positions: tuple[ManagedLivePosition, ...],
+        *,
+        now: datetime,
+        symbol: str | None = None,
+        reference_prices: Mapping[str, Decimal] | None = None,
+        attempt: int = 1,
+    ) -> tuple[LiveExitRequest, ...]:
+        """Build market reduce-only requests for the scheduled risk window.
+
+        Scheduled flattening is deliberately independent of the configured
+        strategy exit policy.  Every live position is targeted, including a
+        position currently covered by a recovery limit.  In that case the
+        recovery order is canceled first and the fallback quantity is capped
+        by the fresh exchange position during request processing.
+        """
+
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        if attempt <= 0:
+            raise ValueError("attempt must be positive")
+        references = reference_prices or {}
+        requests: list[LiveExitRequest] = []
+        reason = f"scheduled_risk_window_flatten_attempt_{attempt}"
+        for position in positions:
+            if (
+                (symbol is not None and position.symbol != symbol)
+                or position.closing_order_filled
+                or position.quantity <= 0
+            ):
+                continue
+            reference_price = references.get(position.symbol, position.entry_price)
+            if reference_price <= 0:
+                continue
+            fallback = self._build_order_request(
+                state=None,
+                position=position,
+                reason=reason,
+                trigger_at=now,
+                identity_trigger_at=now,
+                created_at=now,
+                reference_price=reference_price,
+                quantity=position.quantity,
+            )
+            recovery_plan = position.recovery_order_plan
+            if (
+                recovery_plan is not None
+                and _recovery_order_blocks_current_episode(position)
+            ):
+                requests.append(
+                    LiveExitCancellationRequest(
+                        cancel_plan=recovery_plan,
+                        fallback_candidate=fallback.candidate,
+                        fallback_quantity=position.quantity,
+                        fallback_to_current_position=True,
+                    )
+                )
+            else:
+                requests.append(fallback)
         return tuple(requests)
 
     async def requests_for_quote(

@@ -43,6 +43,63 @@ async def test_fixed_exit_closes_exact_position_quantity() -> None:
     assert request.candidate.reason == "stop_loss"
 
 
+async def test_scheduled_flatten_targets_full_position_as_reduce_only_market() -> None:
+    manager = LiveExitManager(config=_config(PositionExitMode.FIXED))
+    now = datetime(2026, 7, 3, 23, 45, tzinfo=UTC)
+
+    requests = await manager.requests_for_scheduled_flatten(
+        (_long_position(),),
+        now=now,
+        reference_prices={"BTCUSDT": Decimal("99")},
+    )
+
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.quantity == Decimal("1.25")
+    assert request.candidate.reduce_only is True
+    assert request.candidate.entry_type is EntryType.MARKET
+    assert request.candidate.reason == "scheduled_risk_window_flatten_attempt_1"
+
+
+async def test_scheduled_flatten_cancels_recovery_before_using_current_position(
+) -> None:
+    recovery_plan = OrderExecutionPlan(
+        intent_id="recovery-intent",
+        run_id="run-1",
+        client_order_id="recovery-client",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("0.5"),
+        price=Decimal("100.88"),
+        reduce_only=True,
+        created_at=datetime(2026, 7, 3, 23, 30, tzinfo=UTC),
+        position_side=FuturesPositionSide.LONG,
+        quantized=True,
+    )
+    position = replace(
+        _long_position(),
+        quantity=Decimal("1.25"),
+        opened_at=datetime(2026, 7, 3, 23, 20, tzinfo=UTC),
+        recovery_order_client_id=recovery_plan.client_order_id,
+        recovery_order_created_at=recovery_plan.created_at,
+        recovery_order_plan=recovery_plan,
+    )
+    manager = LiveExitManager(config=_config(PositionExitMode.FIXED))
+
+    requests = await manager.requests_for_scheduled_flatten(
+        (position,),
+        now=datetime(2026, 7, 3, 23, 45, tzinfo=UTC),
+    )
+
+    assert len(requests) == 1
+    request = requests[0]
+    assert isinstance(request, LiveExitCancellationRequest)
+    assert request.cancel_plan.client_order_id == "recovery-client"
+    assert request.fallback_quantity == Decimal("1.25")
+    assert request.fallback_to_current_position is True
+
+
 async def test_candle_exit_retries_until_a_close_order_is_observed() -> None:
     candle = ClosedCandle15m(
         symbol="BTCUSDT",

@@ -123,6 +123,9 @@ from crypto_momentum_lab.live_rollout.postgres_runtime import (
     poll_live_market_states,
 )
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
+from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
+    ScheduledRiskWindowConfig,
+)
 from crypto_momentum_lab.live_rollout.session import (
     LiveRolloutSession,
     LiveSessionConfig,
@@ -1640,6 +1643,54 @@ async def _run_live_daemon(
             backend=state_machine,
             account_label=account_label,
         )
+
+        async def cancel_unfilled_live_entry_orders(
+            plans: tuple[OrderExecutionPlan, ...],
+        ) -> int:
+            """Cancel known and exchange-visible opening orders.
+
+            The schedule owns the whole live account during the volatility
+            window, so the final exchange read also catches an opening order
+            that was not yet present in the local unresolved-order table.
+            Known orders still go through the coordinator/state machine so
+            their durable lifecycle is preserved.
+            """
+
+            assert client is not None
+            assert execution_coordinator is not None
+            known_ids = {plan.client_order_id for plan in plans}
+            cancelled_count = 0
+            for plan in plans:
+                result = await execution_coordinator.cancel_order(plan)
+                if (
+                    result.state is ExchangeOrderState.REJECTED
+                    or not result.state.terminal
+                ):
+                    raise RuntimeError(
+                        "known opening order cancellation was not confirmed: "
+                        f"{plan.client_order_id}:{result.state.value}"
+                    )
+                cancelled_count += 1
+
+            open_orders = await client.fetch_open_orders()
+            for order in open_orders:
+                if order.reduce_only or order.client_order_id in known_ids:
+                    continue
+                snapshot = await client.cancel_order_by_client_id(
+                    order.symbol,
+                    order.client_order_id,
+                )
+                if (
+                    snapshot.state is ExchangeOrderState.REJECTED
+                    or not snapshot.state.terminal
+                ):
+                    raise RuntimeError(
+                        "exchange opening order cancellation was not confirmed: "
+                        f"{order.client_order_id}:{snapshot.state.value}"
+                    )
+                cancelled_count += 1
+            return cancelled_count
+
         await _reconcile_run_orders(
             order_repository=order_repository,
             state_machine=execution_coordinator,
@@ -2149,6 +2200,7 @@ async def _run_live_daemon(
                 entry_policy_enforce=entry_policy_enforce,
                 entry_order_type=entry_order_type,
                 entry_limit_ttl_seconds=entry_limit_ttl_seconds,
+                scheduled_risk_window=ScheduledRiskWindowConfig(),
             ),
             exit_manager=LiveExitManager(
                 config=LiveExitConfig(
@@ -2171,6 +2223,8 @@ async def _run_live_daemon(
                 candle_loader=None,
             ),
             exit_recovery_client=client,
+            cancel_unfilled_entry_orders=cancel_unfilled_live_entry_orders,
+            fetch_exchange_positions=client.fetch_positions,
             on_managed_position_symbols=(
                 None
                 if closed_candle_feed is None

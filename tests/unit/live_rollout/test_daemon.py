@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.exc import OperationalError
 
+from crypto_momentum_lab.domain.account import AccountPositionSnapshot
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderEvent,
     ExchangeOrderSnapshot,
@@ -53,6 +54,9 @@ from crypto_momentum_lab.live_rollout.exits import (
     ManagedLivePosition,
 )
 from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
+from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
+    ScheduledRiskWindowConfig,
+)
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PersistedExchangeOrder,
 )
@@ -1718,6 +1722,96 @@ async def test_live_daemon_halts_on_unmanaged_account_position() -> None:
     assert exchange.calls == []
 
 
+async def test_scheduled_risk_window_flattens_verifies_and_reopens_entries() -> None:
+    exchange = PlanAwareExchange()
+    scheduled_now = datetime(2026, 7, 3, 23, 45, tzinfo=UTC)
+    current_time = [scheduled_now]
+    position = ManagedLivePosition(
+        symbol="BTCUSDT",
+        side="long",
+        position_side=FuturesPositionSide.LONG,
+        quantity=Decimal("0.001"),
+        entry_price=Decimal("30000"),
+        opened_at=scheduled_now - timedelta(minutes=1),
+    )
+    cancellation_calls: list[tuple[OrderExecutionPlan, ...]] = []
+
+    async def cancel_entries(
+        plans: tuple[OrderExecutionPlan, ...],
+    ) -> int:
+        cancellation_calls.append(plans)
+        return 0
+
+    async def fetch_positions() -> tuple[AccountPositionSnapshot, ...]:
+        return (
+            AccountPositionSnapshot(
+                environment="live",
+                account_label="primary",
+                symbol="BTCUSDT",
+                position_side="LONG",
+                position_amt=Decimal("0"),
+                entry_price=Decimal("30000"),
+                mark_price=Decimal("30000"),
+                unrealized_pnl=Decimal("0"),
+                notional=Decimal("0"),
+                leverage=10,
+                margin_type="CROSSED",
+                observed_at=current_time[0],
+                raw_payload={},
+            ),
+        )
+
+    async def position_context(state: object) -> LiveDaemonRuntimeContext:
+        del state
+        return replace(
+            _runtime_context(),
+            open_position_symbols=frozenset({"BTCUSDT"}),
+            managed_positions=(position,),
+        )
+
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=position_context,
+        exit_manager=LiveExitManager(
+            config=LiveExitConfig(
+                run_id="run-1",
+                strategy_name="compression_breakout",
+                strategy_version="v0",
+                strategy_config_hash="a" * 64,
+                policy=PositionExitPolicy(),
+            )
+        ),
+        clock=lambda: current_time[0],
+        scheduled_risk_window=ScheduledRiskWindowConfig(),
+        cancel_unfilled_entry_orders=cancel_entries,
+        fetch_exchange_positions=fetch_positions,
+    )
+    daemon._latest_market_states["BTCUSDT"] = _state()
+
+    failure = await daemon.process_scheduled_risk_window(now=scheduled_now)
+
+    assert failure is None
+    assert daemon.entry_enabled is False
+    assert cancellation_calls == [()]
+    assert len(exchange.plans) == 1
+    assert exchange.plans[0].reduce_only is True
+    assert exchange.plans[0].order_type == "MARKET"
+
+    verification_time = datetime(2026, 7, 3, 23, 58, tzinfo=UTC)
+    current_time[0] = verification_time
+    failure = await daemon.process_scheduled_risk_window(now=verification_time)
+
+    assert failure is None
+    assert daemon.entry_enabled is False
+
+    reopen_time = datetime(2026, 7, 4, 0, 2, tzinfo=UTC)
+    current_time[0] = reopen_time
+    failure = await daemon.process_scheduled_risk_window(now=reopen_time)
+
+    assert failure is None
+    assert daemon.entry_enabled is True
+
+
 class FakeLiveRepository:
     def __init__(self) -> None:
         self.saved_checkpoint_run_ids: list[str] = []
@@ -1780,6 +1874,9 @@ def _daemon(
     reconcile_orders=None,
     exit_recovery_client=None,
     clock=None,
+    scheduled_risk_window: ScheduledRiskWindowConfig | None = None,
+    cancel_unfilled_entry_orders=None,
+    fetch_exchange_positions=None,
 ) -> LiveStrategyDaemon:
     order_repository = FakeOrderRepository()
     machine = OrderExecutionStateMachine(
@@ -1822,11 +1919,14 @@ def _daemon(
             entry_policy_compare_only=entry_policy_compare_only,
             entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
+            scheduled_risk_window=scheduled_risk_window,
         ),
         exit_manager=exit_manager,
         exit_recovery_client=exit_recovery_client,
         reconcile_orders=reconcile_orders,
         clock=clock or (lambda: NOW),
+        cancel_unfilled_entry_orders=cancel_unfilled_entry_orders,
+        fetch_exchange_positions=fetch_exchange_positions,
     )
 
 
