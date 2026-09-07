@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from sqlalchemy import (
+    Numeric,
     Select,
     String,
     and_,
@@ -454,11 +455,13 @@ def _account_margin_statement(
 ) -> Select[tuple[datetime, Decimal]]:
     """Fetch one latest aggregate initial-margin observation per bucket.
 
-    Position snapshots do not persist a separate initial-margin column. For
-    the USDT-margined live contracts this is reconstructed as
-    ``abs(notional) / leverage``. A missing or zero leverage falls back to the
-    notional so the chart remains conservative instead of reporting zero
-    exposure.
+    Binance's position-risk payload already contains the exchange-calculated
+    initial margin, but the typed snapshot projection keeps that value in
+    ``raw_payload`` and its legacy ``leverage`` column is often null. Prefer
+    the exchange value (including open-order initial margin when the payload
+    provides it), then fall back to ``abs(notional) / leverage``. A missing or
+    zero leverage ultimately falls back to notional so the chart remains
+    conservative instead of silently reporting zero exposure.
     """
     if interval_seconds <= 0:
         raise ValueError("interval_seconds must be positive")
@@ -481,7 +484,36 @@ def _account_margin_statement(
     ).table_valued("bucket").render_derived(name="margin_buckets")
     snapshot = aliased(AccountPositionSnapshotRow)
     bucket_start = bucket_series.c.bucket
+    raw_initial_margin = func.nullif(
+        snapshot.raw_payload["initialMargin"].astext,
+        "",
+    ).cast(Numeric(38, 18))
+    raw_position_initial_margin = func.nullif(
+        snapshot.raw_payload["positionInitialMargin"].astext,
+        "",
+    ).cast(Numeric(38, 18))
+    raw_open_order_initial_margin = func.nullif(
+        snapshot.raw_payload["openOrderInitialMargin"].astext,
+        "",
+    ).cast(Numeric(38, 18))
+    exchange_initial_margin = case(
+        (
+            raw_initial_margin.is_not(None) & (raw_initial_margin >= 0),
+            raw_initial_margin,
+        ),
+        (
+            raw_position_initial_margin.is_not(None)
+            & (raw_position_initial_margin >= 0),
+            raw_position_initial_margin
+            + func.coalesce(raw_open_order_initial_margin, 0),
+        ),
+        else_=None,
+    )
     margin_per_position = case(
+        (
+            exchange_initial_margin.is_not(None),
+            exchange_initial_margin,
+        ),
         (
             snapshot.leverage.is_not(None) & (snapshot.leverage > 0),
             func.abs(snapshot.notional) / snapshot.leverage,

@@ -164,6 +164,26 @@ def test_live_account_margin_query_aggregates_initial_margin_per_observation() -
     assert "group by account_position_snapshots_1.observed_at" in sql
 
 
+def test_live_account_margin_query_uses_exchange_initial_margin_payload() -> None:
+    statement = _account_margin_statement(
+        environment="live",
+        account_label="account-2",
+        window_start=datetime(2026, 9, 5, tzinfo=UTC),
+        window_end=datetime(2026, 9, 6, tzinfo=UTC),
+        interval_seconds=6 * 60,
+    )
+    sql = str(
+        statement.compile(
+            dialect=postgresql_dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).lower()
+
+    assert "raw_payload" in sql
+    assert "positioninitialmargin" in sql
+    assert "initialmargin" in sql
+
+
 def test_downsample_equity_snapshots_keeps_latest_row_in_each_utc_bucket() -> None:
     start = datetime(2026, 7, 28, tzinfo=UTC)
     rows = [

@@ -47,7 +47,7 @@ const LIVE_ACCOUNT_METRIC_DEFINITIONS = [
   {
     key: "equity",
     title: "资金权益金额变化",
-    subtitle: "USDT · 实际账户权益",
+    subtitle: "USDT · 各账户首个权益点归零",
   },
   {
     key: "equity_change_ratio",
@@ -57,7 +57,7 @@ const LIVE_ACCOUNT_METRIC_DEFINITIONS = [
   {
     key: "margin_used",
     title: "保证金占用金额对比",
-    subtitle: "USDT · 按名义价值 / 杠杆估算",
+    subtitle: "USDT · 交易所初始保证金（含挂单）",
   },
   {
     key: "margin_occupancy_ratio",
@@ -113,7 +113,7 @@ export function renderLiveAccountMetrics(data) {
   return `<div class="block live-account-metrics-block" data-live-account-metrics-selected="${selectedRange.key}">
     ${blockTitle("四账户资金与风险时序", `LIVE ACCOUNT METRICS · ROLLING ${selectedRange.shortLabel} · ${equitySampleLabel(interval)} BUCKETS`, liveMetricsRangeControls(selectedRange.key))}
     <div class="live-metrics-context"><span>${esc(windowText)}</span><span>${accounts.length} 个账户 · ${interval >= 86400 ? `${Math.round(interval / 86400)} 天` : `${Math.round(interval / 60)} 分钟`}采样</span></div>
-    <p class="live-metrics-note">权益比例以窗口首个可用权益点为基准；保证金占用按各时点持仓名义价值除以杠杆汇总，回撤金额与比例均相对窗口内历史峰值计算。</p>
+    <p class="live-metrics-note">权益金额与比例均以各账户窗口首个可用权益点为基准（起点分别为 0 USDT 与 0%）；保证金占用为交易所初始保证金，回撤金额与比例均相对窗口内历史峰值计算。</p>
     <div class="live-metrics-grid">${charts}</div>
   </div>`;
 }

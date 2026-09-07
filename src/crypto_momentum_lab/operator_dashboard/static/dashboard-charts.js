@@ -531,7 +531,7 @@ function liveAccountMetricBucketMap(account, metricKey, intervalSeconds) {
 function metricValueFormat(metricKey) {
   return metricKey.endsWith("_ratio")
     ? metricKey === "margin_occupancy_ratio" ? "percent" : "signed-percent"
-    : metricKey === "equity" ? "money" : "signed-money";
+    : "signed-money";
 }
 
 export function liveAccountMetricModel(
@@ -556,27 +556,39 @@ export function liveAccountMetricModel(
     0,
   );
   if (buckets.length < 2 || valueCount < 2) return null;
-  const series = normalizedAccounts.map((account, index) => ({
-    account,
-    label: account.account_label || `账户 ${index + 1}`,
-    color: LIVE_ACCOUNT_METRIC_COLORS[index % LIVE_ACCOUNT_METRIC_COLORS.length],
-    values: buckets.map((bucket) => maps[index].get(bucket) ?? null),
-    isLive: true,
-  }));
+  const series = normalizedAccounts.map((account, index) => {
+    const values = buckets.map((bucket) => maps[index].get(bucket) ?? null);
+    const baseline = metricKey === "equity"
+      ? values.find((value) => value != null)
+      : null;
+    return {
+      account,
+      label: account.account_label || `账户 ${index + 1}`,
+      color: LIVE_ACCOUNT_METRIC_COLORS[index % LIVE_ACCOUNT_METRIC_COLORS.length],
+      values: metricKey === "equity"
+        ? values.map((value) => (
+          value == null || baseline == null ? null : value - baseline
+        ))
+        : values,
+      isLive: true,
+    };
+  });
   const values = series.flatMap((seriesItem) => (
     seriesItem.values.filter((value) => value != null)
   ));
   const valueFormat = metricValueFormat(metricKey);
   const includeZero = valueFormat !== "money";
+  const nonNegativeMetric = metricKey === "margin_used"
+    || metricKey === "margin_occupancy_ratio";
   let min = includeZero ? Math.min(0, ...values) : Math.min(...values);
   let max = includeZero ? Math.max(0, ...values) : Math.max(...values);
   if (min === max) {
     const padding = Math.max(Math.abs(min) * 0.08, 0.01);
-    min -= padding;
+    min = nonNegativeMetric ? 0 : min - padding;
     max += padding;
   } else {
     const padding = Math.max((max - min) * 0.08, 0.01);
-    min -= padding;
+    min = nonNegativeMetric ? 0 : min - padding;
     max += padding;
   }
   const requestedStart = windowStart ? new Date(windowStart).getTime() : Number.NaN;

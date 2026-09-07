@@ -580,6 +580,14 @@ test("live account metric charts compare all four accounts with unit-aware axes"
   assert.equal(model.series.length, 4);
   assert.equal(model.points.length, 2);
   assert.equal(model.valueFormat, "percent");
+  const marginModel = liveAccountMetricModel(accounts, "margin_used", 360);
+  assert.equal(marginModel.min, 0);
+  const occupancyModel = liveAccountMetricModel(
+    accounts,
+    "margin_occupancy_ratio",
+    360,
+  );
+  assert.equal(occupancyModel.min, 0);
   const html = liveAccountMetricChart(
     accounts,
     "drawdown_ratio",
@@ -595,6 +603,50 @@ test("live account metric charts compare all four accounts with unit-aware axes"
   const option = buildChartOption(payload);
   assert.equal(option.yAxis.axisLabel.formatter(0.01), "+1.00%");
   assert.equal(option.series.length, 4);
+});
+
+test("live account equity amount changes align each account to its first point", () => {
+  const model = liveAccountMetricModel(
+    [
+      {
+        account_label: "primary",
+        metrics_curve: [
+          {
+            observed_at: "2026-08-16T00:00:00Z",
+            equity: "1000",
+          },
+          {
+            observed_at: "2026-08-16T00:06:00Z",
+            equity: "1010",
+          },
+        ],
+      },
+      {
+        account_label: "account-2",
+        metrics_curve: [
+          {
+            observed_at: "2026-08-16T00:00:00Z",
+            equity: "2000",
+          },
+          {
+            observed_at: "2026-08-16T00:06:00Z",
+            equity: "1980",
+          },
+        ],
+      },
+    ],
+    "equity",
+    360,
+    "2026-08-16T00:00:00Z",
+    "2026-08-16T00:06:00Z",
+  );
+
+  assert.equal(model.valueFormat, "signed-money");
+  assert.deepEqual(
+    model.series.map((series) => series.values),
+    [[0, 10], [0, -20]],
+  );
+  assert.equal(model.points[0].values.every((value) => value === 0), true);
 });
 
 test("live account renderer separates sync service from account configuration", () => {
