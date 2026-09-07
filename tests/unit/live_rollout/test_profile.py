@@ -30,10 +30,10 @@ def test_profile_resolves_account_specific_environment_values() -> None:
 def test_profile_defaults_to_primary_production_values() -> None:
     assert LiveOrderFlowImpulseProfile.from_environment({}) == (
         LiveOrderFlowImpulseProfile(
-            impulse_window_buckets=3,
+            impulse_window_buckets=2,
             confirmation_buckets=1,
-            min_return_pct=Decimal("0.01"),
-            min_aggressive_imbalance=Decimal("0.40"),
+            min_return_pct=Decimal("0.005"),
+            min_aggressive_imbalance=Decimal("0.60"),
             min_notional_intensity=Decimal("2"),
             cooldown_buckets=0,
         )

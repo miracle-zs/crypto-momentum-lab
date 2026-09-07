@@ -499,12 +499,12 @@ def test_strategy_config_hash_includes_live_entry_filters() -> None:
     assert enforced != unfiltered
 
 
-def test_live_defaults_disable_ema_and_use_lower_orderflow_imbalance() -> None:
+def test_live_defaults_disable_ema_and_use_primary_orderflow_imbalance() -> None:
     assert main._LIVE_ENTRY_PRICE_ABOVE_EMA5 is False
     assert main._LIVE_ENTRY_PRICE_ABOVE_EMA10 is False
     assert main._live_strategy_config()[
         "order_flow_impulse_min_aggressive_imbalance"
-    ] == Decimal("0.40")
+    ] == Decimal("0.60")
 
 
 def test_strategy_config_hash_includes_account_scoped_profile() -> None:
