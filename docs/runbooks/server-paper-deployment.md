@@ -88,11 +88,13 @@ changes; do not silently reuse a mismatched run.
    data to become healthy, then recreate each strategy service:
 
    ```bash
+   docker compose --env-file .env.server -f compose.server.yaml config --quiet
    docker compose --env-file .env.server -f compose.server.yaml build
    docker compose --env-file .env.server -f compose.server.yaml up -d --no-deps market-data
    docker compose --env-file .env.server -f compose.server.yaml ps market-data
-  docker compose --env-file .env.server -f compose.server.yaml up -d --no-deps \
-     paper-orderflow-pair dashboard
+   docker compose --env-file .env.server -f compose.server.yaml up -d --no-deps \
+     paper-orderflow-pair paper-orderflow-gainer10-pair \
+     paper-b1-gainer100 paper-b1-gainer100-ema
    ```
 
    Do not run the final command until `market-data` reports `healthy`. Each
@@ -100,6 +102,16 @@ changes; do not silently reuse a mismatched run.
    and its latest strategy checkpoint, and consumes only newly closed market
    states. A gap resets that symbol's warm-up cache; the online service never
    synthesizes historical entries or exits.
+
+   Before building an upgrade, check for tracked changes, fast-forward to the
+   reviewed commit, back up `.env.server` while preserving its `0600` mode, and
+   set `CML_CODE_COMMIT` to that exact commit. Preserve unrelated changes and
+   existing backup files. Recreate only services affected by the release.
+   Dashboard releases must also check `CML_DASHBOARD_IMAGE`: an explicit override
+   keeps that service on its pinned image even when `CML_CODE_COMMIT` changes.
+   Live strategy and execution services require their own rollout procedure.
+   Do not use `--remove-orphans`; live account overlays can appear as orphans
+   when only this Compose file is selected.
 
    The server capture subscribes to `aggTrade`, `bookTicker`, and `forceOrder`
    for live state generation, but raw-file archival is limited to
@@ -111,12 +123,41 @@ changes; do not silently reuse a mismatched run.
    server block, validate with `nginx -t`, and reload Nginx. The dashboard is
    anonymous by default, so expose it only over TLS or a private tunnel/VPN.
 
+### Deployment timing and efficient verification
+
+The 2026-09-08 deployment took approximately 13 minutes end to end, including
+operator checks. Image building took about 82 seconds and recreating the four
+paper containers plus dashboard took about 23 seconds. Paper readiness took
+roughly 2–3 minutes, including the first checkpoint and subsequent probe.
+Repeated serial checks and interactive SSH calls that waited after command
+completion added avoidable time. Total deployment duration is not service
+downtime: existing containers continue running during the build.
+
+For a comparable incremental release, aim for approximately 3–5 minutes; this
+is a planning target, not a timeout or availability guarantee. Cold builds,
+archive recovery, database load, and checkpoint restoration can take longer.
+
+- Complete code review and local tests before the deployment window. On the
+  server, combine independent preflight checks into one bounded SSH operation.
+- Build once, restart market-data, and wait for its health before restarting
+  affected paper services. Poll health every 5–10 seconds with a bounded
+  deadline; inspect logs on failure or timeout instead of restarting repeatedly.
+- Collect all affected service health states and image identities together,
+  then check recent logs, checkpoint progress, and the HTTP health endpoint.
+  Avoid reopening source files or repeating successful checks without new
+  evidence. Configure the SSH runner to return when the command exits.
+- `start_period: 15m` is the market-data startup failure grace period, not a
+  mandatory delay. A successful probe can mark it healthy immediately. Paper
+  readiness depends on a successful checkpoint; allow for probe scheduling
+  after that checkpoint rather than sleeping for the entire grace period.
+
 ## Verify
 
 ```bash
 docker compose --env-file .env.server -f compose.server.yaml ps
 docker compose --env-file .env.server -f compose.server.yaml logs --tail=200 \
-  market-data paper-orderflow-pair
+  market-data paper-orderflow-pair paper-orderflow-gainer10-pair \
+  paper-b1-gainer100 paper-b1-gainer100-ema
 curl -fsS http://127.0.0.1:8765/api/health
 curl -fsS http://127.0.0.1/momentum/api/health
 ```
