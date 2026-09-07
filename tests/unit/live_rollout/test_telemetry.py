@@ -346,6 +346,35 @@ async def test_high_frequency_telemetry_stays_in_memory_when_not_persisted() -> 
     assert telemetry.persist_failure_count == 0
 
 
+def test_live_telemetry_prunes_only_inactive_unprotected_series() -> None:
+    telemetry = LiveRuntimeTelemetry(run_id="run-1")
+    old = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+    telemetry._add_sample(
+        symbol="BTCUSDT",
+        lane="entry",
+        transition="a->b",
+        value=1.0,
+        occurred_at=old,
+    )
+    telemetry._add_sample(
+        symbol="ETHUSDT",
+        lane="entry",
+        transition="a->b",
+        value=2.0,
+        occurred_at=old,
+    )
+
+    pruned = telemetry.prune_inactive_symbols(
+        now=old + timedelta(hours=2),
+        protected_symbols={"BTCUSDT"},
+        inactive_after=timedelta(hours=1),
+    )
+
+    assert pruned == 1
+    assert telemetry.sample_series_count == 1
+    assert telemetry.latency_summary()["BTCUSDT"]["entry"]["a->b"]["count"] == 1
+
+
 def test_live_database_plane_urls_prefer_explicit_plane_environment(
     monkeypatch,
 ) -> None:

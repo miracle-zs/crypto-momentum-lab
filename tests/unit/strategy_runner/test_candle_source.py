@@ -63,6 +63,69 @@ def test_closed_candle_ema_provider_uses_closed_prices_and_caches_boundary() -> 
     assert source.calls == 1
 
 
+def test_closed_candle_ema_provider_prunes_old_boundaries_and_idle_symbols() -> None:
+    candle_start = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    candles = tuple(
+        ClosedCandle15m(
+            symbol="BTCUSDT",
+            candle_start=candle_start + index * timedelta(minutes=15),
+            candle_end=candle_start + (index + 1) * timedelta(minutes=15),
+            open_price=Decimal(index + 1),
+            close_price=Decimal(index + 1),
+        )
+        for index in range(10)
+    )
+    access_at = datetime(2026, 8, 1, 15, 0, tzinfo=UTC)
+    provider = ClosedCandleEmaProvider(
+        FakeClosedCandleSource(candles),
+        clock=lambda: access_at,
+    )
+    for boundary in (12, 12, 12):
+        provider.load(
+            symbol="BTCUSDT",
+            observed_at=datetime(2026, 8, 1, boundary, 0, tzinfo=UTC),
+        )
+
+    assert provider.cache_entry_count == 1
+
+    provider.load(
+        symbol="BTCUSDT",
+        observed_at=datetime(2026, 8, 1, 12, 15, tzinfo=UTC),
+    )
+    provider.load(
+        symbol="BTCUSDT",
+        observed_at=datetime(2026, 8, 1, 12, 30, tzinfo=UTC),
+    )
+    assert provider.cache_entry_count == 3
+    assert (
+        provider.prune(
+            now=access_at,
+            protected_symbols={"BTCUSDT"},
+            max_boundaries_per_symbol=2,
+        )
+        == 1
+    )
+    assert provider.cache_entry_count == 2
+
+    idle_provider = ClosedCandleEmaProvider(
+        FakeClosedCandleSource(candles),
+        clock=lambda: access_at,
+    )
+    idle_provider.load(
+        symbol="ETHUSDT",
+        observed_at=datetime(2026, 8, 1, 12, 0, tzinfo=UTC),
+    )
+    assert (
+        idle_provider.prune(
+            now=access_at + timedelta(hours=2),
+            protected_symbols=(),
+            inactive_after=timedelta(hours=1),
+        )
+        == 1
+    )
+    assert idle_provider.cache_entry_count == 0
+
+
 def test_binance_candle_source_loads_closed_15m_rows_and_caches_range() -> None:
     requests: list[httpx.Request] = []
 

@@ -11,7 +11,7 @@ import asyncio
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
@@ -442,6 +442,7 @@ class LiveRuntimeTelemetry:
         self._samples: dict[tuple[str, str, str], deque[float]] = defaultdict(
             lambda: deque(maxlen=self._max_samples_per_metric)
         )
+        self._sample_last_seen: dict[tuple[str, str, str], datetime] = {}
         self._recent_events: deque[LiveRuntimeEvent] = deque(maxlen=queue_size)
         # Keep the production-facing aggregate intentionally low-cardinality:
         # lane, trigger source and terminal reason only.  Source ids and
@@ -467,6 +468,49 @@ class LiveRuntimeTelemetry:
     @property
     def recent_events(self) -> tuple[LiveRuntimeEvent, ...]:
         return tuple(self._recent_events)
+
+    @property
+    def sample_series_count(self) -> int:
+        return len(self._samples)
+
+    @property
+    def sample_count(self) -> int:
+        return sum(len(values) for values in self._samples.values())
+
+    def prune_inactive_symbols(
+        self,
+        *,
+        now: datetime,
+        protected_symbols: Collection[str] = (),
+        inactive_after: timedelta = timedelta(hours=1),
+    ) -> int:
+        """Drop latency sample series for symbols that are no longer active.
+
+        Recent events and in-flight traces remain untouched.  Telemetry is an
+        observational cache, so dropping an old sample series must never alter
+        the live decision or order path.  The caller supplies the account and
+        universe protection set; active series keep their existing sample
+        window rather than being forced through a global byte limit.
+        """
+
+        _require_aware(now, "now")
+        if inactive_after <= timedelta(0):
+            raise ValueError("inactive_after must be positive")
+        protected = {
+            symbol.strip().upper()
+            for symbol in protected_symbols
+            if symbol.strip()
+        }
+        cutoff = now - inactive_after
+        stale_keys = tuple(
+            key
+            for key, last_seen in self._sample_last_seen.items()
+            if key[0].strip().upper() not in protected and last_seen < cutoff
+        )
+        for key in stale_keys:
+            self._samples.pop(key, None)
+            self._sample_last_seen.pop(key, None)
+        return len(stale_keys)
 
     def _trace_id_for_ingress(
         self,
@@ -855,6 +899,7 @@ class LiveRuntimeTelemetry:
         )
         request_started_at: datetime | None = None
         request_attempt: int | None = None
+        pending: deque[tuple[int, datetime]] | None = None
         if is_request:
             request_attempt = trace.exchange_attempts.get(operation, 0) + 1
             trace.exchange_attempts[operation] = request_attempt
@@ -927,6 +972,7 @@ class LiveRuntimeTelemetry:
                     f"{operation}_response_received"
                 ),
                 value=(occurred_at - request_started_at).total_seconds() * 1000,
+                occurred_at=occurred_at,
             )
 
     async def account_fill(
@@ -1054,6 +1100,7 @@ class LiveRuntimeTelemetry:
                         lane=lane,
                         transition=f"{previous_phase}->{phase}",
                         value=delta_ms,
+                        occurred_at=occurred_at,
                     )
             if (
                 MARKET_STATE_RECEIVED in trace.phase_at
@@ -1070,6 +1117,7 @@ class LiveRuntimeTelemetry:
                         lane=lane,
                         transition=f"{MARKET_STATE_RECEIVED}->{phase}",
                         value=origin_delta_ms,
+                        occurred_at=occurred_at,
                     )
         if update_phase and (
             phase not in trace.phase_at or phase in _REPEATABLE_PHASES
@@ -1150,8 +1198,12 @@ class LiveRuntimeTelemetry:
         lane: str,
         transition: str,
         value: float,
+        occurred_at: datetime,
     ) -> None:
-        self._samples[(symbol, lane, transition)].append(value)
+        _require_aware(occurred_at, "occurred_at")
+        key = (symbol, lane, transition)
+        self._samples[key].append(value)
+        self._sample_last_seen[key] = occurred_at
 
     def _enqueue(self, event: LiveRuntimeEvent) -> None:
         if self._queue is None:

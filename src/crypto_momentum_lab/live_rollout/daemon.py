@@ -112,6 +112,9 @@ log = structlog.get_logger()
 _EXIT_RECOVERY_PREFIX = "live-exit-recovery-"
 _EXIT_RECOVERY_MAX_ATTEMPTS = 3
 _EXIT_RECOVERY_RETRY_DELAYS_SECONDS = (2.0, 5.0, 15.0)
+_CACHE_MAINTENANCE_INTERVAL = timedelta(minutes=1)
+_STRATEGY_CACHE_INACTIVE_AFTER = timedelta(minutes=15)
+_TELEMETRY_CACHE_INACTIVE_AFTER = timedelta(hours=1)
 
 
 class LiveRuntimeStrategy(Protocol):
@@ -698,6 +701,9 @@ class LiveStrategyDaemon:
         self._cancel_unfilled_entry_orders = cancel_unfilled_entry_orders
         self._fetch_exchange_positions = fetch_exchange_positions
         self._managed_position_symbols: frozenset[str] = frozenset()
+        self._managed_order_symbols: frozenset[str] = frozenset()
+        self._managed_position_symbols_known = False
+        self._last_cache_maintenance_at: datetime | None = None
         self._context_generation = 0
         self._run_active = False
         self._entry_enabled = True
@@ -729,10 +735,120 @@ class LiveStrategyDaemon:
         self,
         context: LiveDaemonRuntimeContext,
     ) -> None:
-        symbols = context.open_position_symbols or frozenset()
+        symbols = frozenset(
+            (context.open_position_symbols or frozenset())
+            | context.unmanaged_position_symbols
+        )
         self._managed_position_symbols = symbols
+        self._managed_order_symbols = frozenset(
+            order.plan.symbol.strip().upper()
+            for order in context.unresolved_orders
+            if order.plan.symbol.strip()
+        )
+        self._managed_position_symbols_known = True
         if self._on_managed_position_symbols is not None:
             await self._on_managed_position_symbols(symbols)
+
+    def _maybe_prune_runtime_caches(
+        self,
+        *,
+        now: datetime,
+        current_symbol: str,
+        active_symbols: frozenset[str] | None = None,
+    ) -> None:
+        """Incrementally prune cold derived state without blocking the loop."""
+
+        if not self._managed_position_symbols_known:
+            return
+        previous = self._last_cache_maintenance_at
+        if (
+            previous is not None
+            and now - previous < _CACHE_MAINTENANCE_INTERVAL
+        ):
+            return
+
+        protected = {
+            symbol.strip().upper()
+            for symbol in self._managed_position_symbols
+            if symbol.strip()
+        }
+        protected.update(self._managed_order_symbols)
+        protected.add(current_symbol.strip().upper())
+        if active_symbols is not None:
+            protected.update(
+                symbol.strip().upper()
+                for symbol in active_symbols
+                if symbol.strip()
+            )
+        protected.update(
+            plan.symbol.strip().upper()
+            for plan, _notional in self._pending_entry_plans.values()
+            if plan.symbol.strip()
+        )
+        strategy_protected = getattr(
+            self._strategy,
+            "cache_protected_symbols",
+            None,
+        )
+        if callable(strategy_protected):
+            protected.update(strategy_protected())
+        protected_symbols = frozenset(protected)
+
+        strategy_prune = getattr(
+            self._strategy,
+            "prune_inactive_symbols",
+            None,
+        )
+        evicted_strategy_symbols: tuple[str, ...] = ()
+        if callable(strategy_prune):
+            evicted_strategy_symbols = strategy_prune(
+                now=now,
+                protected_symbols=protected_symbols,
+                inactive_after=_STRATEGY_CACHE_INACTIVE_AFTER,
+            )
+
+        evicted_telemetry_series = 0
+        if self._telemetry is not None:
+            telemetry_prune = getattr(
+                self._telemetry,
+                "prune_inactive_symbols",
+                None,
+            )
+            if callable(telemetry_prune):
+                evicted_telemetry_series = telemetry_prune(
+                    now=now,
+                    protected_symbols=protected_symbols,
+                    inactive_after=_TELEMETRY_CACHE_INACTIVE_AFTER,
+                )
+
+        self._last_cache_maintenance_at = now
+        if evicted_strategy_symbols or evicted_telemetry_series:
+            log.info(
+                "live_runtime_cache_pruned",
+                run_id=self._config.run_id,
+                protected_symbol_count=len(protected_symbols),
+                evicted_strategy_symbols=len(evicted_strategy_symbols),
+                evicted_telemetry_series=evicted_telemetry_series,
+                buffered_symbol_count=getattr(
+                    self._strategy,
+                    "buffered_symbol_count",
+                    None,
+                ),
+                buffered_state_count=getattr(
+                    self._strategy,
+                    "buffered_state_count",
+                    None,
+                ),
+                telemetry_sample_series_count=(
+                    None
+                    if self._telemetry is None
+                    else getattr(
+                        self._telemetry,
+                        "sample_series_count",
+                        None,
+                    )
+                ),
+            )
 
     def _invalidate_context_cache(self) -> None:
         self._context_generation += 1
@@ -1011,6 +1127,7 @@ class LiveStrategyDaemon:
         states: AsyncIterable[MarketState15s],
     ) -> LiveDaemonResult:
         self._run_active = True
+        self._last_cache_maintenance_at = None
         await self._checkpoint_writer.start()
         result: LiveDaemonResult | None = None
         exit_outcome = _ExitLaneOutcome()
@@ -2016,6 +2133,11 @@ class LiveStrategyDaemon:
         entry_symbols_loaded_at: datetime | None = None
         async for prefetched in self._states_with_prefetched_context(states):
             state = prefetched.state
+            self._maybe_prune_runtime_caches(
+                now=self._clock(),
+                current_symbol=state.symbol,
+                active_symbols=entry_symbols,
+            )
             previous_state = self._latest_market_states.get(state.symbol)
             if (
                 previous_state is None

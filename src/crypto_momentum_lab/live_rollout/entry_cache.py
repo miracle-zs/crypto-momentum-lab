@@ -13,7 +13,7 @@ import threading
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import structlog
 
@@ -323,6 +323,7 @@ class LiveEntryFilterCache:
         if universe_data is not None:
             self._universe_data_by_bucket[bucket] = universe_data
         self._prune_pool_history(bucket)
+        self._prune_ema_provider(observed_at, symbols)
         self._ready = bool(symbols)
         self._last_refresh_at = observed_at
         self._last_refresh_duration_seconds = time.monotonic() - started
@@ -420,6 +421,28 @@ class LiveEntryFilterCache:
             for key, value in self._snapshots.items()
             if key[1].timestamp() >= cutoff
         }
+
+    def _prune_ema_provider(
+        self,
+        observed_at: datetime,
+        protected_symbols: frozenset[str],
+    ) -> None:
+        prune = getattr(self._ema_provider, "prune", None)
+        if not callable(prune):
+            return
+        with self._provider_lock:
+            pruned = prune(
+                now=observed_at,
+                protected_symbols=protected_symbols,
+                inactive_after=timedelta(hours=1),
+                max_boundaries_per_symbol=32,
+            )
+        if pruned:
+            log.info(
+                "live_entry_ema_cache_pruned",
+                pruned_entries=pruned,
+                protected_symbols=len(protected_symbols),
+            )
 
     @staticmethod
     def _log_refresh_failure(stage: str, error: Exception) -> None:

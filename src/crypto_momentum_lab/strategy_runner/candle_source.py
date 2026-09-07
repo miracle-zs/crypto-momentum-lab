@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -59,12 +59,19 @@ class ClosedCandleEmaProvider:
         source: ClosedCandle15mSource,
         *,
         lookback_candles: int = 200,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if lookback_candles < 10:
             raise ValueError("lookback_candles must be at least 10")
         self._source = source
         self._lookback_candles = lookback_candles
+        self._clock = clock
         self._cache: dict[tuple[str, datetime], ClosedCandleEmaSnapshot] = {}
+        self._last_accessed_at: dict[tuple[str, datetime], datetime] = {}
+
+    @property
+    def cache_entry_count(self) -> int:
+        return len(self._cache)
 
     def load(
         self,
@@ -75,8 +82,11 @@ class ClosedCandleEmaProvider:
         candle_end = _candle_start_15m(observed_at)
         normalized_symbol = symbol.strip().upper()
         cache_key = (normalized_symbol, candle_end)
+        accessed_at = self._clock()
+        _require_aware_datetime(accessed_at, "clock()")
         cached = self._cache.get(cache_key)
         if cached is not None:
+            self._last_accessed_at[cache_key] = accessed_at
             return cached
         candle_start = candle_end - self._lookback_candles * _CANDLE_INTERVAL
         candles = self._source.load_closed_candles(
@@ -98,7 +108,61 @@ class ClosedCandleEmaProvider:
             config_hash=_ema_config_hash(self._lookback_candles),
         )
         self._cache[cache_key] = snapshot
+        self._last_accessed_at[cache_key] = accessed_at
         return snapshot
+
+    def prune(
+        self,
+        *,
+        now: datetime | None = None,
+        protected_symbols: Collection[str] = (),
+        inactive_after: timedelta = timedelta(hours=1),
+        max_boundaries_per_symbol: int = 32,
+    ) -> int:
+        """Prune stale EMA snapshots without imposing a global byte cap.
+
+        Active symbols retain a bounded recent boundary history.  Inactive
+        symbols are removed once their snapshots have not been touched for
+        ``inactive_after``.  A cache miss remains safe because the provider
+        recomputes from the immutable candle source.
+        """
+
+        observed_at = self._clock() if now is None else now
+        _require_aware_datetime(observed_at, "now")
+        if inactive_after <= timedelta(0):
+            raise ValueError("inactive_after must be positive")
+        if max_boundaries_per_symbol <= 0:
+            raise ValueError("max_boundaries_per_symbol must be positive")
+        protected = {
+            symbol.strip().upper()
+            for symbol in protected_symbols
+            if symbol.strip()
+        }
+        cutoff = observed_at - inactive_after
+        keys_by_symbol: dict[str, list[tuple[str, datetime]]] = defaultdict(list)
+        for key in self._cache:
+            keys_by_symbol[key[0]].append(key)
+
+        stale_keys: set[tuple[str, datetime]] = set()
+        for symbol, keys in keys_by_symbol.items():
+            newest = sorted(keys, key=lambda key: key[1], reverse=True)
+            symbol_is_protected = symbol in protected
+            for index, key in enumerate(newest):
+                last_accessed = self._last_accessed_at.get(key)
+                keep_recent_boundary = index < max_boundaries_per_symbol
+                keep_recent_access = (
+                    last_accessed is not None and last_accessed >= cutoff
+                )
+                if symbol_is_protected:
+                    if not keep_recent_boundary:
+                        stale_keys.add(key)
+                elif not (keep_recent_boundary and keep_recent_access):
+                    stale_keys.add(key)
+
+        for key in stale_keys:
+            self._cache.pop(key, None)
+            self._last_accessed_at.pop(key, None)
+        return len(stale_keys)
 
 
 class ClosedCandle15mSource(Protocol):
@@ -384,3 +448,8 @@ def _candle_start_15m(value: datetime) -> datetime:
         second=0,
         microsecond=0,
     )
+
+
+def _require_aware_datetime(value: datetime, field_name: str) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")

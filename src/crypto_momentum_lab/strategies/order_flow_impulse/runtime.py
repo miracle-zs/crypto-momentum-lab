@@ -1,4 +1,5 @@
 from collections import deque
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -119,6 +120,70 @@ class OrderFlowImpulseRuntimeStrategy:
         self._warmup.pop(symbol, None)
         self._cooldown_remaining.pop(symbol, None)
         self._last_processed.pop(symbol, None)
+
+    @property
+    def buffered_symbol_count(self) -> int:
+        """Return the number of symbols with a derived rolling buffer."""
+
+        return len(self._buffers)
+
+    @property
+    def buffered_state_count(self) -> int:
+        """Return the total number of retained rolling states."""
+
+        return sum(len(buffer) for buffer in self._buffers.values())
+
+    def cache_protected_symbols(self) -> frozenset[str]:
+        """Return symbols whose strategy cooldown must survive cache pruning."""
+
+        return frozenset(
+            symbol
+            for symbol, remaining in self._cooldown_remaining.items()
+            if remaining > 0
+        )
+
+    def prune_inactive_symbols(
+        self,
+        *,
+        now: datetime,
+        protected_symbols: Collection[str] = (),
+        inactive_after: timedelta = timedelta(minutes=15),
+    ) -> tuple[str, ...]:
+        """Drop derived state for symbols that have been idle long enough.
+
+        The strategy keeps account-independent rolling state locally, but the
+        live daemon owns the protection set.  An evicted symbol starts from an
+        empty buffer when it returns and therefore fails closed until it has
+        warmed again.  This is deliberately an inactivity policy rather than
+        a global byte cap: active symbols retain the existing buffer length.
+        """
+
+        _require_aware_datetime(now, "now")
+        if inactive_after <= timedelta(0):
+            raise ValueError("inactive_after must be positive")
+        protected = {
+            symbol.strip().upper()
+            for symbol in protected_symbols
+            if symbol.strip()
+        }
+        protected.update(self.cache_protected_symbols())
+        cutoff = now - inactive_after
+        candidates = (
+            set(self._buffers)
+            | set(self._warmup)
+            | set(self._cooldown_remaining)
+            | set(self._last_processed)
+        )
+        evicted: list[str] = []
+        for symbol in sorted(candidates):
+            if symbol in protected:
+                continue
+            last_processed = self._last_processed.get(symbol)
+            if last_processed is not None and last_processed >= cutoff:
+                continue
+            self.reset_symbol(symbol)
+            evicted.append(symbol)
+        return tuple(evicted)
 
     def on_market_state(self, state: MarketState15s) -> StrategyDecision:
         self._last_processed[state.symbol] = state.bucket_start
@@ -350,3 +415,8 @@ def _checkpoint_sequence(payload: dict[str, JsonValue]) -> int:
     except (TypeError, ValueError):
         return 0
     return max(sequence, 0)
+
+
+def _require_aware_datetime(value: datetime, field_name: str) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")

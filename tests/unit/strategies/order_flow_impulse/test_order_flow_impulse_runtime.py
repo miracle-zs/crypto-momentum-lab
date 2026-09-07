@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -101,6 +102,37 @@ def test_orderflow_impulse_resets_symbol_after_a_market_data_gap() -> None:
     assert decision.signals == ()
     assert decision.rejections[0].reason is RejectionReason.INSUFFICIENT_WARMUP
     assert strategy.checkpoint().payload["buffer_sizes"] == {"BTCUSDT": 1}
+
+
+def test_orderflow_impulse_prunes_only_inactive_unprotected_symbols() -> None:
+    strategy = _strategy()
+    strategy.on_market_state(_state(0, Decimal("100.00")))
+    strategy.on_market_state(
+        replace(_state(0, Decimal("200.00")), symbol="ETHUSDT")
+    )
+
+    evicted = strategy.prune_inactive_symbols(
+        now=datetime(2026, 7, 4, 0, 10, tzinfo=UTC),
+        protected_symbols={"BTCUSDT"},
+        inactive_after=timedelta(minutes=5),
+    )
+
+    assert evicted == ("ETHUSDT",)
+    assert strategy.checkpoint().payload["buffer_sizes"] == {"BTCUSDT": 1}
+    assert strategy.buffered_symbol_count == 1
+
+
+def test_orderflow_impulse_keeps_symbol_while_cooldown_is_active() -> None:
+    strategy = _strategy()
+    _last_decision(strategy, _impulse_states())
+
+    evicted = strategy.prune_inactive_symbols(
+        now=datetime(2026, 7, 4, 0, 10, tzinfo=UTC),
+        inactive_after=timedelta(minutes=5),
+    )
+
+    assert evicted == ()
+    assert strategy.buffered_symbol_count == 1
 
 
 def _strategy() -> OrderFlowImpulseRuntimeStrategy:
