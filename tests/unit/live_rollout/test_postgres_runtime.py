@@ -501,6 +501,49 @@ def test_late_fill_after_an_exit_is_a_new_position_episode() -> None:
     assert managed[0].closing_order_filled is False
 
 
+def test_unconfirmed_reopen_is_not_attributed_to_closed_batch() -> None:
+    old_entry_at = NOW
+    old_exit_created_at = NOW + timedelta(seconds=10)
+    old_exit_filled_at = NOW + timedelta(seconds=15)
+    pending_entry_created_at = NOW + timedelta(seconds=20)
+
+    managed, unmanaged = _classify_live_positions(
+        [_position(position_amt=Decimal("0.25"))],
+        [
+            _order(
+                reduce_only=True,
+                side="SELL",
+                quantity=Decimal("0.5"),
+                executed_quantity=Decimal("0.5"),
+                created_at=old_exit_created_at,
+                updated_at=old_exit_filled_at,
+            ),
+            _order(
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("0.25"),
+                executed_quantity=Decimal("0"),
+                created_at=pending_entry_created_at,
+                updated_at=pending_entry_created_at,
+                state=ExchangeOrderState.ACKNOWLEDGED.value,
+                client_order_id="pending-reopen",
+            ),
+            _order(
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("0.5"),
+                executed_quantity=Decimal("0.5"),
+                created_at=old_entry_at,
+                updated_at=old_entry_at,
+                client_order_id="old-entry",
+            ),
+        ],
+    )
+
+    assert managed == ()
+    assert unmanaged == frozenset({"BTCUSDT"})
+
+
 def test_draining_control_survives_a_later_operational_halt() -> None:
     assert (
         _resolve_strategy_live_state("draining", "halted")

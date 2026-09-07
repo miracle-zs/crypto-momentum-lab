@@ -995,8 +995,18 @@ def _classify_live_positions(
             matching_orders=matching_orders,
             fill_times=fill_times,
             fill_prices=fill_prices,
-            preserve_closed_snapshot_lag=closing_filled,
         )
+        if not batches and not closing_filled:
+            # The account snapshot can arrive before the new entry's order
+            # state/fill metadata.  In that window the only confirmed batch
+            # may be an older batch whose reduce-only exit already consumed
+            # it.  Falling back to that accumulator would assign the current
+            # position quantity and the old entry timestamp to the new lot,
+            # which can trigger an immediate candle-timeout exit.  Keep the
+            # symbol fail-closed until the next reconciliation observes the
+            # new entry fill instead of inventing a batch boundary.
+            unmanaged.add(position.symbol)
+            continue
         aggregate_opened_at = max(
             (batch.opened_at for batch in batches),
             default=opened_at,
@@ -1202,7 +1212,6 @@ def _build_position_batches(
     matching_orders: Sequence[_PositionOrder],
     fill_times: Mapping[str, datetime],
     fill_prices: Mapping[str, Decimal],
-    preserve_closed_snapshot_lag: bool,
 ) -> tuple[ManagedLivePositionBatch, ...]:
     events: list[tuple[datetime, int, int, str, _PositionOrder]] = []
     for index, order in enumerate(matching_orders):
@@ -1326,9 +1335,6 @@ def _build_position_batches(
     return _reconcile_batch_quantities(
         batches,
         target_quantity=abs(position.position_amt),
-        fallback_position=position,
-        fallback_accumulator=accumulators[-1],
-        preserve_closed_snapshot_lag=preserve_closed_snapshot_lag,
     )
 
 
@@ -1336,34 +1342,16 @@ def _reconcile_batch_quantities(
     batches: list[ManagedLivePositionBatch],
     *,
     target_quantity: Decimal,
-    fallback_position: AccountPositionSnapshot | AccountPositionSnapshotRow,
-    fallback_accumulator: _PositionBatchAccumulator,
-    preserve_closed_snapshot_lag: bool,
 ) -> tuple[ManagedLivePositionBatch, ...]:
     if target_quantity <= 0:
         return ()
+    if not batches:
+        # There is no surviving confirmed batch to which the snapshot can be
+        # attributed.  Reusing the last closed accumulator would turn a
+        # snapshot/order synchronization gap into an old exit deadline.
+        return ()
     total_quantity = sum((batch.quantity for batch in batches), start=Decimal("0"))
     if total_quantity < target_quantity:
-        if not batches and preserve_closed_snapshot_lag:
-            return ()
-        if not batches:
-            entry_price = (
-                fallback_accumulator.entry_notional
-                / fallback_accumulator.entry_quantity
-                if fallback_accumulator.entry_quantity > 0
-                else fallback_position.entry_price
-            )
-            batches.append(
-                ManagedLivePositionBatch(
-                    batch_id=fallback_accumulator.batch_id,
-                    quantity=target_quantity,
-                    entry_price=entry_price,
-                    opened_at=fallback_accumulator.opened_at,
-                    exit_order_submitted_at=(
-                        fallback_accumulator.exit_order_submitted_at
-                    ),
-                )
-            )
         # Known entry/exit fills are more precise than an account snapshot
         # that may lag those fills.  Never inflate a surviving older batch to
         # the aggregate snapshot quantity; that would duplicate a newer batch
