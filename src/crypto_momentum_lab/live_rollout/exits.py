@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
@@ -58,6 +60,42 @@ class ThreadedClosedCandle15mLoader:
 
 
 @dataclass(frozen=True, slots=True)
+class ManagedLivePositionBatch:
+    """One live position batch separated by a reduce-only order boundary."""
+
+    batch_id: str
+    quantity: Decimal
+    entry_price: Decimal
+    opened_at: datetime
+    exit_order_submitted_at: datetime | None = None
+    recovery_order_client_id: str | None = None
+    recovery_order_plan: OrderExecutionPlan | None = None
+    recovery_order_remaining_quantity: Decimal | None = None
+    closing_order_filled: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.batch_id.strip():
+            raise ValueError("batch_id must not be empty")
+        if self.quantity <= 0:
+            raise ValueError("quantity must be positive")
+        if self.entry_price <= 0:
+            raise ValueError("entry_price must be positive")
+        if self.opened_at.tzinfo is None or self.opened_at.utcoffset() is None:
+            raise ValueError("opened_at must be timezone-aware")
+        if (
+            self.exit_order_submitted_at is not None
+            and (
+                self.exit_order_submitted_at.tzinfo is None
+                or self.exit_order_submitted_at.utcoffset() is None
+            )
+        ):
+            raise ValueError("exit_order_submitted_at must be timezone-aware")
+        if (
+            self.recovery_order_remaining_quantity is not None
+            and self.recovery_order_remaining_quantity < 0
+        ):
+            raise ValueError("recovery_order_remaining_quantity must not be negative")
+@dataclass(frozen=True, slots=True)
 class ManagedLivePosition:
     symbol: str
     side: StrategySide
@@ -73,6 +111,12 @@ class ManagedLivePosition:
     # remaining quantity stays assigned to the timeout fallback while a new
     # recovery limit covers only the uncovered position.
     recovery_order_remaining_quantity: Decimal | None = None
+    # Account snapshots aggregate same-symbol/position-side lots.  The
+    # provider keeps the per-batch lifecycle here so each batch can retain its
+    # own entry anchor and exit deadline.
+    batch_id: str | None = None
+    recovery_exit_started_at: datetime | None = None
+    batches: tuple[ManagedLivePositionBatch, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.symbol.strip():
@@ -92,6 +136,7 @@ class ManagedLivePosition:
         if self.opened_at.tzinfo is None or self.opened_at.utcoffset() is None:
             raise ValueError("opened_at must be timezone-aware")
         for value, field_name in (
+            (self.recovery_exit_started_at, "recovery_exit_started_at"),
             (self.recovery_order_created_at, "recovery_order_created_at"),
         ):
             if value is not None and (
@@ -103,6 +148,36 @@ class ManagedLivePosition:
             and self.recovery_order_remaining_quantity < 0
         ):
             raise ValueError("recovery_order_remaining_quantity must not be negative")
+        if any(batch.quantity <= 0 for batch in self.batches):
+            raise ValueError("batches must contain only positive quantities")
+
+    def batch_views(self) -> tuple[ManagedLivePosition, ...]:
+        """Return strategy views while preserving one aggregate account view."""
+        if not self.batches:
+            return (self,)
+        return tuple(
+            replace(
+                self,
+                quantity=batch.quantity,
+                entry_price=batch.entry_price,
+                opened_at=batch.opened_at,
+                batch_id=batch.batch_id,
+                closing_order_filled=batch.closing_order_filled,
+                recovery_exit_started_at=batch.exit_order_submitted_at,
+                recovery_order_client_id=batch.recovery_order_client_id,
+                recovery_order_created_at=(
+                    None
+                    if batch.recovery_order_plan is None
+                    else batch.recovery_order_plan.created_at
+                ),
+                recovery_order_plan=batch.recovery_order_plan,
+                recovery_order_remaining_quantity=(
+                    batch.recovery_order_remaining_quantity
+                ),
+                batches=(),
+            )
+            for batch in self.batches
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,9 +256,7 @@ class LiveExitManager:
     ) -> None:
         self._config = config
         self._candles = candle_loader
-        self._checked_until: dict[
-            tuple[str, FuturesPositionSide, datetime], datetime
-        ] = {}
+        self._checked_until: dict[tuple[str, FuturesPositionSide, str], datetime] = {}
 
     @property
     def uses_market_state_exit(self) -> bool:
@@ -205,7 +278,7 @@ class LiveExitManager:
         positions: tuple[ManagedLivePosition, ...],
     ) -> tuple[LiveExitRequest, ...]:
         requests: list[LiveExitRequest] = []
-        for position in positions:
+        for position in _strategy_positions(positions):
             if (
                 position.symbol != state.symbol
                 or position.closing_order_filled
@@ -213,13 +286,10 @@ class LiveExitManager:
             ):
                 continue
             if _recovery_order_blocks_current_episode(position):
-                assert position.recovery_order_created_at is not None
-                timeout_at = position.recovery_order_created_at + timedelta(
-                    minutes=15 * self._config.candle_grace_bars
-                )
-                if state.bucket_end >= timeout_at:
+                timeout_at = _recovery_timeout_at(position, self._config)
+                if timeout_at is not None and state.bucket_end >= timeout_at:
                     requests.append(
-                        self._build_grace_timeout_request(
+                        self._build_timeout_request(
                             state=state,
                             position=position,
                             reference_price=(
@@ -256,14 +326,18 @@ class LiveExitManager:
         if received_at.tzinfo is None or received_at.utcoffset() is None:
             raise ValueError("received_at must be timezone-aware")
         requests: list[LiveExitRequest] = []
-        for position in positions:
+        for position in _strategy_positions(positions):
             if (
                 position.symbol != candle.symbol
                 or position.closing_order_filled
                 or _recovery_order_blocks_current_episode(position)
             ):
                 continue
-            key = (position.symbol, position.position_side, position.opened_at)
+            key = (
+                position.symbol,
+                position.position_side,
+                position.batch_id or position.opened_at.isoformat(),
+            )
             checked_until = self._checked_until.get(key)
             if checked_until is not None and candle.candle_end <= checked_until:
                 continue
@@ -365,18 +439,14 @@ class LiveExitManager:
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("now must be timezone-aware")
         requests: list[LiveExitRequest] = []
-        for position in positions:
-            if (
-                position.symbol != state.symbol
-                or position.closing_order_filled
-                or position.recovery_order_client_id is None
-                or position.recovery_order_created_at is None
-                or position.recovery_order_plan is None
-            ):
+        for position in _strategy_positions(positions):
+            if position.symbol != state.symbol or position.closing_order_filled:
                 continue
-            timeout_at = position.recovery_order_created_at + timedelta(
-                minutes=15 * self._config.candle_grace_bars
-            )
+            if _recovery_exit_started_at(position) is None:
+                continue
+            timeout_at = _recovery_timeout_at(position, self._config)
+            if timeout_at is None:
+                continue
             if now < timeout_at:
                 continue
             reference_price = (
@@ -385,11 +455,11 @@ class LiveExitManager:
                 and latest_quote.symbol == position.symbol
                 else _exit_mark_price(state, position.side)
             ) or position.entry_price
-            timeout_quantity = _recovery_timeout_quantity(position)
+            timeout_quantity = position.quantity
             if timeout_quantity <= 0:
                 continue
             requests.append(
-                self._build_grace_timeout_request(
+                self._build_timeout_request(
                     state=state,
                     position=position,
                     reference_price=reference_price,
@@ -474,7 +544,7 @@ class LiveExitManager:
         durable state watermark.
         """
         requests: list[LiveExitRequest] = []
-        for position in positions:
+        for position in _strategy_positions(positions):
             if (
                 position.symbol != quote.symbol
                 or position.closing_order_filled
@@ -555,7 +625,11 @@ class LiveExitManager:
         if _uncovered_position_quantity(position) <= 0:
             return None
         closed_boundary = _candle_start_15m(state.bucket_end)
-        key = (position.symbol, position.position_side, position.opened_at)
+        key = (
+            position.symbol,
+            position.position_side,
+            position.batch_id or position.opened_at.isoformat(),
+        )
         start = self._checked_until.get(key, _candle_start_15m(position.opened_at))
         if closed_boundary <= start:
             return None
@@ -663,7 +737,9 @@ class LiveExitManager:
             # The timer may retry this same fallback many times.  Keep the
             # client order identity tied to the recovery episode rather than
             # to wall-clock ``now`` so a retry remains idempotent.
-            identity_trigger_at=recovery_plan.created_at,
+            identity_trigger_at=(
+                _recovery_exit_started_at(position) or recovery_plan.created_at
+            ),
             reference_price=reference_price,
             created_at=created_at,
             quantity=fallback_quantity,
@@ -672,6 +748,45 @@ class LiveExitManager:
             cancel_plan=recovery_plan,
             fallback_candidate=fallback.candidate,
             fallback_quantity=fallback_quantity,
+        )
+
+    def _build_timeout_request(
+        self,
+        *,
+        state: MarketState15s,
+        position: ManagedLivePosition,
+        reference_price: Decimal,
+        trigger_at: datetime | None = None,
+        created_at: datetime | None = None,
+    ) -> LiveExitRequest:
+        """Build the timeout action for one batch.
+
+        A recovered batch may have only a terminal historical exit order left
+        in the database.  It still has a valid exit boundary and deadline,
+        but there is no live order to cancel.  In that case the timeout must
+        be a direct market request for the batch's remaining quantity.
+        """
+        if position.recovery_order_plan is not None:
+            return self._build_grace_timeout_request(
+                state=state,
+                position=position,
+                reference_price=reference_price,
+                trigger_at=trigger_at,
+                created_at=created_at,
+            )
+        boundary_at = _recovery_exit_started_at(position)
+        if boundary_at is None:
+            raise AssertionError("grace timeout requires an exit boundary")
+        trigger_at = trigger_at or state.bucket_end
+        return self._build_order_request(
+            state=state,
+            position=position,
+            reason=f"candle_15m_grace_timeout_{self._config.candle_grace_bars}",
+            trigger_at=trigger_at,
+            identity_trigger_at=boundary_at,
+            created_at=created_at,
+            reference_price=reference_price,
+            quantity=position.quantity,
         )
 
     def _build_order_request(
@@ -689,9 +804,13 @@ class LiveExitManager:
         quantity: Decimal | None = None,
     ) -> LiveExitOrderRequest:
         identity_trigger_at = identity_trigger_at or trigger_at
+        batch_component = (
+            "" if position.batch_id is None else f":batch:{position.batch_id}"
+        )
         identity = (
             f"{self._config.run_id}:{position.symbol}:"
-            f"{position.position_side.value}:{position.opened_at.isoformat()}:"
+            f"{position.position_side.value}:{position.opened_at.isoformat()}"
+            f"{batch_component}:"
             f"{reason}:{identity_trigger_at.isoformat()}"
         )
         signal_id = f"live-exit-signal-{uuid5(NAMESPACE_URL, identity)}"
@@ -731,6 +850,7 @@ class LiveExitManager:
                     "entry_price": str(position.entry_price),
                     "reference_price": str(reference_price),
                     "opened_at": position.opened_at.astimezone(UTC).isoformat(),
+                    "batch_id": position.batch_id,
                     "trigger_at": trigger_at.astimezone(UTC).isoformat(),
                     "exit_order_type": entry_type.value,
                 },
@@ -796,12 +916,37 @@ def _recovery_price(
 def _recovery_order_blocks_current_episode(
     position: ManagedLivePosition,
 ) -> bool:
-    recovery_created_at = position.recovery_order_created_at
+    recovery_created_at = _recovery_exit_started_at(position)
     return (
-        position.recovery_order_client_id is not None
-        and recovery_created_at is not None
+        recovery_created_at is not None
         and recovery_created_at >= position.opened_at
     )
+
+
+def _recovery_exit_started_at(
+    position: ManagedLivePosition,
+) -> datetime | None:
+    """Return the durable exit boundary for this position view.
+
+    ``recovery_exit_started_at`` is populated from historical exchange order
+    rows, including terminal rows.  The older recovery fields remain a
+    compatibility fallback for callers that construct a position directly.
+    """
+    if position.recovery_exit_started_at is not None:
+        return position.recovery_exit_started_at
+    if position.recovery_order_client_id is None:
+        return None
+    return position.recovery_order_created_at
+
+
+def _recovery_timeout_at(
+    position: ManagedLivePosition,
+    config: LiveExitConfig,
+) -> datetime | None:
+    started_at = _recovery_exit_started_at(position)
+    if started_at is None:
+        return None
+    return started_at + timedelta(minutes=15 * config.candle_grace_bars)
 
 
 def _recovery_remaining_quantity(
@@ -908,3 +1053,13 @@ def _candle_start_15m(value: datetime) -> datetime:
         second=0,
         microsecond=0,
     )
+
+
+def _strategy_positions(
+    positions: tuple[ManagedLivePosition, ...],
+) -> tuple[ManagedLivePosition, ...]:
+    """Expand aggregate account positions into independent strategy batches."""
+    expanded: list[ManagedLivePosition] = []
+    for position in positions:
+        expanded.extend(position.batch_views())
+    return tuple(expanded)

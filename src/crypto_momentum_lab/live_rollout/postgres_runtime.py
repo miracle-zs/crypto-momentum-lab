@@ -1,7 +1,7 @@
 import asyncio
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -20,6 +20,7 @@ from crypto_momentum_lab.domain.account import (
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderState,
     FuturesPositionSide,
+    OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.live_rollout import LiveOperatorApproval
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -35,7 +36,10 @@ from crypto_momentum_lab.execution_account.orders.quantization import (
 from crypto_momentum_lab.execution_account.orders.state_machine import SubmitPolicy
 from crypto_momentum_lab.execution_account.sync import AccountSnapshot
 from crypto_momentum_lab.live_rollout.daemon import LiveDaemonRuntimeContext
-from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
+from crypto_momentum_lab.live_rollout.exits import (
+    ManagedLivePosition,
+    ManagedLivePositionBatch,
+)
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
@@ -618,6 +622,7 @@ class PostgresLiveContextProvider:
             active = [row for row in rows if row.position_amt != 0]
             orders: list[ExchangeOrderRow] = []
             entry_fill_times: dict[str, datetime] = {}
+            entry_fill_values: dict[str, tuple[Decimal, Decimal]] = {}
             if active:
                 active_symbols = tuple(sorted({row.symbol for row in active}))
                 orders = list(
@@ -671,6 +676,12 @@ class PostgresLiveContextProvider:
                             account_fill.order_id,
                             account_fill.trade_at,
                         )
+                        _record_fill_value(
+                            entry_fill_values,
+                            account_fill.order_id,
+                            account_fill.quantity,
+                            account_fill.price,
+                        )
                 if entry_client_order_ids:
                     exchange_fills = (
                         await session.scalars(
@@ -687,12 +698,19 @@ class PostgresLiveContextProvider:
                             exchange_fill.client_order_id,
                             exchange_fill.filled_at,
                         )
+                        _record_fill_value(
+                            entry_fill_values,
+                            exchange_fill.client_order_id,
+                            exchange_fill.quantity,
+                            exchange_fill.price,
+                        )
         active = [row for row in rows if row.position_amt != 0]
         managed, unmanaged = _classify_live_positions(
             active,
             orders,
             unresolved,
             entry_fill_times=entry_fill_times,
+            entry_fill_prices=_average_fill_prices(entry_fill_values),
         )
         return (
             process_at,
@@ -726,6 +744,7 @@ class PostgresLiveContextProvider:
         active = [row for row in rows if row.position_amt != 0]
         orders: list[ExchangeOrderRow] = []
         entry_fill_times: dict[str, datetime] = {}
+        entry_fill_values: dict[str, tuple[Decimal, Decimal]] = {}
         if active:
             async with self._sessions() as session:
                 active_symbols = tuple(sorted({row.symbol for row in active}))
@@ -780,6 +799,12 @@ class PostgresLiveContextProvider:
                             account_fill.order_id,
                             account_fill.trade_at,
                         )
+                        _record_fill_value(
+                            entry_fill_values,
+                            account_fill.order_id,
+                            account_fill.quantity,
+                            account_fill.price,
+                        )
                 if entry_client_order_ids:
                     exchange_fills = (
                         await session.scalars(
@@ -796,11 +821,18 @@ class PostgresLiveContextProvider:
                             exchange_fill.client_order_id,
                             exchange_fill.filled_at,
                         )
+                        _record_fill_value(
+                            entry_fill_values,
+                            exchange_fill.client_order_id,
+                            exchange_fill.quantity,
+                            exchange_fill.price,
+                        )
         managed, unmanaged = _classify_live_positions(
             active,
             orders,
             unresolved,
             entry_fill_times=entry_fill_times,
+            entry_fill_prices=_average_fill_prices(entry_fill_values),
         )
         return (
             snapshot.config.observed_at,
@@ -848,47 +880,87 @@ class PostgresLiveContextProvider:
         return _resolve_strategy_live_state(control_state, state)
 
 
+@dataclass(frozen=True, slots=True)
+class _PositionOrder:
+    symbol: str
+    position_side: FuturesPositionSide
+    side: str
+    reduce_only: bool
+    order_type: str
+    quantity: Decimal
+    executed_quantity: Decimal
+    state: ExchangeOrderState
+    client_order_id: str | None
+    exchange_order_id: str | None
+    created_at: datetime
+    updated_at: datetime
+    price: Decimal | None
+    plan: OrderExecutionPlan | None = None
+
+
+@dataclass(slots=True)
+class _PositionBatchAccumulator:
+    batch_id: str
+    opened_at: datetime
+    entry_quantity: Decimal
+    entry_notional: Decimal
+    exit_order_submitted_at: datetime | None = None
+    exit_orders: list[_PositionOrder] = field(default_factory=list)
+
+
+_EXIT_SUBMITTED_STATES = frozenset(
+    {
+        ExchangeOrderState.SUBMITTING,
+        ExchangeOrderState.CANCELING,
+        ExchangeOrderState.SUBMITTED,
+        ExchangeOrderState.ACKNOWLEDGED,
+        ExchangeOrderState.PARTIALLY_FILLED,
+        ExchangeOrderState.FILLED,
+        ExchangeOrderState.CANCELED,
+        ExchangeOrderState.ABSENT_RECONCILED,
+        ExchangeOrderState.EXPIRED,
+        ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+    }
+)
+
+
 def _classify_live_positions(
     positions: Sequence[AccountPositionSnapshot | AccountPositionSnapshotRow],
     orders: list[ExchangeOrderRow],
     unresolved: tuple[PersistedExchangeOrder, ...] = (),
     *,
     entry_fill_times: Mapping[str, datetime] | None = None,
+    entry_fill_prices: Mapping[str, Decimal] | None = None,
 ) -> tuple[tuple[ManagedLivePosition, ...], frozenset[str]]:
     fill_times = entry_fill_times or {}
-    filled_orders = [
-        row for row in orders if row.state == ExchangeOrderState.FILLED.value
-    ]
+    fill_prices = entry_fill_prices or {}
+    position_orders = _normalise_position_orders(orders, unresolved)
     managed: list[ManagedLivePosition] = []
     unmanaged: set[str] = set()
     for position in positions:
         try:
             position_side = FuturesPositionSide(position.position_side)
-        except ValueError:
+        except (TypeError, ValueError):
             unmanaged.add(position.symbol)
             continue
         side = _strategy_side(position, position_side)
+        matching_orders = [
+            order
+            for order in position_orders
+            if order.symbol == position.symbol
+            and order.position_side is position_side
+        ]
         opening_candidates = [
             order
-            for order in orders
+            for order in matching_orders
             if not order.reduce_only
-            and order.symbol == position.symbol
-            and FuturesPositionSide(order.position_side) is position_side
             and _opening_order_matches_side(order.side, side)
-            and (
-                order.state == ExchangeOrderState.FILLED.value
-                or _entry_fill_at(order, fill_times) is not None
-                or (
-                    getattr(order, "executed_quantity", Decimal("0"))
-                    or Decimal("0")
-                )
-                > 0
-            )
+            and _is_entry_fill_observed(order, fill_times)
         ]
         opening = max(
             opening_candidates,
             key=lambda order: (
-                _entry_fill_at(order, fill_times) or order.updated_at,
+                _order_entry_time(order, fill_times),
                 order.updated_at,
                 order.created_at,
             ),
@@ -897,56 +969,54 @@ def _classify_live_positions(
         if opening is None or position.entry_price <= 0:
             unmanaged.add(position.symbol)
             continue
-        opening_fill_at = _entry_fill_at(opening, fill_times)
-        current_episode_started_at = opening_fill_at or opening.created_at
-        # A reduce-only order belongs to the current position episode when it
-        # was created after the current opening actually filled.  An older
-        # resting limit exit can fill after a later add-on entry; using its
-        # updated_at would then make that old exit suppress the new position.
-        # Keep its remaining quantity on the managed position as the rollover
-        # boundary: the timeout fallback owns that quantity, and a new limit
-        # owns only the uncovered remainder.
+        opened_at = _order_entry_time(opening, fill_times)
+        reduce_only_orders = [
+            order
+            for order in matching_orders
+            if order.reduce_only
+            and not _opening_order_matches_side(order.side, side)
+        ]
         closing_filled_quantity = sum(
             (
-                _filled_order_quantity(order)
-                for order in filled_orders
-                if order.reduce_only
-                and order.symbol == position.symbol
-                and FuturesPositionSide(order.position_side) is position_side
-                and order.created_at >= current_episode_started_at
+                _exit_fill_quantity(order)
+                for order in reduce_only_orders
+                if order.created_at >= opened_at
             ),
             start=Decimal("0"),
         )
         # The account snapshot can still show a position briefly after a full
-        # reduce-only fill.  Suppress duplicate exits only when the filled
-        # quantity covers the current snapshot; a completed exit for an older
-        # or smaller lot must leave the remaining position eligible to exit.
-        closing_filled = closing_filled_quantity >= abs(position.position_amt)
-        active_market_exit = any(
-            item.plan.symbol == position.symbol
-            and item.plan.reduce_only
-            and item.plan.position_side is position_side
-            and item.plan.order_type == "MARKET"
-            and item.plan.created_at >= current_episode_started_at
-            and not item.state.terminal
-            for item in unresolved
+        # reduce-only fill.  Use strict equality here: a larger filled amount
+        # can belong to a closed add-on lot while an older lot remains open.
+        closing_filled = closing_filled_quantity == abs(position.position_amt)
+        batches = _build_position_batches(
+            position=position,
+            side=side,
+            position_side=position_side,
+            matching_orders=matching_orders,
+            fill_times=fill_times,
+            fill_prices=fill_prices,
+            preserve_closed_snapshot_lag=closing_filled,
         )
-        active_exit_orders = [
-            item
-            for item in unresolved
-            if item.plan.symbol == position.symbol
-            and item.plan.reduce_only
-            and item.plan.position_side is position_side
-            and not item.state.terminal
-        ]
-        recovery_order = next(
+        aggregate_opened_at = max(
+            (batch.opened_at for batch in batches),
+            default=opened_at,
+        )
+        latest_recovery = max(
             (
-                item
-                for item in active_exit_orders
-                if item.plan.order_type == "LIMIT"
+                batch
+                for batch in batches
+                if batch.recovery_order_plan is not None
             ),
-            None,
+            key=lambda batch: batch.recovery_order_plan.created_at
+            if batch.recovery_order_plan is not None
+            else batch.opened_at,
+            default=None,
         )
+        # Once multiple residual batches exist, the aggregate flag must stay
+        # open so the exit manager can evaluate the batches independently.
+        # A market order that is active for one batch is carried on that batch
+        # view instead of suppressing every batch in the symbol aggregate.
+        aggregate_closing_filled = closing_filled and not batches
         managed.append(
             ManagedLivePosition(
                 symbol=position.symbol,
@@ -954,36 +1024,478 @@ def _classify_live_positions(
                 position_side=position_side,
                 quantity=abs(position.position_amt),
                 entry_price=position.entry_price,
-                opened_at=_entry_fill_at(opening, fill_times) or opening.updated_at,
-                closing_order_filled=closing_filled or active_market_exit,
+                opened_at=aggregate_opened_at,
+                closing_order_filled=aggregate_closing_filled,
                 recovery_order_client_id=(
                     None
-                    if recovery_order is None
-                    else recovery_order.plan.client_order_id
+                    if latest_recovery is None
+                    else latest_recovery.recovery_order_client_id
+                ),
+                recovery_exit_started_at=(
+                    None
+                    if latest_recovery is None
+                    else latest_recovery.exit_order_submitted_at
                 ),
                 recovery_order_created_at=(
                     None
-                    if recovery_order is None
-                    else recovery_order.plan.created_at
+                    if latest_recovery is None
+                    or latest_recovery.recovery_order_plan is None
+                    else latest_recovery.recovery_order_plan.created_at
                 ),
                 recovery_order_plan=(
-                    None if recovery_order is None else recovery_order.plan
+                    None
+                    if latest_recovery is None
+                    else latest_recovery.recovery_order_plan
                 ),
                 recovery_order_remaining_quantity=(
                     None
-                    if recovery_order is None
-                    else max(
-                        Decimal("0"),
-                        recovery_order.plan.quantity
-                        - recovery_order.executed_quantity,
-                    )
+                    if latest_recovery is None
+                    else latest_recovery.recovery_order_remaining_quantity
                 ),
+                batches=batches,
             )
         )
     return (
         tuple(sorted(managed, key=lambda item: (item.symbol, item.position_side))),
         frozenset(unmanaged),
     )
+
+
+def _normalise_position_orders(
+    orders: Sequence[ExchangeOrderRow],
+    unresolved: Sequence[PersistedExchangeOrder],
+) -> tuple[_PositionOrder, ...]:
+    unresolved_by_client_id = {
+        item.plan.client_order_id: item for item in unresolved
+    }
+    normalised: list[_PositionOrder] = []
+    seen_keys: set[str] = set()
+    for row in orders:
+        client_order_id = _optional_text(getattr(row, "client_order_id", None))
+        persisted = (
+            None
+            if client_order_id is None
+            else unresolved_by_client_id.get(client_order_id)
+        )
+        order = _position_order_from_row(
+            row,
+            plan=None if persisted is None else persisted.plan,
+            fallback_state=None if persisted is None else persisted.state,
+            fallback_executed_quantity=(
+                None if persisted is None else persisted.executed_quantity
+            ),
+        )
+        if order is None:
+            continue
+        key = _position_order_key(order)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        normalised.append(order)
+    for item in unresolved:
+        plan = item.plan
+        key = f"client:{plan.client_order_id}"
+        if key in seen_keys:
+            continue
+        order = _position_order_from_plan(item)
+        seen_keys.add(key)
+        normalised.append(order)
+    return tuple(normalised)
+
+
+def _position_order_from_row(
+    row: object,
+    *,
+    plan: OrderExecutionPlan | None,
+    fallback_state: ExchangeOrderState | None,
+    fallback_executed_quantity: Decimal | None,
+) -> _PositionOrder | None:
+    try:
+        position_side = FuturesPositionSide(
+            getattr(row, "position_side", FuturesPositionSide.BOTH)
+        )
+    except (TypeError, ValueError):
+        return None
+    created_at = getattr(row, "created_at", None)
+    updated_at = getattr(row, "updated_at", None)
+    if created_at is None:
+        created_at = plan.created_at if plan is not None else None
+    if updated_at is None:
+        updated_at = created_at
+    if created_at is None or updated_at is None:
+        return None
+    state = _normalise_order_state(
+        getattr(row, "state", None),
+        fallback=fallback_state,
+    )
+    executed_quantity = _decimal_or_zero(
+        getattr(row, "executed_quantity", None)
+    )
+    if fallback_executed_quantity is not None:
+        executed_quantity = max(
+            executed_quantity,
+            _decimal_or_zero(fallback_executed_quantity),
+        )
+    quantity = _decimal_or_zero(
+        getattr(row, "quantity", None)
+        if getattr(row, "quantity", None) is not None
+        else (None if plan is None else plan.quantity)
+    )
+    quantity = max(quantity, executed_quantity)
+    if quantity <= 0:
+        return None
+    price_value = getattr(row, "price", None)
+    if price_value is None and plan is not None:
+        price_value = plan.price
+    price = None if price_value is None else _decimal_or_zero(price_value)
+    return _PositionOrder(
+        symbol=str(getattr(row, "symbol", plan.symbol if plan else "")),
+        position_side=position_side,
+        side=str(getattr(row, "side", plan.side if plan else "")).upper(),
+        reduce_only=bool(
+            getattr(row, "reduce_only", plan.reduce_only if plan else False)
+        ),
+        order_type=str(
+            getattr(row, "order_type", plan.order_type if plan else "")
+        ).upper(),
+        quantity=quantity,
+        executed_quantity=executed_quantity,
+        state=state,
+        client_order_id=_optional_text(
+            getattr(row, "client_order_id", plan.client_order_id if plan else None)
+        ),
+        exchange_order_id=_optional_text(
+            getattr(row, "exchange_order_id", None)
+        ),
+        created_at=created_at,
+        updated_at=updated_at,
+        price=price,
+        plan=plan,
+    )
+
+
+def _position_order_from_plan(item: PersistedExchangeOrder) -> _PositionOrder:
+    plan = item.plan
+    return _PositionOrder(
+        symbol=plan.symbol,
+        position_side=FuturesPositionSide(plan.position_side),
+        side=plan.side.upper(),
+        reduce_only=plan.reduce_only,
+        order_type=plan.order_type.upper(),
+        quantity=plan.quantity,
+        executed_quantity=max(Decimal("0"), item.executed_quantity),
+        state=_normalise_order_state(item.state),
+        client_order_id=plan.client_order_id,
+        exchange_order_id=item.exchange_order_id,
+        created_at=plan.created_at,
+        updated_at=item.updated_at,
+        price=plan.price,
+        plan=plan,
+    )
+
+
+def _build_position_batches(
+    *,
+    position: AccountPositionSnapshot | AccountPositionSnapshotRow,
+    side: StrategySide,
+    position_side: FuturesPositionSide,
+    matching_orders: Sequence[_PositionOrder],
+    fill_times: Mapping[str, datetime],
+    fill_prices: Mapping[str, Decimal],
+    preserve_closed_snapshot_lag: bool,
+) -> tuple[ManagedLivePositionBatch, ...]:
+    events: list[tuple[datetime, int, int, str, _PositionOrder]] = []
+    for index, order in enumerate(matching_orders):
+        if not order.reduce_only and _opening_order_matches_side(order.side, side):
+            if _is_entry_fill_observed(order, fill_times):
+                events.append(
+                    (
+                        _order_entry_time(order, fill_times),
+                        0,
+                        index,
+                        "entry",
+                        order,
+                    )
+                )
+        elif (
+            order.reduce_only
+            and not _opening_order_matches_side(order.side, side)
+            and order.state in _EXIT_SUBMITTED_STATES
+        ):
+            events.append(
+                (order.created_at, 1, index, "exit", order)
+            )
+    events.sort(key=lambda event: event[:3])
+    accumulators: list[_PositionBatchAccumulator] = []
+    current: _PositionBatchAccumulator | None = None
+    for event_at, _event_priority, _index, event_kind, order in events:
+        if event_kind == "entry":
+            entry_quantity = _entry_fill_quantity(order, fill_times)
+            if entry_quantity <= 0:
+                continue
+            entry_price = _entry_price(order, fill_prices, position.entry_price)
+            if current is None or current.exit_order_submitted_at is not None:
+                current = _PositionBatchAccumulator(
+                    batch_id=_batch_id_for_entry(order),
+                    opened_at=event_at,
+                    entry_quantity=entry_quantity,
+                    entry_notional=entry_quantity * entry_price,
+                )
+                accumulators.append(current)
+            else:
+                current.entry_quantity += entry_quantity
+                current.entry_notional += entry_quantity * entry_price
+                current.opened_at = max(current.opened_at, event_at)
+            continue
+        if current is None:
+            continue
+        if current.exit_order_submitted_at is None:
+            current.exit_order_submitted_at = event_at
+        current.exit_orders.append(order)
+
+    if not accumulators:
+        return ()
+    batches: list[ManagedLivePositionBatch] = []
+    for accumulator in accumulators:
+        remaining_quantity = accumulator.entry_quantity
+        for order in sorted(
+            accumulator.exit_orders,
+            key=lambda item: (item.created_at, item.updated_at),
+        ):
+            fill_quantity = min(
+                remaining_quantity,
+                _exit_fill_quantity(order),
+            )
+            remaining_quantity -= fill_quantity
+            if remaining_quantity <= 0:
+                break
+        if remaining_quantity <= 0:
+            continue
+        entry_price = (
+            accumulator.entry_notional / accumulator.entry_quantity
+            if accumulator.entry_quantity > 0
+            else position.entry_price
+        )
+        active_limit_orders = [
+            order
+            for order in accumulator.exit_orders
+            if order.plan is not None
+            and order.plan.reduce_only
+            and order.order_type == "LIMIT"
+            and not order.state.terminal
+        ]
+        active_market_order = any(
+            order.plan is not None
+            and order.plan.reduce_only
+            and order.order_type == "MARKET"
+            and not order.state.terminal
+            for order in accumulator.exit_orders
+        )
+        recovery_order = max(
+            active_limit_orders,
+            key=lambda order: (order.created_at, order.updated_at),
+            default=None,
+        )
+        recovery_remaining = None
+        if recovery_order is not None and recovery_order.plan is not None:
+            recovery_remaining = max(
+                Decimal("0"),
+                recovery_order.plan.quantity - recovery_order.executed_quantity,
+            )
+        batches.append(
+            ManagedLivePositionBatch(
+                batch_id=accumulator.batch_id,
+                quantity=remaining_quantity,
+                entry_price=entry_price,
+                opened_at=accumulator.opened_at,
+                exit_order_submitted_at=accumulator.exit_order_submitted_at,
+                recovery_order_client_id=(
+                    None
+                    if recovery_order is None or recovery_order.plan is None
+                    else recovery_order.plan.client_order_id
+                ),
+                recovery_order_plan=(
+                    None
+                    if recovery_order is None
+                    else recovery_order.plan
+                ),
+                recovery_order_remaining_quantity=recovery_remaining,
+                closing_order_filled=active_market_order,
+            )
+        )
+    return _reconcile_batch_quantities(
+        batches,
+        target_quantity=abs(position.position_amt),
+        fallback_position=position,
+        fallback_accumulator=accumulators[-1],
+        preserve_closed_snapshot_lag=preserve_closed_snapshot_lag,
+    )
+
+
+def _reconcile_batch_quantities(
+    batches: list[ManagedLivePositionBatch],
+    *,
+    target_quantity: Decimal,
+    fallback_position: AccountPositionSnapshot | AccountPositionSnapshotRow,
+    fallback_accumulator: _PositionBatchAccumulator,
+    preserve_closed_snapshot_lag: bool,
+) -> tuple[ManagedLivePositionBatch, ...]:
+    if target_quantity <= 0:
+        return ()
+    total_quantity = sum((batch.quantity for batch in batches), start=Decimal("0"))
+    if total_quantity < target_quantity:
+        if not batches and preserve_closed_snapshot_lag:
+            return ()
+        if not batches:
+            entry_price = (
+                fallback_accumulator.entry_notional
+                / fallback_accumulator.entry_quantity
+                if fallback_accumulator.entry_quantity > 0
+                else fallback_position.entry_price
+            )
+            batches.append(
+                ManagedLivePositionBatch(
+                    batch_id=fallback_accumulator.batch_id,
+                    quantity=target_quantity,
+                    entry_price=entry_price,
+                    opened_at=fallback_accumulator.opened_at,
+                    exit_order_submitted_at=(
+                        fallback_accumulator.exit_order_submitted_at
+                    ),
+                )
+            )
+        # Known entry/exit fills are more precise than an account snapshot
+        # that may lag those fills.  Never inflate a surviving older batch to
+        # the aggregate snapshot quantity; that would duplicate a newer batch
+        # already known to have been closed.
+        return tuple(batches)
+    if total_quantity == target_quantity:
+        return tuple(batches)
+
+    excess = total_quantity - target_quantity
+    reconciled: list[ManagedLivePositionBatch] = []
+    for batch in reversed(batches):
+        remove = min(excess, batch.quantity)
+        remaining = batch.quantity - remove
+        excess -= remove
+        if remaining > 0:
+            reconciled.append(replace(batch, quantity=remaining))
+    reconciled.reverse()
+    return tuple(reconciled)
+
+
+def _is_entry_fill_observed(
+    order: _PositionOrder,
+    fill_times: Mapping[str, datetime],
+) -> bool:
+    return (
+        order.state in {
+            ExchangeOrderState.PARTIALLY_FILLED,
+            ExchangeOrderState.FILLED,
+        }
+        or _entry_fill_at(order, fill_times) is not None
+        or order.executed_quantity > 0
+    )
+
+
+def _order_entry_time(
+    order: _PositionOrder,
+    fill_times: Mapping[str, datetime],
+) -> datetime:
+    return _entry_fill_at(order, fill_times) or order.updated_at
+
+
+def _entry_fill_quantity(
+    order: _PositionOrder,
+    fill_times: Mapping[str, datetime],
+) -> Decimal:
+    if order.executed_quantity > 0:
+        return order.executed_quantity
+    if order.state is ExchangeOrderState.FILLED:
+        return order.quantity
+    if (
+        order.state is ExchangeOrderState.PARTIALLY_FILLED
+        and _entry_fill_at(order, fill_times) is not None
+    ):
+        return order.quantity
+    return Decimal("0")
+
+
+def _entry_price(
+    order: _PositionOrder,
+    fill_prices: Mapping[str, Decimal],
+    fallback: Decimal,
+) -> Decimal:
+    for identifier in (order.exchange_order_id, order.client_order_id):
+        if identifier is not None and identifier in fill_prices:
+            price = fill_prices[identifier]
+            if price > 0:
+                return price
+    if order.price is not None and order.price > 0:
+        return order.price
+    return fallback
+
+
+def _batch_id_for_entry(order: _PositionOrder) -> str:
+    identifier = order.client_order_id or order.exchange_order_id
+    if identifier is None:
+        identifier = (
+            f"{order.created_at.isoformat()}:{order.side}:{order.quantity}"
+        )
+    return f"{order.symbol}:{order.position_side.value}:{identifier}"
+
+
+def _position_order_key(order: _PositionOrder) -> str:
+    if order.client_order_id is not None:
+        return f"client:{order.client_order_id}"
+    if order.exchange_order_id is not None:
+        return f"exchange:{order.exchange_order_id}"
+    return (
+        f"anonymous:{order.symbol}:{order.position_side.value}:"
+        f"{order.side}:{int(order.reduce_only)}:{order.order_type}:"
+        f"{order.created_at.isoformat()}:{order.quantity}"
+    )
+
+
+def _normalise_order_state(
+    value: object,
+    *,
+    fallback: ExchangeOrderState | None = None,
+) -> ExchangeOrderState:
+    if isinstance(value, ExchangeOrderState):
+        return value
+    if value is not None:
+        try:
+            return ExchangeOrderState(str(value))
+        except ValueError:
+            pass
+    if fallback is not None:
+        return fallback
+    return ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
+
+
+def _exit_fill_quantity(order: _PositionOrder) -> Decimal:
+    if order.state not in _EXIT_SUBMITTED_STATES:
+        return Decimal("0")
+    if order.executed_quantity > 0:
+        return order.executed_quantity
+    return order.quantity if order.state is ExchangeOrderState.FILLED else Decimal("0")
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None
+
+
+def _decimal_or_zero(value: object) -> Decimal:
+    if value is None:
+        return Decimal("0")
+    try:
+        return Decimal(str(value))
+    except (ArithmeticError, TypeError, ValueError):
+        return Decimal("0")
 
 
 def _strategy_side(
@@ -1024,7 +1536,7 @@ def _filled_order_quantity(order: object) -> Decimal:
 
 
 def _entry_fill_at(
-    order: ExchangeOrderRow | None,
+    order: object | None,
     fill_times: Mapping[str, datetime],
 ) -> datetime | None:
     if order is None:
@@ -1050,6 +1562,34 @@ def _record_earliest_fill(
     previous = fill_times.get(identifier)
     if previous is None or filled_at < previous:
         fill_times[identifier] = filled_at
+
+
+def _record_fill_value(
+    fill_values: dict[str, tuple[Decimal, Decimal]],
+    identifier: str | None,
+    quantity: Decimal,
+    price: Decimal,
+) -> None:
+    if identifier is None or quantity <= 0 or price <= 0:
+        return
+    previous_quantity, previous_notional = fill_values.get(
+        identifier,
+        (Decimal("0"), Decimal("0")),
+    )
+    fill_values[identifier] = (
+        previous_quantity + quantity,
+        previous_notional + quantity * price,
+    )
+
+
+def _average_fill_prices(
+    fill_values: Mapping[str, tuple[Decimal, Decimal]],
+) -> dict[str, Decimal]:
+    return {
+        identifier: notional / quantity
+        for identifier, (quantity, notional) in fill_values.items()
+        if quantity > 0 and notional > 0
+    }
 
 
 def _context_cache_can_be_reused(

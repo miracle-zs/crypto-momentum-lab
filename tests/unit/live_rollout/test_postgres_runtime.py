@@ -192,6 +192,212 @@ def test_partial_close_does_not_suppress_remaining_position() -> None:
     assert managed[0].closing_order_filled is False
 
 
+def test_close_larger_than_remaining_position_does_not_suppress_it() -> None:
+    old_entry_at = NOW
+    add_on_fill_at = NOW + timedelta(seconds=20)
+    close_fill_at = add_on_fill_at + timedelta(seconds=5)
+
+    managed, unmanaged = _classify_live_positions(
+        # The add-on lot was closed, while the original lot remains open.
+        [_position(position_amt=Decimal("0.5"))],
+        [
+            _order(
+                reduce_only=True,
+                side="SELL",
+                quantity=Decimal("0.8"),
+                executed_quantity=Decimal("0.8"),
+                created_at=close_fill_at,
+                updated_at=close_fill_at,
+                exchange_order_id="partial-close",
+            ),
+            _order(
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("0.5"),
+                executed_quantity=Decimal("0.5"),
+                created_at=old_entry_at,
+                updated_at=old_entry_at,
+                exchange_order_id="old-entry",
+            ),
+            _order(
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("0.8"),
+                executed_quantity=Decimal("0.8"),
+                created_at=add_on_fill_at,
+                updated_at=add_on_fill_at,
+                exchange_order_id="add-on-entry",
+            ),
+        ],
+        entry_fill_times={
+            "old-entry": old_entry_at,
+            "add-on-entry": add_on_fill_at,
+        },
+    )
+
+    assert unmanaged == frozenset()
+    assert managed[0].closing_order_filled is False
+
+
+def test_position_batches_split_at_exit_order_and_use_latest_entry_time() -> None:
+    first_entry_at = NOW
+    first_exit_at = NOW + timedelta(minutes=30)
+    second_entry_at = NOW + timedelta(minutes=86)
+    latest_second_entry_at = NOW + timedelta(minutes=87)
+    second_exit_at = NOW + timedelta(minutes=105)
+
+    managed, unmanaged = _classify_live_positions(
+        [_position(position_amt=Decimal("4470"))],
+        [
+            _order(
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("1454"),
+                executed_quantity=Decimal("1454"),
+                created_at=first_entry_at,
+                updated_at=first_entry_at,
+                exchange_order_id="first-entry",
+                client_order_id="first-entry-client",
+            ),
+            _order(
+                reduce_only=True,
+                side="SELL",
+                quantity=Decimal("1454"),
+                executed_quantity=Decimal("0"),
+                created_at=first_exit_at,
+                updated_at=first_exit_at,
+                state=ExchangeOrderState.EXPIRED.value,
+                exchange_order_id="first-exit",
+                client_order_id="first-exit-client",
+                order_type="LIMIT",
+            ),
+            _order(
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("1499"),
+                executed_quantity=Decimal("1499"),
+                created_at=second_entry_at,
+                updated_at=second_entry_at,
+                exchange_order_id="second-entry-one",
+                client_order_id="second-entry-one-client",
+            ),
+            _order(
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("1517"),
+                executed_quantity=Decimal("1517"),
+                created_at=latest_second_entry_at,
+                updated_at=latest_second_entry_at,
+                exchange_order_id="second-entry-two",
+                client_order_id="second-entry-two-client",
+            ),
+            _order(
+                reduce_only=True,
+                side="SELL",
+                quantity=Decimal("3016"),
+                executed_quantity=Decimal("0"),
+                created_at=second_exit_at,
+                updated_at=second_exit_at,
+                state=ExchangeOrderState.ACKNOWLEDGED.value,
+                exchange_order_id="second-exit",
+                client_order_id="second-exit-client",
+                order_type="LIMIT",
+            ),
+        ],
+        entry_fill_times={
+            "first-entry": first_entry_at,
+            "second-entry-one": second_entry_at,
+            "second-entry-two": latest_second_entry_at,
+        },
+    )
+
+    assert unmanaged == frozenset()
+    assert len(managed) == 1
+    assert [
+        (batch.quantity, batch.opened_at, batch.exit_order_submitted_at)
+        for batch in managed[0].batches
+    ] == [
+        (Decimal("1454"), first_entry_at, first_exit_at),
+        (Decimal("3016"), latest_second_entry_at, second_exit_at),
+    ]
+
+
+def test_filled_newer_batch_does_not_discard_older_batch_boundary() -> None:
+    first_entry_at = NOW
+    first_exit_at = NOW + timedelta(minutes=30)
+    second_entry_at = NOW + timedelta(minutes=86)
+    latest_second_entry_at = NOW + timedelta(minutes=87)
+    second_exit_at = NOW + timedelta(minutes=105)
+
+    managed, unmanaged = _classify_live_positions(
+        # The account snapshot may still show the aggregate quantity while a
+        # newer batch's fill is already durable in the order history.
+        [_position(position_amt=Decimal("4470"))],
+        [
+            _order(
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("1454"),
+                executed_quantity=Decimal("1454"),
+                created_at=first_entry_at,
+                updated_at=first_entry_at,
+                exchange_order_id="first-entry",
+            ),
+            _order(
+                reduce_only=True,
+                side="SELL",
+                quantity=Decimal("1454"),
+                executed_quantity=Decimal("0"),
+                created_at=first_exit_at,
+                updated_at=first_exit_at,
+                state=ExchangeOrderState.EXPIRED.value,
+                exchange_order_id="first-exit",
+            ),
+            _order(
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("1499"),
+                executed_quantity=Decimal("1499"),
+                created_at=second_entry_at,
+                updated_at=second_entry_at,
+                exchange_order_id="second-entry-one",
+            ),
+            _order(
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("1517"),
+                executed_quantity=Decimal("1517"),
+                created_at=latest_second_entry_at,
+                updated_at=latest_second_entry_at,
+                exchange_order_id="second-entry-two",
+            ),
+            _order(
+                reduce_only=True,
+                side="SELL",
+                quantity=Decimal("3016"),
+                executed_quantity=Decimal("3016"),
+                created_at=second_exit_at,
+                updated_at=second_exit_at,
+                state=ExchangeOrderState.FILLED.value,
+                exchange_order_id="second-exit-filled",
+            ),
+        ],
+        entry_fill_times={
+            "first-entry": first_entry_at,
+            "second-entry-one": second_entry_at,
+            "second-entry-two": latest_second_entry_at,
+        },
+    )
+
+    assert unmanaged == frozenset()
+    assert len(managed) == 1
+    assert managed[0].quantity == Decimal("4470")
+    assert [
+        (batch.quantity, batch.opened_at, batch.exit_order_submitted_at)
+        for batch in managed[0].batches
+    ] == [(Decimal("1454"), first_entry_at, first_exit_at)]
+
+
 def test_classifies_remaining_recovery_quantity_after_partial_fill() -> None:
     recovery_plan = OrderExecutionPlan(
         intent_id="recovery-intent",
@@ -831,6 +1037,8 @@ def _order(
     created_at: datetime | None = None,
     state: str = ExchangeOrderState.FILLED.value,
     exchange_order_id: str | None = None,
+    client_order_id: str | None = None,
+    order_type: str = "LIMIT",
     quantity: Decimal = Decimal("0.5"),
     executed_quantity: Decimal | None = None,
 ):
@@ -847,6 +1055,8 @@ def _order(
         created_at=updated_at if created_at is None else created_at,
         updated_at=updated_at,
         exchange_order_id=exchange_order_id,
+        client_order_id=client_order_id,
+        order_type=order_type,
         quantity=quantity,
         executed_quantity=executed_quantity,
     )

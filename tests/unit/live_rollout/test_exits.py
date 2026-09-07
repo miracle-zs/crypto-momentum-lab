@@ -13,6 +13,7 @@ from crypto_momentum_lab.live_rollout.exits import (
     LiveExitConfig,
     LiveExitManager,
     ManagedLivePosition,
+    ManagedLivePositionBatch,
 )
 from crypto_momentum_lab.strategy_runner.position_exit import (
     ClosedCandle15m,
@@ -533,6 +534,59 @@ async def test_stale_recovery_rollover_splits_quantities() -> None:
     assert isinstance(timeout_requests[0], LiveExitCancellationRequest)
     assert timeout_requests[0].fallback_quantity == Decimal("1.127")
     assert timeout_requests[0].fallback_candidate.features["quantity"] == "1.127"
+
+
+async def test_terminal_batch_keeps_its_own_grace_timeout_without_active_order(
+) -> None:
+    first_exit_at = datetime(2026, 7, 4, 0, 30, tzinfo=UTC)
+    second_exit_at = datetime(2026, 7, 4, 1, 45, tzinfo=UTC)
+    position = replace(
+        _long_position(),
+        quantity=Decimal("4470"),
+        opened_at=datetime(2026, 7, 4, 1, 27, tzinfo=UTC),
+        batches=(
+            ManagedLivePositionBatch(
+                batch_id="first-batch",
+                quantity=Decimal("1454"),
+                entry_price=Decimal("100"),
+                opened_at=datetime(2026, 7, 4, 0, 1, tzinfo=UTC),
+                exit_order_submitted_at=first_exit_at,
+            ),
+            ManagedLivePositionBatch(
+                batch_id="second-batch",
+                quantity=Decimal("3016"),
+                entry_price=Decimal("99"),
+                opened_at=datetime(2026, 7, 4, 1, 27, tzinfo=UTC),
+                exit_order_submitted_at=second_exit_at,
+            ),
+        ),
+    )
+    manager = LiveExitManager(
+        config=_config(
+            PositionExitMode.CANDLE_15M,
+            candle_grace_bars=8,
+            candle_grace_profit_pct=Decimal("0.0088"),
+        )
+    )
+    timeout_at = first_exit_at + timedelta(minutes=15 * 8)
+    state = replace(
+        _state(),
+        bucket_end=timeout_at,
+        last_bid_price=Decimal("99"),
+        mark_price=Decimal("99"),
+        close_price=Decimal("99"),
+    )
+
+    requests = await manager.requests_for_grace_timeout(
+        now=timeout_at + timedelta(seconds=1),
+        state=state,
+        positions=(position,),
+    )
+
+    assert len(requests) == 1
+    assert requests[0].quantity == Decimal("1454")
+    assert requests[0].candidate.reason == "candle_15m_grace_timeout_8"
+    assert requests[0].candidate.entry_type is EntryType.MARKET
 
 
 async def test_closed_candle_path_ignores_the_entry_candle() -> None:
