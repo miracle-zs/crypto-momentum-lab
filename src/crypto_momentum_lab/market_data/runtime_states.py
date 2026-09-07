@@ -85,6 +85,7 @@ class ClosedStateRepository(Protocol):
 
 type RealtimeStateSink = Callable[[tuple[MarketState15s, ...]], Awaitable[None]]
 type RealtimeQuoteSink = Callable[[RealtimeMarketQuote], Awaitable[None]]
+type DurableStatePersistedCallback = Callable[[datetime], None]
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -273,10 +274,12 @@ class ClosedMarketStatePublisher:
         config: ClosedMarketStatePublisherConfig | None = None,
         realtime_state_sink: RealtimeStateSink | None = None,
         realtime_quote_sink: RealtimeQuoteSink | None = None,
+        on_durable_state_persisted: DurableStatePersistedCallback | None = None,
     ) -> None:
         self._repository = repository
         self._realtime_state_sink = realtime_state_sink
         self._realtime_quote_sink = realtime_quote_sink
+        self._on_durable_state_persisted = on_durable_state_persisted
         self._config = (
             ClosedMarketStatePublisherConfig()
             if config is None
@@ -767,6 +770,15 @@ class ClosedMarketStatePublisher:
                     source_watermark_at=watermark,
                     sequence_range=sequence_range,
                 )
+                if self._on_durable_state_persisted is not None:
+                    try:
+                        self._on_durable_state_persisted(watermark)
+                    except Exception:
+                        # A local health marker must never interrupt durable
+                        # market-state persistence or the capture loop.
+                        self._log.exception(
+                            "runtime_state_health_marker_failed"
+                        )
                 return
             except asyncio.CancelledError:
                 raise

@@ -16,6 +16,7 @@ x-live-account-app: &live-account-app
     CML_EXECUTION_DATABASE_URL: ${CML_EXECUTION_DATABASE_URL:-}
     CML_MARKET_DATABASE_URL: ${CML_MARKET_DATABASE_URL:-}
     CML_OBSERVABILITY_DATABASE_URL: ${CML_OBSERVABILITY_DATABASE_URL:-}
+    CML_LOCAL_HEALTH_DIR: /run/cml/health
     CML_CODE_COMMIT: ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
   restart: unless-stopped
   stop_grace_period: 60s
@@ -67,16 +68,7 @@ services:
       - account-2
     depends_on: *live-account-depends
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -m
-        - crypto_momentum_lab.apps.healthcheck_fast
-        - --service
-        - execution-account
-        - --ignore-age
-        - --account-label
-        - account-2
+      test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "120"]
       interval: 60s
       start_interval: 5s
       timeout: 15s
@@ -126,16 +118,7 @@ services:
       - account-3
     depends_on: *live-account-depends
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -m
-        - crypto_momentum_lab.apps.healthcheck_fast
-        - --service
-        - execution-account
-        - --ignore-age
-        - --account-label
-        - account-3
+      test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "120"]
       interval: 60s
       start_interval: 5s
       timeout: 15s
@@ -185,16 +168,7 @@ services:
       - account-4
     depends_on: *live-account-depends
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -m
-        - crypto_momentum_lab.apps.healthcheck_fast
-        - --service
-        - execution-account
-        - --ignore-age
-        - --account-label
-        - account-4
+      test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "120"]
       interval: 60s
       start_interval: 5s
       timeout: 15s
@@ -303,19 +277,7 @@ services:
       execution-account-live-account-2:
         condition: service_healthy
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -m
-        - crypto_momentum_lab.apps.healthcheck_fast
-        - --service
-        - live
-        - --account-label
-        - account-2
-        - --session-id
-        - ${CML_LIVE_SESSION_ID_ACCOUNT_2:-live-account-2-v1}
-        - --lease-owner
-        - ${CML_LIVE_LEASE_OWNER_ACCOUNT_2:-live-worker-account-2}
+      test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "300"]
       interval: 60s
       start_interval: 5s
       timeout: 10s
@@ -424,19 +386,7 @@ services:
       execution-account-live-account-3:
         condition: service_healthy
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -m
-        - crypto_momentum_lab.apps.healthcheck_fast
-        - --service
-        - live
-        - --account-label
-        - account-3
-        - --session-id
-        - ${CML_LIVE_SESSION_ID_ACCOUNT_3:-live-account-3-v1}
-        - --lease-owner
-        - ${CML_LIVE_LEASE_OWNER_ACCOUNT_3:-live-worker-account-3}
+      test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "300"]
       interval: 60s
       start_interval: 5s
       timeout: 10s
@@ -545,19 +495,7 @@ services:
       execution-account-live-account-4:
         condition: service_healthy
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -m
-        - crypto_momentum_lab.apps.healthcheck_fast
-        - --service
-        - live
-        - --account-label
-        - account-4
-        - --session-id
-        - ${CML_LIVE_SESSION_ID_ACCOUNT_4:-live-account-4-v1}
-        - --lease-owner
-        - ${CML_LIVE_LEASE_OWNER_ACCOUNT_4:-live-worker-account-4}
+      test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "300"]
       interval: 60s
       start_interval: 5s
       timeout: 10s

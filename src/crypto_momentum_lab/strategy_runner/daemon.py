@@ -252,6 +252,7 @@ def run_paired_paper_live_daemon(
     clock: Clock,
     entry_symbol_loader: Callable[[datetime], frozenset[str]] | None = None,
     candle_source: ClosedCandle15mSource | None = None,
+    on_checkpoint_persisted: Callable[[], None] | None = None,
 ) -> PairedPaperLiveDaemonResult:
     """Run multiple exit-only variants from one shared strategy calculation."""
     if len(accounts) < 2:
@@ -563,6 +564,7 @@ def run_paired_paper_live_daemon(
                         now,
                     )
                 )
+            _notify_checkpoint_persisted(on_checkpoint_persisted)
             checkpoint_dirty = False
             processed_since_checkpoint = 0
             last_checkpoint_saved_at = now
@@ -579,6 +581,7 @@ def run_paired_paper_live_daemon(
                     saved_at,
                 )
             )
+        _notify_checkpoint_persisted(on_checkpoint_persisted)
         last_checkpoint_saved_at = saved_at
 
     return _paired_result(
@@ -1007,6 +1010,7 @@ def run_paper_live_daemon(
     entry_policy_comparison_observer: (
         PaperEntryPolicyComparisonObserver | None
     ) = None,
+    on_checkpoint_persisted: Callable[[], None] | None = None,
 ) -> PaperLiveDaemonResult:
     checkpoint = _run_async(repository.load_checkpoint(config.run_id))
     if checkpoint is not None:
@@ -1281,6 +1285,7 @@ def run_paper_live_daemon(
                     now,
                 )
             )
+            _notify_checkpoint_persisted(on_checkpoint_persisted)
             last_checkpoint_saved_at = now
             checkpoint_dirty = False
             processed_since_checkpoint = 0
@@ -1296,6 +1301,7 @@ def run_paper_live_daemon(
                 saved_at,
             )
         )
+        _notify_checkpoint_persisted(on_checkpoint_persisted)
         last_checkpoint_saved_at = saved_at
 
     return PaperLiveDaemonResult(
@@ -1486,6 +1492,18 @@ def _run_async[T](awaitable: Coroutine[object, object, T]) -> T:
     except RuntimeError:
         return asyncio.run(awaitable)
     raise RuntimeError("run_paper_live_daemon cannot run inside an active event loop")
+
+
+def _notify_checkpoint_persisted(
+    callback: Callable[[], None] | None,
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback()
+    except Exception:
+        # A local readiness marker must never interrupt paper execution.
+        log.exception("paper_health_marker_failed")
 
 
 def _require_non_empty(value: str, field_name: str) -> None:

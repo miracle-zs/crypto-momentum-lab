@@ -21,12 +21,15 @@ COPY src ./src
 COPY configs ./configs
 COPY alembic.ini ./
 COPY alembic ./alembic
+COPY docker/local-healthcheck /usr/local/bin/cml-local-healthcheck
+
+RUN chmod 0755 /usr/local/bin/cml-local-healthcheck
 
 RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation .
 
 ENV CML_CODE_COMMIT=${CML_CODE_COMMIT}
 
-RUN mkdir -p /app/data && chown -R cml:cml /app
+RUN mkdir -p /app/data /run/cml/health && chown -R cml:cml /app /run/cml
 
 USER cml
 

@@ -16,6 +16,7 @@ x-app: &app
     CML_EXECUTION_DATABASE_URL: ${CML_EXECUTION_DATABASE_URL:-}
     CML_MARKET_DATABASE_URL: ${CML_MARKET_DATABASE_URL:-}
     CML_OBSERVABILITY_DATABASE_URL: ${CML_OBSERVABILITY_DATABASE_URL:-}
+    CML_LOCAL_HEALTH_DIR: /run/cml/health
     CML_CODE_COMMIT: ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
   restart: unless-stopped
   # Short-lived/stateless services can restart quickly. Services that flush
@@ -31,16 +32,10 @@ x-paper: &paper
       condition: service_healthy
   mem_limit: 192m
   healthcheck:
-    # This launches a fresh Python interpreter and opens a database
-    # connection. Keep the readiness window, but avoid running it every few
-    # seconds on a host that also carries the market-data event loop.
-    test:
-      - CMD
-      - python
-      - -m
-      - crypto_momentum_lab.apps.healthcheck_fast
-      - --service
-      - paper
+    # The service publishes a local heartbeat after its existing database
+    # checkpoint succeeds. Reading the marker avoids a Python startup and a
+    # new PostgreSQL connection for every probe.
+    test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "180"]
     interval: 60s
     start_interval: 5s
     timeout: 15s
@@ -159,15 +154,9 @@ services:
     volumes:
       - market-data:/app/data
     healthcheck:
-      # Preserve roughly the previous 2-minute failure-detection window while
-      # reducing the Python healthcheck CPU bursts from every 30 seconds.
-      test:
-        - CMD
-        - python
-        - -m
-        - crypto_momentum_lab.apps.healthcheck_fast
-        - --service
-        - market-data
+      # Runtime-state persistence refreshes the local marker. The probe only
+      # reads that marker and never opens a second database connection.
+      test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "120"]
       interval: 60s
       start_interval: 15s
       timeout: 15s
@@ -486,18 +475,7 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -m
-        - crypto_momentum_lab.apps.healthcheck_fast
-        - --service
-        - execution-account
-        # Live account readiness is process state only; live execution does
-        # not apply a hidden account-data age cutoff.
-        - --ignore-age
-        - --account-label
-        - ${CML_LIVE_ACCOUNT_LABEL:-primary}
+      test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "120"]
       interval: 60s
       start_interval: 5s
       timeout: 15s
@@ -609,21 +587,9 @@ services:
       execution-account-live:
         condition: service_healthy
     healthcheck:
-      # The endpoint is inexpensive once running, but starting Python for
-      # every probe still competes with the data and strategy processes.
-      test:
-        - CMD
-        - python
-        - -m
-        - crypto_momentum_lab.apps.healthcheck_fast
-        - --service
-        - live
-        - --account-label
-        - ${CML_LIVE_ACCOUNT_LABEL:-primary}
-        - --session-id
-        - ${CML_LIVE_SESSION_ID:-live-primary-v1}
-        - --lease-owner
-        - ${CML_LIVE_LEASE_OWNER:-live-worker}
+      # The live process refreshes liveness locally and refreshes the database
+      # marker after lease/checkpoint writes.
+      test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "300"]
       interval: 60s
       start_interval: 5s
       timeout: 10s

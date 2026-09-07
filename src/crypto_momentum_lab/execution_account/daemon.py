@@ -278,6 +278,7 @@ class UserDataAccountSyncDaemon:
         on_event_applied: UserDataAccountAppliedCallback | None = None,
         on_snapshot: UserDataAccountSnapshotCallback | None = None,
         on_persisted: UserDataAccountPersistedCallback | None = None,
+        on_heartbeat: Callable[[], None] | None = None,
         expected_position_registry: AccountPositionExpectationRegistry | None = None,
         on_reconciled_fill: UserDataAccountReconciledFillCallback | None = None,
     ) -> None:
@@ -288,6 +289,7 @@ class UserDataAccountSyncDaemon:
         self._sleep = sleep
         self._on_error = on_error
         self._on_persisted = on_persisted
+        self._on_heartbeat = on_heartbeat
         self._on_event_applied = on_event_applied
         self._on_snapshot = on_snapshot
         self._expected_position_registry = expected_position_registry
@@ -858,6 +860,7 @@ class UserDataAccountSyncDaemon:
                     await self._service.publish_user_data_heartbeat(
                         observed_at=self._now(),
                     )
+                    self._notify_heartbeat()
 
     async def _reconcile(
         self,
@@ -934,6 +937,7 @@ class UserDataAccountSyncDaemon:
             else:
                 self._accept_events = False
         if _is_ready_result(result):
+            self._notify_heartbeat()
             # Publish immediately after the in-memory state has been replaced.
             # Reconciliation inspection is telemetry/recovery bookkeeping and
             # must not delay the account-state handoff to live consumers.
@@ -943,6 +947,14 @@ class UserDataAccountSyncDaemon:
                 self._schedule_reconciliation_persistence(result)
         await self._inspect_reconciliation(result)
         return result
+
+    def _notify_heartbeat(self) -> None:
+        if self._on_heartbeat is None:
+            return
+        try:
+            self._on_heartbeat()
+        except Exception as error:
+            self._report_error(error)
 
     async def _snapshot(self) -> None:
         pipeline_active = self._event_queue is not None

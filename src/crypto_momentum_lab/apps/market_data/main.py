@@ -24,6 +24,7 @@ from crypto_momentum_lab.domain.market.models import (
     CaptureStream,
 )
 from crypto_momentum_lab.domain.universe.models import UniverseSnapshot
+from crypto_momentum_lab.health import LocalHealthWriter
 from crypto_momentum_lab.market_data.agg_trade_recovery import (
     AggTradeGapRecoverer,
     agg_trade_gap_quality_event,
@@ -626,6 +627,8 @@ class MarketDataRuntime:
 @asynccontextmanager
 async def build_market_data_runtime(
     config_path: Path,
+    *,
+    on_durable_state_persisted: Callable[[datetime], None] | None = None,
 ) -> AsyncIterator[MarketDataRuntime]:
     runtime = load_runtime_config(config_path)
     engine = create_market_database_engine(_market_database_url(runtime.database_url))
@@ -666,6 +669,7 @@ async def build_market_data_runtime(
         ),
         realtime_state_sink=state_hub.publish,
         realtime_quote_sink=quote_hub.publish,
+        on_durable_state_persisted=on_durable_state_persisted,
     )
     protected_run_ids = parse_paper_exit_run_ids()
     live_position_account_labels = parse_live_position_account_labels()
@@ -934,7 +938,16 @@ async def run_market_data(
     *,
     stop_requested: asyncio.Event | None = None,
 ) -> None:
-    async with build_market_data_runtime(config_path) as runtime:
+    health = LocalHealthWriter.from_environment()
+    health_callback = (
+        None
+        if health is None
+        else lambda _watermark: health.heartbeat(database_ok=True)
+    )
+    async with build_market_data_runtime(
+        config_path,
+        on_durable_state_persisted=health_callback,
+    ) as runtime:
         capture_task: asyncio.Task[None] | None = None
         auxiliary_tasks: tuple[asyncio.Task[None], ...] = ()
         stop_task: asyncio.Task[bool] | None = None
@@ -1076,6 +1089,8 @@ async def run_market_data(
             if quote_hub is not None:
                 await quote_hub.stop()
             await runtime.state_hub.stop()
+    if health is not None:
+        health.stopped()
 
 
 async def run_market_data_until_stopped(

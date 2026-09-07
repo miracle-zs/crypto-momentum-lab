@@ -1,0 +1,25 @@
+#!/bin/sh
+
+# Read process-local readiness without starting Python or opening PostgreSQL.
+set -eu
+
+max_age_seconds="${1:-180}"
+health_dir="${CML_LOCAL_HEALTH_DIR:-/run/cml/health}"
+status_file="$health_dir/status"
+database_file="$health_dir/database"
+
+case "$max_age_seconds" in
+  ''|*[!0-9]*) exit 1 ;;
+esac
+
+[ "$(cat "$status_file" 2>/dev/null || true)" = "ready" ] || exit 1
+
+now="$(date +%s)"
+for marker in "$status_file" "$database_file"; do
+  modified="$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null || true)"
+  case "$modified" in
+    ''|*[!0-9]*) exit 1 ;;
+  esac
+  age=$((now - modified))
+  [ "$age" -ge 0 ] && [ "$age" -le "$max_age_seconds" ] || exit 1
+done

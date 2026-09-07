@@ -88,6 +88,7 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     PreparedOrderSubmission,
     SubmitPolicy,
 )
+from crypto_momentum_lab.health import LocalHealthWriter
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     BinanceClosedCandle15mFeed,
     ClosedCandle15mFeedConfig,
@@ -1545,6 +1546,24 @@ async def _run_live_daemon(
         raise ValueError("market_quote_hub_url must not be empty in hub mode")
     if not account_event_hub_url.strip():
         raise ValueError("account_event_hub_url must not be empty")
+    health = LocalHealthWriter.from_environment()
+
+    def mark_live_database_ok() -> None:
+        if health is None:
+            return
+        try:
+            health.database_ok()
+        except Exception:
+            log.exception("live_health_database_marker_failed")
+
+    def mark_live_ready() -> None:
+        if health is None:
+            return
+        try:
+            health.heartbeat(database_ok=True)
+        except Exception:
+            log.exception("live_health_marker_failed")
+
     now = datetime.now(tz=UTC)
     execution_engine = create_execution_database_engine(execution_database_url)
     market_engine = create_market_database_engine(market_database_url)
@@ -2144,6 +2163,7 @@ async def _run_live_daemon(
             )
         def on_lease_renewed(lease: TradingLease) -> None:
             context_provider.update_lease(lease)
+            mark_live_database_ok()
             log.info(
                 "live_lease_renewed",
                 session_id=session_id,
@@ -2250,6 +2270,7 @@ async def _run_live_daemon(
             repository=_LiveDaemonRepositoryAdapter(
                 order_repository,
                 checkpoint_repository,
+                mark_live_database_ok,
             ),
             state_machine=execution_coordinator,
             context_provider=context_provider,
@@ -2390,6 +2411,7 @@ async def _run_live_daemon(
                 risk_config_hash=risk_config_hash,
                 state=LiveSessionState.LIVE_ENABLED,
             )
+        mark_live_ready()
         startup_phase = False
         hub_source: WebSocketMarketStateSource | None = None
         quote_source: WebSocketMarketQuoteSource | None = None
@@ -2511,6 +2533,30 @@ async def _run_live_daemon(
                 run_id=session_id,
             )
         )
+        local_health_task: asyncio.Task[None] | None = None
+
+        async def refresh_local_health() -> None:
+            while True:
+                await asyncio.sleep(_LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS)
+                if health is None:
+                    continue
+                try:
+                    if (
+                        market_task.done()
+                        or account_task.done()
+                        or lease_task.done()
+                    ):
+                        health.degraded()
+                    else:
+                        health.heartbeat()
+                except Exception:
+                    log.exception("live_health_marker_failed")
+
+        if health is not None:
+            local_health_task = asyncio.create_task(
+                refresh_local_health(),
+                name=f"live-local-health:{session_id}",
+            )
         try:
             monitored_tasks: set[asyncio.Task[object]] = {
                 market_task,
@@ -2605,6 +2651,8 @@ async def _run_live_daemon(
                 lease_task.cancel()
             if not reconcile_task.done():
                 reconcile_task.cancel()
+            if local_health_task is not None and not local_health_task.done():
+                local_health_task.cancel()
             if entry_filter_cache is not None:
                 await entry_filter_cache.stop()
             if entry_symbol_cache is not None:
@@ -2625,6 +2673,11 @@ async def _run_live_daemon(
                 ),
                 lease_task,
                 reconcile_task,
+                *(
+                    (local_health_task,)
+                    if local_health_task is not None
+                    else ()
+                ),
                 *(
                     (entry_filter_cache_task,)
                     if entry_filter_cache_task is not None
@@ -2692,6 +2745,11 @@ async def _run_live_daemon(
         await checkpoint_engine.dispose()
         if heartbeat_engine is not None:
             await heartbeat_engine.dispose()
+        if health is not None:
+            try:
+                health.stopped()
+            except Exception:
+                log.exception("live_health_stop_marker_failed")
 
 
 class _LatestMarketStateCache:
@@ -3102,9 +3160,11 @@ class _LiveDaemonRepositoryAdapter:
         self,
         order_repository: PostgresOrderRepository,
         checkpoint_repository: PostgresPaperDaemonRepository,
+        on_database_success: Callable[[], None] | None = None,
     ) -> None:
         self._orders = order_repository
         self._checkpoints = checkpoint_repository
+        self._on_database_success = on_database_success
 
     async def save_approved_intent(
         self,
@@ -3135,6 +3195,8 @@ class _LiveDaemonRepositoryAdapter:
         saved_at: datetime,
     ) -> None:
         await self._checkpoints.save_checkpoint(run_id, checkpoint, saved_at)
+        if self._on_database_success is not None:
+            self._on_database_success()
 
 
 async def _reconcile_run_orders(

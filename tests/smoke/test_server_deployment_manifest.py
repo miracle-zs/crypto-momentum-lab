@@ -23,11 +23,19 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         "research-data:/app/research-data:ro"
     ]
     assert manifest["x-app"]["stop_grace_period"] == "20s"
+    assert manifest["x-app"]["environment"]["CML_LOCAL_HEALTH_DIR"] == (
+        "/run/cml/health"
+    )
     assert "build" not in manifest["x-app"]
     assert services["migrate"]["build"]["context"] == "."
     assert services["migrate"]["image"] == manifest["x-app"]["image"]
     assert services["market-data"]["healthcheck"]["start_period"] == "15m"
     assert services["market-data"]["healthcheck"]["start_interval"] == "15s"
+    assert services["market-data"]["healthcheck"]["test"] == [
+        "CMD",
+        "/usr/local/bin/cml-local-healthcheck",
+        "120",
+    ]
     assert services["market-data"]["stop_grace_period"] == "60s"
     assert services["postgres"]["mem_limit"] == "1g"
     assert services["postgres"]["memswap_limit"] == "1536m"
@@ -44,10 +52,11 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert services["dashboard"]["healthcheck"]["retries"] == 4
     assert services["market-data"]["healthcheck"]["interval"] == "60s"
     assert services["market-data"]["healthcheck"]["retries"] == 2
-    assert _option_value(
-        services["market-data"]["healthcheck"]["test"],
-        "-m",
-    ) == "crypto_momentum_lab.apps.healthcheck_fast"
+    assert services["execution-account-live"]["healthcheck"]["test"] == [
+        "CMD",
+        "/usr/local/bin/cml-local-healthcheck",
+        "120",
+    ]
     for service in (
         "paper-orderflow-pair",
         "paper-b1-gainer100",
@@ -56,15 +65,11 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         assert services[service]["healthcheck"]["interval"] == "60s"
         assert services[service]["healthcheck"]["retries"] == 2
         assert services[service]["healthcheck"]["start_interval"] == "5s"
-        assert _option_value(
-            services[service]["healthcheck"]["test"],
-            "-m",
-        ) == "crypto_momentum_lab.apps.healthcheck_fast"
-    for service in ("execution-account-live", "live-strategy"):
-        assert _option_value(
-            services[service]["healthcheck"]["test"],
-            "-m",
-        ) == "crypto_momentum_lab.apps.healthcheck_fast"
+        assert services[service]["healthcheck"]["test"] == [
+            "CMD",
+            "/usr/local/bin/cml-local-healthcheck",
+            "180",
+        ]
     for service in (
         "paper-orderflow-pair",
     ):
@@ -162,10 +167,11 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert services["execution-account-live"]["profiles"] == ["live"]
     assert services["live-strategy"]["profiles"] == ["live"]
     live_healthcheck = services["live-strategy"]["healthcheck"]["test"]
-    assert _option_value(live_healthcheck, "--service") == "live"
-    assert _option_value(live_healthcheck, "-m") == (
-        "crypto_momentum_lab.apps.healthcheck_fast"
-    )
+    assert live_healthcheck == [
+        "CMD",
+        "/usr/local/bin/cml-local-healthcheck",
+        "300",
+    ]
     assert services["research-collector"]["healthcheck"]["interval"] == "90s"
     assert services["research-collector"]["healthcheck"]["retries"] == 2
     assert services["research-collector"]["healthcheck"]["start_interval"] == "5s"
@@ -176,10 +182,6 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
             "urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=3)\""
         ),
     ]
-    assert "--ignore-age" not in live_healthcheck
-    assert _option_value(live_healthcheck, "--session-id") == (
-        "${CML_LIVE_SESSION_ID:-live-primary-v1}"
-    )
     live_command = services["live-strategy"]["command"]
     assert _option_value(live_command, "--entry-positive-gainer-top-count") == (
         "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-10}"
@@ -233,6 +235,16 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
         assert strategy["stop_grace_period"] == "60s"
         assert execution["healthcheck"]["start_interval"] == "5s"
         assert strategy["healthcheck"]["start_interval"] == "5s"
+        assert execution["healthcheck"]["test"] == [
+            "CMD",
+            "/usr/local/bin/cml-local-healthcheck",
+            "120",
+        ]
+        assert strategy["healthcheck"]["test"] == [
+            "CMD",
+            "/usr/local/bin/cml-local-healthcheck",
+            "300",
+        ]
         assert f"account-{account_number}" in execution["command"]
         assert f"account-{account_number}" in strategy["command"]
         for option in (
@@ -254,6 +266,7 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
         ]["condition"] == "service_healthy"
 
     account_two_environment = services["live-strategy-account-2"]["environment"]
+    assert account_two_environment["CML_LOCAL_HEALTH_DIR"] == "/run/cml/health"
     assert (
         account_two_environment["CML_LIVE_IMPULSE_WINDOW_BUCKETS"]
         == "${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_2:-2}"

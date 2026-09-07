@@ -41,6 +41,7 @@ from crypto_momentum_lab.execution_account.sync import (
     ExecutionAccountSyncResult,
     ExecutionAccountSyncService,
 )
+from crypto_momentum_lab.health import LocalHealthWriter
 from crypto_momentum_lab.persistence.postgres import (
     PostgresAccountRepository,
     PostgresOperationalRetentionRepository,
@@ -360,6 +361,12 @@ async def sync_continuously(
     snapshot_retention_max_rows_per_table: int,
     snapshot_retention_max_runtime_seconds: float,
 ) -> None:
+    health = LocalHealthWriter.from_environment()
+    health_callback = (
+        None
+        if health is None
+        else lambda: health.heartbeat(database_ok=True)
+    )
     engine = create_account_database_engine(database_url)
     retention_engine = create_maintenance_database_engine(database_url)
     expected_position_registry = AccountPositionExpectationRegistry(
@@ -464,6 +471,7 @@ async def sync_continuously(
                 ),
                 on_event_applied=publish_account_event,
                 on_snapshot=publish_account_snapshot,
+                on_heartbeat=health_callback,
                 expected_position_registry=expected_position_registry,
                 on_reconciled_fill=publish_reconciled_fill,
             )
@@ -505,6 +513,8 @@ async def sync_continuously(
                     pass
             await client.aclose()
     finally:
+        if health is not None:
+            health.stopped()
         await account_event_hub.stop()
         await retention_engine.dispose()
         await engine.dispose()

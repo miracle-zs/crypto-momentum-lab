@@ -17,6 +17,7 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyRunIdentity,
     deterministic_config_hash,
 )
+from crypto_momentum_lab.health import LocalHealthWriter
 from crypto_momentum_lab.persistence.parquet import read_market_states_15s_dataset
 from crypto_momentum_lab.persistence.postgres import (
     PostgresPaperDaemonRepository,
@@ -900,6 +901,12 @@ def paper_live_daemon_command(
     resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
     if not resolved_database_url:
         raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
+    health = LocalHealthWriter.from_environment()
+    health_callback = (
+        None
+        if health is None
+        else lambda: health.heartbeat(database_ok=True)
+    )
     resolved_run_id = run_id or f"paper-live-daemon-{uuid4()}"
     order_flow_min_aggressive_imbalance_decimal = (
         _parse_optional_non_negative_decimal(
@@ -1074,6 +1081,7 @@ def paper_live_daemon_command(
             entry_policy_comparison_observer=(
                 None if comparison_sink is None else comparison_sink
             ),
+            on_checkpoint_persisted=health_callback,
         )
     typer.echo(
         "Paper live daemon completed: "
@@ -1085,6 +1093,8 @@ def paper_live_daemon_command(
             "Entry Policy observations written: "
             f"{entry_policy_compare_output.as_posix()}"
         )
+    if health is not None:
+        health.stopped()
 
 
 @app.command("paper-live-pair")
@@ -1372,6 +1382,12 @@ def paper_live_pair_command(
     resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
     if not resolved_database_url:
         raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
+    health = LocalHealthWriter.from_environment()
+    health_callback = (
+        None
+        if health is None
+        else lambda: health.heartbeat(database_ok=True)
+    )
     order_flow_min_aggressive_imbalance_decimal = (
         _parse_optional_non_negative_decimal(
             order_flow_min_aggressive_imbalance,
@@ -1722,6 +1738,7 @@ def paper_live_pair_command(
             clock=clock,
             entry_symbol_loader=entry_symbol_loader,
             candle_source=candle_source,
+            on_checkpoint_persisted=health_callback,
         )
     states_processed = result.account_results[0].processed_state_count
     halt_reason = result.account_results[0].halt_reason
@@ -1731,6 +1748,8 @@ def paper_live_pair_command(
         f"states={states_processed} "
         f"halt={halt_reason or 'none'}"
     )
+    if health is not None:
+        health.stopped()
 
 
 def build_paper_state_source(
