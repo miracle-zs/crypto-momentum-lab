@@ -55,6 +55,11 @@ _DEFAULT_POOL_TIMEOUT_SECONDS = 5.0
 _COMMAND_EXIT_PRIORITY = 0
 _COMMAND_ENTRY_PRIORITY = 10
 _COMMAND_BACKGROUND_PRIORITY = 20
+_MARGIN_TYPE_ALIASES = {
+    "CROSS": "CROSSED",
+    "CROSSED": "CROSSED",
+    "ISOLATED": "ISOLATED",
+}
 
 
 class BinanceRateLimitError(httpx.HTTPStatusError):
@@ -327,6 +332,24 @@ class BinanceUsdMPrivateReadClient:
             for item in _require_sequence_of_mappings(payload)
         )
 
+    async def fetch_symbol_margin_type(self, symbol: str) -> str | None:
+        """Read the exchange's symbol-level futures margin mode."""
+        normalized_symbol = _normalize_symbols((symbol,))[0]
+        payload = await self._signed_get(
+            "/fapi/v1/symbolConfig",
+            {"symbol": normalized_symbol},
+        )
+        for item in _require_sequence_of_mappings(payload):
+            if str(item.get("symbol", "")).upper() != normalized_symbol:
+                continue
+            raw_margin_type = _optional_str(item.get("marginType"))
+            return (
+                None
+                if raw_margin_type is None
+                else _normalize_margin_type(raw_margin_type)
+            )
+        return None
+
     async def fetch_open_orders(
         self,
         symbol: str | None = None,
@@ -574,9 +597,13 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         connect_timeout_seconds: float = _DEFAULT_CONNECT_TIMEOUT_SECONDS,
         pool_timeout_seconds: float = _DEFAULT_POOL_TIMEOUT_SECONDS,
         entry_leverage: int | None = None,
+        margin_type: str | None = None,
     ) -> None:
         if entry_leverage is not None and not 1 <= entry_leverage <= 125:
             raise ValueError("entry_leverage must be between 1 and 125")
+        normalized_margin_type = (
+            None if margin_type is None else _normalize_margin_type(margin_type)
+        )
         super().__init__(
             api_key=api_key,
             api_secret=api_secret,
@@ -594,7 +621,10 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         )
         self._live_submit_enabled = live_submit_enabled
         self._entry_leverage = entry_leverage
+        self._entry_margin_type = normalized_margin_type
         self._configured_leverage_by_symbol: dict[str, int] = {}
+        self._configured_margin_type_by_symbol: dict[str, str] = {}
+        self._margin_type_lock = asyncio.Lock()
 
     async def warm_entry_leverage(self, symbols: Iterable[str]) -> None:
         """Confirm entry leverage before the live market loop can submit."""
@@ -608,6 +638,26 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         for symbol in _normalize_symbols(symbols):
             await self._ensure_entry_leverage(symbol)
 
+    async def warm_entry_margin_type(self, symbols: Iterable[str]) -> None:
+        """Confirm entry margin type before the live market loop can submit."""
+
+        if not self._live_submit_enabled:
+            raise LiveSubmissionDisabledError(
+                "Binance trade client requires explicit live submit enablement"
+            )
+        if self._entry_margin_type is None:
+            return
+        errors: list[str] = []
+        for symbol in _normalize_symbols(symbols):
+            try:
+                await self._ensure_entry_margin_type(symbol)
+            except ExchangeOrderRejectedError as error:
+                errors.append(f"{symbol}: {error}")
+        if errors:
+            raise ExchangeOrderRejectedError(
+                "Binance entry margin type warmup failed: " + "; ".join(errors)
+            )
+
     async def submit_order(self, plan: OrderExecutionPlan) -> ExchangeOrderSnapshot:
         if not self._live_submit_enabled:
             raise LiveSubmissionDisabledError(
@@ -615,6 +665,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             )
         entry_leverage = None
         if not plan.reduce_only:
+            await self._ensure_entry_margin_type(plan.symbol)
             entry_leverage = await self._ensure_entry_leverage(plan.symbol)
         params: dict[str, str | int | float | bool | None] = {
             "symbol": plan.symbol,
@@ -717,6 +768,60 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             active_exit_order_client_ids=tuple(sorted(active_client_order_ids)),
             observed_at=self._now(),
         )
+
+    async def _ensure_entry_margin_type(self, symbol: str) -> str | None:
+        if self._entry_margin_type is None:
+            return None
+        normalized_symbol = _normalize_symbols((symbol,))[0]
+        async with self._margin_type_lock:
+            configured = self._configured_margin_type_by_symbol.get(
+                normalized_symbol
+            )
+            if configured is not None:
+                return configured
+            try:
+                current = await self.fetch_symbol_margin_type(normalized_symbol)
+                if current == self._entry_margin_type:
+                    self._configured_margin_type_by_symbol[normalized_symbol] = current
+                    return current
+                try:
+                    await self._signed_post(
+                        "/fapi/v1/marginType",
+                        {
+                            "symbol": normalized_symbol,
+                            "marginType": self._entry_margin_type,
+                        },
+                        priority=_COMMAND_ENTRY_PRIORITY,
+                    )
+                except httpx.HTTPStatusError as exc:
+                    # Binance reports an already-selected mode as an error.
+                    # Treat it as a success only after the read-back below.
+                    if _exchange_error_code(exc) != -4046:
+                        raise
+                verified = await self.fetch_symbol_margin_type(normalized_symbol)
+            except httpx.TimeoutException as exc:
+                raise ExchangeOrderRejectedError(
+                    "Binance entry margin type was not confirmed; "
+                    "order was not sent"
+                ) from exc
+            except httpx.HTTPStatusError as exc:
+                raise ExchangeOrderRejectedError(
+                    _exchange_error_message(exc)
+                ) from exc
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
+                raise ExchangeOrderRejectedError(
+                    "Binance entry margin type was not confirmed; "
+                    "order was not sent"
+                ) from exc
+            if verified != self._entry_margin_type:
+                actual = verified or "unknown"
+                raise ExchangeOrderRejectedError(
+                    "Binance entry margin type was not confirmed; "
+                    f"expected {self._entry_margin_type}, got {actual}; "
+                    "order was not sent"
+                )
+            self._configured_margin_type_by_symbol[normalized_symbol] = verified
+            return verified
 
     async def _ensure_entry_leverage(self, symbol: str) -> int | None:
         if self._entry_leverage is None:
@@ -1034,6 +1139,15 @@ def _optional_str(value: object) -> str | None:
         return None
     text = str(value)
     return text if text else None
+
+
+def _normalize_margin_type(value: str) -> str:
+    normalized = value.strip().upper()
+    try:
+        return _MARGIN_TYPE_ALIASES[normalized]
+    except KeyError as exc:
+        allowed = ", ".join(sorted(set(_MARGIN_TYPE_ALIASES.values())))
+        raise ValueError(f"margin_type must be one of: {allowed}") from exc
 
 
 def _normalize_symbols(symbols: Iterable[str]) -> tuple[str, ...]:

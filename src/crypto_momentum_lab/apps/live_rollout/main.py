@@ -656,6 +656,13 @@ def submit_plan_command(
     entry_leverage: Annotated[
         int, typer.Option("--entry-leverage", min=1, max=125)
     ] = 1,
+    margin_type: Annotated[
+        str,
+        typer.Option(
+            "--margin-type",
+            help="Entry margin mode: CROSSED or ISOLATED.",
+        ),
+    ] = "CROSSED",
     confirmation: Annotated[
         bool, typer.Option("--i-understand-this-places-real-orders")
     ] = False,
@@ -686,6 +693,7 @@ def submit_plan_command(
             api_key=api_key,
             api_secret=api_secret,
             entry_leverage=entry_leverage,
+            margin_type=margin_type,
         )
     )
     typer.echo(json.dumps(asdict(result), default=str, sort_keys=True))
@@ -844,6 +852,13 @@ def run_command(
     entry_leverage: Annotated[
         int, typer.Option("--entry-leverage", min=1, max=125)
     ] = 1,
+    margin_type: Annotated[
+        str,
+        typer.Option(
+            "--margin-type",
+            help="Entry margin mode: CROSSED or ISOLATED.",
+        ),
+    ] = "CROSSED",
     entry_policy_compare_only: Annotated[
         bool,
         typer.Option(
@@ -948,6 +963,7 @@ def run_command(
             api_key=credentials.api_key,
             api_secret=credentials.api_secret,
             entry_leverage=entry_leverage,
+            margin_type=margin_type,
             entry_policy_compare_only=entry_policy_compare_only,
             entry_policy_enforce=entry_policy_enforce,
             acknowledge_missing_shadow_preflight=acknowledge_missing_shadow_preflight,
@@ -1027,6 +1043,7 @@ async def _run_live_plan(
     api_key: str,
     api_secret: str,
     entry_leverage: int,
+    margin_type: str = "CROSSED",
 ) -> LiveSessionResult:
     if plan.run_id != session_id:
         raise ValueError("order plan run_id must match session_id")
@@ -1089,6 +1106,7 @@ async def _run_live_plan(
             live_submit_enabled=True,
             base_url=base_url,
             entry_leverage=entry_leverage,
+            margin_type=margin_type,
         )
         account_config = await client.fetch_account_config()
         plan_uses_hedge_mode = plan.position_side is not FuturesPositionSide.BOTH
@@ -1511,6 +1529,7 @@ async def _run_live_daemon(
     api_key: str,
     api_secret: str,
     entry_leverage: int,
+    margin_type: str = "CROSSED",
     persist_exchange_operations: Collection[str] | None = None,
     entry_policy_compare_only: bool = False,
     entry_policy_enforce: bool = False,
@@ -1625,6 +1644,7 @@ async def _run_live_daemon(
             live_submit_enabled=True,
             base_url=base_url,
             entry_leverage=entry_leverage,
+            margin_type=margin_type,
         )
         account_config = await client.fetch_account_config()
         if account_config.hedge_mode != hedge_mode:
@@ -1922,26 +1942,53 @@ async def _run_live_daemon(
                 return data.symbols
 
             entry_symbol_loader = load_entry_symbols_from_database
-        if entry_symbol_loader is not None and entry_leverage is not None:
+        if entry_symbol_loader is not None:
             assert client is not None
             try:
                 initial_entry_symbols = await entry_symbol_loader(now)
-                await client.warm_entry_leverage(initial_entry_symbols)
-                log.info(
-                    "live_entry_leverage_warmed",
-                    symbol_count=len(initial_entry_symbols),
-                    leverage=entry_leverage,
-                )
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                # A failed warmup keeps the existing per-symbol confirmation
-                # fallback in place. It must be visible, but it must not make
-                # exits unavailable during startup.
                 log.warning(
-                    "live_entry_leverage_warmup_failed",
+                    "live_entry_symbol_warmup_failed",
                     error_type=type(error).__name__,
                 )
+            else:
+                if margin_type is not None:
+                    try:
+                        await client.warm_entry_margin_type(initial_entry_symbols)
+                        log.info(
+                            "live_entry_margin_type_warmed",
+                            symbol_count=len(initial_entry_symbols),
+                            margin_type=margin_type,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as error:
+                        # A failed warmup keeps the per-symbol confirmation
+                        # fallback in place. It remains fail-closed before
+                        # any affected entry is submitted.
+                        log.warning(
+                            "live_entry_margin_type_warmup_failed",
+                            error_type=type(error).__name__,
+                        )
+                if entry_leverage is not None:
+                    try:
+                        await client.warm_entry_leverage(initial_entry_symbols)
+                        log.info(
+                            "live_entry_leverage_warmed",
+                            symbol_count=len(initial_entry_symbols),
+                            leverage=entry_leverage,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as error:
+                        # A failed warmup keeps the existing per-symbol
+                        # confirmation fallback in place.
+                        log.warning(
+                            "live_entry_leverage_warmup_failed",
+                            error_type=type(error).__name__,
+                        )
         entry_filter_cache_required = (
             ema_provider is not None and entry_symbol_loader is not None
         )

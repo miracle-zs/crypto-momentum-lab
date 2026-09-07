@@ -280,6 +280,8 @@ services:
       - --acknowledge-missing-shadow-preflight
       - --entry-leverage
       - ${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_2:-5}
+      - --margin-type
+      - ${CML_LIVE_MARGIN_TYPE_ACCOUNT_2:-CROSSED}
       - --persist-exchange-operations
       - ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS_ACCOUNT_2:-submit,cancel}
       - --exit-mode
@@ -399,6 +401,8 @@ services:
       - --acknowledge-missing-shadow-preflight
       - --entry-leverage
       - ${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_3:-5}
+      - --margin-type
+      - ${CML_LIVE_MARGIN_TYPE_ACCOUNT_3:-CROSSED}
       - --persist-exchange-operations
       - ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS_ACCOUNT_3:-submit,cancel}
       - --exit-mode
@@ -518,6 +522,8 @@ services:
       - --acknowledge-missing-shadow-preflight
       - --entry-leverage
       - ${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_4:-5}
+      - --margin-type
+      - ${CML_LIVE_MARGIN_TYPE_ACCOUNT_4:-CROSSED}
       - --persist-exchange-operations
       - ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS_ACCOUNT_4:-submit,cancel}
       - --exit-mode

@@ -1016,6 +1016,153 @@ async def test_trade_client_confirms_entry_leverage_before_order() -> None:
     assert requested_paths == ["/fapi/v1/leverage", "/fapi/v1/order"]
 
 
+async def test_trade_client_confirms_entry_margin_type_before_order() -> None:
+    requested_paths: list[str] = []
+    symbol_config_calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal symbol_config_calls
+        requested_paths.append(request.url.path)
+        if request.url.path == "/fapi/v1/symbolConfig":
+            symbol_config_calls += 1
+            margin_type = "ISOLATED" if symbol_config_calls == 1 else "CROSSED"
+            return httpx.Response(
+                200,
+                json=[{"symbol": "BTCUSDT", "marginType": margin_type}],
+            )
+        if request.url.path == "/fapi/v1/marginType":
+            body = parse_qs(request.content.decode())
+            assert body["symbol"] == ["BTCUSDT"]
+            assert body["marginType"] == ["CROSSED"]
+            return httpx.Response(200, json={"code": 200, "msg": "success"})
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": _order_plan().client_order_id,
+                "orderId": 12345,
+                "status": "FILLED",
+                "executedQty": "0.003",
+                "avgPrice": "30000",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        margin_type="CROSSED",
+    )
+
+    try:
+        await client.submit_order(_order_plan())
+    finally:
+        await client.aclose()
+
+    assert requested_paths == [
+        "/fapi/v1/symbolConfig",
+        "/fapi/v1/marginType",
+        "/fapi/v1/symbolConfig",
+        "/fapi/v1/order",
+    ]
+
+
+async def test_trade_client_warms_entry_margin_type_outside_order_path() -> None:
+    requested_paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/fapi/v1/symbolConfig":
+            return httpx.Response(
+                200,
+                json=[{"symbol": "BTCUSDT", "marginType": "CROSSED"}],
+            )
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": _order_plan().client_order_id,
+                "orderId": 12345,
+                "status": "FILLED",
+                "executedQty": "0.003",
+                "avgPrice": "30000",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        margin_type="CROSSED",
+    )
+
+    try:
+        await client.warm_entry_margin_type(("BTCUSDT",))
+        await client.submit_order(_order_plan())
+    finally:
+        await client.aclose()
+
+    assert requested_paths == ["/fapi/v1/symbolConfig", "/fapi/v1/order"]
+
+
+async def test_margin_type_change_failure_does_not_submit_order() -> None:
+    requested_paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/fapi/v1/symbolConfig":
+            return httpx.Response(
+                200,
+                json=[{"symbol": "BTCUSDT", "marginType": "ISOLATED"}],
+            )
+        assert request.url.path == "/fapi/v1/marginType"
+        return httpx.Response(
+            400,
+            request=request,
+            json={
+                "code": -4048,
+                "msg": "Margin type cannot be changed if there exists position",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        margin_type="CROSSED",
+    )
+
+    try:
+        with pytest.raises(ExchangeOrderRejectedError, match="Margin type"):
+            await client.submit_order(_order_plan())
+    finally:
+        await client.aclose()
+
+    assert requested_paths == ["/fapi/v1/symbolConfig", "/fapi/v1/marginType"]
+
+
 async def test_trade_client_warm_entry_leverage_removes_first_order_round_trip(
 ) -> None:
     requested_paths: list[str] = []

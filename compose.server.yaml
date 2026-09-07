@@ -584,6 +584,8 @@ services:
       - --acknowledge-missing-shadow-preflight
       - --entry-leverage
       - ${CML_LIVE_ENTRY_LEVERAGE:-5}
+      - --margin-type
+      - ${CML_LIVE_MARGIN_TYPE:-CROSSED}
       # Production rollout explicitly retains only auditable write boundaries.
       - --persist-exchange-operations
       - ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-}
