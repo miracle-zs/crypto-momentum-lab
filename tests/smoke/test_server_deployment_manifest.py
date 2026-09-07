@@ -19,6 +19,9 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     } <= services.keys()
     assert "paper-liquidation-optimized" not in services
     assert services["dashboard"]["ports"] == ["127.0.0.1:8765:8765"]
+    assert services["dashboard"]["volumes"] == [
+        "research-data:/app/research-data:ro"
+    ]
     assert manifest["x-app"]["stop_grace_period"] == "20s"
     assert "build" not in manifest["x-app"]
     assert services["migrate"]["build"]["context"] == "."

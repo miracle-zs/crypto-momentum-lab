@@ -657,6 +657,8 @@ services:
         condition: service_completed_successfully
     ports:
       - "127.0.0.1:8765:8765"
+    volumes:
+      - research-data:/app/research-data:ro
     healthcheck:
       test:
         - CMD-SHELL
