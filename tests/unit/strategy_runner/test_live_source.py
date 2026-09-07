@@ -34,6 +34,20 @@ class FakeLoader:
     def close(self) -> None:
         pass
 
+
+class WakeupLoader(FakeLoader):
+    def __init__(self, batches) -> None:
+        super().__init__(batches)
+        self.prepared = 0
+        self.waits: list[float] = []
+
+    def prepare_wakeup(self) -> None:
+        self.prepared += 1
+
+    def wait_for_data(self, timeout_seconds: float) -> None:
+        self.waits.append(timeout_seconds)
+
+
 class LoopRecordingRepository:
     def __init__(self) -> None:
         self.loops: list[asyncio.AbstractEventLoop] = []
@@ -187,6 +201,27 @@ def test_postgres_paper_source_backs_off_only_while_idle(monkeypatch) -> None:
 
     assert tuple(source) == (state,)
     assert sleeps == [1.0, 2.0, 3.0]
+
+
+def test_postgres_paper_source_uses_durable_wakeup_when_available() -> None:
+    state = fixture_state("BTCUSDT", 0)
+    loader = WakeupLoader([(), (state,)])
+    source = PostgresPaperMarketStateSource(
+        loader=loader,
+        config=PaperLiveSourceConfig(
+            environment="research",
+            start_at=None,
+            poll_interval_seconds=1.0,
+            idle_timeout_seconds=30.0,
+            max_states=1,
+            batch_size=1,
+        ),
+    )
+
+    assert tuple(source) == (state,)
+    assert loader.prepared == 1
+    assert len(loader.waits) == 1
+    assert 29.0 < loader.waits[0] <= 30.0
 
 
 def test_paper_live_source_has_no_historical_resume_interface() -> None:

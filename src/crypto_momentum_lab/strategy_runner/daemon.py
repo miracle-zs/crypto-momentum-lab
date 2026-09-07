@@ -192,6 +192,7 @@ class PaperLiveDaemonConfig:
         default_factory=PaperEntryFilterConfig
     )
     entry_policy_compare_only: bool = False
+    checkpoint_phase_seconds: float = 0.0
 
     def __post_init__(self) -> None:
         _require_non_empty(self.run_id, "run_id")
@@ -201,6 +202,10 @@ class PaperLiveDaemonConfig:
             raise ValueError("checkpoint_every_states must be positive")
         if self.checkpoint_every_seconds <= 0:
             raise ValueError("checkpoint_every_seconds must be positive")
+        if not 0 <= self.checkpoint_phase_seconds < self.checkpoint_every_seconds:
+            raise ValueError(
+                "checkpoint_phase_seconds must be in [0, checkpoint_every_seconds)"
+            )
         if self.max_market_state_age_seconds <= 0:
             raise ValueError("max_market_state_age_seconds must be positive")
         if self.entry_symbol_refresh_seconds <= 0:
@@ -275,13 +280,13 @@ def run_paired_paper_live_daemon(
             or identity.config_hash != first_identity.config_hash
         ):
             raise ValueError("paired accounts must share strategy identity")
+        if (
+            account.config.checkpoint_phase_seconds
+            != first_config.checkpoint_phase_seconds
+        ):
+            raise ValueError("paired accounts must share checkpoint phase")
 
-    checkpoints = tuple(
-        _run_async(
-            account.repository.load_checkpoint(account.config.run_id)
-        )
-        for account in accounts
-    )
+    checkpoints = _load_paired_checkpoints(accounts)
     available_checkpoints = tuple(
         checkpoint for checkpoint in checkpoints if checkpoint is not None
     )
@@ -357,6 +362,9 @@ def run_paired_paper_live_daemon(
     checkpoint_dirty = False
     last_checkpoint_saved_at: datetime | None = None
     last_checkpoint_elapsed_anchor = clock.now()
+    checkpoint_not_before = last_checkpoint_elapsed_anchor + timedelta(
+        seconds=first_config.checkpoint_phase_seconds
+    )
     last_equity_snapshot_at: list[datetime | None] = [None] * len(accounts)
     last_candle_end_by_account: list[dict[str, datetime]] = [
         {} for _ in accounts
@@ -549,38 +557,36 @@ def run_paired_paper_live_daemon(
         processed_since_checkpoint += 1
         final_cursor = state.bucket_start
         checkpoint_due = (
-            processed_since_checkpoint
-            >= first_config.checkpoint_every_states
-            or (now - last_checkpoint_elapsed_anchor).total_seconds()
-            >= first_config.checkpoint_every_seconds
+            now >= checkpoint_not_before
+            and (
+                processed_since_checkpoint
+                >= first_config.checkpoint_every_states
+                or (now - last_checkpoint_elapsed_anchor).total_seconds()
+                >= first_config.checkpoint_every_seconds
+            )
         )
         if checkpoint_due:
             checkpoint_to_save = _checkpoint_for_persistence(strategy)
-            for account in accounts:
-                _run_async(
-                    account.repository.save_checkpoint(
-                        account.config.run_id,
-                        checkpoint_to_save,
-                        now,
-                    )
-                )
+            _save_paired_checkpoints(
+                accounts=accounts,
+                checkpoint=checkpoint_to_save,
+                saved_at=now,
+            )
             _notify_checkpoint_persisted(on_checkpoint_persisted)
             checkpoint_dirty = False
             processed_since_checkpoint = 0
             last_checkpoint_saved_at = now
             last_checkpoint_elapsed_anchor = now
+            checkpoint_not_before = now
 
     if checkpoint_dirty:
         saved_at = clock.now()
         checkpoint_to_save = _checkpoint_for_persistence(strategy)
-        for account in accounts:
-            _run_async(
-                account.repository.save_checkpoint(
-                    account.config.run_id,
-                    checkpoint_to_save,
-                    saved_at,
-                )
-            )
+        _save_paired_checkpoints(
+            accounts=accounts,
+            checkpoint=checkpoint_to_save,
+            saved_at=saved_at,
+        )
         _notify_checkpoint_persisted(on_checkpoint_persisted)
         last_checkpoint_saved_at = saved_at
 
@@ -591,6 +597,73 @@ def run_paired_paper_live_daemon(
         final_cursor=final_cursor,
         saved_at=last_checkpoint_saved_at,
     )
+
+
+def _load_paired_checkpoints(
+    accounts: tuple[PairedPaperLiveAccount, ...],
+) -> tuple[StrategyCheckpoint | None, ...]:
+    """Load paired cursors in one query when the repository supports it."""
+    grouped: dict[int, tuple[PaperLiveDaemonRepository, list[str]]] = {}
+    for account in accounts:
+        key = id(account.repository)
+        repository, run_ids = grouped.setdefault(
+            key,
+            (account.repository, []),
+        )
+        run_ids.append(account.config.run_id)
+
+    checkpoints_by_run_id: dict[str, StrategyCheckpoint] = {}
+    for repository, run_ids in grouped.values():
+        load_checkpoints = getattr(repository, "load_checkpoints", None)
+        if callable(load_checkpoints):
+            loaded = _run_async(load_checkpoints(tuple(run_ids)))
+            checkpoints_by_run_id.update(loaded)
+            continue
+        for run_id in run_ids:
+            checkpoint = _run_async(repository.load_checkpoint(run_id))
+            if checkpoint is not None:
+                checkpoints_by_run_id[run_id] = checkpoint
+    return tuple(
+        checkpoints_by_run_id.get(account.config.run_id)
+        for account in accounts
+    )
+
+
+def _save_paired_checkpoints(
+    *,
+    accounts: tuple[PairedPaperLiveAccount, ...],
+    checkpoint: StrategyCheckpoint,
+    saved_at: datetime,
+) -> None:
+    """Write paired cursors in one transaction per repository."""
+    grouped: dict[
+        int,
+        tuple[
+            PaperLiveDaemonRepository,
+            list[tuple[str, StrategyCheckpoint, datetime]],
+        ],
+    ] = {}
+    for account in accounts:
+        key = id(account.repository)
+        repository, values = grouped.setdefault(
+            key,
+            (account.repository, []),
+        )
+        values.append((account.config.run_id, checkpoint, saved_at))
+
+    for repository, values in grouped.values():
+        save_checkpoints = getattr(repository, "save_checkpoints", None)
+        if callable(save_checkpoints):
+            _run_async(save_checkpoints(tuple(values)))
+            continue
+        for run_id, account_checkpoint, account_saved_at in values:
+            _run_async(
+                repository.save_checkpoint(
+                    run_id,
+                    account_checkpoint,
+                    account_saved_at,
+                )
+            )
 
 
 def _paired_result(
@@ -1061,6 +1134,9 @@ def run_paper_live_daemon(
     last_checkpoint_saved_at: datetime | None = None
     daemon_started_at = clock.now()
     last_checkpoint_elapsed_anchor = daemon_started_at
+    checkpoint_not_before = daemon_started_at + timedelta(
+        seconds=config.checkpoint_phase_seconds
+    )
     last_equity_snapshot_at: datetime | None = None
     last_candle_end_by_symbol: dict[str, datetime] = {}
     candle_history_by_symbol: dict[str, deque[ClosedCandle15m]] = {}
@@ -1276,7 +1352,10 @@ def run_paper_live_daemon(
         should_checkpoint_by_time = (
             now - last_checkpoint_elapsed_anchor
         ).total_seconds() >= config.checkpoint_every_seconds
-        if should_checkpoint_by_count or should_checkpoint_by_time:
+        if (
+            now >= checkpoint_not_before
+            and (should_checkpoint_by_count or should_checkpoint_by_time)
+        ):
             checkpoint_to_save = _checkpoint_for_persistence(strategy)
             _run_async(
                 repository.save_checkpoint(
@@ -1290,6 +1369,7 @@ def run_paper_live_daemon(
             checkpoint_dirty = False
             processed_since_checkpoint = 0
             last_checkpoint_elapsed_anchor = now
+            checkpoint_not_before = now
 
     if checkpoint_dirty:
         saved_at = clock.now()

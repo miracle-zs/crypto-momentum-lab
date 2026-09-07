@@ -92,6 +92,28 @@ class FakeRepository(PaperLiveDaemonRepository):
         return self.loaded_checkpoint
 
 
+class BatchFakeRepository(FakeRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.loaded_batches: list[tuple[str, ...]] = []
+        self.saved_batches: list[
+            tuple[tuple[str, StrategyCheckpoint, datetime], ...]
+        ] = []
+
+    async def load_checkpoints(
+        self,
+        run_ids: tuple[str, ...],
+    ) -> dict[str, StrategyCheckpoint]:
+        self.loaded_batches.append(run_ids)
+        return {}
+
+    async def save_checkpoints(
+        self,
+        checkpoints: tuple[tuple[str, StrategyCheckpoint, datetime], ...],
+    ) -> None:
+        self.saved_batches.append(checkpoints)
+
+
 class FakeStrategy(RuntimeStrategy):
     def __init__(self) -> None:
         self.restored_checkpoint: StrategyCheckpoint | None = None
@@ -799,6 +821,46 @@ def test_paired_daemon_calculates_entries_once_and_fans_out_accounts() -> None:
     assert first_artifacts.fills[0].filled_at == states[0].bucket_end
     assert second_artifacts.fills[0].filled_at == states[0].bucket_end
     assert third_artifacts.fills[0].filled_at == states[0].bucket_end
+
+
+def test_paired_daemon_batches_shared_repository_checkpoints() -> None:
+    state = fixture_state("BTCUSDT", 0)
+    first_identity = _identity()
+    second_identity = _identity("run-2")
+    repository = BatchFakeRepository()
+
+    result = run_paired_paper_live_daemon(
+        source=(state,),
+        strategy=FakeStrategy(),
+        accounts=(
+            PairedPaperLiveAccount(
+                repository=repository,
+                artifact_repository=FakeArtifactRepository(),
+                config=_config(
+                    run_identity=first_identity,
+                    checkpoint_every_states=1,
+                ),
+            ),
+            PairedPaperLiveAccount(
+                repository=repository,
+                artifact_repository=FakeArtifactRepository(),
+                config=_config(
+                    run_id="run-2",
+                    run_identity=second_identity,
+                    checkpoint_every_states=1,
+                ),
+            ),
+        ),
+        clock=FakeClock(state.bucket_end + timedelta(seconds=1)),
+    )
+
+    assert result.account_results[0].processed_state_count == 1
+    assert repository.loaded_batches == [("run-1", "run-2")]
+    assert len(repository.saved_batches) == 1
+    assert tuple(item[0] for item in repository.saved_batches[0]) == (
+        "run-1",
+        "run-2",
+    )
 
 
 def test_paired_entry_filters_preserve_b2_and_c1_subsets() -> None:

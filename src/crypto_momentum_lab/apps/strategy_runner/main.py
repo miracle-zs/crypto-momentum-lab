@@ -884,6 +884,14 @@ def paper_live_daemon_command(
         float,
         typer.Option("--checkpoint-every-seconds", min=1),
     ] = 60.0,
+    checkpoint_phase_seconds: Annotated[
+        float,
+        typer.Option(
+            "--checkpoint-phase-seconds",
+            min=0,
+            help="Stable initial phase offset used to stagger checkpoint writes.",
+        ),
+    ] = 0.0,
     max_market_state_age_seconds: Annotated[
         float,
         typer.Option("--max-market-state-age-seconds", min=1),
@@ -1050,6 +1058,7 @@ def paper_live_daemon_command(
                 environment=environment,
                 checkpoint_every_states=checkpoint_every_states,
                 checkpoint_every_seconds=checkpoint_every_seconds,
+                checkpoint_phase_seconds=checkpoint_phase_seconds,
                 max_market_state_age_seconds=max_market_state_age_seconds,
                 run_identity=identity,
                 source_description=source.description,
@@ -1368,6 +1377,14 @@ def paper_live_pair_command(
         float,
         typer.Option("--checkpoint-every-seconds", min=1),
     ] = 60.0,
+    checkpoint_phase_seconds: Annotated[
+        float,
+        typer.Option(
+            "--checkpoint-phase-seconds",
+            min=0,
+            help="Stable phase offset shared by all paired accounts.",
+        ),
+    ] = 0.0,
     max_market_state_age_seconds: Annotated[
         float,
         typer.Option("--max-market-state-age-seconds", min=1),
@@ -1550,6 +1567,7 @@ def paper_live_pair_command(
         environment=environment,
         checkpoint_every_states=checkpoint_every_states,
         checkpoint_every_seconds=checkpoint_every_seconds,
+        checkpoint_phase_seconds=checkpoint_phase_seconds,
         max_market_state_age_seconds=max_market_state_age_seconds,
         run_identity=candle_identity,
         source_description=source.description,
@@ -1581,6 +1599,7 @@ def paper_live_pair_command(
                     environment=environment,
                     checkpoint_every_states=checkpoint_every_states,
                     checkpoint_every_seconds=checkpoint_every_seconds,
+                    checkpoint_phase_seconds=checkpoint_phase_seconds,
                     max_market_state_age_seconds=max_market_state_age_seconds,
                     run_identity=fixed_identity,
                     source_description=source.description,
@@ -1613,6 +1632,7 @@ def paper_live_pair_command(
                     environment=environment,
                     checkpoint_every_states=checkpoint_every_states,
                     checkpoint_every_seconds=checkpoint_every_seconds,
+                    checkpoint_phase_seconds=checkpoint_phase_seconds,
                     max_market_state_age_seconds=max_market_state_age_seconds,
                     run_identity=third_identity,
                     source_description=source.description,
@@ -1698,6 +1718,7 @@ def paper_live_pair_command(
                     environment=environment,
                     checkpoint_every_states=checkpoint_every_states,
                     checkpoint_every_seconds=checkpoint_every_seconds,
+                    checkpoint_phase_seconds=checkpoint_phase_seconds,
                     max_market_state_age_seconds=max_market_state_age_seconds,
                     run_identity=filtered_identity,
                     source_description=source.description,
@@ -1785,6 +1806,7 @@ def build_postgres_paper_source(
         environment=environment,
         universe_repository=PostgresUniverseRepository(factory),
         shutdown=engine.dispose,
+        notification_database_url=database_url,
     )
     return PostgresPaperMarketStateSource(
         loader=loader,

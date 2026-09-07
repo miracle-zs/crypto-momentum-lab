@@ -127,6 +127,22 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     )
     orderflow = services["paper-orderflow-pair"]["command"]
     gainer10_orderflow = services["paper-orderflow-gainer10-pair"]["command"]
+    assert _option_value(orderflow, "--checkpoint-phase-seconds") == "0"
+    assert (
+        _option_value(
+            services["paper-b1-gainer100"]["command"],
+            "--checkpoint-phase-seconds",
+        )
+        == "30"
+    )
+    assert _option_value(gainer10_orderflow, "--checkpoint-phase-seconds") == "15"
+    assert (
+        _option_value(
+            services["paper-b1-gainer100-ema"]["command"],
+            "--checkpoint-phase-seconds",
+        )
+        == "45"
+    )
     assert _option_value(
         gainer10_orderflow,
         "--orderflow-min-aggressive-imbalance",

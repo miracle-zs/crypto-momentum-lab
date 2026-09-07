@@ -5,16 +5,20 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
+import asyncpg  # type: ignore[import-untyped]
+
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
 )
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
+    RUNTIME_STATE_READY_CHANNEL,
     PostgresRuntimeMarketStateRepository,
     RuntimeStateCursor,
 )
 
 _MAX_IDLE_POLL_INTERVAL_SECONDS = 3.0
+_NOTIFICATION_RETRY_SECONDS = 5.0
 
 
 class RuntimeStateLoader(Protocol):
@@ -55,6 +59,7 @@ class PaperLiveSourceConfig:
     idle_timeout_seconds: float
     max_states: int
     batch_size: int
+    notification_wait_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         if not self.environment.strip():
@@ -69,6 +74,8 @@ class PaperLiveSourceConfig:
             raise ValueError("max_states must be positive")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if self.notification_wait_seconds <= 0:
+            raise ValueError("notification_wait_seconds must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +124,14 @@ class PostgresPaperMarketStateSource:
         idle_started_at = time.monotonic()
         idle_poll_interval = self.config.poll_interval_seconds
         try:
+            prepare_wakeup = getattr(self.loader, "prepare_wakeup", None)
+            wakeup_enabled = callable(prepare_wakeup)
+            if callable(prepare_wakeup):
+                try:
+                    wakeup_enabled = prepare_wakeup() is not False
+                except Exception:
+                    # The durable cursor and fallback polling remain authoritative.
+                    wakeup_enabled = False
             while yielded < self.config.max_states:
                 limit = min(
                     self.config.batch_size,
@@ -152,16 +167,126 @@ class PostgresPaperMarketStateSource:
                         self.config.idle_timeout_seconds - elapsed_idle,
                     )
                 if sleep_seconds > 0:
-                    time.sleep(sleep_seconds)
-                    idle_poll_interval = min(
-                        _MAX_IDLE_POLL_INTERVAL_SECONDS,
-                        max(
-                            self.config.poll_interval_seconds,
-                            sleep_seconds * 2,
-                        ),
-                    )
+                    wait_for_data = getattr(self.loader, "wait_for_data", None)
+                    if wakeup_enabled and callable(wait_for_data):
+                        wait_for_data(
+                            min(
+                                self.config.notification_wait_seconds,
+                                self.config.idle_timeout_seconds - elapsed_idle,
+                            )
+                        )
+                    else:
+                        time.sleep(sleep_seconds)
+                        idle_poll_interval = min(
+                            _MAX_IDLE_POLL_INTERVAL_SECONDS,
+                            max(
+                                self.config.poll_interval_seconds,
+                                sleep_seconds * 2,
+                            ),
+                        )
         finally:
             self.loader.close()
+
+
+class _AsyncPostgresRuntimeStateWakeup:
+    def __init__(
+        self,
+        *,
+        database_url: str,
+        environment: str,
+        channel: str,
+    ) -> None:
+        self._database_url = database_url
+        self._environment = environment
+        self._channel = channel
+        self._event = asyncio.Event()
+        self._connection: asyncpg.Connection | None = None
+
+    async def ensure_started(self) -> None:
+        connection = self._connection
+        if connection is not None and not connection.is_closed():
+            return
+        connection = await asyncpg.connect(
+            self._notification_dsn(),
+            timeout=5.0,
+        )
+        try:
+            await connection.add_listener(
+                self._channel,
+                self._on_notification,
+            )
+        except Exception:
+            await connection.close()
+            raise
+        self._connection = connection
+
+    async def wait(self, timeout_seconds: float) -> bool:
+        if timeout_seconds <= 0:
+            return False
+        try:
+            await self.ensure_started()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await asyncio.sleep(min(_NOTIFICATION_RETRY_SECONDS, timeout_seconds))
+            return False
+        if self._event.is_set():
+            self._event.clear()
+            return True
+        try:
+            await asyncio.wait_for(
+                self._event.wait(),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            return False
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await self._close_connection()
+            return False
+        self._event.clear()
+        return True
+
+    async def close(self) -> None:
+        await self._close_connection()
+
+    async def _close_connection(self) -> None:
+        connection = self._connection
+        self._connection = None
+        if connection is None:
+            return
+        try:
+            await connection.remove_listener(
+                self._channel,
+                self._on_notification,
+            )
+        except Exception:
+            pass
+        try:
+            await connection.close()
+        except Exception:
+            pass
+
+    def _on_notification(
+        self,
+        _connection: asyncpg.Connection,
+        _pid: int,
+        channel: str,
+        payload: str,
+    ) -> None:
+        if channel != self._channel:
+            return
+        if payload == self._environment or payload.startswith(
+            f"{self._environment}|"
+        ):
+            self._event.set()
+
+    def _notification_dsn(self) -> str:
+        for prefix in ("postgresql+asyncpg://", "postgresql+psycopg://"):
+            if self._database_url.startswith(prefix):
+                return "postgresql://" + self._database_url[len(prefix) :]
+        return self._database_url
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,11 +295,55 @@ class AsyncPostgresRuntimeStateLoader:
     environment: str
     universe_repository: PostgresUniverseRepository | None = None
     shutdown: Callable[[], Awaitable[None]] | None = None
+    notification_database_url: str | None = None
+    notification_channel: str = RUNTIME_STATE_READY_CHANNEL
     _event_loop: asyncio.AbstractEventLoop = field(
         default_factory=asyncio.new_event_loop,
         repr=False,
         compare=False,
     )
+    _notification_wakeup: _AsyncPostgresRuntimeStateWakeup | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        if self.notification_database_url is not None:
+            object.__setattr__(
+                self,
+                "_notification_wakeup",
+                _AsyncPostgresRuntimeStateWakeup(
+                    database_url=self.notification_database_url,
+                    environment=self.environment,
+                    channel=self.notification_channel,
+                ),
+            )
+
+    def prepare_wakeup(self) -> bool:
+        if self._notification_wakeup is None:
+            return False
+        try:
+            self._event_loop.run_until_complete(
+                self._notification_wakeup.ensure_started()
+            )
+        except Exception:
+            # Database polling remains the fallback if LISTEN is unavailable.
+            pass
+        return True
+
+    def wait_for_data(self, timeout_seconds: float) -> None:
+        wakeup = self._notification_wakeup
+        if wakeup is None:
+            time.sleep(timeout_seconds)
+            return
+        try:
+            self._event_loop.run_until_complete(wakeup.wait(timeout_seconds))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            time.sleep(min(_NOTIFICATION_RETRY_SECONDS, timeout_seconds))
 
     def load_after(
         self,
@@ -258,9 +427,15 @@ class AsyncPostgresRuntimeStateLoader:
     def close(self) -> None:
         if self._event_loop.is_closed():
             return
-        if self.shutdown is not None:
-            self._event_loop.run_until_complete(self.shutdown())
-        self._event_loop.close()
+        try:
+            if self._notification_wakeup is not None:
+                self._event_loop.run_until_complete(
+                    self._notification_wakeup.close()
+                )
+            if self.shutdown is not None:
+                self._event_loop.run_until_complete(self.shutdown())
+        finally:
+            self._event_loop.close()
 
 
 def _initial_cursor(start_at: datetime | None) -> RuntimeStateCursor:

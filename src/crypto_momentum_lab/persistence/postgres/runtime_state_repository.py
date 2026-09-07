@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import cast
 
-from sqlalchemy import func, or_, select, tuple_, update
+from sqlalchemy import func, or_, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -15,6 +15,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
 
 _MAX_RUNTIME_STATE_INSERT_ROWS = 500
 _RUNTIME_STATE_INTERVAL_SECONDS = 15
+RUNTIME_STATE_READY_CHANNEL = "cml_runtime_state_ready"
 type _RuntimeStateKey = tuple[str, str, datetime]
 
 
@@ -175,6 +176,16 @@ class PostgresRuntimeMarketStateRepository:
         async with self._session_factory() as session:
             async with session.begin():
                 await _insert_many_idempotent(session, values)
+                for environment in sorted(
+                    {state.environment for state in states}
+                ):
+                    await session.execute(
+                        text("SELECT pg_notify(:channel, :payload)"),
+                        {
+                            "channel": RUNTIME_STATE_READY_CHANNEL,
+                            "payload": environment,
+                        },
+                    )
 
     async def mark_incomplete(self, gap: AggTradeGap) -> None:
         previous_bucket = _bucket_start_15s(gap.previous_event_at)

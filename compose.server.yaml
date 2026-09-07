@@ -269,6 +269,8 @@ services:
       - "1000"
       - --checkpoint-every-seconds
       - "60"
+      - --checkpoint-phase-seconds
+      - "0"
       - --max-market-state-age-seconds
       - "120"
       - --require-market-quote
@@ -321,6 +323,8 @@ services:
       - "1000"
       - --checkpoint-every-seconds
       - "60"
+      - --checkpoint-phase-seconds
+      - "30"
       - --max-market-state-age-seconds
       - "120"
       - --require-market-quote
@@ -378,6 +382,8 @@ services:
       - "1000"
       - --checkpoint-every-seconds
       - "60"
+      - --checkpoint-phase-seconds
+      - "15"
       - --max-market-state-age-seconds
       - "120"
       - --require-market-quote
@@ -428,6 +434,8 @@ services:
       - "1000"
       - --checkpoint-every-seconds
       - "60"
+      - --checkpoint-phase-seconds
+      - "45"
       - --max-market-state-age-seconds
       - "120"
       - --require-market-quote

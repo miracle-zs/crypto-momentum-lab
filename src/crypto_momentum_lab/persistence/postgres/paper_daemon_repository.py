@@ -584,6 +584,63 @@ class PostgresPaperDaemonRepository:
             total_ms=round((committed_at - started) * 1000, 3),
         )
 
+    async def save_checkpoints(
+        self,
+        checkpoints: Sequence[
+            tuple[str, StrategyCheckpoint, datetime]
+        ],
+    ) -> None:
+        """Persist several independent run checkpoints in one transaction."""
+        if not checkpoints:
+            return
+        started = perf_counter()
+        values = tuple(
+            checkpoint_row_values(
+                run_id=run_id,
+                checkpoint=checkpoint,
+                saved_at=saved_at,
+            )
+            for run_id, checkpoint, saved_at in checkpoints
+        )
+        values_ready_at = perf_counter()
+        async with self._session_factory() as session:
+            async with session.begin():
+                pool_acquire_started = perf_counter()
+                await session.connection()
+                pool_acquired_at = perf_counter()
+                statement = insert(StrategyRuntimeCheckpointRow).values(values)
+                execute_started = perf_counter()
+                await session.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=["run_id"],
+                        set_={
+                            key: statement.excluded[key]
+                            for key in values[0]
+                            if key != "run_id"
+                        },
+                    )
+                )
+                execute_finished_at = perf_counter()
+            committed_at = perf_counter()
+        log.info(
+            "strategy_checkpoints_persisted",
+            run_count=len(values),
+            prepare_ms=round((values_ready_at - started) * 1000, 3),
+            pool_acquire_ms=round(
+                (pool_acquired_at - pool_acquire_started) * 1000,
+                3,
+            ),
+            sql_execute_ms=round(
+                (execute_finished_at - execute_started) * 1000,
+                3,
+            ),
+            commit_ms=round(
+                (committed_at - execute_finished_at) * 1000,
+                3,
+            ),
+            total_ms=round((committed_at - started) * 1000, 3),
+        )
+
     async def save_runtime_events(
         self,
         events: Sequence[Mapping[str, object]],
@@ -611,24 +668,37 @@ class PostgresPaperDaemonRepository:
                 )
 
     async def load_checkpoint(self, run_id: str) -> StrategyCheckpoint | None:
-        if not run_id.strip():
-            raise ValueError("run_id must not be empty")
+        return (await self.load_checkpoints((run_id,))).get(run_id)
+
+    async def load_checkpoints(
+        self,
+        run_ids: Sequence[str],
+    ) -> dict[str, StrategyCheckpoint]:
+        if not run_ids:
+            return {}
+        for run_id in run_ids:
+            if not run_id.strip():
+                raise ValueError("run_id must not be empty")
+        unique_run_ids = tuple(dict.fromkeys(run_ids))
         async with self._session_factory() as session:
-            row = await session.scalar(
-                select(StrategyRuntimeCheckpointRow).where(
-                    StrategyRuntimeCheckpointRow.run_id == run_id
+            rows = (
+                await session.scalars(
+                    select(StrategyRuntimeCheckpointRow).where(
+                        StrategyRuntimeCheckpointRow.run_id.in_(unique_run_ids)
+                    )
                 )
+            ).all()
+        return {
+            row.run_id: checkpoint_from_row_values(
+                last_processed_at_by_symbol=row.last_processed_at_by_symbol,
+                warmup_buckets_by_symbol=row.warmup_buckets_by_symbol,
+                cooldown_buckets_remaining_by_symbol=(
+                    row.cooldown_buckets_remaining_by_symbol
+                ),
+                payload=cast(dict[str, JsonValue], row.payload),
             )
-        if row is None:
-            return None
-        return checkpoint_from_row_values(
-            last_processed_at_by_symbol=row.last_processed_at_by_symbol,
-            warmup_buckets_by_symbol=row.warmup_buckets_by_symbol,
-            cooldown_buckets_remaining_by_symbol=(
-                row.cooldown_buckets_remaining_by_symbol
-            ),
-            payload=cast(dict[str, JsonValue], row.payload),
-        )
+            for row in rows
+        }
 
 
 async def _insert_idempotent(
