@@ -27,9 +27,9 @@ The strategy parameters are 15-second buckets unless stated otherwise:
 | account | impulse window | confirmation | min return | min imbalance | min intensity | cooldown |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | primary | 2 | 1 | 0.005 | 0.60 | 2 | 0 |
-| account-2 | 2 | 1 | 0.005 | 0.50 | 3.0 | 0 |
-| account-3 | 2 | 1 | 0.005 | 0.50 | 2 | 0 |
-| account-4 | 2 | 1 | 0.005 | 0.50 | 2 | 0 |
+| account-2 | 2 | 1 | 0.005 | 0.60 | 2.0 | 0 |
+| account-3 | 2 | 1 | 0.005 | 0.60 | 2.0 | 0 |
+| account-4 | 2 | 1 | 0.005 | 0.60 | 2.0 | 0 |
 
 Every profile value is included in the runtime strategy hash. Account 3 and
 account 4 may therefore have the same strategy hash because their strategy

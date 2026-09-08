@@ -293,11 +293,11 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
     )
     assert (
         account_two_environment["CML_LIVE_MIN_IMBALANCE"]
-        == "${CML_LIVE_MIN_IMBALANCE_ACCOUNT_2:-0.50}"
+        == "${CML_LIVE_MIN_IMBALANCE_ACCOUNT_2:-0.60}"
     )
     assert (
         account_two_environment["CML_LIVE_MIN_INTENSITY"]
-        == "${CML_LIVE_MIN_INTENSITY_ACCOUNT_2:-3.0}"
+        == "${CML_LIVE_MIN_INTENSITY_ACCOUNT_2:-2.0}"
     )
 
 
