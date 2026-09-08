@@ -906,7 +906,7 @@ class LiveStrategyDaemon:
         The live app refreshes its normal entry prerequisites from several
         asynchronous channels.  Keeping the schedule gate separate prevents
         one of those callbacks from accidentally reopening entries during the
-        07:45--08:02 protection window.
+        07:45--10:00 protection window.
         """
 
         if not isinstance(blocked, bool):
@@ -1181,7 +1181,7 @@ class LiveStrategyDaemon:
         *,
         now: datetime | None = None,
     ) -> str | None:
-        """Apply the daily 07:45--08:02 entry and flattening controls.
+        """Apply the daily 07:45--10:00 entry and flattening controls.
 
         This method is public so a supervisor can invoke it independently in
         tests or during a controlled recovery.  The normal live run starts a

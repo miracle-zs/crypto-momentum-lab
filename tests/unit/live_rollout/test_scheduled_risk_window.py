@@ -28,7 +28,11 @@ def test_default_schedule_uses_agreed_asia_shanghai_boundaries() -> None:
         is ScheduledRiskWindowPhase.VERIFYING
     )
     assert (
-        schedule.phase(datetime(2026, 7, 4, 0, 2, tzinfo=UTC))
+        schedule.phase(datetime(2026, 7, 4, 1, 59, 59, tzinfo=UTC))
+        is ScheduledRiskWindowPhase.VERIFYING
+    )
+    assert (
+        schedule.phase(datetime(2026, 7, 4, 2, 0, tzinfo=UTC))
         is ScheduledRiskWindowPhase.REOPENED
     )
 

@@ -62,7 +62,7 @@ boundaries are excluded from executable timeout decisions. A position that
 cannot be explained by durably bound batches remains fail-closed until the
 exchange/account reconciliation supplies a complete current episode.
 
-Starting a daemon after 08:02 intentionally does not replay that morning's
+Starting a daemon after 10:00 intentionally does not replay that morning's
 scheduled liquidation. Existing 707 positions therefore must not be described
 as already cleared by this code change. Deployment and live position verification
 are separate from the local regression results.

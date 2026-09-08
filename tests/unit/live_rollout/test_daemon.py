@@ -1740,7 +1740,7 @@ async def test_scheduled_risk_window_late_start_after_reopen_is_noop(
     monkeypatch,
 ) -> None:
     exchange = PlanAwareExchange()
-    reopen_time = datetime(2026, 7, 4, 0, 2, tzinfo=UTC)
+    reopen_time = datetime(2026, 7, 4, 2, 0, tzinfo=UTC)
     position = ManagedLivePosition(
         symbol="BTCUSDT",
         side="long",
@@ -1895,7 +1895,7 @@ async def test_scheduled_risk_window_flattens_verifies_and_reopens_entries(
     assert failure is None
     assert daemon.entry_enabled is False
 
-    reopen_time = datetime(2026, 7, 4, 0, 2, tzinfo=UTC)
+    reopen_time = datetime(2026, 7, 4, 2, 0, tzinfo=UTC)
     current_time[0] = reopen_time
     failure = await daemon.process_scheduled_risk_window(now=reopen_time)
 
