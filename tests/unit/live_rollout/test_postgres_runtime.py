@@ -627,6 +627,123 @@ def test_reused_exit_history_leaves_707_in_new_batch() -> None:
     assert managed[0].batches[0].opened_at == reopened_at
 
 
+def test_legacy_exit_history_does_not_keep_an_old_batch_active() -> None:
+    old_at = NOW
+    current_at = NOW + timedelta(days=20)
+    orders = [
+        _order(
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("386"),
+            executed_quantity=Decimal("386"),
+            created_at=old_at,
+            updated_at=old_at,
+            client_order_id="old-entry",
+        ),
+        _order(
+            reduce_only=True,
+            side="SELL",
+            quantity=Decimal("386"),
+            executed_quantity=Decimal("0"),
+            state=ExchangeOrderState.CANCELED.value,
+            created_at=old_at + timedelta(minutes=22),
+            updated_at=old_at + timedelta(minutes=37),
+            client_order_id="legacy-limit",
+        ),
+        _order(
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("384"),
+            executed_quantity=Decimal("384"),
+            created_at=old_at + timedelta(minutes=34),
+            updated_at=old_at + timedelta(minutes=34),
+            client_order_id="middle-entry",
+        ),
+        _order(
+            reduce_only=True,
+            side="SELL",
+            quantity=Decimal("386"),
+            executed_quantity=Decimal("386"),
+            created_at=old_at + timedelta(minutes=37),
+            updated_at=old_at + timedelta(minutes=37),
+            client_order_id="legacy-exit-one",
+        ),
+        _order(
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("380"),
+            executed_quantity=Decimal("380"),
+            created_at=old_at + timedelta(minutes=52),
+            updated_at=old_at + timedelta(minutes=52),
+            client_order_id="latest-old-entry",
+        ),
+        _order(
+            reduce_only=True,
+            side="SELL",
+            quantity=Decimal("764"),
+            executed_quantity=Decimal("764"),
+            created_at=old_at + timedelta(minutes=97),
+            updated_at=old_at + timedelta(minutes=97),
+            client_order_id="legacy-exit-two",
+        ),
+        _order(
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("540"),
+            executed_quantity=Decimal("540"),
+            created_at=current_at,
+            updated_at=current_at,
+            client_order_id="current-entry",
+        ),
+        _order(
+            reduce_only=True,
+            side="SELL",
+            quantity=Decimal("154"),
+            executed_quantity=Decimal("154"),
+            created_at=current_at + timedelta(minutes=22),
+            updated_at=current_at + timedelta(minutes=22),
+            client_order_id="current-exit",
+        ),
+        _order(
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("536"),
+            executed_quantity=Decimal("536"),
+            created_at=current_at + timedelta(minutes=30),
+            updated_at=current_at + timedelta(minutes=30),
+            client_order_id="new-entry",
+        ),
+        _order(
+            reduce_only=True,
+            side="SELL",
+            quantity=Decimal("150"),
+            executed_quantity=Decimal("150"),
+            created_at=current_at + timedelta(minutes=52),
+            updated_at=current_at + timedelta(minutes=52),
+            client_order_id="new-exit",
+        ),
+    ]
+
+    managed, unmanaged = _classify_live_positions(
+        [_position(position_amt=Decimal("386"))],
+        orders,
+        exit_batch_ids={
+            "current-exit": "BTCUSDT:LONG:current-entry",
+            "new-exit": "BTCUSDT:LONG:new-entry",
+        },
+        legacy_exit_order_ids=frozenset(
+            {"legacy-limit", "legacy-exit-one", "legacy-exit-two"}
+        ),
+    )
+
+    assert unmanaged == frozenset()
+    assert len(managed) == 1
+    assert [batch.batch_id for batch in managed[0].batches] == [
+        "BTCUSDT:LONG:new-entry"
+    ]
+    assert managed[0].batches[0].quantity == Decimal("386")
+
+
 def test_draining_control_survives_a_later_operational_halt() -> None:
     assert (
         _resolve_strategy_live_state("draining", "halted") is StrategyLiveState.DRAINING

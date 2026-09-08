@@ -706,13 +706,17 @@ class PostgresLiveContextProvider:
                             exchange_fill.price,
                         )
         active = [row for row in rows if row.position_amt != 0]
+        exit_batch_ids, legacy_exit_order_ids = (
+            await _load_exit_batch_bindings(self._sessions, orders)
+        )
         managed, unmanaged = _classify_live_positions(
             active,
             orders,
             unresolved,
             entry_fill_times=entry_fill_times,
             entry_fill_prices=_average_fill_prices(entry_fill_values),
-            exit_batch_ids=await _load_exit_batch_ids(self._sessions, orders),
+            exit_batch_ids=exit_batch_ids,
+            legacy_exit_order_ids=legacy_exit_order_ids,
         )
         return (
             process_at,
@@ -829,13 +833,17 @@ class PostgresLiveContextProvider:
                             exchange_fill.quantity,
                             exchange_fill.price,
                         )
+        exit_batch_ids, legacy_exit_order_ids = (
+            await _load_exit_batch_bindings(self._sessions, orders)
+        )
         managed, unmanaged = _classify_live_positions(
             active,
             orders,
             unresolved,
             entry_fill_times=entry_fill_times,
             entry_fill_prices=_average_fill_prices(entry_fill_values),
-            exit_batch_ids=await _load_exit_batch_ids(self._sessions, orders),
+            exit_batch_ids=exit_batch_ids,
+            legacy_exit_order_ids=legacy_exit_order_ids,
         )
         return (
             snapshot.config.observed_at,
@@ -900,6 +908,7 @@ class _PositionOrder:
     price: Decimal | None
     plan: OrderExecutionPlan | None = None
     exit_batch_id: str | None = None
+    legacy_exit_attribution: bool = False
 
 
 @dataclass(slots=True)
@@ -910,6 +919,7 @@ class _PositionBatchAccumulator:
     entry_notional: Decimal
     exit_order_submitted_at: datetime | None = None
     exit_orders: list[_PositionOrder] = field(default_factory=list)
+    legacy_exit_attribution: bool = False
 
 
 _EXIT_SUBMITTED_STATES = frozenset(
@@ -936,14 +946,23 @@ def _classify_live_positions(
     entry_fill_times: Mapping[str, datetime] | None = None,
     entry_fill_prices: Mapping[str, Decimal] | None = None,
     exit_batch_ids: Mapping[str, str] | None = None,
+    legacy_exit_order_ids: frozenset[str] = frozenset(),
 ) -> tuple[tuple[ManagedLivePosition, ...], frozenset[str]]:
     fill_times = entry_fill_times or {}
     fill_prices = entry_fill_prices or {}
     position_orders = _normalise_position_orders(orders, unresolved)
-    if exit_batch_ids:
+    if exit_batch_ids or legacy_exit_order_ids:
         position_orders = tuple(
             replace(
-                order, exit_batch_id=exit_batch_ids.get(order.client_order_id or "")
+                order,
+                exit_batch_id=(
+                    None
+                    if exit_batch_ids is None
+                    else exit_batch_ids.get(order.client_order_id or "")
+                ),
+                legacy_exit_attribution=(
+                    order.client_order_id in legacy_exit_order_ids
+                ),
             )
             for order in position_orders
         )
@@ -1087,12 +1106,24 @@ async def _load_exit_batch_ids(
     sessions: async_sessionmaker[AsyncSession],
     orders: Sequence[ExchangeOrderRow],
 ) -> dict[str, str]:
+    bindings, _legacy_order_ids = await _load_exit_batch_bindings(
+        sessions,
+        orders,
+    )
+    return bindings
+
+
+async def _load_exit_batch_bindings(
+    sessions: async_sessionmaker[AsyncSession],
+    orders: Sequence[ExchangeOrderRow],
+) -> tuple[dict[str, str], frozenset[str]]:
     intent_clients = {
         order.intent_id: order.client_order_id
         for order in orders if order.reduce_only
     }
     if not intent_clients:
-        return {}
+        return {}, frozenset()
+    legacy_order_ids = set(intent_clients.values())
     async with sessions() as session:
         rows = (await session.execute(
             select(OrderIntentExecutionRow.intent_id, OrderIntentExecutionRow.details)
@@ -1103,8 +1134,10 @@ async def _load_exit_batch_ids(
         features = details.get("features", {}) if isinstance(details, dict) else {}
         batch_id = features.get("batch_id") if isinstance(features, dict) else None
         if isinstance(batch_id, str) and batch_id:
-            result[intent_clients[intent_id]] = batch_id
-    return result
+            client_order_id = intent_clients[intent_id]
+            result[client_order_id] = batch_id
+            legacy_order_ids.discard(client_order_id)
+    return result, frozenset(legacy_order_ids)
 
 
 def _normalise_position_orders(
@@ -1303,6 +1336,8 @@ def _build_position_batches(
             )
         if target is None:
             continue
+        if order.legacy_exit_attribution:
+            target.legacy_exit_attribution = True
         if target.exit_order_submitted_at is None:
             target.exit_order_submitted_at = event_at
         target.exit_orders.append(order)
@@ -1375,6 +1410,7 @@ def _build_position_batches(
                 ),
                 recovery_order_remaining_quantity=recovery_remaining,
                 closing_order_filled=active_market_order,
+                legacy_attribution=accumulator.legacy_exit_attribution,
             )
         )
     return _reconcile_batch_quantities(
@@ -1395,6 +1431,41 @@ def _reconcile_batch_quantities(
         # attributed.  Reusing the last closed accumulator would turn a
         # snapshot/order synchronization gap into an old exit deadline.
         return ()
+    has_legacy_attribution = any(
+        batch.legacy_attribution for batch in batches
+    )
+    if has_legacy_attribution:
+        # Pre-binding exit rows cannot identify which lot they consumed.  Do
+        # not let their old recovery boundary remain executable.  Keep only
+        # batches with durable bindings; if they cannot explain the whole
+        # exchange snapshot, fail closed until a later account refresh sees a
+        # complete current episode.
+        batches = [
+            batch for batch in batches if not batch.legacy_attribution
+        ]
+        if not batches:
+            return ()
+        clean_quantity = sum(
+            (batch.quantity for batch in batches),
+            start=Decimal("0"),
+        )
+        if clean_quantity < target_quantity:
+            return ()
+        if clean_quantity == target_quantity:
+            return tuple(batches)
+
+        # With legacy history present, prefer the newest durably-bound
+        # batches.  This is the opposite of the normal lag reconciliation,
+        # which preserves older boundaries when all exits are explicit.
+        excess = clean_quantity - target_quantity
+        legacy_reconciled: list[ManagedLivePositionBatch] = []
+        for batch in batches:
+            remove = min(excess, batch.quantity)
+            remaining = batch.quantity - remove
+            excess -= remove
+            if remaining > 0:
+                legacy_reconciled.append(replace(batch, quantity=remaining))
+        return tuple(legacy_reconciled)
     total_quantity = sum((batch.quantity for batch in batches), start=Decimal("0"))
     if total_quantity < target_quantity:
         # Known entry/exit fills are more precise than an account snapshot

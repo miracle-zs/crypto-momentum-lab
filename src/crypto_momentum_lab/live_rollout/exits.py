@@ -72,6 +72,10 @@ class ManagedLivePositionBatch:
     recovery_order_plan: OrderExecutionPlan | None = None
     recovery_order_remaining_quantity: Decimal | None = None
     closing_order_filled: bool = False
+    # Historical exit rows created before durable batch bindings are not
+    # reliable lifecycle boundaries.  The runtime may use them while
+    # reconstructing quantity, but must never let them win an active timeout.
+    legacy_attribution: bool = False
 
     def __post_init__(self) -> None:
         if not self.batch_id.strip():

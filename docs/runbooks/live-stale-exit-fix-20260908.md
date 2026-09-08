@@ -25,8 +25,11 @@ fallback that invented a batch when no surviving accumulator existed.
   exchange IDs remain in the event journal but cannot overwrite the order row.
 - Both position-loading paths read the batch binding from persisted intents.
   Named exits consume that accumulator, not whichever accumulator was newest
-  when the exit was submitted. Older records lacking bindings retain the
-  previous chronological interpretation.
+  when the exit was submitted. Older records lacking bindings are marked as
+  legacy attribution: they can remain in the audit history, but they cannot
+  supply an active recovery boundary or trigger a timeout. If the durably
+  bound batches cannot explain the exchange snapshot, the symbol stays
+  unmanaged until a later reconciliation supplies a complete episode.
 - Expired reduce-only candidates are rejected before submission. A fresh exit
   decision can be evaluated on the next observation.
 - Exit-only checks reject an unmanaged target symbol; another unmanaged symbol
@@ -53,10 +56,11 @@ Ruff passes and mypy reports no issues in the four changed source files.
 ## Operational boundaries
 
 This change does not rewrite historical orders, reconstruct each reused exchange
-attempt, or submit a one-off liquidation. The historical residual can retain a
-merged batch identity where prior repeated exchange attempts were absent from
-the order summary, although its new entry time is restored. The original event
-and account-fill journals remain the source for historical audit.
+attempt, or submit a one-off liquidation. Legacy rows remain available in the
+original event and account-fill journals for audit, while their ambiguous batch
+boundaries are excluded from executable timeout decisions. A position that
+cannot be explained by durably bound batches remains fail-closed until the
+exchange/account reconciliation supplies a complete current episode.
 
 Starting a daemon after 08:02 intentionally does not replay that morning's
 scheduled liquidation. Existing 707 positions therefore must not be described
