@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 from collections.abc import (
     AsyncIterable,
     AsyncIterator,
@@ -228,6 +229,9 @@ _LIVE_ENTRY_ORDER_TYPE = EntryType.LIMIT
 _LIVE_ENTRY_LIMIT_TTL_SECONDS = 900
 _LIVE_ORDERFLOW_PROFILE = LiveOrderFlowImpulseProfile()
 _LIVE_MARKET_WEBSOCKET_URL = "wss://fstream.binance.com/market/ws"
+_GIT_COMMIT_HASH_LENGTH = 40
+_CONFIG_HASH_LENGTH = 64
+_HEX_HASH_PATTERN = re.compile(r"^[0-9a-f]+$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,6 +548,43 @@ def approve_command(
     confirmation: Annotated[str, typer.Option("--confirmation")] = "",
     expires_in_minutes: Annotated[str, typer.Option("--expires-in-minutes")] = "never",
 ) -> None:
+    strategy_config_hash = _validate_hex_hash(
+        strategy_config_hash,
+        "--strategy-config-hash",
+        _CONFIG_HASH_LENGTH,
+    )
+    risk_config_hash = _validate_hex_hash(
+        risk_config_hash,
+        "--risk-config-hash",
+        _CONFIG_HASH_LENGTH,
+    )
+    git_commit_hash = _validate_hex_hash(
+        git_commit_hash,
+        "--git-commit-hash",
+        _GIT_COMMIT_HASH_LENGTH,
+    )
+    migration_revision = migration_revision.strip()
+    if not migration_revision:
+        raise typer.BadParameter("--migration-revision must not be empty")
+    configured_strategy_hash = (
+        os.environ.get("CML_LIVE_STRATEGY_CONFIG_HASH", "").strip().lower()
+    )
+    if (
+        configured_strategy_hash
+        and configured_strategy_hash != "unset"
+        and strategy_config_hash != configured_strategy_hash
+    ):
+        raise typer.BadParameter(
+            "--strategy-config-hash does not match the configured Live runtime hash"
+        )
+    resolved_database_url = _database_url(database_url)
+    latest_risk_hash = asyncio.run(
+        _latest_risk_config_hash(resolved_database_url, account_label)
+    )
+    if risk_config_hash != latest_risk_hash:
+        raise typer.BadParameter(
+            "--risk-config-hash does not match the latest persisted risk config"
+        )
     now = datetime.now(tz=UTC)
     approval = LiveOperatorApproval(
         approval_id=f"approval-{uuid4()}",
@@ -570,8 +611,103 @@ def approve_command(
         expires_at=_parse_approval_expiration(now, expires_in_minutes),
         created_at=now,
     )
-    asyncio.run(_save_approval(_database_url(database_url), approval))
+    asyncio.run(_save_approval(resolved_database_url, approval))
     typer.echo(f"Live approval recorded: {approval.approval_id}")
+
+
+@app.command("approve-runtime")
+def approve_runtime_command(
+    database_url: Annotated[str | None, typer.Option("--database-url")] = None,
+    account_label: Annotated[str, typer.Option("--account-label")] = "primary",
+    strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    git_commit_hash: Annotated[str, typer.Option("--git-commit-hash")] = "",
+    migration_revision: Annotated[
+        str, typer.Option("--migration-revision")
+    ] = "",
+    notional_cap: Annotated[str, typer.Option("--notional-cap")] = "unlimited",
+    max_open_positions: Annotated[
+        str, typer.Option("--max-open-positions")
+    ] = "unlimited",
+    max_daily_loss: Annotated[str, typer.Option("--max-daily-loss")] = "unlimited",
+    approver: Annotated[str, typer.Option("--approver")] = "",
+    confirmation: Annotated[str, typer.Option("--confirmation")] = "",
+    expires_in_minutes: Annotated[str, typer.Option("--expires-in-minutes")] = "never",
+) -> None:
+    """Record approval values derived from the running account environment."""
+
+    resolved_database_url = _database_url(database_url)
+    strategy_config_hash = _validate_hex_hash(
+        _runtime_strategy_config_hash(strategy),
+        "runtime strategy config hash",
+        _CONFIG_HASH_LENGTH,
+    )
+    configured_strategy_hash = (
+        os.environ.get("CML_LIVE_STRATEGY_CONFIG_HASH", "").strip().lower()
+    )
+    if (
+        configured_strategy_hash
+        and configured_strategy_hash != "unset"
+        and configured_strategy_hash != strategy_config_hash
+    ):
+        raise typer.BadParameter(
+            "configured Live strategy hash does not match the runtime hash"
+        )
+    risk_config_hash = asyncio.run(
+        _latest_risk_config_hash(resolved_database_url, account_label)
+    )
+    git_commit_hash = _validate_hex_hash(
+        git_commit_hash.strip() or os.environ.get("CML_CODE_COMMIT", ""),
+        "--git-commit-hash or CML_CODE_COMMIT",
+        _GIT_COMMIT_HASH_LENGTH,
+    )
+    migration_revision = (
+        migration_revision.strip()
+        or os.environ.get("CML_LIVE_MIGRATION_REVISION", "").strip()
+    )
+    if not migration_revision:
+        raise typer.BadParameter(
+            "--migration-revision or CML_LIVE_MIGRATION_REVISION is required"
+        )
+    now = datetime.now(tz=UTC)
+    approval = LiveOperatorApproval(
+        approval_id=f"approval-{uuid4()}",
+        account_label=account_label,
+        strategy_name=strategy,
+        strategy_config_hash=strategy_config_hash,
+        risk_config_hash=risk_config_hash,
+        git_commit_hash=git_commit_hash,
+        database_migration_revision=migration_revision,
+        approved_notional_cap=_parse_optional_decimal_limit(
+            notional_cap,
+            "--notional-cap",
+        ),
+        approved_max_open_positions=_parse_optional_integer_limit(
+            max_open_positions,
+            "--max-open-positions",
+        ),
+        approved_max_daily_loss=_parse_optional_decimal_limit(
+            max_daily_loss,
+            "--max-daily-loss",
+        ),
+        approver_name=approver,
+        approval_text=confirmation,
+        expires_at=_parse_approval_expiration(now, expires_in_minutes),
+        created_at=now,
+    )
+    asyncio.run(_save_approval(resolved_database_url, approval))
+    typer.echo(
+        json.dumps(
+            {
+                "approval_id": approval.approval_id,
+                "account_label": account_label,
+                "strategy_config_hash": strategy_config_hash,
+                "risk_config_hash": risk_config_hash,
+                "git_commit_hash": git_commit_hash,
+                "database_migration_revision": migration_revision,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 @app.command("preflight")
@@ -579,11 +715,38 @@ def preflight_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
     strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    strict: Annotated[bool, typer.Option("--strict")] = False,
+    expected_git_commit: Annotated[
+        str | None, typer.Option("--expected-git-commit")
+    ] = None,
+    expected_migration_revision: Annotated[
+        str | None, typer.Option("--expected-migration-revision")
+    ] = None,
 ) -> None:
+    if expected_git_commit is not None:
+        expected_git_commit = _validate_hex_hash(
+            expected_git_commit,
+            "--expected-git-commit",
+            _GIT_COMMIT_HASH_LENGTH,
+        )
+    if expected_migration_revision is not None:
+        expected_migration_revision = expected_migration_revision.strip()
+        if not expected_migration_revision:
+            raise typer.BadParameter(
+                "--expected-migration-revision must not be empty"
+            )
     payload = asyncio.run(
-        _preflight_summary(_database_url(database_url), account_label, strategy)
+        _preflight_summary(
+            _database_url(database_url),
+            account_label,
+            strategy,
+            expected_git_commit=expected_git_commit,
+            expected_migration_revision=expected_migration_revision,
+        )
     )
     typer.echo(json.dumps(payload, sort_keys=True))
+    if strict and payload["preflight_ok"] is not True:
+        raise typer.Exit(code=1)
 
 
 @app.command("resolve-missing-order")
@@ -3542,6 +3705,56 @@ def _live_strategy_config_hash(
     )
 
 
+def _validate_hex_hash(
+    raw_value: str,
+    option_name: str,
+    expected_length: int,
+) -> str:
+    """Normalize and validate an operator-supplied immutable hash value."""
+
+    value = raw_value.strip().lower()
+    if len(value) != expected_length or _HEX_HASH_PATTERN.fullmatch(value) is None:
+        raise typer.BadParameter(
+            f"{option_name} must be exactly {expected_length} lowercase hex characters"
+        )
+    return value
+
+
+def _runtime_strategy_config_hash(strategy_name: str) -> str:
+    """Compute the hash from the same environment values used by Live run."""
+
+    runtime_config = _preflight_runtime_strategy_config()
+    return _live_strategy_config_hash(
+        strategy_name,
+        profile=runtime_config.profile,
+        entry_positive_gainer_top_count=runtime_config.entry_positive_gainer_top_count,
+        require_price_above_ema5=runtime_config.require_price_above_ema5,
+        require_price_above_ema10=runtime_config.require_price_above_ema10,
+        entry_policy_enforce=runtime_config.entry_policy_enforce,
+        entry_order_type=runtime_config.entry_order_type,
+        entry_limit_ttl_seconds=runtime_config.entry_limit_ttl_seconds,
+    )
+
+
+async def _latest_risk_config_hash(
+    database_url: str,
+    account_label: str,
+) -> str:
+    engine = create_execution_database_engine(database_url)
+    try:
+        config = await _latest_risk_config(
+            async_sessionmaker(engine, expire_on_commit=False),
+            account_label,
+        )
+        return _validate_hex_hash(
+            config.config_hash,
+            "latest risk config hash",
+            _CONFIG_HASH_LENGTH,
+        )
+    finally:
+        await engine.dispose()
+
+
 async def _prepare_live_risk_gates(
     *,
     database_url: str,
@@ -3800,6 +4013,9 @@ async def _preflight_summary(
     database_url: str,
     account_label: str,
     strategy_name: str,
+    *,
+    expected_git_commit: str | None = None,
+    expected_migration_revision: str | None = None,
 ) -> dict[str, object]:
     now = datetime.now(tz=UTC)
     engine = create_execution_database_engine(database_url)
@@ -3829,23 +4045,67 @@ async def _preflight_summary(
             entry_limit_ttl_seconds=runtime_config.entry_limit_ttl_seconds,
         )
         configured_strategy_config_hash = (
-            os.environ.get("CML_LIVE_STRATEGY_CONFIG_HASH", "").strip()
+            os.environ.get("CML_LIVE_STRATEGY_CONFIG_HASH", "").strip().lower()
             or None
         )
+        if configured_strategy_config_hash == "unset":
+            configured_strategy_config_hash = None
         approved_strategy_config_hash = (
             None if approval is None else approval.strategy_config_hash
         )
+        account_state = await _latest_account_state(factory, account_label)
+        approval_risk_config_hash = (
+            None if approval is None else approval.risk_config_hash
+        )
+        approval_git_commit_hash = (
+            None if approval is None else approval.git_commit_hash
+        )
+        approval_migration_revision = (
+            None
+            if approval is None
+            else approval.database_migration_revision
+        )
+        checks: dict[str, bool] = {
+            "approval_present": approval is not None,
+            "lease_present": lease is not None,
+            "account_ready": account_state.value == "ready_readonly",
+            "runtime_strategy_config_matches_approval": (
+                approval is not None
+                and runtime_strategy_config_hash == approved_strategy_config_hash
+            ),
+            "risk_config_matches_approval": (
+                approval is not None
+                and risk_config.config_hash == approval_risk_config_hash
+            ),
+        }
+        if configured_strategy_config_hash is not None:
+            checks["runtime_strategy_config_matches_configured"] = (
+                runtime_strategy_config_hash == configured_strategy_config_hash
+            )
+        if expected_git_commit is not None:
+            checks["approval_git_commit_matches_expected"] = (
+                approval_git_commit_hash == expected_git_commit.strip().lower()
+            )
+        if expected_migration_revision is not None:
+            checks["approval_migration_matches_expected"] = (
+                approval_migration_revision == expected_migration_revision.strip()
+            )
+        preflight_errors = [name for name, passed in checks.items() if not passed]
         return {
             "approval_present": approval is not None,
             "lease_present": lease is not None,
-            "account_state": (
-                await _latest_account_state(factory, account_label)
-            ).value,
+            "account_state": account_state.value,
             "unresolved_order_count": len(unresolved),
             "risk_config_hash": risk_config.config_hash,
+            "approved_risk_config_hash": approval_risk_config_hash,
             "runtime_strategy_config_hash": runtime_strategy_config_hash,
             "configured_strategy_config_hash": configured_strategy_config_hash,
             "approved_strategy_config_hash": approved_strategy_config_hash,
+            "approved_git_commit_hash": approval_git_commit_hash,
+            "approved_migration_revision": approval_migration_revision,
+            "preflight_checks": checks,
+            "preflight_errors": preflight_errors,
+            "preflight_ok": not preflight_errors,
             "runtime_strategy_config_matches_configured": (
                 None
                 if configured_strategy_config_hash is None

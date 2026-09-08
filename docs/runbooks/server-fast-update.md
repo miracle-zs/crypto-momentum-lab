@@ -65,11 +65,19 @@ It uses `docker compose up -d --wait`. Compose recreates a service when its
 image or configuration changed, so the normal path does not need
 `--force-recreate`.
 
+The deployment script accepts `CML_DEPLOY_WAIT_TIMEOUT_SECONDS` (default 600)
+so a broken healthcheck fails with diagnostics instead of waiting forever.
+
 ## Live update
 
-Before the Live step, update each account's approval to the exact image commit
-and migration revision, and run `prepare` when a lease is missing. Keep the
-existing strategy and risk hashes and limits. Run the same script with the
+Before the Live step, record each account's approval from its own Compose
+service. `approve-runtime` derives the strategy hash from the account-scoped
+environment, the risk hash from the latest persisted risk snapshot, and the
+Git commit from `CML_CODE_COMMIT` (or a validated `--git-commit-hash` value);
+it prevents hand-copying immutable hashes. When approvals are prepared after
+the target image is built, rerun the deployment with `--live`; an unchanged
+checkout takes the Live-only retry path and does not rebuild consumers.
+Run `prepare` separately when a lease is missing. Run the deployment with the
 explicit Live flag:
 
 ```bash
@@ -79,10 +87,12 @@ deploy/ops/update_server.sh 43.167.191.253 <commit-sha> --live
 Set `CML_LIVE_CONCURRENCY=1` before the command for a serialized rollout, or
 leave the default `2` to use two bounded restart waves.
 
-The Live path first renews every active lease to one hour, checking its owner
-and strategy binding, then runs `preflight` for every currently running
-strategy. If any approval, hash, migration, account readiness, or lease check
-fails, no Live container is restarted. It then updates the active execution
+The Live path builds the target image, renews every active lease to one hour,
+then runs strict `preflight` for every currently running strategy before
+restarting any consumer or Live container. It checks the approval, runtime
+strategy hash, risk snapshot, target commit, migration revision, account
+readiness, and lease presence. If any check fails, the command exits before
+restarting services. It then updates the active execution
 services in a bounded parallel wave and the strategies in a second bounded
 wave. The default concurrency is two; set `CML_LIVE_CONCURRENCY=1` for a more
 conservative rollout or `=4` when the host has headroom:
@@ -97,24 +107,22 @@ enable a disabled Live account accidentally. Do not remove the `--live` flag to
 make an approval failure disappear; fix the approval or lease and rerun the
 preflight.
 
-The following is an account-2 example. Replace `2` in the service name,
-account label, and environment variable names for account 3 or 4. The risk hash
-must come from that account's latest risk snapshot.
+The following is an account-2 example. Replace `2` in the service name and
+account label for account 3 or 4. No strategy, risk, or commit hash is typed
+manually:
 
 ```bash
 account_suffix=2
 strategy_service="live-strategy-account-${account_suffix}"
-strategy_hash_var="CML_LIVE_STRATEGY_CONFIG_HASH_ACCOUNT_${account_suffix}"
 migration_var="CML_LIVE_MIGRATION_REVISION_ACCOUNT_${account_suffix}"
+target_commit="$(git rev-parse origin/main)"
 
 docker compose --env-file .env.server \
   -f compose.server.yaml -f compose.live.accounts.yaml --profile live \
-  run --rm --no-deps "$strategy_service" approve \
+  run --rm --no-deps "$strategy_service" approve-runtime \
   --account-label "account-${account_suffix}" \
   --strategy orderflow_impulse \
-  --strategy-config-hash "${!strategy_hash_var}" \
-  --risk-config-hash "$RISK_CONFIG_HASH" \
-  --git-commit-hash "$CML_CODE_COMMIT" \
+  --git-commit-hash "$target_commit" \
   --migration-revision "${!migration_var}" \
   --notional-cap 10000 \
   --max-open-positions 500 \

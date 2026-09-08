@@ -34,6 +34,7 @@ def test_live_cli_exposes_required_commands() -> None:
     assert result.exit_code == 0
     for command in (
         "approve",
+        "approve-runtime",
         "prepare",
         "renew-lease",
         "preflight",
@@ -473,6 +474,61 @@ def test_strategy_config_hash_is_stable_for_selected_strategy() -> None:
     assert first.exit_code == 0
     assert first.stdout == second.stdout
     assert len(first.stdout.strip()) == 64
+
+
+@pytest.mark.parametrize(
+    ("value", "length"),
+    [
+        ("a" * 39, 40),
+        ("a" * 41, 40),
+        ("a" * 63, 64),
+        ("a" * 64 + "g", 64),
+    ],
+)
+def test_operator_hash_values_require_exact_hex_lengths(
+    value: str,
+    length: int,
+) -> None:
+    with pytest.raises(BadParameter):
+        main._validate_hex_hash(value, "--hash", length)
+
+
+def test_runtime_strategy_config_hash_uses_live_environment(monkeypatch) -> None:
+    monkeypatch.setenv("CML_LIVE_ENTRY_POLICY_MODE", "enforce")
+    monkeypatch.setenv("CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT", "10")
+    monkeypatch.setenv("CML_LIVE_IMPULSE_WINDOW_BUCKETS", "2")
+    monkeypatch.setenv("CML_LIVE_CONFIRMATION_BUCKETS", "1")
+    monkeypatch.setenv("CML_LIVE_MIN_RETURN_PCT", "0.005")
+    monkeypatch.setenv("CML_LIVE_MIN_IMBALANCE", "0.60")
+    monkeypatch.setenv("CML_LIVE_MIN_INTENSITY", "2.0")
+    monkeypatch.setenv("CML_LIVE_COOLDOWN_BUCKETS", "0")
+
+    runtime_hash = main._runtime_strategy_config_hash("orderflow_impulse")
+
+    assert runtime_hash == (
+        "4586faafeab53e123b8dca93f0c489a87f7e795bd6bebe18fdb4c52f36696bef"
+    )
+
+
+def test_strict_preflight_returns_failure_exit_code(monkeypatch) -> None:
+    async def fake_summary(*args, **kwargs):
+        del args, kwargs
+        return {"preflight_ok": False, "preflight_errors": ["approval_present"]}
+
+    monkeypatch.setattr(main, "_preflight_summary", fake_summary)
+
+    result = runner.invoke(
+        app,
+        [
+            "preflight",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--strict",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "approval_present" in result.stdout
 
 
 def test_strategy_config_hash_includes_live_entry_filters() -> None:
