@@ -3180,7 +3180,7 @@ class _LiveDaemonRepositoryAdapter:
         evaluation: RiskEvaluation,
         plan: OrderExecutionPlan,
         prepared_at: datetime,
-    ) -> PreparedOrderSubmission:
+    ) -> PreparedOrderSubmission | None:
         return await self._orders.prepare_submission(
             intent=intent,
             evaluation=evaluation,

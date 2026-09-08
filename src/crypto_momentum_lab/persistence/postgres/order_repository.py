@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import and_, case, delete, func, literal, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -86,8 +86,12 @@ class PostgresOrderRepository:
         evaluation: RiskEvaluation,
         plan: OrderExecutionPlan,
         prepared_at: datetime,
-    ) -> PreparedOrderSubmission:
-        """Atomically journal intent, plan, and SUBMITTING before the REST call."""
+    ) -> PreparedOrderSubmission | None:
+        """Grant one durable submission; existing orders must be reconciled.
+
+        A client ID is never reusable, including after a terminal outcome or
+        process restart. The unique insert arbitrates concurrent exit lanes.
+        """
 
         if evaluation.decision is not RiskDecision.APPROVED:
             raise ValueError("risk evaluation must approve the intent")
@@ -155,11 +159,14 @@ class PostgresOrderRepository:
                     .values(intent_values)
                     .on_conflict_do_nothing()
                 )
-                await session.execute(
+                inserted_order = await session.scalar(
                     insert(ExchangeOrderRow)
                     .values(order_values)
                     .on_conflict_do_nothing()
+                    .returning(ExchangeOrderRow.client_order_id)
                 )
+                if inserted_order is None:
+                    return None
                 await session.execute(
                     insert(ExchangeOrderEventRow)
                     .values(event_values)
@@ -264,9 +271,21 @@ class PostgresOrderRepository:
                     .returning(ExchangeOrderEventRow.event_id)
                 )
                 if inserted is not None:
+                    advance_state = and_(
+                        ExchangeOrderRow.updated_at <= event.occurred_at,
+                        or_(
+                            ExchangeOrderRow.state != ExchangeOrderState.FILLED.value,
+                            literal(event.state is ExchangeOrderState.FILLED),
+                        ),
+                    )
                     order_values: dict[str, object] = {
-                        "state": event.state.value,
-                        "updated_at": event.occurred_at,
+                        "state": case(
+                            (advance_state, event.state.value),
+                            else_=ExchangeOrderRow.state,
+                        ),
+                        "updated_at": func.greatest(
+                            ExchangeOrderRow.updated_at, event.occurred_at
+                        ),
                     }
                     if event.exchange_order_id is not None:
                         order_values["exchange_order_id"] = event.exchange_order_id
@@ -283,7 +302,16 @@ class PostgresOrderRepository:
                         update(ExchangeOrderRow)
                         .where(
                             ExchangeOrderRow.client_order_id
-                            == event.client_order_id
+                            == event.client_order_id,
+                            # Preserve the immutable exchange identity. Keep
+                            # conflicting legacy events in the event journal,
+                            # but never merge another order into this row.
+                            or_(
+                                literal(event.exchange_order_id is None),
+                                ExchangeOrderRow.exchange_order_id.is_(None),
+                                ExchangeOrderRow.exchange_order_id
+                                == event.exchange_order_id,
+                            ),
                         )
                         .values(order_values)
                     )

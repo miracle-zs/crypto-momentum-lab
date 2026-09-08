@@ -52,6 +52,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ExchangeOrderRow,
     ExecutionAccountProcessStateRow,
     LiveSessionTransitionRow,
+    OrderIntentExecutionRow,
 )
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PersistedExchangeOrder,
@@ -711,6 +712,7 @@ class PostgresLiveContextProvider:
             unresolved,
             entry_fill_times=entry_fill_times,
             entry_fill_prices=_average_fill_prices(entry_fill_values),
+            exit_batch_ids=await _load_exit_batch_ids(self._sessions, orders),
         )
         return (
             process_at,
@@ -833,6 +835,7 @@ class PostgresLiveContextProvider:
             unresolved,
             entry_fill_times=entry_fill_times,
             entry_fill_prices=_average_fill_prices(entry_fill_values),
+            exit_batch_ids=await _load_exit_batch_ids(self._sessions, orders),
         )
         return (
             snapshot.config.observed_at,
@@ -896,6 +899,7 @@ class _PositionOrder:
     updated_at: datetime
     price: Decimal | None
     plan: OrderExecutionPlan | None = None
+    exit_batch_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -931,10 +935,18 @@ def _classify_live_positions(
     *,
     entry_fill_times: Mapping[str, datetime] | None = None,
     entry_fill_prices: Mapping[str, Decimal] | None = None,
+    exit_batch_ids: Mapping[str, str] | None = None,
 ) -> tuple[tuple[ManagedLivePosition, ...], frozenset[str]]:
     fill_times = entry_fill_times or {}
     fill_prices = entry_fill_prices or {}
     position_orders = _normalise_position_orders(orders, unresolved)
+    if exit_batch_ids:
+        position_orders = tuple(
+            replace(
+                order, exit_batch_id=exit_batch_ids.get(order.client_order_id or "")
+            )
+            for order in position_orders
+        )
     managed: list[ManagedLivePosition] = []
     unmanaged: set[str] = set()
     for position in positions:
@@ -1069,6 +1081,30 @@ def _classify_live_positions(
         tuple(sorted(managed, key=lambda item: (item.symbol, item.position_side))),
         frozenset(unmanaged),
     )
+
+
+async def _load_exit_batch_ids(
+    sessions: async_sessionmaker[AsyncSession],
+    orders: Sequence[ExchangeOrderRow],
+) -> dict[str, str]:
+    intent_clients = {
+        order.intent_id: order.client_order_id
+        for order in orders if order.reduce_only
+    }
+    if not intent_clients:
+        return {}
+    async with sessions() as session:
+        rows = (await session.execute(
+            select(OrderIntentExecutionRow.intent_id, OrderIntentExecutionRow.details)
+            .where(OrderIntentExecutionRow.intent_id.in_(tuple(intent_clients)))
+        )).all()
+    result: dict[str, str] = {}
+    for intent_id, details in rows:
+        features = details.get("features", {}) if isinstance(details, dict) else {}
+        batch_id = features.get("batch_id") if isinstance(features, dict) else None
+        if isinstance(batch_id, str) and batch_id:
+            result[intent_clients[intent_id]] = batch_id
+    return result
 
 
 def _normalise_position_orders(
@@ -1256,11 +1292,20 @@ def _build_position_batches(
                 current.entry_notional += entry_quantity * entry_price
                 current.opened_at = max(current.opened_at, event_at)
             continue
-        if current is None:
+        target = current
+        if order.exit_batch_id is not None:
+            target = next(
+                (
+                    batch for batch in accumulators
+                    if batch.batch_id == order.exit_batch_id
+                ),
+                None,
+            )
+        if target is None:
             continue
-        if current.exit_order_submitted_at is None:
-            current.exit_order_submitted_at = event_at
-        current.exit_orders.append(order)
+        if target.exit_order_submitted_at is None:
+            target.exit_order_submitted_at = event_at
+        target.exit_orders.append(order)
 
     if not accumulators:
         return ()

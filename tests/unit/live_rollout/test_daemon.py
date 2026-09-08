@@ -327,7 +327,8 @@ def test_live_policy_modes_are_mutually_exclusive() -> None:
         )
 
 
-async def test_live_daemon_does_not_submit_expired_entry_candidate() -> None:
+@pytest.mark.parametrize("reduce_only", [False, True])
+async def test_live_daemon_does_not_submit_expired_entry_candidate(reduce_only) -> None:
     exchange = PlanAwareExchange()
 
     class ExpiredCandidateStrategy(FakeStrategy):
@@ -339,6 +340,7 @@ async def test_live_daemon_does_not_submit_expired_entry_candidate() -> None:
                     replace(
                         decision.candidates[0],
                         expires_at=NOW + timedelta(seconds=1),
+                        reduce_only=reduce_only,
                     ),
                 ),
             )
@@ -354,6 +356,18 @@ async def test_live_daemon_does_not_submit_expired_entry_candidate() -> None:
     assert result.halt_reason is None
     assert result.approved_intent_count == 0
     assert result.submitted_order_count == 0
+    assert exchange.calls == []
+
+
+async def test_duplicate_prepared_intent_never_reaches_exchange() -> None:
+    class AlreadySubmittedRepository(FakeLiveRepository):
+        async def prepare_submission(self, **kwargs):
+            return None
+
+    exchange = PlanAwareExchange()
+    daemon = _daemon(exchange=exchange, repository=AlreadySubmittedRepository())
+    result = await daemon.run(_states())
+    assert result.halt_reason is None
     assert exchange.calls == []
 
 
@@ -1795,7 +1809,10 @@ async def test_scheduled_risk_window_late_start_after_reopen_is_noop(
     )
 
 
-async def test_scheduled_risk_window_flattens_verifies_and_reopens_entries() -> None:
+@pytest.mark.parametrize("unmanaged_symbols", [frozenset(), frozenset({"ETHUSDT"})])
+async def test_scheduled_risk_window_flattens_verifies_and_reopens_entries(
+    unmanaged_symbols,
+) -> None:
     exchange = PlanAwareExchange()
     scheduled_now = datetime(2026, 7, 3, 23, 45, tzinfo=UTC)
     current_time = [scheduled_now]
@@ -1840,6 +1857,7 @@ async def test_scheduled_risk_window_flattens_verifies_and_reopens_entries() -> 
             _runtime_context(),
             open_position_symbols=frozenset({"BTCUSDT"}),
             managed_positions=(position,),
+            unmanaged_position_symbols=unmanaged_symbols,
         )
 
     daemon = _daemon(

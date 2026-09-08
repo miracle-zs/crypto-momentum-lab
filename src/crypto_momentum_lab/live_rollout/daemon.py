@@ -143,7 +143,7 @@ class LiveDaemonRepository(Protocol):
         evaluation: RiskEvaluation,
         plan: OrderExecutionPlan,
         prepared_at: datetime,
-    ) -> PreparedOrderSubmission: ...
+    ) -> PreparedOrderSubmission | None: ...
 
     async def save_checkpoint(
         self,
@@ -993,7 +993,7 @@ class LiveStrategyDaemon:
         context = await self._context_provider(state)
         self._sync_pending_entry_plans(context)
         await self._publish_managed_position_symbols(context)
-        if context.unmanaged_position_symbols:
+        if state.symbol in context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
             return f"unmanaged_live_positions:{symbols}"
         if self._run_active:
@@ -1037,7 +1037,7 @@ class LiveStrategyDaemon:
         context = await self._context_provider(state)
         self._sync_pending_entry_plans(context)
         await self._publish_managed_position_symbols(context)
-        if context.unmanaged_position_symbols:
+        if state.symbol in context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
             return f"unmanaged_live_positions:{symbols}"
         if self._run_active:
@@ -1074,7 +1074,7 @@ class LiveStrategyDaemon:
         context = await self._context_provider(state)
         self._sync_pending_entry_plans(context)
         await self._publish_managed_position_symbols(context)
-        if context.unmanaged_position_symbols:
+        if state.symbol in context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
             return f"unmanaged_live_positions:{symbols}"
         outcome = await self._process_closed_candle_work(
@@ -1105,7 +1105,7 @@ class LiveStrategyDaemon:
         context = await self._context_provider(state)
         self._sync_pending_entry_plans(context)
         await self._publish_managed_position_symbols(context)
-        if context.unmanaged_position_symbols:
+        if state.symbol in context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
             return f"unmanaged_live_positions:{symbols}"
         outcome = await self._process_grace_timeout_work(
@@ -1469,7 +1469,7 @@ class LiveStrategyDaemon:
                     error_type=type(error).__name__,
                 )
                 continue
-            if context.unmanaged_position_symbols:
+            if state.symbol in context.unmanaged_position_symbols:
                 symbols = ",".join(sorted(context.unmanaged_position_symbols))
                 failure = f"unmanaged_live_positions:{symbols}"
                 log.error(
@@ -1546,7 +1546,7 @@ class LiveStrategyDaemon:
                         f"{type(error).__name__}"
                     )
                     continue
-                if context.unmanaged_position_symbols:
+                if state.symbol in context.unmanaged_position_symbols:
                     symbols = ",".join(
                         sorted(context.unmanaged_position_symbols)
                     )
@@ -3065,7 +3065,7 @@ class LiveStrategyDaemon:
                     context = await self._context_provider(state)
                     self._sync_pending_entry_plans(context)
                     await self._publish_managed_position_symbols(context)
-                    if context.unmanaged_position_symbols:
+                    if state.symbol in context.unmanaged_position_symbols:
                         symbols = ",".join(
                             sorted(context.unmanaged_position_symbols)
                         )
@@ -3087,7 +3087,7 @@ class LiveStrategyDaemon:
                     context = await self._context_provider(state)
                     self._sync_pending_entry_plans(context)
                     await self._publish_managed_position_symbols(context)
-                    if context.unmanaged_position_symbols:
+                    if state.symbol in context.unmanaged_position_symbols:
                         symbols = ",".join(
                             sorted(context.unmanaged_position_symbols)
                         )
@@ -3222,9 +3222,9 @@ class LiveStrategyDaemon:
                 reason=self.entry_enabled_reason,
             )
             return None
-        if not candidate.reduce_only and candidate.expires_at <= execution_now:
+        if candidate.expires_at <= execution_now:
             log.warning(
-                "live_entry_candidate_expired_before_execution",
+                "live_candidate_expired_before_execution",
                 run_id=self._config.run_id,
                 candidate_id=candidate.candidate_id,
                 symbol=candidate.symbol,
@@ -3363,6 +3363,14 @@ class LiveStrategyDaemon:
                 plan=plan,
                 prepared_at=self._clock(),
             )
+            if prepared_submission is None:
+                log.info(
+                    "live_duplicate_submission_suppressed",
+                    run_id=self._config.run_id,
+                    symbol=plan.symbol,
+                    client_order_id=plan.client_order_id,
+                )
+                return None
             intent_saved_at = prepared_submission.submitting_event.occurred_at
         else:
             await self._repository.save_approved_intent(

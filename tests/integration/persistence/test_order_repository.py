@@ -154,6 +154,140 @@ async def test_prepare_submission_journals_intent_order_and_event_together(
     assert event_states == [ExchangeOrderState.SUBMITTING.value]
 
 
+async def test_concurrent_prepare_grants_only_one_submission(order_repository) -> None:
+    repository, factory = order_repository
+    evaluation = RiskEvaluation(
+        evaluation_id="evaluation-1",
+        candidate_id="candidate-1",
+        decision=RiskDecision.APPROVED,
+        reason="approved",
+        evaluated_at=NOW,
+        details={},
+    )
+    results = await asyncio.gather(
+        *(
+            repository.prepare_submission(
+                intent=_intent(),
+                evaluation=evaluation,
+                plan=_plan(),
+                prepared_at=NOW + timedelta(seconds=index),
+            )
+            for index in range(2)
+        )
+    )
+    assert sum(result is not None for result in results) == 1
+    await repository.append_order_event(
+        ExchangeOrderEvent(
+            event_id="original-filled",
+            client_order_id=_plan().client_order_id,
+            state=ExchangeOrderState.FILLED,
+            occurred_at=NOW + timedelta(seconds=3),
+            exchange_order_id="original-order",
+            details={},
+        )
+    )
+    restarted = PostgresOrderRepository(factory)
+    assert (
+        await restarted.prepare_submission(
+            intent=_intent(),
+            evaluation=evaluation,
+            plan=_plan(),
+            prepared_at=NOW + timedelta(hours=8),
+        )
+        is None
+    )
+    async with factory() as session:
+        row = await session.get(ExchangeOrderRow, _plan().client_order_id)
+        assert row.state == ExchangeOrderState.FILLED.value
+        assert row.exchange_order_id == "original-order"
+        count = await session.scalar(
+            select(func.count())
+            .select_from(ExchangeOrderEventRow)
+            .where(ExchangeOrderEventRow.state == ExchangeOrderState.SUBMITTING.value)
+        )
+        assert count == 1
+
+
+async def test_late_ack_cannot_reopen_filled_order(order_repository) -> None:
+    repository, factory = order_repository
+    await _save_intent(repository)
+    await repository.save_planned_order(_plan())
+    for event_id, state, seconds in (
+        ("filled-first", ExchangeOrderState.FILLED, 3),
+        ("late-ack", ExchangeOrderState.ACKNOWLEDGED, 1),
+    ):
+        await repository.append_order_event(
+            ExchangeOrderEvent(
+                event_id=event_id,
+                client_order_id=_plan().client_order_id,
+                state=state,
+                occurred_at=NOW + timedelta(seconds=seconds),
+                exchange_order_id="original-order",
+                details={},
+            )
+        )
+    async with factory() as session:
+        row = await session.get(ExchangeOrderRow, _plan().client_order_id)
+        assert row.state == ExchangeOrderState.FILLED.value
+        assert row.updated_at == NOW + timedelta(seconds=3)
+
+
+async def test_conflicting_exchange_identity_is_journaled_without_overwrite(
+    order_repository,
+) -> None:
+    repository, factory = order_repository
+    await _save_intent(repository)
+    await repository.save_planned_order(_plan())
+    for index, exchange_id in enumerate(("original-order", "different-order")):
+        await repository.append_order_event(
+            ExchangeOrderEvent(
+                event_id=f"identity-{index}",
+                client_order_id=_plan().client_order_id,
+                state=ExchangeOrderState.FILLED,
+                occurred_at=NOW + timedelta(seconds=index),
+                exchange_order_id=exchange_id,
+                details={"executed_quantity": str(index + 1)},
+            )
+        )
+    async with factory() as session:
+        row = await session.get(ExchangeOrderRow, _plan().client_order_id)
+        assert row.exchange_order_id == "original-order"
+        assert row.executed_quantity == Decimal("1")
+        assert (
+            await session.scalar(
+                select(func.count()).select_from(ExchangeOrderEventRow)
+            )
+            == 2
+        )
+
+
+async def test_exit_batch_binding_loads_from_durable_intent(order_repository) -> None:
+    from dataclasses import replace
+
+    from crypto_momentum_lab.live_rollout.postgres_runtime import _load_exit_batch_ids
+
+    repository, factory = order_repository
+    intent = replace(_intent(), reduce_only=True, features={"batch_id": "old-batch"})
+    await repository.save_approved_intent(
+        intent,
+        RiskEvaluation(
+            evaluation_id="evaluation-1",
+            candidate_id=intent.candidate_id,
+            decision=RiskDecision.APPROVED,
+            reason="approved",
+            evaluated_at=NOW,
+            details={},
+        ),
+    )
+    plan = replace(_plan(), reduce_only=True, side="SELL")
+    await repository.save_planned_order(plan)
+    async with factory() as session:
+        orders = (await session.scalars(select(ExchangeOrderRow))).all()
+    assert await _load_exit_batch_ids(factory, orders) == {
+        plan.client_order_id: "old-batch"
+    }
+
+
 async def test_load_unresolved_orders_returns_unknown_state(
     order_repository: tuple[
         PostgresOrderRepository,

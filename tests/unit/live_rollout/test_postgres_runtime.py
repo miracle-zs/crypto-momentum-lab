@@ -544,10 +544,92 @@ def test_unconfirmed_reopen_is_not_attributed_to_closed_batch() -> None:
     assert unmanaged == frozenset({"BTCUSDT"})
 
 
+def test_reused_exit_history_leaves_707_in_new_batch() -> None:
+    old_at = NOW
+    reopened_at = NOW + timedelta(hours=11)
+    orders = [
+        _order(
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("21654"),
+            executed_quantity=Decimal("21654"),
+            created_at=old_at,
+            updated_at=old_at,
+            client_order_id="old-entry",
+        ),
+        _order(
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("21404"),
+            executed_quantity=Decimal("21404"),
+            created_at=old_at + timedelta(hours=3),
+            updated_at=old_at + timedelta(hours=3),
+            client_order_id="middle-entry",
+        ),
+        _order(
+            reduce_only=True,
+            side="SELL",
+            quantity=Decimal("21654"),
+            executed_quantity=Decimal("21654"),
+            created_at=old_at + timedelta(hours=2),
+            updated_at=reopened_at + timedelta(seconds=1),
+            client_order_id="reused-exit",
+        ),
+        _order(
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("22361"),
+            executed_quantity=Decimal("22361"),
+            created_at=reopened_at,
+            updated_at=reopened_at,
+            client_order_id="new-entry",
+        ),
+    ]
+    # A newer batch was opened and closed before the older batch timed out.
+    # The old timeout must consume its named batch, not the latest accumulator.
+    orders.extend(
+        [
+            _order(
+                reduce_only=True,
+                side="SELL",
+                quantity=Decimal("21654"),
+                executed_quantity=Decimal("0"),
+                state="canceled",
+                created_at=old_at + timedelta(minutes=24),
+                client_order_id="old-limit",
+            ),
+            _order(
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("21819"),
+                created_at=old_at + timedelta(hours=1),
+                updated_at=old_at + timedelta(hours=1),
+                client_order_id="interleaved-entry",
+            ),
+            _order(
+                reduce_only=True,
+                side="SELL",
+                quantity=Decimal("21819"),
+                created_at=old_at + timedelta(hours=1, minutes=20),
+                updated_at=old_at + timedelta(hours=1, minutes=40),
+                client_order_id="interleaved-exit",
+            ),
+        ]
+    )
+    managed, unmanaged = _classify_live_positions(
+        [_position(position_amt=Decimal("707"))],
+        orders,
+        exit_batch_ids={"reused-exit": "BTCUSDT:LONG:old-entry"},
+    )
+    assert not unmanaged
+    assert len(managed[0].batches) == 1
+    assert managed[0].batches[0].quantity == Decimal("707")
+    assert managed[0].batches[0].opened_at == reopened_at
+
+
 def test_draining_control_survives_a_later_operational_halt() -> None:
     assert (
-        _resolve_strategy_live_state("draining", "halted")
-        is StrategyLiveState.DRAINING
+        _resolve_strategy_live_state("draining", "halted") is StrategyLiveState.DRAINING
     )
 
 
