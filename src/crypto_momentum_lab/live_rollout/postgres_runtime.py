@@ -5,6 +5,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -65,6 +66,8 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
     RuntimeStateCursor,
 )
+
+log = structlog.get_logger(__name__)
 
 
 class PostgresLiveContextProvider:
@@ -919,6 +922,7 @@ class _PositionBatchAccumulator:
     entry_notional: Decimal
     exit_order_submitted_at: datetime | None = None
     exit_orders: list[_PositionOrder] = field(default_factory=list)
+    exit_filled_quantity: Decimal = Decimal("0")
     legacy_exit_attribution: bool = False
 
 
@@ -1334,30 +1338,106 @@ def _build_position_batches(
                 ),
                 None,
             )
-        if target is None:
-            continue
+
+        filled_quantity = _exit_fill_quantity(order)
+        remaining_fill = filled_quantity
+
+        def attach(
+            batch: _PositionBatchAccumulator,
+            quantity: Decimal,
+            *,
+            exit_order: _PositionOrder = order,
+            submitted_at: datetime = event_at,
+            legacy_attribution: bool = order.legacy_exit_attribution,
+        ) -> None:
+            if legacy_attribution:
+                batch.legacy_exit_attribution = True
+            if batch.exit_order_submitted_at is None:
+                batch.exit_order_submitted_at = submitted_at
+            batch.exit_orders.append(exit_order)
+            batch.exit_filled_quantity += quantity
+
         if order.legacy_exit_attribution:
-            target.legacy_exit_attribution = True
-        if target.exit_order_submitted_at is None:
-            target.exit_order_submitted_at = event_at
-        target.exit_orders.append(order)
+            # Legacy rows intentionally keep the old fail-closed semantics:
+            # they may describe a historical boundary for the latest
+            # accumulator, but their fill must not be redistributed across
+            # other batches because the exchange-side lot is unknowable.
+            if target is not None:
+                available = max(
+                    Decimal("0"),
+                    target.entry_quantity - target.exit_filled_quantity,
+                )
+                if filled_quantity <= 0 and available > 0:
+                    attach(target, Decimal("0"))
+                elif available > 0 and filled_quantity > 0:
+                    attach(target, min(available, filled_quantity))
+            continue
+
+        if target is not None:
+            available = max(
+                Decimal("0"),
+                target.entry_quantity - target.exit_filled_quantity,
+            )
+            if filled_quantity <= 0:
+                # An active/canceled historical order still creates a batch
+                # boundary, but only while that named batch has remaining
+                # capacity.  A stale order for a closed batch must not become
+                # a recovery boundary for a newer position.
+                if available > 0:
+                    attach(target, Decimal("0"))
+                else:
+                    target = None
+            elif available > 0:
+                allocated = min(available, remaining_fill)
+                attach(target, allocated)
+                remaining_fill -= allocated
+            else:
+                target = None
+
+        # Reduce-only orders are executed against the aggregate exchange
+        # position.  A historical batch binding can therefore be wrong after
+        # an old stale-exit bug.  When the named batch is already exhausted,
+        # allocate the filled overflow to the newest surviving batches instead
+        # of leaving a phantom old batch that steals the next position's
+        # quantity during snapshot reconciliation.
+        if remaining_fill > 0 or (filled_quantity <= 0 and target is None):
+            fallback_candidates = reversed(accumulators)
+            for fallback in fallback_candidates:
+                if fallback is target:
+                    continue
+                available = max(
+                    Decimal("0"),
+                    fallback.entry_quantity - fallback.exit_filled_quantity,
+                )
+                if available <= 0:
+                    continue
+                if filled_quantity <= 0:
+                    attach(fallback, Decimal("0"))
+                    break
+                allocated = min(available, remaining_fill)
+                attach(fallback, allocated)
+                if order.exit_batch_id is not None:
+                    log.warning(
+                        "live_exit_batch_binding_reassigned",
+                        symbol=order.symbol,
+                        client_order_id=order.client_order_id,
+                        bound_batch_id=order.exit_batch_id,
+                        fallback_batch_id=fallback.batch_id,
+                        filled_quantity=str(filled_quantity),
+                        reassigned_quantity=str(allocated),
+                    )
+                remaining_fill -= allocated
+                if remaining_fill <= 0:
+                    break
 
     if not accumulators:
         return ()
     batches: list[ManagedLivePositionBatch] = []
     for accumulator in accumulators:
-        remaining_quantity = accumulator.entry_quantity
-        for order in sorted(
-            accumulator.exit_orders,
-            key=lambda item: (item.created_at, item.updated_at),
-        ):
-            fill_quantity = min(
-                remaining_quantity,
-                _exit_fill_quantity(order),
-            )
-            remaining_quantity -= fill_quantity
-            if remaining_quantity <= 0:
-                break
+        remaining_quantity = max(
+            Decimal("0"),
+            accumulator.entry_quantity - accumulator.exit_filled_quantity,
+        )
         if remaining_quantity <= 0:
             continue
         entry_price = (

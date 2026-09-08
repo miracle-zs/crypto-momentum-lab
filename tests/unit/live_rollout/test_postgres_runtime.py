@@ -627,6 +627,97 @@ def test_reused_exit_history_leaves_707_in_new_batch() -> None:
     assert managed[0].batches[0].opened_at == reopened_at
 
 
+def test_overdrawn_bound_exit_is_reassigned_before_reconciling_reopened_batch() -> None:
+    old_at = NOW
+    current_at = NOW + timedelta(hours=1)
+    reopened_at = NOW + timedelta(hours=2)
+    orders = [
+        _order(
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("526"),
+            executed_quantity=Decimal("526"),
+            created_at=old_at,
+            updated_at=old_at,
+            client_order_id="old-entry",
+        ),
+        _order(
+            reduce_only=True,
+            side="SELL",
+            quantity=Decimal("526"),
+            executed_quantity=Decimal("526"),
+            created_at=old_at + timedelta(minutes=10),
+            updated_at=old_at + timedelta(minutes=10),
+            client_order_id="old-close",
+        ),
+        _order(
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("516"),
+            executed_quantity=Decimal("516"),
+            created_at=current_at,
+            updated_at=current_at,
+            client_order_id="current-entry",
+        ),
+        # This historical exit was actually filled against the current
+        # position, but its old batch binding points at an already closed lot.
+        _order(
+            reduce_only=True,
+            side="SELL",
+            quantity=Decimal("386"),
+            executed_quantity=Decimal("386"),
+            created_at=current_at + timedelta(minutes=10),
+            updated_at=current_at + timedelta(minutes=10),
+            client_order_id="misbound-close",
+        ),
+        _order(
+            reduce_only=True,
+            side="SELL",
+            quantity=Decimal("130"),
+            executed_quantity=Decimal("130"),
+            created_at=current_at + timedelta(minutes=20),
+            updated_at=current_at + timedelta(minutes=20),
+            client_order_id="current-close",
+        ),
+        _order(
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("505"),
+            executed_quantity=Decimal("505"),
+            created_at=reopened_at,
+            updated_at=reopened_at,
+            client_order_id="reopened-entry",
+        ),
+        _order(
+            reduce_only=True,
+            side="SELL",
+            quantity=Decimal("119"),
+            executed_quantity=Decimal("119"),
+            created_at=reopened_at + timedelta(minutes=20),
+            updated_at=reopened_at + timedelta(minutes=20),
+            client_order_id="reopened-close",
+        ),
+    ]
+
+    managed, unmanaged = _classify_live_positions(
+        [_position(position_amt=Decimal("386"))],
+        orders,
+        exit_batch_ids={
+            "old-close": "BTCUSDT:LONG:old-entry",
+            "misbound-close": "BTCUSDT:LONG:old-entry",
+            "current-close": "BTCUSDT:LONG:current-entry",
+            "reopened-close": "BTCUSDT:LONG:reopened-entry",
+        },
+    )
+
+    assert unmanaged == frozenset()
+    assert len(managed) == 1
+    assert [
+        (batch.batch_id, batch.quantity, batch.opened_at)
+        for batch in managed[0].batches
+    ] == [("BTCUSDT:LONG:reopened-entry", Decimal("386"), reopened_at)]
+
+
 def test_legacy_exit_history_does_not_keep_an_old_batch_active() -> None:
     old_at = NOW
     current_at = NOW + timedelta(days=20)
