@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: update_server.sh <server-host> [git-ref] [--live]
+Usage: update_server.sh <server-host> [git-ref] [--live] [--refresh-approvals]
 
 Environment:
   CML_SERVER_USER  SSH user (default: root)
@@ -15,23 +15,61 @@ Environment:
 
 The live profile is never touched unless --live is supplied. Live updates run
 preflight for every currently running account before restarting any live
-container. The SSH connection uses an agent/key by default. When
+container. --refresh-approvals is an explicit opt-in that refreshes active
+approvals from the target runtime while preserving their existing limits and
+operator fields; it requires --live and an explicit git-ref. The SSH connection
+uses an agent/key by default. When
 CML_SSH_PASSWORD is set, sshpass reads it from the environment; the password
 is never a command-line argument, remote argument, or repository value.
 USAGE
 }
 
-if [[ $# -lt 1 || $# -gt 3 ]]; then
+if [[ $# -lt 1 ]]; then
   usage >&2
   exit 64
 fi
 
 server_host="$1"
-target_ref="${2:-origin/main}"
+shift
+target_ref="origin/main"
+target_ref_set=0
 live_update=0
-if [[ "${3:-}" == "--live" ]]; then
-  live_update=1
-elif [[ -n "${3:-}" ]]; then
+refresh_approvals=0
+while (( $# > 0 )); do
+  case "$1" in
+    --live)
+      live_update=1
+      ;;
+    --refresh-approvals)
+      refresh_approvals=1
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --*)
+      usage >&2
+      exit 64
+      ;;
+    *)
+      if [[ "$target_ref_set" == 1 ]]; then
+        usage >&2
+        exit 64
+      fi
+      target_ref="$1"
+      target_ref_set=1
+      ;;
+  esac
+  shift
+done
+
+if [[ "$refresh_approvals" == 1 && "$live_update" != 1 ]]; then
+  echo "--refresh-approvals requires --live" >&2
+  exit 64
+fi
+
+if [[ "$refresh_approvals" == 1 && "$target_ref_set" == 0 ]]; then
+  echo "--refresh-approvals requires an explicit git-ref" >&2
   usage >&2
   exit 64
 fi
@@ -56,7 +94,7 @@ fi
 
 "${ssh_command[@]}" "${ssh_opts[@]}" "${server_user}@${server_host}" bash -s -- \
   "$remote_dir" "$target_ref" "$live_update" "$live_concurrency" \
-  "$deploy_wait_timeout" <<'REMOTE_SCRIPT'
+  "$deploy_wait_timeout" "$refresh_approvals" <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
 remote_dir="$1"
@@ -64,8 +102,13 @@ target_ref="$2"
 live_update="$3"
 live_concurrency="$4"
 deploy_wait_timeout="$5"
+refresh_approvals="$6"
 if ! [[ "$deploy_wait_timeout" =~ ^[1-9][0-9]*$ ]]; then
   echo "Invalid CML_DEPLOY_WAIT_TIMEOUT_SECONDS: $deploy_wait_timeout" >&2
+  exit 64
+fi
+if [[ "$refresh_approvals" != 0 && "$refresh_approvals" != 1 ]]; then
+  echo "Invalid refresh approvals flag: $refresh_approvals" >&2
   exit 64
 fi
 cd "$remote_dir"
@@ -266,6 +309,84 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     esac
   }
 
+  wait_for_batch() {
+    local failure=0
+    local pid
+    for pid in "$@"; do
+      if ! wait "$pid"; then
+        failure=1
+      fi
+    done
+    return "$failure"
+  }
+
+  refresh_approval_for_pair() {
+    local pair="$1"
+    local account execution_service strategy_service
+    IFS=: read -r account execution_service strategy_service <<<"$pair"
+    echo "refresh approval $account"
+    "${compose[@]}" run --rm --no-deps -T "$strategy_service" \
+      refresh-approval-runtime \
+      --account-label "$account" \
+      --strategy orderflow_impulse \
+      --git-commit-hash "$target_commit" \
+      --migration-revision "$(migration_revision_for_account "$account")" \
+      </dev/null
+  }
+
+  renew_lease_for_pair() {
+    local pair="$1"
+    local account execution_service strategy_service lease_owner
+    IFS=: read -r account execution_service strategy_service <<<"$pair"
+    lease_owner="$(lease_owner_for_account "$account")"
+    echo "renew lease $account"
+    "${compose[@]}" run --rm --no-deps -T "$strategy_service" renew-lease \
+      --account-label "$account" \
+      --strategy orderflow_impulse \
+      --lease-owner "$lease_owner" \
+      --lease-ttl-seconds 3600 \
+      --confirmation "RENEW LIVE RISK LEASE" </dev/null >/dev/null
+  }
+
+  preflight_pair() {
+    local pair="$1"
+    local account execution_service strategy_service
+    IFS=: read -r account execution_service strategy_service <<<"$pair"
+    echo "preflight $account"
+    "${compose[@]}" run --rm --no-deps -T "$strategy_service" preflight \
+      --account-label "$account" \
+      --strategy orderflow_impulse \
+      --strict \
+      --expected-git-commit "$target_commit" \
+      --expected-migration-revision "$(migration_revision_for_account "$account")" \
+      </dev/null
+  }
+
+  run_parallel_pairs() {
+    local action="$1"
+    shift
+    local pair
+    local -a pids=()
+    for pair in "$@"; do
+      case "$action" in
+        refresh) refresh_approval_for_pair "$pair" & ;;
+        renew) renew_lease_for_pair "$pair" & ;;
+        preflight) preflight_pair "$pair" & ;;
+        *) echo "unknown parallel action: $action" >&2; return 64 ;;
+      esac
+      pids+=("$!")
+      if (( ${#pids[@]} >= live_concurrency )); then
+        if ! wait_for_batch "${pids[@]}"; then
+          return 1
+        fi
+        pids=()
+      fi
+    done
+    if (( ${#pids[@]} > 0 )); then
+      wait_for_batch "${pids[@]}"
+    fi
+  }
+
   active_pairs=()
   for pair in "${live_pairs[@]}"; do
     IFS=: read -r account execution_service strategy_service <<<"$pair"
@@ -290,28 +411,28 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   # Validate approvals with the freshly built image before restarting any
   # consumer or execution service. A bad approval now fails in seconds after
   # the build instead of waiting for a Live healthcheck to turn unhealthy.
-  for pair in "${active_pairs[@]}"; do
-    IFS=: read -r account execution_service strategy_service <<<"$pair"
-    lease_owner="$(lease_owner_for_account "$account")"
-    echo "renew lease $account"
-    "${compose[@]}" run --rm --no-deps -T "$strategy_service" renew-lease \
-      --account-label "$account" \
-      --strategy orderflow_impulse \
-      --lease-owner "$lease_owner" \
-      --lease-ttl-seconds 3600 \
-      --confirmation "RENEW LIVE RISK LEASE" </dev/null >/dev/null
-  done
-  for pair in "${active_pairs[@]}"; do
-    IFS=: read -r account execution_service strategy_service <<<"$pair"
-    echo "preflight $account"
-    "${compose[@]}" run --rm --no-deps -T "$strategy_service" preflight \
-      --account-label "$account" \
-      --strategy orderflow_impulse \
-      --strict \
-      --expected-git-commit "$target_commit" \
-      --expected-migration-revision "$(migration_revision_for_account "$account")" \
-      </dev/null
-  done
+  if [[ "$refresh_approvals" == 1 ]]; then
+    approval_refresh_started_at="$(date +%s)"
+    if ! run_parallel_pairs refresh "${active_pairs[@]}"; then
+      echo "approval refresh failed; Live services were not restarted" >&2
+      exit 1
+    fi
+    echo "phase=approval-refresh elapsed_seconds=$(( $(date +%s) - approval_refresh_started_at ))"
+  fi
+
+  lease_started_at="$(date +%s)"
+  if ! run_parallel_pairs renew "${active_pairs[@]}"; then
+    echo "lease renewal failed; Live services were not restarted" >&2
+    exit 1
+  fi
+  echo "phase=lease-renew elapsed_seconds=$(( $(date +%s) - lease_started_at ))"
+
+  preflight_started_at="$(date +%s)"
+  if ! run_parallel_pairs preflight "${active_pairs[@]}"; then
+    echo "preflight failed; Live services were not restarted" >&2
+    exit 1
+  fi
+  echo "phase=preflight elapsed_seconds=$(( $(date +%s) - preflight_started_at ))"
   live_preflight_complete=1
 fi
 
@@ -361,10 +482,14 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     fi
   done
   if (( ${#execution_services[@]} > 0 )); then
+    execution_started_at="$(date +%s)"
     echo "update execution wave (${#execution_services[@]} services)"
     "${compose[@]}" --parallel "$live_concurrency" up -d --no-deps --wait \
       --wait-timeout "$deploy_wait_timeout" \
       "${execution_services[@]}"
+    echo "phase=execution elapsed_seconds=$(( $(date +%s) - execution_started_at ))"
+  else
+    echo "phase=execution skipped no_active_services=1"
   fi
 
   strategy_services=()
@@ -375,10 +500,14 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     fi
   done
   if (( ${#strategy_services[@]} > 0 )); then
+    strategy_started_at="$(date +%s)"
     echo "update strategy wave (${#strategy_services[@]} services)"
     "${compose[@]}" --parallel "$live_concurrency" up -d --no-deps --wait \
       --wait-timeout "$deploy_wait_timeout" \
       "${strategy_services[@]}"
+    echo "phase=strategy elapsed_seconds=$(( $(date +%s) - strategy_started_at ))"
+  else
+    echo "phase=strategy skipped no_active_services=1"
   fi
   echo "phase=live elapsed_seconds=$(( $(date +%s) - live_started_at ))"
 fi

@@ -35,6 +35,7 @@ def test_live_cli_exposes_required_commands() -> None:
     for command in (
         "approve",
         "approve-runtime",
+        "refresh-approval-runtime",
         "prepare",
         "renew-lease",
         "preflight",
@@ -508,6 +509,74 @@ def test_runtime_strategy_config_hash_uses_live_environment(monkeypatch) -> None
     assert runtime_hash == (
         "4586faafeab53e123b8dca93f0c489a87f7e795bd6bebe18fdb4c52f36696bef"
     )
+
+
+def test_refresh_approval_runtime_preserves_existing_limits(monkeypatch) -> None:
+    now = datetime.now(tz=UTC)
+    current = main.LiveOperatorApproval(
+        approval_id="approval-old",
+        account_label="account-2",
+        strategy_name="orderflow_impulse",
+        strategy_config_hash="a" * 64,
+        risk_config_hash="b" * 64,
+        git_commit_hash="c" * 40,
+        database_migration_revision="20260906_0030",
+        approved_notional_cap=Decimal("10000"),
+        approved_max_open_positions=500,
+        approved_max_daily_loss=Decimal("10000"),
+        approver_name="operator",
+        approval_text="ENABLE SMALL LIVE TRADING",
+        expires_at=None,
+        created_at=now - timedelta(minutes=1),
+    )
+    saved: list[main.LiveOperatorApproval] = []
+
+    async def fake_load(*args):
+        del args
+        return current
+
+    async def fake_risk_hash(*args):
+        del args
+        return "d" * 64
+
+    async def fake_save(_database_url, approval):
+        saved.append(approval)
+
+    monkeypatch.setattr(main, "_load_active_approval", fake_load)
+    monkeypatch.setattr(main, "_latest_risk_config_hash", fake_risk_hash)
+    monkeypatch.setattr(main, "_runtime_strategy_config_hash", lambda _: "e" * 64)
+    monkeypatch.setattr(main, "_save_approval", fake_save)
+
+    result = runner.invoke(
+        app,
+        [
+            "refresh-approval-runtime",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--account-label",
+            "account-2",
+            "--git-commit-hash",
+            "f" * 40,
+            "--migration-revision",
+            "20260906_0030",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert len(saved) == 1
+    refreshed = saved[0]
+    assert refreshed.approval_id != current.approval_id
+    assert refreshed.strategy_config_hash == "e" * 64
+    assert refreshed.risk_config_hash == "d" * 64
+    assert refreshed.git_commit_hash == "f" * 40
+    assert refreshed.approved_notional_cap == current.approved_notional_cap
+    assert (
+        refreshed.approved_max_open_positions
+        == current.approved_max_open_positions
+    )
+    assert refreshed.approved_max_daily_loss == current.approved_max_daily_loss
+    assert refreshed.approver_name == current.approver_name
+    assert refreshed.approval_text == current.approval_text
 
 
 def test_strict_preflight_returns_failure_exit_code(monkeypatch) -> None:

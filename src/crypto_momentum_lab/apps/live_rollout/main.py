@@ -710,6 +710,102 @@ def approve_runtime_command(
     )
 
 
+@app.command("refresh-approval-runtime")
+def refresh_approval_runtime_command(
+    database_url: Annotated[str | None, typer.Option("--database-url")] = None,
+    account_label: Annotated[str, typer.Option("--account-label")] = "primary",
+    strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    git_commit_hash: Annotated[str, typer.Option("--git-commit-hash")] = "",
+    migration_revision: Annotated[
+        str, typer.Option("--migration-revision")
+    ] = "",
+) -> None:
+    """Refresh an active approval while preserving its operator limits."""
+
+    resolved_database_url = _database_url(database_url)
+    now = datetime.now(tz=UTC)
+    current_approval = asyncio.run(
+        _load_active_approval(
+            resolved_database_url,
+            account_label,
+            strategy,
+            now,
+        )
+    )
+    if current_approval is None:
+        raise typer.BadParameter(
+            f"active approval is missing for {account_label}/{strategy}"
+        )
+    strategy_config_hash = _validate_hex_hash(
+        _runtime_strategy_config_hash(strategy),
+        "runtime strategy config hash",
+        _CONFIG_HASH_LENGTH,
+    )
+    configured_strategy_hash = (
+        os.environ.get("CML_LIVE_STRATEGY_CONFIG_HASH", "").strip().lower()
+    )
+    if (
+        configured_strategy_hash
+        and configured_strategy_hash != "unset"
+        and configured_strategy_hash != strategy_config_hash
+    ):
+        raise typer.BadParameter(
+            "configured Live strategy hash does not match the runtime hash"
+        )
+    risk_config_hash = asyncio.run(
+        _latest_risk_config_hash(resolved_database_url, account_label)
+    )
+    git_commit_hash = _validate_hex_hash(
+        git_commit_hash.strip() or os.environ.get("CML_CODE_COMMIT", ""),
+        "--git-commit-hash or CML_CODE_COMMIT",
+        _GIT_COMMIT_HASH_LENGTH,
+    )
+    migration_revision = (
+        migration_revision.strip()
+        or os.environ.get("CML_LIVE_MIGRATION_REVISION", "").strip()
+    )
+    if not migration_revision:
+        raise typer.BadParameter(
+            "--migration-revision or CML_LIVE_MIGRATION_REVISION is required"
+        )
+    refreshed_approval = replace(
+        current_approval,
+        approval_id=f"approval-{uuid4()}",
+        strategy_config_hash=strategy_config_hash,
+        risk_config_hash=risk_config_hash,
+        git_commit_hash=git_commit_hash,
+        database_migration_revision=migration_revision,
+        created_at=now,
+    )
+    asyncio.run(_save_approval(resolved_database_url, refreshed_approval))
+    typer.echo(
+        json.dumps(
+            {
+                "approval_id": refreshed_approval.approval_id,
+                "account_label": account_label,
+                "strategy_config_hash": strategy_config_hash,
+                "risk_config_hash": risk_config_hash,
+                "git_commit_hash": git_commit_hash,
+                "database_migration_revision": migration_revision,
+                "preserved_notional_cap": (
+                    None
+                    if refreshed_approval.approved_notional_cap is None
+                    else str(refreshed_approval.approved_notional_cap)
+                ),
+                "preserved_max_open_positions": (
+                    refreshed_approval.approved_max_open_positions
+                ),
+                "preserved_max_daily_loss": (
+                    None
+                    if refreshed_approval.approved_max_daily_loss is None
+                    else str(refreshed_approval.approved_max_daily_loss)
+                ),
+            },
+            sort_keys=True,
+        )
+    )
+
+
 @app.command("preflight")
 def preflight_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
@@ -3750,6 +3846,25 @@ async def _latest_risk_config_hash(
             config.config_hash,
             "latest risk config hash",
             _CONFIG_HASH_LENGTH,
+        )
+    finally:
+        await engine.dispose()
+
+
+async def _load_active_approval(
+    database_url: str,
+    account_label: str,
+    strategy_name: str,
+    now: datetime,
+) -> LiveOperatorApproval | None:
+    engine = create_execution_database_engine(database_url)
+    try:
+        return await PostgresLiveRolloutRepository(
+            async_sessionmaker(engine, expire_on_commit=False)
+        ).load_active_approval(
+            account_label=account_label,
+            strategy_name=strategy_name,
+            now=now,
         )
     finally:
         await engine.dispose()

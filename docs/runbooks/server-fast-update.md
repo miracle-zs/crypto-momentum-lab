@@ -23,10 +23,11 @@ The host must have the Ubuntu `docker-buildx` package installed once so Compose
 can use BuildKit/Bake and retain the dependency cache. The package install does
 not restart Docker or any application container.
 
-Approval and lease preparation is a separate safety operation. Run it before
-restarting Live containers. If approval or lease state is wrong, a Live worker
-must remain fail-closed; its retry backoff can otherwise add another few
-minutes while an operator diagnoses the mismatch.
+Approval state remains fail-closed. For an ordinary Live update, the existing
+approval must already reference the target commit. When the target image is
+ready and the active approval should keep its current limits, use the explicit
+`--refresh-approvals` option described below; it refreshes only active accounts
+and preserves the stored limits and operator fields.
 
 ## Normal update
 
@@ -70,29 +71,37 @@ so a broken healthcheck fails with diagnostics instead of waiting forever.
 
 ## Live update
 
-Before the Live step, record each account's approval from its own Compose
-service. `approve-runtime` derives the strategy hash from the account-scoped
-environment, the risk hash from the latest persisted risk snapshot, and the
-Git commit from `CML_CODE_COMMIT` (or a validated `--git-commit-hash` value);
-it prevents hand-copying immutable hashes. When approvals are prepared after
-the target image is built, rerun the deployment with `--live`; an unchanged
-checkout takes the Live-only retry path and does not rebuild consumers.
-Run `prepare` separately when a lease is missing. Run the deployment with the
-explicit Live flag:
+`--refresh-approvals` is the one-command path for an active account whose
+approval should follow the target runtime. It requires an explicit commit
+argument and `--live`; after the image is built it derives the strategy hash
+from that account's environment, reads the latest risk hash, keeps the existing
+limits/operator/text/expiry, and updates only the commit and migration binding.
+It fails if an active approval is missing, so it cannot create Live authority
+from nothing. Run `prepare` separately when a lease is missing.
+
+For a target that already has matching approvals:
 
 ```bash
 deploy/ops/update_server.sh 43.167.191.253 <commit-sha> --live
 ```
 
+To refresh the existing approvals and deploy in one explicit command:
+
+```bash
+deploy/ops/update_server.sh 43.167.191.253 <commit-sha> \
+  --live --refresh-approvals
+```
+
 Set `CML_LIVE_CONCURRENCY=1` before the command for a serialized rollout, or
 leave the default `2` to use two bounded restart waves.
 
-The Live path builds the target image, renews every active lease to one hour,
-then runs strict `preflight` for every currently running strategy before
-restarting any consumer or Live container. It checks the approval, runtime
-strategy hash, risk snapshot, target commit, migration revision, account
-readiness, and lease presence. If any check fails, the command exits before
-restarting services. It then updates the active execution
+The Live path builds the target image, optionally refreshes active approvals,
+renews active leases, then runs strict `preflight` for every currently running
+strategy before restarting any consumer or Live container. Lease renewal and
+read-only preflight run in bounded parallel batches using
+`CML_LIVE_CONCURRENCY`. The checks cover the approval, runtime strategy hash,
+risk snapshot, target commit, migration revision, account readiness, and lease
+presence. If any check fails, the command exits before restarting services. It then updates the active execution
 services in a bounded parallel wave and the strategies in a second bounded
 wave. The default concurrency is two; set `CML_LIVE_CONCURRENCY=1` for a more
 conservative rollout or `=4` when the host has headroom:
@@ -105,11 +114,12 @@ conservative rollout or `=4` when the host has headroom:
 Services that are not currently running are skipped, so the script does not
 enable a disabled Live account accidentally. Do not remove the `--live` flag to
 make an approval failure disappear; fix the approval or lease and rerun the
-preflight.
+preflight. Each phase prints its own elapsed seconds, including approval
+refresh, lease renewal, preflight, execution restart, and strategy restart.
 
-The following is an account-2 example. Replace `2` in the service name and
-account label for account 3 or 4. No strategy, risk, or commit hash is typed
-manually:
+The lower-level command remains available for an account-specific manual
+operation. It derives the runtime hashes, but its limit flags intentionally
+create a new approval rather than preserving the previous one:
 
 ```bash
 account_suffix=2
