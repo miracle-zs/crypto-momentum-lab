@@ -11,6 +11,7 @@ Environment:
   CML_REMOTE_DIR   checkout on the server (default: /opt/crypto-momentum-lab)
   CML_LIVE_CONCURRENCY  maximum parallel Live services (default: 2)
   CML_DEPLOY_WAIT_TIMEOUT_SECONDS  Compose health wait timeout (default: 600)
+  CML_DASHBOARD_REQUIRED  require the dashboard endpoint (default: 1)
   CML_SSH_PASSWORD  optional password for sshpass; prefer an SSH key
 
 The live profile is never touched unless --live is supplied. Live updates run
@@ -78,6 +79,12 @@ server_user="${CML_SERVER_USER:-root}"
 remote_dir="${CML_REMOTE_DIR:-/opt/crypto-momentum-lab}"
 live_concurrency="${CML_LIVE_CONCURRENCY:-2}"
 deploy_wait_timeout="${CML_DEPLOY_WAIT_TIMEOUT_SECONDS:-600}"
+dashboard_required="${CML_DASHBOARD_REQUIRED:-1}"
+
+if [[ "$dashboard_required" != 0 && "$dashboard_required" != 1 ]]; then
+  echo "Invalid CML_DASHBOARD_REQUIRED: $dashboard_required" >&2
+  exit 64
+fi
 
 ssh_opts=( -o ConnectTimeout=15 )
 ssh_command=(ssh)
@@ -94,7 +101,7 @@ fi
 
 "${ssh_command[@]}" "${ssh_opts[@]}" "${server_user}@${server_host}" bash -s -- \
   "$remote_dir" "$target_ref" "$live_update" "$live_concurrency" \
-  "$deploy_wait_timeout" "$refresh_approvals" <<'REMOTE_SCRIPT'
+  "$deploy_wait_timeout" "$refresh_approvals" "$dashboard_required" <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
 remote_dir="$1"
@@ -103,12 +110,17 @@ live_update="$3"
 live_concurrency="$4"
 deploy_wait_timeout="$5"
 refresh_approvals="$6"
+dashboard_required="$7"
 if ! [[ "$deploy_wait_timeout" =~ ^[1-9][0-9]*$ ]]; then
   echo "Invalid CML_DEPLOY_WAIT_TIMEOUT_SECONDS: $deploy_wait_timeout" >&2
   exit 64
 fi
 if [[ "$refresh_approvals" != 0 && "$refresh_approvals" != 1 ]]; then
   echo "Invalid refresh approvals flag: $refresh_approvals" >&2
+  exit 64
+fi
+if [[ "$dashboard_required" != 0 && "$dashboard_required" != 1 ]]; then
+  echo "Invalid dashboard required flag: $dashboard_required" >&2
   exit 64
 fi
 cd "$remote_dir"
@@ -265,6 +277,16 @@ is_running() {
   [[ "$state" == "running" ]]
 }
 
+is_healthy() {
+  local service="$1"
+  local container_id
+  local status
+  container_id="$("${compose[@]}" ps -q "$service" 2>/dev/null || true)"
+  [[ -n "$container_id" ]] || return 1
+  status="$(docker inspect -f '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id" 2>/dev/null || true)"
+  [[ "$status" == "running|healthy" ]]
+}
+
 live_preflight_complete=0
 if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   live_pairs=(
@@ -407,6 +429,42 @@ else
   echo "phase=build skipped runtime_unchanged=1"
 fi
 
+# Nginx exposes the dashboard on the host's 8765 port. Keep an already
+# healthy dashboard in place, but recover a Created, stopped, or unhealthy
+# dashboard before reporting a successful application deployment. This does
+# not enable a disabled Live account; it protects the configured operator UI.
+dashboard_needs_start=0
+if [[ "$dashboard_required" == 1 ]] && ! is_healthy dashboard; then
+  dashboard_needs_start=1
+fi
+if [[ "$dashboard_changed" == 1 || "$dashboard_needs_start" == 1 ]]; then
+  dashboard_started_at="$(date +%s)"
+  "${compose[@]}" up -d --no-deps --wait --wait-timeout "$deploy_wait_timeout" dashboard
+  echo "phase=dashboard elapsed_seconds=$(( $(date +%s) - dashboard_started_at ))"
+fi
+
+dashboard_check_required=0
+if [[ "$dashboard_required" == 1 || "$dashboard_changed" == 1 ]]; then
+  dashboard_check_required=1
+fi
+if [[ "$dashboard_check_required" == 1 ]]; then
+  dashboard_health_started_at="$(date +%s)"
+  if ! is_healthy dashboard; then
+    echo "dashboard is not healthy; refusing to report a successful deployment" >&2
+    exit 1
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "dashboard verification requires curl on the server" >&2
+    exit 69
+  fi
+  if ! curl --fail --silent --show-error --max-time 10 \
+    http://127.0.0.1:8765/api/health >/dev/null; then
+    echo "dashboard health endpoint is unavailable on 127.0.0.1:8765" >&2
+    exit 1
+  fi
+  echo "phase=dashboard-health elapsed_seconds=$(( $(date +%s) - dashboard_health_started_at ))"
+fi
+
 if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   # Validate approvals with the freshly built image before restarting any
   # consumer or execution service. A bad approval now fails in seconds after
@@ -454,9 +512,6 @@ if [[ "$paper_changed" == 1 ]]; then
     paper-b1-gainer100
     paper-b1-gainer100-ema
   )
-fi
-if [[ "$dashboard_changed" == 1 ]]; then
-  consumer_services+=(dashboard)
 fi
 if (( ${#consumer_services[@]} > 0 )); then
   consumers_started_at="$(date +%s)"

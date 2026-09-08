@@ -58,9 +58,11 @@ The script:
    `.env.server`;
 4. validates the merged Compose graph;
 5. builds the image once using the dependency cache;
-6. waits for `market-data`, then updates only the affected research, paper, and
-   dashboard consumers;
-7. prints phase timings, the deployed commit, and the container health summary.
+6. starts a missing dashboard without recreating a healthy one and verifies its
+   health endpoint;
+7. waits for `market-data`, then updates only the affected research and paper
+   consumers;
+8. prints phase timings, the deployed commit, and the container health summary.
 
 It uses `docker compose up -d --wait`. Compose recreates a service when its
 image or configuration changed, so the normal path does not need
@@ -68,6 +70,11 @@ image or configuration changed, so the normal path does not need
 
 The deployment script accepts `CML_DEPLOY_WAIT_TIMEOUT_SECONDS` (default 600)
 so a broken healthcheck fails with diagnostics instead of waiting forever.
+It also requires the dashboard by default: if the dashboard is stopped or
+unhealthy, the script starts it and verifies both its Compose healthcheck and
+`127.0.0.1:8765/api/health` before reporting success. Set
+`CML_DASHBOARD_REQUIRED=0` only on a host where the Nginx dashboard route is
+intentionally disabled.
 
 ## Live update
 
@@ -112,10 +119,13 @@ conservative rollout or `=4` when the host has headroom:
    next wave.
 
 Services that are not currently running are skipped, so the script does not
-enable a disabled Live account accidentally. Do not remove the `--live` flag to
-make an approval failure disappear; fix the approval or lease and rerun the
-preflight. Each phase prints its own elapsed seconds, including approval
-refresh, lease renewal, preflight, execution restart, and strategy restart.
+enable a disabled Live account accidentally. The dashboard is handled
+separately because Nginx routes `/momentum/` to it: a missing or unhealthy
+dashboard is started and verified, while a healthy dashboard is left in place.
+Do not remove the `--live` flag to make an approval failure disappear; fix the
+approval or lease and rerun the preflight. Each phase prints its own elapsed
+seconds, including dashboard health, approval refresh, lease renewal,
+preflight, execution restart, and strategy restart.
 
 The lower-level command remains available for an account-specific manual
 operation. It derives the runtime hashes, but its limit flags intentionally
