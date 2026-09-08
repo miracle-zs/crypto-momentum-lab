@@ -10,8 +10,9 @@ leases, reconciliation, or the fail-closed entry gate.
 
 The application image is built on the server. A cold dependency build is the
 largest variable cost; the Dockerfile keeps third-party dependencies in a layer
-keyed only by `pyproject.toml`, so source-only changes rebuild a small local
-wheel. Healthchecks retain their 60/90-second steady-state intervals to keep
+keyed only by `pyproject.toml`, and BuildKit keeps the pip download cache
+outside the release layer, so source-only changes rebuild a small local wheel.
+Healthchecks retain their 60/90-second steady-state intervals to keep
 probe CPU low, but use a 5-second `start_interval` (15 seconds for the long
 market-data recovery window) while a container is starting. Stateless
 research, paper, and dashboard services stop after 20 seconds; market-data and
@@ -49,20 +50,32 @@ deploy/ops/update_server.sh 43.167.191.253 <commit-sha> --live
 unset CML_SSH_PASSWORD
 ```
 
+The script acquires a repository-local deployment lock. A second invocation for
+the same host exits with code 75 while the first deployment is still running.
+It records the last target and completed phase inside `.git`; if an earlier
+invocation reached the target checkout but failed during build, health, or
+restart, rerun the same command and the empty Git diff is treated as a recovery
+run. A completed non-Live target remains a no-op on a later repeat; an explicit
+`--live` invocation still performs its approval and lease reconciliation.
+
 The script:
 
 1. fetches the target and requires a clean `main` checkout on the server;
-2. classifies the changed paths and skips the build/restart when a commit only
+2. fast-forwards to a newer target or safely resets to an explicit ancestor for
+   a rollback, then verifies that `HEAD` equals the requested commit;
+3. classifies the changed paths and skips the build/restart when a commit only
    changes docs, tests, or operator tooling;
-3. updates the runtime-only `CML_CODE_COMMIT` and dashboard image in
+4. updates the runtime-only `CML_CODE_COMMIT` and dashboard image in
    `.env.server`;
-4. validates the merged Compose graph;
-5. builds the image once using the dependency cache;
-6. starts a missing dashboard without recreating a healthy one and verifies its
+5. validates the merged Compose graph;
+6. builds the image once using the dependency cache;
+7. starts a missing dashboard without recreating a healthy one and verifies its
    health endpoint;
-7. waits for `market-data`, then updates only the affected research and paper
+8. waits for `market-data`, then updates only the affected research and paper
    consumers;
-8. prints phase timings, the deployed commit, and the container health summary.
+9. verifies the image and health state of every service it updated;
+10. prints separate remote and client-side timings, the deployed commit, and
+    the container health summary.
 
 It uses `docker compose up -d --wait`. Compose recreates a service when its
 image or configuration changed, so the normal path does not need
@@ -72,9 +85,11 @@ The deployment script accepts `CML_DEPLOY_WAIT_TIMEOUT_SECONDS` (default 600)
 so a broken healthcheck fails with diagnostics instead of waiting forever.
 It also requires the dashboard by default: if the dashboard is stopped or
 unhealthy, the script starts it and verifies both its Compose healthcheck and
-`127.0.0.1:8765/api/health` before reporting success. Set
+`127.0.0.1:8765/api/health`, plus the local reverse-proxy endpoint
+`http://127.0.0.1/momentum/api/health`, before reporting success. Set
 `CML_DASHBOARD_REQUIRED=0` only on a host where the Nginx dashboard route is
-intentionally disabled.
+intentionally disabled. On a host whose proxy uses another local URL, set
+`CML_DASHBOARD_PROXY_URL` for that invocation.
 
 ## Live update
 
@@ -166,10 +181,19 @@ git -C /opt/crypto-momentum-lab rev-parse --short HEAD
 grep -E '^(CML_CODE_COMMIT|CML_DASHBOARD_IMAGE)=' /opt/crypto-momentum-lab/.env.server
 ```
 
-For a rollback, pass the previous deployed commit to the same script. A Live
-rollback still requires approvals whose commit hash matches that previous
-image; the script intentionally stops before restarting Live services when
-that preflight does not pass.
+For a rollback, pass the previous deployed commit explicitly. The checkout must
+be clean; the script moves the local `main` ref back to that ancestor with
+`git reset --keep`, rebuilds the requested image, and verifies the resulting
+`HEAD` and service image. A Live rollback still requires approvals whose commit
+hash matches that previous image. Use `--refresh-approvals` when the existing
+approval should keep its limits while changing its commit binding; otherwise
+the script stops before restarting Live services when preflight detects the
+mismatch.
+
+If any phase fails, the script prints the checkout, Compose service state, and
+the matching container image/status. The remote phase timer starts after SSH
+connects; the `phase=client-total` line includes SSH setup, authentication, and
+the complete remote command.
 
 Healthcheck frequency controls failure detection and Docker wait time; it does
 not determine the freshness of the market data consumed by the strategies.

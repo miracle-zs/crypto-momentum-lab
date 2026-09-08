@@ -12,6 +12,7 @@ Environment:
   CML_LIVE_CONCURRENCY  maximum parallel Live services (default: 2)
   CML_DEPLOY_WAIT_TIMEOUT_SECONDS  Compose health wait timeout (default: 600)
   CML_DASHBOARD_REQUIRED  require the dashboard endpoint (default: 1)
+  CML_DASHBOARD_PROXY_URL  local reverse-proxy health URL (default: http://127.0.0.1/momentum/api/health)
   CML_SSH_PASSWORD  optional password for sshpass; prefer an SSH key
 
 The live profile is never touched unless --live is supplied. Live updates run
@@ -28,6 +29,11 @@ USAGE
 if [[ $# -lt 1 ]]; then
   usage >&2
   exit 64
+fi
+
+if [[ $# -eq 1 && ( "$1" == "--help" || "$1" == "-h" ) ]]; then
+  usage
+  exit 0
 fi
 
 server_host="$1"
@@ -80,9 +86,15 @@ remote_dir="${CML_REMOTE_DIR:-/opt/crypto-momentum-lab}"
 live_concurrency="${CML_LIVE_CONCURRENCY:-2}"
 deploy_wait_timeout="${CML_DEPLOY_WAIT_TIMEOUT_SECONDS:-600}"
 dashboard_required="${CML_DASHBOARD_REQUIRED:-1}"
+dashboard_proxy_url="${CML_DASHBOARD_PROXY_URL:-http://127.0.0.1/momentum/api/health}"
 
 if [[ "$dashboard_required" != 0 && "$dashboard_required" != 1 ]]; then
   echo "Invalid CML_DASHBOARD_REQUIRED: $dashboard_required" >&2
+  exit 64
+fi
+
+if [[ -z "$dashboard_proxy_url" ]]; then
+  echo "Invalid CML_DASHBOARD_PROXY_URL: value must not be empty" >&2
   exit 64
 fi
 
@@ -99,9 +111,11 @@ else
   ssh_opts+=( -o BatchMode=yes )
 fi
 
-"${ssh_command[@]}" "${ssh_opts[@]}" "${server_user}@${server_host}" bash -s -- \
+client_started_at="$(date +%s)"
+if "${ssh_command[@]}" "${ssh_opts[@]}" "${server_user}@${server_host}" bash -s -- \
   "$remote_dir" "$target_ref" "$live_update" "$live_concurrency" \
-  "$deploy_wait_timeout" "$refresh_approvals" "$dashboard_required" <<'REMOTE_SCRIPT'
+  "$deploy_wait_timeout" "$refresh_approvals" "$dashboard_required" \
+  "$dashboard_proxy_url" <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
 remote_dir="$1"
@@ -111,6 +125,7 @@ live_concurrency="$4"
 deploy_wait_timeout="$5"
 refresh_approvals="$6"
 dashboard_required="$7"
+dashboard_proxy_url="$8"
 if ! [[ "$deploy_wait_timeout" =~ ^[1-9][0-9]*$ ]]; then
   echo "Invalid CML_DEPLOY_WAIT_TIMEOUT_SECONDS: $deploy_wait_timeout" >&2
   exit 64
@@ -123,8 +138,47 @@ if [[ "$dashboard_required" != 0 && "$dashboard_required" != 1 ]]; then
   echo "Invalid dashboard required flag: $dashboard_required" >&2
   exit 64
 fi
+if [[ -z "$dashboard_proxy_url" ]]; then
+  echo "Invalid dashboard proxy URL: value must not be empty" >&2
+  exit 64
+fi
 cd "$remote_dir"
 deploy_started_at="$(date +%s)"
+
+git_dir="$(git rev-parse --git-dir)"
+deploy_lock_file="$git_dir/cml-deploy.lock"
+deploy_state_file="$git_dir/cml-deploy-state"
+if ! command -v flock >/dev/null 2>&1; then
+  echo "Refusing deployment: flock is required for the deployment lock" >&2
+  exit 69
+fi
+exec 9>"$deploy_lock_file"
+if ! flock -n 9; then
+  echo "Refusing deployment: another deployment is already running for $remote_dir" >&2
+  exit 75
+fi
+
+deploy_state_target=""
+deploy_state_status=""
+if [[ -f "$deploy_state_file" ]]; then
+  deploy_state_target="$(sed -n 's/^target_commit=//p' "$deploy_state_file" | tail -n 1)"
+  deploy_state_status="$(sed -n 's/^status=//p' "$deploy_state_file" | tail -n 1)"
+fi
+
+write_deploy_state() {
+  local status="$1"
+  local phase="$2"
+  local state_tmp="${deploy_state_file}.tmp"
+  umask 077
+  {
+    printf 'target_commit=%s\n' "${target_commit:-}"
+    printf 'status=%s\n' "$status"
+    printf 'phase=%s\n' "$phase"
+    printf 'live_update=%s\n' "$live_update"
+    printf 'updated_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$state_tmp"
+  mv -f "$state_tmp" "$deploy_state_file"
+}
 
 # Refuse to overwrite tracked operator changes. Ignored runtime files such as
 # .env.server and its backups are allowed and are updated below.
@@ -142,7 +196,23 @@ fi
 
 previous_commit="$(git rev-parse HEAD)"
 target_commit="$(git rev-parse "$target_ref")"
-git merge --ff-only "$target_commit"
+git cat-file -e "$target_commit^{commit}"
+if ! git merge --ff-only "$target_commit"; then
+  # A previously deployed commit may be an intentional rollback target. The
+  # checkout is clean above, so reset --keep moves only the local branch ref
+  # and tracked files needed to reach that explicit commit.
+  if [[ "$(git merge-base "$previous_commit" "$target_commit")" == "$target_commit" ]]; then
+    git reset --keep "$target_commit"
+  else
+    echo "Refusing deployment: target is not an ancestor and cannot be fast-forwarded or rolled back safely" >&2
+    exit 1
+  fi
+fi
+if [[ "$(git rev-parse HEAD)" != "$target_commit" ]]; then
+  echo "Refusing deployment: checkout did not reach target commit $target_commit" >&2
+  exit 1
+fi
+write_deploy_state running checkout
 
 # Classify the commit range before building. Documentation, tests, and
 # operator-only changes update the checkout without rebuilding or restarting
@@ -224,9 +294,26 @@ while IFS= read -r changed_path; do
   esac
 done <<<"$changed_files"
 
+# If the previous attempt reached the target checkout but failed before all
+# services converged, the next invocation has an empty commit diff. Treat it
+# as a recovery run so the already-running services are reconciled again.
+if [[ "$target_commit" == "$previous_commit" \
+  && ( "$deploy_state_target" != "$target_commit" || "$deploy_state_status" != "success" ) ]]; then
+  runtime_changed=1
+  market_changed=1
+  research_changed=1
+  paper_changed=1
+  dashboard_changed=1
+  if [[ "$live_update" == 1 ]]; then
+    live_changed=1
+  fi
+  echo "recovery_run=1 reason=target_checkout_already_present"
+fi
+
 if [[ "$runtime_changed" == 0 ]]; then
   echo "runtime_unchanged=1"
   if [[ "$live_update" != 1 ]]; then
+    write_deploy_state success unchanged
     echo "deployed_checkout=$target_commit"
     exit 0
   fi
@@ -262,6 +349,28 @@ compose=(
   -f compose.live.accounts.yaml
   --profile live
 )
+deploy_phase=compose
+
+print_failure_context() {
+  local status="$1"
+  echo "deployment_failed=1 exit_code=$status checkout=$(git rev-parse HEAD 2>/dev/null || echo unknown)" >&2
+  echo "failure_service_status:" >&2
+  "${compose[@]}" ps >&2 || true
+  echo "failure_container_status:" >&2
+  docker ps --format '{{.Names}}|{{.Image}}|{{.Status}}' \
+    | grep -E 'crypto-momentum-lab-(dashboard|market-data|research-collector|paper-|execution-account-live|live-strategy)' \
+    | sort >&2 || true
+}
+
+on_deploy_exit() {
+  local status="$?"
+  if (( status != 0 )); then
+    write_deploy_state failed "${deploy_phase:-unknown}" || true
+    print_failure_context "$status"
+  fi
+  exit "$status"
+}
+trap on_deploy_exit EXIT
 
 # Resolve the full graph before stopping anything. This also catches missing
 # account credentials and malformed environment overrides early.
@@ -285,6 +394,23 @@ is_healthy() {
   [[ -n "$container_id" ]] || return 1
   status="$(docker inspect -f '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id" 2>/dev/null || true)"
   [[ "$status" == "running|healthy" ]]
+}
+
+verify_service_target() {
+  local service="$1"
+  local expected_image="crypto-momentum-lab-app:${target_commit}"
+  local container_id state image
+  container_id="$("${compose[@]}" ps -q "$service" 2>/dev/null || true)"
+  if [[ -z "$container_id" ]]; then
+    echo "verification failed: service $service has no container" >&2
+    return 1
+  fi
+  state="$(docker inspect -f '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id" 2>/dev/null || true)"
+  image="$(docker inspect -f '{{.Config.Image}}' "$container_id" 2>/dev/null || true)"
+  if [[ "$state" != "running|healthy" || "$image" != "$expected_image" ]]; then
+    echo "verification failed: service=$service state=$state image=$image expected_image=$expected_image" >&2
+    return 1
+  fi
 }
 
 live_preflight_complete=0
@@ -421,6 +547,8 @@ fi
 
 # Build once. The Dockerfile keeps dependency installation in a layer keyed by
 # pyproject.toml, so ordinary source changes only rebuild the application.
+deploy_phase=build
+write_deploy_state running "$deploy_phase"
 if [[ "$runtime_changed" == 1 ]]; then
   build_started_at="$(date +%s)"
   "${compose[@]}" build
@@ -434,6 +562,8 @@ fi
 # dashboard before reporting a successful application deployment. This does
 # not enable a disabled Live account; it protects the configured operator UI.
 dashboard_needs_start=0
+deploy_phase=dashboard
+write_deploy_state running "$deploy_phase"
 if [[ "$dashboard_required" == 1 ]] && ! is_healthy dashboard; then
   dashboard_needs_start=1
 fi
@@ -462,10 +592,19 @@ if [[ "$dashboard_check_required" == 1 ]]; then
     echo "dashboard health endpoint is unavailable on 127.0.0.1:8765" >&2
     exit 1
   fi
+  if [[ "$dashboard_required" == 1 ]]; then
+    if ! curl --fail --silent --show-error --location --max-time 10 \
+      "$dashboard_proxy_url" >/dev/null; then
+      echo "dashboard reverse-proxy health endpoint is unavailable: $dashboard_proxy_url" >&2
+      exit 1
+    fi
+  fi
   echo "phase=dashboard-health elapsed_seconds=$(( $(date +%s) - dashboard_health_started_at ))"
 fi
 
 if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
+  deploy_phase=live-preflight
+  write_deploy_state running "$deploy_phase"
   # Validate approvals with the freshly built image before restarting any
   # consumer or execution service. A bad approval now fails in seconds after
   # the build instead of waiting for a Live healthcheck to turn unhealthy.
@@ -496,12 +635,15 @@ fi
 
 # market-data must be ready before research and strategy consumers restart.
 if [[ "$market_changed" == 1 ]]; then
+  deploy_phase=market-data
+  write_deploy_state running "$deploy_phase"
   market_started_at="$(date +%s)"
   "${compose[@]}" up -d --no-deps --wait --wait-timeout "$deploy_wait_timeout" market-data
   echo "phase=market-data elapsed_seconds=$(( $(date +%s) - market_started_at ))"
 fi
 
 consumer_services=()
+verification_services=()
 if [[ "$research_changed" == 1 ]]; then
   consumer_services+=(research-collector)
 fi
@@ -514,12 +656,23 @@ if [[ "$paper_changed" == 1 ]]; then
   )
 fi
 if (( ${#consumer_services[@]} > 0 )); then
+  deploy_phase=consumers
+  write_deploy_state running "$deploy_phase"
   consumers_started_at="$(date +%s)"
   "${compose[@]}" up -d --no-deps --wait --wait-timeout "$deploy_wait_timeout" "${consumer_services[@]}"
   echo "phase=consumers elapsed_seconds=$(( $(date +%s) - consumers_started_at ))"
 fi
+if [[ "$dashboard_changed" == 1 || "$dashboard_needs_start" == 1 ]]; then
+  verification_services+=(dashboard)
+fi
+if [[ "$market_changed" == 1 ]]; then
+  verification_services+=(market-data)
+fi
+verification_services+=("${consumer_services[@]}")
 
 if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
+  deploy_phase=live-restart
+  write_deploy_state running "$deploy_phase"
   if [[ "$live_preflight_complete" != 1 ]]; then
     echo "live preflight did not complete" >&2
     exit 1
@@ -564,9 +717,19 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   else
     echo "phase=strategy skipped no_active_services=1"
   fi
+  verification_services+=("${execution_services[@]}" "${strategy_services[@]}")
   echo "phase=live elapsed_seconds=$(( $(date +%s) - live_started_at ))"
 fi
 
+verification_started_at="$(date +%s)"
+deploy_phase=verify
+write_deploy_state running "$deploy_phase"
+for service in "${verification_services[@]}"; do
+  verify_service_target "$service"
+done
+echo "phase=verify elapsed_seconds=$(( $(date +%s) - verification_started_at )) services=${#verification_services[@]}"
+
+write_deploy_state success complete
 echo "phase=total elapsed_seconds=$(( $(date +%s) - deploy_started_at ))"
 
 echo "deployed_commit=$target_commit"
@@ -574,3 +737,10 @@ docker ps --format '{{.Names}}|{{.Image}}|{{.Status}}' \
   | grep -E 'crypto-momentum-lab-(dashboard|market-data|research-collector|paper-|execution-account-live|live-strategy)' \
   | sort
 REMOTE_SCRIPT
+then
+  ssh_status=0
+else
+  ssh_status=$?
+fi
+echo "phase=client-total elapsed_seconds=$(( $(date +%s) - client_started_at ))"
+exit "$ssh_status"
