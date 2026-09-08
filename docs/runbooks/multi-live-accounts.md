@@ -28,8 +28,8 @@ The strategy parameters are 15-second buckets unless stated otherwise:
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | primary | 2 | 1 | 0.005 | 0.60 | 2 | 0 |
 | account-2 | 2 | 1 | 0.005 | 0.60 | 2.0 | 0 |
-| account-3 | 2 | 1 | 0.005 | 0.60 | 2.0 | 0 |
-| account-4 | 2 | 1 | 0.005 | 0.60 | 2.0 | 0 |
+| account-3 | 3 | 1 | 0.015 | 0.30 | 2.0 | 0 |
+| account-4 | 3 | 1 | 0.015 | 0.30 | 2.0 | 0 |
 
 Every profile value is included in the runtime strategy hash. Account 3 and
 account 4 may therefore have the same strategy hash because their strategy

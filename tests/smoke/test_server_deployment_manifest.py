@@ -300,6 +300,27 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
         == "${CML_LIVE_MIN_INTENSITY_ACCOUNT_2:-2.0}"
     )
 
+    for account_number in (3, 4):
+        account_environment = services[
+            f"live-strategy-account-{account_number}"
+        ]["environment"]
+        assert (
+            account_environment["CML_LIVE_IMPULSE_WINDOW_BUCKETS"]
+            == f"${{CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_{account_number}:-3}}"
+        )
+        assert (
+            account_environment["CML_LIVE_MIN_RETURN_PCT"]
+            == f"${{CML_LIVE_MIN_RETURN_PCT_ACCOUNT_{account_number}:-0.015}}"
+        )
+        assert (
+            account_environment["CML_LIVE_MIN_IMBALANCE"]
+            == f"${{CML_LIVE_MIN_IMBALANCE_ACCOUNT_{account_number}:-0.30}}"
+        )
+        assert (
+            account_environment["CML_LIVE_MIN_INTENSITY"]
+            == f"${{CML_LIVE_MIN_INTENSITY_ACCOUNT_{account_number}:-2.0}}"
+        )
+
 
 def test_server_paper_capture_only_subscribes_to_strategy_required_streams() -> None:
     capture = yaml.safe_load(
