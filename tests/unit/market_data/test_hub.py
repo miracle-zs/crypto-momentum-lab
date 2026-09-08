@@ -641,3 +641,76 @@ async def test_market_state_source_accepts_new_stream_epoch_after_hub_restart(
 
     assert json.loads(sent_messages[1])["stream_id"] == "stream-a"
     assert json.loads(sent_messages[1])["last_sequence"] == 1
+
+
+async def test_market_state_source_requests_durable_recovery_on_stream_reset(
+    monkeypatch,
+) -> None:
+    state = fixture_state("BTCUSDT", 0)
+    sent_messages: list[str] = []
+    ready = json.dumps(
+        {
+            "type": "market_state_hub_ready",
+            "schema_version": 1,
+            "environment": "research",
+            "stream_id": "stream-b",
+            "stream_reset": True,
+            "replay_available": True,
+            "oldest_sequence": 1,
+            "latest_sequence": 1,
+        }
+    )
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self._messages = [
+                ready,
+                encode_market_state_batch(
+                    (state,),
+                    sequence=1,
+                    published_at=state.bucket_end,
+                    stream_id="stream-b",
+                ),
+            ]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, message):
+            sent_messages.append(message)
+
+        async def recv(self):
+            return self._messages.pop(0)
+
+    monkeypatch.setattr(
+        hub_module,
+        "connect",
+        lambda *_args, **_kwargs: FakeConnection(),
+    )
+    source = WebSocketMarketStateSource(
+        url="ws://unused",
+        environment="research",
+        consumer_id="test-collector",
+        config=MarketStateHubConfig(
+            reconnect_delays=(0,),
+            unavailable_timeout_seconds=10,
+        ),
+        fail_on_replay_unavailable=True,
+    )
+    source.set_resume_cursor(stream_id="stream-a", sequence=7)
+
+    with pytest.raises(
+        MarketStateHubReplayUnavailable,
+        match="stream reset",
+    ) as raised:
+        await anext(source.batches())
+
+    assert raised.value.requested_sequence == 7
+    assert raised.value.stream_id == "stream-b"
+    assert raised.value.latest_sequence == 1
+    subscription = json.loads(sent_messages[0])
+    assert subscription["stream_id"] == "stream-a"
+    assert subscription["last_sequence"] == 7

@@ -562,6 +562,27 @@ class WebSocketMarketStateSource:
                             "market-state hub environment mismatch"
                         )
                     ready_stream_id = _optional_string(ready, "stream_id")
+                    stream_changed = (
+                        self._stream_id is not None
+                        and ready_stream_id is not None
+                        and ready_stream_id != self._stream_id
+                    )
+                    # Durable consumers must recover the interval between
+                    # stream epochs before accepting the new sequence origin.
+                    if stream_changed and self._fail_on_replay_unavailable:
+                        raise MarketStateHubReplayUnavailable(
+                            "market-state replay is unavailable: Hub stream reset",
+                            requested_sequence=self._last_sequence,
+                            oldest_sequence=_optional_int(
+                                ready,
+                                "oldest_sequence",
+                            ),
+                            latest_sequence=_optional_int(
+                                ready,
+                                "latest_sequence",
+                            ),
+                            stream_id=ready_stream_id,
+                        )
                     if (
                         ready_stream_id is not None
                         and ready_stream_id != self._stream_id
