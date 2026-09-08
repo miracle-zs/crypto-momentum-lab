@@ -633,6 +633,18 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   live_preflight_complete=1
 fi
 
+# Preserve the durable research cursor before the Hub's stream epoch changes.
+# Otherwise an old collector can observe the new Hub first, reset its cursor,
+# and make the new collector look like a fresh subscriber with no gap to heal.
+if [[ "$market_changed" == 1 && "$research_changed" == 1 ]] \
+  && is_running research-collector; then
+  deploy_phase=research-stop
+  write_deploy_state running "$deploy_phase"
+  research_stop_started_at="$(date +%s)"
+  "${compose[@]}" stop --timeout 60 research-collector
+  echo "phase=research-stop elapsed_seconds=$(( $(date +%s) - research_stop_started_at ))"
+fi
+
 # market-data must be ready before research and strategy consumers restart.
 if [[ "$market_changed" == 1 ]]; then
   deploy_phase=market-data
