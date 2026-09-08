@@ -30,12 +30,22 @@ minutes while an operator diagnoses the mismatch.
 
 ## Normal update
 
-Push the desired commit first and note its full SHA. Use an SSH key or agent;
-never put a server password in a script or repository. From a workstation with
-the repository checkout, run:
+Push the desired commit first and note its full SHA. Use an SSH key or agent
+when available. For a password-only host, export `CML_SSH_PASSWORD` in the
+current shell; the deployment script passes it to `sshpass` through the
+environment and never stores it in the repository or command arguments. From a
+workstation with the repository checkout, run:
 
 ```bash
 deploy/ops/update_server.sh 43.167.191.253 <commit-sha>
+```
+
+For a password-only connection:
+
+```bash
+export CML_SSH_PASSWORD='your-password'
+deploy/ops/update_server.sh 43.167.191.253 <commit-sha> --live
+unset CML_SSH_PASSWORD
 ```
 
 The script:

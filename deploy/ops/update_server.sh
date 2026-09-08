@@ -10,11 +10,13 @@ Environment:
   CML_SERVER_USER  SSH user (default: root)
   CML_REMOTE_DIR   checkout on the server (default: /opt/crypto-momentum-lab)
   CML_LIVE_CONCURRENCY  maximum parallel Live services (default: 2)
+  CML_SSH_PASSWORD  optional password for sshpass; prefer an SSH key
 
 The live profile is never touched unless --live is supplied. Live updates run
 preflight for every currently running account before restarting any live
-container. The SSH connection must use an agent/key; credentials are not read
-from this script.
+container. The SSH connection uses an agent/key by default. When
+CML_SSH_PASSWORD is set, sshpass reads it from the environment; the password
+is never a command-line argument, remote argument, or repository value.
 USAGE
 }
 
@@ -37,12 +39,20 @@ server_user="${CML_SERVER_USER:-root}"
 remote_dir="${CML_REMOTE_DIR:-/opt/crypto-momentum-lab}"
 live_concurrency="${CML_LIVE_CONCURRENCY:-2}"
 
-ssh_opts=(
-  -o BatchMode=yes
-  -o ConnectTimeout=15
-)
+ssh_opts=( -o ConnectTimeout=15 )
+ssh_command=(ssh)
+if [[ -n "${CML_SSH_PASSWORD:-}" ]]; then
+  if ! command -v sshpass >/dev/null 2>&1; then
+    echo "CML_SSH_PASSWORD is set but sshpass is not installed" >&2
+    exit 69
+  fi
+  export SSHPASS="$CML_SSH_PASSWORD"
+  ssh_command=(sshpass -e ssh)
+else
+  ssh_opts+=( -o BatchMode=yes )
+fi
 
-ssh "${ssh_opts[@]}" "${server_user}@${server_host}" bash -s -- \
+"${ssh_command[@]}" "${ssh_opts[@]}" "${server_user}@${server_host}" bash -s -- \
   "$remote_dir" "$target_ref" "$live_update" "$live_concurrency" <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
