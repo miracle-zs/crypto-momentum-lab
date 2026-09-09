@@ -24,6 +24,7 @@ from crypto_momentum_lab.strategies.order_flow_impulse.event_study import (
     OrderFlowDirection,
     OrderFlowImpulseConfig,
     OrderFlowImpulseEvent,
+    VOLUME_RATIO_TOTAL_BUCKETS,
     find_order_flow_impulses,
 )
 from crypto_momentum_lab.strategies.runtime_checkpoint import (
@@ -373,7 +374,10 @@ def _warmup_buckets(config: OrderFlowImpulseConfig) -> int:
         config.baseline_window_buckets + config.impulse_window_buckets - 1,
         config.breakout_window_buckets,
     )
-    return first_candidate + config.confirmation_buckets
+    strategy_warmup = first_candidate + config.confirmation_buckets
+    if config.min_notional_5m_vs_30m > 0:
+        return max(strategy_warmup, VOLUME_RATIO_TOTAL_BUCKETS)
+    return strategy_warmup
 
 
 def _strategy_side(direction: OrderFlowDirection) -> StrategySide:
@@ -399,6 +403,7 @@ def _features(event: OrderFlowImpulseEvent) -> dict[str, JsonValue]:
         "aggressive_imbalance": str(event.aggressive_imbalance),
         "baseline_notional": str(event.baseline_notional),
         "notional_intensity": str(event.notional_intensity),
+        "notional_5m_vs_30m": _optional_decimal(event.notional_5m_vs_30m),
         "liquidation_count": event.liquidation_count,
         "liquidation_notional": str(event.liquidation_notional),
     }

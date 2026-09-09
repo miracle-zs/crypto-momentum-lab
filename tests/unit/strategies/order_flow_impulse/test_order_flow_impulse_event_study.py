@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -171,6 +172,35 @@ def test_summarizes_events_by_direction() -> None:
         Decimal("0.009803921568627450980392156863")
     )
     assert summary.by_direction[OrderFlowDirection.DOWN].count == 0
+
+
+def test_applies_causal_five_minute_volume_ratio_filter() -> None:
+    states = [
+        _state(
+            index,
+            Decimal("100.00"),
+            notional=Decimal("100") if index < 137 else Decimal("300"),
+        )
+        for index in range(137)
+    ]
+    states.extend(
+        (
+            _state(137, Decimal("100.00"), notional=Decimal("300"), buy=Decimal("250")),
+            _state(138, Decimal("100.50"), notional=Decimal("300"), buy=Decimal("250")),
+            _state(139, Decimal("102.00"), notional=Decimal("300"), buy=Decimal("250")),
+        )
+    )
+
+    enabled = replace(_config(), min_notional_5m_vs_30m=Decimal("1.25"))
+    events = find_order_flow_impulses(tuple(states), enabled)
+
+    assert len(events) == 1
+    assert events[0].detected_at == states[-1].bucket_start
+    assert events[0].notional_5m_vs_30m == Decimal("1.3")
+    assert find_order_flow_impulses(
+        tuple(states),
+        replace(enabled, min_notional_5m_vs_30m=Decimal("1.50")),
+    ) == ()
 
 
 def _config() -> OrderFlowImpulseConfig:

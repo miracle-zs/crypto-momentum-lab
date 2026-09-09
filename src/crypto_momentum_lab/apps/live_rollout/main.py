@@ -324,6 +324,10 @@ def strategy_config_hash_command(
         str | None,
         typer.Option("--min-intensity"),
     ] = None,
+    min_notional_5m_vs_30m: Annotated[
+        str | None,
+        typer.Option("--min-notional-5m-vs-30m"),
+    ] = None,
     cooldown_buckets: Annotated[
         int | None,
         typer.Option("--cooldown-buckets", min=0),
@@ -362,6 +366,7 @@ def strategy_config_hash_command(
         min_return_pct=min_return_pct,
         min_imbalance=min_imbalance,
         min_intensity=min_intensity,
+        min_notional_5m_vs_30m=min_notional_5m_vs_30m,
         cooldown_buckets=cooldown_buckets,
     )
     typer.echo(
@@ -402,6 +407,10 @@ def prepare_command(
     min_intensity: Annotated[
         str | None,
         typer.Option("--min-intensity"),
+    ] = None,
+    min_notional_5m_vs_30m: Annotated[
+        str | None,
+        typer.Option("--min-notional-5m-vs-30m"),
     ] = None,
     cooldown_buckets: Annotated[
         int | None,
@@ -465,6 +474,7 @@ def prepare_command(
         min_return_pct=min_return_pct,
         min_imbalance=min_imbalance,
         min_intensity=min_intensity,
+        min_notional_5m_vs_30m=min_notional_5m_vs_30m,
         cooldown_buckets=cooldown_buckets,
     )
     payload = asyncio.run(
@@ -984,6 +994,10 @@ def run_command(
         str | None,
         typer.Option("--min-intensity"),
     ] = None,
+    min_notional_5m_vs_30m: Annotated[
+        str | None,
+        typer.Option("--min-notional-5m-vs-30m"),
+    ] = None,
     cooldown_buckets: Annotated[
         int | None,
         typer.Option("--cooldown-buckets", min=0),
@@ -1173,6 +1187,7 @@ def run_command(
         min_return_pct=min_return_pct,
         min_imbalance=min_imbalance,
         min_intensity=min_intensity,
+        min_notional_5m_vs_30m=min_notional_5m_vs_30m,
         cooldown_buckets=cooldown_buckets,
     )
     credentials = _resolve_live_cli_credentials(
@@ -3755,6 +3770,9 @@ def _live_strategy_config(
         "order_flow_impulse_min_notional_intensity": (
             resolved_profile.min_notional_intensity
         ),
+        "order_flow_impulse_min_notional_5m_vs_30m": (
+            resolved_profile.min_notional_5m_vs_30m
+        ),
         "cooldown_buckets": resolved_profile.cooldown_buckets,
     }
 
@@ -4006,6 +4024,7 @@ def _resolve_live_profile_options(
     min_return_pct: str | None,
     min_imbalance: str | None,
     min_intensity: str | None,
+    min_notional_5m_vs_30m: str | None,
     cooldown_buckets: int | None,
 ) -> LiveOrderFlowImpulseProfile:
     """Build one account profile from all CLI values or the service env.
@@ -4020,6 +4039,7 @@ def _resolve_live_profile_options(
         min_return_pct,
         min_imbalance,
         min_intensity,
+        min_notional_5m_vs_30m,
         cooldown_buckets,
     )
     if not any(value is not None for value in values):
@@ -4027,15 +4047,23 @@ def _resolve_live_profile_options(
             return LiveOrderFlowImpulseProfile.from_environment()
         except ValueError as error:
             raise typer.BadParameter(str(error)) from error
+    legacy_values = values[:5] + values[6:]
+    if min_notional_5m_vs_30m is None and all(
+        value is not None for value in legacy_values
+    ):
+        # Keep the six-option CLI form backward-compatible.  The seventh
+        # dimension is opt-in and disabled when omitted from a manual command.
+        min_notional_5m_vs_30m = "0"
     if not all(value is not None for value in values):
         raise typer.BadParameter(
-            "all six order-flow profile options must be provided together"
+            "all seven order-flow profile options must be provided together"
         )
     assert impulse_window_buckets is not None
     assert confirmation_buckets is not None
     assert min_return_pct is not None
     assert min_imbalance is not None
     assert min_intensity is not None
+    assert min_notional_5m_vs_30m is not None
     assert cooldown_buckets is not None
     try:
         return LiveOrderFlowImpulseProfile(
@@ -4044,6 +4072,7 @@ def _resolve_live_profile_options(
             min_return_pct=Decimal(min_return_pct),
             min_aggressive_imbalance=Decimal(min_imbalance),
             min_notional_intensity=Decimal(min_intensity),
+            min_notional_5m_vs_30m=Decimal(min_notional_5m_vs_30m),
             cooldown_buckets=cooldown_buckets,
         )
     except (InvalidOperation, ValueError) as error:

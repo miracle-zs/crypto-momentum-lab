@@ -77,6 +77,7 @@ def test_registry_allows_account_scoped_orderflow_profile_overrides() -> None:
             "order_flow_impulse_min_return_pct": Decimal("0.01"),
             "order_flow_impulse_min_aggressive_imbalance": Decimal("0.40"),
             "order_flow_impulse_min_notional_intensity": Decimal("2"),
+            "order_flow_impulse_min_notional_5m_vs_30m": Decimal("1.50"),
             "cooldown_buckets": 0,
         },
     )
@@ -86,6 +87,7 @@ def test_registry_allows_account_scoped_orderflow_profile_overrides() -> None:
     assert runtime_config.event_config.min_return_pct == Decimal("0.01")
     assert runtime_config.event_config.min_aggressive_imbalance == Decimal("0.40")
     assert runtime_config.event_config.min_notional_intensity == Decimal("2")
+    assert runtime_config.event_config.min_notional_5m_vs_30m == Decimal("1.50")
     assert runtime_config.event_config.cooldown_buckets == 0
 
 

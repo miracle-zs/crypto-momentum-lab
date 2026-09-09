@@ -1,7 +1,7 @@
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 
@@ -11,6 +11,14 @@ from crypto_momentum_lab.domain.market.models import MarketState15s
 class OrderFlowDirection(StrEnum):
     UP = "up"
     DOWN = "down"
+
+
+VOLUME_RATIO_RECENT_BUCKETS = 20
+VOLUME_RATIO_BASELINE_BUCKETS = 120
+VOLUME_RATIO_TOTAL_BUCKETS = (
+    VOLUME_RATIO_RECENT_BUCKETS + VOLUME_RATIO_BASELINE_BUCKETS
+)
+_VOLUME_RATIO_BUCKET = timedelta(seconds=15)
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +32,7 @@ class OrderFlowImpulseConfig:
     confirmation_buckets: int
     cooldown_buckets: int
     forward_horizon_buckets: tuple[int, ...]
+    min_notional_5m_vs_30m: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
         if self.impulse_window_buckets <= 1:
@@ -38,6 +47,10 @@ class OrderFlowImpulseConfig:
             raise ValueError("min_aggressive_imbalance must be non-negative")
         if self.min_notional_intensity <= 0:
             raise ValueError("min_notional_intensity must be positive")
+        if not self.min_notional_5m_vs_30m.is_finite():
+            raise ValueError("min_notional_5m_vs_30m must be finite")
+        if self.min_notional_5m_vs_30m < 0:
+            raise ValueError("min_notional_5m_vs_30m must be non-negative")
         if self.confirmation_buckets <= 0:
             raise ValueError("confirmation_buckets must be positive")
         if self.cooldown_buckets < 0:
@@ -69,6 +82,7 @@ class OrderFlowImpulseEvent:
     aggressive_imbalance: Decimal
     baseline_notional: Decimal
     notional_intensity: Decimal
+    notional_5m_vs_30m: Decimal | None
     spread: Decimal | None
     midpoint: Decimal | None
     liquidation_count: int
@@ -273,6 +287,16 @@ def _build_event(
     impulse_start_price = _state_price(impulse[0])
     impulse_end_price = _state_price(impulse[-1])
     event_price = _state_price(states[detection_index])
+    notional_5m_vs_30m = (
+        _notional_volume_ratio(states, detection_index)
+        if config.min_notional_5m_vs_30m > 0
+        else None
+    )
+    if config.min_notional_5m_vs_30m > 0 and (
+        notional_5m_vs_30m is None
+        or notional_5m_vs_30m < config.min_notional_5m_vs_30m
+    ):
+        return None
     if (
         impulse_start_price is None
         or impulse_end_price is None
@@ -330,6 +354,7 @@ def _build_event(
         aggressive_imbalance=aggressive_imbalance,
         baseline_notional=baseline_notional,
         notional_intensity=notional_intensity,
+        notional_5m_vs_30m=notional_5m_vs_30m,
         spread=detection_state.spread,
         midpoint=detection_state.midpoint,
         liquidation_count=sum(state.liquidation_count for state in impulse),
@@ -340,6 +365,41 @@ def _build_event(
         forward_returns=forward_returns,
         max_favorable_return=max(available_returns) if available_returns else None,
         max_adverse_return=min(available_returns) if available_returns else None,
+    )
+
+
+def _notional_volume_ratio(
+    states: tuple[MarketState15s, ...],
+    index: int,
+) -> Decimal | None:
+    """Return recent five-minute notional versus the prior 30-minute mean."""
+
+    first_index = index - VOLUME_RATIO_TOTAL_BUCKETS + 1
+    if first_index < 0:
+        return None
+    window = states[first_index : index + 1]
+    if len(window) != VOLUME_RATIO_TOTAL_BUCKETS:
+        return None
+    if any(
+        right.bucket_start - left.bucket_start != _VOLUME_RATIO_BUCKET
+        for left, right in zip(window, window[1:], strict=False)
+    ):
+        return None
+
+    recent_start = VOLUME_RATIO_BASELINE_BUCKETS
+    baseline_total = sum(
+        (state.trade_notional for state in window[:recent_start]),
+        Decimal("0"),
+    )
+    if baseline_total <= 0:
+        return None
+    recent_total = sum(
+        (state.trade_notional for state in window[recent_start:]),
+        Decimal("0"),
+    )
+    return (
+        recent_total * Decimal(VOLUME_RATIO_BASELINE_BUCKETS)
+        / (baseline_total * Decimal(VOLUME_RATIO_RECENT_BUCKETS))
     )
 
 

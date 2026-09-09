@@ -223,6 +223,11 @@ def _replace_order_flow_overrides(
             default=event_config.min_notional_intensity,
             field_name="min_notional_intensity",
         ),
+        min_notional_5m_vs_30m=_decimal_value(
+            config.get("order_flow_impulse_min_notional_5m_vs_30m"),
+            default=event_config.min_notional_5m_vs_30m,
+            field_name="min_notional_5m_vs_30m",
+        ),
         cooldown_buckets=_int_value(
             config.get("cooldown_buckets"),
             default=event_config.cooldown_buckets,

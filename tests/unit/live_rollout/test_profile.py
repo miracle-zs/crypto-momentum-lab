@@ -13,6 +13,7 @@ def test_profile_resolves_account_specific_environment_values() -> None:
             "CML_LIVE_MIN_RETURN_PCT": "0.01",
             "CML_LIVE_MIN_IMBALANCE": "0.40",
             "CML_LIVE_MIN_INTENSITY": "2",
+            "CML_LIVE_MIN_NOTIONAL_5M_VS_30M": "1.50",
             "CML_LIVE_COOLDOWN_BUCKETS": "0",
         }
     )
@@ -23,6 +24,7 @@ def test_profile_resolves_account_specific_environment_values() -> None:
         "min_return_pct": "0.01",
         "min_aggressive_imbalance": "0.40",
         "min_notional_intensity": "2",
+        "min_notional_5m_vs_30m": "1.50",
         "cooldown_buckets": 0,
     }
 
@@ -30,11 +32,12 @@ def test_profile_resolves_account_specific_environment_values() -> None:
 def test_profile_defaults_to_primary_production_values() -> None:
     assert LiveOrderFlowImpulseProfile.from_environment({}) == (
         LiveOrderFlowImpulseProfile(
-            impulse_window_buckets=2,
+            impulse_window_buckets=4,
             confirmation_buckets=1,
             min_return_pct=Decimal("0.005"),
-            min_aggressive_imbalance=Decimal("0.60"),
-            min_notional_intensity=Decimal("2"),
+            min_aggressive_imbalance=Decimal("0.30"),
+            min_notional_intensity=Decimal("1.5"),
+            min_notional_5m_vs_30m=Decimal("1.50"),
             cooldown_buckets=0,
         )
     )
@@ -48,6 +51,11 @@ def test_profile_defaults_to_primary_production_values() -> None:
         ("CML_LIVE_MIN_RETURN_PCT", "0", "min_return"),
         ("CML_LIVE_MIN_IMBALANCE", "-0.1", "min_aggressive_imbalance"),
         ("CML_LIVE_MIN_INTENSITY", "0", "min_notional_intensity"),
+        (
+            "CML_LIVE_MIN_NOTIONAL_5M_VS_30M",
+            "-0.1",
+            "min_notional_5m_vs_30m",
+        ),
         ("CML_LIVE_COOLDOWN_BUCKETS", "-1", "cooldown"),
     ],
 )

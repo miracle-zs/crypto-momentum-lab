@@ -18,11 +18,12 @@ from decimal import Decimal, InvalidOperation
 class LiveOrderFlowImpulseProfile:
     """Validated per-account parameters for ``orderflow_impulse``."""
 
-    impulse_window_buckets: int = 2
+    impulse_window_buckets: int = 4
     confirmation_buckets: int = 1
     min_return_pct: Decimal = Decimal("0.005")
-    min_aggressive_imbalance: Decimal = Decimal("0.60")
-    min_notional_intensity: Decimal = Decimal("2")
+    min_aggressive_imbalance: Decimal = Decimal("0.30")
+    min_notional_intensity: Decimal = Decimal("1.5")
+    min_notional_5m_vs_30m: Decimal = Decimal("1.50")
     cooldown_buckets: int = 0
 
     def __post_init__(self) -> None:
@@ -36,6 +37,7 @@ class LiveOrderFlowImpulseProfile:
             ("min_return_pct", self.min_return_pct),
             ("min_aggressive_imbalance", self.min_aggressive_imbalance),
             ("min_notional_intensity", self.min_notional_intensity),
+            ("min_notional_5m_vs_30m", self.min_notional_5m_vs_30m),
         ):
             if not value.is_finite():
                 raise ValueError(f"{name} must be finite")
@@ -45,6 +47,8 @@ class LiveOrderFlowImpulseProfile:
             raise ValueError("min_aggressive_imbalance must be non-negative")
         if self.min_notional_intensity <= 0:
             raise ValueError("min_notional_intensity must be positive")
+        if self.min_notional_5m_vs_30m < 0:
+            raise ValueError("min_notional_5m_vs_30m must be non-negative")
 
     def as_dict(self) -> dict[str, object]:
         """Return canonical values suitable for a strategy hash."""
@@ -55,6 +59,7 @@ class LiveOrderFlowImpulseProfile:
             "min_return_pct": str(self.min_return_pct),
             "min_aggressive_imbalance": str(self.min_aggressive_imbalance),
             "min_notional_intensity": str(self.min_notional_intensity),
+            "min_notional_5m_vs_30m": str(self.min_notional_5m_vs_30m),
             "cooldown_buckets": self.cooldown_buckets,
         }
 
@@ -96,6 +101,11 @@ class LiveOrderFlowImpulseProfile:
                 values,
                 "CML_LIVE_MIN_INTENSITY",
                 defaults.min_notional_intensity,
+            ),
+            min_notional_5m_vs_30m=_read_decimal(
+                values,
+                "CML_LIVE_MIN_NOTIONAL_5M_VS_30M",
+                defaults.min_notional_5m_vs_30m,
             ),
             cooldown_buckets=_read_int(
                 values,

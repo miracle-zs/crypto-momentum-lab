@@ -53,6 +53,12 @@ def test_orderflow_impulse_accepts_missing_midpoint_when_trade_price_exists() ->
     assert "midpoint" not in strategy.required_data().required_fields
 
 
+def test_volume_filter_requires_140_consecutive_states_for_warmup() -> None:
+    strategy = _strategy(min_notional_5m_vs_30m=Decimal("1.50"))
+
+    assert strategy.required_data().warmup_buckets == 140
+
+
 def test_orderflow_impulse_restores_checkpoint() -> None:
     strategy = _strategy()
     checkpoint = StrategyCheckpoint(
@@ -135,7 +141,10 @@ def test_orderflow_impulse_keeps_symbol_while_cooldown_is_active() -> None:
     assert strategy.buffered_symbol_count == 1
 
 
-def _strategy() -> OrderFlowImpulseRuntimeStrategy:
+def _strategy(
+    *,
+    min_notional_5m_vs_30m: Decimal = Decimal("0"),
+) -> OrderFlowImpulseRuntimeStrategy:
     config = OrderFlowImpulseRuntimeConfig(
         event_config=OrderFlowImpulseConfig(
             impulse_window_buckets=3,
@@ -147,6 +156,7 @@ def _strategy() -> OrderFlowImpulseRuntimeStrategy:
             confirmation_buckets=1,
             cooldown_buckets=2,
             forward_horizon_buckets=(1,),
+            min_notional_5m_vs_30m=min_notional_5m_vs_30m,
         ),
         candidate_notional=Decimal("100"),
         candidate_ttl_buckets=2,

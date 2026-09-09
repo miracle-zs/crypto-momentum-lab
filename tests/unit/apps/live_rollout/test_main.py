@@ -319,6 +319,8 @@ def test_live_run_passes_account_scoped_profile_to_daemon(monkeypatch) -> None:
             "0.40",
             "--min-intensity",
             "2",
+            "--min-notional-5m-vs-30m",
+            "1.50",
             "--cooldown-buckets",
             "0",
             "--i-understand-this-places-real-orders",
@@ -329,6 +331,7 @@ def test_live_run_passes_account_scoped_profile_to_daemon(monkeypatch) -> None:
     profile = captured["profile"]
     assert isinstance(profile, main.LiveOrderFlowImpulseProfile)
     assert profile.impulse_window_buckets == 4
+    assert profile.min_notional_5m_vs_30m == Decimal("1.50")
 
 
 def test_live_run_passes_shadow_preflight_acknowledgment_to_daemon(monkeypatch) -> None:
@@ -629,14 +632,17 @@ def test_live_defaults_disable_ema_and_use_primary_orderflow_imbalance() -> None
     assert main._LIVE_ENTRY_PRICE_ABOVE_EMA10 is False
     assert main._live_strategy_config()[
         "order_flow_impulse_min_aggressive_imbalance"
-    ] == Decimal("0.60")
+    ] == Decimal("0.30")
+    assert main._live_strategy_config()[
+        "order_flow_impulse_min_notional_5m_vs_30m"
+    ] == Decimal("1.50")
 
 
 def test_strategy_config_hash_includes_account_scoped_profile() -> None:
     primary = main._live_strategy_config_hash("orderflow_impulse")
     account_two = main._live_strategy_config_hash(
         "orderflow_impulse",
-        profile=main.LiveOrderFlowImpulseProfile(impulse_window_buckets=4),
+        profile=main.LiveOrderFlowImpulseProfile(impulse_window_buckets=3),
     )
 
     assert primary != account_two
