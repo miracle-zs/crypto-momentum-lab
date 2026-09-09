@@ -313,6 +313,10 @@ class PostgresPaperDaemonRepository:
                     upgrade_values = _legacy_paper_run_upgrade_values(
                         actual=actual,
                         expected=expected,
+                        compatible_config_hashes=(
+                            identity.config_hash,
+                            *identity.config_hash_aliases,
+                        ),
                     )
                     if upgrade_values is None:
                         raise ValueError("paper live run conflict")
@@ -924,10 +928,18 @@ def _legacy_paper_run_upgrade_values(
     *,
     actual: dict[str, object],
     expected: dict[str, object],
+    compatible_config_hashes: tuple[str, ...] = (),
 ) -> dict[str, object] | None:
     """Return safe in-place upgrades for compatible paper runs."""
     normalized_actual = _normalize_paper_run_for_compare(actual)
     normalized_expected = _normalize_paper_run_for_compare(expected)
+    if normalized_actual.get("config_hash") != normalized_expected.get(
+        "config_hash"
+    ):
+        if normalized_actual.get("config_hash") not in compatible_config_hashes:
+            return None
+        normalized_actual = dict(normalized_actual)
+        normalized_actual["config_hash"] = normalized_expected.get("config_hash")
     actual_without_commit = {
         key: value
         for key, value in normalized_actual.items()

@@ -197,6 +197,38 @@ def test_known_commit_paper_run_can_upgrade_code_commit() -> None:
     }
 
 
+def test_paper_run_accepts_legacy_volume_hash_alias() -> None:
+    actual = {
+        "strategy_name": "orderflow_impulse",
+        "strategy_version": "v0",
+        "config_hash": "seven-dimensional-zero-volume-hash",
+        "run_mode": "paper",
+        "code_commit": "old-known-commit",
+        "source_description": "postgres-runtime-states:research",
+        "execution_config": {},
+    }
+    expected = {
+        **actual,
+        "config_hash": "six-dimensional-hash",
+        "code_commit": "new-commit",
+    }
+
+    assert _legacy_paper_run_upgrade_values(
+        actual=actual,
+        expected=expected,
+        compatible_config_hashes=(expected["config_hash"], actual["config_hash"]),
+    ) == {
+        "code_commit": "new-commit",
+        "execution_config": {},
+    }
+
+    assert _legacy_paper_run_upgrade_values(
+        actual=actual,
+        expected=expected,
+        compatible_config_hashes=(expected["config_hash"],),
+    ) is None
+
+
 def test_known_commit_paper_run_can_upgrade_candle_exit_fields() -> None:
     actual = {
         "strategy_name": "orderflow_impulse",

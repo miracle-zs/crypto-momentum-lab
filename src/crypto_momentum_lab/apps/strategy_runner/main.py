@@ -1951,11 +1951,27 @@ def build_runtime_identity_for_cli(
         strategy_name,
         config=config_payload,
     )
+    config_hash = deterministic_config_hash(runtime_config)
+    config_hash_aliases: tuple[str, ...] = ()
+    if strategy_name == "orderflow_impulse":
+        event_config = getattr(runtime_config, "event_config", None)
+        disabled_volume_threshold = getattr(
+            event_config,
+            "min_notional_5m_vs_30m",
+            None,
+        )
+        if disabled_volume_threshold == 0:
+            historical_config_hash = deterministic_config_hash(
+                runtime_config,
+                preserve_disabled_orderflow_volume=True,
+            )
+            if historical_config_hash != config_hash:
+                config_hash_aliases = (historical_config_hash,)
     return StrategyRunIdentity(
         run_id=run_id,
         strategy_name=strategy_name,
         strategy_version="v0",
-        config_hash=deterministic_config_hash(runtime_config),
+        config_hash=config_hash,
         run_mode=RunMode.PAPER,
         code_commit=(
             resolve_code_commit()
@@ -1964,6 +1980,7 @@ def build_runtime_identity_for_cli(
         ),
         created_at=generated_at,
         source_paths=(source_description,),
+        config_hash_aliases=config_hash_aliases,
     )
 
 

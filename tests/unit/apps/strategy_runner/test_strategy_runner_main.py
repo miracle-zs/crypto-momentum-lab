@@ -965,3 +965,26 @@ def test_runtime_strategy_builder_supports_orderflow() -> None:
     )
 
     assert strategy.metadata().name == "orderflow_impulse"
+
+
+def test_runtime_identity_keeps_legacy_zero_volume_hash_alias() -> None:
+    identity = main.build_runtime_identity_for_cli(
+        strategy_name="orderflow_impulse",
+        run_id="run-orderflow",
+        generated_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        source_description="postgres-runtime-states:research",
+        compression_breakout=CompressionBreakoutConfig(
+            compression_window_buckets=3,
+            max_range_width_pct=Decimal("0.01"),
+            min_breakout_pct=Decimal("0.001"),
+            acceptance_buckets=1,
+            cooldown_buckets=2,
+            forward_horizon_buckets=(1,),
+        ),
+        candidate_notional=Decimal("100"),
+        candidate_ttl_buckets=4,
+        signal_interval_seconds=15,
+    )
+
+    assert len(identity.config_hash_aliases) == 1
+    assert identity.config_hash_aliases[0] != identity.config_hash
