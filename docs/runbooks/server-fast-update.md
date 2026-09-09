@@ -92,7 +92,9 @@ bounded to 300 seconds and image builds to 900 seconds. Override them with
 `CML_DEPLOY_OPERATION_TIMEOUT_SECONDS`, and
 `CML_DEPLOY_BUILD_TIMEOUT_SECONDS` when a host needs different limits. A
 broken operation or healthcheck now fails with diagnostics instead of waiting
-indefinitely.
+indefinitely. A container in `exited`, `restarting`, `paused`, or another
+non-running state fails immediately; the health-wait timeout applies only while
+the container is running but its healthcheck is still `starting`.
 It also requires the dashboard by default: if the dashboard is stopped or
 unhealthy, the script starts it and verifies both its Compose healthcheck and
 `127.0.0.1:8765/api/health`, plus the local reverse-proxy endpoint

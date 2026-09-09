@@ -602,8 +602,7 @@ wait_for_services_healthy() {
       status="$(service_status "$service")"
       state="${status%%|*}"
       health="${status#*|}"
-      if [[ "$state" == missing || "$state" == exited || "$state" == dead \
-        || "$health" == unhealthy ]]; then
+      if [[ "$state" != running || "$health" == unhealthy ]]; then
         failure_service="$service"
         echo "service failed during health wait: service=$service status=$status" >&2
         print_service_logs "$service"

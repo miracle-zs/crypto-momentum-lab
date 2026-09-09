@@ -32,6 +32,7 @@ def test_deployment_script_is_valid_shell_and_has_recovery_guards() -> None:
     assert "service_is_converged" in script
     assert "up_and_wait" in script
     assert "--force-recreate --no-deps" in script
+    assert '"$state" != running' in script
     assert "runtime_commit=" in script
     assert "image_commit=" in script
     assert "CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS" in script
