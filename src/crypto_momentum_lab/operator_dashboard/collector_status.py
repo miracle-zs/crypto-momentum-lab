@@ -59,8 +59,17 @@ def read_research_collector_status(
             parquet_files,
             window_seconds=config.window_seconds,
         )
-        pending_spool_files, pending_spool_bytes = _spool_stats(
-            root / "spool" / "pending"
+        (
+            pending_spool_files,
+            pending_spool_bytes,
+            pending_spool_overdue_files,
+            pending_spool_oldest_age_seconds,
+        ) = _spool_stats(
+            root / "spool" / "pending",
+            now=now_utc,
+            overdue_after_seconds=(
+                config.window_seconds + config.late_tolerance_seconds
+            ),
         )
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return _unavailable_response(
@@ -92,10 +101,10 @@ def read_research_collector_status(
         alerts.append("采集卷或整机剩余空间进入告警区")
     if gap_count:
         alerts.append(f"已发现 {gap_count} 个 15 分钟窗口缺口")
-    if pending_spool_files:
+    if pending_spool_overdue_files:
         alerts.append(
-            f"spool 有 {pending_spool_files} 个待处理文件，合计 "
-            f"{pending_spool_bytes} bytes"
+            f"spool 有 {pending_spool_overdue_files} 个文件超时未落盘，"
+            f"当前待处理共 {pending_spool_files} 个，合计 {pending_spool_bytes} bytes"
         )
 
     status = _status_for_snapshot(
@@ -103,7 +112,7 @@ def read_research_collector_status(
         stale=stale,
         capacity_state=capacity.state,
         gap_count=gap_count,
-        pending_spool_files=pending_spool_files,
+        pending_spool_overdue_files=pending_spool_overdue_files,
     )
     latest_window_start = max(window_starts) if window_starts else None
     first_window_start = min(window_starts) if window_starts else None
@@ -112,8 +121,10 @@ def read_research_collector_status(
         status_detail=_status_detail(
             status=status,
             checkpoint=checkpoint,
+            capacity_state=capacity.state,
             gap_count=gap_count,
             pending_spool_files=pending_spool_files,
+            pending_spool_overdue_files=pending_spool_overdue_files,
         ),
         generated_at=now_utc,
         environment=environment,
@@ -135,6 +146,8 @@ def read_research_collector_status(
         disk_pause_free_bytes=config.global_pause_free_bytes,
         pending_spool_files=pending_spool_files,
         pending_spool_bytes=pending_spool_bytes,
+        pending_spool_overdue_files=pending_spool_overdue_files,
+        pending_spool_oldest_age_seconds=pending_spool_oldest_age_seconds,
         parquet_file_count=len(parquet_files),
         parquet_first_window_start=first_window_start,
         parquet_latest_window_start=latest_window_start,
@@ -233,11 +246,43 @@ def _window_gap_count(
     return gap_count
 
 
-def _spool_stats(root: Path) -> tuple[int, int]:
+def _spool_stats(
+    root: Path,
+    *,
+    now: datetime,
+    overdue_after_seconds: int,
+) -> tuple[int, int, int, float | None]:
     if not root.is_dir():
-        return 0, 0
-    files = tuple(path for path in root.rglob("*") if path.is_file())
-    return len(files), sum(path.stat().st_size for path in files)
+        return 0, 0, 0, None
+    pending_spool_files = 0
+    pending_spool_bytes = 0
+    pending_spool_overdue_files = 0
+    pending_spool_oldest_age_seconds: float | None = None
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        pending_spool_files += 1
+        pending_spool_bytes += stat.st_size
+        age_seconds = _age_seconds(
+            now,
+            datetime.fromtimestamp(stat.st_mtime, tz=UTC),
+        )
+        if age_seconds is None:
+            continue
+        if (
+            pending_spool_oldest_age_seconds is None
+            or age_seconds > pending_spool_oldest_age_seconds
+        ):
+            pending_spool_oldest_age_seconds = age_seconds
+        if age_seconds > overdue_after_seconds:
+            pending_spool_overdue_files += 1
+    return (
+        pending_spool_files,
+        pending_spool_bytes,
+        pending_spool_overdue_files,
+        pending_spool_oldest_age_seconds,
+    )
 
 
 def _status_for_snapshot(
@@ -246,7 +291,7 @@ def _status_for_snapshot(
     stale: bool,
     capacity_state: CapacityState,
     gap_count: int,
-    pending_spool_files: int,
+    pending_spool_overdue_files: int,
 ) -> OperationalStatus:
     if checkpoint is None:
         return OperationalStatus.NO_DATA
@@ -257,7 +302,7 @@ def _status_for_snapshot(
     if (
         capacity_state is CapacityState.WARNING
         or gap_count > 0
-        or pending_spool_files > 0
+        or pending_spool_overdue_files > 0
     ):
         return OperationalStatus.DEGRADED
     return OperationalStatus.FRESH
@@ -267,8 +312,10 @@ def _status_detail(
     *,
     status: OperationalStatus,
     checkpoint: CollectorCheckpoint | None,
+    capacity_state: CapacityState,
     gap_count: int,
     pending_spool_files: int,
+    pending_spool_overdue_files: int,
 ) -> str:
     if status is OperationalStatus.NO_DATA or checkpoint is None:
         return "等待 checkpoint"
@@ -276,10 +323,17 @@ def _status_detail(
         return "容量保护已暂停写入"
     if status is OperationalStatus.STALE:
         return "checkpoint 超过新鲜度窗口"
+    if capacity_state is CapacityState.WARNING:
+        return "容量保护进入告警区"
     if gap_count:
         return f"存在 {gap_count} 个窗口缺口"
+    if pending_spool_overdue_files:
+        return (
+            f"spool 超时待处理 {pending_spool_overdue_files} 个"
+            f"（当前共 {pending_spool_files} 个）"
+        )
     if pending_spool_files:
-        return f"spool 待处理 {pending_spool_files} 个"
+        return f"当前 15 分钟窗口写入中，待封存 {pending_spool_files} 个"
     return "checkpoint 与 Parquet 窗口持续更新"
 
 
@@ -311,6 +365,8 @@ def _unavailable_response(
         disk_pause_free_bytes=config.global_pause_free_bytes,
         pending_spool_files=0,
         pending_spool_bytes=0,
+        pending_spool_overdue_files=0,
+        pending_spool_oldest_age_seconds=None,
         parquet_file_count=0,
         parquet_first_window_start=None,
         parquet_latest_window_start=None,

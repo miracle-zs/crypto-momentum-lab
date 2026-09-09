@@ -330,6 +330,7 @@ test("collector renderer exposes freshness, continuity, and capacity evidence", 
     disk_pause_free_bytes: 10 * 1024 ** 3,
     pending_spool_files: 0,
     pending_spool_bytes: 0,
+    pending_spool_overdue_files: 0,
     parquet_file_count: 32,
     parquet_first_window_start: "2026-09-03T07:15:00Z",
     parquet_latest_window_start: "2026-09-03T15:00:00Z",
@@ -355,6 +356,35 @@ test("collector renderer exposes freshness, continuity, and capacity evidence", 
   assert.match(html, /最近封存窗口/);
   assert.match(html, /龙虾USDT/);
   assert.match(html, /collector-recent-windows/);
+});
+
+test("collector renderer distinguishes normal spool from overdue spool", () => {
+  const [freshStatus, freshHtml] = renderCollector({
+    status: "FRESH",
+    status_detail: "当前 15 分钟窗口写入中，待封存 3 个",
+    pending_spool_files: 3,
+    pending_spool_bytes: 2048,
+    pending_spool_overdue_files: 0,
+    alerts: [],
+  });
+  assert.equal(freshStatus, "FRESH");
+  assert.match(freshHtml, /spool 待封存/);
+  assert.match(freshHtml, /当前 15 分钟窗口写入中/);
+  assert.doesNotMatch(freshHtml, /spool 超时积压/);
+  assert.match(freshHtml, /没有容量或超时积压告警/);
+
+  const [degradedStatus, degradedHtml] = renderCollector({
+    status: "DEGRADED",
+    status_detail: "spool 超时待处理 2 个（当前共 5 个）",
+    pending_spool_files: 5,
+    pending_spool_bytes: 4096,
+    pending_spool_overdue_files: 2,
+    alerts: ["spool 有 2 个文件超时未落盘"],
+  });
+  assert.equal(degradedStatus, "DEGRADED");
+  assert.match(degradedHtml, /spool 超时积压/);
+  assert.match(degradedHtml, /2 个已超过封存时限/);
+  assert.match(degradedHtml, /REVIEW/);
 });
 
 test("universe renderer includes relative snapshot age", () => {

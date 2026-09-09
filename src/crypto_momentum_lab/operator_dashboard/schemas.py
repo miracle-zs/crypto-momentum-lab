@@ -114,6 +114,8 @@ class ResearchCollectorResponse(DashboardSchema):
     top_count: int
     late_tolerance_seconds: int
     max_spool_bytes: int
+    pending_spool_overdue_files: int = 0
+    pending_spool_oldest_age_seconds: float | None = None
     alerts: list[str] = Field(default_factory=list)
     recent_windows: list[dict[str, JsonValue]] = Field(default_factory=list)
 

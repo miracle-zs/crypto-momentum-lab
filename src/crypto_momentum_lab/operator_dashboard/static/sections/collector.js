@@ -66,7 +66,7 @@ function freeSpaceMeter(data) {
 function alertPanel(data) {
   const alerts = Array.isArray(data.alerts) ? data.alerts : [];
   if (!alerts.length) {
-    return `<div class="ok-box collector-ok"><i></i><span>checkpoint 新鲜，窗口连续，当前没有容量或积压告警。</span></div>`;
+    return `<div class="ok-box collector-ok"><i></i><span>checkpoint 新鲜，窗口连续，当前没有容量或超时积压告警。</span></div>`;
   }
   return `<div class="alert-box collector-alert">
     <strong>REVIEW</strong>
@@ -84,6 +84,15 @@ export function renderCollector(data) {
   const latestWrittenAge = data?.parquet_latest_age_seconds == null
     ? "未知"
     : relAge(data.parquet_latest_age_seconds);
+  const pendingSpoolFiles = Number(data?.pending_spool_files) || 0;
+  const pendingSpoolOverdueFiles = Number(data?.pending_spool_overdue_files) || 0;
+  const spoolLabel = pendingSpoolOverdueFiles ? "spool 超时积压" : "spool 待封存";
+  const spoolNote = pendingSpoolOverdueFiles
+    ? `${num(pendingSpoolOverdueFiles, 0)} 个已超过封存时限 · ${bytes(data?.pending_spool_bytes)}`
+    : pendingSpoolFiles
+      ? `当前 15 分钟窗口写入中 · ${bytes(data?.pending_spool_bytes)}`
+      : "无待封存批次";
+  const spoolTone = pendingSpoolOverdueFiles ? "warn" : "pos";
   const windows = Array.isArray(data?.recent_windows) ? data.recent_windows : [];
   const recentWindowTable = dataTable([
     {
@@ -129,7 +138,7 @@ export function renderCollector(data) {
     ${tile("最近 checkpoint", checkpointAge, readableTime(data?.checkpoint_at), tone)}
     ${tile("最后状态", readableTime(data?.last_bucket_start), data?.last_symbol || "暂无标的", "txt")}
     ${tile("窗口数量", `${num(data?.parquet_file_count, 0)} 个`, data?.parquet_gap_count ? `缺口 ${num(data.parquet_gap_count, 0)} 个` : "连续性未发现缺口", data?.parquet_gap_count ? "warn" : "pos")}
-    ${tile("spool 积压", `${num(data?.pending_spool_files, 0)} 个`, bytes(data?.pending_spool_bytes), data?.pending_spool_files ? "warn" : "pos")}
+    ${tile(spoolLabel, `${num(pendingSpoolFiles, 0)} 个`, spoolNote, spoolTone)}
     ${tile("最新文件", latestWrittenAge, `${num(data?.parquet_file_count, 0)} 个 Parquet`, "num")}
   </div>`;
   const storage = `<div class="collector-meter-grid">

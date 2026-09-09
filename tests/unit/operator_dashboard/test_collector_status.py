@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import UTC, datetime, timedelta
 
 from crypto_momentum_lab.operator_dashboard.collector_status import (
@@ -44,6 +45,19 @@ def _write_window(root, start: datetime) -> None:
     window_path.write_bytes(b"parquet metadata placeholder")
 
 
+def _write_spool_file(
+    root,
+    *,
+    name: str,
+    modified_at: datetime,
+) -> None:
+    spool_path = root / "spool" / "pending" / "hub" / name
+    spool_path.parent.mkdir(parents=True, exist_ok=True)
+    spool_path.write_bytes(b"spool payload placeholder")
+    timestamp = modified_at.timestamp()
+    os.utime(spool_path, (timestamp, timestamp))
+
+
 def test_collector_status_reports_fresh_contiguous_windows(tmp_path) -> None:
     now = datetime(2026, 9, 3, 15, 17, tzinfo=UTC)
     root = tmp_path / "research-data"
@@ -66,6 +80,55 @@ def test_collector_status_reports_fresh_contiguous_windows(tmp_path) -> None:
     assert response.recent_windows[0]["window_start"] == (
         "2026-09-03T15:30:00+00:00"
     )
+
+
+def test_collector_status_does_not_alert_on_current_window_spool(tmp_path) -> None:
+    now = datetime(2026, 9, 3, 15, 17, tzinfo=UTC)
+    root = tmp_path / "research-data"
+    root.mkdir()
+    _write_checkpoint(
+        root,
+        updated_at=now - timedelta(seconds=8),
+        last_bucket_start=datetime(2026, 9, 3, 15, 14, 45, tzinfo=UTC),
+    )
+    _write_window(root, datetime(2026, 9, 3, 15, 0, tzinfo=UTC))
+    _write_spool_file(
+        root,
+        name="current-window.json",
+        modified_at=now - timedelta(seconds=60),
+    )
+
+    response = read_research_collector_status(root, now=now)
+
+    assert response.status is OperationalStatus.FRESH
+    assert response.pending_spool_files == 1
+    assert response.pending_spool_overdue_files == 0
+    assert response.alerts == []
+    assert "待封存" in response.status_detail
+
+
+def test_collector_status_alerts_on_overdue_spool(tmp_path) -> None:
+    now = datetime(2026, 9, 3, 15, 17, tzinfo=UTC)
+    root = tmp_path / "research-data"
+    root.mkdir()
+    _write_checkpoint(
+        root,
+        updated_at=now - timedelta(seconds=8),
+        last_bucket_start=datetime(2026, 9, 3, 15, 14, 45, tzinfo=UTC),
+    )
+    _write_window(root, datetime(2026, 9, 3, 15, 0, tzinfo=UTC))
+    _write_spool_file(
+        root,
+        name="overdue.json",
+        modified_at=now - timedelta(seconds=15 * 60 + 30 + 1),
+    )
+
+    response = read_research_collector_status(root, now=now)
+
+    assert response.status is OperationalStatus.DEGRADED
+    assert response.pending_spool_files == 1
+    assert response.pending_spool_overdue_files == 1
+    assert any("spool" in alert and "超时" in alert for alert in response.alerts)
 
 
 def test_collector_status_surfaces_window_gaps(tmp_path) -> None:
