@@ -4,7 +4,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid5
@@ -321,6 +321,11 @@ def _normalize_json_value(
         for key, item in value.items():
             if not isinstance(key, str):
                 raise TypeError("JSON object keys must be strings")
+            if (
+                canonical_decimals
+                and _is_disabled_orderflow_volume_dimension(key, item)
+            ):
+                continue
             normalized[key] = _normalize_json_value(
                 item,
                 canonical_decimals=canonical_decimals,
@@ -335,6 +340,27 @@ def _normalize_json_value(
             for item in value
         ]
     raise TypeError(f"Unsupported JSON value: {type(value).__name__}")
+
+
+def _is_disabled_orderflow_volume_dimension(key: str, value: object) -> bool:
+    """Keep the zero-valued seventh order-flow dimension hash-compatible.
+
+    The volume ratio was added after six-dimensional paper runs already
+    existed.  A zero threshold deliberately preserves the old behavior, so
+    including that no-op field in the canonical hash would create a false
+    configuration change during a restart.
+    """
+
+    if key != "min_notional_5m_vs_30m" or isinstance(value, bool):
+        return False
+    if isinstance(value, Decimal | int | float):
+        return value == 0
+    if isinstance(value, str):
+        try:
+            return Decimal(value.strip()) == 0
+        except InvalidOperation:
+            return False
+    return False
 
 
 def _ensure_json_normalizable(value: object, field_name: str) -> None:

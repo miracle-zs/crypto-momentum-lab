@@ -25,6 +25,8 @@ x-live-account-app: &live-account-app
 x-live-account-depends: &live-account-depends
   migrate:
     condition: service_completed_successfully
+  volume-init:
+    condition: service_completed_successfully
 
 services:
   execution-account-live-account-2:
@@ -50,6 +52,10 @@ services:
       - "300"
       - --historical-fill-reconciliation-interval-seconds
       - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS:-21600}
+      - --request-interval-seconds
+      - ${CML_ACCOUNT_REQUEST_INTERVAL_SECONDS:-0.5}
+      - --shared-request-pacer-path
+      - /run/cml/binance-rest-pacer/private-read.lock
       - --snapshot-retention-days
       - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
       - --equity-retention-days
@@ -69,6 +75,8 @@ services:
       - --account-label
       - account-2
     depends_on: *live-account-depends
+    volumes:
+      - binance-rest-pacer:/run/cml/binance-rest-pacer
     healthcheck:
       test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "120"]
       interval: 60s
@@ -102,6 +110,10 @@ services:
       - "300"
       - --historical-fill-reconciliation-interval-seconds
       - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS:-21600}
+      - --request-interval-seconds
+      - ${CML_ACCOUNT_REQUEST_INTERVAL_SECONDS:-0.5}
+      - --shared-request-pacer-path
+      - /run/cml/binance-rest-pacer/private-read.lock
       - --snapshot-retention-days
       - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
       - --equity-retention-days
@@ -121,6 +133,8 @@ services:
       - --account-label
       - account-3
     depends_on: *live-account-depends
+    volumes:
+      - binance-rest-pacer:/run/cml/binance-rest-pacer
     healthcheck:
       test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "120"]
       interval: 60s
@@ -154,6 +168,10 @@ services:
       - "300"
       - --historical-fill-reconciliation-interval-seconds
       - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS:-21600}
+      - --request-interval-seconds
+      - ${CML_ACCOUNT_REQUEST_INTERVAL_SECONDS:-0.5}
+      - --shared-request-pacer-path
+      - /run/cml/binance-rest-pacer/private-read.lock
       - --snapshot-retention-days
       - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
       - --equity-retention-days
@@ -173,6 +191,8 @@ services:
       - --account-label
       - account-4
     depends_on: *live-account-depends
+    volumes:
+      - binance-rest-pacer:/run/cml/binance-rest-pacer
     healthcheck:
       test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "120"]
       interval: 60s

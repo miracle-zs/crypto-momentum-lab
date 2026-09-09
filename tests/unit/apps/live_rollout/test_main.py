@@ -510,7 +510,7 @@ def test_runtime_strategy_config_hash_uses_live_environment(monkeypatch) -> None
     runtime_hash = main._runtime_strategy_config_hash("orderflow_impulse")
 
     assert runtime_hash == (
-        "4586faafeab53e123b8dca93f0c489a87f7e795bd6bebe18fdb4c52f36696bef"
+        "81d514396e45a861abcc120dc0c1ed01927690c8fe3c5debcc6e545ed8d4234f"
     )
 
 

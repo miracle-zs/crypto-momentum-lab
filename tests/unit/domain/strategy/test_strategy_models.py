@@ -45,6 +45,28 @@ def test_deterministic_config_hash_is_order_stable() -> None:
     assert len(left) == 64
 
 
+def test_disabled_orderflow_volume_dimension_keeps_legacy_hash() -> None:
+    legacy_six_dimensional = {
+        "impulse_window_buckets": 4,
+        "baseline_window_buckets": 4,
+        "breakout_window_buckets": 4,
+        "min_return_pct": Decimal("0.005"),
+        "min_aggressive_imbalance": Decimal("0.30"),
+        "min_notional_intensity": Decimal("1.5"),
+        "confirmation_buckets": 1,
+        "cooldown_buckets": 0,
+        "forward_horizon_buckets": (1,),
+    }
+    current_seven_dimensional = {
+        **legacy_six_dimensional,
+        "min_notional_5m_vs_30m": Decimal("0"),
+    }
+
+    assert deterministic_config_hash(current_seven_dimensional) == (
+        deterministic_config_hash(legacy_six_dimensional)
+    )
+
+
 def test_deterministic_signal_and_candidate_ids_are_stable() -> None:
     identity = _identity()
     detected_at = datetime(2026, 6, 22, 0, 1, tzinfo=UTC)

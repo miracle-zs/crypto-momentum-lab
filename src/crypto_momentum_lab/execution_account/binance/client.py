@@ -1,4 +1,5 @@
 import asyncio
+import fcntl
 import hashlib
 import heapq
 import hmac
@@ -7,6 +8,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import cast
 from urllib.parse import urlencode
 
@@ -177,6 +179,61 @@ class _AsyncRequestPacer:
             return
 
 
+class _FileRequestPacer:
+    """Coordinate request starts across account processes on one host.
+
+    The execution-account services run in separate containers, so an
+    in-process asyncio pacer cannot protect the aggregate Binance request
+    budget.  A short-lived advisory lock reserves the next wall-clock slot in
+    a shared volume; the network request starts after the lock is released.
+    Corrupt or stale state is treated as an empty schedule, which fails safe
+    by preserving the configured interval rather than blocking forever.
+    """
+
+    def __init__(self, path: str | Path, min_interval_seconds: float) -> None:
+        if min_interval_seconds < 0:
+            raise ValueError("min_interval_seconds must not be negative")
+        path_text = str(path).strip()
+        if not path_text:
+            raise ValueError("path must not be empty")
+        self._path = Path(path_text)
+        self._min_interval_seconds = min_interval_seconds
+
+    async def wait(self, *, priority: int = _COMMAND_ENTRY_PRIORITY) -> None:
+        del priority
+        if self._min_interval_seconds == 0:
+            return
+        delay = await asyncio.to_thread(self._reserve_slot)
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+    async def aclose(self) -> None:
+        """Match the in-process pacer interface; the lock is per request."""
+
+    def _reserve_slot(self) -> float:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._path.open("a+", encoding="ascii") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                handle.seek(0)
+                raw_next_allowed_at = handle.read().strip()
+                try:
+                    next_allowed_at = float(raw_next_allowed_at or "0")
+                except ValueError:
+                    next_allowed_at = 0.0
+                now = time.time()
+                reserved_at = max(now, next_allowed_at)
+                handle.seek(0)
+                handle.truncate()
+                handle.write(
+                    f"{reserved_at + self._min_interval_seconds:.9f}\n"
+                )
+                handle.flush()
+                return max(0.0, reserved_at - now)
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 class BinanceUsdMPrivateReadClient:
     def __init__(
         self,
@@ -191,6 +248,8 @@ class BinanceUsdMPrivateReadClient:
         recv_window_ms: int = 10000,
         request_interval_seconds: float = 0.2,
         command_request_interval_seconds: float | None = None,
+        shared_request_pacer_path: str | Path | None = None,
+        shared_command_request_pacer_path: str | Path | None = None,
         request_timeout_seconds: float = _DEFAULT_REQUEST_TIMEOUT_SECONDS,
         connect_timeout_seconds: float = _DEFAULT_CONNECT_TIMEOUT_SECONDS,
         pool_timeout_seconds: float = _DEFAULT_POOL_TIMEOUT_SECONDS,
@@ -225,11 +284,26 @@ class BinanceUsdMPrivateReadClient:
         self._account_label = account_label
         self._clock = clock or (lambda: datetime.now(tz=UTC))
         self._recv_window_ms = recv_window_ms
-        self._read_request_pacer = _AsyncRequestPacer(request_interval_seconds)
-        self._command_request_pacer = _AsyncRequestPacer(
+        self._read_request_pacer = (
+            _AsyncRequestPacer(request_interval_seconds)
+            if shared_request_pacer_path is None
+            else _FileRequestPacer(
+                shared_request_pacer_path,
+                request_interval_seconds,
+            )
+        )
+        command_interval = (
             request_interval_seconds
             if command_request_interval_seconds is None
             else command_request_interval_seconds
+        )
+        self._command_request_pacer = (
+            _AsyncRequestPacer(command_interval)
+            if shared_command_request_pacer_path is None
+            else _FileRequestPacer(
+                shared_command_request_pacer_path,
+                command_interval,
+            )
         )
         self._client = http_client or httpx.AsyncClient(
             base_url=base_url,

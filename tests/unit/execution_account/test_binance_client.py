@@ -1,4 +1,5 @@
 import asyncio
+import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -17,6 +18,7 @@ from crypto_momentum_lab.execution_account.binance.client import (
     BinanceUsdMPrivateReadClient,
     BinanceUsdMTradeClient,
     _AsyncRequestPacer,
+    _FileRequestPacer,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeCancellationUnknownError,
@@ -75,6 +77,24 @@ async def test_command_pacer_closes_pending_waiter() -> None:
 
     with pytest.raises(asyncio.CancelledError):
         await waiter
+
+
+async def test_file_request_pacer_shares_slots_between_account_processes(
+    tmp_path,
+) -> None:
+    path = tmp_path / "private-read.lock"
+    first = _FileRequestPacer(path, 0.03)
+    second = _FileRequestPacer(path, 0.03)
+    try:
+        await first.wait()
+        first_finished_at = time.monotonic()
+        await second.wait()
+        second_finished_at = time.monotonic()
+    finally:
+        await first.aclose()
+        await second.aclose()
+
+    assert second_finished_at - first_finished_at >= 0.02
 
 
 async def test_signed_request_includes_timestamp_and_signature() -> None:

@@ -103,6 +103,21 @@ def sync_once_command(
             help="Comma-separated symbols for recent Binance fill reconciliation.",
         ),
     ] = "",
+    request_interval_seconds: Annotated[
+        float,
+        typer.Option(
+            "--request-interval-seconds",
+            min=0,
+            help="Minimum spacing between private Binance REST request starts.",
+        ),
+    ] = 0.2,
+    shared_request_pacer_path: Annotated[
+        str | None,
+        typer.Option(
+            "--shared-request-pacer-path",
+            help="Shared lock file used to coordinate account REST requests.",
+        ),
+    ] = None,
 ) -> None:
     resolved_database_url = _execution_database_url(database_url)
     if not resolved_database_url:
@@ -127,6 +142,8 @@ def sync_once_command(
             expected_multi_assets_mode=expected_multi_assets_mode,
             expected_hedge_mode=expected_hedge_mode,
             fill_symbols=_parse_symbols(fill_symbols),
+            request_interval_seconds=request_interval_seconds,
+            shared_request_pacer_path=shared_request_pacer_path,
         )
     )
     typer.echo(
@@ -258,6 +275,21 @@ def sync_command(
             help="Hard timeout for one retention cycle.",
         ),
     ] = 45.0,
+    request_interval_seconds: Annotated[
+        float,
+        typer.Option(
+            "--request-interval-seconds",
+            min=0,
+            help="Minimum spacing between private Binance REST request starts.",
+        ),
+    ] = 0.2,
+    shared_request_pacer_path: Annotated[
+        str | None,
+        typer.Option(
+            "--shared-request-pacer-path",
+            help="Shared lock file used to coordinate account REST requests.",
+        ),
+    ] = None,
 ) -> None:
     resolved_database_url = _execution_database_url(database_url)
     if not resolved_database_url:
@@ -293,6 +325,8 @@ def sync_command(
             historical_fill_reconciliation_interval_seconds=(
                 historical_fill_reconciliation_interval_seconds
             ),
+            request_interval_seconds=request_interval_seconds,
+            shared_request_pacer_path=shared_request_pacer_path,
             snapshot_retention_days=snapshot_retention_days,
             equity_retention_days=equity_retention_days,
             snapshot_retention_interval_seconds=(
@@ -320,6 +354,8 @@ async def sync_once(
     expected_multi_assets_mode: bool,
     expected_hedge_mode: bool = False,
     fill_symbols: tuple[str, ...] = (),
+    request_interval_seconds: float = 0.2,
+    shared_request_pacer_path: str | None = None,
 ) -> ExecutionAccountSyncResult:
     engine = create_account_database_engine(database_url)
     try:
@@ -341,6 +377,9 @@ async def sync_once(
             environment=environment,
             account_label=account_label,
             base_url=base_url,
+            request_interval_seconds=request_interval_seconds,
+            shared_request_pacer_path=shared_request_pacer_path,
+            shared_command_request_pacer_path=shared_request_pacer_path,
         )
         try:
             service = ExecutionAccountSyncService(
@@ -389,6 +428,8 @@ async def sync_continuously(
     snapshot_retention_batch_size: int,
     snapshot_retention_max_rows_per_table: int,
     snapshot_retention_max_runtime_seconds: float,
+    request_interval_seconds: float = 0.2,
+    shared_request_pacer_path: str | None = None,
 ) -> None:
     health = LocalHealthWriter.from_environment()
     health_callback = (
@@ -436,6 +477,9 @@ async def sync_continuously(
             environment=environment,
             account_label=account_label,
             base_url=base_url,
+            request_interval_seconds=request_interval_seconds,
+            shared_request_pacer_path=shared_request_pacer_path,
+            shared_command_request_pacer_path=shared_request_pacer_path,
         )
         retention_task: asyncio.Task[None] | None = None
         try:

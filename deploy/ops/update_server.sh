@@ -160,9 +160,11 @@ fi
 
 deploy_state_target=""
 deploy_state_status=""
+deploy_state_phase=""
 if [[ -f "$deploy_state_file" ]]; then
   deploy_state_target="$(sed -n 's/^target_commit=//p' "$deploy_state_file" | tail -n 1)"
   deploy_state_status="$(sed -n 's/^status=//p' "$deploy_state_file" | tail -n 1)"
+  deploy_state_phase="$(sed -n 's/^phase=//p' "$deploy_state_file" | tail -n 1)"
 fi
 
 write_deploy_state() {
@@ -224,6 +226,8 @@ research_changed=0
 paper_changed=0
 dashboard_changed=0
 live_changed=0
+recovery_run=0
+resume_from_phase=""
 changed_files="$(git diff --name-only "$previous_commit" "$target_commit")"
 while IFS= read -r changed_path; do
   [[ -z "$changed_path" ]] && continue
@@ -299,6 +303,8 @@ done <<<"$changed_files"
 # as a recovery run so the already-running services are reconciled again.
 if [[ "$target_commit" == "$previous_commit" \
   && ( "$deploy_state_target" != "$target_commit" || "$deploy_state_status" != "success" ) ]]; then
+  recovery_run=1
+  resume_from_phase="${deploy_state_phase:-checkout}"
   runtime_changed=1
   market_changed=1
   research_changed=1
@@ -307,7 +313,7 @@ if [[ "$target_commit" == "$previous_commit" \
   if [[ "$live_update" == 1 ]]; then
     live_changed=1
   fi
-  echo "recovery_run=1 reason=target_checkout_already_present"
+  echo "recovery_run=1 reason=target_checkout_already_present resume_from_phase=$resume_from_phase"
 fi
 
 if [[ "$runtime_changed" == 0 ]]; then
@@ -351,6 +357,50 @@ compose=(
 )
 deploy_phase=compose
 
+phase_rank() {
+  case "$1" in
+    checkout) echo 0 ;;
+    compose) echo 1 ;;
+    build) echo 2 ;;
+    dashboard) echo 3 ;;
+    live-preflight) echo 4 ;;
+    research-stop) echo 5 ;;
+    market-data) echo 6 ;;
+    consumers) echo 7 ;;
+    live-restart) echo 8 ;;
+    verify) echo 9 ;;
+    complete) echo 10 ;;
+    *) echo 0 ;;
+  esac
+}
+
+should_run_phase() {
+  local phase="$1"
+  if [[ "$recovery_run" != 1 ]]; then
+    return 0
+  fi
+  local current_rank resume_rank
+  current_rank="$(phase_rank "$phase")"
+  resume_rank="$(phase_rank "$resume_from_phase")"
+  if (( current_rank >= resume_rank )); then
+    return 0
+  fi
+  return 1
+}
+
+image_exists() {
+  docker image inspect "crypto-momentum-lab-app:${target_commit}" \
+    >/dev/null 2>&1
+}
+
+failure_service=""
+
+print_service_logs() {
+  local service="$1"
+  echo "failure_logs_service=$service" >&2
+  "${compose[@]}" logs --no-color --tail=200 "$service" >&2 || true
+}
+
 print_failure_context() {
   local status="$1"
   echo "deployment_failed=1 exit_code=$status checkout=$(git rev-parse HEAD 2>/dev/null || echo unknown)" >&2
@@ -360,6 +410,9 @@ print_failure_context() {
   docker ps --format '{{.Names}}|{{.Image}}|{{.Status}}' \
     | grep -E 'crypto-momentum-lab-(dashboard|market-data|research-collector|paper-|execution-account-live|live-strategy)' \
     | sort >&2 || true
+  if [[ -n "$failure_service" ]]; then
+    print_service_logs "$failure_service"
+  fi
 }
 
 on_deploy_exit() {
@@ -374,26 +427,99 @@ trap on_deploy_exit EXIT
 
 # Resolve the full graph before stopping anything. This also catches missing
 # account credentials and malformed environment overrides early.
-"${compose[@]}" config --quiet
+if should_run_phase compose; then
+  deploy_phase=compose
+  write_deploy_state running "$deploy_phase"
+  "${compose[@]}" config --quiet
+else
+  echo "phase=compose skipped resume_from_phase=$resume_from_phase"
+fi
+
+service_status() {
+  local service="$1"
+  local container_id
+  container_id="$("${compose[@]}" ps -q "$service" 2>/dev/null || true)"
+  if [[ -z "$container_id" ]]; then
+    printf 'missing|missing\n'
+    return 0
+  fi
+  docker inspect -f '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+    "$container_id" 2>/dev/null || printf 'missing|missing\n'
+}
 
 is_running() {
   local service="$1"
-  local container_id
-  local state
-  container_id="$("${compose[@]}" ps -q "$service" 2>/dev/null || true)"
-  [[ -n "$container_id" ]] || return 1
-  state="$(docker inspect -f '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
-  [[ "$state" == "running" ]]
+  [[ "$(service_status "$service")" == "running|"* ]]
 }
 
 is_healthy() {
   local service="$1"
-  local container_id
-  local status
+  [[ "$(service_status "$service")" == "running|healthy" ]]
+}
+
+service_is_converged() {
+  local service="$1"
+  local container_id state image
   container_id="$("${compose[@]}" ps -q "$service" 2>/dev/null || true)"
   [[ -n "$container_id" ]] || return 1
-  status="$(docker inspect -f '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id" 2>/dev/null || true)"
-  [[ "$status" == "running|healthy" ]]
+  state="$(service_status "$service")"
+  image="$(docker inspect -f '{{.Config.Image}}' "$container_id" 2>/dev/null || true)"
+  [[ "$state" == "running|healthy" \
+    && "$image" == "crypto-momentum-lab-app:${target_commit}" ]]
+}
+
+wait_for_services_healthy() {
+  local deadline=$(( $(date +%s) + deploy_wait_timeout ))
+  local service status state health all_ready
+  while :; do
+    all_ready=1
+    for service in "$@"; do
+      status="$(service_status "$service")"
+      state="${status%%|*}"
+      health="${status#*|}"
+      if [[ "$state" == missing || "$state" == exited || "$state" == dead \
+        || "$health" == unhealthy ]]; then
+        failure_service="$service"
+        echo "service failed during health wait: service=$service status=$status" >&2
+        print_service_logs "$service"
+        return 1
+      fi
+      if [[ "$state" != running \
+        || ( "$health" != healthy && "$health" != none ) ]]; then
+        all_ready=0
+      fi
+    done
+    if (( all_ready == 1 )); then
+      return 0
+    fi
+    if (( $(date +%s) >= deadline )); then
+      failure_service="${service:-unknown}"
+      echo "service health wait timed out: service=$failure_service" >&2
+      print_service_logs "$failure_service"
+      return 1
+    fi
+    sleep 5
+  done
+}
+
+up_and_wait() {
+  if (( $# == 0 )); then
+    return 0
+  fi
+  failure_service="$1"
+  "${compose[@]}" up -d --no-deps "$@"
+  wait_for_services_healthy "$@"
+}
+
+up_and_wait_parallel() {
+  local parallel="$1"
+  shift
+  if (( $# == 0 )); then
+    return 0
+  fi
+  failure_service="$1"
+  "${compose[@]}" --parallel "$parallel" up -d --no-deps "$@"
+  wait_for_services_healthy "$@"
 }
 
 verify_service_target() {
@@ -405,7 +531,7 @@ verify_service_target() {
     echo "verification failed: service $service has no container" >&2
     return 1
   fi
-  state="$(docker inspect -f '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id" 2>/dev/null || true)"
+  state="$(service_status "$service")"
   image="$(docker inspect -f '{{.Config.Image}}' "$container_id" 2>/dev/null || true)"
   if [[ "$state" != "running|healthy" || "$image" != "$expected_image" ]]; then
     echo "verification failed: service=$service state=$state image=$image expected_image=$expected_image" >&2
@@ -414,6 +540,10 @@ verify_service_target() {
 }
 
 live_preflight_complete=0
+if [[ "$recovery_run" == 1 ]] \
+  && (( $(phase_rank "$resume_from_phase") > $(phase_rank live-preflight) )); then
+  live_preflight_complete=1
+fi
 if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   live_pairs=(
     "primary:execution-account-live:live-strategy"
@@ -548,13 +678,21 @@ fi
 # Build once. The Dockerfile keeps dependency installation in a layer keyed by
 # pyproject.toml, so ordinary source changes only rebuild the application.
 deploy_phase=build
-write_deploy_state running "$deploy_phase"
-if [[ "$runtime_changed" == 1 ]]; then
-  build_started_at="$(date +%s)"
-  "${compose[@]}" build
-  echo "phase=build elapsed_seconds=$(( $(date +%s) - build_started_at ))"
+if should_run_phase build; then
+  write_deploy_state running "$deploy_phase"
+  if [[ "$runtime_changed" == 1 ]]; then
+    if image_exists; then
+      echo "phase=build skipped target_image_exists=1"
+    else
+      build_started_at="$(date +%s)"
+      "${compose[@]}" build
+      echo "phase=build elapsed_seconds=$(( $(date +%s) - build_started_at ))"
+    fi
+  else
+    echo "phase=build skipped runtime_unchanged=1"
+  fi
 else
-  echo "phase=build skipped runtime_unchanged=1"
+  echo "phase=build skipped resume_from_phase=$resume_from_phase"
 fi
 
 # Nginx exposes the dashboard on the host's 8765 port. Keep an already
@@ -563,14 +701,21 @@ fi
 # not enable a disabled Live account; it protects the configured operator UI.
 dashboard_needs_start=0
 deploy_phase=dashboard
-write_deploy_state running "$deploy_phase"
-if [[ "$dashboard_required" == 1 ]] && ! is_healthy dashboard; then
-  dashboard_needs_start=1
-fi
-if [[ "$dashboard_changed" == 1 || "$dashboard_needs_start" == 1 ]]; then
-  dashboard_started_at="$(date +%s)"
-  "${compose[@]}" up -d --no-deps --wait --wait-timeout "$deploy_wait_timeout" dashboard
-  echo "phase=dashboard elapsed_seconds=$(( $(date +%s) - dashboard_started_at ))"
+if should_run_phase dashboard; then
+  write_deploy_state running "$deploy_phase"
+  if [[ "$dashboard_required" == 1 ]] && ! is_healthy dashboard; then
+    dashboard_needs_start=1
+  fi
+  if [[ "$dashboard_changed" == 1 || "$dashboard_needs_start" == 1 ]] \
+    && ! service_is_converged dashboard; then
+    dashboard_started_at="$(date +%s)"
+    up_and_wait dashboard
+    echo "phase=dashboard elapsed_seconds=$(( $(date +%s) - dashboard_started_at ))"
+  else
+    echo "phase=dashboard skipped converged=1"
+  fi
+else
+  echo "phase=dashboard skipped resume_from_phase=$resume_from_phase"
 fi
 
 dashboard_check_required=0
@@ -602,7 +747,8 @@ if [[ "$dashboard_check_required" == 1 ]]; then
   echo "phase=dashboard-health elapsed_seconds=$(( $(date +%s) - dashboard_health_started_at ))"
 fi
 
-if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
+if [[ "$live_update" == 1 && "$live_changed" == 1 ]] \
+  && should_run_phase live-preflight; then
   deploy_phase=live-preflight
   write_deploy_state running "$deploy_phase"
   # Validate approvals with the freshly built image before restarting any
@@ -636,7 +782,8 @@ fi
 # Preserve the durable research cursor before the Hub's stream epoch changes.
 # Otherwise an old collector can observe the new Hub first, reset its cursor,
 # and make the new collector look like a fresh subscriber with no gap to heal.
-if [[ "$market_changed" == 1 && "$research_changed" == 1 ]] \
+if should_run_phase research-stop \
+  && [[ "$market_changed" == 1 && "$research_changed" == 1 ]] \
   && is_running research-collector; then
   deploy_phase=research-stop
   write_deploy_state running "$deploy_phase"
@@ -646,32 +793,44 @@ if [[ "$market_changed" == 1 && "$research_changed" == 1 ]] \
 fi
 
 # market-data must be ready before research and strategy consumers restart.
-if [[ "$market_changed" == 1 ]]; then
+if should_run_phase market-data && [[ "$market_changed" == 1 ]]; then
   deploy_phase=market-data
   write_deploy_state running "$deploy_phase"
-  market_started_at="$(date +%s)"
-  "${compose[@]}" up -d --no-deps --wait --wait-timeout "$deploy_wait_timeout" market-data
-  echo "phase=market-data elapsed_seconds=$(( $(date +%s) - market_started_at ))"
+  if service_is_converged market-data; then
+    echo "phase=market-data skipped converged=1"
+  else
+    market_started_at="$(date +%s)"
+    up_and_wait market-data
+    echo "phase=market-data elapsed_seconds=$(( $(date +%s) - market_started_at ))"
+  fi
 fi
 
-consumer_services=()
+consumer_candidates=()
 verification_services=()
 if [[ "$research_changed" == 1 ]]; then
-  consumer_services+=(research-collector)
+  consumer_candidates+=(research-collector)
 fi
 if [[ "$paper_changed" == 1 ]]; then
-  consumer_services+=(
+  consumer_candidates+=(
     paper-orderflow-pair
     paper-orderflow-gainer10-pair
     paper-b1-gainer100
     paper-b1-gainer100-ema
   )
 fi
-if (( ${#consumer_services[@]} > 0 )); then
+consumer_services=()
+for service in "${consumer_candidates[@]}"; do
+  if service_is_converged "$service"; then
+    echo "phase=consumers service=$service skipped converged=1"
+  else
+    consumer_services+=("$service")
+  fi
+done
+if should_run_phase consumers && (( ${#consumer_services[@]} > 0 )); then
   deploy_phase=consumers
   write_deploy_state running "$deploy_phase"
   consumers_started_at="$(date +%s)"
-  "${compose[@]}" up -d --no-deps --wait --wait-timeout "$deploy_wait_timeout" "${consumer_services[@]}"
+  up_and_wait "${consumer_services[@]}"
   echo "phase=consumers elapsed_seconds=$(( $(date +%s) - consumers_started_at ))"
 fi
 if [[ "$dashboard_changed" == 1 || "$dashboard_needs_start" == 1 ]]; then
@@ -680,7 +839,7 @@ fi
 if [[ "$market_changed" == 1 ]]; then
   verification_services+=(market-data)
 fi
-verification_services+=("${consumer_services[@]}")
+verification_services+=("${consumer_candidates[@]}")
 
 if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   deploy_phase=live-restart
@@ -694,42 +853,53 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   # bound. Re-check strategy processes before the second wave so a service that
   # drained during execution restarts is not accidentally enabled.
   live_started_at="$(date +%s)"
+  execution_candidates=()
   execution_services=()
   for pair in "${active_pairs[@]}"; do
     IFS=: read -r account execution_service strategy_service <<<"$pair"
     if is_running "$strategy_service"; then
-      execution_services+=("$execution_service")
+      execution_candidates+=("$execution_service")
+      if service_is_converged "$execution_service"; then
+        echo "phase=execution service=$execution_service skipped converged=1"
+      else
+        execution_services+=("$execution_service")
+      fi
     fi
   done
   if (( ${#execution_services[@]} > 0 )); then
     execution_started_at="$(date +%s)"
     echo "update execution wave (${#execution_services[@]} services)"
-    "${compose[@]}" --parallel "$live_concurrency" up -d --no-deps --wait \
-      --wait-timeout "$deploy_wait_timeout" \
-      "${execution_services[@]}"
+    up_and_wait_parallel "$live_concurrency" "${execution_services[@]}"
     echo "phase=execution elapsed_seconds=$(( $(date +%s) - execution_started_at ))"
   else
     echo "phase=execution skipped no_active_services=1"
   fi
 
+  strategy_candidates=()
   strategy_services=()
   for pair in "${active_pairs[@]}"; do
     IFS=: read -r account execution_service strategy_service <<<"$pair"
     if is_running "$strategy_service"; then
-      strategy_services+=("$strategy_service")
+      strategy_candidates+=("$strategy_service")
+      if service_is_converged "$strategy_service"; then
+        echo "phase=strategy service=$strategy_service skipped converged=1"
+      else
+        strategy_services+=("$strategy_service")
+      fi
     fi
   done
   if (( ${#strategy_services[@]} > 0 )); then
     strategy_started_at="$(date +%s)"
     echo "update strategy wave (${#strategy_services[@]} services)"
-    "${compose[@]}" --parallel "$live_concurrency" up -d --no-deps --wait \
-      --wait-timeout "$deploy_wait_timeout" \
-      "${strategy_services[@]}"
+    up_and_wait_parallel "$live_concurrency" "${strategy_services[@]}"
     echo "phase=strategy elapsed_seconds=$(( $(date +%s) - strategy_started_at ))"
   else
     echo "phase=strategy skipped no_active_services=1"
   fi
-  verification_services+=("${execution_services[@]}" "${strategy_services[@]}")
+  verification_services+=(
+    "${execution_candidates[@]}"
+    "${strategy_candidates[@]}"
+  )
   echo "phase=live elapsed_seconds=$(( $(date +%s) - live_started_at ))"
 fi
 

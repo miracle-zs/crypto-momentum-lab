@@ -25,13 +25,32 @@ def test_deployment_script_is_valid_shell_and_has_recovery_guards() -> None:
     assert "phase=client-total" in script
     assert "verify_service_target" in script
     assert "dashboard_proxy_url" in script
+    assert "deploy_state_phase" in script
+    assert "resume_from_phase" in script
+    assert "should_run_phase" in script
+    assert "docker image inspect" in script
+    assert "service_is_converged" in script
+    assert "up_and_wait" in script
+    assert "logs --no-color --tail=200" in script
+
+
+def test_live_account_services_share_the_private_request_pacer_volume() -> None:
+    compose = "\n".join(
+        (
+            (ROOT / "compose.server.yaml").read_text(encoding="utf-8"),
+            (ROOT / "compose.live.accounts.yaml").read_text(encoding="utf-8"),
+        )
+    )
+
+    assert compose.count("binance-rest-pacer:/run/cml/binance-rest-pacer") >= 5
+    assert "binance-rest-pacer:" in compose
 
 
 def test_research_collector_stops_before_market_data_restart() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
 
     assert script.index('research_stop_started_at="$(date +%s)"') < script.index(
-        'if [[ "$market_changed" == 1 ]]; then'
+        "if should_run_phase market-data"
     )
 
 

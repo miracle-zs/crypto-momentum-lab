@@ -118,10 +118,12 @@ services:
     <<: *app
     user: root
     entrypoint: ["sh", "-c"]
-    command: ["chown -R cml:cml /app/data /app/research-data"]
+    command:
+      - chown -R cml:cml /app/data /app/research-data /run/cml/binance-rest-pacer
     volumes:
       - market-data:/app/data
       - research-data:/app/research-data
+      - binance-rest-pacer:/run/cml/binance-rest-pacer
     restart: "no"
 
   market-data:
@@ -465,6 +467,10 @@ services:
       - "300"
       - --historical-fill-reconciliation-interval-seconds
       - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS:-21600}
+      - --request-interval-seconds
+      - ${CML_ACCOUNT_REQUEST_INTERVAL_SECONDS:-0.5}
+      - --shared-request-pacer-path
+      - /run/cml/binance-rest-pacer/private-read.lock
       - --snapshot-retention-days
       - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
       - --equity-retention-days
@@ -484,6 +490,10 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      volume-init:
+        condition: service_completed_successfully
+    volumes:
+      - binance-rest-pacer:/run/cml/binance-rest-pacer
     healthcheck:
       test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "120"]
       interval: 60s
@@ -658,3 +668,4 @@ volumes:
   postgres-data:
   market-data:
   research-data:
+  binance-rest-pacer:
