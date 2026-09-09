@@ -310,6 +310,10 @@ async def sync_once(
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         repository = PostgresAccountRepository(factory)
+        historical_fill_symbols = await repository.load_historical_fill_symbols(
+            environment=environment,
+            account_label=account_label,
+        )
         client = BinanceUsdMPrivateReadClient(
             api_key=api_key,
             api_secret=api_secret,
@@ -327,7 +331,9 @@ async def sync_once(
                     expected_multi_assets_mode=expected_multi_assets_mode,
                     expected_hedge_mode=expected_hedge_mode,
                     observed_at=datetime.now(tz=UTC),
-                    recent_fill_symbols=fill_symbols,
+                    recent_fill_symbols=tuple(
+                        sorted(set(fill_symbols) | historical_fill_symbols)
+                    ),
                 ),
             )
             return await service.sync_once()
@@ -384,6 +390,10 @@ async def sync_continuously(
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         repository = PostgresAccountRepository(factory)
+        historical_fill_symbols = await repository.load_historical_fill_symbols(
+            environment=environment,
+            account_label=account_label,
+        )
         retention_factory = async_sessionmaker(
             retention_engine,
             expire_on_commit=False,
@@ -409,7 +419,9 @@ async def sync_continuously(
                     expected_multi_assets_mode=expected_multi_assets_mode,
                     expected_hedge_mode=expected_hedge_mode,
                     observed_at=datetime.now(tz=UTC),
-                    recent_fill_symbols=fill_symbols,
+                    recent_fill_symbols=tuple(
+                        sorted(set(fill_symbols) | historical_fill_symbols)
+                    ),
                 ),
             )
             stream = BinanceUsdMUserDataStream(

@@ -172,6 +172,35 @@ class PostgresAccountRepository:
     async def save_process_state(self, state: ExecutionAccountProcessState) -> None:
         await self._insert(ExecutionAccountProcessStateRow, process_state_row(state))
 
+    async def load_historical_fill_symbols(
+        self,
+        *,
+        environment: str,
+        account_label: str,
+    ) -> frozenset[str]:
+        """Return every symbol already seen in the durable fill ledger.
+
+        A restarted account synchronizer cannot rely on the current position
+        snapshot to discover symbols: a symbol can have been opened and fully
+        closed while the process was down.  Seeding REST fill reconciliation
+        from this immutable history lets the next sync repair that gap without
+        changing the live position view.
+        """
+        if not environment.strip():
+            raise ValueError("environment must not be empty")
+        if not account_label.strip():
+            raise ValueError("account_label must not be empty")
+        async with self._session_factory() as session:
+            symbols = await session.scalars(
+                select(AccountFillEventRow.symbol)
+                .where(
+                    AccountFillEventRow.environment == environment,
+                    AccountFillEventRow.account_label == account_label,
+                )
+                .distinct()
+            )
+            return frozenset(symbols.all())
+
     async def load_active_position_symbols(
         self,
         *,
