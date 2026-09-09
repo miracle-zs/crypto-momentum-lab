@@ -844,7 +844,7 @@ if should_run_phase migrate && [[ "$runtime_changed" == 1 ]]; then
   wait_for_services_healthy "$deploy_wait_timeout" postgres
   failure_service=migrate
   run_with_timeout "migration" "$deploy_operation_timeout" \
-    "${compose[@]}" run --rm --no-deps migrate
+    "${compose[@]}" run --rm --no-deps migrate </dev/null
   echo "phase=migrate elapsed_seconds=$(( $(date +%s) - migration_started_at ))"
 else
   echo "phase=migrate skipped runtime_unchanged=$runtime_changed"
@@ -868,7 +868,7 @@ if should_run_phase volume-init && [[ "$runtime_changed" == 1 ]]; then
         fi
       done
       exit 1
-    '; then
+    ' </dev/null; then
     volume_init_needed=1
   else
     volume_check_status=$?
@@ -883,7 +883,7 @@ if should_run_phase volume-init && [[ "$runtime_changed" == 1 ]]; then
     volume_init_started_at="$(date +%s)"
     failure_service=volume-init
     run_with_timeout "volume-init" "$deploy_operation_timeout" \
-      "${compose[@]}" run --rm --no-deps volume-init
+      "${compose[@]}" run --rm --no-deps volume-init </dev/null
     echo "phase=volume-init elapsed_seconds=$(( $(date +%s) - volume_init_started_at ))"
   else
     echo "phase=volume-init skipped ownership=correct"
