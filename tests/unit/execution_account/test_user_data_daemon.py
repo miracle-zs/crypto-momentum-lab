@@ -2,6 +2,8 @@ import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+
 from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
@@ -36,12 +38,19 @@ class FakeStream:
         self.stop_count += 1
 
 
+class BlockingStream(FakeStream):
+    async def run(self) -> None:
+        await asyncio.Event().wait()
+
+
 class FakeService:
     def __init__(self, snapshot: AccountSnapshot) -> None:
         self.snapshot = snapshot
         self.sync_calls = 0
         self.persisted = []
         self.heartbeats = []
+        self.sync_include_fills = []
+        self.sync_started = asyncio.Event()
 
     async def sync_once(
         self,
@@ -51,6 +60,8 @@ class FakeService:
         include_fills,
     ):
         self.sync_calls += 1
+        self.sync_include_fills.append(include_fills)
+        self.sync_started.set()
         return ExecutionAccountSyncResult(
             status=ExecutionAccountStatus.READY_READONLY,
             reconciliation_id=f"reconciliation-{self.sync_calls}",
@@ -69,6 +80,23 @@ class FakeService:
 
     async def publish_user_data_heartbeat(self, *, observed_at):
         self.heartbeats.append(observed_at)
+
+
+async def test_run_does_not_block_startup_on_historical_fill_reconciliation() -> None:
+    service = FakeService(_snapshot())
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=BlockingStream(),
+        config=UserDataAccountSyncConfig(),
+    )
+    task = asyncio.create_task(daemon.run())
+    try:
+        await asyncio.wait_for(service.sync_started.wait(), timeout=1)
+        assert service.sync_include_fills == [False]
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
 
 class RealtimeFakeService(FakeService):

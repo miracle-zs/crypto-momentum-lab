@@ -1,6 +1,6 @@
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
@@ -10,6 +10,7 @@ from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
     AccountFillEvent,
+    AccountFillReconciliationCursor,
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
     AccountReconciliationRun,
@@ -100,6 +101,12 @@ class AccountSyncRepository(Protocol):
     ) -> None:
         pass
 
+    async def save_fill_reconciliation_cursors(
+        self,
+        cursors: tuple[AccountFillReconciliationCursor, ...],
+    ) -> None:
+        pass
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutionAccountSyncConfig:
@@ -109,6 +116,10 @@ class ExecutionAccountSyncConfig:
     expected_hedge_mode: bool
     observed_at: datetime
     recent_fill_symbols: tuple[str, ...] = ()
+    recent_fill_cursors: Mapping[str, AccountFillReconciliationCursor] = field(
+        default_factory=dict
+    )
+    historical_fill_reconciliation_interval_seconds: float = 6 * 60 * 60
 
     def __post_init__(self) -> None:
         if not self.environment.strip():
@@ -119,6 +130,25 @@ class ExecutionAccountSyncConfig:
             raise ValueError("observed_at must be timezone-aware")
         if any(not symbol.strip() for symbol in self.recent_fill_symbols):
             raise ValueError("recent_fill_symbols must not contain empty values")
+        if self.historical_fill_reconciliation_interval_seconds <= 0:
+            raise ValueError(
+                "historical_fill_reconciliation_interval_seconds must be positive"
+            )
+        for symbol, cursor in self.recent_fill_cursors.items():
+            normalized_symbol = symbol.strip().upper()
+            if not normalized_symbol:
+                raise ValueError("recent_fill_cursors must not contain empty keys")
+            if cursor.symbol.strip().upper() != normalized_symbol:
+                raise ValueError(
+                    "recent_fill_cursors keys must match cursor symbols"
+                )
+            if (
+                cursor.environment != self.environment
+                or cursor.account_label != self.account_label
+            ):
+                raise ValueError(
+                    "recent_fill_cursors must match the sync account scope"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +203,7 @@ class ExecutionAccountSyncResult:
     new_fills: tuple[AccountFillEvent, ...] = ()
     new_fill_keys: frozenset[FillKey] = frozenset()
     fill_count_by_symbol: tuple[tuple[str, int], ...] = ()
+    fill_cursor_updates: tuple[AccountFillReconciliationCursor, ...] = ()
 
 
 def diff_account_snapshots(
@@ -388,7 +419,21 @@ class ExecutionAccountSyncService:
             symbol.strip().upper() for symbol in config.recent_fill_symbols
         }
         self._active_position_keys: set[tuple[str, str]] = set()
-        self._fill_cursors: dict[str, _FillCursor] = {}
+        self._fill_cursors: dict[str, _FillCursor] = {
+            symbol.strip().upper(): _FillCursor(
+                from_id=cursor.from_id,
+                start_time_ms=cursor.start_time_ms,
+            )
+            for symbol, cursor in config.recent_fill_cursors.items()
+        }
+        self._fill_cursor_checked_at: dict[str, datetime] = {
+            symbol.strip().upper(): cursor.last_checked_at
+            for symbol, cursor in config.recent_fill_cursors.items()
+        }
+        self._tracked_fill_symbols.update(self._fill_cursors)
+        self._historical_fill_reconciliation_interval = timedelta(
+            seconds=config.historical_fill_reconciliation_interval_seconds
+        )
         self._last_balance_values: dict[str, BalanceValue] = {}
         self._known_fill_keys: set[FillKey] = set()
         self._known_fill_key_order: deque[FillKey] = deque(
@@ -557,20 +602,25 @@ class ExecutionAccountSyncService:
             active_position_keys = _position_keys(active_positions)
             self._active_position_keys = active_position_keys
             open_orders = await self._client.fetch_open_orders()
-            self._tracked_fill_symbols.update(
+            active_fill_symbols = {
                 position.symbol.strip().upper() for position in active_positions
-            )
-            self._tracked_fill_symbols.update(
+            }
+            active_fill_symbols.update(
                 order.symbol.strip().upper() for order in open_orders
             )
-            tracked_fill_symbols = tuple(sorted(self._tracked_fill_symbols))
+            self._tracked_fill_symbols.update(active_fill_symbols)
+            tracked_fill_symbols = self._fill_symbols_for_reconciliation(
+                active_fill_symbols=active_fill_symbols,
+                observed_at=config.observed_at,
+            )
             previous_fill_cursors = dict(self._fill_cursors)
             previous_active_symbols = {
-                symbol for symbol, _position_side in previous_active_position_keys
+                symbol.strip().upper()
+                for symbol, _position_side in previous_active_position_keys
             }
             newly_active_symbols = (
                 {
-                    position.symbol for position in active_positions
+                    position.symbol.strip().upper() for position in active_positions
                 }
                 - previous_active_symbols
                 if self._has_completed_sync
@@ -599,7 +649,10 @@ class ExecutionAccountSyncService:
                     from_id_by_symbol={
                         symbol: cursor.from_id
                         for symbol, cursor in previous_fill_cursors.items()
-                        if cursor.from_id is not None
+                        if (
+                            cursor.from_id is not None
+                            and symbol in tracked_fill_symbols
+                        )
                     },
                     start_time_by_symbol=start_time_by_symbol,
                 )
@@ -629,6 +682,22 @@ class ExecutionAccountSyncService:
                 if include_fills
                 else previous_fill_cursors
             )
+            fill_cursor_updates = (
+                tuple(
+                    AccountFillReconciliationCursor(
+                        environment=config.environment,
+                        account_label=config.account_label,
+                        symbol=symbol,
+                        from_id=cursor.from_id,
+                        start_time_ms=cursor.start_time_ms,
+                        last_checked_at=config.observed_at,
+                    )
+                    for symbol in tracked_fill_symbols
+                    if (cursor := next_fill_cursors.get(symbol)) is not None
+                )
+                if include_fills
+                else ()
+            )
             new_fills = tuple(
                 fill
                 for fill in fills
@@ -636,7 +705,6 @@ class ExecutionAccountSyncService:
                 in new_fill_keys
             )
             self._remember_balance_values(balances)
-            self._fill_cursors = next_fill_cursors
             for key in fill_keys:
                 self._remember_fill_key(key)
             self._has_completed_sync = True
@@ -655,6 +723,7 @@ class ExecutionAccountSyncService:
                 new_fills=new_fills,
                 new_fill_keys=new_fill_keys,
                 fill_count_by_symbol=fill_count_by_symbol,
+                fill_cursor_updates=fill_cursor_updates,
             )
             assert result.snapshot is not None
             self._remember_observation(result.snapshot.config.observed_at)
@@ -720,6 +789,25 @@ class ExecutionAccountSyncService:
                 fill_count=result.fill_count,
             ),
         )
+        if result.fill_cursor_updates:
+            await self._repository.save_fill_reconciliation_cursors(
+                result.fill_cursor_updates
+            )
+            self._fill_cursors.update(
+                {
+                    cursor.symbol.strip().upper(): _FillCursor(
+                        from_id=cursor.from_id,
+                        start_time_ms=cursor.start_time_ms,
+                    )
+                    for cursor in result.fill_cursor_updates
+                }
+            )
+            self._fill_cursor_checked_at.update(
+                {
+                    cursor.symbol.strip().upper(): cursor.last_checked_at
+                    for cursor in result.fill_cursor_updates
+                }
+            )
         await self._save_state(
             ExecutionAccountStatus.READY_READONLY,
             config=config,
@@ -793,6 +881,25 @@ class ExecutionAccountSyncService:
             new_fill_keys=frozenset(_fill_keys(fills)),
             fill_count_by_symbol=_fill_counts_by_symbol(fills),
         )
+
+    def _fill_symbols_for_reconciliation(
+        self,
+        *,
+        active_fill_symbols: set[str],
+        observed_at: datetime,
+    ) -> tuple[str, ...]:
+        historical_cutoff = (
+            observed_at - self._historical_fill_reconciliation_interval
+        )
+        due_historical_symbols = {
+            symbol
+            for symbol in self._tracked_fill_symbols
+            if (
+                self._fill_cursor_checked_at.get(symbol) is None
+                or self._fill_cursor_checked_at[symbol] <= historical_cutoff
+            )
+        }
+        return tuple(sorted(active_fill_symbols | due_historical_symbols))
 
     def _balances_to_persist(
         self,

@@ -14,6 +14,7 @@ def test_initial_migration_creates_universe_tables(database_url: str) -> None:
         "account_balance_snapshots",
         "account_config_snapshots",
         "account_fill_events",
+        "account_fill_reconciliation_cursors",
         "account_open_orders",
         "account_position_snapshots",
         "account_reconciliation_runs",

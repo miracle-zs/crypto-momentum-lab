@@ -1,10 +1,11 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
     AccountFillEvent,
+    AccountFillReconciliationCursor,
     AccountPositionSnapshot,
     ExecutionAccountStatus,
 )
@@ -97,6 +98,7 @@ class FakeRepository:
         self.fills = []
         self.configs = []
         self.reconciliation_runs = []
+        self.fill_cursor_calls = []
         self.snapshot_calls = 0
 
     async def save_process_state(self, state):
@@ -137,6 +139,9 @@ class FakeRepository:
         self.open_orders.extend(open_orders)
         self.fills.extend(fills)
         self.reconciliation_runs.append(run)
+
+    async def save_fill_reconciliation_cursors(self, cursors):
+        self.fill_cursor_calls.append(tuple(cursors))
 
 
 async def test_sync_once_persists_snapshot_and_ready_state() -> None:
@@ -199,7 +204,9 @@ async def test_sync_tracks_incremental_fill_keys_and_baselines_new_symbols() -> 
 
     first = await service.sync_once()
     service._tracked_fill_symbols.add("ETHUSDT")
-    second = await service.sync_once()
+    second = await service.sync_once(
+        observed_at=datetime(2026, 7, 4, 6, 0, tzinfo=UTC)
+    )
 
     assert client.calls[0] == (
         ("BTCUSDT",),
@@ -299,6 +306,60 @@ async def test_sync_once_halts_on_account_mode_mismatch() -> None:
     assert repository.snapshot_calls == 1
     assert repository.process_states[-1].state is ExecutionAccountStatus.HALTED_READONLY
     assert "multi_assets_mode_mismatch" in repository.process_states[-1].reason
+
+
+async def test_sync_restores_cursors_and_defers_fresh_historical_symbols() -> None:
+    observed_at = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+    client = CursorClient(responses=[()])
+    repository = FakeRepository()
+    service = ExecutionAccountSyncService(
+        client=client,
+        repository=repository,
+        config=ExecutionAccountSyncConfig(
+            environment="live",
+            account_label="primary",
+            expected_multi_assets_mode=False,
+            expected_hedge_mode=False,
+            observed_at=observed_at,
+            recent_fill_symbols=("BTCUSDT", "ETHUSDT"),
+            recent_fill_cursors={
+                "BTCUSDT": AccountFillReconciliationCursor(
+                    environment="live",
+                    account_label="primary",
+                    symbol="BTCUSDT",
+                    from_id=44,
+                    start_time_ms=None,
+                    last_checked_at=observed_at - timedelta(hours=2),
+                ),
+                "ETHUSDT": AccountFillReconciliationCursor(
+                    environment="live",
+                    account_label="primary",
+                    symbol="ETHUSDT",
+                    from_id=88,
+                    start_time_ms=None,
+                    last_checked_at=observed_at - timedelta(minutes=5),
+                ),
+            },
+            historical_fill_reconciliation_interval_seconds=3600,
+        ),
+    )
+
+    result = await service.sync_once()
+
+    assert client.calls == [
+        (("BTCUSDT",), {"BTCUSDT": 44}, {}),
+    ]
+    assert result.fill_cursor_updates == (
+        AccountFillReconciliationCursor(
+            environment="live",
+            account_label="primary",
+            symbol="BTCUSDT",
+            from_id=44,
+            start_time_ms=None,
+            last_checked_at=observed_at,
+        ),
+    )
+    assert repository.fill_cursor_calls == [result.fill_cursor_updates]
 
 
 async def test_sync_once_halts_on_hedge_mode_mismatch() -> None:

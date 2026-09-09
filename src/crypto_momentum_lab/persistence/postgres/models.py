@@ -3,6 +3,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
@@ -724,6 +725,36 @@ class AccountFillEventRow(Base):
             "account_label",
             "order_id",
             "trade_at",
+        ),
+    )
+
+
+class AccountFillReconciliationCursorRow(Base):
+    __tablename__ = "account_fill_reconciliation_cursors"
+
+    environment: Mapped[str] = mapped_column(String(32), primary_key=True)
+    account_label: Mapped[str] = mapped_column(String(64), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    from_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    start_time_ms: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    last_checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "(from_id IS NULL) <> (start_time_ms IS NULL)",
+            name="ck_account_fill_cursor_one_position",
+        ),
+        Index(
+            "ix_account_fill_cursor_due",
+            "environment",
+            "account_label",
+            "last_checked_at",
         ),
     )
 

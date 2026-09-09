@@ -13,6 +13,7 @@ from crypto_momentum_lab.domain.account import (
     AccountBalanceSnapshot,
     AccountConfigSnapshot,
     AccountFillEvent,
+    AccountFillReconciliationCursor,
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
     AccountReconciliationRun,
@@ -23,6 +24,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     AccountBalanceSnapshotRow,
     AccountConfigSnapshotRow,
     AccountFillEventRow,
+    AccountFillReconciliationCursorRow,
     AccountOpenOrderRow,
     AccountPositionSnapshotRow,
     AccountReconciliationRunRow,
@@ -201,6 +203,65 @@ class PostgresAccountRepository:
             )
             return frozenset(symbols.all())
 
+    async def load_fill_reconciliation_cursors(
+        self,
+        *,
+        environment: str,
+        account_label: str,
+    ) -> dict[str, AccountFillReconciliationCursor]:
+        if not environment.strip():
+            raise ValueError("environment must not be empty")
+        if not account_label.strip():
+            raise ValueError("account_label must not be empty")
+        async with self._session_factory() as session:
+            rows = await session.scalars(
+                select(AccountFillReconciliationCursorRow).where(
+                    AccountFillReconciliationCursorRow.environment == environment,
+                    AccountFillReconciliationCursorRow.account_label
+                    == account_label,
+                )
+            )
+            return {
+                row.symbol: AccountFillReconciliationCursor(
+                    environment=row.environment,
+                    account_label=row.account_label,
+                    symbol=row.symbol,
+                    from_id=row.from_id,
+                    start_time_ms=row.start_time_ms,
+                    last_checked_at=row.last_checked_at,
+                )
+                for row in rows.all()
+            }
+
+    async def save_fill_reconciliation_cursors(
+        self,
+        cursors: tuple[AccountFillReconciliationCursor, ...],
+    ) -> None:
+        if not cursors:
+            return
+        async with self._session_factory() as session:
+            async with session.begin():
+                values = [
+                    fill_reconciliation_cursor_row(cursor)
+                    for cursor in cursors
+                ]
+                statement = insert(AccountFillReconciliationCursorRow).values(
+                    values
+                )
+                statement = statement.on_conflict_do_update(
+                    index_elements=[
+                        "environment",
+                        "account_label",
+                        "symbol",
+                    ],
+                    set_={
+                        "from_id": statement.excluded.from_id,
+                        "start_time_ms": statement.excluded.start_time_ms,
+                        "last_checked_at": statement.excluded.last_checked_at,
+                    },
+                )
+                await session.execute(statement)
+
     async def load_active_position_symbols(
         self,
         *,
@@ -336,6 +397,19 @@ def fill_event_row(fill: AccountFillEvent) -> dict[str, object]:
         "fee_asset": fill.fee_asset,
         "trade_at": fill.trade_at,
         "raw_payload": _jsonable(fill.raw_payload),
+    }
+
+
+def fill_reconciliation_cursor_row(
+    cursor: AccountFillReconciliationCursor,
+) -> dict[str, object]:
+    return {
+        "environment": cursor.environment,
+        "account_label": cursor.account_label,
+        "symbol": cursor.symbol,
+        "from_id": cursor.from_id,
+        "start_time_ms": cursor.start_time_ms,
+        "last_checked_at": cursor.last_checked_at,
     }
 
 

@@ -48,6 +48,8 @@ services:
       - "300"
       - --rest-reconciliation-interval-seconds
       - "300"
+      - --historical-fill-reconciliation-interval-seconds
+      - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS:-21600}
       - --snapshot-retention-days
       - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
       - --equity-retention-days
@@ -98,6 +100,8 @@ services:
       - "300"
       - --rest-reconciliation-interval-seconds
       - "300"
+      - --historical-fill-reconciliation-interval-seconds
+      - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS:-21600}
       - --snapshot-retention-days
       - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
       - --equity-retention-days
@@ -148,6 +152,8 @@ services:
       - "300"
       - --rest-reconciliation-interval-seconds
       - "300"
+      - --historical-fill-reconciliation-interval-seconds
+      - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS:-21600}
       - --snapshot-retention-days
       - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
       - --equity-retention-days

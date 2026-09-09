@@ -51,6 +51,8 @@ from crypto_momentum_lab.persistence.postgres import (
 
 app = typer.Typer(no_args_is_help=True)
 
+_DEFAULT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS = 6 * 60 * 60
+
 
 @app.callback()
 def execution_account_app() -> None:
@@ -199,6 +201,16 @@ def sync_command(
         float,
         typer.Option("--rest-reconciliation-interval-seconds", min=30),
     ] = 300.0,
+    historical_fill_reconciliation_interval_seconds: Annotated[
+        float,
+        typer.Option(
+            "--historical-fill-reconciliation-interval-seconds",
+            min=300,
+            help=(
+                "How often closed historical symbols are checked for new fills."
+            ),
+        ),
+    ] = _DEFAULT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS,
     snapshot_retention_days: Annotated[
         int,
         typer.Option(
@@ -278,6 +290,9 @@ def sync_command(
             rest_reconciliation_interval_seconds=(
                 rest_reconciliation_interval_seconds
             ),
+            historical_fill_reconciliation_interval_seconds=(
+                historical_fill_reconciliation_interval_seconds
+            ),
             snapshot_retention_days=snapshot_retention_days,
             equity_retention_days=equity_retention_days,
             snapshot_retention_interval_seconds=(
@@ -314,6 +329,12 @@ async def sync_once(
             environment=environment,
             account_label=account_label,
         )
+        historical_fill_cursors = (
+            await repository.load_fill_reconciliation_cursors(
+                environment=environment,
+                account_label=account_label,
+            )
+        )
         client = BinanceUsdMPrivateReadClient(
             api_key=api_key,
             api_secret=api_secret,
@@ -334,6 +355,7 @@ async def sync_once(
                     recent_fill_symbols=tuple(
                         sorted(set(fill_symbols) | historical_fill_symbols)
                     ),
+                    recent_fill_cursors=historical_fill_cursors,
                 ),
             )
             return await service.sync_once()
@@ -360,6 +382,7 @@ async def sync_continuously(
     account_event_hub_host: str,
     account_event_hub_port: int,
     rest_reconciliation_interval_seconds: float,
+    historical_fill_reconciliation_interval_seconds: float,
     snapshot_retention_days: int,
     equity_retention_days: int,
     snapshot_retention_interval_seconds: float,
@@ -394,6 +417,12 @@ async def sync_continuously(
             environment=environment,
             account_label=account_label,
         )
+        historical_fill_cursors = (
+            await repository.load_fill_reconciliation_cursors(
+                environment=environment,
+                account_label=account_label,
+            )
+        )
         retention_factory = async_sessionmaker(
             retention_engine,
             expire_on_commit=False,
@@ -421,6 +450,10 @@ async def sync_continuously(
                     observed_at=datetime.now(tz=UTC),
                     recent_fill_symbols=tuple(
                         sorted(set(fill_symbols) | historical_fill_symbols)
+                    ),
+                    recent_fill_cursors=historical_fill_cursors,
+                    historical_fill_reconciliation_interval_seconds=(
+                        historical_fill_reconciliation_interval_seconds
                     ),
                 ),
             )

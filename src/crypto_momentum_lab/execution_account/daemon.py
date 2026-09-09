@@ -322,7 +322,11 @@ class UserDataAccountSyncDaemon:
             while True:
                 if self._state is None:
                     try:
-                        result = await self._reconcile(include_fills=True)
+                        # Bring balances/positions online first.  The first
+                        # historical fill audit runs in the scheduled REST
+                        # reconciliation so a large closed-symbol universe
+                        # cannot delay the user-data stream startup.
+                        result = await self._reconcile(include_fills=False)
                         if not _is_ready_result(result):
                             consecutive_failures += 1
                             await self._sleep_for_failure(consecutive_failures, None)

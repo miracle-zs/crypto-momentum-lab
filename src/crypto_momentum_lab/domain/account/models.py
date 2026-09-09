@@ -120,6 +120,31 @@ class AccountFillEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class AccountFillReconciliationCursor:
+    """Durable position in Binance per-symbol trade reconciliation."""
+
+    environment: str
+    account_label: str
+    symbol: str
+    from_id: int | None
+    start_time_ms: int | None
+    last_checked_at: datetime
+
+    def __post_init__(self) -> None:
+        _require_common(self.environment, self.account_label)
+        _require_non_empty(self.symbol, "symbol")
+        _require_aware(self.last_checked_at, "last_checked_at")
+        if self.from_id is not None and self.from_id < 0:
+            raise ValueError("from_id must be non-negative")
+        if self.start_time_ms is not None and self.start_time_ms < 0:
+            raise ValueError("start_time_ms must be non-negative")
+        if (self.from_id is None) == (self.start_time_ms is None):
+            raise ValueError(
+                "exactly one of from_id and start_time_ms must be present"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class AccountFundingEvent:
     environment: str
     account_label: str
