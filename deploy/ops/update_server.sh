@@ -363,14 +363,15 @@ phase_rank() {
     compose) echo 1 ;;
     build) echo 2 ;;
     migrate) echo 3 ;;
-    dashboard) echo 4 ;;
-    live-preflight) echo 5 ;;
-    research-stop) echo 6 ;;
-    market-data) echo 7 ;;
-    consumers) echo 8 ;;
-    live-restart) echo 9 ;;
-    verify) echo 10 ;;
-    complete) echo 11 ;;
+    volume-init) echo 4 ;;
+    dashboard) echo 5 ;;
+    live-preflight) echo 6 ;;
+    research-stop) echo 7 ;;
+    market-data) echo 8 ;;
+    consumers) echo 9 ;;
+    live-restart) echo 10 ;;
+    verify) echo 11 ;;
+    complete) echo 12 ;;
     *) echo 0 ;;
   esac
 }
@@ -713,6 +714,20 @@ if should_run_phase migrate && [[ "$runtime_changed" == 1 ]]; then
   echo "phase=migrate elapsed_seconds=$(( $(date +%s) - migration_started_at ))"
 else
   echo "phase=migrate skipped runtime_unchanged=$runtime_changed"
+fi
+
+# Initialize the named data volumes before any service is restarted with
+# --no-deps.  In particular, execution-account needs to create the shared
+# Binance request-pacer lock as the unprivileged cml user.
+deploy_phase=volume-init
+if should_run_phase volume-init && [[ "$runtime_changed" == 1 ]]; then
+  write_deploy_state running "$deploy_phase"
+  volume_init_started_at="$(date +%s)"
+  failure_service=volume-init
+  "${compose[@]}" run --rm --no-deps volume-init
+  echo "phase=volume-init elapsed_seconds=$(( $(date +%s) - volume_init_started_at ))"
+else
+  echo "phase=volume-init skipped runtime_unchanged=$runtime_changed"
 fi
 
 # Nginx exposes the dashboard on the host's 8765 port. Keep an already

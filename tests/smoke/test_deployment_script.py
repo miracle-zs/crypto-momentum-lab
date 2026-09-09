@@ -34,6 +34,8 @@ def test_deployment_script_is_valid_shell_and_has_recovery_guards() -> None:
     assert "--force-recreate --no-deps" in script
     assert "phase=migrate" in script
     assert 'run --rm --no-deps migrate' in script
+    assert "phase=volume-init" in script
+    assert 'run --rm --no-deps volume-init' in script
     assert "logs --no-color --tail=200" in script
 
 
