@@ -10,7 +10,12 @@ Environment:
   CML_SERVER_USER  SSH user (default: root)
   CML_REMOTE_DIR   checkout on the server (default: /opt/crypto-momentum-lab)
   CML_LIVE_CONCURRENCY  maximum parallel Live services (default: 2)
-  CML_DEPLOY_WAIT_TIMEOUT_SECONDS  Compose health wait timeout (default: 600)
+  CML_DEPLOY_WAIT_TIMEOUT_SECONDS  general health wait timeout (default: 300)
+  CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS  market-data health timeout (default: 900)
+  CML_CONSUMER_WAIT_TIMEOUT_SECONDS  Paper/research health timeout (default: 300)
+  CML_LIVE_WAIT_TIMEOUT_SECONDS  Live health timeout (default: 300)
+  CML_DEPLOY_OPERATION_TIMEOUT_SECONDS  individual Docker operation timeout (default: 300)
+  CML_DEPLOY_BUILD_TIMEOUT_SECONDS  image build timeout (default: 900)
   CML_DASHBOARD_REQUIRED  require the dashboard endpoint (default: 1)
   CML_DASHBOARD_PROXY_URL  local reverse-proxy health URL (default: http://127.0.0.1/momentum/api/health)
   CML_SSH_PASSWORD  optional password for sshpass; prefer an SSH key
@@ -84,7 +89,12 @@ fi
 server_user="${CML_SERVER_USER:-root}"
 remote_dir="${CML_REMOTE_DIR:-/opt/crypto-momentum-lab}"
 live_concurrency="${CML_LIVE_CONCURRENCY:-2}"
-deploy_wait_timeout="${CML_DEPLOY_WAIT_TIMEOUT_SECONDS:-600}"
+deploy_wait_timeout="${CML_DEPLOY_WAIT_TIMEOUT_SECONDS:-300}"
+market_data_wait_timeout="${CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS:-900}"
+consumer_wait_timeout="${CML_CONSUMER_WAIT_TIMEOUT_SECONDS:-300}"
+live_wait_timeout="${CML_LIVE_WAIT_TIMEOUT_SECONDS:-300}"
+deploy_operation_timeout="${CML_DEPLOY_OPERATION_TIMEOUT_SECONDS:-300}"
+deploy_build_timeout="${CML_DEPLOY_BUILD_TIMEOUT_SECONDS:-900}"
 dashboard_required="${CML_DASHBOARD_REQUIRED:-1}"
 dashboard_proxy_url="${CML_DASHBOARD_PROXY_URL:-http://127.0.0.1/momentum/api/health}"
 
@@ -97,6 +107,19 @@ if [[ -z "$dashboard_proxy_url" ]]; then
   echo "Invalid CML_DASHBOARD_PROXY_URL: value must not be empty" >&2
   exit 64
 fi
+
+for timeout_value in \
+  "$deploy_wait_timeout" \
+  "$market_data_wait_timeout" \
+  "$consumer_wait_timeout" \
+  "$live_wait_timeout" \
+  "$deploy_operation_timeout" \
+  "$deploy_build_timeout"; do
+  if ! [[ "$timeout_value" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Invalid deployment timeout: $timeout_value" >&2
+    exit 64
+  fi
+done
 
 ssh_opts=( -o ConnectTimeout=15 )
 ssh_command=(ssh)
@@ -114,8 +137,11 @@ fi
 client_started_at="$(date +%s)"
 if "${ssh_command[@]}" "${ssh_opts[@]}" "${server_user}@${server_host}" bash -s -- \
   "$remote_dir" "$target_ref" "$live_update" "$live_concurrency" \
-  "$deploy_wait_timeout" "$refresh_approvals" "$dashboard_required" \
-  "$dashboard_proxy_url" <<'REMOTE_SCRIPT'
+  "$deploy_wait_timeout" "$market_data_wait_timeout" \
+  "$consumer_wait_timeout" "$live_wait_timeout" \
+  "$deploy_operation_timeout" "$deploy_build_timeout" \
+  "$refresh_approvals" "$dashboard_required" "$dashboard_proxy_url" \
+  <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
 remote_dir="$1"
@@ -123,13 +149,34 @@ target_ref="$2"
 live_update="$3"
 live_concurrency="$4"
 deploy_wait_timeout="$5"
-refresh_approvals="$6"
-dashboard_required="$7"
-dashboard_proxy_url="$8"
-if ! [[ "$deploy_wait_timeout" =~ ^[1-9][0-9]*$ ]]; then
-  echo "Invalid CML_DEPLOY_WAIT_TIMEOUT_SECONDS: $deploy_wait_timeout" >&2
-  exit 64
-fi
+market_data_wait_timeout="$6"
+consumer_wait_timeout="$7"
+live_wait_timeout="$8"
+deploy_operation_timeout="$9"
+deploy_build_timeout="${10}"
+refresh_approvals="${11}"
+dashboard_required="${12}"
+dashboard_proxy_url="${13}"
+for timeout_name in \
+  CML_DEPLOY_WAIT_TIMEOUT_SECONDS \
+  CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS \
+  CML_CONSUMER_WAIT_TIMEOUT_SECONDS \
+  CML_LIVE_WAIT_TIMEOUT_SECONDS \
+  CML_DEPLOY_OPERATION_TIMEOUT_SECONDS \
+  CML_DEPLOY_BUILD_TIMEOUT_SECONDS; do
+  case "$timeout_name" in
+    CML_DEPLOY_WAIT_TIMEOUT_SECONDS) timeout_value="$deploy_wait_timeout" ;;
+    CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS) timeout_value="$market_data_wait_timeout" ;;
+    CML_CONSUMER_WAIT_TIMEOUT_SECONDS) timeout_value="$consumer_wait_timeout" ;;
+    CML_LIVE_WAIT_TIMEOUT_SECONDS) timeout_value="$live_wait_timeout" ;;
+    CML_DEPLOY_OPERATION_TIMEOUT_SECONDS) timeout_value="$deploy_operation_timeout" ;;
+    CML_DEPLOY_BUILD_TIMEOUT_SECONDS) timeout_value="$deploy_build_timeout" ;;
+  esac
+  if ! [[ "$timeout_value" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Invalid $timeout_name: $timeout_value" >&2
+    exit 64
+  fi
+done
 if [[ "$refresh_approvals" != 0 && "$refresh_approvals" != 1 ]]; then
   echo "Invalid refresh approvals flag: $refresh_approvals" >&2
   exit 64
@@ -142,8 +189,28 @@ if [[ -z "$dashboard_proxy_url" ]]; then
   echo "Invalid dashboard proxy URL: value must not be empty" >&2
   exit 64
 fi
+if ! command -v timeout >/dev/null 2>&1; then
+  echo "Refusing deployment: timeout is required for bounded operations" >&2
+  exit 69
+fi
 cd "$remote_dir"
 deploy_started_at="$(date +%s)"
+
+run_with_timeout() {
+  local label="$1"
+  local timeout_seconds="$2"
+  shift 2
+  local started_at status
+  started_at="$(date +%s)"
+  echo "operation=start name=$label timeout_seconds=$timeout_seconds"
+  if timeout --foreground --kill-after=30s "$timeout_seconds" "$@"; then
+    status=0
+  else
+    status=$?
+  fi
+  echo "operation=end name=$label status=$status elapsed_seconds=$(( $(date +%s) - started_at ))"
+  return "$status"
+}
 
 git_dir="$(git rev-parse --git-dir)"
 deploy_lock_file="$git_dir/cml-deploy.lock"
@@ -159,10 +226,16 @@ if ! flock -n 9; then
 fi
 
 deploy_state_target=""
+deploy_state_checkout=""
+deploy_state_runtime=""
+deploy_state_image=""
 deploy_state_status=""
 deploy_state_phase=""
 if [[ -f "$deploy_state_file" ]]; then
   deploy_state_target="$(sed -n 's/^target_commit=//p' "$deploy_state_file" | tail -n 1)"
+  deploy_state_checkout="$(sed -n 's/^checkout_commit=//p' "$deploy_state_file" | tail -n 1)"
+  deploy_state_runtime="$(sed -n 's/^runtime_commit=//p' "$deploy_state_file" | tail -n 1)"
+  deploy_state_image="$(sed -n 's/^image_commit=//p' "$deploy_state_file" | tail -n 1)"
   deploy_state_status="$(sed -n 's/^status=//p' "$deploy_state_file" | tail -n 1)"
   deploy_state_phase="$(sed -n 's/^phase=//p' "$deploy_state_file" | tail -n 1)"
 fi
@@ -174,6 +247,9 @@ write_deploy_state() {
   umask 077
   {
     printf 'target_commit=%s\n' "${target_commit:-}"
+    printf 'checkout_commit=%s\n' "${target_commit:-}"
+    printf 'runtime_commit=%s\n' "${runtime_commit:-}"
+    printf 'image_commit=%s\n' "${runtime_image_commit:-}"
     printf 'status=%s\n' "$status"
     printf 'phase=%s\n' "$phase"
     printf 'live_update=%s\n' "$live_update"
@@ -190,7 +266,7 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
   exit 1
 fi
 
-git fetch --prune origin main
+run_with_timeout "git-fetch" "$deploy_operation_timeout" git fetch --prune origin main
 if [[ "$(git branch --show-current)" != "main" ]]; then
   echo "Refusing deployment: checkout must be on main" >&2
   exit 1
@@ -214,6 +290,14 @@ if [[ "$(git rev-parse HEAD)" != "$target_commit" ]]; then
   echo "Refusing deployment: checkout did not reach target commit $target_commit" >&2
   exit 1
 fi
+
+env_runtime_commit=""
+if [[ -f .env.server ]]; then
+  env_runtime_commit="$(sed -n 's/^CML_CODE_COMMIT=//p' .env.server | tail -n 1)"
+fi
+runtime_commit="${deploy_state_runtime:-${env_runtime_commit:-${deploy_state_target:-$previous_commit}}}"
+runtime_image_commit="${deploy_state_image:-$runtime_commit}"
+previous_runtime_commit="$runtime_commit"
 write_deploy_state running checkout
 
 # Classify the commit range before building. Documentation, tests, and
@@ -301,19 +385,29 @@ done <<<"$changed_files"
 # If the previous attempt reached the target checkout but failed before all
 # services converged, the next invocation has an empty commit diff. Treat it
 # as a recovery run so the already-running services are reconciled again.
+state_checkout_commit="${deploy_state_checkout:-$deploy_state_target}"
 if [[ "$target_commit" == "$previous_commit" \
-  && ( "$deploy_state_target" != "$target_commit" || "$deploy_state_status" != "success" ) ]]; then
+  && ( "$state_checkout_commit" != "$target_commit" || "$deploy_state_status" != "success" ) ]]; then
   recovery_run=1
   resume_from_phase="${deploy_state_phase:-checkout}"
-  runtime_changed=1
-  market_changed=1
-  research_changed=1
-  paper_changed=1
-  dashboard_changed=1
-  if [[ "$live_update" == 1 ]]; then
+  if [[ "$runtime_commit" == "$target_commit" ]]; then
+    runtime_changed=1
+    market_changed=1
+    research_changed=1
+    paper_changed=1
+    dashboard_changed=1
+    if [[ "$live_update" == 1 ]]; then
+      live_changed=1
+    fi
+  elif [[ "$live_update" == 1 ]]; then
     live_changed=1
   fi
-  echo "recovery_run=1 reason=target_checkout_already_present resume_from_phase=$resume_from_phase"
+  echo "recovery_run=1 reason=target_checkout_already_present resume_from_phase=$resume_from_phase runtime_commit=$runtime_commit"
+fi
+
+if [[ "$runtime_changed" == 1 ]]; then
+  runtime_commit="$target_commit"
+  runtime_image_commit="$target_commit"
 fi
 
 if [[ "$runtime_changed" == 0 ]]; then
@@ -344,8 +438,14 @@ set_env_value() {
   fi
 }
 
-set_env_value CML_CODE_COMMIT "$target_commit"
-set_env_value CML_DASHBOARD_IMAGE "crypto-momentum-lab-app:${target_commit}"
+set_env_value CML_CODE_COMMIT "$runtime_commit"
+current_dashboard_image="$(sed -n 's/^CML_DASHBOARD_IMAGE=//p' .env.server | tail -n 1)"
+if [[ -z "$current_dashboard_image" \
+  || "$current_dashboard_image" == "crypto-momentum-lab-app:${previous_runtime_commit}" ]]; then
+  set_env_value CML_DASHBOARD_IMAGE "crypto-momentum-lab-app:${runtime_commit}"
+else
+  echo "dashboard_image_preserved=1"
+fi
 chmod 600 .env.server
 
 compose=(
@@ -355,6 +455,10 @@ compose=(
   -f compose.live.accounts.yaml
   --profile live
 )
+dashboard_image="$(sed -n 's/^CML_DASHBOARD_IMAGE=//p' .env.server | tail -n 1)"
+if [[ -z "$dashboard_image" ]]; then
+  dashboard_image="crypto-momentum-lab-app:${runtime_commit}"
+fi
 deploy_phase=compose
 
 phase_rank() {
@@ -391,8 +495,16 @@ should_run_phase() {
 }
 
 image_exists() {
-  docker image inspect "crypto-momentum-lab-app:${target_commit}" \
+  docker image inspect "crypto-momentum-lab-app:${runtime_image_commit}" \
     >/dev/null 2>&1
+}
+
+expected_image_for_service() {
+  if [[ "$1" == "dashboard" ]]; then
+    printf '%s' "$dashboard_image"
+  else
+    printf 'crypto-momentum-lab-app:%s' "$runtime_image_commit"
+  fi
 }
 
 failure_service=""
@@ -432,7 +544,8 @@ trap on_deploy_exit EXIT
 if should_run_phase compose; then
   deploy_phase=compose
   write_deploy_state running "$deploy_phase"
-  "${compose[@]}" config --quiet
+  run_with_timeout "compose-config" "$deploy_operation_timeout" \
+    "${compose[@]}" config --quiet
 else
   echo "phase=compose skipped resume_from_phase=$resume_from_phase"
 fi
@@ -461,18 +574,28 @@ is_healthy() {
 
 service_is_converged() {
   local service="$1"
-  local container_id state image
+  local container_id state image expected_image
   container_id="$("${compose[@]}" ps -q "$service" 2>/dev/null || true)"
   [[ -n "$container_id" ]] || return 1
   state="$(service_status "$service")"
   image="$(docker inspect -f '{{.Config.Image}}' "$container_id" 2>/dev/null || true)"
+  expected_image="$(expected_image_for_service "$service")"
   [[ "$state" == "running|healthy" \
-    && "$image" == "crypto-momentum-lab-app:${target_commit}" ]]
+    && "$image" == "$expected_image" ]]
 }
 
 wait_for_services_healthy() {
-  local deadline=$(( $(date +%s) + deploy_wait_timeout ))
+  local timeout_seconds="$1"
+  shift
+  if ! [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Invalid health wait timeout: $timeout_seconds" >&2
+    return 64
+  fi
+  local deadline=$(( $(date +%s) + timeout_seconds ))
   local service status state health all_ready
+  if (( $# == 0 )); then
+    return 0
+  fi
   while :; do
     all_ready=1
     for service in "$@"; do
@@ -496,7 +619,7 @@ wait_for_services_healthy() {
     fi
     if (( $(date +%s) >= deadline )); then
       failure_service="${service:-unknown}"
-      echo "service health wait timed out: service=$failure_service" >&2
+      echo "service health wait timed out: service=$failure_service timeout_seconds=$timeout_seconds" >&2
       print_service_logs "$failure_service"
       return 1
     fi
@@ -505,29 +628,35 @@ wait_for_services_healthy() {
 }
 
 up_and_wait() {
-  if (( $# == 0 )); then
-    return 0
-  fi
-  failure_service="$1"
-  "${compose[@]}" up -d --force-recreate --no-deps "$@"
-  wait_for_services_healthy "$@"
-}
-
-up_and_wait_parallel() {
-  local parallel="$1"
+  local health_timeout="$1"
   shift
   if (( $# == 0 )); then
     return 0
   fi
   failure_service="$1"
-  "${compose[@]}" --parallel "$parallel" up -d --force-recreate --no-deps "$@"
-  wait_for_services_healthy "$@"
+  run_with_timeout "compose-up:$*" "$deploy_operation_timeout" \
+    "${compose[@]}" up -d --force-recreate --no-deps "$@"
+  wait_for_services_healthy "$health_timeout" "$@"
+}
+
+up_and_wait_parallel() {
+  local health_timeout="$1"
+  local parallel="$2"
+  shift 2
+  if (( $# == 0 )); then
+    return 0
+  fi
+  failure_service="$1"
+  run_with_timeout "compose-up:$*" "$deploy_operation_timeout" \
+    "${compose[@]}" --parallel "$parallel" up -d --force-recreate --no-deps "$@"
+  wait_for_services_healthy "$health_timeout" "$@"
 }
 
 verify_service_target() {
   local service="$1"
-  local expected_image="crypto-momentum-lab-app:${target_commit}"
+  local expected_image
   local container_id state image
+  expected_image="$(expected_image_for_service "$service")"
   container_id="$("${compose[@]}" ps -q "$service" 2>/dev/null || true)"
   if [[ -z "$container_id" ]]; then
     echo "verification failed: service $service has no container" >&2
@@ -605,13 +734,14 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     local account execution_service strategy_service
     IFS=: read -r account execution_service strategy_service <<<"$pair"
     echo "refresh approval $account"
-    "${compose[@]}" run --rm --no-deps -T "$strategy_service" \
-      refresh-approval-runtime \
-      --account-label "$account" \
-      --strategy orderflow_impulse \
-      --git-commit-hash "$target_commit" \
-      --migration-revision "$(migration_revision_for_account "$account")" \
-      </dev/null
+    run_with_timeout "refresh-approval:$account" "$deploy_operation_timeout" \
+      "${compose[@]}" run --rm --no-deps -T "$strategy_service" \
+        refresh-approval-runtime \
+        --account-label "$account" \
+        --strategy orderflow_impulse \
+        --git-commit-hash "$runtime_commit" \
+        --migration-revision "$(migration_revision_for_account "$account")" \
+        </dev/null
   }
 
   renew_lease_for_pair() {
@@ -620,12 +750,13 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     IFS=: read -r account execution_service strategy_service <<<"$pair"
     lease_owner="$(lease_owner_for_account "$account")"
     echo "renew lease $account"
-    "${compose[@]}" run --rm --no-deps -T "$strategy_service" renew-lease \
-      --account-label "$account" \
-      --strategy orderflow_impulse \
-      --lease-owner "$lease_owner" \
-      --lease-ttl-seconds 3600 \
-      --confirmation "RENEW LIVE RISK LEASE" </dev/null >/dev/null
+    run_with_timeout "renew-lease:$account" "$deploy_operation_timeout" \
+      "${compose[@]}" run --rm --no-deps -T "$strategy_service" renew-lease \
+        --account-label "$account" \
+        --strategy orderflow_impulse \
+        --lease-owner "$lease_owner" \
+        --lease-ttl-seconds 3600 \
+        --confirmation "RENEW LIVE RISK LEASE" </dev/null >/dev/null
   }
 
   preflight_pair() {
@@ -633,13 +764,14 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     local account execution_service strategy_service
     IFS=: read -r account execution_service strategy_service <<<"$pair"
     echo "preflight $account"
-    "${compose[@]}" run --rm --no-deps -T "$strategy_service" preflight \
-      --account-label "$account" \
-      --strategy orderflow_impulse \
-      --strict \
-      --expected-git-commit "$target_commit" \
-      --expected-migration-revision "$(migration_revision_for_account "$account")" \
-      </dev/null
+    run_with_timeout "preflight:$account" "$deploy_operation_timeout" \
+      "${compose[@]}" run --rm --no-deps -T "$strategy_service" preflight \
+        --account-label "$account" \
+        --strategy orderflow_impulse \
+        --strict \
+        --expected-git-commit "$runtime_commit" \
+        --expected-migration-revision "$(migration_revision_for_account "$account")" \
+        </dev/null
   }
 
   run_parallel_pairs() {
@@ -687,7 +819,8 @@ if should_run_phase build; then
       echo "phase=build skipped target_image_exists=1"
     else
       build_started_at="$(date +%s)"
-      "${compose[@]}" build
+      run_with_timeout "compose-build" "$deploy_build_timeout" \
+        "${compose[@]}" build
       echo "phase=build elapsed_seconds=$(( $(date +%s) - build_started_at ))"
     fi
   else
@@ -706,11 +839,13 @@ if should_run_phase migrate && [[ "$runtime_changed" == 1 ]]; then
   write_deploy_state running "$deploy_phase"
   migration_started_at="$(date +%s)"
   failure_service=migrate
-  "${compose[@]}" up -d postgres
+  run_with_timeout "compose-up:postgres" "$deploy_operation_timeout" \
+    "${compose[@]}" up -d postgres
   failure_service=postgres
-  wait_for_services_healthy postgres
+  wait_for_services_healthy "$deploy_wait_timeout" postgres
   failure_service=migrate
-  "${compose[@]}" run --rm --no-deps migrate
+  run_with_timeout "migration" "$deploy_operation_timeout" \
+    "${compose[@]}" run --rm --no-deps migrate
   echo "phase=migrate elapsed_seconds=$(( $(date +%s) - migration_started_at ))"
 else
   echo "phase=migrate skipped runtime_unchanged=$runtime_changed"
@@ -722,10 +857,38 @@ fi
 deploy_phase=volume-init
 if should_run_phase volume-init && [[ "$runtime_changed" == 1 ]]; then
   write_deploy_state running "$deploy_phase"
-  volume_init_started_at="$(date +%s)"
-  failure_service=volume-init
-  "${compose[@]}" run --rm --no-deps volume-init
-  echo "phase=volume-init elapsed_seconds=$(( $(date +%s) - volume_init_started_at ))"
+  volume_init_needed=1
+  if run_with_timeout "volume-init-check" "$deploy_operation_timeout" \
+    "${compose[@]}" run --rm --no-deps -T --entrypoint sh volume-init -c '
+      for path in /app/data /app/research-data /run/cml/binance-rest-pacer; do
+        if [ ! -d "$path" ]; then
+          exit 0
+        fi
+        if find "$path" -maxdepth 1 \( ! -user cml -o ! -group cml \) -print -quit | grep -q .; then
+          exit 0
+        fi
+      done
+      exit 1
+    '; then
+    volume_init_needed=1
+  else
+    volume_check_status=$?
+    if (( volume_check_status == 1 )); then
+      volume_init_needed=0
+    else
+      echo "volume ownership check failed status=$volume_check_status" >&2
+      exit "$volume_check_status"
+    fi
+  fi
+  if (( volume_init_needed == 1 )); then
+    volume_init_started_at="$(date +%s)"
+    failure_service=volume-init
+    run_with_timeout "volume-init" "$deploy_operation_timeout" \
+      "${compose[@]}" run --rm --no-deps volume-init
+    echo "phase=volume-init elapsed_seconds=$(( $(date +%s) - volume_init_started_at ))"
+  else
+    echo "phase=volume-init skipped ownership=correct"
+  fi
 else
   echo "phase=volume-init skipped runtime_unchanged=$runtime_changed"
 fi
@@ -744,7 +907,7 @@ if should_run_phase dashboard; then
   if [[ "$dashboard_changed" == 1 || "$dashboard_needs_start" == 1 ]] \
     && ! service_is_converged dashboard; then
     dashboard_started_at="$(date +%s)"
-    up_and_wait dashboard
+    up_and_wait "$deploy_wait_timeout" dashboard
     echo "phase=dashboard elapsed_seconds=$(( $(date +%s) - dashboard_started_at ))"
   else
     echo "phase=dashboard skipped converged=1"
@@ -823,7 +986,8 @@ if should_run_phase research-stop \
   deploy_phase=research-stop
   write_deploy_state running "$deploy_phase"
   research_stop_started_at="$(date +%s)"
-  "${compose[@]}" stop --timeout 60 research-collector
+  run_with_timeout "research-stop" "$deploy_operation_timeout" \
+    "${compose[@]}" stop --timeout 60 research-collector
   echo "phase=research-stop elapsed_seconds=$(( $(date +%s) - research_stop_started_at ))"
 fi
 
@@ -835,7 +999,7 @@ if should_run_phase market-data && [[ "$market_changed" == 1 ]]; then
     echo "phase=market-data skipped converged=1"
   else
     market_started_at="$(date +%s)"
-    up_and_wait market-data
+    up_and_wait "$market_data_wait_timeout" market-data
     echo "phase=market-data elapsed_seconds=$(( $(date +%s) - market_started_at ))"
   fi
 fi
@@ -865,7 +1029,7 @@ if should_run_phase consumers && (( ${#consumer_services[@]} > 0 )); then
   deploy_phase=consumers
   write_deploy_state running "$deploy_phase"
   consumers_started_at="$(date +%s)"
-  up_and_wait "${consumer_services[@]}"
+  up_and_wait "$consumer_wait_timeout" "${consumer_services[@]}"
   echo "phase=consumers elapsed_seconds=$(( $(date +%s) - consumers_started_at ))"
 fi
 if [[ "$dashboard_changed" == 1 || "$dashboard_needs_start" == 1 ]]; then
@@ -904,7 +1068,7 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   if (( ${#execution_services[@]} > 0 )); then
     execution_started_at="$(date +%s)"
     echo "update execution wave (${#execution_services[@]} services)"
-    up_and_wait_parallel "$live_concurrency" "${execution_services[@]}"
+    up_and_wait_parallel "$live_wait_timeout" "$live_concurrency" "${execution_services[@]}"
     echo "phase=execution elapsed_seconds=$(( $(date +%s) - execution_started_at ))"
   else
     echo "phase=execution skipped no_active_services=1"
@@ -926,7 +1090,7 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   if (( ${#strategy_services[@]} > 0 )); then
     strategy_started_at="$(date +%s)"
     echo "update strategy wave (${#strategy_services[@]} services)"
-    up_and_wait_parallel "$live_concurrency" "${strategy_services[@]}"
+    up_and_wait_parallel "$live_wait_timeout" "$live_concurrency" "${strategy_services[@]}"
     echo "phase=strategy elapsed_seconds=$(( $(date +%s) - strategy_started_at ))"
   else
     echo "phase=strategy skipped no_active_services=1"
@@ -950,6 +1114,9 @@ write_deploy_state success complete
 echo "phase=total elapsed_seconds=$(( $(date +%s) - deploy_started_at ))"
 
 echo "deployed_commit=$target_commit"
+echo "deployed_checkout=$target_commit"
+echo "deployed_runtime=$runtime_commit"
+echo "deployed_image=$runtime_image_commit"
 docker ps --format '{{.Names}}|{{.Image}}|{{.Status}}' \
   | grep -E 'crypto-momentum-lab-(dashboard|market-data|research-collector|paper-|execution-account-live|live-strategy)' \
   | sort

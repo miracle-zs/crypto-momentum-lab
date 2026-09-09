@@ -32,10 +32,18 @@ def test_deployment_script_is_valid_shell_and_has_recovery_guards() -> None:
     assert "service_is_converged" in script
     assert "up_and_wait" in script
     assert "--force-recreate --no-deps" in script
+    assert "runtime_commit=" in script
+    assert "image_commit=" in script
+    assert "CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS" in script
+    assert "CML_DEPLOY_OPERATION_TIMEOUT_SECONDS" in script
+    assert "CML_DEPLOY_BUILD_TIMEOUT_SECONDS" in script
+    assert "run_with_timeout" in script
     assert "phase=migrate" in script
     assert 'run --rm --no-deps migrate' in script
     assert "phase=volume-init" in script
     assert 'run --rm --no-deps volume-init' in script
+    assert "volume-init-check" in script
+    assert "ownership=correct" in script
     assert "logs --no-color --tail=200" in script
 
 
@@ -56,6 +64,14 @@ def test_research_collector_stops_before_market_data_restart() -> None:
 
     assert script.index('research_stop_started_at="$(date +%s)"') < script.index(
         "if should_run_phase market-data"
+    )
+
+
+def test_volume_initialization_precedes_dashboard_restart() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    assert script.index("deploy_phase=volume-init") < script.index(
+        "# Nginx exposes the dashboard"
     )
 
 

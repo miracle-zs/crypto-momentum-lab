@@ -74,15 +74,25 @@ The script:
 8. waits for `market-data`, then updates only the affected research and paper
    consumers;
 9. verifies the image and health state of every service it updated;
-10. prints separate remote and client-side timings, the deployed commit, and
-    the container health summary.
+10. prints separate remote and client-side timings, the checkout/runtime/image
+    commits, and the container health summary.
 
-It uses `docker compose up -d --wait`. Compose recreates a service when its
-image or configuration changed, so the normal path does not need
-`--force-recreate`.
+The script uses bounded Compose operations and an explicit health wait. A
+healthy service with the expected image is left in place; a service that must
+be updated is recreated with `--force-recreate --no-deps` after migrations and
+the volume-ownership check complete. The volume initializer only runs its
+recursive `chown` when the mounted data directories are not owned by `cml`.
 
-The deployment script accepts `CML_DEPLOY_WAIT_TIMEOUT_SECONDS` (default 600)
-so a broken healthcheck fails with diagnostics instead of waiting forever.
+The default health wait is 300 seconds for the dashboard, PostgreSQL,
+research/Paper, and Live services. `market-data` gets 900 seconds because its
+healthcheck has a 15-minute startup window. Individual Docker operations are
+bounded to 300 seconds and image builds to 900 seconds. Override them with
+`CML_DEPLOY_WAIT_TIMEOUT_SECONDS`, `CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS`,
+`CML_CONSUMER_WAIT_TIMEOUT_SECONDS`, `CML_LIVE_WAIT_TIMEOUT_SECONDS`,
+`CML_DEPLOY_OPERATION_TIMEOUT_SECONDS`, and
+`CML_DEPLOY_BUILD_TIMEOUT_SECONDS` when a host needs different limits. A
+broken operation or healthcheck now fails with diagnostics instead of waiting
+indefinitely.
 It also requires the dashboard by default: if the dashboard is stopped or
 unhealthy, the script starts it and verifies both its Compose healthcheck and
 `127.0.0.1:8765/api/health`, plus the local reverse-proxy endpoint
