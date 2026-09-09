@@ -362,14 +362,15 @@ phase_rank() {
     checkout) echo 0 ;;
     compose) echo 1 ;;
     build) echo 2 ;;
-    dashboard) echo 3 ;;
-    live-preflight) echo 4 ;;
-    research-stop) echo 5 ;;
-    market-data) echo 6 ;;
-    consumers) echo 7 ;;
-    live-restart) echo 8 ;;
-    verify) echo 9 ;;
-    complete) echo 10 ;;
+    migrate) echo 3 ;;
+    dashboard) echo 4 ;;
+    live-preflight) echo 5 ;;
+    research-stop) echo 6 ;;
+    market-data) echo 7 ;;
+    consumers) echo 8 ;;
+    live-restart) echo 9 ;;
+    verify) echo 10 ;;
+    complete) echo 11 ;;
     *) echo 0 ;;
   esac
 }
@@ -507,7 +508,7 @@ up_and_wait() {
     return 0
   fi
   failure_service="$1"
-  "${compose[@]}" up -d --no-deps "$@"
+  "${compose[@]}" up -d --force-recreate --no-deps "$@"
   wait_for_services_healthy "$@"
 }
 
@@ -518,7 +519,7 @@ up_and_wait_parallel() {
     return 0
   fi
   failure_service="$1"
-  "${compose[@]}" --parallel "$parallel" up -d --no-deps "$@"
+  "${compose[@]}" --parallel "$parallel" up -d --force-recreate --no-deps "$@"
   wait_for_services_healthy "$@"
 }
 
@@ -693,6 +694,25 @@ if should_run_phase build; then
   fi
 else
   echo "phase=build skipped resume_from_phase=$resume_from_phase"
+fi
+
+# Apply schema changes before any service is restarted with --no-deps. The
+# execution-account processes can touch newly added tables during startup, so
+# running migrations only through Compose dependency ordering is not enough
+# when a deployment resumes after a partial rollout.
+deploy_phase=migrate
+if should_run_phase migrate && [[ "$runtime_changed" == 1 ]]; then
+  write_deploy_state running "$deploy_phase"
+  migration_started_at="$(date +%s)"
+  failure_service=migrate
+  "${compose[@]}" up -d postgres
+  failure_service=postgres
+  wait_for_services_healthy postgres
+  failure_service=migrate
+  "${compose[@]}" run --rm --no-deps migrate
+  echo "phase=migrate elapsed_seconds=$(( $(date +%s) - migration_started_at ))"
+else
+  echo "phase=migrate skipped runtime_unchanged=$runtime_changed"
 fi
 
 # Nginx exposes the dashboard on the host's 8765 port. Keep an already

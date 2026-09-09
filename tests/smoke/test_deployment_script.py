@@ -31,6 +31,9 @@ def test_deployment_script_is_valid_shell_and_has_recovery_guards() -> None:
     assert "docker image inspect" in script
     assert "service_is_converged" in script
     assert "up_and_wait" in script
+    assert "--force-recreate --no-deps" in script
+    assert "phase=migrate" in script
+    assert 'run --rm --no-deps migrate' in script
     assert "logs --no-color --tail=200" in script
 
 
