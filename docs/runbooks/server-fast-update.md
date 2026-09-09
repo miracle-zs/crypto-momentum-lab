@@ -58,6 +58,14 @@ restart, rerun the same command and the empty Git diff is treated as a recovery
 run. A completed non-Live target remains a no-op on a later repeat; an explicit
 `--live` invocation still performs its approval and lease reconciliation.
 
+New deployment state records the original base commit. Retries classify that
+same range, so a failed dashboard-only update does not restart market-data,
+research, Paper, or Live. A newer target arriving during a failed rollout also
+includes the unfinished range. Legacy state without a base uses the conservative
+recovery behavior once. Healthy Live account pairs already using the target
+image skip reconciliation unless `--refresh-approvals` is explicitly requested.
+All timed external commands receive closed stdin to protect the SSH script input.
+
 The script:
 
 1. fetches the target and requires a clean `main` checkout on the server;

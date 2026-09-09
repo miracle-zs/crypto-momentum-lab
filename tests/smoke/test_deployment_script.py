@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -58,6 +59,49 @@ def test_live_account_services_share_the_private_request_pacer_volume() -> None:
 
     assert compose.count("binance-rest-pacer:/run/cml/binance-rest-pacer") >= 5
     assert "binance-rest-pacer:" in compose
+
+
+def test_retry_classification_preserves_dashboard_only_scope(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    def git(*args: str) -> str:
+        return subprocess.check_output(
+            ["git", "-C", str(tmp_path), *args], text=True
+        ).strip()
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    git("commit", "--allow-empty", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    dashboard = tmp_path / "src/crypto_momentum_lab/operator_dashboard"
+    dashboard.mkdir(parents=True)
+    (dashboard / "queries.py").write_text("# changed\n")
+    git("add", ".")
+    git("commit", "-qm", "dashboard")
+    target = git("rev-parse", "HEAD")
+    script = DEPLOY_SCRIPT.read_text()
+    classification = script[
+        script.index("runtime_changed=0\n"):
+        script.index('if [[ "$runtime_changed" == 1 ]]; then')
+    ]
+    result = subprocess.check_output(
+        ["bash", "-c", 'set -eu\n' + classification +
+         '\nprintf "%s" "$runtime_changed:$dashboard_changed:'
+         '$market_changed:$paper_changed:$live_changed"'],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "deployment_base_commit": base,
+            "target_commit": target,
+            "previous_commit": target,
+            "deploy_state_checkout": target,
+            "deploy_state_target": target,
+            "deploy_state_status": "failed",
+            "deploy_state_phase": "dashboard",
+            "deploy_state_base": base,
+            "runtime_commit": target,
+            "live_update": "1",
+        }, text=True,
+    )
+    assert result.endswith("1:1:0:0:0")
 
 
 def test_research_collector_stops_before_market_data_restart() -> None:

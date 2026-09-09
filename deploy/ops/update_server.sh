@@ -203,7 +203,7 @@ run_with_timeout() {
   local started_at status
   started_at="$(date +%s)"
   echo "operation=start name=$label timeout_seconds=$timeout_seconds"
-  if timeout --foreground --kill-after=30s "$timeout_seconds" "$@"; then
+  if timeout --foreground --kill-after=30s "$timeout_seconds" "$@" </dev/null; then
     status=0
   else
     status=$?
@@ -231,6 +231,7 @@ deploy_state_runtime=""
 deploy_state_image=""
 deploy_state_status=""
 deploy_state_phase=""
+deploy_state_base=""
 if [[ -f "$deploy_state_file" ]]; then
   deploy_state_target="$(sed -n 's/^target_commit=//p' "$deploy_state_file" | tail -n 1)"
   deploy_state_checkout="$(sed -n 's/^checkout_commit=//p' "$deploy_state_file" | tail -n 1)"
@@ -238,6 +239,7 @@ if [[ -f "$deploy_state_file" ]]; then
   deploy_state_image="$(sed -n 's/^image_commit=//p' "$deploy_state_file" | tail -n 1)"
   deploy_state_status="$(sed -n 's/^status=//p' "$deploy_state_file" | tail -n 1)"
   deploy_state_phase="$(sed -n 's/^phase=//p' "$deploy_state_file" | tail -n 1)"
+  deploy_state_base="$(sed -n 's/^base_commit=//p' "$deploy_state_file" | tail -n 1)"
 fi
 
 write_deploy_state() {
@@ -247,6 +249,7 @@ write_deploy_state() {
   umask 077
   {
     printf 'target_commit=%s\n' "${target_commit:-}"
+    printf 'base_commit=%s\n' "${deployment_base_commit:-}"
     printf 'checkout_commit=%s\n' "${target_commit:-}"
     printf 'runtime_commit=%s\n' "${runtime_commit:-}"
     printf 'image_commit=%s\n' "${runtime_image_commit:-}"
@@ -298,6 +301,13 @@ fi
 runtime_commit="${deploy_state_runtime:-${env_runtime_commit:-${deploy_state_target:-$previous_commit}}}"
 runtime_image_commit="${deploy_state_image:-$runtime_commit}"
 previous_runtime_commit="$runtime_commit"
+deployment_base_commit="$previous_commit"
+# Keep the original diff across retries (including a newer target arriving
+# during an incomplete rollout), rather than treating every service as changed.
+if [[ "$deploy_state_status" != success && -n "$deploy_state_base" ]]; then
+  git cat-file -e "$deploy_state_base^{commit}"
+  deployment_base_commit="$deploy_state_base"
+fi
 write_deploy_state running checkout
 
 # Classify the commit range before building. Documentation, tests, and
@@ -312,7 +322,7 @@ dashboard_changed=0
 live_changed=0
 recovery_run=0
 resume_from_phase=""
-changed_files="$(git diff --name-only "$previous_commit" "$target_commit")"
+changed_files="$(git diff --name-only "$deployment_base_commit" "$target_commit")"
 while IFS= read -r changed_path; do
   [[ -z "$changed_path" ]] && continue
   case "$changed_path" in
@@ -390,7 +400,9 @@ if [[ "$target_commit" == "$previous_commit" \
   && ( "$state_checkout_commit" != "$target_commit" || "$deploy_state_status" != "success" ) ]]; then
   recovery_run=1
   resume_from_phase="${deploy_state_phase:-checkout}"
-  if [[ "$runtime_commit" == "$target_commit" ]]; then
+  if [[ -n "$deploy_state_base" ]]; then
+    : # The persisted base above restores the exact affected service groups.
+  elif [[ "$runtime_commit" == "$target_commit" ]]; then
     runtime_changed=1
     market_changed=1
     research_changed=1
@@ -802,7 +814,13 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   for pair in "${live_pairs[@]}"; do
     IFS=: read -r account execution_service strategy_service <<<"$pair"
     if is_running "$strategy_service"; then
-      active_pairs+=("$pair")
+      if [[ "$refresh_approvals" != 1 ]] \
+        && service_is_converged "$execution_service" \
+        && service_is_converged "$strategy_service"; then
+        echo "phase=live account=$account skipped converged=1"
+      else
+        active_pairs+=("$pair")
+      fi
     fi
   done
 
