@@ -679,6 +679,43 @@ test("live account equity amount changes align each account to its first point",
   assert.equal(model.points[0].values.every((value) => value === 0), true);
 });
 
+test("live account metric charts start at the first daily 08:00 UTC+8 bucket", () => {
+  const accounts = ["primary", "account-2"].map((accountLabel, index) => ({
+    account_label: accountLabel,
+    metrics_curve: [
+      {
+        observed_at: "2026-08-15T01:06:00Z",
+        equity: String(900 + index),
+      },
+      {
+        observed_at: "2026-08-16T00:00:00Z",
+        equity: String(1000 + index),
+      },
+      {
+        observed_at: "2026-08-16T00:06:00Z",
+        equity: String(1010 + index),
+      },
+    ],
+  }));
+
+  const model = liveAccountMetricModel(
+    accounts,
+    "equity",
+    6 * 60,
+    "2026-08-15T01:00:00Z",
+    "2026-08-16T01:00:00Z",
+  );
+
+  assert.equal(model.domainStart, Date.parse("2026-08-16T00:00:00Z"));
+  assert.equal(model.anchorAt, Date.parse("2026-08-16T00:00:00Z"));
+  assert.equal(model.anchorMode, "daily-anchor");
+  assert.equal(model.points[0].at, Date.parse("2026-08-16T00:00:00Z"));
+  assert.deepEqual(model.series.map((series) => series.values), [
+    [0, 10],
+    [0, 10],
+  ]);
+});
+
 test("live account renderer separates sync service from account configuration", () => {
   const [status, html] = renderAccount({
     status: "READY",

@@ -34,6 +34,14 @@ default. Future cash-flow corrections can be supplied with
 An explicit `[]` disables the default correction. This is a read-only derived
 view; it does not rewrite the underlying equity snapshots.
 
+The account page's `四账户资金与风险时序` panel anchors each selected range at
+the first daily 08:00 Asia/Shanghai boundary within that range. The API and
+browser use the same anchor for bucket alignment, so equity, margin, and
+drawdown comparisons share one time origin. An active trading lease also supplies
+the account's strategy binding when no `strategy_live_states` row is available;
+the card then shows the leased strategy and `租约有效` instead of reporting an
+unknown strategy. The lease is not treated as proof of a strategy heartbeat.
+
 Status meanings:
 
 - `UNKNOWN`: required telemetry is missing.

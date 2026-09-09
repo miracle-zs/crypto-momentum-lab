@@ -200,6 +200,13 @@ function comparisonDailyAnchor(referenceMs) {
   return anchorWallMs - offsetMs;
 }
 
+function dailyAnchorAtOrAfter(referenceMs) {
+  const anchorAt = comparisonDailyAnchor(referenceMs);
+  return anchorAt >= referenceMs
+    ? anchorAt
+    : comparisonDailyAnchor(referenceMs + 24 * 60 * 60 * 1000);
+}
+
 function comparisonStart(commonBuckets, anchorAt) {
   const anchoredBucket = commonBuckets.find((bucket) => bucket >= anchorAt);
   if (anchoredBucket != null) {
@@ -516,14 +523,23 @@ const LIVE_ACCOUNT_METRIC_COLORS = [
   "var(--series-violet)",
 ];
 
-function liveAccountMetricBucketMap(account, metricKey, intervalSeconds) {
+function liveAccountMetricBucketMap(
+  account,
+  metricKey,
+  intervalSeconds,
+  bucketOriginMs = Number.NaN,
+) {
   const intervalMs = Math.max(1, intervalSeconds) * 1000;
   const buckets = new Map();
   for (const row of account.metrics_curve || []) {
     const observedAt = new Date(row.observed_at || "").getTime();
     const value = asNumber(row[metricKey]);
     if (!Number.isFinite(observedAt) || value == null) continue;
-    buckets.set(Math.floor(observedAt / intervalMs) * intervalMs, value);
+    const bucket = Number.isFinite(bucketOriginMs)
+      ? bucketOriginMs
+        + Math.floor((observedAt - bucketOriginMs) / intervalMs) * intervalMs
+      : Math.floor(observedAt / intervalMs) * intervalMs;
+    buckets.set(bucket, value);
   }
   return buckets;
 }
@@ -545,12 +561,28 @@ export function liveAccountMetricModel(
     (account) => Array.isArray(account.metrics_curve),
   );
   if (!normalizedAccounts.length) return null;
+  const requestedStart = windowStart
+    ? new Date(windowStart).getTime()
+    : Number.NaN;
+  const requestedEnd = windowEnd
+    ? new Date(windowEnd).getTime()
+    : Number.NaN;
+  const dailyAnchor = Number.isFinite(requestedStart)
+    ? dailyAnchorAtOrAfter(requestedStart)
+    : Number.NaN;
+  const anchoredWindow = Number.isFinite(dailyAnchor)
+    && (!Number.isFinite(requestedEnd) || dailyAnchor <= requestedEnd);
+  const chartStart = anchoredWindow ? dailyAnchor : requestedStart;
   const maps = normalizedAccounts.map((account) => (
-    liveAccountMetricBucketMap(account, metricKey, intervalSeconds)
+    liveAccountMetricBucketMap(account, metricKey, intervalSeconds, chartStart)
   ));
   const buckets = [...new Set(maps.flatMap((map) => [...map.keys()]))]
     .sort((left, right) => left - right)
-    .slice(-240);
+    .filter((bucket) => (
+      (!Number.isFinite(chartStart) || bucket >= chartStart)
+      && (!Number.isFinite(requestedEnd) || bucket <= requestedEnd)
+    ))
+    .slice(-241);
   const valueCount = maps.reduce(
     (total, map) => total + buckets.filter((bucket) => map.has(bucket)).length,
     0,
@@ -591,8 +623,6 @@ export function liveAccountMetricModel(
     min = nonNegativeMetric ? 0 : min - padding;
     max += padding;
   }
-  const requestedStart = windowStart ? new Date(windowStart).getTime() : Number.NaN;
-  const requestedEnd = windowEnd ? new Date(windowEnd).getTime() : Number.NaN;
   return {
     metricKey,
     valueFormat,
@@ -601,10 +631,12 @@ export function liveAccountMetricModel(
       at: bucket,
       values: series.map((seriesItem) => seriesItem.values[index]),
     })),
-    domainStart: Number.isFinite(requestedStart) ? requestedStart : buckets[0],
-    domainEnd: Number.isFinite(requestedEnd) && requestedEnd > requestedStart
+    domainStart: Number.isFinite(chartStart) ? chartStart : buckets[0],
+    domainEnd: Number.isFinite(requestedEnd) && requestedEnd > chartStart
       ? requestedEnd
       : buckets.at(-1),
+    anchorAt: anchoredWindow ? dailyAnchor : null,
+    anchorMode: anchoredWindow ? "daily-anchor" : "window-start-fallback",
     min,
     max,
     intervalSeconds,
@@ -637,6 +669,8 @@ export function liveAccountMetricChart(
     domainEnd: model.domainEnd,
     min: model.min,
     max: model.max,
+    anchorAt: model.anchorAt,
+    anchorMode: model.anchorMode,
     points: model.points,
     series: model.series.map((series) => ({
       label: series.label,

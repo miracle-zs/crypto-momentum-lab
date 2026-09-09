@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, cast
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
     Numeric,
@@ -89,10 +90,13 @@ from crypto_momentum_lab.persistence.postgres.models import (
 _EQUITY_WINDOW = timedelta(hours=24)
 _EQUITY_BUCKET_SECONDS = 6 * 60
 _EQUITY_MAX_POINTS = 240
+_LIVE_ACCOUNT_METRIC_MAX_POINTS = _EQUITY_MAX_POINTS + 1
 _LIVE_SIGNAL_MAX_ROWS = 30
 _PAPER_HISTORY_RECENT_LIMIT = 500
 _COMMON_EQUITY_BUCKET_SECONDS = 15 * 60
 FIXED_COMMON_EQUITY_START_AT = datetime(2026, 8, 21, 2, 45, tzinfo=UTC)
+_LIVE_ACCOUNT_METRIC_TIME_ZONE = ZoneInfo("Asia/Shanghai")
+_LIVE_ACCOUNT_METRIC_ANCHOR_HOUR = 8
 _ACCOUNT_EQUITY_RANGES: dict[str, tuple[timedelta, int]] = {
     "24h": (timedelta(hours=24), 6 * 60),
     "7d": (timedelta(days=7), 60 * 60),
@@ -799,6 +803,26 @@ def _account_equity_range(value: str) -> tuple[timedelta, int]:
         raise ValueError(f"unsupported account equity range: {value}") from error
 
 
+def _live_account_metrics_window_start(
+    window_end: datetime,
+    window: timedelta,
+) -> datetime:
+    """Return the first daily 08:00 (UTC+8) anchor inside the requested window."""
+    if window <= timedelta(0):
+        raise ValueError("window must be positive")
+    requested_start = _as_utc(window_end) - window
+    local_start = requested_start.astimezone(_LIVE_ACCOUNT_METRIC_TIME_ZONE)
+    anchor = local_start.replace(
+        hour=_LIVE_ACCOUNT_METRIC_ANCHOR_HOUR,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    if anchor < local_start:
+        anchor += timedelta(days=1)
+    return anchor.astimezone(UTC)
+
+
 def _split_exchange_orders(
     rows: Sequence[ExchangeOrderRow],
 ) -> tuple[list[ExchangeOrderRow], list[ExchangeOrderRow]]:
@@ -982,47 +1006,53 @@ class DashboardQueries:
             | set(lease_by_account),
             key=_account_label_sort_key,
         )
-        return [
-            LiveAccountSummaryResponse(
-                account_label=account_label,
-                environment=(
-                    process_by_account[account_label].environment
-                    if account_label in process_by_account
-                    else "live"
-                ),
-                status=_live_account_status(
-                    None
-                    if account_label not in process_by_account
-                    else process_by_account[account_label].state
-                ),
-                readiness=(
-                    process_by_account[account_label].state
-                    if account_label in process_by_account
-                    else "missing"
-                ),
-                observed_at=(
-                    process_by_account[account_label].occurred_at
-                    if account_label in process_by_account
-                    else None
-                ),
-                strategy_name=(
-                    strategy_by_account[account_label].strategy_name
-                    if account_label in strategy_by_account
-                    else None
-                ),
-                strategy_state=(
-                    strategy_by_account[account_label].state
-                    if account_label in strategy_by_account
-                    else None
-                ),
-                lease_expires_at=(
-                    lease_by_account[account_label].expires_at
-                    if account_label in lease_by_account
-                    else None
-                ),
+        summaries: list[LiveAccountSummaryResponse] = []
+        for account_label in account_labels:
+            strategy = strategy_by_account.get(account_label)
+            lease = lease_by_account.get(account_label)
+            summaries.append(
+                LiveAccountSummaryResponse(
+                    account_label=account_label,
+                    environment=(
+                        process_by_account[account_label].environment
+                        if account_label in process_by_account
+                        else "live"
+                    ),
+                    status=_live_account_status(
+                        None
+                        if account_label not in process_by_account
+                        else process_by_account[account_label].state
+                    ),
+                    readiness=(
+                        process_by_account[account_label].state
+                        if account_label in process_by_account
+                        else "missing"
+                    ),
+                    observed_at=(
+                        process_by_account[account_label].occurred_at
+                        if account_label in process_by_account
+                        else None
+                    ),
+                    strategy_name=(
+                        strategy.strategy_name
+                        if strategy is not None
+                        else lease.strategy_name
+                        if lease is not None
+                        else None
+                    ),
+                    strategy_state=(
+                        strategy.state
+                        if strategy is not None
+                        else None
+                    ),
+                    lease_expires_at=(
+                        lease.expires_at
+                        if lease is not None
+                        else None
+                    ),
+                )
             )
-            for account_label in account_labels
-        ]
+        return summaries
 
     async def live_accounts(self) -> LiveAccountsResponse:
         """Return a small, bounded operational snapshot for every live account."""
@@ -1059,10 +1089,13 @@ class DashboardQueries:
         self,
         equity_range: str = "24h",
     ) -> LiveAccountMetricsResponse:
-        """Return six comparable time-series metrics for every live account."""
+        """Return six comparable metrics starting at daily 08:00 UTC+8."""
         equity_window, equity_bucket_seconds = _account_equity_range(equity_range)
         equity_window_end = self._clock()
-        equity_window_start = equity_window_end - equity_window
+        equity_window_start = _live_account_metrics_window_start(
+            equity_window_end,
+            equity_window,
+        )
         async with self._session_factory() as session:
             processes = (
                 await session.scalars(_latest_live_account_process_statement())
@@ -1107,6 +1140,7 @@ class DashboardQueries:
                                 window_start=equity_window_start,
                                 window_end=equity_window_end,
                                 interval_seconds=equity_bucket_seconds,
+                                max_points=_LIVE_ACCOUNT_METRIC_MAX_POINTS,
                             )
                         )
                     ).all()
@@ -1121,6 +1155,7 @@ class DashboardQueries:
                                 window_start=equity_window_start,
                                 window_end=equity_window_end,
                                 interval_seconds=equity_bucket_seconds,
+                                max_points=_LIVE_ACCOUNT_METRIC_MAX_POINTS,
                             )
                         )
                     ).all()

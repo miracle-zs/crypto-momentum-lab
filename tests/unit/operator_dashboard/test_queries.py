@@ -21,6 +21,7 @@ from crypto_momentum_lab.operator_dashboard.queries import (
     _latest_live_account_process_statement,
     _live_account_equity_point,
     _live_account_metric_points,
+    _live_account_metrics_window_start,
     _live_common_equity_statement,
     _live_equity_observations,
     _live_observation,
@@ -89,6 +90,33 @@ def test_live_account_summary_keeps_four_account_order_and_state_join() -> None:
     assert all(summary.lease_expires_at is not None for summary in summaries)
 
 
+def test_live_account_summary_uses_active_lease_when_strategy_state_missing() -> None:
+    observed_at = datetime(2026, 9, 6, tzinfo=UTC)
+    lease_expires_at = observed_at + timedelta(minutes=10)
+
+    summaries = DashboardQueries._live_account_summaries(
+        [
+            SimpleNamespace(
+                account_label="primary",
+                environment="live",
+                state="ready_readonly",
+                occurred_at=observed_at,
+            )
+        ],
+        [],
+        [
+            SimpleNamespace(
+                account_label="primary",
+                strategy_name="orderflow_impulse",
+                expires_at=lease_expires_at,
+            )
+        ],
+    )
+
+    assert summaries[0].strategy_name == "orderflow_impulse"
+    assert summaries[0].strategy_state is None
+
+
 def test_latest_live_account_process_query_excludes_non_live_states() -> None:
     statement = _latest_live_account_process_statement()
     sql = str(
@@ -141,6 +169,20 @@ def test_live_account_metric_points_derive_equity_margin_and_drawdown_ratios() -
     assert points[1].margin_occupancy_ratio == str(Decimal("120") / Decimal("1010"))
     assert [point.drawdown for point in points] == ["0", "0", "-20"]
     assert points[2].drawdown_ratio == "-0.01980198019801980198019801980"
+
+
+def test_live_account_metrics_window_starts_at_daily_0800_utc_plus_8() -> None:
+    window_end = datetime(2026, 9, 9, 1, 0, tzinfo=UTC)
+
+    assert _live_account_metrics_window_start(
+        window_end,
+        timedelta(hours=24),
+    ) == datetime(2026, 9, 9, 0, 0, tzinfo=UTC)
+
+    assert _live_account_metrics_window_start(
+        datetime(2026, 9, 8, 23, 0, tzinfo=UTC),
+        timedelta(hours=24),
+    ) == datetime(2026, 9, 8, 0, 0, tzinfo=UTC)
 
 
 def test_live_account_margin_query_aggregates_initial_margin_per_observation() -> None:

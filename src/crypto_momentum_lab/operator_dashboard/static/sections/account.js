@@ -2,6 +2,7 @@ import {
   replaceChildrenFromHtml,
 } from "../dashboard-dom.js";
 import {
+  COMPARISON_ANCHOR_HOUR,
   DEFAULT_EQUITY_BUCKET_SECONDS,
   DISPLAY_TIME_ZONE_LABEL,
 } from "../dashboard-config.js";
@@ -110,10 +111,11 @@ export function renderLiveAccountMetrics(data) {
   const windowText = data?.equity_window_start && data?.equity_window_end
     ? `${selectedRange.key === "1y" ? fullDateTime(data.equity_window_start) : dayTime(data.equity_window_start)} → ${selectedRange.key === "1y" ? fullDateTime(data.equity_window_end) : dayTime(data.equity_window_end)} ${DISPLAY_TIME_ZONE_LABEL}`
     : "等待时间窗口";
+  const anchorLabel = `${String(COMPARISON_ANCHOR_HOUR).padStart(2, "0")}:00 ${DISPLAY_TIME_ZONE_LABEL}`;
   return `<div class="block live-account-metrics-block" data-live-account-metrics-selected="${selectedRange.key}">
-    ${blockTitle("四账户资金与风险时序", `LIVE ACCOUNT METRICS · ROLLING ${selectedRange.shortLabel} · ${equitySampleLabel(interval)} BUCKETS`, liveMetricsRangeControls(selectedRange.key))}
+    ${blockTitle("四账户资金与风险时序", `LIVE ACCOUNT METRICS · DAILY ${anchorLabel} · ${selectedRange.shortLabel} · ${equitySampleLabel(interval)} BUCKETS`, liveMetricsRangeControls(selectedRange.key))}
     <div class="live-metrics-context"><span>${esc(windowText)}</span><span>${accounts.length} 个账户 · ${interval >= 86400 ? `${Math.round(interval / 86400)} 天` : `${Math.round(interval / 60)} 分钟`}采样</span></div>
-    <p class="live-metrics-note">权益金额与比例均以各账户窗口首个可用权益点为基准（起点分别为 0 USDT 与 0%）；保证金占用为交易所初始保证金，回撤金额与比例均相对窗口内历史峰值计算。</p>
+    <p class="live-metrics-note">每个时间窗口从每日 ${esc(anchorLabel)} 起算；权益金额与比例均以各账户窗口首个可用权益点为基准（起点分别为 0 USDT 与 0%）；保证金占用为交易所初始保证金，回撤金额与比例均相对窗口内历史峰值计算。</p>
     <div class="live-metrics-grid">${charts}</div>
   </div>`;
 }
@@ -476,6 +478,17 @@ function liveAccountStatusClass(status) {
       : "status-UNKNOWN";
 }
 
+function liveStrategyStateLabel(state, leaseExpiresAt) {
+  const normalized = String(state || "").toLowerCase();
+  if (!normalized && leaseExpiresAt) return "租约有效";
+  return {
+    active: "运行中",
+    running: "运行中",
+    draining: "排空中",
+    halted: "已停止",
+  }[normalized] || state || "状态未知";
+}
+
 function accountFleetMetric(accounts, key) {
   return accounts.reduce(
     (total, account) => total + (asNumber(account.summary?.[key]) || 0),
@@ -489,6 +502,10 @@ function liveAccountCard(account, index, selectedLabel) {
   const statusClass = liveAccountStatusClass(account.status);
   const readiness = account.readiness || "待确认";
   const strategy = account.strategy_name || "未关联策略";
+  const strategyState = liveStrategyStateLabel(
+    account.strategy_state,
+    account.lease_expires_at,
+  );
   const lease = account.lease_expires_at
     ? `租约至 ${dayTime(account.lease_expires_at)}`
     : "无有效租约";
@@ -507,7 +524,7 @@ function liveAccountCard(account, index, selectedLabel) {
       <span><small>未实现盈亏</small><b class="num ${pnlClass(summary.total_unrealized_pnl)}">${esc(signedMoney(summary.total_unrealized_pnl))}</b></span>
       <span><small>名义价值</small><b class="num">${esc(money(summary.gross_position_notional))}</b></span>
     </span>`
-    : `<span class="live-account-card-state-detail"><span>${esc(strategy)} · ${esc(account.strategy_state || "状态未知")}</span><span>${esc(readiness)} · ${esc(lease)}</span></span>`;
+    : `<span class="live-account-card-state-detail"><span>${esc(strategy)} · ${esc(strategyState)}</span><span>${esc(readiness)} · ${esc(lease)}</span></span>`;
   const footer = financialSnapshot
     ? `${summary.position_count ?? 0} 个持仓 · ${summary.open_order_count ?? 0} 个挂单`
     : "进入账户详情";
