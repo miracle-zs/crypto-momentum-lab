@@ -259,6 +259,107 @@ def test_binance_candle_source_retries_read_timeout() -> None:
     assert attempts == 2
 
 
+def test_symbol_cache_isolated_across_pruning_and_historical_refill() -> None:
+    now = datetime(2026, 8, 1, 13, 0, tzinfo=UTC)
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.params["symbol"])
+        start_ms = int(request.url.params["startTime"])
+        end_ms = int(request.url.params["endTime"]) + 1
+        # Reverse rows to verify reads still return chronological candles.
+        return httpx.Response(
+            200,
+            json=[
+                _kline(
+                    start=datetime.fromtimestamp(ms / 1000, UTC).isoformat(),
+                    open_price="100",
+                    close_price="101",
+                )
+                for ms in reversed(range(start_ms, end_ms, 900_000))
+            ],
+        )
+
+    with BinanceRestClosedCandle15mSource(
+        "https://fapi.binance.test",
+        transport=httpx.MockTransport(handler),
+        clock=lambda: now,
+        cache_retention=timedelta(minutes=30),
+    ) as source:
+        start = now - timedelta(minutes=30)
+        btc = source.load_closed_candles(symbol="BTCUSDT", start=start, end=now)
+        eth = source.load_closed_candles(symbol="ETHUSDT", start=start, end=now)
+        assert [c.candle_start for c in btc] == [start, start + timedelta(minutes=15)]
+        now += timedelta(minutes=30)
+        source.load_closed_candles(symbol="BTCUSDT", start=start, end=now)
+        # Re-request pruned BTC history; ETH retains its independent history.
+        assert (
+            source.load_closed_candles(
+                symbol="BTCUSDT",
+                start=start,
+                end=now - timedelta(minutes=30),
+            )
+            == btc
+        )
+        assert (
+            source.load_closed_candles(
+                symbol="ETHUSDT",
+                start=start,
+                end=now - timedelta(minutes=30),
+            )
+            == eth
+        )
+        assert calls == ["BTCUSDT", "ETHUSDT", "BTCUSDT", "BTCUSDT", "ETHUSDT"]
+
+
+def test_concurrent_same_symbol_requests_share_one_fetch() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    fetching = Event()
+    release = Event()
+    calls = 0
+    start = datetime(2026, 8, 1, 12, 45, tzinfo=UTC)
+    end = start + timedelta(minutes=15)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        fetching.set()
+        assert release.wait(5)
+        return httpx.Response(
+            200,
+            json=[
+                _kline(start=start.isoformat(), open_price="100", close_price="101"),
+            ],
+        )
+
+    with (
+        BinanceRestClosedCandle15mSource(
+            "https://fapi.binance.test",
+            transport=httpx.MockTransport(handler),
+            clock=lambda: end,
+        ) as source,
+        ThreadPoolExecutor(max_workers=2) as executor,
+    ):
+        first = executor.submit(
+            source.load_closed_candles,
+            symbol="BTCUSDT",
+            start=start,
+            end=end,
+        )
+        assert fetching.wait(5)
+        second = executor.submit(
+            source.load_closed_candles,
+            symbol="BTCUSDT",
+            start=start,
+            end=end,
+        )
+        release.set()
+        assert first.result(timeout=5) == second.result(timeout=5)
+    assert calls == 1
+
+
 def _kline(
     *,
     start: str,

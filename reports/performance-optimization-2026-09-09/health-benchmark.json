@@ -1,0 +1,16 @@
+[
+  {
+    "version": "before",
+    "data_files": 2000,
+    "samples": 5,
+    "p50_ms": 590.611,
+    "max_ms": 593.636
+  },
+  {
+    "version": "after",
+    "data_files": 2000,
+    "samples": 5,
+    "p50_ms": 39.479,
+    "max_ms": 40.946
+  }
+]

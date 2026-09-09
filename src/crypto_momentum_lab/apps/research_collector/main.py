@@ -29,6 +29,7 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
 from crypto_momentum_lab.persistence.postgres.session import (
     create_async_database_engine,
 )
+from crypto_momentum_lab.research_collector.health import check_health
 from crypto_momentum_lab.research_collector.models import (
     CollectorConfig,
     CollectorError,
@@ -43,10 +44,6 @@ from crypto_momentum_lab.research_collector.service import (
 )
 from crypto_momentum_lab.research_collector.source import (
     PostgresMarketStateBackfillSource,
-)
-from crypto_momentum_lab.research_collector.storage import (
-    CapacityGuard,
-    CheckpointStore,
 )
 
 app = typer.Typer(no_args_is_help=True)
@@ -211,35 +208,11 @@ def health_command(
         typer.Option("--max-age-seconds", min=0),
     ] = 120,
 ) -> None:
-    """Check the local checkpoint and capacity guard for container health."""
+    """Read the collector's cached capacity and durable-progress snapshot."""
 
-    checkpoint = CheckpointStore(root / "checkpoints" / f"{environment}.json").load(
-        environment=environment
-    )
-    if checkpoint is None:
-        typer.echo("collector checkpoint is missing", err=True)
-        raise typer.Exit(code=1)
-    config = CollectorConfig(environment=environment, root=root)
-    snapshot = CapacityGuard(
-        root,
-        soft_limit_bytes=config.soft_limit_bytes,
-        hard_limit_bytes=config.hard_limit_bytes,
-        global_warning_free_bytes=config.global_warning_free_bytes,
-        global_pause_free_bytes=config.global_pause_free_bytes,
-    ).snapshot()
-    now = checkpoint.updated_at
-    stale = now is None or (max_age_seconds > 0 and _age_seconds(now) > max_age_seconds)
-    payload = {
-        "environment": environment,
-        "last_sequence": checkpoint.last_sequence,
-        "updated_at": None if now is None else now.isoformat(),
-        "collector_bytes": snapshot.collector_bytes,
-        "disk_free_bytes": snapshot.disk_free_bytes,
-        "capacity_state": snapshot.state.value,
-        "stale": stale,
-    }
+    ready, payload = check_health(root, environment, max_age_seconds)
     typer.echo(json.dumps(payload, sort_keys=True))
-    if stale or snapshot.state.value == "paused":
+    if not ready:
         raise typer.Exit(code=1)
 
 
@@ -370,11 +343,3 @@ async def _run_collector(
 
 def _gib_bytes(value: float) -> int:
     return int(value * _BYTES_PER_GIB)
-
-
-def _age_seconds(value: object) -> float:
-    from datetime import UTC, datetime
-
-    if not isinstance(value, datetime):
-        return float("inf")
-    return max(0.0, (datetime.now(UTC) - value).total_seconds())

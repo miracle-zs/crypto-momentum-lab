@@ -1,0 +1,50 @@
+[
+  {
+    "version": "before",
+    "symbols": 1,
+    "candles_per_symbol": 200,
+    "samples": 100,
+    "p50_ms": 0.1313,
+    "p95_ms": 0.144
+  },
+  {
+    "version": "after",
+    "symbols": 1,
+    "candles_per_symbol": 200,
+    "samples": 100,
+    "p50_ms": 0.1195,
+    "p95_ms": 0.1363
+  },
+  {
+    "version": "before",
+    "symbols": 100,
+    "candles_per_symbol": 200,
+    "samples": 100,
+    "p50_ms": 3.0085,
+    "p95_ms": 3.385
+  },
+  {
+    "version": "after",
+    "symbols": 100,
+    "candles_per_symbol": 200,
+    "samples": 100,
+    "p50_ms": 0.1183,
+    "p95_ms": 0.1594
+  },
+  {
+    "version": "before",
+    "symbols": 500,
+    "candles_per_symbol": 200,
+    "samples": 100,
+    "p50_ms": 19.4743,
+    "p95_ms": 20.8772
+  },
+  {
+    "version": "after",
+    "symbols": 500,
+    "candles_per_symbol": 200,
+    "samples": 100,
+    "p50_ms": 0.1184,
+    "p95_ms": 0.1516
+  }
+]

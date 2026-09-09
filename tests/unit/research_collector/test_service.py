@@ -205,3 +205,40 @@ async def test_collector_recovers_after_hub_stream_reset(tmp_path: Path) -> None
     assert health.last_sequence == 1
     assert health.last_persisted_bucket == recovered.bucket_start
     assert health.pending_spool_files == 0
+
+
+async def test_health_marker_tracks_durable_progress_pause_and_stop(tmp_path):
+    import pytest
+
+    from crypto_momentum_lab.research_collector.health import check_health
+    from crypto_momentum_lab.research_collector.models import CollectorPaused
+
+    config = CollectorConfig(
+        environment="research",
+        root=tmp_path,
+        soft_limit_bytes=1024**2,
+        hard_limit_bytes=2 * 1024**2,
+        global_warning_free_bytes=2,
+        global_pause_free_bytes=1,
+        window_seconds=15,
+        late_tolerance_seconds=0,
+    )
+    collector = ResearchStateCollector(
+        config=config,
+        source=_IdleSource(),
+        selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
+    )
+    assert not check_health(tmp_path, "research")[0]
+    state = fixture_state("BTCUSDT", 0)
+    await collector.ingest(_batch(state, 1))
+    assert check_health(tmp_path, "research")[0]
+    # A failed capacity guard must never publish a fresh successful checkpoint.
+    (tmp_path / "quota-fill").write_bytes(b"x" * (2 * 1024**2))
+    with pytest.raises(CollectorPaused):
+        await collector.ingest(_batch(state, 2))
+    assert not check_health(tmp_path, "research")[0]
+    (tmp_path / "quota-fill").unlink()
+    await collector.ingest(_batch(state, 2))
+    assert check_health(tmp_path, "research")[0]
+    await collector.stop()
+    assert not check_health(tmp_path, "research")[0]

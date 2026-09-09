@@ -204,7 +204,7 @@ class BinanceRestClosedCandle15mSource:
         )
         self._cache_retention = cache_retention
         self._clock = clock
-        self._candles: dict[tuple[str, datetime], ClosedCandle15m] = {}
+        self._candles: dict[str, dict[datetime, ClosedCandle15m]] = {}
         self._coverage: dict[str, tuple[datetime, datetime]] = {}
         # Calls for the same symbol are single-flight: a second strategy
         # request waits for the first range fill, then serves from coverage.
@@ -260,35 +260,35 @@ class BinanceRestClosedCandle15mSource:
                 coverage = (covered_start, covered_end)
             self._coverage[normalized_symbol] = coverage
 
-        candles = tuple(
-            candle
-            for (cached_symbol, candle_start), candle in sorted(
-                self._candles.items(),
-                key=lambda item: item[0],
+            candles = tuple(
+                candle
+                for candle_start, candle in sorted(
+                    self._candles.get(normalized_symbol, {}).items()
+                )
+                if aligned_start <= candle_start < aligned_end
             )
-            if cached_symbol == normalized_symbol
-            and aligned_start <= candle_start < aligned_end
-        )
-        expected_starts = {
-            aligned_start + index * _CANDLE_INTERVAL
-            for index in range(
-                int((aligned_end - aligned_start) / _CANDLE_INTERVAL)
+            expected_starts = {
+                aligned_start + index * _CANDLE_INTERVAL
+                for index in range(
+                    int((aligned_end - aligned_start) / _CANDLE_INTERVAL)
+                )
+            }
+            actual_starts = {candle.candle_start for candle in candles}
+            missing_starts = expected_starts - actual_starts
+            if missing_starts:
+                missing = ", ".join(
+                    item.isoformat() for item in sorted(missing_starts)[:5]
+                )
+                suffix = "..." if len(missing_starts) > 5 else ""
+                raise ClosedCandleSourceError(
+                    f"incomplete Binance 15m candle range for {normalized_symbol}: "
+                    f"missing {len(missing_starts)} candle(s) starting at "
+                    f"{missing}{suffix}"
+                )
+            self._prune(
+                normalized_symbol, requested_start=aligned_start, end=aligned_end
             )
-        }
-        actual_starts = {candle.candle_start for candle in candles}
-        missing_starts = expected_starts - actual_starts
-        if missing_starts:
-            missing = ", ".join(
-                item.isoformat() for item in sorted(missing_starts)[:5]
-            )
-            suffix = "..." if len(missing_starts) > 5 else ""
-            raise ClosedCandleSourceError(
-                f"incomplete Binance 15m candle range for {normalized_symbol}: "
-                f"missing {len(missing_starts)} candle(s) starting at "
-                f"{missing}{suffix}"
-            )
-        self._prune(normalized_symbol, requested_start=aligned_start, end=aligned_end)
-        return candles
+            return candles
 
     def _fetch_range(
         self,
@@ -321,7 +321,7 @@ class BinanceRestClosedCandle15mSource:
                 and candle.candle_end <= end
             )
             for candle in parsed:
-                self._candles[(symbol, candle.candle_start)] = candle
+                self._candles.setdefault(symbol, {})[candle.candle_start] = candle
             if not parsed:
                 raise ClosedCandleSourceError(
                     f"Binance returned no closed 15m candles for {symbol} "
@@ -393,17 +393,12 @@ class BinanceRestClosedCandle15mSource:
         requested_start: datetime,
         end: datetime,
     ) -> None:
-        retention_before = (
-            _candle_start_15m(self._clock()) - self._cache_retention
-        )
+        retention_before = _candle_start_15m(self._clock()) - self._cache_retention
         prune_before = min(end, max(requested_start, retention_before))
-        stale_keys = tuple(
-            key
-            for key in self._candles
-            if key[0] == symbol and key[1] < prune_before
-        )
+        symbol_candles = self._candles.get(symbol, {})
+        stale_keys = tuple(key for key in symbol_candles if key < prune_before)
         for key in stale_keys:
-            self._candles.pop(key, None)
+            symbol_candles.pop(key, None)
         covered_start, covered_end = self._coverage[symbol]
         self._coverage[symbol] = (max(covered_start, prune_before), covered_end)
 

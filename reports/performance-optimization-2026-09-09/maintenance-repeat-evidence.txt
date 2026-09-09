@@ -1,0 +1,56 @@
+BEGIN
+SET
+SET
+          sampled_at
+-------------------------------
+ 2026-09-09 14:32:17.659144+00
+(1 row)
+
+          relname           | total_size | n_live_tup | n_dead_tup |  reltuples   | reloptions | default_vacuum_threshold |        last_autovacuum        |       last_autoanalyze        | autovacuum_count
+----------------------------+------------+------------+------------+--------------+------------+--------------------------+-------------------------------+-------------------------------+------------------
+ universe_entries           | 898 MB     |    4902274 |       3143 | 4.863202e+06 |            |                 972690.4 | 2026-09-07 22:16:35.125617+00 | 2026-09-09 08:31:29.598622+00 |                2
+ account_balance_snapshots  | 580 MB     |     218258 |      40597 |       223903 |            |       44830.600000000006 | 2026-09-09 04:55:19.615916+00 | 2026-09-09 11:33:40.414726+00 |               11
+ strategy_runtime_events    | 553 MB     |     830096 |       1160 |       814347 |            |       162919.40000000002 | 2026-09-08 19:18:44.864038+00 | 2026-09-08 23:36:01.759775+00 |                9
+ account_position_snapshots | 288 MB     |     280771 |      12884 |       272800 |            |                    54610 | 2026-09-08 11:43:19.083332+00 | 2026-09-09 03:55:14.056355+00 |               19
+ paper_positions            | 23 MB      |      14964 |       1891 |        14963 |            |       3042.6000000000004 | 2026-09-09 12:41:40.389397+00 | 2026-09-09 14:30:46.702103+00 |              133
+ exchange_orders            | 6568 kB    |       5085 |        889 |         5083 |            |                   1066.6 | 2026-09-09 07:02:21.364962+00 | 2026-09-09 14:15:45.28541+00  |               61
+(6 rows)
+
+              name               | setting | unit
+---------------------------------+---------+------
+ autovacuum_analyze_scale_factor | 0.1     |
+ autovacuum_analyze_threshold    | 50      |
+ autovacuum_vacuum_scale_factor  | 0.2     |
+ autovacuum_vacuum_threshold     | 50      |
+ autovacuum_work_mem             | 32768   | kB
+ maintenance_work_mem            | 32768   | kB
+(6 rows)
+
+ pid | state | wait_event_type | wait_event | transaction_age
+-----+-------+-----------------+------------+-----------------
+(0 rows)
+
+ pid | datid | datname | relid | phase | heap_blks_total | heap_blks_scanned | heap_blks_vacuumed | index_vacuum_count | max_dead_tuples | num_dead_tuples
+-----+-------+---------+-------+-------+-----------------+-------------------+--------------------+--------------------+-----------------+-----------------
+(0 rows)
+
+                                                                                                                                                                                                                QUERY PLAN
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.86..1824.89 rows=250 width=14) (actual rows=250 loops=1)
+   Buffers: shared hit=14117
+   ->  Nested Loop Semi Join  (cost=0.86..79936.96 rows=10956 width=14) (actual rows=250 loops=1)
+         Buffers: shared hit=14117
+         ->  Index Scan using ix_account_balance_account_observed on account_balance_snapshots candidate  (cost=0.43..49394.25 rows=32868 width=31) (actual rows=4377 loops=1)
+               Index Cond: (((environment)::text = 'live'::text) AND ((account_label)::text = 'primary'::text) AND (observed_at >= (now() - '370 days'::interval)) AND (observed_at < (now() - '7 days'::interval)))
+               Buffers: shared hit=985
+         ->  Index Only Scan using ix_account_balance_asset_hour_observed on account_balance_snapshots newer  (cost=0.43..1.88 rows=2 width=25) (actual rows=0 loops=4377)
+               Index Cond: ((environment = 'live'::text) AND (account_label = 'primary'::text) AND (asset = (candidate.asset)::text) AND ((date_trunc('hour'::text, (observed_at AT TIME ZONE 'UTC'::text))) = date_trunc('hour'::text, (candidate.observed_at AT TIME ZONE 'UTC'::text))) AND (observed_at > candidate.observed_at) AND (observed_at >= (now() - '370 days'::interval)) AND (observed_at < (now() - '7 days'::interval)))
+               Heap Fetches: 0
+               Buffers: shared hit=13132
+ Planning:
+   Buffers: shared hit=220
+ Planning Time: 2.960 ms
+ Execution Time: 41.394 ms
+(15 rows)
+
+COMMIT

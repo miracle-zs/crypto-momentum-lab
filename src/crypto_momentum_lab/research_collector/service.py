@@ -24,6 +24,7 @@ from crypto_momentum_lab.market_data.hub import (
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     RuntimeStateCursor,
 )
+from crypto_momentum_lab.research_collector.health import CollectorHealthStore
 from crypto_momentum_lab.research_collector.models import (
     CollectionBatch,
     CollectionReceipt,
@@ -117,6 +118,8 @@ class ResearchStateCollector:
         self._initialized = False
         self._capacity_snapshot: CapacitySnapshot | None = None
         self._last_capacity_refresh = 0.0
+        self._health_store = CollectorHealthStore(config.root, config.environment)
+        self._health_store.reset()
 
     @property
     def config(self) -> CollectorConfig:
@@ -286,6 +289,7 @@ class ResearchStateCollector:
         if self._stopping:
             return
         self._stopping = True
+        self._publish_health()
         stop = getattr(self._source, "stop", None)
         if callable(stop):
             stop()
@@ -413,6 +417,7 @@ class ResearchStateCollector:
                 "research_collector_paused_by_capacity",
                 environment=self._config.environment,
             )
+        self._publish_health()
         while not self._stopping:
             snapshot = await asyncio.to_thread(self._capacity.snapshot)
             self._capacity_snapshot = snapshot
@@ -505,6 +510,44 @@ class ResearchStateCollector:
             updated_at=datetime.now(UTC),
         )
         await asyncio.to_thread(self._checkpoint_store.save, self._checkpoint)
+        self._publish_health()
+
+    def _publish_health(self) -> None:
+        checkpoint = self._checkpoint
+        snapshot = self._capacity_snapshot
+        self._health_store.save(
+            {
+                "environment": self._config.environment,
+                "ready": not self._paused
+                and not self._stopping
+                and snapshot is not None,
+                "last_sequence": None
+                if checkpoint is None
+                else checkpoint.last_sequence,
+                "updated_at": (
+                    None
+                    if checkpoint is None or checkpoint.updated_at is None
+                    else checkpoint.updated_at.isoformat()
+                ),
+                "capacity_updated_at": (
+                    None
+                    if snapshot is None
+                    else (
+                        datetime.now(UTC)
+                        - timedelta(
+                            seconds=time.monotonic() - self._last_capacity_refresh
+                        )
+                    ).isoformat()
+                ),
+                "capacity_state": None if snapshot is None else snapshot.state.value,
+                "collector_bytes": None
+                if snapshot is None
+                else snapshot.collector_bytes,
+                "disk_free_bytes": None
+                if snapshot is None
+                else snapshot.disk_free_bytes,
+            }
+        )
 
     def _durable_sequence(self) -> int | None:
         checkpoint = self._require_checkpoint()
@@ -614,7 +657,11 @@ class ResearchStateCollector:
             self._last_received_bucket = latest
 
     def _ensure_capacity(self) -> CapacitySnapshot:
-        snapshot = self._capacity.ensure_writable()
+        try:
+            snapshot = self._capacity.ensure_writable()
+        except CollectorPaused:
+            self._health_store.reset()
+            raise
         self._capacity_snapshot = snapshot
         self._last_capacity_refresh = time.monotonic()
         if snapshot.state is CapacityState.WARNING:
