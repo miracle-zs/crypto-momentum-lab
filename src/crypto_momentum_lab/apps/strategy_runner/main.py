@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import nullcontext
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -1445,11 +1446,9 @@ def paper_live_pair_command(
         forward_horizon_buckets=(1,),
     )
     candidate_notional_decimal = Decimal(candidate_notional)
-    fixed_identity = (
-        None
-        if fixed_run_id is None
-        else build_runtime_identity_for_cli(
-            run_id=fixed_run_id,
+    def identity_for(run_id: str | None) -> StrategyRunIdentity | None:
+        return _paired_runtime_identity(
+            run_id,
             strategy_name=strategy_name,
             generated_at=created_at,
             source_description=source.description,
@@ -1461,105 +1460,14 @@ def paper_live_pair_command(
                 order_flow_min_aggressive_imbalance_decimal
             ),
         )
-    )
-    candle_identity = build_runtime_identity_for_cli(
-        run_id=candle_run_id,
-        strategy_name=strategy_name,
-        generated_at=created_at,
-        source_description=source.description,
-        compression_breakout=compression_breakout,
-        candidate_notional=candidate_notional_decimal,
-        candidate_ttl_buckets=candidate_ttl_buckets,
-        signal_interval_seconds=signal_interval_seconds,
-        order_flow_min_aggressive_imbalance=(
-            order_flow_min_aggressive_imbalance_decimal
-        ),
-    )
-    third_identity = (
-        None
-        if third_run_id is None
-        else build_runtime_identity_for_cli(
-            run_id=third_run_id,
-            strategy_name=strategy_name,
-            generated_at=created_at,
-            source_description=source.description,
-            compression_breakout=compression_breakout,
-            candidate_notional=candidate_notional_decimal,
-            candidate_ttl_buckets=candidate_ttl_buckets,
-            signal_interval_seconds=signal_interval_seconds,
-            order_flow_min_aggressive_imbalance=(
-                order_flow_min_aggressive_imbalance_decimal
-            ),
-        )
-    )
-    fourth_identity = (
-        None
-        if fourth_run_id is None
-        else build_runtime_identity_for_cli(
-            run_id=fourth_run_id,
-            strategy_name=strategy_name,
-            generated_at=created_at,
-            source_description=source.description,
-            compression_breakout=compression_breakout,
-            candidate_notional=candidate_notional_decimal,
-            candidate_ttl_buckets=candidate_ttl_buckets,
-            signal_interval_seconds=signal_interval_seconds,
-            order_flow_min_aggressive_imbalance=(
-                order_flow_min_aggressive_imbalance_decimal
-            ),
-        )
-    )
-    fifth_identity = (
-        None
-        if fifth_run_id is None
-        else build_runtime_identity_for_cli(
-            run_id=fifth_run_id,
-            strategy_name=strategy_name,
-            generated_at=created_at,
-            source_description=source.description,
-            compression_breakout=compression_breakout,
-            candidate_notional=candidate_notional_decimal,
-            candidate_ttl_buckets=candidate_ttl_buckets,
-            signal_interval_seconds=signal_interval_seconds,
-            order_flow_min_aggressive_imbalance=(
-                order_flow_min_aggressive_imbalance_decimal
-            ),
-        )
-    )
-    sixth_identity = (
-        None
-        if sixth_run_id is None
-        else build_runtime_identity_for_cli(
-            run_id=sixth_run_id,
-            strategy_name=strategy_name,
-            generated_at=created_at,
-            source_description=source.description,
-            compression_breakout=compression_breakout,
-            candidate_notional=candidate_notional_decimal,
-            candidate_ttl_buckets=candidate_ttl_buckets,
-            signal_interval_seconds=signal_interval_seconds,
-            order_flow_min_aggressive_imbalance=(
-                order_flow_min_aggressive_imbalance_decimal
-            ),
-        )
-    )
-    seventh_identity = (
-        None
-        if seventh_run_id is None
-        else build_runtime_identity_for_cli(
-            run_id=seventh_run_id,
-            strategy_name=strategy_name,
-            generated_at=created_at,
-            source_description=source.description,
-            compression_breakout=compression_breakout,
-            candidate_notional=candidate_notional_decimal,
-            candidate_ttl_buckets=candidate_ttl_buckets,
-            signal_interval_seconds=signal_interval_seconds,
-            order_flow_min_aggressive_imbalance=(
-                order_flow_min_aggressive_imbalance_decimal
-            ),
-        )
-    )
+
+    fixed_identity = identity_for(fixed_run_id)
+    candle_identity = identity_for(candle_run_id)
+    third_identity = identity_for(third_run_id)
+    fourth_identity = identity_for(fourth_run_id)
+    fifth_identity = identity_for(fifth_run_id)
+    sixth_identity = identity_for(sixth_run_id)
+    seventh_identity = identity_for(seventh_run_id)
     strategy = build_runtime_strategy_for_cli(
         strategy_name=strategy_name,
         run_id=fixed_run_id or candle_run_id,
@@ -1575,95 +1483,59 @@ def paper_live_pair_command(
         identity=fixed_identity or candle_identity,
     )
     repository = build_paper_daemon_repository(resolved_database_url)
-    candle_config = PaperLiveDaemonConfig(
-        run_id=candle_run_id,
-        strategy_name=strategy_name,
-        environment=environment,
-        checkpoint_every_states=checkpoint_every_states,
-        checkpoint_every_seconds=checkpoint_every_seconds,
-        checkpoint_phase_seconds=checkpoint_phase_seconds,
-        max_market_state_age_seconds=max_market_state_age_seconds,
-        run_identity=candle_identity,
-        source_description=source.description,
-        execution=ReplayExecutionConfig(
-            latency_buckets=1,
-            require_market_quote=require_market_quote,
-        ),
-        portfolio=PaperExitConfig(
-            exit_mode=PaperExitMode.CANDLE_15M,
-            initial_balance=Decimal(paper_initial_balance),
-            max_holding_buckets=candle_max_holding_buckets,
-            require_executable_quote=require_market_quote,
-            candle_grace_bars=candle_grace_bars,
-            candle_grace_profit_pct=Decimal(candle_grace_profit_pct),
-        ),
-        entry_filter=_entry_filter_config(long_only=candle_entry_long_only),
-    )
-    accounts = []
+    account_specs: list[_PairedAccountSpec] = []
     if fixed_run_id is not None:
         if fixed_identity is None:
             raise AssertionError("fixed identity must be present")
-        accounts.append(
-            PairedPaperLiveAccount(
-                repository,
-                repository,
-                PaperLiveDaemonConfig(
-                    run_id=fixed_run_id,
-                    strategy_name=strategy_name,
-                    environment=environment,
-                    checkpoint_every_states=checkpoint_every_states,
-                    checkpoint_every_seconds=checkpoint_every_seconds,
-                    checkpoint_phase_seconds=checkpoint_phase_seconds,
-                    max_market_state_age_seconds=max_market_state_age_seconds,
-                    run_identity=fixed_identity,
-                    source_description=source.description,
-                    execution=ReplayExecutionConfig(
-                        latency_buckets=1,
-                        require_market_quote=require_market_quote,
-                    ),
-                    portfolio=PaperExitConfig(
-                        exit_mode=PaperExitMode.FIXED,
-                        initial_balance=Decimal(paper_initial_balance),
-                        take_profit_pct=Decimal(fixed_take_profit_pct),
-                        stop_loss_pct=Decimal(fixed_stop_loss_pct),
-                        max_holding_buckets=fixed_max_holding_buckets,
-                        require_executable_quote=require_market_quote,
-                    ),
+        account_specs.append(
+            _PairedAccountSpec(
+                run_id=fixed_run_id,
+                run_identity=fixed_identity,
+                portfolio=PaperExitConfig(
+                    exit_mode=PaperExitMode.FIXED,
+                    initial_balance=Decimal(paper_initial_balance),
+                    take_profit_pct=Decimal(fixed_take_profit_pct),
+                    stop_loss_pct=Decimal(fixed_stop_loss_pct),
+                    max_holding_buckets=fixed_max_holding_buckets,
+                    require_executable_quote=require_market_quote,
                 ),
             )
         )
-    accounts.append(PairedPaperLiveAccount(repository, repository, candle_config))
+    if candle_identity is None:
+        raise AssertionError("candle identity must be present")
+    account_specs.append(
+        _PairedAccountSpec(
+            run_id=candle_run_id,
+            run_identity=candle_identity,
+            portfolio=PaperExitConfig(
+                exit_mode=PaperExitMode.CANDLE_15M,
+                initial_balance=Decimal(paper_initial_balance),
+                max_holding_buckets=candle_max_holding_buckets,
+                require_executable_quote=require_market_quote,
+                candle_grace_bars=candle_grace_bars,
+                candle_grace_profit_pct=Decimal(candle_grace_profit_pct),
+            ),
+            entry_filter=_entry_filter_config(
+                long_only=candle_entry_long_only
+            ),
+        )
+    )
     if third_run_id is not None:
         if third_identity is None:
             raise AssertionError("third identity must be present")
-        accounts.append(
-            PairedPaperLiveAccount(
-                repository,
-                repository,
-                PaperLiveDaemonConfig(
-                    run_id=third_run_id,
-                    strategy_name=strategy_name,
-                    environment=environment,
-                    checkpoint_every_states=checkpoint_every_states,
-                    checkpoint_every_seconds=checkpoint_every_seconds,
-                    checkpoint_phase_seconds=checkpoint_phase_seconds,
-                    max_market_state_age_seconds=max_market_state_age_seconds,
-                    run_identity=third_identity,
-                    source_description=source.description,
-                    execution=ReplayExecutionConfig(
-                        latency_buckets=1,
-                        require_market_quote=require_market_quote,
+        account_specs.append(
+            _PairedAccountSpec(
+                run_id=third_run_id,
+                run_identity=third_identity,
+                portfolio=PaperExitConfig(
+                    exit_mode=PaperExitMode.CANDLE_15M,
+                    initial_balance=Decimal(paper_initial_balance),
+                    max_holding_buckets=candle_max_holding_buckets,
+                    candle_minimum_holding_buckets=(
+                        third_candle_minimum_holding_buckets
                     ),
-                    portfolio=PaperExitConfig(
-                        exit_mode=PaperExitMode.CANDLE_15M,
-                        initial_balance=Decimal(paper_initial_balance),
-                        max_holding_buckets=candle_max_holding_buckets,
-                        candle_minimum_holding_buckets=(
-                            third_candle_minimum_holding_buckets
-                        ),
-                        candle_confirmation_count=third_candle_confirmation_count,
-                        require_executable_quote=require_market_quote,
-                    ),
+                    candle_confirmation_count=third_candle_confirmation_count,
+                    require_executable_quote=require_market_quote,
                 ),
             )
         )
@@ -1722,39 +1594,39 @@ def paper_live_pair_command(
             continue
         if filtered_identity is None:
             raise AssertionError(f"{ordinal} identity must be present")
-        accounts.append(
-            PairedPaperLiveAccount(
-                repository,
-                repository,
-                PaperLiveDaemonConfig(
-                    run_id=filtered_run_id,
-                    strategy_name=strategy_name,
-                    environment=environment,
-                    checkpoint_every_states=checkpoint_every_states,
-                    checkpoint_every_seconds=checkpoint_every_seconds,
-                    checkpoint_phase_seconds=checkpoint_phase_seconds,
-                    max_market_state_age_seconds=max_market_state_age_seconds,
-                    run_identity=filtered_identity,
-                    source_description=source.description,
-                    execution=ReplayExecutionConfig(
-                        latency_buckets=1,
-                        require_market_quote=require_market_quote,
-                    ),
-                    portfolio=PaperExitConfig(
-                        exit_mode=PaperExitMode.CANDLE_15M,
-                        initial_balance=Decimal(paper_initial_balance),
-                        max_holding_buckets=candle_max_holding_buckets,
-                        require_executable_quote=require_market_quote,
-                        candle_grace_bars=grace_bars,
-                        candle_grace_profit_pct=Decimal(grace_profit_pct),
-                    ),
-                    entry_filter=_entry_filter_config(
-                        long_only=long_only,
-                        max_abs_aggressive_imbalance=max_abs_imbalance,
-                    ),
+        account_specs.append(
+            _PairedAccountSpec(
+                run_id=filtered_run_id,
+                run_identity=filtered_identity,
+                portfolio=PaperExitConfig(
+                    exit_mode=PaperExitMode.CANDLE_15M,
+                    initial_balance=Decimal(paper_initial_balance),
+                    max_holding_buckets=candle_max_holding_buckets,
+                    require_executable_quote=require_market_quote,
+                    candle_grace_bars=grace_bars,
+                    candle_grace_profit_pct=Decimal(grace_profit_pct),
+                ),
+                entry_filter=_entry_filter_config(
+                    long_only=long_only,
+                    max_abs_aggressive_imbalance=max_abs_imbalance,
                 ),
             )
         )
+    accounts = tuple(
+        _build_paired_account(
+            repository,
+            spec,
+            strategy_name=strategy_name,
+            environment=environment,
+            checkpoint_every_states=checkpoint_every_states,
+            checkpoint_every_seconds=checkpoint_every_seconds,
+            checkpoint_phase_seconds=checkpoint_phase_seconds,
+            max_market_state_age_seconds=max_market_state_age_seconds,
+            source_description=source.description,
+            require_market_quote=require_market_quote,
+        )
+        for spec in account_specs
+    )
     with BinanceRestClosedCandle15mSource(binance_base_url) as candle_source:
         if entry_positive_gainer_top_count is None:
             entry_symbol_loader = source.load_active_symbols_at
@@ -1852,6 +1724,81 @@ def build_paper_daemon_repository(database_url: str) -> PostgresPaperDaemonRepos
     engine = create_async_database_engine(database_url, pooled=False)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     return PostgresPaperDaemonRepository(factory)
+
+
+@dataclass(frozen=True, slots=True)
+class _PairedAccountSpec:
+    run_id: str
+    run_identity: StrategyRunIdentity
+    portfolio: PaperExitConfig
+    entry_filter: PaperEntryFilterConfig = field(
+        default_factory=PaperEntryFilterConfig
+    )
+
+
+def _paired_runtime_identity(
+    run_id: str | None,
+    *,
+    strategy_name: str,
+    generated_at: datetime,
+    source_description: str,
+    compression_breakout: CompressionBreakoutConfig,
+    candidate_notional: Decimal,
+    candidate_ttl_buckets: int,
+    signal_interval_seconds: int,
+    order_flow_min_aggressive_imbalance: Decimal | None,
+) -> StrategyRunIdentity | None:
+    if run_id is None:
+        return None
+    return build_runtime_identity_for_cli(
+        run_id=run_id,
+        strategy_name=strategy_name,
+        generated_at=generated_at,
+        source_description=source_description,
+        compression_breakout=compression_breakout,
+        candidate_notional=candidate_notional,
+        candidate_ttl_buckets=candidate_ttl_buckets,
+        signal_interval_seconds=signal_interval_seconds,
+        order_flow_min_aggressive_imbalance=(
+            order_flow_min_aggressive_imbalance
+        ),
+    )
+
+
+def _build_paired_account(
+    repository: object,
+    spec: _PairedAccountSpec,
+    *,
+    strategy_name: str,
+    environment: str,
+    checkpoint_every_states: int,
+    checkpoint_every_seconds: float,
+    checkpoint_phase_seconds: float,
+    max_market_state_age_seconds: float,
+    source_description: str,
+    require_market_quote: bool,
+) -> PairedPaperLiveAccount:
+    return PairedPaperLiveAccount(
+        repository,
+        repository,
+        PaperLiveDaemonConfig(
+            run_id=spec.run_id,
+            strategy_name=strategy_name,
+            environment=environment,
+            checkpoint_every_states=checkpoint_every_states,
+            checkpoint_every_seconds=checkpoint_every_seconds,
+            checkpoint_phase_seconds=checkpoint_phase_seconds,
+            max_market_state_age_seconds=max_market_state_age_seconds,
+            run_identity=spec.run_identity,
+            source_description=source_description,
+            execution=ReplayExecutionConfig(
+                latency_buckets=1,
+                require_market_quote=require_market_quote,
+            ),
+            portfolio=spec.portfolio,
+            entry_filter=spec.entry_filter,
+        ),
+    )
 
 
 def _entry_filter_config(
