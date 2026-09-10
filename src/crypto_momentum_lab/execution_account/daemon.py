@@ -31,6 +31,7 @@ from crypto_momentum_lab.execution_account.user_data_sync import (
 log = structlog.get_logger(__name__)
 
 _QueueItem = TypeVar("_QueueItem")
+_MISSING_FILL_RECONNECT_RETRY_SECONDS = 60.0
 
 
 class AccountSyncCycle(Protocol):
@@ -299,6 +300,7 @@ class UserDataAccountSyncDaemon:
         self._state_lock = asyncio.Lock()
         self._rest_sync_lock = asyncio.Lock()
         self._pending_missing_fill_keys: dict[FillKey, datetime] = {}
+        self._missing_fill_reconnect_requested_at: dict[FillKey, datetime] = {}
         self._event_queue: asyncio.Queue[BinanceUserDataEvent] | None = None
         self._persistence_queue: asyncio.Queue[
             _PendingUserDataPersistence | None
@@ -1020,7 +1022,24 @@ class UserDataAccountSyncDaemon:
                     pending_after[fill_key] = now
 
             reconnect_requested = False
-            if still_missing:
+            pending_after.update(
+                {
+                    fill_key: pending_before[fill_key]
+                    for fill_key in still_missing
+                }
+            )
+            reconnect_candidates = {
+                fill_key
+                for fill_key in still_missing
+                if (
+                    fill_key
+                    not in self._missing_fill_reconnect_requested_at
+                    or now
+                    - self._missing_fill_reconnect_requested_at[fill_key]
+                    >= timedelta(seconds=_MISSING_FILL_RECONNECT_RETRY_SECONDS)
+                )
+            }
+            if reconnect_candidates:
                 request_reconnect = getattr(
                     self._stream,
                     "request_reconnect",
@@ -1034,14 +1053,26 @@ class UserDataAccountSyncDaemon:
                         if inspect.isawaitable(reconnect_result):
                             await reconnect_result
                         reconnect_requested = True
+                        self._missing_fill_reconnect_requested_at.update(
+                            {
+                                fill_key: now
+                                for fill_key in reconnect_candidates
+                            }
+                        )
                     except Exception as error:
                         self._report_error(error)
                         pending_after.update(
                             {
                                 fill_key: pending_before[fill_key]
-                                for fill_key in still_missing
+                                for fill_key in reconnect_candidates
                             }
                         )
+                        for fill_key in reconnect_candidates:
+                            self._missing_fill_reconnect_requested_at.pop(
+                                fill_key,
+                                None,
+                            )
+            if still_missing:
                 log.warning(
                     "binance_user_data_stream_missing_fill_events",
                     rest_new_fill_count=len(result.new_fill_keys),
@@ -1050,8 +1081,18 @@ class UserDataAccountSyncDaemon:
                     pending_fill_count=len(pending_after),
                     parsed_event_count=stream_event_count,
                     reconnect_requested=reconnect_requested,
+                    reconnect_deferred_count=(
+                        len(still_missing) - len(reconnect_candidates)
+                    ),
                 )
             self._pending_missing_fill_keys = pending_after
+            self._missing_fill_reconnect_requested_at = {
+                fill_key: requested_at
+                for fill_key, requested_at in (
+                    self._missing_fill_reconnect_requested_at.items()
+                )
+                if fill_key in pending_after
+            }
 
         last_event_received_at = getattr(
             metrics,

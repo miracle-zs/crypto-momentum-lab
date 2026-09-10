@@ -98,6 +98,13 @@ async def test_daemon_reconnects_after_a_fill_key_stays_unmatched() -> None:
         "rest_reconciliation_found_unmatched_fill_keys"
     ]
 
+    await daemon._inspect_reconciliation(_result(fill_count=12))
+
+    assert stream.reconnect_reasons == [
+        "rest_reconciliation_found_unmatched_fill_keys"
+    ]
+    assert fill_key in daemon._pending_missing_fill_keys
+
 
 async def test_daemon_accepts_a_fill_key_seen_by_the_stream() -> None:
     stream = WatchdogStream()
