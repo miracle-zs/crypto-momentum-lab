@@ -259,9 +259,14 @@ class MarketStateHub:
             replay_buffer.append((sequence, message))
             self._published_batch_count += 1
             self._latest_published_at = published_at
-            self._latest_bucket_start = max(
+            batch_latest_bucket_start = max(
                 state.bucket_start for state in environment_states
             )
+            if (
+                self._latest_bucket_start is None
+                or batch_latest_bucket_start > self._latest_bucket_start
+            ):
+                self._latest_bucket_start = batch_latest_bucket_start
             async with self._subscriber_lock:
                 subscribers = tuple(
                     item

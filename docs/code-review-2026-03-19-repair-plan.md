@@ -16,7 +16,7 @@
 - P1 #8–#9、#11–#12：官方 candle 源退避、成对 daemon 的 EMA context、paper gap reset、paper-live latency 默认值。
 - P1 #14–#19：WebSocket 实时旁路有界异步化、durable 背压超时、磁盘保护接线、manifest journal 回放、aggTrade 恢复游标、archive 坏 writer 隔离。
 - P1 #21–#23：portfolio 批量查询与 commit 后缓存、connection pool 关闭锁、quality event 批量写入。
-- P2 #26、#27、#29、#33、#34：grace 平仓遵守最短持仓时间；EMA 入场过滤按 LONG/SHORT 选择 ask/bid；LIMIT 价格按最终交易所 BUY/SELL 方向向外量化；删除不可达 URL 校验；重复 client order 冲突会回滚整笔 prepare 事务。
+- P2 #26、#27、#29、#31、#33、#34：grace 平仓遵守最短持仓时间；EMA 入场过滤按 LONG/SHORT 选择 ask/bid；LIMIT 价格按最终交易所 BUY/SELL 方向向外量化；hub 进度指标保持全局历史最大值；删除不可达 URL 校验；重复 client order 冲突会回滚整笔 prepare 事务。
 - P2 #24（第一阶段）：本地 15m 聚合器对不完整窗口、缺分钟和跳过窗口生成有界 gap 事件；乱序到达时按第 0/14 分钟修正 15m 开收盘，paper daemon 输出告警，仍拒绝合成残缺 K 线。权威官方 candle source 的历史补取继续作为部署配置项。
 - P2 #25（第一阶段）：paper position 持久化 `last_candle_end` 游标，重启后按游标顺序补取并逐根处理官方闭合 candle；多根确认历史不再只依赖当前最近一根。回补仍是 paper 模型事件，使用官方 candle 的结束时间和收盘价，不宣称为宕机期间真实交易所成交。
 - P2 #28（第一阶段）：陈旧 paper market state 现在按 symbol 只告警一次，并在恢复新鲜 state 时记录恢复事件；陈旧期间明确跳过策略和持仓标记，退出延后到新鲜行情，避免用陈旧价格模拟成交。PostgreSQL source 的 idle timeout 也会记录结构化 error 并退出，交由 Compose `restart: unless-stopped` 拉起新实例；恢复后的退出仍以新鲜 state/candle 为准。

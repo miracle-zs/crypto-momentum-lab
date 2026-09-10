@@ -102,6 +102,17 @@ async def test_market_state_hub_replay_window_detects_unrecoverable_gap() -> Non
     assert messages == ()
 
 
+async def test_market_state_hub_metrics_keep_latest_bucket_start_monotonic() -> None:
+    hub = MarketStateHub()
+    newer = fixture_state("BTCUSDT", 2)
+    older = fixture_state("BTCUSDT", 1)
+
+    await hub.publish((newer,))
+    await hub.publish((older,))
+
+    assert hub.metrics.latest_bucket_start == newer.bucket_start
+
+
 async def test_batch_source_can_fail_closed_with_replay_metadata(monkeypatch) -> None:
     messages = [
         json.dumps(
