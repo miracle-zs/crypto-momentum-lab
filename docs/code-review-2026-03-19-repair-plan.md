@@ -19,7 +19,7 @@
 - P2 #26、#27、#29、#33、#34：grace 平仓遵守最短持仓时间；EMA 入场过滤按 LONG/SHORT 选择 ask/bid；LIMIT 价格按最终交易所 BUY/SELL 方向向外量化；删除不可达 URL 校验；重复 client order 冲突会回滚整笔 prepare 事务。
 - P2 #24（第一阶段）：本地 15m 聚合器对不完整窗口、缺分钟和跳过窗口生成有界 gap 事件；paper daemon 输出告警，仍拒绝合成残缺 K 线。权威官方 candle source 的历史补取继续作为部署配置项。
 - P2 #25（第一阶段）：paper position 持久化 `last_candle_end` 游标，重启后按游标顺序补取并逐根处理官方闭合 candle；多根确认历史不再只依赖当前最近一根。回补仍是 paper 模型事件，使用官方 candle 的结束时间和收盘价，不宣称为宕机期间真实交易所成交。
-- P2 #28（第一阶段）：陈旧 paper market state 现在按 symbol 只告警一次，并在恢复新鲜 state 时记录恢复事件；陈旧期间明确跳过策略和持仓标记，退出延后到新鲜行情，避免用陈旧价格模拟成交。无行情输入本身的独立 watchdog 和恢复后的即时退出规则仍待补齐。
+- P2 #28（第一阶段）：陈旧 paper market state 现在按 symbol 只告警一次，并在恢复新鲜 state 时记录恢复事件；陈旧期间明确跳过策略和持仓标记，退出延后到新鲜行情，避免用陈旧价格模拟成交。PostgreSQL source 的 idle timeout 也会记录结构化 error 并退出，交由 Compose `restart: unless-stopped` 拉起新实例；恢复后的退出仍以新鲜 state/candle 为准。
 - P2 #32（第一阶段）：REST 发现但 WS 尚未出现的 fill key 保留为待核对状态；重连请求成功只记录请求时间，按 60 秒节流重试，直到 WS 指标真正看到该 key，避免把“请求返回”误判为恢复或形成重连风暴。
 - D1–D3、D5、D9：按需选择 live compose、修正 strategies 路径、多账户 ops monitor、live position label 预检、补齐 gainer10 的部署断言。
 
@@ -29,7 +29,7 @@
 
 1. **策略一致性**：按账户提交 cooldown；为批处理 paper 增加 position/exit 结果，建立与 daemon 的边界对照测试。
 2. **数据库资源隔离**：为 runtime state、quality/manifest、maintenance 查询定义并发预算，先以观测数据确认连接池大小，再拆 maintenance pool。
-3. **P2 正确性收敛**：继续处理 24–34，优先 #28 的无行情 watchdog/恢复退出规则与剩余边界；#24 的本地缺口可观测性、#25 的游标化官方 candle 顺序回补、#28 的陈旧状态告警、#32 的 fill 待核对与重连节流、#26/#27/#29/#33/#34 已在第一批收敛。
+3. **P2 正确性收敛**：继续处理 24–34，优先剩余边界；#24 的本地缺口可观测性、#25 的游标化官方 candle 顺序回补、#28 的陈旧状态告警与 source idle watchdog、#32 的 fill 待核对与重连节流、#26/#27/#29/#33/#34 已在第一批收敛。
 4. **架构收敛**：先抽取无业务语义差异的序列化/解析 helper；A2、A4、A6、A7 在补齐 round-trip 和调用方测试后再重构，暂不做大规模 compose 或入口重写。
 5. **部署条件项**：确认真实 nginx 上层鉴权和数据库备份/恢复演练证据；若证据不足，再分别补 health probe 兼容的应用鉴权和可演练的备份作业。
 

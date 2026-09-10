@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Protocol
 
 import asyncpg  # type: ignore[import-untyped]
+import structlog
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.persistence.postgres.repository import (
@@ -19,6 +20,7 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
 
 _MAX_IDLE_POLL_INTERVAL_SECONDS = 3.0
 _NOTIFICATION_RETRY_SECONDS = 5.0
+log = structlog.get_logger(__name__)
 
 
 class RuntimeStateLoader(Protocol):
@@ -156,6 +158,20 @@ class PostgresPaperMarketStateSource:
 
                 elapsed_idle = time.monotonic() - idle_started_at
                 if elapsed_idle >= self.config.idle_timeout_seconds:
+                    log.error(
+                        "paper_market_state_source_idle_timeout",
+                        environment=self.config.environment,
+                        idle_timeout_seconds=self.config.idle_timeout_seconds,
+                        elapsed_idle_seconds=elapsed_idle,
+                        yielded_state_count=yielded,
+                        cursor_bucket_start=(
+                            None
+                            if cursor.bucket_start is None
+                            else cursor.bucket_start.isoformat()
+                        ),
+                        cursor_symbol=cursor.symbol,
+                        action="exit_for_container_restart",
+                    )
                     return
                 sleep_seconds = min(
                     idle_poll_interval,

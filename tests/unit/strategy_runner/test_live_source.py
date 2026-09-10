@@ -35,6 +35,14 @@ class FakeLoader:
         pass
 
 
+class RecordingLogger:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, dict[str, object]]] = []
+
+    def error(self, event: str, **kwargs: object) -> None:
+        self.events.append(("error", event, kwargs))
+
+
 class WakeupLoader(FakeLoader):
     def __init__(self, batches) -> None:
         super().__init__(batches)
@@ -148,8 +156,10 @@ def test_postgres_paper_source_yields_in_order_and_advances_cursor() -> None:
     )
 
 
-def test_postgres_paper_source_stops_after_idle_timeout() -> None:
+def test_postgres_paper_source_stops_after_idle_timeout(monkeypatch) -> None:
     loader = FakeLoader([()])
+    logger = RecordingLogger()
+    monkeypatch.setattr(live_source, "log", logger)
     source = PostgresPaperMarketStateSource(
         loader=loader,
         config=PaperLiveSourceConfig(
@@ -169,6 +179,21 @@ def test_postgres_paper_source_stops_after_idle_timeout() -> None:
             symbol="",
         )
     ]
+    assert len(logger.events) == 1
+    level, event, fields = logger.events[0]
+    assert (level, event) == (
+        "error",
+        "paper_market_state_source_idle_timeout",
+    )
+    assert fields["environment"] == "research"
+    assert fields["idle_timeout_seconds"] == 0
+    assert fields["elapsed_idle_seconds"] >= 0
+    assert fields["yielded_state_count"] == 0
+    assert fields["cursor_bucket_start"] == datetime(
+        2026, 7, 3, 0, 0, tzinfo=UTC
+    ).isoformat()
+    assert fields["cursor_symbol"] == ""
+    assert fields["action"] == "exit_for_container_restart"
 
 
 def test_postgres_paper_source_backs_off_only_while_idle(monkeypatch) -> None:
