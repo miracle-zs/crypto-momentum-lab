@@ -1,6 +1,6 @@
 # P2 与架构条目逐项复核
 
-复核日期：2026-09-10。对象：docs/code-review-2026-03-19.md。依据为当前工作区代码及配置，不代表报告日期对应的历史版本或线上部署状态。本轮更新 #24–#34 的验收记录并包含对应的本地修复。
+复核日期：2026-09-10。对象：docs/code-review-2026-03-19.md。依据为当前工作区代码及配置，不代表报告日期对应的历史版本或线上部署状态。本轮更新 #24–#34、A2 的验收记录并包含对应的本地修复。
 
 “成立”表示代码事实及问题方向有依据；“部分成立”表示事实存在，但影响、适用范围或建议需要修正；“不作为缺陷”表示属于有意设计或原结论证据不足。结构重复不等于运行错误。
 
@@ -39,7 +39,7 @@
 | 编号 | 结论 | 证据与处理意见 |
 |---|---|---|
 | A1 | 已完成第一阶段 | 两个未被 Compose 使用的 PostgreSQL readiness CLI（SQLAlchemy 与 psycopg）及其测试已删除；Compose 继续只使用不启动 Python、不连接数据库的 `cml-local-healthcheck`。同时移除只供旧 DB 探针读取的 `CML_HEALTHCHECK_RUN_ID(S)` 环境变量。research_collector 的独立健康检查保留，因为它检查的是 collector 自己的状态文件。 |
-| A2 | 成立，值得重构 | [live CLI](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/live_rollout/main.py:25)与[live postgres runtime](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/live_rollout/postgres_runtime.py:12)导入 shadow CLI 的查询私有函数，形成下层依赖 app 入口的耦合。下沉账户/风险/规则查询服务有明确收益。不过导入的是读取 helper，不能推导 live 因而获得 shadow 的“抑制写”语义。 |
+| A2 | 已完成第一阶段 | [live CLI](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/live_rollout/main.py:170)与[live postgres runtime](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/live_rollout/postgres_runtime.py:57)不再导入 shadow CLI 私有函数；账户状态、风险配置和交易规则查询已下沉到[`runtime_context.py`](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/persistence/postgres/runtime_context.py:1)。shadow 仍可复用同一持久化查询原语，但 live 不会因此获得 shadow 的写入/抑制语义。后续若需更深领域封装可另行安排，不属于当前耦合缺陷。 |
 | A3 | 已完成第一阶段 | [orderflow](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategies/order_flow_impulse/runtime.py:49)与[liquidation](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategies/liquidation_cascade/runtime.py:46)现在组合使用[StrategyRuntimeState](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategies/runtime_state.py:17)，共用 rolling buffer、warmup/cooldown、reset、checkpoint 恢复和事件前状态机；策略仍各自提供 required_data、事件发现和 signal/candidate 特征构造。payload 键仍由策略显式指定并保持 `market_state_buffers` 兼容；compression 的 `signal_buffers` 与 pending_signal_states 继续独立，不做基类或 checkpoint 迁移。 |
 | A4 | 成立，收益明确 | [pair CLI](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/strategy_runner/main.py:1440)确实七次构造 identity，并有序数化参数和多段 account config。适合内部先引入账户列表/统一构造器，再为新配置格式保留旧 CLI 转换层。不是必须一次性破坏部署命令。 |
 | A5a | 已完成第一阶段 | 对 YAML 解析后核对的命令重复已收敛：base 与附加账户 compose 各自用一个 `x-execution-account-command` 序列锚点，账户名移到显式 `CML_ACCOUNT_LABEL` 环境变量，CLI `--account-label` 仍保留并优先；live strategy 的 profile/top-N 参数改由既有环境解析器读取，账户、会话、hub、风险和退出差异仍显式保留。这样减少了可安全消除的复制，暂不引入跨文件生成器或无边界的 env 参数化。 |
