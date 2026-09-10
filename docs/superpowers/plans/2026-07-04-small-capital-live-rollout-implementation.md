@@ -213,14 +213,12 @@ git commit -m "feat: add small-capital live session"
 - Modify: `src/crypto_momentum_lab/execution_account/orders/state_machine.py`
 - Create: `tests/unit/live_rollout/test_rollback.py`
 - Create: `tests/unit/live_rollout/test_commands.py`
-- Create: `tests/unit/execution_account/test_cancel_controls.py`
 
 **Step 1: Write failing tests**
 
 Write tests named:
 
 - `test_disable_new_entries_allows_reduce_only_orders`: verifies draining blocks entries but allows reduce-only exits.
-- `test_cancel_all_requires_operator_command_record`: verifies cancel calls are rejected until a command record exists.
 - `test_cancel_non_reduce_only_orders_uses_idempotent_client_ids`: verifies repeated cancel commands do not duplicate state transitions.
 - `test_emergency_flatten_requires_explicit_confirmation`: verifies flatten cannot run without configured confirmation text.
 - `test_reconcile_until_flat_before_releasing_lease`: verifies lease release is rejected while positions remain.
@@ -230,7 +228,7 @@ Write tests named:
 Run:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/unit/live_rollout/test_rollback.py tests/unit/live_rollout/test_commands.py tests/unit/execution_account/test_cancel_controls.py -v
+PYTHONPATH=src .venv/bin/python -m pytest tests/unit/live_rollout/test_rollback.py tests/unit/live_rollout/test_commands.py -v
 ```
 
 Expected: FAIL because rollback command records and cancel controls do not exist.
@@ -242,7 +240,6 @@ Persist command records for:
 - global halt;
 - disable new entries;
 - strategy drain;
-- cancel all open orders;
 - emergency flatten;
 - release lease after flat reconciliation.
 
@@ -264,7 +261,7 @@ Rollback order:
 Run:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/unit/live_rollout/test_rollback.py tests/unit/live_rollout/test_commands.py tests/unit/execution_account/test_cancel_controls.py -v
+PYTHONPATH=src .venv/bin/python -m pytest tests/unit/live_rollout/test_rollback.py tests/unit/live_rollout/test_commands.py -v
 .venv/bin/ruff check src/crypto_momentum_lab/live_rollout src/crypto_momentum_lab/execution_account tests/unit/live_rollout tests/unit/execution_account
 .venv/bin/mypy src
 ```

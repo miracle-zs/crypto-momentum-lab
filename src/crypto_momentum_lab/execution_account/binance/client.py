@@ -43,7 +43,6 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderPreSubmissionError,
 )
 from crypto_momentum_lab.live_rollout.commands import (
-    CANCEL_ALL_CONFIRMATION,
     EMERGENCY_FLATTEN_CONFIRMATION,
     require_authorized_command,
 )
@@ -1078,41 +1077,6 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 ) from exc
             raise ExchangeCancellationUnknownError(
                 "Binance cancel request was rejected; order state must be reconciled"
-            ) from exc
-        return self._order_snapshot(_require_mapping(payload))
-
-    async def cancel_order(
-        self,
-        *,
-        symbol: str,
-        client_order_id: str,
-        command: RollbackCommand | None,
-    ) -> ExchangeOrderSnapshot:
-        if not self._live_submit_enabled:
-            raise LiveSubmissionDisabledError(
-                "Binance trade client requires explicit live submit enablement"
-            )
-        require_authorized_command(
-            command,
-            command_type="cancel_all_open_orders",
-            confirmation_text=CANCEL_ALL_CONFIRMATION,
-        )
-        try:
-            payload = await self._signed_delete(
-                "/fapi/v1/order",
-                {
-                    "symbol": symbol,
-                    "origClientOrderId": client_order_id,
-                },
-                priority=_COMMAND_EXIT_PRIORITY,
-            )
-        except httpx.TimeoutException as exc:
-            raise ExchangeCancellationUnknownError(
-                "Binance cancel request timed out; order state must be reconciled"
-            ) from exc
-        except httpx.RequestError as exc:
-            raise ExchangeCancellationUnknownError(
-                "Binance cancel request failed; order state must be reconciled"
             ) from exc
         return self._order_snapshot(_require_mapping(payload))
 
