@@ -325,11 +325,11 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
         ]["environment"]
         assert (
             account_environment["CML_LIVE_IMPULSE_WINDOW_BUCKETS"]
-            == f"${{CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_{account_number}:-3}}"
+            == f"${{CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_{account_number}:-2}}"
         )
         assert (
             account_environment["CML_LIVE_MIN_RETURN_PCT"]
-            == f"${{CML_LIVE_MIN_RETURN_PCT_ACCOUNT_{account_number}:-0.015}}"
+            == f"${{CML_LIVE_MIN_RETURN_PCT_ACCOUNT_{account_number}:-0.005}}"
         )
         assert (
             account_environment["CML_LIVE_MIN_IMBALANCE"]
@@ -337,11 +337,11 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
         )
         assert (
             account_environment["CML_LIVE_MIN_INTENSITY"]
-            == f"${{CML_LIVE_MIN_INTENSITY_ACCOUNT_{account_number}:-2.0}}"
+            == f"${{CML_LIVE_MIN_INTENSITY_ACCOUNT_{account_number}:-4.0}}"
         )
         assert (
             account_environment["CML_LIVE_MIN_NOTIONAL_5M_VS_30M"]
-            == f"${{CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_{account_number}:-0}}"
+            == f"${{CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_{account_number}:-1.50}}"
         )
 
 

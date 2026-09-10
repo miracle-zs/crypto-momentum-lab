@@ -28,8 +28,8 @@ The strategy parameters are 15-second buckets unless stated otherwise:
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | primary | 4 | 1 | 0.005 | 0.30 | 1.5 | 1.50 | 0 |
 | account-2 | 4 | 1 | 0.005 | 0.30 | 1.5 | 1.50 | 0 |
-| account-3 | 3 | 1 | 0.015 | 0.30 | 2.0 | 0 (disabled) | 0 |
-| account-4 | 3 | 1 | 0.015 | 0.30 | 2.0 | 0 (disabled) | 0 |
+| account-3 | 2 | 1 | 0.005 | 0.30 | 4.0 | 1.50 | 0 |
+| account-4 | 2 | 1 | 0.005 | 0.30 | 4.0 | 1.50 | 0 |
 
 The `min 5m/30m notional` value compares the latest 20 consecutive 15-second
 states with the immediately preceding 120 states. A value of `0` disables
