@@ -332,6 +332,7 @@ class PostgresLiveContextProvider:
             unrealized,
             gross,
             managed_positions,
+            pending_symbols,
             unmanaged_symbols,
         ) = unresolved_and_positions[1]
         unresolved = unresolved_and_positions[0]
@@ -370,6 +371,7 @@ class PostgresLiveContextProvider:
             strategy_state=strategy_state,
             trading_rules=rules,
             managed_positions=managed_positions,
+            pending_position_symbols=pending_symbols,
             unmanaged_position_symbols=unmanaged_symbols,
             unresolved_orders=unresolved,
             account_snapshot=realtime_account_snapshot,
@@ -551,6 +553,7 @@ class PostgresLiveContextProvider:
             Decimal,
             tuple[ManagedLivePosition, ...],
             frozenset[str],
+            frozenset[str],
         ],
     ]:
         unresolved = await self._order_repository.load_unresolved_orders(
@@ -572,6 +575,7 @@ class PostgresLiveContextProvider:
         Decimal,
         Decimal,
         tuple[ManagedLivePosition, ...],
+        frozenset[str],
         frozenset[str],
     ]:
         if account_snapshot is not None:
@@ -716,7 +720,7 @@ class PostgresLiveContextProvider:
         exit_batch_ids, legacy_exit_order_ids = (
             await _load_exit_batch_bindings(self._sessions, orders)
         )
-        managed, unmanaged = _classify_live_positions(
+        managed, pending, unmanaged = _classify_live_positions_detailed(
             active,
             orders,
             unresolved,
@@ -731,6 +735,7 @@ class PostgresLiveContextProvider:
             sum((row.unrealized_pnl for row in active), start=Decimal("0")),
             sum((abs(row.notional) for row in active), start=Decimal("0")),
             managed,
+            pending,
             unmanaged,
         )
 
@@ -744,6 +749,7 @@ class PostgresLiveContextProvider:
         Decimal,
         Decimal,
         tuple[ManagedLivePosition, ...],
+        frozenset[str],
         frozenset[str],
     ]:
         """Build the hot account view from the Hub's complete snapshot.
@@ -843,7 +849,7 @@ class PostgresLiveContextProvider:
         exit_batch_ids, legacy_exit_order_ids = (
             await _load_exit_batch_bindings(self._sessions, orders)
         )
-        managed, unmanaged = _classify_live_positions(
+        managed, pending, unmanaged = _classify_live_positions_detailed(
             active,
             orders,
             unresolved,
@@ -858,6 +864,7 @@ class PostgresLiveContextProvider:
             sum((row.unrealized_pnl for row in active), start=Decimal("0")),
             sum((abs(row.notional) for row in active), start=Decimal("0")),
             managed,
+            pending,
             unmanaged,
         )
 
@@ -944,6 +951,16 @@ _EXIT_SUBMITTED_STATES = frozenset(
         ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
     }
 )
+_PENDING_ENTRY_STATES = frozenset(
+    {
+        ExchangeOrderState.SUBMITTING,
+        ExchangeOrderState.CANCELING,
+        ExchangeOrderState.SUBMITTED,
+        ExchangeOrderState.ACKNOWLEDGED,
+        ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+    }
+)
+_PENDING_POSITION_MAX_AGE_SECONDS = 60
 
 
 def _classify_live_positions(
@@ -956,6 +973,33 @@ def _classify_live_positions(
     exit_batch_ids: Mapping[str, str] | None = None,
     legacy_exit_order_ids: frozenset[str] = frozenset(),
 ) -> tuple[tuple[ManagedLivePosition, ...], frozenset[str]]:
+    """Keep the historical two-value classification API for callers/tests."""
+    managed, _pending, unmanaged = _classify_live_positions_detailed(
+        positions,
+        orders,
+        unresolved,
+        entry_fill_times=entry_fill_times,
+        entry_fill_prices=entry_fill_prices,
+        exit_batch_ids=exit_batch_ids,
+        legacy_exit_order_ids=legacy_exit_order_ids,
+    )
+    return managed, unmanaged
+
+
+def _classify_live_positions_detailed(
+    positions: Sequence[AccountPositionSnapshot | AccountPositionSnapshotRow],
+    orders: list[ExchangeOrderRow],
+    unresolved: tuple[PersistedExchangeOrder, ...] = (),
+    *,
+    entry_fill_times: Mapping[str, datetime] | None = None,
+    entry_fill_prices: Mapping[str, Decimal] | None = None,
+    exit_batch_ids: Mapping[str, str] | None = None,
+    legacy_exit_order_ids: frozenset[str] = frozenset(),
+) -> tuple[
+    tuple[ManagedLivePosition, ...],
+    frozenset[str],
+    frozenset[str],
+]:
     fill_times = entry_fill_times or {}
     fill_prices = entry_fill_prices or {}
     position_orders = _normalise_position_orders(orders, unresolved)
@@ -975,6 +1019,7 @@ def _classify_live_positions(
             for order in position_orders
         )
     managed: list[ManagedLivePosition] = []
+    pending: set[str] = set()
     unmanaged: set[str] = set()
     for position in positions:
         try:
@@ -1006,6 +1051,14 @@ def _classify_live_positions(
             default=None,
         )
         if opening is None or position.entry_price <= 0:
+            if _has_recent_pending_entry_order(
+                position,
+                matching_orders,
+                fill_times,
+                side=side,
+            ):
+                pending.add(position.symbol)
+                continue
             unmanaged.add(position.symbol)
             continue
         opened_at = _order_entry_time(opening, fill_times)
@@ -1044,6 +1097,14 @@ def _classify_live_positions(
             # which can trigger an immediate candle-timeout exit.  Keep the
             # symbol fail-closed until the next reconciliation observes the
             # new entry fill instead of inventing a batch boundary.
+            if _has_recent_pending_entry_order(
+                position,
+                matching_orders,
+                fill_times,
+                side=side,
+            ):
+                pending.add(position.symbol)
+                continue
             unmanaged.add(position.symbol)
             continue
         aggregate_opened_at = max(
@@ -1106,8 +1167,44 @@ def _classify_live_positions(
         )
     return (
         tuple(sorted(managed, key=lambda item: (item.symbol, item.position_side))),
+        frozenset(pending),
         frozenset(unmanaged),
     )
+
+
+def _has_recent_pending_entry_order(
+    position: AccountPositionSnapshot | AccountPositionSnapshotRow,
+    matching_orders: Sequence[_PositionOrder],
+    fill_times: Mapping[str, datetime],
+    *,
+    side: StrategySide,
+) -> bool:
+    """Identify a bounded order-to-position visibility race.
+
+    An account event can publish a new position before the order state or
+    fill ledger transaction is visible to the strategy runtime. Only a
+    recent, non-terminal entry order from this run qualifies as pending;
+    unknown positions and stale orders remain fail-closed as unmanaged.
+    """
+    observed_at = getattr(position, "observed_at", None)
+    if not isinstance(observed_at, datetime):
+        return False
+    for order in matching_orders:
+        if (
+            order.reduce_only
+            or not _opening_order_matches_side(order.side, side)
+            or order.state not in _PENDING_ENTRY_STATES
+            or _is_entry_fill_observed(order, fill_times)
+        ):
+            continue
+        try:
+            pending_since = min(order.created_at, order.updated_at)
+            age_seconds = (observed_at - pending_since).total_seconds()
+        except TypeError:
+            return False
+        if 0 <= age_seconds <= _PENDING_POSITION_MAX_AGE_SECONDS:
+            return True
+    return False
 
 
 async def _load_exit_batch_ids(

@@ -185,7 +185,7 @@ def test_live_account_metrics_window_starts_at_daily_0800_utc_plus_8() -> None:
     ) == datetime(2026, 9, 8, 0, 0, tzinfo=UTC)
 
 
-def test_live_account_margin_query_aggregates_initial_margin_per_observation() -> None:
+def test_live_account_margin_query_uses_account_level_rest_margin() -> None:
     statement = _account_margin_statement(
         environment="live",
         account_label="account-2",
@@ -200,13 +200,15 @@ def test_live_account_margin_query_aggregates_initial_margin_per_observation() -
         )
     ).lower()
 
-    assert "account_position_snapshots" in sql
-    assert "sum" in sql
-    assert "leverage" in sql
-    assert "group by account_position_snapshots_1.observed_at" in sql
+    assert "account_config_snapshots" in sql
+    assert "account_reconciliation_runs" in sql
+    assert "totalinitialmargin" in sql
+    assert "rest_reconciliation" in sql
+    assert "account_position_snapshots" not in sql
+    assert "notional" not in sql
 
 
-def test_live_account_margin_query_uses_exchange_initial_margin_payload() -> None:
+def test_live_account_margin_query_excludes_websocket_config_observations() -> None:
     statement = _account_margin_statement(
         environment="live",
         account_label="account-2",
@@ -222,8 +224,8 @@ def test_live_account_margin_query_uses_exchange_initial_margin_payload() -> Non
     ).lower()
 
     assert "raw_payload" in sql
-    assert "positioninitialmargin" in sql
-    assert "initialmargin" in sql
+    assert "totalinitialmargin" in sql
+    assert "user_data_stream" not in sql
 
 
 def test_downsample_equity_snapshots_keeps_latest_row_in_each_utc_bucket() -> None:

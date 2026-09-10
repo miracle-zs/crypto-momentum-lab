@@ -1000,7 +1000,7 @@ async def test_account_event_reconciles_order_before_publishing_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_account_event_retries_transient_unmanaged_position(
+async def test_account_event_retries_pending_position_sync(
     monkeypatch,
 ) -> None:
     event = SimpleNamespace(
@@ -1026,7 +1026,7 @@ async def test_account_event_retries_transient_unmanaged_position(
             del quote
             self.calls += 1
             if self.calls == 1:
-                return "unmanaged_live_positions:BTCUSDT"
+                return "pending_live_positions:BTCUSDT"
             return None
 
     class Source:
@@ -1055,6 +1055,58 @@ async def test_account_event_retries_transient_unmanaged_position(
     assert daemon.calls == 2
     assert delays == [0.25]
     assert failures == [("BTCUSDT", None)]
+
+
+@pytest.mark.asyncio
+async def test_account_event_does_not_retry_confirmed_unmanaged_position(
+    monkeypatch,
+) -> None:
+    event = SimpleNamespace(
+        event_type="ACCOUNT_UPDATE",
+        client_order_id=None,
+        has_fill=False,
+        symbols=("BTCUSDT",),
+    )
+    state = SimpleNamespace(symbol="BTCUSDT")
+    sleep_calls: list[float] = []
+    failures: list[tuple[str, str | None]] = []
+
+    async def sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(main.asyncio, "sleep", sleep)
+
+    class Daemon:
+        managed_position_symbols = frozenset()
+
+        async def process_account_event(self, _state, *, quote):
+            del quote
+            return "unmanaged_live_positions:BTCUSDT"
+
+    class Source:
+        def __aiter__(self):
+            async def stream():
+                yield event
+
+            return stream()
+
+    await main._run_account_event_channel(
+        source=Source(),
+        daemon=Daemon(),
+        latest_market_states=SimpleNamespace(
+            for_symbols=lambda _symbols: (state,)
+        ),
+        latest_market_quotes=SimpleNamespace(for_symbols=lambda _symbols: ()),
+        order_repository=None,
+        state_machine=None,
+        run_id="run-1",
+        on_exit_failure=lambda symbol, failure: failures.append(
+            (symbol, failure)
+        ),
+    )
+
+    assert sleep_calls == []
+    assert failures == [("BTCUSDT", "unmanaged_live_positions:BTCUSDT")]
 
 
 async def test_shadow_preflight_accepts_an_old_matching_session() -> None:

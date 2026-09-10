@@ -1736,6 +1736,43 @@ async def test_live_daemon_halts_on_unmanaged_account_position() -> None:
     assert exchange.calls == []
 
 
+async def test_pending_account_position_blocks_entries_without_halting() -> None:
+    exchange = PlanAwareExchange()
+
+    async def position_context(state: object) -> LiveDaemonRuntimeContext:
+        del state
+        return replace(
+            _runtime_context(),
+            open_position_symbols=frozenset({"ETHUSDT"}),
+            pending_position_symbols=frozenset({"ETHUSDT"}),
+        )
+
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=position_context,
+        exit_manager=LiveExitManager(
+            config=LiveExitConfig(
+                run_id="run-1",
+                strategy_name="compression_breakout",
+                strategy_version="v0",
+                strategy_config_hash="a" * 64,
+                policy=PositionExitPolicy(),
+            )
+        ),
+    )
+
+    failure = await daemon.process_account_event(
+        replace(_state(), symbol="ETHUSDT")
+    )
+
+    assert failure == "pending_live_positions:ETHUSDT"
+    assert daemon.entry_enabled is False
+    assert daemon.entry_enabled_reason == (
+        "account_position_sync_pending:ETHUSDT"
+    )
+    assert exchange.calls == []
+
+
 async def test_scheduled_risk_window_late_start_after_reopen_is_noop(
     monkeypatch,
 ) -> None:

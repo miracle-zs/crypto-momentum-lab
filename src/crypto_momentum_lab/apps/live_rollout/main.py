@@ -236,7 +236,16 @@ _DEFAULT_PERSIST_EXCHANGE_OPERATIONS = frozenset({"submit", "cancel"})
 _GIT_COMMIT_HASH_LENGTH = 40
 _CONFIG_HASH_LENGTH = 64
 _HEX_HASH_PATTERN = re.compile(r"^[0-9a-f]+$")
-_UNMANAGED_POSITION_RETRY_DELAYS_SECONDS = (0.25, 0.5, 1.0)
+_PENDING_POSITION_RETRY_DELAYS_SECONDS = (
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    4.0,
+    8.0,
+    16.0,
+    32.0,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3193,6 +3202,23 @@ async def _resilient_account_event_stream(
             return
 
 
+def _is_pending_position_sync_failure(failure: str | None) -> bool:
+    return bool(
+        failure is not None
+        and failure.startswith("pending_live_positions:")
+    )
+
+
+def _promote_pending_position_failure(failure: str) -> str:
+    if not _is_pending_position_sync_failure(failure):
+        return failure
+    return failure.replace(
+        "pending_live_positions:",
+        "unmanaged_live_positions:",
+        1,
+    )
+
+
 async def _run_quote_channel(
     *,
     source: WebSocketMarketQuoteSource,
@@ -3221,8 +3247,17 @@ async def _run_quote_channel(
                 )
                 continue
             if failure is not None:
-                if on_exit_failure is not None:
+                pending_position_sync = _is_pending_position_sync_failure(
+                    failure
+                )
+                if not pending_position_sync and on_exit_failure is not None:
                     on_exit_failure(quote.symbol, failure)
+                if pending_position_sync:
+                    log.warning(
+                        "live_market_quote_position_sync_pending",
+                        symbol=quote.symbol,
+                        reason=failure,
+                    )
                 delay = min(
                     retry_delay_by_symbol.get(quote.symbol, 1.0),
                     60.0,
@@ -3282,7 +3317,44 @@ async def _run_closed_candle_channel(
                 )
                 await asyncio.sleep(delay_seconds)
         if failure is not None:
-            if on_exit_failure is not None:
+            if _is_pending_position_sync_failure(failure):
+                for attempt, delay in enumerate(
+                    _PENDING_POSITION_RETRY_DELAYS_SECONDS,
+                    start=1,
+                ):
+                    log.warning(
+                        "live_closed_candle_position_sync_retry",
+                        symbol=event.candle.symbol,
+                        attempt=attempt,
+                        delay_seconds=delay,
+                        reason=failure,
+                    )
+                    await asyncio.sleep(delay)
+                    try:
+                        failure = await daemon.process_closed_candle(
+                            event,
+                            latest_quote=quote,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as error:
+                        if not _is_transient_live_runtime_error(error):
+                            raise
+                        log.warning(
+                            "live_closed_candle_position_sync_degraded",
+                            symbol=event.candle.symbol,
+                            attempt=attempt,
+                            error_type=type(error).__name__,
+                        )
+                        continue
+                    if not _is_pending_position_sync_failure(failure):
+                        break
+                failure = (
+                    _promote_pending_position_failure(failure)
+                    if failure is not None
+                    else None
+                )
+            if failure is not None and on_exit_failure is not None:
                 on_exit_failure(event.candle.symbol, failure)
             log.error(
                 "live_closed_candle_exit_degraded",
@@ -3336,8 +3408,17 @@ async def _run_grace_timeout_channel(
                 )
                 continue
             if failure is not None:
-                if on_exit_failure is not None:
+                pending_position_sync = _is_pending_position_sync_failure(
+                    failure
+                )
+                if not pending_position_sync and on_exit_failure is not None:
                     on_exit_failure(state.symbol, failure)
+                if pending_position_sync:
+                    log.warning(
+                        "live_grace_timeout_position_sync_pending",
+                        symbol=state.symbol,
+                        reason=failure,
+                    )
                 delay = min(
                     retry_delay_by_symbol.get(state.symbol, 1.0),
                     60.0,
@@ -3402,15 +3483,13 @@ async def _run_account_event_channel(
                     state,
                     quote=quote,
                 )
-                if failure is not None and failure.startswith(
-                    "unmanaged_live_positions:"
-                ):
+                if _is_pending_position_sync_failure(failure):
                     for attempt, delay in enumerate(
-                        _UNMANAGED_POSITION_RETRY_DELAYS_SECONDS,
+                        _PENDING_POSITION_RETRY_DELAYS_SECONDS,
                         start=1,
                     ):
                         log.warning(
-                            "live_account_event_unmanaged_retry",
+                            "live_account_event_position_sync_retry",
                             run_id=run_id,
                             symbol=state.symbol,
                             attempt=attempt,
@@ -3422,14 +3501,19 @@ async def _run_account_event_channel(
                             state,
                             quote=quote,
                         )
-                        if failure is None:
+                        if not _is_pending_position_sync_failure(failure):
                             log.info(
-                                "live_account_event_unmanaged_recovered",
+                                "live_account_event_position_sync_recovered",
                                 run_id=run_id,
                                 symbol=state.symbol,
                                 attempt=attempt,
                             )
                             break
+                    failure = (
+                        _promote_pending_position_failure(failure)
+                        if failure is not None
+                        else None
+                    )
                 if failure is not None:
                     if on_exit_failure is not None:
                         on_exit_failure(state.symbol, failure)

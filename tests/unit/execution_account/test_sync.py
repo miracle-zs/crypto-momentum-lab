@@ -35,7 +35,7 @@ class FakeClient:
             hedge_mode=hedge_mode,
             fee_tier=0,
             observed_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
-            raw_payload={},
+            raw_payload={"totalInitialMargin": "12.34"},
         )
 
     async def fetch_account_config(self):
@@ -159,6 +159,9 @@ async def test_sync_once_persists_snapshot_and_ready_state() -> None:
     assert len(repository.balances) == 2
     assert repository.process_states[-1].state is ExecutionAccountStatus.READY_READONLY
     assert repository.reconciliation_runs[-1].status == "ready"
+    assert repository.reconciliation_runs[-1].details == {
+        "source": "rest_reconciliation"
+    }
 
 
 async def test_realtime_sync_publishes_before_durable_persistence() -> None:
@@ -286,6 +289,11 @@ async def test_user_data_event_persists_merged_snapshot() -> None:
         "BNB",
         "USDT",
     ]
+    assert repository.configs[-1].observed_at == initial.snapshot.config.observed_at
+    assert repository.configs[-1].observed_at != event.received_at
+    assert repository.configs[-1].raw_payload == {
+        "totalInitialMargin": "12.34"
+    }
     assert repository.reconciliation_runs[-1].details["source"] == (
         "user_data_stream"
     )

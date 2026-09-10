@@ -26,6 +26,7 @@ from crypto_momentum_lab.live_rollout.daemon import LiveDaemonRuntimeContext
 from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,
     _classify_live_positions,
+    _classify_live_positions_detailed,
     _resolve_strategy_live_state,
     live_limits_from_approval,
     poll_live_market_states,
@@ -59,6 +60,46 @@ def test_marks_external_position_as_unmanaged() -> None:
     managed, unmanaged = _classify_live_positions([_position()], [])
 
     assert managed == ()
+    assert unmanaged == frozenset({"BTCUSDT"})
+
+
+def test_recent_unfilled_current_run_entry_is_pending_not_unmanaged() -> None:
+    managed, pending, unmanaged = _classify_live_positions_detailed(
+        [_position(observed_at=NOW + timedelta(seconds=25))],
+        [
+            _order(
+                reduce_only=False,
+                side="BUY",
+                state=ExchangeOrderState.ACKNOWLEDGED.value,
+                created_at=NOW,
+                updated_at=NOW + timedelta(seconds=60),
+                exchange_order_id="exchange-entry-1",
+            )
+        ],
+    )
+
+    assert managed == ()
+    assert pending == frozenset({"BTCUSDT"})
+    assert unmanaged == frozenset()
+
+
+def test_stale_unfilled_current_run_entry_remains_unmanaged() -> None:
+    managed, pending, unmanaged = _classify_live_positions_detailed(
+        [_position(observed_at=NOW + timedelta(seconds=61))],
+        [
+            _order(
+                reduce_only=False,
+                side="BUY",
+                state=ExchangeOrderState.ACKNOWLEDGED.value,
+                created_at=NOW,
+                updated_at=NOW + timedelta(seconds=60),
+                exchange_order_id="exchange-entry-1",
+            )
+        ],
+    )
+
+    assert managed == ()
+    assert pending == frozenset()
     assert unmanaged == frozenset({"BTCUSDT"})
 
 
@@ -983,6 +1024,7 @@ async def test_position_view_skips_order_history_when_account_is_flat() -> None:
     assert result[1] == frozenset()
     assert result[4] == ()
     assert result[5] == frozenset()
+    assert result[6] == frozenset()
     assert session.scalars_calls == 0
 
 
@@ -1034,6 +1076,7 @@ async def test_position_view_uses_hub_snapshot_without_account_queries() -> None
         Decimal("0"),
         Decimal("0"),
         (),
+        frozenset(),
         frozenset(),
     )
 
@@ -1111,6 +1154,7 @@ async def test_delayed_state_reuses_newer_cached_context(monkeypatch) -> None:
                 Decimal("0"),
                 Decimal("0"),
                 (),
+                frozenset(),
                 frozenset(),
             ),
         )
@@ -1299,6 +1343,7 @@ async def test_context_reload_survives_cache_invalidation_during_rule_load(
                 Decimal("0"),
                 (),
                 frozenset(),
+                frozenset(),
             ),
         )
 
@@ -1353,12 +1398,17 @@ def _runtime_context() -> LiveDaemonRuntimeContext:
     )
 
 
-def _position(*, position_amt: Decimal = Decimal("0.5")):
+def _position(
+    *,
+    position_amt: Decimal = Decimal("0.5"),
+    observed_at: datetime = NOW,
+):
     return SimpleNamespace(
         symbol="BTCUSDT",
         position_side="LONG",
         position_amt=position_amt,
         entry_price=Decimal("100"),
+        observed_at=observed_at,
     )
 
 

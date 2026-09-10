@@ -18,6 +18,7 @@ from sqlalchemy import (
     case,
     column,
     func,
+    or_,
     select,
     text,
     true,
@@ -459,13 +460,12 @@ def _account_margin_statement(
 ) -> Select[tuple[datetime, Decimal]]:
     """Fetch one latest aggregate initial-margin observation per bucket.
 
-    Binance's position-risk payload already contains the exchange-calculated
-    initial margin, but the typed snapshot projection keeps that value in
-    ``raw_payload`` and its legacy ``leverage`` column is often null. Prefer
-    the exchange value (including open-order initial margin when the payload
-    provides it), then fall back to ``abs(notional) / leverage``. A missing or
-    zero leverage ultimately falls back to notional so the chart remains
-    conservative instead of silently reporting zero exposure.
+    Use Binance's account-level REST response as the source of truth. The
+    position-risk and WebSocket position payloads are per-symbol projections;
+    their notional values are not margin and may be stale while an account
+    event is being merged. ``totalInitialMargin`` already includes the
+    exchange's account-level position and open-order initial-margin result.
+    WebSocket observations are excluded by the reconciliation source join.
     """
     if interval_seconds <= 0:
         raise ValueError("interval_seconds must be positive")
@@ -486,61 +486,44 @@ def _account_margin_statement(
         end_bucket,
         bucket_interval,
     ).table_valued("bucket").render_derived(name="margin_buckets")
-    snapshot = aliased(AccountPositionSnapshotRow)
+    config = aliased(AccountConfigSnapshotRow)
+    reconciliation = aliased(AccountReconciliationRunRow)
     bucket_start = bucket_series.c.bucket
-    raw_initial_margin = func.nullif(
-        snapshot.raw_payload["initialMargin"].astext,
+    raw_total_initial_margin = func.nullif(
+        config.raw_payload["totalInitialMargin"].astext,
         "",
     ).cast(Numeric(38, 18))
-    raw_position_initial_margin = func.nullif(
-        snapshot.raw_payload["positionInitialMargin"].astext,
-        "",
-    ).cast(Numeric(38, 18))
-    raw_open_order_initial_margin = func.nullif(
-        snapshot.raw_payload["openOrderInitialMargin"].astext,
-        "",
-    ).cast(Numeric(38, 18))
-    exchange_initial_margin = case(
-        (
-            raw_initial_margin.is_not(None) & (raw_initial_margin >= 0),
-            raw_initial_margin,
-        ),
-        (
-            raw_position_initial_margin.is_not(None)
-            & (raw_position_initial_margin >= 0),
-            raw_position_initial_margin
-            + func.coalesce(raw_open_order_initial_margin, 0),
-        ),
-        else_=None,
-    )
-    margin_per_position = case(
-        (
-            exchange_initial_margin.is_not(None),
-            exchange_initial_margin,
-        ),
-        (
-            snapshot.leverage.is_not(None) & (snapshot.leverage > 0),
-            func.abs(snapshot.notional) / snapshot.leverage,
-        ),
-        else_=func.abs(snapshot.notional),
-    )
+    rest_source = reconciliation.details["source"].astext
     latest_margin = (
         select(
-            snapshot.observed_at.label("observed_at"),
-            func.coalesce(func.sum(margin_per_position), 0).label(
-                "margin_used"
+            config.observed_at.label("observed_at"),
+            raw_total_initial_margin.label("margin_used"),
+        )
+        .select_from(config)
+        .join(
+            reconciliation,
+            and_(
+                reconciliation.environment == config.environment,
+                reconciliation.account_label == config.account_label,
+                reconciliation.observed_at == config.observed_at,
+                reconciliation.status == "ready",
             ),
         )
         .where(
-            snapshot.environment == environment,
-            snapshot.account_label == account_label,
-            snapshot.observed_at >= window_start,
-            snapshot.observed_at <= window_end,
-            snapshot.observed_at >= bucket_start,
-            snapshot.observed_at < bucket_start + bucket_interval,
+            config.environment == environment,
+            config.account_label == account_label,
+            config.observed_at >= window_start,
+            config.observed_at <= window_end,
+            config.observed_at >= bucket_start,
+            config.observed_at < bucket_start + bucket_interval,
+            raw_total_initial_margin.is_not(None),
+            raw_total_initial_margin >= 0,
+            or_(
+                rest_source == "rest_reconciliation",
+                rest_source.is_(None),
+            ),
         )
-        .group_by(snapshot.observed_at)
-        .order_by(snapshot.observed_at.desc())
+        .order_by(config.observed_at.desc())
         .limit(1)
         .lateral("latest_margin")
     )

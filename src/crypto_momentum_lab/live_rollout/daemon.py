@@ -254,6 +254,7 @@ class LiveDaemonRuntimeContext:
     strategy_state: StrategyLiveState
     trading_rules: dict[str, SymbolTradingRules]
     managed_positions: tuple[ManagedLivePosition, ...] = ()
+    pending_position_symbols: frozenset[str] = frozenset()
     unmanaged_position_symbols: frozenset[str] = frozenset()
     unresolved_orders: tuple[PersistedExchangeOrder, ...] = ()
     account_snapshot: AccountSnapshot | None = None
@@ -702,6 +703,7 @@ class LiveStrategyDaemon:
         self._fetch_exchange_positions = fetch_exchange_positions
         self._managed_position_symbols: frozenset[str] = frozenset()
         self._managed_order_symbols: frozenset[str] = frozenset()
+        self._pending_position_symbols: frozenset[str] = frozenset()
         self._managed_position_symbols_known = False
         self._last_cache_maintenance_at: datetime | None = None
         self._context_generation = 0
@@ -738,8 +740,10 @@ class LiveStrategyDaemon:
         symbols = frozenset(
             (context.open_position_symbols or frozenset())
             | context.unmanaged_position_symbols
+            | context.pending_position_symbols
         )
         self._managed_position_symbols = symbols
+        self._pending_position_symbols = context.pending_position_symbols
         self._managed_order_symbols = frozenset(
             order.plan.symbol.strip().upper()
             for order in context.unresolved_orders
@@ -858,12 +862,19 @@ class LiveStrategyDaemon:
 
     @property
     def entry_enabled(self) -> bool:
-        return self._entry_enabled and not self._scheduled_entry_blocked
+        return (
+            self._entry_enabled
+            and not self._scheduled_entry_blocked
+            and not self._pending_position_symbols
+        )
 
     @property
     def entry_enabled_reason(self) -> str:
         if self._scheduled_entry_blocked:
             return self._scheduled_entry_block_reason
+        if self._pending_position_symbols:
+            symbols = ",".join(sorted(self._pending_position_symbols))
+            return f"account_position_sync_pending:{symbols}"
         return self._entry_enabled_reason
 
     @property
@@ -993,6 +1004,9 @@ class LiveStrategyDaemon:
         context = await self._context_provider(state)
         self._sync_pending_entry_plans(context)
         await self._publish_managed_position_symbols(context)
+        if state.symbol in context.pending_position_symbols:
+            symbols = ",".join(sorted(context.pending_position_symbols))
+            return f"pending_live_positions:{symbols}"
         if state.symbol in context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
             return f"unmanaged_live_positions:{symbols}"
@@ -1037,6 +1051,9 @@ class LiveStrategyDaemon:
         context = await self._context_provider(state)
         self._sync_pending_entry_plans(context)
         await self._publish_managed_position_symbols(context)
+        if state.symbol in context.pending_position_symbols:
+            symbols = ",".join(sorted(context.pending_position_symbols))
+            return f"pending_live_positions:{symbols}"
         if state.symbol in context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
             return f"unmanaged_live_positions:{symbols}"
@@ -1074,6 +1091,9 @@ class LiveStrategyDaemon:
         context = await self._context_provider(state)
         self._sync_pending_entry_plans(context)
         await self._publish_managed_position_symbols(context)
+        if state.symbol in context.pending_position_symbols:
+            symbols = ",".join(sorted(context.pending_position_symbols))
+            return f"pending_live_positions:{symbols}"
         if state.symbol in context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
             return f"unmanaged_live_positions:{symbols}"
@@ -1105,6 +1125,9 @@ class LiveStrategyDaemon:
         context = await self._context_provider(state)
         self._sync_pending_entry_plans(context)
         await self._publish_managed_position_symbols(context)
+        if state.symbol in context.pending_position_symbols:
+            symbols = ",".join(sorted(context.pending_position_symbols))
+            return f"pending_live_positions:{symbols}"
         if state.symbol in context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
             return f"unmanaged_live_positions:{symbols}"
@@ -1469,6 +1492,17 @@ class LiveStrategyDaemon:
                     error_type=type(error).__name__,
                 )
                 continue
+            if state.symbol in context.pending_position_symbols:
+                symbols = ",".join(
+                    sorted(context.pending_position_symbols)
+                )
+                failure = f"pending_live_positions:{symbols}"
+                log.warning(
+                    "live_scheduled_flatten_position_sync_pending",
+                    run_id=self._config.run_id,
+                    symbols=symbols,
+                )
+                continue
             if state.symbol in context.unmanaged_position_symbols:
                 symbols = ",".join(sorted(context.unmanaged_position_symbols))
                 failure = f"unmanaged_live_positions:{symbols}"
@@ -1545,6 +1579,12 @@ class LiveStrategyDaemon:
                         "scheduled_flatten_context_failed:"
                         f"{type(error).__name__}"
                     )
+                    continue
+                if state.symbol in context.pending_position_symbols:
+                    symbols = ",".join(
+                        sorted(context.pending_position_symbols)
+                    )
+                    failure = f"pending_live_positions:{symbols}"
                     continue
                 if state.symbol in context.unmanaged_position_symbols:
                     symbols = ",".join(
@@ -3065,6 +3105,13 @@ class LiveStrategyDaemon:
                     context = await self._context_provider(state)
                     self._sync_pending_entry_plans(context)
                     await self._publish_managed_position_symbols(context)
+                    if state.symbol in context.pending_position_symbols:
+                        symbols = ",".join(
+                            sorted(context.pending_position_symbols)
+                        )
+                        return approved, submitted, (
+                            f"pending_live_positions:{symbols}"
+                        )
                     if state.symbol in context.unmanaged_position_symbols:
                         symbols = ",".join(
                             sorted(context.unmanaged_position_symbols)
@@ -3087,6 +3134,13 @@ class LiveStrategyDaemon:
                     context = await self._context_provider(state)
                     self._sync_pending_entry_plans(context)
                     await self._publish_managed_position_symbols(context)
+                    if state.symbol in context.pending_position_symbols:
+                        symbols = ",".join(
+                            sorted(context.pending_position_symbols)
+                        )
+                        return approved, submitted, (
+                            f"pending_live_positions:{symbols}"
+                        )
                     if state.symbol in context.unmanaged_position_symbols:
                         symbols = ",".join(
                             sorted(context.unmanaged_position_symbols)
@@ -3781,6 +3835,9 @@ def _live_signal_account_context(
         "open_position_symbols": sorted(context.open_position_symbols or ()),
         "managed_position_symbols": sorted(
             position.symbol for position in context.managed_positions
+        ),
+        "pending_position_symbols": sorted(
+            context.pending_position_symbols
         ),
         "unmanaged_position_symbols": sorted(
             context.unmanaged_position_symbols

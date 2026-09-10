@@ -441,6 +441,7 @@ class ExecutionAccountSyncService:
         )
         self._has_completed_sync = False
         self._latest_observation_at: datetime | None = None
+        self._latest_rest_account_config: AccountConfigSnapshot | None = None
 
     async def snapshot_once(self, *, observed_at: datetime | None = None) -> None:
         """Persist a lightweight balance/position observation.
@@ -556,6 +557,7 @@ class ExecutionAccountSyncService:
             )
         try:
             account_config = await self._client.fetch_account_config()
+            self._latest_rest_account_config = account_config
             reconciliation_id = _reconciliation_id(config)
             mismatches: list[str] = []
             if account_config.multi_assets_mode != (
@@ -728,7 +730,10 @@ class ExecutionAccountSyncService:
             assert result.snapshot is not None
             self._remember_observation(result.snapshot.config.observed_at)
             if persist:
-                await self.persist_reconciliation_result(result, source=None)
+                await self.persist_reconciliation_result(
+                    result,
+                    source="rest_reconciliation",
+                )
             return result
         except Exception as error:
             try:
@@ -842,8 +847,13 @@ class ExecutionAccountSyncService:
             event.event_id,
         )
         persisted_balances = self._balances_to_persist(snapshot.balances)
+        account_config = self._latest_rest_account_config or snapshot.config
         await self._repository.save_reconciliation_snapshot(
-            config=replace(snapshot.config, observed_at=event.received_at),
+            # Keep the last REST account-config observation as the identity of
+            # the account-level margin snapshot. A WebSocket event only
+            # changes balances/positions; stamping the stale REST payload with
+            # the event time would make it look like a fresh margin reading.
+            config=account_config,
             balances=persisted_balances,
             positions=snapshot.positions,
             open_orders=snapshot.open_orders,
