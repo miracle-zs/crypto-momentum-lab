@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -206,6 +207,59 @@ async def test_concurrent_prepare_grants_only_one_submission(order_repository) -
             .where(ExchangeOrderEventRow.state == ExchangeOrderState.SUBMITTING.value)
         )
         assert count == 1
+
+
+async def test_prepare_rejects_client_order_id_reused_by_another_intent(
+    order_repository,
+) -> None:
+    repository, factory = order_repository
+    prepared = await repository.prepare_submission(
+        intent=_intent(),
+        evaluation=RiskEvaluation(
+            evaluation_id="evaluation-1",
+            candidate_id="candidate-1",
+            decision=RiskDecision.APPROVED,
+            reason="approved",
+            evaluated_at=NOW,
+            details={},
+        ),
+        plan=_plan(),
+        prepared_at=NOW + timedelta(milliseconds=2),
+    )
+    assert prepared is not None
+
+    conflicting_intent = replace(_intent(), candidate_id="candidate-2")
+    conflicting_plan = replace(_plan(), intent_id="candidate-2")
+    with pytest.raises(ValueError, match="client order ID"):
+        await repository.prepare_submission(
+            intent=conflicting_intent,
+            evaluation=RiskEvaluation(
+                evaluation_id="evaluation-2",
+                candidate_id="candidate-2",
+                decision=RiskDecision.APPROVED,
+                reason="approved",
+                evaluated_at=NOW,
+                details={},
+            ),
+            plan=conflicting_plan,
+            prepared_at=NOW + timedelta(seconds=1),
+        )
+
+    async with factory() as session:
+        assert (
+            await session.scalar(
+                select(OrderIntentExecutionRow).where(
+                    OrderIntentExecutionRow.intent_id == "candidate-2"
+                )
+            )
+            is None
+        )
+        existing = await session.get(
+            ExchangeOrderRow,
+            _plan().client_order_id,
+        )
+        assert existing is not None
+        assert existing.intent_id == "candidate-1"
 
 
 async def test_late_ack_cannot_reopen_filled_order(order_repository) -> None:

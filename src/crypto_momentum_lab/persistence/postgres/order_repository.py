@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -46,6 +47,31 @@ class PersistedExchangeOrder:
 
 class _SubmissionAlreadyPrepared(Exception):
     """Abort the transaction when the client order ID already exists."""
+
+
+def _same_order_identity(
+    existing_order: ExchangeOrderRow,
+    expected_values: Mapping[str, object],
+) -> bool:
+    """Keep idempotency scoped to the exact durable order identity."""
+
+    return all(
+        getattr(existing_order, field_name) == expected_values[field_name]
+        for field_name in (
+            "intent_id",
+            "run_id",
+            "symbol",
+            "side",
+            "order_type",
+            "quantity",
+            "price",
+            "time_in_force",
+            "expires_at",
+            "reduce_only",
+            "position_side",
+            "created_at",
+        )
+    )
 
 
 class PostgresOrderRepository:
@@ -171,9 +197,26 @@ class PostgresOrderRepository:
                         .returning(ExchangeOrderRow.client_order_id)
                     )
                     if inserted_order is None:
-                        # The intent insert may have been new even though a
-                        # concurrent/restarted worker already owns the client
-                        # order ID. Roll back both statements atomically.
+                        existing_order = await session.scalar(
+                            select(ExchangeOrderRow).where(
+                                ExchangeOrderRow.client_order_id
+                                == plan.client_order_id
+                            )
+                        )
+                        if existing_order is None:
+                            raise RuntimeError(
+                                "client order ID conflict could not be reconciled"
+                            )
+                        if not _same_order_identity(
+                            existing_order,
+                            order_values,
+                        ):
+                            raise ValueError(
+                                "client order ID is already bound to a "
+                                "different order"
+                            )
+                        # A restarted or concurrent worker already owns the
+                        # same order. Roll back any new intent atomically.
                         raise _SubmissionAlreadyPrepared
                     await session.execute(
                         insert(ExchangeOrderEventRow)
@@ -522,4 +565,3 @@ def _order_event_id(
             f"order-event:{client_order_id}:{state.value}:{occurred_at.isoformat()}",
         )
     )
-
