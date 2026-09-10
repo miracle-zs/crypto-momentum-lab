@@ -49,6 +49,75 @@ def test_deployment_script_is_valid_shell_and_has_recovery_guards() -> None:
     assert "logs --no-color --tail=200" in script
 
 
+def test_deployment_script_only_loads_live_overlay_for_live_updates() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    compose_start = script.index("compose=(\n")
+    compose_end = script.index("dashboard_image=", compose_start)
+    compose_block = script[compose_start:compose_end]
+
+    assert "-f compose.server.yaml" in compose_block
+    assert 'if [[ "$live_update" == 1 ]]; then' in compose_block
+    assert "-f compose.live.accounts.yaml" in compose_block
+    assert "--profile live" in compose_block
+    live_overlay_guard = compose_block.index('if [[ "$live_update" == 1 ]]; then')
+    live_overlay = compose_block.index("-f compose.live.accounts.yaml")
+    assert live_overlay_guard < live_overlay
+
+
+def test_ancestor_target_reaches_reset_keep_branch(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(
+            ["git", "-C", str(tmp_path), *args], text=True
+        ).strip()
+
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    git("commit", "--allow-empty", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    git("commit", "--allow-empty", "-qm", "newer")
+    newer = git("rev-parse", "HEAD")
+    git("branch", "target", base)
+
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    start = script.index('previous_commit="$(git rev-parse HEAD)"')
+    end = script.index("\nenv_runtime_commit=\"\"", start)
+    rollback_logic = script[start:end]
+    command = (
+        "set -Eeuo pipefail\n"
+        "target_ref=target\n"
+        f"{rollback_logic}\n"
+        'test "$(git rev-parse HEAD)" = "$target_commit"\n'
+    )
+    subprocess.run(["bash", "-c", command], cwd=tmp_path, check=True)
+    assert git("rev-parse", "HEAD") == base
+    assert newer != base
+
+
+def test_strategy_runtime_path_is_classified_without_market_restart() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    classification_start = script.index("runtime_changed=0\n")
+    classification_end = script.index(
+        'if [[ "$runtime_changed" == 1 ]]; then',
+        classification_start,
+    )
+    classification = script[classification_start:classification_end]
+    assert "src/crypto_momentum_lab/strategies/*" in classification
+    assert "src/crypto_momentum_lab/strategy/*" not in classification
+
+
+def test_live_update_checks_position_labels_for_running_accounts() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    assert "position_label_is_configured()" in script
+    assert "validate_live_position_labels()" in script
+    assert "CML_LIVE_POSITION_ACCOUNT_LABELS" in script
+    assert script.index("validate_live_position_labels()") < script.index(
+        "if ! validate_live_position_labels; then"
+    )
+
+
 def test_live_account_services_share_the_private_request_pacer_volume() -> None:
     compose = "\n".join(
         (

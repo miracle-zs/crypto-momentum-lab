@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shutil
 import signal
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
@@ -22,6 +23,7 @@ from crypto_momentum_lab.domain.market.models import (
     ArchiveManifest,
     CaptureRoute,
     CaptureStream,
+    RawEnvelope,
 )
 from crypto_momentum_lab.domain.universe.models import UniverseSnapshot
 from crypto_momentum_lab.health import LocalHealthWriter
@@ -200,17 +202,23 @@ def parse_live_position_account_labels(
     """
 
     if value is None:
-        raw_value = os.environ.get(_LIVE_POSITION_ACCOUNT_LABELS_ENV, "")
-        if not raw_value.strip():
-            single = parse_live_position_account_label()
-            return frozenset() if single is None else frozenset({single})
+        plural_value = os.environ.get(_LIVE_POSITION_ACCOUNT_LABELS_ENV, "")
+        singular_value = parse_live_position_account_label()
     else:
-        raw_value = value
-    labels = tuple(item.strip() for item in raw_value.split(","))
-    if any(not item for item in labels):
+        plural_value = value
+        singular_value = None
+    raw_labels = (
+        tuple(item.strip() for item in plural_value.split(","))
+        if plural_value.strip()
+        else ()
+    )
+    if any(not item for item in raw_labels):
         raise ValueError(
             f"{_LIVE_POSITION_ACCOUNT_LABELS_ENV} must contain non-empty labels"
         )
+    labels = {item for item in raw_labels if item}
+    if singular_value is not None:
+        labels.add(singular_value)
     return frozenset(labels)
 
 
@@ -724,6 +732,9 @@ async def build_market_data_runtime(
         coalescing_interval_seconds=(
             runtime.capture.book_ticker_coalescing_interval_seconds
         ),
+        backpressure_timeout_seconds=(
+            runtime.capture.backpressure_timeout_seconds
+        ),
     )
 
     async def save_manifest(manifest: ArchiveManifest) -> None:
@@ -738,6 +749,21 @@ async def build_market_data_runtime(
         capture_version=capture_version,
     ):
         await save_manifest(recovery_result.manifest)
+
+    async def save_replayed_manifest(manifest: ArchiveManifest) -> None:
+        # A replay must fail and leave its journal entry in place when the
+        # database is still unavailable. Calling the normal fallback writer
+        # here would append the same entry and then let replay delete it.
+        await capture_repository.save_manifest(manifest)
+
+    replayed_manifest_count = await manifest_journal.replay(
+        save_replayed_manifest
+    )
+    if replayed_manifest_count:
+        log.info(
+            "pending_manifest_journal_replayed",
+            count=replayed_manifest_count,
+        )
 
     await prune_expired_raw_archives(
         capture_repository,
@@ -784,6 +810,11 @@ async def build_market_data_runtime(
         archive_streams=archive_streams,
     )
 
+    capture: MarketDataCaptureService
+
+    async def on_capture_envelope(envelope: RawEnvelope) -> None:
+        await capture.submit(envelope)
+
     def connection_factory(group: SubscriptionGroup) -> BinanceWebSocketConnection:
         base_url = (
             str(runtime.capture.public_websocket_url)
@@ -799,7 +830,7 @@ async def build_market_data_runtime(
                 item.binance_name for item in group.subscriptions
             ),
             generation=1,
-            on_envelope=coordinator.submit,
+            on_envelope=on_capture_envelope,
             on_lifecycle=coordinator.observe_lifecycle,
             reconnect_delays=(0.0, 1.0, 5.0),
             connection_lifetime_seconds=(
@@ -855,6 +886,9 @@ async def build_market_data_runtime(
             halt_free_bytes=archive_config.halt_free_bytes,
             recovery_free_bytes=archive_config.recovery_free_bytes,
         ),
+        disk_free_bytes_provider=lambda: shutil.disk_usage(
+            archive_config.root
+        ).free,
         coordinator=coordinator,
     )
     observer = CaptureUniverseObserver(

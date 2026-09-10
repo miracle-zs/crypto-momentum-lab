@@ -1029,6 +1029,13 @@ def paper_live_daemon_command(
                 or state.close_price
                 or state.mark_price
             )
+            long_entry_price = entry_price
+            short_entry_price = (
+                state.last_bid_price
+                or state.midpoint
+                or state.close_price
+                or state.mark_price
+            )
             if entry_price is None:
                 return None
             try:
@@ -1040,6 +1047,8 @@ def paper_live_daemon_command(
                 return None
             return PaperEntryFilterContext(
                 entry_price=entry_price,
+                long_entry_price=long_entry_price,
+                short_entry_price=short_entry_price,
                 ema5=ema_snapshot.ema5,
                 ema10=ema_snapshot.ema10,
                 ema_observed_at=ema_snapshot.observed_at,
@@ -1063,7 +1072,7 @@ def paper_live_daemon_command(
                 run_identity=identity,
                 source_description=source.description,
                 execution=ReplayExecutionConfig(
-                    latency_buckets=0,
+                    latency_buckets=1,
                     require_market_quote=require_market_quote,
                 ),
                 portfolio=PaperExitConfig(
@@ -1572,7 +1581,7 @@ def paper_live_pair_command(
         run_identity=candle_identity,
         source_description=source.description,
         execution=ReplayExecutionConfig(
-            latency_buckets=0,
+            latency_buckets=1,
             require_market_quote=require_market_quote,
         ),
         portfolio=PaperExitConfig(
@@ -1604,7 +1613,7 @@ def paper_live_pair_command(
                     run_identity=fixed_identity,
                     source_description=source.description,
                     execution=ReplayExecutionConfig(
-                        latency_buckets=0,
+                        latency_buckets=1,
                         require_market_quote=require_market_quote,
                     ),
                     portfolio=PaperExitConfig(
@@ -1637,7 +1646,7 @@ def paper_live_pair_command(
                     run_identity=third_identity,
                     source_description=source.description,
                     execution=ReplayExecutionConfig(
-                        latency_buckets=0,
+                        latency_buckets=1,
                         require_market_quote=require_market_quote,
                     ),
                     portfolio=PaperExitConfig(
@@ -1723,7 +1732,7 @@ def paper_live_pair_command(
                     run_identity=filtered_identity,
                     source_description=source.description,
                     execution=ReplayExecutionConfig(
-                        latency_buckets=0,
+                        latency_buckets=1,
                         require_market_quote=require_market_quote,
                     ),
                     portfolio=PaperExitConfig(

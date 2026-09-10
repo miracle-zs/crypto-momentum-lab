@@ -167,6 +167,31 @@ async def monitor_market_data_health(
                     "dispatch_task_alive",
                     None,
                 ),
+                "realtime_queue_events": getattr(
+                    snapshot,
+                    "realtime_queue_events",
+                    None,
+                ),
+                "realtime_queue_dropped_events": getattr(
+                    snapshot,
+                    "realtime_queue_dropped_events",
+                    None,
+                ),
+                "realtime_queue_max_events": getattr(
+                    snapshot,
+                    "realtime_queue_max_events",
+                    None,
+                ),
+                "realtime_queue_high_watermark_events": getattr(
+                    snapshot,
+                    "realtime_queue_high_watermark_events",
+                    None,
+                ),
+                "realtime_dispatch_task_alive": getattr(
+                    snapshot,
+                    "realtime_dispatch_task_alive",
+                    None,
+                ),
             }
             for snapshot in getattr(connections, "connection_snapshots", ())
         )

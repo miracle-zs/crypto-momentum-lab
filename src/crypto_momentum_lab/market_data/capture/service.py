@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -121,12 +122,14 @@ class MarketDataCaptureService:
         repository: CaptureStateRepository,
         connection_pool: CaptureConnectionPool,
         disk_guard: DiskSpaceGuard,
+        disk_free_bytes_provider: Callable[[], int] | None = None,
         coordinator: CaptureRunner | None = None,
     ) -> None:
         self._queue = queue
         self._repository = repository
         self._connection_pool = connection_pool
         self._disk_guard = disk_guard
+        self._disk_free_bytes_provider = disk_free_bytes_provider
         self._coordinator = coordinator
         self._state = MarketDataState.STARTING
         self._monitoring_generation = 0
@@ -143,6 +146,7 @@ class MarketDataCaptureService:
         self._pending_manifests = 0
         self._oldest_pending_manifest_seconds: float | None = None
         self._disk_free_bytes = 0
+        self._halted_by_disk = False
 
     @property
     def state(self) -> MarketDataState:
@@ -175,14 +179,46 @@ class MarketDataCaptureService:
         await self._transition(MarketDataState.STOPPED, reason=None)
 
     async def submit(self, envelope: RawEnvelope) -> None:
+        if self._state is MarketDataState.HALTED and not self._halted_by_disk:
+            raise CaptureQueueFull("capture is halted")
+        await self.ensure_disk_space()
         try:
             await self._queue.put(envelope)
         except CaptureQueueFull:
+            self._halted_by_disk = False
             await self._transition(
                 MarketDataState.HALTED,
                 reason="capture queue overflow",
             )
             raise
+
+    async def ensure_disk_space(self) -> DiskStatus:
+        """Evaluate disk capacity before accepting another durable envelope."""
+
+        if self._disk_free_bytes_provider is None:
+            return DiskStatus.HEALTHY
+        free_bytes = self._disk_free_bytes_provider()
+        if free_bytes < 0:
+            raise ValueError("disk free bytes must not be negative")
+        self._disk_free_bytes = free_bytes
+        status = self._disk_guard.evaluate(free_bytes)
+        if status is DiskStatus.HALT:
+            self._halted_by_disk = True
+            if self._state is not MarketDataState.HALTED:
+                await self._transition(
+                    MarketDataState.HALTED,
+                    reason=(
+                        "disk free space below halt threshold: "
+                        f"{free_bytes} bytes"
+                    ),
+                )
+            raise CaptureQueueFull(
+                "capture halted because disk free space is below the halt threshold"
+            )
+        if self._state is MarketDataState.HALTED and self._halted_by_disk:
+            self._halted_by_disk = False
+            await self._transition(MarketDataState.READY, reason="disk recovered")
+        return status
 
     async def apply_symbols(
         self,

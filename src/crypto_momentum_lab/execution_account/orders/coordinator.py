@@ -75,6 +75,7 @@ class _KeyCommandScheduler:
         self._queue: asyncio.PriorityQueue[tuple[int, int, Any, Any]] = (
             asyncio.PriorityQueue()
         )
+        self._state_lock = asyncio.Lock()
         self._sequence = 0
         self._closed = False
         self._worker = asyncio.create_task(
@@ -91,20 +92,29 @@ class _KeyCommandScheduler:
         priority: int,
         operation: Callable[[], Awaitable[Any]],
     ) -> Any:
-        if self._closed:
-            raise RuntimeError("order command scheduler is closed")
         future = asyncio.get_running_loop().create_future()
-        sequence = self._sequence
-        self._sequence += 1
-        await self._queue.put((priority, sequence, operation, future))
+        async with self._state_lock:
+            if self._closed:
+                raise RuntimeError("order command scheduler is closed")
+            sequence = self._sequence
+            self._sequence += 1
+            await self._queue.put((priority, sequence, operation, future))
         return await future
 
     async def close(self) -> None:
-        if self._closed:
-            await self._worker
-            return
-        self._closed = True
-        await self._queue.put((2**31 - 1, self._sequence, None, None))
+        async with self._state_lock:
+            if not self._closed:
+                self._closed = True
+                while not self._queue.empty():
+                    _priority, _sequence, _operation, future = (
+                        self._queue.get_nowait()
+                    )
+                    self._queue.task_done()
+                    if future is not None and not future.done():
+                        future.set_exception(
+                            RuntimeError("order command scheduler is closed")
+                        )
+                await self._queue.put((2**31 - 1, self._sequence, None, None))
         await self._worker
 
     async def _run(self) -> None:
@@ -113,6 +123,8 @@ class _KeyCommandScheduler:
             try:
                 if operation is None:
                     return
+                if future is None or future.cancelled():
+                    continue
                 try:
                     result = await operation()
                 except BaseException as error:
@@ -154,6 +166,8 @@ class OrderExecutionCoordinator:
         self._backend = backend
         self._account_label = account_label.strip()
         self._schedulers: dict[OrderExecutionKey, _KeyCommandScheduler] = {}
+        self._scheduler_lock = asyncio.Lock()
+        self._closed = False
 
     async def submit(
         self,
@@ -256,8 +270,12 @@ class OrderExecutionCoordinator:
         )
 
     async def aclose(self) -> None:
-        schedulers = tuple(self._schedulers.values())
-        self._schedulers.clear()
+        async with self._scheduler_lock:
+            if self._closed:
+                return
+            self._closed = True
+            schedulers = tuple(self._schedulers.values())
+            self._schedulers.clear()
         if schedulers:
             await asyncio.gather(*(scheduler.close() for scheduler in schedulers))
 
@@ -273,10 +291,13 @@ class OrderExecutionCoordinator:
             symbol=plan.symbol.strip().upper(),
             position_side=plan.position_side,
         )
-        scheduler = self._schedulers.get(key)
-        if scheduler is None:
-            scheduler = _KeyCommandScheduler(key)
-            self._schedulers[key] = scheduler
+        async with self._scheduler_lock:
+            if self._closed:
+                raise RuntimeError("order execution coordinator is closed")
+            scheduler = self._schedulers.get(key)
+            if scheduler is None:
+                scheduler = _KeyCommandScheduler(key)
+                self._schedulers[key] = scheduler
         return await scheduler.submit(priority=priority, operation=operation)
 
 

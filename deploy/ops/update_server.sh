@@ -278,16 +278,18 @@ fi
 previous_commit="$(git rev-parse HEAD)"
 target_commit="$(git rev-parse "$target_ref")"
 git cat-file -e "$target_commit^{commit}"
-if ! git merge --ff-only "$target_commit"; then
+if [[ "$target_commit" == "$previous_commit" ]]; then
+  echo "checkout already at target commit $target_commit"
+elif [[ "$(git merge-base "$previous_commit" "$target_commit")" == "$previous_commit" ]]; then
+  git merge --ff-only "$target_commit"
+elif [[ "$(git merge-base "$previous_commit" "$target_commit")" == "$target_commit" ]]; then
   # A previously deployed commit may be an intentional rollback target. The
   # checkout is clean above, so reset --keep moves only the local branch ref
   # and tracked files needed to reach that explicit commit.
-  if [[ "$(git merge-base "$previous_commit" "$target_commit")" == "$target_commit" ]]; then
-    git reset --keep "$target_commit"
-  else
-    echo "Refusing deployment: target is not an ancestor and cannot be fast-forwarded or rolled back safely" >&2
-    exit 1
-  fi
+  git reset --keep "$target_commit"
+else
+  echo "Refusing deployment: target is not an ancestor and cannot be fast-forwarded or rolled back safely" >&2
+  exit 1
 fi
 if [[ "$(git rev-parse HEAD)" != "$target_commit" ]]; then
   echo "Refusing deployment: checkout did not reach target commit $target_commit" >&2
@@ -372,7 +374,7 @@ while IFS= read -r changed_path; do
       dashboard_changed=1
       live_changed=1
       ;;
-    src/crypto_momentum_lab/strategy/*|\
+    src/crypto_momentum_lab/strategies/*|\
     src/crypto_momentum_lab/apps/strategy_runner/*|\
     src/crypto_momentum_lab/domain/*)
       runtime_changed=1
@@ -464,9 +466,13 @@ compose=(
   docker compose
   --env-file .env.server
   -f compose.server.yaml
-  -f compose.live.accounts.yaml
-  --profile live
 )
+if [[ "$live_update" == 1 ]]; then
+  compose+=(
+    -f compose.live.accounts.yaml
+    --profile live
+  )
+fi
 dashboard_image="$(sed -n 's/^CML_DASHBOARD_IMAGE=//p' .env.server | tail -n 1)"
 if [[ -z "$dashboard_image" ]]; then
   dashboard_image="crypto-momentum-lab-app:${runtime_commit}"
@@ -707,6 +713,46 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     printf '%s' "${value:-$fallback}"
   }
 
+  position_label_is_configured() {
+    local required_label="$1"
+    local configured_labels="$2"
+    local label
+    local -a labels=()
+    IFS=',' read -r -a labels <<<"$configured_labels"
+    for label in "${labels[@]}"; do
+      # Match the same comma-separated, whitespace-tolerant format accepted
+      # by market-data. Empty entries are ignored here; the application parser
+      # still rejects malformed values before starting the service.
+      label="${label#${label%%[![:space:]]*}}"
+      label="${label%${label##*[![:space:]]}}"
+      if [[ "$label" == "$required_label" ]]; then
+        return 0
+      fi
+    done
+    return 1
+  }
+
+  validate_live_position_labels() {
+    local pair account execution_service strategy_service required_label
+    local configured_labels
+    configured_labels="$(env_value CML_LIVE_ACCOUNT_LABEL primary),$(env_value CML_LIVE_POSITION_ACCOUNT_LABELS '')"
+    for pair in "${live_pairs[@]}"; do
+      IFS=: read -r account execution_service strategy_service <<<"$pair"
+      if ! is_running "$strategy_service" && ! is_running "$execution_service"; then
+        continue
+      fi
+      if [[ "$account" == primary ]]; then
+        required_label="$(env_value CML_LIVE_ACCOUNT_LABEL primary)"
+      else
+        required_label="$account"
+      fi
+      if ! position_label_is_configured "$required_label" "$configured_labels"; then
+        echo "Refusing live update: running account $account ($required_label) is absent from CML_LIVE_POSITION_ACCOUNT_LABELS" >&2
+        return 1
+      fi
+    done
+  }
+
   lease_owner_for_account() {
     local account="$1"
     case "$account" in
@@ -823,6 +869,9 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
       fi
     fi
   done
+  if ! validate_live_position_labels; then
+    exit 1
+  fi
 
 fi
 

@@ -285,6 +285,19 @@ async def test_cancel_timeout_reconciles_before_marking_order_unknown() -> None:
     assert result.state is ExchangeOrderState.CANCELED
 
 
+async def test_cancel_rejection_reconciles_before_marking_order_unknown() -> None:
+    exchange = CancelExchange(
+        ExchangeOrderRejectedError("timestamp rejected"),
+        query_results=[_snapshot(ExchangeOrderState.CANCELED)],
+    )
+    repository = FakeOrderRepository()
+
+    result = await _machine(exchange, repository).cancel_order(_plan())
+
+    assert exchange.calls == ["cancel", "query"]
+    assert result.state is ExchangeOrderState.CANCELED
+
+
 async def test_cancel_not_found_is_terminal_absent_and_not_rejected() -> None:
     exchange = CancelExchange(
         ExchangeOrderAlreadyAbsentError(

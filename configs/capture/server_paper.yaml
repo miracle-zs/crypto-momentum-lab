@@ -20,6 +20,7 @@ realtime_closure_delay_seconds: 1
 durable_closure_delay_seconds: 3
 queue_max_events: 25000
 queue_max_bytes: 67108864
+backpressure_timeout_seconds: 30
 shutdown_timeout_seconds: 30
 archive:
   root: data/raw

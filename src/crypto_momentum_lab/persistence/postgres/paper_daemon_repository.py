@@ -490,6 +490,7 @@ class PostgresPaperDaemonRepository:
         config: PaperExitConfig,
     ) -> None:
         _require_aware(observed_at, "observed_at")
+        next_stats: _PortfolioStats
         async with self._session_factory() as session:
             async with session.begin():
                 await _load_run(session, run_id)
@@ -500,13 +501,21 @@ class PostgresPaperDaemonRepository:
                 if stats is None:
                     stats = await _load_portfolio_stats(session, run_id)
                 next_stats = replace(stats)
-                for position in positions:
-                    row = await session.scalar(
-                        select(PaperPositionRow).where(
-                            PaperPositionRow.position_id
-                            == position.position_id
+                position_ids = tuple(
+                    position.position_id for position in positions
+                )
+                rows_by_id = {
+                    row.position_id: row
+                    for row in (
+                        await session.scalars(
+                            select(PaperPositionRow).where(
+                                PaperPositionRow.position_id.in_(position_ids)
+                            )
                         )
-                    )
+                    ).all()
+                }
+                for position in positions:
+                    row = rows_by_id.get(position.position_id)
                     if row is None:
                         raise ValueError("paper position is not initialized")
                     next_stats.apply(row, -1)
@@ -531,7 +540,10 @@ class PostgresPaperDaemonRepository:
                         },
                     )
                 )
-                self._portfolio_stats[run_id] = next_stats
+        # Publish the cache only after the transaction commits. A failed
+        # snapshot write must not make later equity calculations use data that
+        # is absent from PostgreSQL.
+        self._portfolio_stats[run_id] = next_stats
 
     async def save_checkpoint(
         self,

@@ -1,6 +1,6 @@
 import asyncio
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -30,6 +30,8 @@ class QualityTracker(Protocol):
 
 class QualityRepository(Protocol):
     async def save_quality_event(self, event: QualityEvent) -> None: ...
+
+    async def save_quality_events(self, events: Iterable[QualityEvent]) -> None: ...
 
     async def save_process_state(
         self,
@@ -139,8 +141,7 @@ class CaptureCoordinator:
         self,
         event: ConnectionLifecycleEvent,
     ) -> None:
-        for quality_event in self._quality.observe_lifecycle(event):
-            await self._repository.save_quality_event(quality_event)
+        await self._save_quality_events(self._quality.observe_lifecycle(event))
 
     async def run(self) -> None:
         while not self._stopping or self._queue.size:
@@ -204,8 +205,7 @@ class CaptureCoordinator:
         acknowledgement = (
             await self._archive.append(envelope) if should_archive else None
         )
-        for event in quality_events:
-            await self._repository.save_quality_event(event)
+        await self._save_quality_events(quality_events)
         if (
             acknowledgement is not None
             and self._acknowledgement_sink is not None
@@ -225,6 +225,22 @@ class CaptureCoordinator:
             and self._archive_streams is not None
             and envelope.stream not in self._archive_streams
         )
+
+    async def _save_quality_events(
+        self,
+        events: Iterable[QualityEvent],
+    ) -> None:
+        values = tuple(events)
+        if not values:
+            return
+        batch_method = getattr(self._repository, "save_quality_events", None)
+        if batch_method is None:
+            for event in values:
+                await self._repository.save_quality_event(event)
+            return
+        result = batch_method(values)
+        if inspect.isawaitable(result):
+            await result
 
     async def _publish_batch(
         self,

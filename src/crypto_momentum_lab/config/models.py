@@ -184,6 +184,7 @@ class CaptureConfig(BaseModel):
     )
     queue_max_events: int = Field(gt=0)
     queue_max_bytes: int = Field(gt=0)
+    backpressure_timeout_seconds: float = Field(default=30.0, gt=0, le=3600)
     shutdown_timeout_seconds: float = Field(gt=0)
     archive: ArchiveConfig
 

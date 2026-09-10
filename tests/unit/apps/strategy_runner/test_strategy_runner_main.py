@@ -716,7 +716,7 @@ def test_paper_live_daemon_builds_daemon_config(
     assert config.checkpoint_every_states == 7
     assert config.checkpoint_every_seconds == 30
     assert config.max_market_state_age_seconds == 90
-    assert config.execution.latency_buckets == 0
+    assert config.execution.latency_buckets == 1
     assert config.entry_filter.max_cluster_trade_count == 1000
     assert config.entry_policy_compare_only is True
     assert calls[0]["entry_policy_comparison_observer"] is not None
@@ -876,9 +876,9 @@ def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
     assert accounts[3].config.portfolio.exit_mode.value == "candle_15m"
     assert accounts[4].config.portfolio.exit_mode.value == "candle_15m"
     assert accounts[2].config.portfolio.candle_minimum_holding_buckets == 180
-    assert accounts[0].config.execution.latency_buckets == 0
-    assert accounts[1].config.execution.latency_buckets == 0
-    assert accounts[2].config.execution.latency_buckets == 0
+    assert accounts[0].config.execution.latency_buckets == 1
+    assert accounts[1].config.execution.latency_buckets == 1
+    assert accounts[2].config.execution.latency_buckets == 1
     assert accounts[3].config.entry_filter.allow_long is True
     assert accounts[3].config.entry_filter.allow_short is False
     assert accounts[3].config.entry_filter.max_abs_aggressive_imbalance is None

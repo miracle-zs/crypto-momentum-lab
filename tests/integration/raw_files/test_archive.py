@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 from dataclasses import replace
@@ -9,7 +10,10 @@ import pytest
 import zstandard
 
 from crypto_momentum_lab.domain.market.models import ArchiveManifest, RawEnvelope
-from crypto_momentum_lab.persistence.raw_files.archive import ZstdJsonlArchive
+from crypto_momentum_lab.persistence.raw_files.archive import (
+    ZstdJsonlArchive,
+    _ArchiveWriter,
+)
 from crypto_momentum_lab.persistence.raw_files.reader import replay_envelopes
 
 
@@ -149,6 +153,56 @@ async def test_archive_rejects_path_traversal_symbol(
 
     with pytest.raises(ValueError, match="safe path component"):
         await archive.append(replace(raw_envelope, symbol="../../etc"))
+
+
+async def test_flush_failure_discards_broken_writer(
+    tmp_path: Path,
+    raw_envelope: RawEnvelope,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifests: list[ArchiveManifest] = []
+    original_flush = _ArchiveWriter._flush_block
+    flush_calls = 0
+
+    def fail_once(writer: _ArchiveWriter) -> None:
+        nonlocal flush_calls
+        flush_calls += 1
+        if flush_calls == 1:
+            raise OSError("simulated fsync failure")
+        original_flush(writer)
+
+    monkeypatch.setattr(_ArchiveWriter, "_flush_block", fail_once)
+
+    async def save_manifest(manifest: ArchiveManifest) -> None:
+        manifests.append(manifest)
+
+    archive = ZstdJsonlArchive(
+        root=tmp_path,
+        environment="test",
+        capture_version="test",
+        manifest_sink=save_manifest,
+        known_gap_count_provider=lambda key: 0,
+        zstd_level=1,
+        rotation_uncompressed_bytes=10_000_000,
+        max_open_writers=4,
+        group_commit_max_events=1,
+        group_commit_max_milliseconds=10_000,
+    )
+
+    with pytest.raises(OSError, match="simulated fsync failure"):
+        await archive.append(raw_envelope)
+    temporary_files = await asyncio.to_thread(
+        lambda: tuple(tmp_path.rglob("*.tmp"))
+    )
+    assert not temporary_files
+
+    acknowledgement = await archive.append(
+        replace(raw_envelope, local_sequence=2)
+    )
+    await archive.close()
+
+    assert acknowledgement.local_sequence == 2
+    assert len(manifests) == 1
 
 
 async def _noop_manifest(manifest: ArchiveManifest) -> None:

@@ -170,11 +170,12 @@ class AggTradeGapRecoverer:
                         current=envelope,
                     )
                 )
-            self._last_seen[key] = _SeenTrade(
-                current_id,
-                event_at,
-                envelope.connection_session_id,
-            )
+            else:
+                self._last_seen[key] = _SeenTrade(
+                    current_id,
+                    event_at,
+                    envelope.connection_session_id,
+                )
             accepted_indices.add(index)
 
         results = await asyncio.gather(
@@ -185,6 +186,16 @@ class AggTradeGapRecoverer:
         for result in results:
             request = result.request
             if result.failure_reason is None:
+                assert request.current.symbol is not None
+                assert request.current.exchange_event_at is not None
+                request_current = _SeenTrade(
+                    request.current_id,
+                    request.current.exchange_event_at,
+                    request.current.connection_session_id,
+                )
+                self._last_seen[
+                    (request.current.environment, request.current.symbol)
+                ] = request_current
                 recovered = tuple(
                     _recovered_envelope(trade, current=request.current)
                     for trade in result.trades
@@ -232,8 +243,8 @@ class AggTradeGapRecoverer:
         next_id = request.previous.aggregate_trade_id + 1
         trades: list[BinanceAggTrade] = []
         try:
-            async with asyncio.timeout(self._recovery_timeout_seconds):
-                async with self._semaphore:
+            async with self._semaphore:
+                async with asyncio.timeout(self._recovery_timeout_seconds):
                     while next_id < request.current_id:
                         limit = min(1000, request.current_id - next_id)
                         if not await self._reserve_request_budget():

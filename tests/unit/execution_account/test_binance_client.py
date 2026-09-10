@@ -27,6 +27,7 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
     LiveSubmissionDisabledError,
+    OrderPreSubmissionError,
 )
 
 
@@ -807,6 +808,39 @@ async def test_trade_client_submits_gtd_limit_entry() -> None:
     assert snapshot.state is ExchangeOrderState.ACKNOWLEDGED
 
 
+async def test_trade_client_rejects_gtd_order_before_exchange_write() -> None:
+    plan = replace(
+        _order_plan(),
+        order_type="LIMIT",
+        price=Decimal("30000"),
+        time_in_force="GTD",
+        expires_at=datetime(2026, 7, 4, 0, 5, tzinfo=UTC),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("pre-submission validation must avoid the exchange")
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        with pytest.raises(OrderPreSubmissionError, match="600 seconds"):
+            await client.submit_order(plan)
+    finally:
+        await client.aclose()
+
+
 async def test_trade_client_uses_position_side_for_hedge_mode_close() -> None:
     captured_body = ""
     plan = replace(
@@ -922,6 +956,60 @@ async def test_trade_client_treats_cancel_rate_limit_as_unknown_outcome() -> Non
         await client.aclose()
 
     assert error.value.retry_after_seconds == 4.0
+
+
+async def test_trade_client_treats_cancel_rejection_as_unknown_outcome() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            request=request,
+            json={"code": -1021, "msg": "Timestamp for this request is outside"},
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        with pytest.raises(ExchangeCancellationUnknownError):
+            await client.cancel_order_by_client_id("BTCUSDT", "client-1")
+    finally:
+        await client.aclose()
+
+
+async def test_trade_client_treats_connect_error_on_submit_as_unknown_outcome() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection reset", request=request)
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        with pytest.raises(ExchangeSubmissionTimeoutError, match="unknown outcome"):
+            await client.submit_order(_order_plan())
+    finally:
+        await client.aclose()
 
 
 async def test_trade_client_classifies_missing_cancel_order_as_absent() -> None:

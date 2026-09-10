@@ -13,6 +13,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         "bootstrap-universe",
         "market-data",
         "paper-orderflow-pair",
+        "paper-orderflow-gainer10-pair",
         "paper-b1-gainer100",
         "paper-b1-gainer100-ema",
         "dashboard",
@@ -59,6 +60,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     ]
     for service in (
         "paper-orderflow-pair",
+        "paper-orderflow-gainer10-pair",
         "paper-b1-gainer100",
         "paper-b1-gainer100-ema",
     ):

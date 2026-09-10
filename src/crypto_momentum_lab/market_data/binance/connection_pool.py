@@ -72,6 +72,8 @@ class BinanceConnectionPool:
         self._active_subscriptions: frozenset[Subscription] = frozenset()
         self._connections: dict[str, PoolConnection] = {}
         self._subscription_connections: dict[Subscription, str] = {}
+        self._lock = asyncio.Lock()
+        self._stopped = False
 
     async def start(self) -> None:
         return None
@@ -83,80 +85,88 @@ class BinanceConnectionPool:
         streams: tuple[CaptureStream, ...],
         generation: int,
     ) -> None:
-        desired_items: set[Subscription] = set()
-        for stream in streams:
-            if (
-                stream is CaptureStream.BOOK_TICKER
-                and self._use_all_book_ticker_stream
-            ):
-                desired_items.add(Subscription.global_book_ticker())
-                continue
-            desired_items.update(
-                Subscription.for_symbol(stream, symbol)
-                for symbol in symbols
+        async with self._lock:
+            if self._stopped:
+                raise RuntimeError("connection pool is stopped")
+            desired_items: set[Subscription] = set()
+            for stream in streams:
+                if (
+                    stream is CaptureStream.BOOK_TICKER
+                    and self._use_all_book_ticker_stream
+                ):
+                    desired_items.add(Subscription.global_book_ticker())
+                    continue
+                desired_items.update(
+                    Subscription.for_symbol(stream, symbol)
+                    for symbol in symbols
+                )
+            desired = frozenset(desired_items)
+            groups = build_subscription_groups(
+                desired,
+                max_per_connection=self._max_subscriptions_per_connection,
+                max_per_connection_by_stream=(
+                    self._max_subscriptions_per_connection_by_stream
+                ),
             )
-        desired = frozenset(desired_items)
-        groups = build_subscription_groups(
-            desired,
-            max_per_connection=self._max_subscriptions_per_connection,
-            max_per_connection_by_stream=(
-                self._max_subscriptions_per_connection_by_stream
-            ),
-        )
-        desired_groups = {group.group_id: group for group in groups}
-        desired_owners = {
-            subscription: group.group_id
-            for group in groups
-            for subscription in group.subscriptions
-        }
-        new_group_ids = await self._ensure_connections(groups)
+            desired_groups = {group.group_id: group for group in groups}
+            desired_owners = {
+                subscription: group.group_id
+                for group in groups
+                for subscription in group.subscriptions
+            }
+            new_group_ids = await self._ensure_connections(groups)
 
-        for group in groups:
-            if group.group_id in new_group_ids:
-                continue
-            connection = self._connections[group.group_id]
-            current = frozenset(
-                subscription
-                for subscription in self._active_subscriptions
-                if self._subscription_connections.get(subscription)
-                == group.group_id
-            )
-            plan = plan_subscription_change(
-                current,
-                frozenset(group.subscriptions),
-                generation=generation,
-            )
-            await self._apply_plan(connection, plan)
+            for group in groups:
+                if group.group_id in new_group_ids:
+                    continue
+                connection = self._connections[group.group_id]
+                current = frozenset(
+                    subscription
+                    for subscription in self._active_subscriptions
+                    if self._subscription_connections.get(subscription)
+                    == group.group_id
+                )
+                plan = plan_subscription_change(
+                    current,
+                    frozenset(group.subscriptions),
+                    generation=generation,
+                )
+                await self._apply_plan(connection, plan)
 
-        for group_id in sorted(set(self._connections) - set(desired_groups)):
-            connection = self._connections[group_id]
-            current = frozenset(
-                subscription
-                for subscription in self._active_subscriptions
-                if self._subscription_connections.get(subscription) == group_id
-            )
-            plan = plan_subscription_change(
-                current,
-                frozenset(),
-                generation=generation,
-            )
-            await self._apply_plan(connection, plan)
-            await connection.stop()
-            del self._connections[group_id]
-        self._active_subscriptions = desired
-        self._subscription_connections = desired_owners
+            for group_id in sorted(set(self._connections) - set(desired_groups)):
+                connection = self._connections[group_id]
+                current = frozenset(
+                    subscription
+                    for subscription in self._active_subscriptions
+                    if self._subscription_connections.get(subscription)
+                    == group_id
+                )
+                plan = plan_subscription_change(
+                    current,
+                    frozenset(),
+                    generation=generation,
+                )
+                await self._apply_plan(connection, plan)
+                await connection.stop()
+                del self._connections[group_id]
+            self._active_subscriptions = desired
+            self._subscription_connections = desired_owners
 
     async def stop(self) -> None:
-        connections = tuple(self._connections.values())
-        try:
-            results = await asyncio.gather(
-                *(connection.stop() for connection in connections),
-                return_exceptions=True,
-            )
-        finally:
-            self._connections.clear()
-            self._active_subscriptions = frozenset()
-            self._subscription_connections.clear()
+        async with self._lock:
+            if self._stopped:
+                return
+            self._stopped = True
+            connections = tuple(self._connections.values())
+            try:
+                results = await asyncio.gather(
+                    *(connection.stop() for connection in connections),
+                    return_exceptions=True,
+                )
+            finally:
+                self._connections.clear()
+                self._active_subscriptions = frozenset()
+                self._subscription_connections.clear()
         for result in results:
             if isinstance(result, BaseException):
                 raise result

@@ -467,6 +467,51 @@ def test_candle_grace_exits_profitably_on_first_adverse_candle() -> None:
     assert closed.grace_exit_started_at is None
 
 
+def test_candle_grace_respects_minimum_holding_period() -> None:
+    position = position_from_entry_fill("run-1", _fill())
+    assert position is not None
+    config = PaperExitConfig(
+        exit_mode=PaperExitMode.CANDLE_15M,
+        max_holding_buckets=5760,
+        candle_minimum_holding_buckets=180,
+        candle_grace_bars=1,
+    )
+    warning = _candle(open_price="105", close_price="102")
+    pending = mark_positions(
+        positions=(position,),
+        state=_state(close=Decimal("99"), bucket_start=warning.candle_end),
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+        closed_candle=warning,
+    )[0]
+
+    assert pending.status is PaperPositionStatus.OPEN
+    assert pending.grace_exit_started_at == warning.candle_end
+
+    before_minimum = mark_positions(
+        positions=(pending,),
+        state=_state(
+            close=Decimal("101"),
+            bucket_start=warning.candle_end + timedelta(minutes=14),
+        ),
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+    )[0]
+    assert before_minimum.status is PaperPositionStatus.OPEN
+
+    after_minimum = mark_positions(
+        positions=(before_minimum,),
+        state=_state(
+            close=Decimal("101"),
+            bucket_start=warning.candle_end + timedelta(minutes=15),
+        ),
+        config=config,
+        taker_fee_rate=Decimal("0.0004"),
+    )[0]
+    assert after_minimum.status is PaperPositionStatus.CLOSED
+    assert after_minimum.close_reason == "candle_15m_grace_limit_1"
+
+
 def test_candle_grace_exits_at_recovered_executable_mark() -> None:
     position = position_from_entry_fill("run-1", _fill())
     assert position is not None

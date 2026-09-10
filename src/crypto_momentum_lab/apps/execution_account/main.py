@@ -120,11 +120,6 @@ def sync_once_command(
     ] = None,
 ) -> None:
     resolved_database_url = _execution_database_url(database_url)
-    if not resolved_database_url:
-        raise typer.BadParameter(
-            "--database-url or CML_EXECUTION_DATABASE_URL or "
-            "CML_DATABASE_URL is required"
-        )
     credentials = _resolve_cli_credentials(
         role=BinanceCredentialRole.READ,
         api_key_env=api_key_env,
@@ -292,11 +287,6 @@ def sync_command(
     ] = None,
 ) -> None:
     resolved_database_url = _execution_database_url(database_url)
-    if not resolved_database_url:
-        raise typer.BadParameter(
-            "--database-url or CML_EXECUTION_DATABASE_URL or "
-            "CML_DATABASE_URL is required"
-        )
     credentials = _resolve_cli_credentials(
         role=BinanceCredentialRole.READ,
         api_key_env=api_key_env,

@@ -50,6 +50,24 @@ class SlowAggTradeHistory:
         return ()
 
 
+class FlakyAggTradeHistory:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def fetch_agg_trades(
+        self,
+        symbol: str,
+        *,
+        from_id: int,
+        limit: int,
+    ) -> tuple[BinanceAggTrade, ...]:
+        del symbol, from_id, limit
+        self.calls += 1
+        if self.calls == 1:
+            return ()
+        return (_trade(11), _trade(12))
+
+
 async def test_recoverer_inserts_missing_trades_before_live_event() -> None:
     history = FakeAggTradeHistory((_trade(11), _trade(12)))
     recoverer = AggTradeGapRecoverer(history)
@@ -66,6 +84,23 @@ async def test_recoverer_inserts_missing_trades_before_live_event() -> None:
     assert [item.recovered for item in recovered.envelopes] == [True, True, False]
     assert recovered.unrecovered_gaps == ()
     assert history.calls == [("BTCUSDT", 11, 2)]
+
+
+async def test_failed_recovery_does_not_advance_last_seen_cursor() -> None:
+    history = FlakyAggTradeHistory()
+    recoverer = AggTradeGapRecoverer(history)
+    await recoverer.expand((_envelope(10),))
+
+    first = await recoverer.expand((_envelope(13),))
+    second = await recoverer.expand((_envelope(13),))
+
+    assert first.unrecovered_gaps[0].reason == "history_incomplete"
+    assert [item.exchange_sequence for item in second.envelopes] == [
+        "11",
+        "12",
+        "13",
+    ]
+    assert history.calls == 2
 
 
 async def test_recoverer_marks_gap_when_history_is_incomplete() -> None:

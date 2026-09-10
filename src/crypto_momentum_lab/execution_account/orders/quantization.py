@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, ROUND_UP, Decimal
 
 from crypto_momentum_lab.domain.execution import (
     FuturesPositionSide,
@@ -143,7 +143,12 @@ def _quantized_price(
     if intent.entry_type is EntryType.MARKET:
         return None
     source_price = intent.limit_price or reference_price
-    return _round_down(source_price, rules.tick_size)
+    side = _exchange_side(intent)
+    rounding = ROUND_DOWN if side == "BUY" else ROUND_UP
+    units = (source_price / rules.tick_size).to_integral_value(
+        rounding=rounding
+    )
+    return units * rules.tick_size
 
 
 def _exchange_side(intent: OrderIntentCandidate) -> str:

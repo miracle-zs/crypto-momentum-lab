@@ -2,6 +2,8 @@ import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderState,
     FuturesPositionSide,
@@ -9,6 +11,8 @@ from crypto_momentum_lab.domain.execution import (
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
+    OrderExecutionKey,
+    _KeyCommandScheduler,
 )
 
 NOW = datetime(2026, 8, 22, tzinfo=UTC)
@@ -94,6 +98,52 @@ async def test_same_position_is_serial_and_exit_has_priority_over_entry() -> Non
     ]
     assert exit_task.result().state is ExchangeOrderState.ACKNOWLEDGED
     await coordinator.aclose()
+
+
+async def test_scheduler_close_releases_queued_submitters() -> None:
+    scheduler = _KeyCommandScheduler(
+        OrderExecutionKey("primary", "BTCUSDT", FuturesPositionSide.BOTH)
+    )
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    calls: list[str] = []
+
+    async def first_operation():
+        calls.append("first")
+        first_started.set()
+        await release_first.wait()
+
+    async def queued_operation():
+        calls.append("queued")
+
+    first_task = asyncio.create_task(
+        scheduler.submit(priority=0, operation=first_operation)
+    )
+    await first_started.wait()
+    queued_task = asyncio.create_task(
+        scheduler.submit(priority=10, operation=queued_operation)
+    )
+    await asyncio.sleep(0)
+    close_task = asyncio.create_task(scheduler.close())
+    await asyncio.sleep(0)
+    release_first.set()
+
+    await first_task
+    await close_task
+    with pytest.raises(RuntimeError, match="scheduler is closed"):
+        await queued_task
+    assert calls == ["first"]
+
+
+async def test_coordinator_rejects_commands_after_close() -> None:
+    coordinator = OrderExecutionCoordinator(
+        backend=BlockingBackend(),
+        account_label="primary",
+    )
+    await coordinator.aclose()
+
+    with pytest.raises(RuntimeError, match="coordinator is closed"):
+        await coordinator.submit(_plan("BTCUSDT", reduce_only=False))
 
 
 def _plan(symbol: str, *, reduce_only: bool) -> OrderExecutionPlan:

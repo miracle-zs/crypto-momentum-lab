@@ -28,6 +28,7 @@ from crypto_momentum_lab.domain.strategy import (
 )
 from crypto_momentum_lab.strategy_runner.candle_source import (
     ClosedCandle15mSource,
+    ClosedCandleSourceError,
 )
 from crypto_momentum_lab.strategy_runner.fills import (
     ReplayExecutionConfig,
@@ -77,6 +78,7 @@ class RuntimeStrategy(Protocol):
 
 
 _PAPER_RECOVERY_STATE_LIMIT = 100_000
+_CANDLE_SOURCE_RETRY_SECONDS = 30.0
 
 
 class PaperLiveDaemonRepository(Protocol):
@@ -166,6 +168,8 @@ class PaperEntryFilterConfig:
 @dataclass(frozen=True, slots=True)
 class PaperEntryFilterContext:
     entry_price: Decimal | None
+    long_entry_price: Decimal | None = None
+    short_entry_price: Decimal | None = None
     ema5: Decimal | None = None
     ema10: Decimal | None = None
     ema_observed_at: datetime | None = None
@@ -185,7 +189,7 @@ class PaperLiveDaemonConfig:
     run_identity: StrategyRunIdentity | None = None
     source_description: str = "paper-live"
     execution: ReplayExecutionConfig = field(
-        default_factory=lambda: ReplayExecutionConfig(latency_buckets=0)
+        default_factory=ReplayExecutionConfig
     )
     portfolio: PaperExitConfig = field(default_factory=PaperExitConfig)
     entry_filter: PaperEntryFilterConfig = field(
@@ -257,6 +261,9 @@ def run_paired_paper_live_daemon(
     clock: Clock,
     entry_symbol_loader: Callable[[datetime], frozenset[str]] | None = None,
     candle_source: ClosedCandle15mSource | None = None,
+    entry_filter_context_loader: (
+        Callable[[MarketState15s], PaperEntryFilterContext | None] | None
+    ) = None,
     on_checkpoint_persisted: Callable[[], None] | None = None,
 ) -> PairedPaperLiveDaemonResult:
     """Run multiple exit-only variants from one shared strategy calculation."""
@@ -369,6 +376,9 @@ def run_paired_paper_live_daemon(
     last_candle_end_by_account: list[dict[str, datetime]] = [
         {} for _ in accounts
     ]
+    candle_retry_after_by_account: list[dict[str, datetime]] = [
+        {} for _ in accounts
+    ]
     entry_symbols: frozenset[str] | None = None
     entry_symbols_loaded_at: datetime | None = None
     gapped_symbols: set[str] = set()
@@ -430,13 +440,38 @@ def run_paired_paper_live_daemon(
                 closed_candle is None
                 and config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
             ):
-                closed_candle = _load_latest_closed_candle_for_positions(
-                    positions=tuple(open_positions_by_account[index].values()),
-                    state=state,
-                    source=candle_source,
-                    not_before=identity.created_at,
-                    after=last_candle_end_by_account[index].get(state.symbol),
+                retry_after = candle_retry_after_by_account[index].get(
+                    state.symbol
                 )
+                if retry_after is None or now >= retry_after:
+                    try:
+                        closed_candle = _load_latest_closed_candle_for_positions(
+                            positions=tuple(
+                                open_positions_by_account[index].values()
+                            ),
+                            state=state,
+                            source=candle_source,
+                            not_before=identity.created_at,
+                            after=last_candle_end_by_account[index].get(
+                                state.symbol
+                            ),
+                        )
+                    except ClosedCandleSourceError as error:
+                        log.warning(
+                            "closed_candle_source_unavailable",
+                            symbol=state.symbol,
+                            account_index=index,
+                            error=str(error),
+                        )
+                        candle_retry_after_by_account[index][
+                            state.symbol
+                        ] = now + timedelta(
+                            seconds=_CANDLE_SOURCE_RETRY_SECONDS
+                        )
+                    else:
+                        candle_retry_after_by_account[index].pop(
+                            state.symbol, None
+                        )
             candle_history: deque[ClosedCandle15m] | None = None
             if closed_candle is not None:
                 last_candle_end_by_account[index][state.symbol] = (
@@ -476,12 +511,18 @@ def run_paired_paper_live_daemon(
             position_updates_by_account.append(position_updates)
 
         decision = strategy.on_market_state(state)
+        entry_filter_context = (
+            None
+            if entry_filter_context_loader is None
+            else entry_filter_context_loader(state)
+        )
         last_processed_at_by_symbol[state.symbol] = state.bucket_start
         for index, account in enumerate(accounts):
             account_decision = _decision_for_account(
                 decision,
                 account.config.run_identity,
                 account.config.entry_filter,
+                context=entry_filter_context,
             )
             if entry_allowed and (
                 account_decision.signals or account_decision.candidates
@@ -691,6 +732,8 @@ def _decision_for_account(
     decision: StrategyDecision,
     identity: StrategyRunIdentity | None,
     entry_filter: PaperEntryFilterConfig,
+    *,
+    context: PaperEntryFilterContext | None = None,
 ) -> StrategyDecision:
     if identity is None:
         raise ValueError("paired paper account requires run_identity")
@@ -698,7 +741,11 @@ def _decision_for_account(
     signal_ids: dict[str, str] = {}
     signals: list[StrategySignal] = []
     for signal in decision.signals:
-        if not _signal_passes_entry_filter(signal, entry_filter):
+        if not _signal_passes_entry_filter(
+            signal,
+            entry_filter,
+            context=context,
+        ):
             continue
         signal_id = _paired_record_id(
             prefix="sig",
@@ -784,19 +831,21 @@ def _signal_passes_entry_filter(
         if trade_count is None or trade_count > max_trade_count:
             return False
     if entry_filter.require_price_above_ema5:
+        entry_price = _entry_price_for_side(context, signal.side)
         if (
             context is None
-            or context.entry_price is None
+            or entry_price is None
             or context.ema5 is None
-            or context.entry_price <= context.ema5
+            or entry_price <= context.ema5
         ):
             return False
     if entry_filter.require_price_above_ema10:
+        entry_price = _entry_price_for_side(context, signal.side)
         if (
             context is None
-            or context.entry_price is None
+            or entry_price is None
             or context.ema10 is None
-            or context.entry_price <= context.ema10
+            or entry_price <= context.ema10
         ):
             return False
     return True
@@ -835,22 +884,36 @@ def _paper_signal_gate_reasons(
 def _paper_ema_filter_passes(
     entry_filter: PaperEntryFilterConfig,
     context: PaperEntryFilterContext | None,
+    *,
+    side: StrategySide | None = None,
 ) -> bool:
+    entry_price = _entry_price_for_side(context, side)
     if entry_filter.require_price_above_ema5 and (
-        context is None
-        or context.entry_price is None
+        entry_price is None
         or context.ema5 is None
-        or context.entry_price <= context.ema5
+        or entry_price <= context.ema5
     ):
         return False
     if entry_filter.require_price_above_ema10 and (
-        context is None
-        or context.entry_price is None
+        entry_price is None
         or context.ema10 is None
-        or context.entry_price <= context.ema10
+        or entry_price <= context.ema10
     ):
         return False
     return True
+
+
+def _entry_price_for_side(
+    context: PaperEntryFilterContext | None,
+    side: StrategySide | None,
+) -> Decimal | None:
+    if context is None:
+        return None
+    if side is StrategySide.LONG and context.long_entry_price is not None:
+        return context.long_entry_price
+    if side is StrategySide.SHORT and context.short_entry_price is not None:
+        return context.short_entry_price
+    return context.entry_price
 
 
 def _paper_policy_comparisons(
@@ -893,6 +956,7 @@ def _paper_policy_comparisons(
         elif not _paper_ema_filter_passes(
             entry_filter,
             entry_filter_context,
+            side=None if signal is None else signal.side,
         ):
             legacy_reason = "ema_filter_failed"
         else:
@@ -1139,6 +1203,7 @@ def run_paper_live_daemon(
     )
     last_equity_snapshot_at: datetime | None = None
     last_candle_end_by_symbol: dict[str, datetime] = {}
+    candle_retry_after_by_symbol: dict[str, datetime] = {}
     candle_history_by_symbol: dict[str, deque[ClosedCandle15m]] = {}
     entry_symbols: frozenset[str] | None = None
     entry_symbols_loaded_at: datetime | None = None
@@ -1212,13 +1277,27 @@ def run_paper_live_daemon(
                 closed_candle is None
                 and config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
             ):
-                closed_candle = _load_latest_closed_candle_for_positions(
-                    positions=tuple(open_positions.values()),
-                    state=state,
-                    source=candle_source,
-                    not_before=candle_not_before,
-                    after=last_candle_end_by_symbol.get(state.symbol),
-                )
+                retry_after = candle_retry_after_by_symbol.get(state.symbol)
+                if retry_after is None or now >= retry_after:
+                    try:
+                        closed_candle = _load_latest_closed_candle_for_positions(
+                            positions=tuple(open_positions.values()),
+                            state=state,
+                            source=candle_source,
+                            not_before=candle_not_before,
+                            after=last_candle_end_by_symbol.get(state.symbol),
+                        )
+                    except ClosedCandleSourceError as error:
+                        log.warning(
+                            "closed_candle_source_unavailable",
+                            symbol=state.symbol,
+                            error=str(error),
+                        )
+                        candle_retry_after_by_symbol[state.symbol] = (
+                            now + timedelta(seconds=_CANDLE_SOURCE_RETRY_SECONDS)
+                        )
+                    else:
+                        candle_retry_after_by_symbol.pop(state.symbol, None)
             candle_history: deque[ClosedCandle15m] | None = None
             if closed_candle is not None:
                 last_candle_end_by_symbol[state.symbol] = (

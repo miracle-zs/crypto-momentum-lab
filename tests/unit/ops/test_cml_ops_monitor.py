@@ -188,6 +188,54 @@ def test_build_config_reads_live_session_from_compose_env(
     assert config.live_lease_owner == "worker-2"
 
 
+def test_build_config_supports_multiple_compose_files_and_live_accounts(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CML_COMPOSE_PROFILES", "live")
+    monkeypatch.setenv(
+        "CML_MONITOR_LIVE_ACCOUNTS",
+        "primary|live-primary-v1|live-worker,"
+        "account-2|live-account-2-v1|live-worker-account-2",
+    )
+    args = argparse.Namespace(
+        project_directory=str(tmp_path),
+        compose_file=(
+            f"{tmp_path / 'compose.yaml'},{tmp_path / 'compose.live.yaml'}"
+        ),
+        services="postgres,live-strategy,live-strategy-account-2",
+        live_run_id=None,
+        interval_seconds=60.0,
+        log_window_seconds=120.0,
+        telemetry_stale_after_seconds=900.0,
+        rss_warning_fraction=0.75,
+        rss_critical_fraction=0.90,
+        rss_growth_bytes=64 * 1024 * 1024,
+        rss_growth_window_seconds=1_800.0,
+        alert_cooldown_seconds=900.0,
+        command_timeout_seconds=15.0,
+        state_path=str(tmp_path / "state.json"),
+    )
+
+    config = build_config(args)
+    monitor = OpsMonitor(config, runner=None)
+
+    assert config.compose_files == (
+        tmp_path / "compose.yaml",
+        tmp_path / "compose.live.yaml",
+    )
+    assert config.compose_profiles == ("live",)
+    assert config.live_accounts == (
+        ("primary", "live-primary-v1", "live-worker"),
+        ("account-2", "live-account-2-v1", "live-worker-account-2"),
+    )
+    assert monitor._compose_prefix()[-4:] == [
+        "-f",
+        str(tmp_path / "compose.live.yaml"),
+        "--profile",
+        "live",
+    ]
+
+
 def test_serverchan_config_and_payload(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("SERVERCHAN_SENDKEY", "SCT-test-key")
     args = argparse.Namespace(

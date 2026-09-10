@@ -64,6 +64,11 @@ class BinanceWebSocketMetricsSnapshot:
     ingress_queue_high_watermark_events: int = 0
     reader_task_alive: bool = False
     dispatch_task_alive: bool = False
+    realtime_queue_events: int = 0
+    realtime_queue_dropped_events: int = 0
+    realtime_queue_max_events: int = 0
+    realtime_queue_high_watermark_events: int = 0
+    realtime_dispatch_task_alive: bool = False
 
 
 class _ConnectionPhase(StrEnum):
@@ -161,8 +166,13 @@ class BinanceWebSocketConnection:
         self._ingress_queue_events = 0
         self._ingress_queue_dropped_events = 0
         self._ingress_queue_high_watermark_events = 0
+        self._realtime_queue_max_events = ingress_queue_max_events
+        self._realtime_queue_events = 0
+        self._realtime_queue_dropped_events = 0
+        self._realtime_queue_high_watermark_events = 0
         self._reader_task: asyncio.Task[None] | None = None
         self._dispatch_task: asyncio.Task[None] | None = None
+        self._realtime_dispatch_task: asyncio.Task[None] | None = None
 
     def metrics_snapshot(self) -> BinanceWebSocketMetricsSnapshot:
         return BinanceWebSocketMetricsSnapshot(
@@ -212,6 +222,16 @@ class BinanceWebSocketConnection:
                 self._dispatch_task is not None
                 and not self._dispatch_task.done()
             ),
+            realtime_queue_events=self._realtime_queue_events,
+            realtime_queue_dropped_events=self._realtime_queue_dropped_events,
+            realtime_queue_max_events=self._realtime_queue_max_events,
+            realtime_queue_high_watermark_events=(
+                self._realtime_queue_high_watermark_events
+            ),
+            realtime_dispatch_task_alive=(
+                self._realtime_dispatch_task is not None
+                and not self._realtime_dispatch_task.done()
+            ),
         )
 
     async def start(self) -> None:
@@ -235,6 +255,12 @@ class BinanceWebSocketConnection:
                 OSError,
             ) as error:
                 reason = error.__class__.__name__
+                if isinstance(error, CaptureQueueFull):
+                    # Reconnecting cannot make a saturated durable queue
+                    # drain. Stop this connection and leave the capture
+                    # service in its persisted HALTED state instead of
+                    # creating a reconnect storm that drops more events.
+                    self._stopping = True
                 close_code = getattr(error, "code", None)
                 self._last_close_code = (
                     close_code if isinstance(close_code, int) else None
@@ -339,9 +365,13 @@ class BinanceWebSocketConnection:
         data_queue: asyncio.Queue[RawEnvelope] = asyncio.Queue(
             maxsize=self._ingress_queue_max_events
         )
+        realtime_queue: asyncio.Queue[RawEnvelope] = asyncio.Queue(
+            maxsize=self._realtime_queue_max_events
+        )
         ack_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=32)
         reader_task: asyncio.Task[None] | None = None
         dispatch_task: asyncio.Task[None] | None = None
+        realtime_dispatch_task: asyncio.Task[None] | None = None
         ack_task: asyncio.Task[object] | None = None
         desired_task: asyncio.Task[bool] | None = None
         async with connect(
@@ -372,13 +402,18 @@ class BinanceWebSocketConnection:
                     session_id=session_id,
                     data_queue=data_queue,
                     ack_queue=ack_queue,
+                    realtime_queue=realtime_queue,
                 )
             )
             dispatch_task = asyncio.create_task(
                 self._dispatch_messages(data_queue)
             )
+            realtime_dispatch_task = asyncio.create_task(
+                self._dispatch_realtime_messages(realtime_queue)
+            )
             self._reader_task = reader_task
             self._dispatch_task = dispatch_task
+            self._realtime_dispatch_task = realtime_dispatch_task
             try:
                 initial_names, initial_generation = await self._desired_snapshot()
                 await self._start_control(
@@ -478,6 +513,7 @@ class BinanceWebSocketConnection:
                     for task in (
                         reader_task,
                         dispatch_task,
+                        realtime_dispatch_task,
                         ack_task,
                         desired_task,
                     )
@@ -486,7 +522,9 @@ class BinanceWebSocketConnection:
                 await _cancel_and_drain_tasks(child_tasks)
                 self._reader_task = None
                 self._dispatch_task = None
+                self._realtime_dispatch_task = None
                 self._ingress_queue_events = 0
+                self._realtime_queue_events = 0
         return "closed"
 
     async def _read_messages(
@@ -496,6 +534,7 @@ class BinanceWebSocketConnection:
         session_id: UUID,
         data_queue: asyncio.Queue[RawEnvelope],
         ack_queue: asyncio.Queue[object],
+        realtime_queue: asyncio.Queue[RawEnvelope],
     ) -> None:
         local_sequence = 0
         while not self._stopping:
@@ -543,7 +582,23 @@ class BinanceWebSocketConnection:
                 continue
             local_sequence += 1
             if self._on_realtime_envelope is not None:
-                await self._on_realtime_envelope(envelope)
+                try:
+                    realtime_queue.put_nowait(envelope)
+                except asyncio.QueueFull:
+                    self._realtime_queue_dropped_events += 1
+                    log.warning(
+                        "binance_websocket_realtime_queue_saturated",
+                        group_id=self._group_id,
+                        route=self._route.value,
+                        stream=self._stream.value,
+                        dropped_events=self._realtime_queue_dropped_events,
+                    )
+                else:
+                    self._realtime_queue_events = realtime_queue.qsize()
+                    self._realtime_queue_high_watermark_events = max(
+                        self._realtime_queue_high_watermark_events,
+                        self._realtime_queue_events,
+                    )
             try:
                 data_queue.put_nowait(envelope)
             except asyncio.QueueFull as exc:
@@ -578,6 +633,38 @@ class BinanceWebSocketConnection:
                 await self._on_envelope(envelope)
             finally:
                 data_queue.task_done()
+            await asyncio.sleep(0)
+
+    async def _dispatch_realtime_messages(
+        self,
+        realtime_queue: asyncio.Queue[RawEnvelope],
+    ) -> None:
+        if self._on_realtime_envelope is None:
+            return
+        while not self._stopping or not realtime_queue.empty():
+            try:
+                envelope = await asyncio.wait_for(
+                    realtime_queue.get(),
+                    timeout=0.1,
+                )
+            except TimeoutError:
+                continue
+            self._realtime_queue_events = realtime_queue.qsize()
+            try:
+                await self._on_realtime_envelope(envelope)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                log.exception(
+                    "binance_websocket_realtime_sink_failed",
+                    group_id=self._group_id,
+                    route=self._route.value,
+                    stream=self._stream.value,
+                    reason=error.__class__.__name__,
+                    error=str(error),
+                )
+            finally:
+                realtime_queue.task_done()
             await asyncio.sleep(0)
 
     async def _send_control(

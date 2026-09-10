@@ -68,11 +68,12 @@ async def test_connection_reconnects_with_new_session_and_full_set(
 
 
 @pytest.mark.e2e
-async def test_connection_rebuilds_when_envelope_dispatch_fails(
+async def test_connection_halts_when_envelope_dispatch_fails(
     fake_binance_server,
 ) -> None:
     fake_binance_server.close_first_connection = False
     lifecycle: list[ConnectionLifecycleEvent] = []
+    queue_failed = asyncio.Event()
 
     async def reject(envelope: RawEnvelope) -> None:
         del envelope
@@ -80,6 +81,8 @@ async def test_connection_rebuilds_when_envelope_dispatch_fails(
 
     async def observe(event: ConnectionLifecycleEvent) -> None:
         lifecycle.append(event)
+        if event.reason == "CaptureQueueFull" and not event.opened:
+            queue_failed.set()
 
     connection = BinanceWebSocketConnection(
         base_url=fake_binance_server.market_url,
@@ -99,7 +102,8 @@ async def test_connection_rebuilds_when_envelope_dispatch_fails(
 
     run_task = asyncio.create_task(connection.run())
     try:
-        await fake_binance_server.wait_for_connections(2)
+        await fake_binance_server.wait_for_connections(1)
+        await asyncio.wait_for(queue_failed.wait(), timeout=5)
     finally:
         await connection.stop()
         await run_task

@@ -78,6 +78,7 @@ class PaperRunnerConfig:
     liquidation_cascade: LiquidationCascadeConfig | None = None
     execution: ReplayExecutionConfig = field(default_factory=ReplayExecutionConfig)
     max_states: int | None = None
+    reset_on_gap: bool = True
 
     def __post_init__(self) -> None:
         if not self.strategy_name:
@@ -96,6 +97,8 @@ class PaperRunnerConfig:
             raise ValueError("signal_interval_seconds must be positive")
         if self.max_states is not None and self.max_states <= 0:
             raise ValueError("max_states must be positive")
+        if not isinstance(self.reset_on_gap, bool):
+            raise TypeError("reset_on_gap must be a bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +154,7 @@ def run_paper_trading(
     paper_fills: list[SimulatedFill] = []
     pending_candidates: list[OrderIntentCandidate] = []
     last_processed_at_by_symbol: dict[str, datetime] = {}
+    max_gap_seconds = strategy.required_data().max_gap_seconds
     input_state_count = 0
 
     for state in source:
@@ -158,6 +162,14 @@ def run_paper_trading(
             break
         _validate_state(state, last_processed_at_by_symbol)
         input_state_count += 1
+        last_processed_at = last_processed_at_by_symbol.get(state.symbol)
+        if (
+            config.reset_on_gap
+            and last_processed_at is not None
+            and (state.bucket_start - last_processed_at).total_seconds()
+            > max_gap_seconds
+        ):
+            strategy.reset_symbol(state.symbol)
         decision = strategy.on_market_state(state)
         signals.extend(decision.signals)
         candidates.extend(decision.candidates)

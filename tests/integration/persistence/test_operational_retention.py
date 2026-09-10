@@ -69,7 +69,7 @@ async def test_contract_metadata_retention_keeps_latest_snapshot(repository) -> 
 
 async def test_account_snapshot_retention_keeps_latest_row(repository) -> None:
     factory = repository._session_factory
-    environment = f"retention-{uuid4().hex}"
+    environment = f"ret-{uuid4().hex[:12]}"
     account_label = "primary"
     older_at = datetime(2026, 6, 14, 10, 0, tzinfo=UTC)
     latest_at = datetime(2026, 6, 14, 11, 0, tzinfo=UTC)
@@ -131,7 +131,7 @@ async def test_account_snapshot_retention_thins_old_balance_history_hourly(
     repository,
 ) -> None:
     factory = repository._session_factory
-    environment = f"retention-{uuid4().hex}"
+    environment = f"ret-{uuid4().hex[:12]}"
     account_label = "primary"
     first_at = datetime(2026, 6, 14, 10, 5, tzinfo=UTC)
     latest_in_hour_at = datetime(2026, 6, 14, 10, 55, tzinfo=UTC)
@@ -190,7 +190,7 @@ async def test_account_snapshot_retention_thins_multiple_batches(
     repository,
 ) -> None:
     factory = repository._session_factory
-    environment = f"retention-{uuid4().hex}"
+    environment = f"ret-{uuid4().hex[:12]}"
     account_label = "primary"
     before = datetime(2026, 6, 15, tzinfo=UTC)
     equity_before = datetime(2026, 6, 14, tzinfo=UTC)

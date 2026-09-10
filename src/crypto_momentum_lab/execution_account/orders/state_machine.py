@@ -529,14 +529,29 @@ class OrderExecutionStateMachine:
                 plan=plan,
             )
         except ExchangeOrderRejectedError as exc:
+            # A cancel rejection only tells us that this request failed. It
+            # does not prove that the resting exchange order disappeared, so
+            # keep it in the reconciliation queue instead of treating the
+            # rejection as a terminal order outcome.
+            query_result = await self._query_order_with_retry(
+                plan,
+                not_found_reason="cancel_rejection_order_not_found",
+            )
+            if query_result.snapshot is not None:
+                return await self._apply_snapshot(plan, query_result.snapshot)
             await self._append_event(
                 plan,
-                ExchangeOrderState.REJECTED,
-                details={"reason": str(exc)},
+                ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+                details={
+                    "reason": str(exc) or "cancel_rejected",
+                    "reconciliation_reason": query_result.reason
+                    or "cancel_rejection_order_not_found",
+                    "reconciliation_attempts": query_result.attempts,
+                },
             )
             return OrderExecutionResult(
                 plan.client_order_id,
-                ExchangeOrderState.REJECTED,
+                ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
                 None,
                 plan=plan,
             )

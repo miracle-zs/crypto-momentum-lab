@@ -126,8 +126,8 @@ class ZstdJsonlArchive:
 
             writer = self._writers.get(key)
             if writer is not None and writer.should_rotate_for(len(row)):
-                await writer.finalize()
                 del self._writers[key]
+                await writer.finalize()
                 writer = None
 
             if writer is None:
@@ -154,7 +154,17 @@ class ZstdJsonlArchive:
             self._writers.move_to_end(key)
             await self._evict_lru_writers()
 
-        return await writer.append(envelope, row)
+        try:
+            return await writer.append(envelope, row)
+        except Exception:
+            # A write/flush failure makes the compressed stream unusable. Do
+            # not leave the broken writer in the LRU map where the next
+            # envelope would append to a file whose checksum is unknown.
+            async with self._lock:
+                if self._writers.get(key) is writer:
+                    del self._writers[key]
+            await writer.abort()
+            raise
 
     async def close(self) -> None:
         async with self._lock:
@@ -278,7 +288,16 @@ class _ArchiveWriter:
             if len(self._pending) == 1:
                 self._schedule_commit_timer()
             if len(self._pending) >= self._group_commit_max_events:
-                await self._commit_locked()
+                try:
+                    await self._commit_locked()
+                except Exception:
+                    # This append propagates the commit error directly; the
+                    # future exists only for the common delayed-commit path.
+                    # Consume its mirrored exception to avoid an unhandled
+                    # Future warning while other pending callers receive it.
+                    if future.done() and not future.cancelled():
+                        future.exception()
+                    raise
         return await future
 
     async def finalize(self) -> ArchiveManifest:
@@ -369,9 +388,12 @@ class _ArchiveWriter:
         try:
             await asyncio.to_thread(self._flush_block)
         except Exception as exc:
+            self._closed = True
+            self._cancel_commit_timer()
             for _, future in pending:
                 if not future.done():
                     future.set_exception(exc)
+            await asyncio.to_thread(self._abort_sync)
             raise
 
         committed_at = datetime.now(UTC)

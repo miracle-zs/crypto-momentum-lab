@@ -75,8 +75,17 @@ class PostgresCaptureRepository:
         return deleted_count
 
     async def save_quality_event(self, event: QualityEvent) -> None:
+        await self.save_quality_events((event,))
+
+    async def save_quality_events(
+        self,
+        events: Iterable[QualityEvent],
+    ) -> None:
+        values = tuple(_quality_values(event) for event in events)
+        if not values:
+            return
         statement = insert(MarketDataQualityEventRow).values(
-            **_quality_values(event)
+            values
         )
         statement = statement.on_conflict_do_nothing(
             index_elements=["event_id"]

@@ -40,6 +40,7 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     ExchangeOrderRejectedError,
     ExchangeSubmissionTimeoutError,
     LiveSubmissionDisabledError,
+    OrderPreSubmissionError,
 )
 from crypto_momentum_lab.live_rollout.commands import (
     CANCEL_ALL_CONFIRMATION,
@@ -759,9 +760,9 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             params["timeInForce"] = time_in_force
             if time_in_force == "GTD":
                 if plan.expires_at is None:
-                    raise ValueError("GTD order is missing expires_at")
+                    raise OrderPreSubmissionError("GTD order is missing expires_at")
                 if plan.expires_at <= self._now() + timedelta(seconds=600):
-                    raise ValueError(
+                    raise OrderPreSubmissionError(
                         "GTD order must expire more than 600 seconds from now"
                     )
                 params["goodTillDate"] = int(
@@ -780,6 +781,10 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         except httpx.TimeoutException as exc:
             raise ExchangeSubmissionTimeoutError(
                 "Binance order submit timed out"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise ExchangeSubmissionTimeoutError(
+                "Binance order submit failed with an unknown outcome"
             ) from exc
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code >= 500:
@@ -1071,7 +1076,9 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     http_status=exc.response.status_code,
                     open_orders_checked=True,
                 ) from exc
-            raise ExchangeOrderRejectedError(_exchange_error_message(exc)) from exc
+            raise ExchangeCancellationUnknownError(
+                "Binance cancel request was rejected; order state must be reconciled"
+            ) from exc
         return self._order_snapshot(_require_mapping(payload))
 
     async def cancel_order(

@@ -137,6 +137,20 @@ def test_parse_live_position_account_labels_falls_back_to_legacy_single_label(
     assert main.parse_live_position_account_labels() == frozenset({"primary"})
 
 
+def test_parse_live_position_account_labels_merges_legacy_single_label(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CML_LIVE_POSITION_ACCOUNT_LABEL", " primary ")
+    monkeypatch.setenv(
+        "CML_LIVE_POSITION_ACCOUNT_LABELS",
+        "account-2, account-3",
+    )
+
+    assert main.parse_live_position_account_labels() == frozenset(
+        {"primary", "account-2", "account-3"}
+    )
+
+
 def test_parse_live_position_account_labels_rejects_empty_tokens() -> None:
     with pytest.raises(ValueError, match="non-empty labels"):
         main.parse_live_position_account_labels("primary,,account-2")

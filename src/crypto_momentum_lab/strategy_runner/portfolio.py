@@ -375,6 +375,13 @@ def _apply_candle_grace_exit(
 
     started_at = position.grace_exit_started_at
     deadline = position.grace_exit_deadline
+    minimum_holding_at = position.opened_at + timedelta(
+        seconds=(
+            config.candle_minimum_holding_buckets
+            * config.state_interval_seconds
+        )
+    )
+    minimum_holding_reached = state.bucket_end >= minimum_holding_at
     if started_at is None:
         if not _is_adverse_candle(position, closed_candle):
             return None
@@ -385,7 +392,10 @@ def _apply_candle_grace_exit(
             closed_candle=closed_candle,
             taker_fee_rate=taker_fee_rate,
         )
-        if profitable_exit_price is not None:
+        if (
+            profitable_exit_price is not None
+            and closed_candle.candle_end >= minimum_holding_at
+        ):
             return _close_at_price(
                 position=position,
                 closed_at=closed_candle.candle_end,
@@ -400,8 +410,13 @@ def _apply_candle_grace_exit(
     elif deadline is None:
         deadline = started_at + timedelta(minutes=15 * config.candle_grace_bars)
 
-    if state.bucket_end >= position.opened_at + timedelta(
-        seconds=config.max_holding_buckets * config.state_interval_seconds
+    if (
+        minimum_holding_reached
+        and state.bucket_end
+        >= position.opened_at
+        + timedelta(
+            seconds=config.max_holding_buckets * config.state_interval_seconds
+        )
     ):
         return _close_at_price(
             position=position,
@@ -415,7 +430,11 @@ def _apply_candle_grace_exit(
         position=position,
         profit_pct=config.candle_grace_profit_pct,
     )
-    if _entry_limit_touched(position.side, mark_price, recovery_limit):
+    if minimum_holding_reached and _entry_limit_touched(
+        position.side,
+        mark_price,
+        recovery_limit,
+    ):
         return _close_at_price(
             position=position,
             closed_at=state.bucket_end,
@@ -427,7 +446,8 @@ def _apply_candle_grace_exit(
         )
 
     if (
-        closed_candle is not None
+        minimum_holding_reached
+        and closed_candle is not None
         and deadline is not None
         and closed_candle.candle_end >= deadline
     ):

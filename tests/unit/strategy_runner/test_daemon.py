@@ -14,6 +14,9 @@ from crypto_momentum_lab.domain.strategy import (
     StrategySide,
     StrategySignal,
 )
+from crypto_momentum_lab.strategy_runner.candle_source import (
+    ClosedCandleSourceError,
+)
 from crypto_momentum_lab.strategy_runner.daemon import (
     PairedPaperLiveAccount,
     PaperEntryFilterConfig,
@@ -24,6 +27,7 @@ from crypto_momentum_lab.strategy_runner.daemon import (
     PaperLiveDaemonResult,
     RuntimeStrategy,
     _checkpoint_for_persistence,
+    _signal_passes_entry_filter,
     run_paired_paper_live_daemon,
     run_paper_live_daemon,
 )
@@ -1057,6 +1061,123 @@ def test_paired_daemon_only_reads_the_latest_closed_candle() -> None:
     assert closed.close_reason == "candle_15m_bullish"
     assert closed.closed_at == candle.candle_end
     assert closed.exit_price == candle.close_price
+
+
+def test_paired_daemon_passes_entry_filter_context_to_each_account() -> None:
+    state = fixture_state("BTCUSDT", 0)
+    first_identity = _identity()
+    second_identity = _identity("run-2")
+    first_artifacts = FakeArtifactRepository()
+    second_artifacts = FakeArtifactRepository()
+
+    result = run_paired_paper_live_daemon(
+        source=(state,),
+        strategy=SignalStrategy(first_identity),
+        accounts=(
+            PairedPaperLiveAccount(
+                repository=FakeRepository(),
+                artifact_repository=first_artifacts,
+                config=_config(run_identity=first_identity),
+            ),
+            PairedPaperLiveAccount(
+                repository=FakeRepository(),
+                artifact_repository=second_artifacts,
+                config=_config(
+                    run_id="run-2",
+                    run_identity=second_identity,
+                    entry_filter=PaperEntryFilterConfig(
+                        require_price_above_ema5=True,
+                    ),
+                ),
+            ),
+        ),
+        clock=FakeClock(state.bucket_end + timedelta(seconds=1)),
+        entry_filter_context_loader=lambda _state: PaperEntryFilterContext(
+            entry_price=Decimal("100.01"),
+            ema5=Decimal("100"),
+        ),
+    )
+
+    assert result.account_results[1].processed_state_count == 1
+    assert len(first_artifacts.decisions) == 1
+    assert len(second_artifacts.decisions) == 1
+
+
+def test_short_ema_filter_uses_bid_side_entry_price() -> None:
+    identity = _identity()
+    state = fixture_state("BTCUSDT", 0)
+    signal = SignalStrategy(identity, side=StrategySide.SHORT).on_market_state(
+        state
+    ).signals[0]
+    entry_filter = PaperEntryFilterConfig(
+        allow_long=False,
+        allow_short=True,
+        require_price_above_ema5=True,
+    )
+    context = PaperEntryFilterContext(
+        entry_price=Decimal("101"),
+        long_entry_price=Decimal("101"),
+        short_entry_price=Decimal("99"),
+        ema5=Decimal("100"),
+    )
+
+    assert not _signal_passes_entry_filter(signal, entry_filter, context=context)
+    assert _signal_passes_entry_filter(
+        signal,
+        entry_filter,
+        context=replace(context, short_entry_price=Decimal("101")),
+    )
+
+
+def test_daemon_retries_closed_candle_source_after_a_short_backoff() -> None:
+    states = (fixture_state("BTCUSDT", 60), fixture_state("BTCUSDT", 61))
+    identity = _identity()
+    artifacts = FakeArtifactRepository()
+    position = position_from_entry_fill(
+        identity.run_id,
+        _filled_entry(
+            symbol=states[0].symbol,
+            filled_at=states[0].bucket_start - timedelta(hours=1),
+        ),
+    )
+    assert position is not None
+    artifacts.positions[position.position_id] = position
+
+    class FailingClosedCandleSource:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def load_closed_candles(
+            self,
+            *,
+            symbol: str,
+            start: datetime,
+            end: datetime,
+        ) -> tuple[ClosedCandle15m, ...]:
+            del symbol, start, end
+            self.calls += 1
+            raise ClosedCandleSourceError("latest candle is not available yet")
+
+    candle_source = FailingClosedCandleSource()
+    result = run_paper_live_daemon(
+        source=states,
+        strategy=FakeStrategy(),
+        repository=FakeRepository(),
+        artifact_repository=artifacts,
+        config=_config(
+            run_identity=identity,
+            portfolio=PaperExitConfig(
+                exit_mode=PaperExitMode.CANDLE_15M,
+                max_holding_buckets=5760,
+            ),
+        ),
+        clock=FakeClock(states[-1].bucket_end + timedelta(seconds=1)),
+        candle_source=candle_source,
+    )
+
+    assert result.processed_state_count == 2
+    assert candle_source.calls == 1
+    assert tuple(artifacts.positions.values())[0].status is PaperPositionStatus.OPEN
 
 
 def test_daemon_uses_protected_symbol_for_exit_without_opening_new_trade() -> None:

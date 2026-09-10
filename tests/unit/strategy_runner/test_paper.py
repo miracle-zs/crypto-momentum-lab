@@ -5,7 +5,12 @@ from decimal import Decimal
 import pytest
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
-from crypto_momentum_lab.domain.strategy import RunMode
+from crypto_momentum_lab.domain.strategy import (
+    RunMode,
+    StrategyCheckpoint,
+    StrategyDataRequirement,
+    StrategyDecision,
+)
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
 )
@@ -110,6 +115,62 @@ def test_run_paper_trading_rejects_backward_symbol_state() -> None:
             source=InMemoryPaperMarketStateSource(states),
             config=_paper_config(),
         )
+
+
+def test_run_paper_trading_resets_strategy_after_a_gap(monkeypatch) -> None:
+    class TrackingStrategy:
+        def __init__(self) -> None:
+            self.reset_symbols: list[str] = []
+            self._checkpoint = StrategyCheckpoint(
+                last_processed_at_by_symbol={},
+                warmup_buckets_by_symbol={},
+                cooldown_buckets_remaining_by_symbol={},
+                payload={},
+            )
+
+        def required_data(self) -> StrategyDataRequirement:
+            return StrategyDataRequirement(
+                base_state_interval_seconds=15,
+                warmup_buckets=1,
+                required_fields=("close_price",),
+                max_gap_seconds=15,
+                allow_entries_before_warmup=False,
+            )
+
+        def reset_symbol(self, symbol: str) -> None:
+            self.reset_symbols.append(symbol)
+
+        def on_market_state(self, state: MarketState15s) -> StrategyDecision:
+            self._checkpoint = StrategyCheckpoint(
+                last_processed_at_by_symbol={state.symbol: state.bucket_start},
+                warmup_buckets_by_symbol={state.symbol: 1},
+                cooldown_buckets_remaining_by_symbol={state.symbol: 0},
+                payload={},
+            )
+            return StrategyDecision(
+                signals=(),
+                candidates=(),
+                rejections=(),
+                checkpoint=self._checkpoint,
+            )
+
+        def checkpoint(self) -> StrategyCheckpoint:
+            return self._checkpoint
+
+    strategy = TrackingStrategy()
+    monkeypatch.setattr(
+        "crypto_momentum_lab.strategy_runner.paper.build_runtime_strategy",
+        lambda *args, **kwargs: strategy,
+    )
+
+    run_paper_trading(
+        source=InMemoryPaperMarketStateSource(
+            (_state(0, close=Decimal("100")), _state(2, close=Decimal("100"))),
+        ),
+        config=_paper_config(),
+    )
+
+    assert strategy.reset_symbols == ["BTCUSDT"]
 
 
 def test_run_paper_trading_accepts_orderflow_impulse_strategy() -> None:

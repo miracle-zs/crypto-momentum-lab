@@ -179,7 +179,7 @@ def test_fast_symbol_extracts_combined_and_nested_payloads() -> None:
 
 
 @pytest.mark.asyncio
-async def test_connection_reconnects_after_capture_queue_backpressure(
+async def test_connection_halts_after_capture_queue_backpressure(
     monkeypatch,
 ) -> None:
     attempts = 0
@@ -209,15 +209,14 @@ async def test_connection_reconnects_after_capture_queue_backpressure(
         attempts += 1
         if attempts == 1:
             raise CaptureQueueFull("queue event limit reached")
-        connection._stopping = True
         return "stopped"
 
     monkeypatch.setattr(connection, "_run_once", fake_run_once)
 
     await connection.run()
 
-    assert attempts == 2
-    assert lifecycle_reasons == ["CaptureQueueFull", "stopped"]
+    assert attempts == 1
+    assert lifecycle_reasons == ["CaptureQueueFull"]
 
 
 @pytest.mark.asyncio
@@ -294,6 +293,87 @@ async def test_subscription_updates_are_queued_without_direct_socket_access(
 
     assert connection._desired_names == ("ethusdt@aggTrade",)
     assert connection._generation == 3
+
+
+@pytest.mark.asyncio
+async def test_realtime_sink_does_not_block_socket_reader() -> None:
+    sink_started = asyncio.Event()
+    release_sink = asyncio.Event()
+
+    async def slow_sink(envelope) -> None:
+        del envelope
+        sink_started.set()
+        await release_sink.wait()
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self._messages = iter(
+                [
+                    json.dumps(
+                        {
+                            "e": "bookTicker",
+                            "E": 1781488800000,
+                            "s": "BTCUSDT",
+                            "u": 7,
+                        }
+                    )
+                ]
+            )
+            self._blocked = asyncio.Event()
+
+        async def recv(self) -> str:
+            try:
+                return next(self._messages)
+            except StopIteration:
+                await self._blocked.wait()
+                raise AssertionError(
+                    "fake socket was unexpectedly released"
+                ) from None
+
+    connection = BinanceWebSocketConnection(
+        base_url="wss://example.test/ws",
+        route=route_for(CaptureStream.BOOK_TICKER),
+        environment="test",
+        desired_names=("btcusdt@bookTicker",),
+        generation=1,
+        on_envelope=lambda envelope: asyncio.sleep(0),
+        on_lifecycle=lambda event: asyncio.sleep(0),
+        reconnect_delays=(0.0,),
+        connection_lifetime_seconds=60,
+        open_timeout_seconds=1,
+        ping_interval_seconds=20,
+        ping_timeout_seconds=20,
+        silence_timeout_seconds=2,
+        on_realtime_envelope=slow_sink,
+    )
+    socket = FakeConnection()
+    data_queue = asyncio.Queue(maxsize=2)
+    realtime_queue = asyncio.Queue(maxsize=2)
+    ack_queue = asyncio.Queue(maxsize=2)
+    reader_task = asyncio.create_task(
+        connection._read_messages(
+            socket,
+            session_id=UUID(int=1),
+            data_queue=data_queue,
+            ack_queue=ack_queue,
+            realtime_queue=realtime_queue,
+        )
+    )
+    dispatch_task = asyncio.create_task(
+        connection._dispatch_realtime_messages(realtime_queue)
+    )
+
+    await asyncio.wait_for(sink_started.wait(), timeout=1)
+    assert data_queue.qsize() == 1
+
+    connection._stopping = True
+    release_sink.set()
+    reader_task.cancel()
+    await asyncio.gather(
+        reader_task,
+        dispatch_task,
+        return_exceptions=True,
+    )
 
 
 @pytest.mark.parametrize(

@@ -44,6 +44,10 @@ class PersistedExchangeOrder:
     executed_quantity: Decimal = Decimal("0")
 
 
+class _SubmissionAlreadyPrepared(Exception):
+    """Abort the transaction when the client order ID already exists."""
+
+
 class PostgresOrderRepository:
     def __init__(
         self,
@@ -152,33 +156,39 @@ class PostgresOrderRepository:
             "exchange_order_id": submitting_event.exchange_order_id,
             "details": _jsonable(submitting_event.details),
         }
-        async with self._session_factory() as session:
-            async with session.begin():
-                await session.execute(
-                    insert(OrderIntentExecutionRow)
-                    .values(intent_values)
-                    .on_conflict_do_nothing()
-                )
-                inserted_order = await session.scalar(
-                    insert(ExchangeOrderRow)
-                    .values(order_values)
-                    .on_conflict_do_nothing()
-                    .returning(ExchangeOrderRow.client_order_id)
-                )
-                if inserted_order is None:
-                    return None
-                await session.execute(
-                    insert(ExchangeOrderEventRow)
-                    .values(event_values)
-                    .on_conflict_do_nothing()
-                )
-                await session.execute(
-                    update(OrderIntentExecutionRow)
-                    .where(
-                        OrderIntentExecutionRow.intent_id == plan.intent_id
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    await session.execute(
+                        insert(OrderIntentExecutionRow)
+                        .values(intent_values)
+                        .on_conflict_do_nothing()
                     )
-                    .values(state=ExchangeOrderState.SUBMITTING.value)
-                )
+                    inserted_order = await session.scalar(
+                        insert(ExchangeOrderRow)
+                        .values(order_values)
+                        .on_conflict_do_nothing()
+                        .returning(ExchangeOrderRow.client_order_id)
+                    )
+                    if inserted_order is None:
+                        # The intent insert may have been new even though a
+                        # concurrent/restarted worker already owns the client
+                        # order ID. Roll back both statements atomically.
+                        raise _SubmissionAlreadyPrepared
+                    await session.execute(
+                        insert(ExchangeOrderEventRow)
+                        .values(event_values)
+                        .on_conflict_do_nothing()
+                    )
+                    await session.execute(
+                        update(OrderIntentExecutionRow)
+                        .where(
+                            OrderIntentExecutionRow.intent_id == plan.intent_id
+                        )
+                        .values(state=ExchangeOrderState.SUBMITTING.value)
+                    )
+        except _SubmissionAlreadyPrepared:
+            return None
         return PreparedOrderSubmission(
             plan=plan,
             submitting_event=submitting_event,
@@ -271,11 +281,26 @@ class PostgresOrderRepository:
                     .returning(ExchangeOrderEventRow.event_id)
                 )
                 if inserted is not None:
+                    terminal_states = tuple(
+                        state.value
+                        for state in ExchangeOrderState
+                        if state.terminal
+                    )
+                    terminal_transition = and_(
+                        literal(event.state.terminal),
+                        # FILLED is the strongest terminal observation; a
+                        # later cancel/reject event must not erase it.
+                        or_(
+                            ExchangeOrderRow.state
+                            != ExchangeOrderState.FILLED.value,
+                            literal(event.state is ExchangeOrderState.FILLED),
+                        ),
+                    )
                     advance_state = and_(
                         ExchangeOrderRow.updated_at <= event.occurred_at,
                         or_(
-                            ExchangeOrderRow.state != ExchangeOrderState.FILLED.value,
-                            literal(event.state is ExchangeOrderState.FILLED),
+                            ExchangeOrderRow.state.not_in(terminal_states),
+                            terminal_transition,
                         ),
                     )
                     order_values: dict[str, object] = {
@@ -283,8 +308,15 @@ class PostgresOrderRepository:
                             (advance_state, event.state.value),
                             else_=ExchangeOrderRow.state,
                         ),
-                        "updated_at": func.greatest(
-                            ExchangeOrderRow.updated_at, event.occurred_at
+                        "updated_at": case(
+                            (
+                                advance_state,
+                                func.greatest(
+                                    ExchangeOrderRow.updated_at,
+                                    event.occurred_at,
+                                ),
+                            ),
+                            else_=ExchangeOrderRow.updated_at,
                         ),
                     }
                     if event.exchange_order_id is not None:

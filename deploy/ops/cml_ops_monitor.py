@@ -19,7 +19,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -39,6 +39,16 @@ _DEFAULT_RSS_GROWTH_BYTES = 64 * 1024 * 1024
 _DEFAULT_RSS_GROWTH_WINDOW_SECONDS = 1_800.0
 _DEFAULT_ALERT_COOLDOWN_SECONDS = 900.0
 _DEFAULT_COMMAND_TIMEOUT_SECONDS = 15.0
+
+
+def _live_strategy_service(account_label: str) -> str:
+    """Map a configured account label to its Compose strategy service."""
+
+    return (
+        "live-strategy"
+        if account_label == "primary"
+        else f"live-strategy-{account_label}"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,8 +326,13 @@ class SubprocessRunner:
 class MonitorConfig:
     project_directory: Path = Path("/opt/crypto-momentum-lab")
     compose_file: Path = Path("/opt/crypto-momentum-lab/compose.server.yaml")
+    compose_files: tuple[Path, ...] = ()
+    compose_profiles: tuple[str, ...] = ()
     compose_env_file: Path | None = Path("/opt/crypto-momentum-lab/.env.server")
     services: tuple[str, ...] = _DEFAULT_SERVICES
+    live_accounts: tuple[tuple[str, str, str], ...] = (
+        ("primary", "live-primary-v1", "live-worker"),
+    )
     live_run_id: str = "live-primary-v1"
     live_account_label: str = "primary"
     live_lease_owner: str = "live-worker"
@@ -402,12 +417,38 @@ class OpsMonitor:
             )
 
         market_id = self._container_id("market-data")
-        live_id = self._container_id("live-strategy")
-        combined_signals = self._log_signals(
-            market_id,
-            live_id,
-            since_seconds=self._config.log_window_seconds,
+        strategy_services = tuple(
+            _live_strategy_service(account_label)
+            for account_label, _run_id, _lease_owner in self._config.live_accounts
         )
+        combined_signals = LogSignals()
+        for strategy_service in strategy_services:
+            live_id = self._container_id(strategy_service)
+            signals = self._log_signals(
+                market_id,
+                live_id,
+                since_seconds=self._config.log_window_seconds,
+            )
+            combined_signals = LogSignals(
+                telemetry_persist_failures=(
+                    combined_signals.telemetry_persist_failures
+                    + signals.telemetry_persist_failures
+                ),
+                dead_connection_tasks=(
+                    *combined_signals.dead_connection_tasks,
+                    *signals.dead_connection_tasks,
+                ),
+                latest_rss_bytes=(
+                    signals.latest_rss_bytes
+                    if signals.latest_rss_bytes is not None
+                    else combined_signals.latest_rss_bytes
+                ),
+                rss_observed_at=(
+                    signals.rss_observed_at
+                    if signals.rss_observed_at is not None
+                    else combined_signals.rss_observed_at
+                ),
+            )
         alerts.extend(evaluate_log_signals(combined_signals))
         if combined_signals.latest_rss_bytes is not None:
             alerts.extend(
@@ -420,20 +461,29 @@ class OpsMonitor:
 
         postgres_id = self._container_id("postgres")
         if postgres_id is not None:
-            try:
-                database_state = self._database_state(postgres_id)
-            except Exception as error:
-                alerts.append(
-                    Alert(
-                        "database_check_failed",
-                        "critical",
-                        "PostgreSQL observability query failed",
-                        {"error_type": type(error).__name__, "error": str(error)},
+            for account_label, run_id, lease_owner in self._config.live_accounts:
+                try:
+                    database_state = self._database_state(
+                        postgres_id,
+                        live_run_id=run_id,
+                        live_account_label=account_label,
+                        live_lease_owner=lease_owner,
                     )
-                )
-            else:
-                alerts.extend(
-                    evaluate_database_state(
+                except Exception as error:
+                    alerts.append(
+                        Alert(
+                            f"database_check_failed:{account_label}",
+                            "critical",
+                            "PostgreSQL observability query failed",
+                            {
+                                "account_label": account_label,
+                                "error_type": type(error).__name__,
+                                "error": str(error),
+                            },
+                        )
+                    )
+                else:
+                    account_alerts = evaluate_database_state(
                         now=datetime.fromtimestamp(now, UTC),
                         latest_checkpoint_age_seconds=(
                             database_state.latest_checkpoint_age_seconds
@@ -447,7 +497,17 @@ class OpsMonitor:
                         ),
                         stale_after_seconds=self._config.telemetry_stale_after_seconds,
                     )
-                )
+                    alerts.extend(
+                        replace(
+                            alert,
+                            name=f"{alert.name}:{account_label}",
+                            details={
+                                **alert.details,
+                                "account_label": account_label,
+                            },
+                        )
+                        for alert in account_alerts
+                    )
 
         active_keys = {alert.name for alert in alerts}
         for alert in alerts:
@@ -577,10 +637,21 @@ class OpsMonitor:
             rss_observed_at=latest_rss_at,
         )
 
-    def _database_state(self, container_id: str) -> DatabaseState:
-        run_id = _sql_literal(self._config.live_run_id)
-        account_label = _sql_literal(self._config.live_account_label)
-        lease_owner = _sql_literal(self._config.live_lease_owner)
+    def _database_state(
+        self,
+        container_id: str,
+        *,
+        live_run_id: str | None = None,
+        live_account_label: str | None = None,
+        live_lease_owner: str | None = None,
+    ) -> DatabaseState:
+        run_id = _sql_literal(live_run_id or self._config.live_run_id)
+        account_label = _sql_literal(
+            live_account_label or self._config.live_account_label
+        )
+        lease_owner = _sql_literal(
+            live_lease_owner or self._config.live_lease_owner
+        )
         sql = f"""
 SELECT 'checkpoint_age' || E'\\t' || COALESCE(
   EXTRACT(EPOCH FROM (clock_timestamp() - max(saved_at)))::text, '-1'
@@ -691,7 +762,11 @@ SELECT 'parallel_maintenance' || E'\\t' || current_setting(
         ]
         if self._config.compose_env_file is not None:
             command.extend(["--env-file", str(self._config.compose_env_file)])
-        command.extend(["-f", str(self._config.compose_file)])
+        compose_files = self._config.compose_files or (self._config.compose_file,)
+        for compose_file in compose_files:
+            command.extend(["-f", str(compose_file)])
+        for profile in self._config.compose_profiles:
+            command.extend(["--profile", profile])
         return command
 
     def _emit(self, alert: Alert, *, now: float) -> None:
@@ -987,6 +1062,21 @@ def _read_env_value(path: Path | None, name: str) -> str | None:
     return None
 
 
+def _parse_live_accounts(raw_value: str | None) -> tuple[tuple[str, str, str], ...]:
+    if raw_value is None or not raw_value.strip():
+        return (("primary", "live-primary-v1", "live-worker"),)
+    accounts: list[tuple[str, str, str]] = []
+    for item in raw_value.split(","):
+        parts = tuple(part.strip() for part in item.split("|"))
+        if len(parts) != 3 or any(not part for part in parts):
+            raise ValueError(
+                "CML_MONITOR_LIVE_ACCOUNTS must use "
+                "label|session-id|lease-owner entries"
+            )
+        accounts.append((parts[0], parts[1], parts[2]))
+    return tuple(accounts)
+
+
 def build_config(args: argparse.Namespace) -> MonitorConfig:
     services = tuple(
         item.strip()
@@ -1012,11 +1102,31 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         or _read_env_value(compose_env_file, "CML_LIVE_LEASE_OWNER")
         or "live-worker"
     )
+    compose_file_values = tuple(
+        item.strip()
+        for item in str(args.compose_file).split(",")
+        if item.strip()
+    )
+    compose_files = tuple(Path(item) for item in compose_file_values)
+    profile_values = tuple(
+        item.strip()
+        for item in os.environ.get("CML_COMPOSE_PROFILES", "").split(",")
+        if item.strip()
+    )
     return MonitorConfig(
         project_directory=Path(args.project_directory),
-        compose_file=Path(args.compose_file),
+        compose_file=(
+            compose_files[0]
+            if compose_files
+            else Path(args.compose_file)
+        ),
+        compose_files=compose_files,
+        compose_profiles=profile_values,
         compose_env_file=compose_env_file,
         services=services or _DEFAULT_SERVICES,
+        live_accounts=_parse_live_accounts(
+            os.environ.get("CML_MONITOR_LIVE_ACCOUNTS")
+        ),
         live_run_id=live_run_id,
         live_account_label=live_account_label,
         live_lease_owner=live_lease_owner,

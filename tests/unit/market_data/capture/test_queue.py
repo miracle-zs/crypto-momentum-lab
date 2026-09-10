@@ -71,6 +71,23 @@ async def test_queue_put_waits_for_capacity_without_dropping(
     assert queue.backpressure_wait_seconds >= 0
 
 
+async def test_queue_backpressure_timeout_fails_closed(
+    raw_envelope: RawEnvelope,
+) -> None:
+    queue = BoundedEnvelopeQueue(
+        max_events=1,
+        max_bytes=100000,
+        backpressure_timeout_seconds=0.01,
+    )
+    await queue.put(raw_envelope)
+
+    with pytest.raises(CaptureQueueFull, match="backpressure timeout"):
+        await queue.put(replace(raw_envelope, local_sequence=2))
+
+    queued = await queue.get()
+    queue.task_done(queued)
+
+
 async def test_queue_coalesces_realtime_book_ticker_within_bucket(
     raw_envelope: RawEnvelope,
 ) -> None:

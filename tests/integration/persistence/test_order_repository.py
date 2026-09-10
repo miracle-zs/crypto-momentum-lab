@@ -232,6 +232,36 @@ async def test_late_ack_cannot_reopen_filled_order(order_repository) -> None:
         assert row.updated_at == NOW + timedelta(seconds=3)
 
 
+async def test_late_ack_cannot_reopen_canceled_order(order_repository) -> None:
+    repository, factory = order_repository
+    await _save_intent(repository)
+    await repository.save_planned_order(_plan())
+    await repository.append_order_event(
+        ExchangeOrderEvent(
+            event_id="canceled-first",
+            client_order_id=_plan().client_order_id,
+            state=ExchangeOrderState.CANCELED,
+            occurred_at=NOW + timedelta(seconds=3),
+            exchange_order_id="original-order",
+            details={},
+        )
+    )
+    await repository.append_order_event(
+        ExchangeOrderEvent(
+            event_id="late-partial",
+            client_order_id=_plan().client_order_id,
+            state=ExchangeOrderState.PARTIALLY_FILLED,
+            occurred_at=NOW + timedelta(seconds=4),
+            exchange_order_id="original-order",
+            details={},
+        )
+    )
+    async with factory() as session:
+        row = await session.get(ExchangeOrderRow, _plan().client_order_id)
+        assert row.state == ExchangeOrderState.CANCELED.value
+        assert row.updated_at == NOW + timedelta(seconds=3)
+
+
 async def test_conflicting_exchange_identity_is_journaled_without_overwrite(
     order_repository,
 ) -> None:

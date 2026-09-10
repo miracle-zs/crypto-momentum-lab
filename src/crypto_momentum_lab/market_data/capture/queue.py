@@ -36,6 +36,7 @@ class BoundedEnvelopeQueue:
         max_bytes: int,
         coalescing_streams: frozenset[CaptureStream] = frozenset(),
         coalescing_interval_seconds: float = 0.0,
+        backpressure_timeout_seconds: float = 30.0,
     ) -> None:
         if max_events <= 0:
             raise ValueError("max_events must be positive")
@@ -43,11 +44,14 @@ class BoundedEnvelopeQueue:
             raise ValueError("max_bytes must be positive")
         if coalescing_interval_seconds < 0:
             raise ValueError("coalescing_interval_seconds must be non-negative")
+        if backpressure_timeout_seconds <= 0:
+            raise ValueError("backpressure_timeout_seconds must be positive")
         self._queue: asyncio.Queue[_QueueItem] = asyncio.Queue(maxsize=max_events)
         self._max_events = max_events
         self._max_bytes = max_bytes
         self._coalescing_streams = coalescing_streams
         self._coalescing_interval_seconds = coalescing_interval_seconds
+        self._backpressure_timeout_seconds = backpressure_timeout_seconds
         self._pending_by_key: dict[Hashable, _QueueItem] = {}
         self._coalescing_buffers: dict[Hashable, _QueueItem] = {}
         self._coalescing_tasks: dict[Hashable, asyncio.Task[None]] = {}
@@ -126,7 +130,20 @@ class BoundedEnvelopeQueue:
                         wait_started_at = time.monotonic()
                         self._backpressure_wait_count += 1
                         self._waiting_producers += 1
-                await self._capacity_available.wait()
+                remaining = self._backpressure_timeout_seconds - (
+                    time.monotonic() - wait_started_at
+                )
+                if remaining <= 0:
+                    raise CaptureQueueFull("queue backpressure timeout")
+                try:
+                    await asyncio.wait_for(
+                        self._capacity_available.wait(),
+                        timeout=remaining,
+                    )
+                except TimeoutError as error:
+                    raise CaptureQueueFull(
+                        "queue backpressure timeout"
+                    ) from error
         finally:
             if wait_started_at is not None:
                 self._waiting_producers -= 1

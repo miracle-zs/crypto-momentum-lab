@@ -79,6 +79,53 @@ def test_hedge_mode_preserves_strategy_position_side_for_close() -> None:
     assert result.quantity == Decimal("0.003")
 
 
+def test_limit_price_rounds_outward_for_exchange_side() -> None:
+    result = quantize_order_plan(
+        replace(
+            _intent(Decimal("100")),
+            entry_type=EntryType.LIMIT,
+            limit_price=Decimal("100.05"),
+        ),
+        _rules(),
+        reference_price=Decimal("100"),
+        resize_tolerance=Decimal("0.20"),
+    )
+    assert isinstance(result, OrderExecutionPlan)
+    assert result.side == "BUY"
+    assert result.price == Decimal("100.0")
+
+    short_result = quantize_order_plan(
+        replace(
+            _intent(Decimal("100")),
+            side=StrategySide.SHORT,
+            entry_type=EntryType.LIMIT,
+            limit_price=Decimal("100.05"),
+        ),
+        _rules(),
+        reference_price=Decimal("100"),
+        resize_tolerance=Decimal("0.20"),
+    )
+    assert isinstance(short_result, OrderExecutionPlan)
+    assert short_result.side == "SELL"
+    assert short_result.price == Decimal("100.1")
+
+    close_result = quantize_order_plan(
+        replace(
+            _intent(Decimal("100")),
+            entry_type=EntryType.LIMIT,
+            limit_price=Decimal("100.05"),
+            reduce_only=True,
+        ),
+        _rules(),
+        reference_price=Decimal("100"),
+        resize_tolerance=Decimal("0.20"),
+        requested_quantity=Decimal("0.5"),
+    )
+    assert isinstance(close_result, OrderExecutionPlan)
+    assert close_result.side == "SELL"
+    assert close_result.price == Decimal("100.1")
+
+
 def _rules() -> SymbolTradingRules:
     return SymbolTradingRules(
         symbol="BTCUSDT",

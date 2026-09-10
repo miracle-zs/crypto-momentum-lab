@@ -44,6 +44,7 @@ def build_service(
     *,
     queue_max_events: int,
     queue_max_bytes: int = 100000,
+    disk_free_bytes_provider=None,
 ) -> MarketDataCaptureService:
     return MarketDataCaptureService(
         queue=BoundedEnvelopeQueue(
@@ -57,6 +58,7 @@ def build_service(
             halt_free_bytes=200,
             recovery_free_bytes=250,
         ),
+        disk_free_bytes_provider=disk_free_bytes_provider,
     )
 
 
@@ -93,6 +95,21 @@ def test_disk_halt_requires_recovery_threshold() -> None:
     assert guard.evaluate(190) is DiskStatus.HALT
     assert guard.evaluate(220) is DiskStatus.HALT
     assert guard.evaluate(260) is DiskStatus.HEALTHY
+
+
+async def test_low_disk_space_halts_before_accepting_an_envelope(
+    raw_envelope: RawEnvelope,
+) -> None:
+    service = build_service(
+        queue_max_events=10,
+        disk_free_bytes_provider=lambda: 190,
+    )
+
+    with pytest.raises(CaptureQueueFull, match="disk free space"):
+        await service.submit(raw_envelope)
+
+    assert service.state is MarketDataState.HALTED
+    assert service.metrics_snapshot().disk_free_bytes == 190
 
 
 async def test_start_applies_initial_symbols_and_stop_persists_state() -> None:

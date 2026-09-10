@@ -42,6 +42,7 @@ class AccountUserDataUpdate:
 class AccountUserDataState:
     """Merge Binance partial account events onto the latest REST snapshot."""
 
+    _SEEN_TRADE_CACHE_SIZE = 8192
     _OPEN_ORDER_STATUSES = frozenset({"NEW", "PARTIALLY_FILLED"})
     _NO_FILL_TERMINAL_ORDER_STATUSES = frozenset(
         {"CANCELED", "REJECTED", "EXPIRED", "EXPIRED_IN_MATCH"}
@@ -67,7 +68,10 @@ class AccountUserDataState:
         }
         self._seen_event_ids: deque[str] = deque(maxlen=4096)
         self._seen_event_id_set: set[str] = set()
-        self._seen_trade_ids: set[tuple[str, str]] = set()
+        self._seen_trade_ids: deque[tuple[str, str]] = deque(
+            maxlen=self._SEEN_TRADE_CACHE_SIZE
+        )
+        self._seen_trade_id_set: set[tuple[str, str]] = set()
 
     def replace_snapshot(self, snapshot: AccountSnapshot) -> None:
         self._config = snapshot.config
@@ -317,7 +321,7 @@ class AccountUserDataState:
         if not trade_id or trade_id == "-1" or not fee_asset:
             raise UserDataStateError("trade event is missing trade id or fee asset")
         trade_key = (symbol, trade_id)
-        if trade_key in self._seen_trade_ids:
+        if trade_key in self._seen_trade_id_set:
             return True, (), None
         fee = _decimal(row.get("n", "0"), "ORDER_TRADE_UPDATE fee")
         if fee < 0:
@@ -347,7 +351,7 @@ class AccountUserDataState:
             ),
             raw_payload=_event_raw_payload(event, "fill", row),
         )
-        self._seen_trade_ids.add(trade_key)
+        self._remember_trade(trade_key)
         return True, (fill,), None
 
     def _remember_event(self, event_id: str) -> None:
@@ -356,6 +360,13 @@ class AccountUserDataState:
             self._seen_event_id_set.discard(expired)
         self._seen_event_ids.append(event_id)
         self._seen_event_id_set.add(event_id)
+
+    def _remember_trade(self, trade_key: tuple[str, str]) -> None:
+        if len(self._seen_trade_ids) == self._seen_trade_ids.maxlen:
+            expired = self._seen_trade_ids.popleft()
+            self._seen_trade_id_set.discard(expired)
+        self._seen_trade_ids.append(trade_key)
+        self._seen_trade_id_set.add(trade_key)
 
 
 def _initial_mark_price(
