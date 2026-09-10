@@ -138,6 +138,7 @@ async def test_live_paper_artifacts_are_idempotent_and_resume_pending_candidates
         frozenset({"another-run"})
     ) == frozenset()
     closed_at = opened[0].opened_at + timedelta(minutes=20)
+    last_candle_end = closed_at - timedelta(minutes=15)
     closed = replace(
         opened[0],
         status=PaperPositionStatus.CLOSED,
@@ -149,6 +150,7 @@ async def test_live_paper_artifacts_are_idempotent_and_resume_pending_candidates
         return_pct=Decimal("-0.0008"),
         close_reason="max_holding_period",
         updated_at=closed_at,
+        last_candle_end=last_candle_end,
     )
     await artifacts.save_portfolio(
         report.run.run_id,
@@ -156,6 +158,13 @@ async def test_live_paper_artifacts_are_idempotent_and_resume_pending_candidates
         closed_at,
         PaperExitConfig(),
     )
+    async with artifacts._session_factory() as session:
+        persisted_closed = await session.get(
+            PaperPositionRow,
+            closed.position_id,
+        )
+    assert persisted_closed is not None
+    assert persisted_closed.last_candle_end == last_candle_end
     assert await artifacts.load_open_positions(report.run.run_id) == ()
     assert await artifacts.load_open_position_symbols(
         frozenset({report.run.run_id})

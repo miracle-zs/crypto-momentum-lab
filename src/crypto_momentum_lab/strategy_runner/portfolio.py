@@ -248,6 +248,7 @@ class PaperPosition:
     grace_exit_started_at: datetime | None
     grace_exit_deadline: datetime | None
     updated_at: datetime
+    last_candle_end: datetime | None = None
 
 
 def deterministic_position_id(entry_fill_id: str) -> str:
@@ -321,6 +322,18 @@ def mark_positions(
         )
         if mark_price is None:
             continue
+        candle_is_new = closed_candle is not None and (
+            position.last_candle_end is None
+            or closed_candle.candle_end > position.last_candle_end
+        )
+        effective_closed_candle = closed_candle if candle_is_new else None
+        # Keep the full recent history for multi-candle confirmation. The
+        # cursor only gates the current event; previously processed candles
+        # are still required to prove consecutive confirmation.
+        effective_closed_candles = closed_candles
+        last_candle_end = position.last_candle_end
+        if effective_closed_candle is not None:
+            last_candle_end = effective_closed_candle.candle_end
         gross_pnl = _gross_pnl(position, mark_price)
         unrealized_pnl = gross_pnl - position.entry_fee
         gross_return = gross_pnl / position.entry_notional
@@ -333,20 +346,22 @@ def mark_positions(
                 state=state,
                 mark_price=mark_price,
                 unrealized_pnl=unrealized_pnl,
-                closed_candle=closed_candle,
+                closed_candle=effective_closed_candle,
                 config=config,
                 taker_fee_rate=taker_fee_rate,
             )
             if grace_update is not None:
-                updates.append(grace_update)
+                updates.append(
+                    replace(grace_update, last_candle_end=last_candle_end)
+                )
                 continue
         close_reason = _close_reason(
             gross_return=gross_return,
             held_until=observed_at,
             position=position,
             config=config,
-            closed_candle=closed_candle,
-            closed_candles=closed_candles,
+            closed_candle=effective_closed_candle,
+            closed_candles=effective_closed_candles,
         )
         if close_reason is None:
             updates.append(
@@ -355,16 +370,17 @@ def mark_positions(
                     last_mark_price=mark_price,
                     unrealized_pnl=unrealized_pnl,
                     updated_at=observed_at,
+                    last_candle_end=last_candle_end,
                 )
             )
             continue
         exit_price = mark_price
         closed_at = observed_at
         if close_reason.startswith("candle_15m_"):
-            if closed_candle is None:
+            if effective_closed_candle is None:
                 raise AssertionError("candle exit requires a closed candle")
-            exit_price = closed_candle.close_price
-            closed_at = closed_candle.candle_end
+            exit_price = effective_closed_candle.close_price
+            closed_at = effective_closed_candle.candle_end
             gross_pnl = _gross_pnl(position, exit_price)
         exit_notional = position.quantity * exit_price
         exit_fee = exit_notional * taker_fee_rate
@@ -382,6 +398,7 @@ def mark_positions(
                 return_pct=realized_pnl / position.entry_notional,
                 close_reason=close_reason,
                 updated_at=closed_at,
+                last_candle_end=last_candle_end,
             )
         )
     return tuple(updates)

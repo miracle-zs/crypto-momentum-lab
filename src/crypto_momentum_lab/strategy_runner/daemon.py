@@ -317,6 +317,7 @@ def run_paired_paper_live_daemon(
     pending_by_account: list[list[OrderIntentCandidate]] = []
     open_positions_by_account: list[dict[str, PaperPosition]] = []
     last_position_persisted_at_by_account: list[dict[str, datetime]] = []
+    last_candle_end_by_account: list[dict[str, datetime]] = []
     candle_aggregators: list[Candle15mAggregator | None] = []
     candle_history_by_account: list[
         dict[str, deque[ClosedCandle15m]]
@@ -353,6 +354,9 @@ def run_paired_paper_live_daemon(
         last_position_persisted_at_by_account.append(
             {position.position_id: position.updated_at for position in open_positions}
         )
+        last_candle_end_by_account.append(
+            _initial_candle_cursors(open_positions)
+        )
         candle_aggregators.append(
             Candle15mAggregator()
             if (
@@ -373,9 +377,6 @@ def run_paired_paper_live_daemon(
         seconds=first_config.checkpoint_phase_seconds
     )
     last_equity_snapshot_at: list[datetime | None] = [None] * len(accounts)
-    last_candle_end_by_account: list[dict[str, datetime]] = [
-        {} for _ in accounts
-    ]
     candle_retry_after_by_account: list[dict[str, datetime]] = [
         {} for _ in accounts
     ]
@@ -433,7 +434,7 @@ def run_paired_paper_live_daemon(
             if identity is None:
                 raise ValueError("paired paper account requires run_identity")
             aggregator = candle_aggregators[index]
-            closed_candle = (
+            observed_candle = (
                 None if aggregator is None else aggregator.observe(state)
             )
             if aggregator is not None:
@@ -441,8 +442,11 @@ def run_paired_paper_live_daemon(
                     aggregator=aggregator,
                     account_index=index,
                 )
+            closed_candles: tuple[ClosedCandle15m, ...] = (
+                () if observed_candle is None else (observed_candle,)
+            )
             if (
-                closed_candle is None
+                not closed_candles
                 and config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
             ):
                 retry_after = candle_retry_after_by_account[index].get(
@@ -450,7 +454,7 @@ def run_paired_paper_live_daemon(
                 )
                 if retry_after is None or now >= retry_after:
                     try:
-                        closed_candle = _load_latest_closed_candle_for_positions(
+                        closed_candles = _load_closed_candles_for_positions(
                             positions=tuple(
                                 open_positions_by_account[index].values()
                             ),
@@ -477,43 +481,56 @@ def run_paired_paper_live_daemon(
                         candle_retry_after_by_account[index].pop(
                             state.symbol, None
                         )
-            candle_history: deque[ClosedCandle15m] | None = None
-            if closed_candle is not None:
-                last_candle_end_by_account[index][state.symbol] = (
-                    closed_candle.candle_end
-                )
-                candle_history = candle_history_by_account[index].setdefault(
-                    state.symbol,
-                    deque(
-                        maxlen=max(
-                            2,
-                            config.portfolio.candle_confirmation_count,
-                        )
+            position_updates_by_id: dict[str, PaperPosition] = {}
+            candle_events: tuple[ClosedCandle15m | None, ...] = (
+                closed_candles if closed_candles else (None,)
+            )
+            for closed_candle in candle_events:
+                candle_history: deque[ClosedCandle15m] | None = None
+                if closed_candle is not None:
+                    last_candle_end_by_account[index][state.symbol] = (
+                        closed_candle.candle_end
+                    )
+                    candle_history = candle_history_by_account[index].setdefault(
+                        state.symbol,
+                        deque(
+                            maxlen=max(
+                                2,
+                                config.portfolio.candle_confirmation_count,
+                            )
+                        ),
+                    )
+                    if (
+                        not candle_history
+                        or candle_history[-1].candle_start
+                        != closed_candle.candle_start
+                    ):
+                        candle_history.append(closed_candle)
+                candle_history = candle_history_by_account[index].get(state.symbol)
+                position_updates = mark_positions(
+                    positions=tuple(
+                        open_positions_by_account[index].values()
+                    ),
+                    state=state,
+                    config=config.portfolio,
+                    taker_fee_rate=config.execution.taker_fee_rate,
+                    closed_candle=closed_candle,
+                    closed_candles=(
+                        () if candle_history is None else tuple(candle_history)
                     ),
                 )
-                if (
-                    not candle_history
-                    or candle_history[-1].candle_start
-                    != closed_candle.candle_start
-                ):
-                    candle_history.append(closed_candle)
-            candle_history = candle_history_by_account[index].get(state.symbol)
-            position_updates = mark_positions(
-                positions=tuple(open_positions_by_account[index].values()),
-                state=state,
-                config=config.portfolio,
-                taker_fee_rate=config.execution.taker_fee_rate,
-                closed_candle=closed_candle,
-                closed_candles=(
-                    () if candle_history is None else tuple(candle_history)
-                ),
-            )
-            for position in position_updates:
-                if position.status is PaperPositionStatus.CLOSED:
-                    open_positions_by_account[index].pop(position.position_id, None)
-                else:
-                    open_positions_by_account[index][position.position_id] = position
-            position_updates_by_account.append(position_updates)
+                for position in position_updates:
+                    position_updates_by_id[position.position_id] = position
+                    if position.status is PaperPositionStatus.CLOSED:
+                        open_positions_by_account[index].pop(
+                            position.position_id,
+                            None,
+                        )
+                    else:
+                        open_positions_by_account[index][position.position_id] = (
+                            position
+                        )
+            position_updates_by_account.append(tuple(position_updates_by_id.values()))
 
         decision = strategy.on_market_state(state)
         entry_filter_context = (
@@ -1091,21 +1108,21 @@ def _checkpoint_progress(checkpoint: StrategyCheckpoint) -> float:
     )
 
 
-def _load_latest_closed_candle_for_positions(
+def _load_closed_candles_for_positions(
     *,
     positions: tuple[PaperPosition, ...],
     state: MarketState15s,
     source: ClosedCandle15mSource | None,
     not_before: datetime,
     after: datetime | None,
-) -> ClosedCandle15m | None:
+) -> tuple[ClosedCandle15m, ...]:
     if source is None:
-        return None
+        return ()
     candle_end = _candle_start_15m(state.bucket_start)
     if candle_end <= not_before or (
         after is not None and candle_end <= after
     ):
-        return None
+        return ()
     matching = tuple(
         position
         for position in positions
@@ -1114,14 +1131,43 @@ def _load_latest_closed_candle_for_positions(
         and position.opened_at < candle_end
     )
     if not matching:
-        return None
-    candle_start = candle_end - timedelta(minutes=15)
+        return ()
+    candle_start = (
+        after if after is not None else candle_end - timedelta(minutes=15)
+    )
+    candle_start = max(candle_start, _candle_start_15m(not_before))
     candles = source.load_closed_candles(
         symbol=state.symbol,
         start=candle_start,
         end=candle_end,
     )
-    return candles[-1] if candles else None
+    return tuple(
+        candle
+        for candle in candles
+        if candle.candle_end <= candle_end
+        and (after is None or candle.candle_end > after)
+    )
+
+
+def _initial_candle_cursors(
+    positions: tuple[PaperPosition, ...],
+) -> dict[str, datetime]:
+    """Recover a symbol cursor only when every open position has one."""
+
+    positions_by_symbol: dict[str, list[PaperPosition]] = {}
+    for position in positions:
+        if position.status is PaperPositionStatus.OPEN:
+            positions_by_symbol.setdefault(position.symbol, []).append(position)
+    cursors: dict[str, datetime] = {}
+    for symbol, symbol_positions in positions_by_symbol.items():
+        values = [
+            position.last_candle_end
+            for position in symbol_positions
+            if position.last_candle_end is not None
+        ]
+        if len(values) == len(symbol_positions):
+            cursors[symbol] = min(values)
+    return cursors
 
 
 def _candle_start_15m(value: datetime) -> datetime:
@@ -1195,6 +1241,11 @@ def run_paper_live_daemon(
                 for position in loaded_open_positions
             }
         )
+        initial_candle_cursors = _initial_candle_cursors(
+            loaded_open_positions
+        )
+    else:
+        initial_candle_cursors = {}
 
     processed = 0
     processed_since_checkpoint = 0
@@ -1207,7 +1258,7 @@ def run_paper_live_daemon(
         seconds=config.checkpoint_phase_seconds
     )
     last_equity_snapshot_at: datetime | None = None
-    last_candle_end_by_symbol: dict[str, datetime] = {}
+    last_candle_end_by_symbol: dict[str, datetime] = initial_candle_cursors
     candle_retry_after_by_symbol: dict[str, datetime] = {}
     candle_history_by_symbol: dict[str, deque[ClosedCandle15m]] = {}
     entry_symbols: frozenset[str] | None = None
@@ -1273,21 +1324,24 @@ def run_paper_live_daemon(
 
         position_updates: tuple[PaperPosition, ...] = ()
         if artifact_repository is not None:
-            closed_candle = (
+            observed_candle = (
                 None
                 if candle_aggregator is None
                 else candle_aggregator.observe(state)
             )
             if candle_aggregator is not None:
                 _log_candle_gap_events(aggregator=candle_aggregator)
+            closed_candles: tuple[ClosedCandle15m, ...] = (
+                () if observed_candle is None else (observed_candle,)
+            )
             if (
-                closed_candle is None
+                not closed_candles
                 and config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
             ):
                 retry_after = candle_retry_after_by_symbol.get(state.symbol)
                 if retry_after is None or now >= retry_after:
                     try:
-                        closed_candle = _load_latest_closed_candle_for_positions(
+                        closed_candles = _load_closed_candles_for_positions(
                             positions=tuple(open_positions.values()),
                             state=state,
                             source=candle_source,
@@ -1305,42 +1359,49 @@ def run_paper_live_daemon(
                         )
                     else:
                         candle_retry_after_by_symbol.pop(state.symbol, None)
-            candle_history: deque[ClosedCandle15m] | None = None
-            if closed_candle is not None:
-                last_candle_end_by_symbol[state.symbol] = (
-                    closed_candle.candle_end
-                )
-                candle_history = candle_history_by_symbol.setdefault(
-                    state.symbol,
-                    deque(
-                        maxlen=max(
-                            2,
-                            config.portfolio.candle_confirmation_count,
-                        )
+            position_updates_by_id: dict[str, PaperPosition] = {}
+            candle_events: tuple[ClosedCandle15m | None, ...] = (
+                closed_candles if closed_candles else (None,)
+            )
+            for closed_candle in candle_events:
+                candle_history: deque[ClosedCandle15m] | None = None
+                if closed_candle is not None:
+                    last_candle_end_by_symbol[state.symbol] = (
+                        closed_candle.candle_end
+                    )
+                    candle_history = candle_history_by_symbol.setdefault(
+                        state.symbol,
+                        deque(
+                            maxlen=max(
+                                2,
+                                config.portfolio.candle_confirmation_count,
+                            )
+                        ),
+                    )
+                    if (
+                        not candle_history
+                        or candle_history[-1].candle_start
+                        != closed_candle.candle_start
+                    ):
+                        candle_history.append(closed_candle)
+                candle_history = candle_history_by_symbol.get(state.symbol)
+                position_updates = mark_positions(
+                    positions=tuple(open_positions.values()),
+                    state=state,
+                    config=config.portfolio,
+                    taker_fee_rate=config.execution.taker_fee_rate,
+                    closed_candle=closed_candle,
+                    closed_candles=(
+                        () if candle_history is None else tuple(candle_history)
                     ),
                 )
-                if (
-                    not candle_history
-                    or candle_history[-1].candle_start
-                    != closed_candle.candle_start
-                ):
-                    candle_history.append(closed_candle)
-            candle_history = candle_history_by_symbol.get(state.symbol)
-            position_updates = mark_positions(
-                positions=tuple(open_positions.values()),
-                state=state,
-                config=config.portfolio,
-                taker_fee_rate=config.execution.taker_fee_rate,
-                closed_candle=closed_candle,
-                closed_candles=(
-                    () if candle_history is None else tuple(candle_history)
-                ),
-            )
-            for position in position_updates:
-                if position.status is PaperPositionStatus.CLOSED:
-                    open_positions.pop(position.position_id, None)
-                else:
-                    open_positions[position.position_id] = position
+                for position in position_updates:
+                    position_updates_by_id[position.position_id] = position
+                    if position.status is PaperPositionStatus.CLOSED:
+                        open_positions.pop(position.position_id, None)
+                    else:
+                        open_positions[position.position_id] = position
+            position_updates = tuple(position_updates_by_id.values())
 
         raw_decision = strategy.on_market_state(state)
         entry_filter_context = None

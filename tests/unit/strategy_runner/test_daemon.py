@@ -1063,6 +1063,63 @@ def test_paired_daemon_only_reads_the_latest_closed_candle() -> None:
     assert closed.exit_price == candle.close_price
 
 
+def test_daemon_backfills_closed_candles_after_persisted_cursor() -> None:
+    state = fixture_state("BTCUSDT", 180)
+    identity = _identity()
+    artifacts = FakeArtifactRepository()
+    cursor = state.bucket_start - timedelta(minutes=45)
+    position = position_from_entry_fill(
+        identity.run_id,
+        replace(
+            _filled_entry(
+                symbol=state.symbol,
+                filled_at=state.bucket_start - timedelta(hours=1),
+            ),
+            side=StrategySide.SHORT,
+        ),
+    )
+    assert position is not None
+    artifacts.positions[position.position_id] = replace(
+        position,
+        last_candle_end=cursor,
+    )
+    candles = tuple(
+        ClosedCandle15m(
+            symbol=state.symbol,
+            candle_start=cursor + timedelta(minutes=15 * index),
+            candle_end=cursor + timedelta(minutes=15 * (index + 1)),
+            open_price=Decimal("100"),
+            close_price=Decimal("101"),
+        )
+        for index in range(3)
+    )
+    candle_source = FakeClosedCandleSource(candles)
+
+    run_paper_live_daemon(
+        source=(state,),
+        strategy=FakeStrategy(),
+        repository=FakeRepository(),
+        artifact_repository=artifacts,
+        config=_config(
+            run_identity=identity,
+            portfolio=PaperExitConfig(
+                exit_mode=PaperExitMode.CANDLE_15M,
+                candle_confirmation_count=2,
+                max_holding_buckets=5760,
+            ),
+        ),
+        clock=FakeClock(state.bucket_end + timedelta(seconds=1)),
+        candle_source=candle_source,
+    )
+
+    assert candle_source.calls == [(state.symbol, cursor, state.bucket_start)]
+    closed = artifacts.portfolio_updates[0][0]
+    assert closed.status is PaperPositionStatus.CLOSED
+    assert closed.close_reason == "candle_15m_bullish_2confirm"
+    assert closed.closed_at == candles[1].candle_end
+    assert closed.last_candle_end == candles[1].candle_end
+
+
 def test_paired_daemon_passes_entry_filter_context_to_each_account() -> None:
     state = fixture_state("BTCUSDT", 0)
     first_identity = _identity()

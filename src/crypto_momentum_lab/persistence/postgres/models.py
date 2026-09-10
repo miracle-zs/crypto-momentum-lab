@@ -496,6 +496,9 @@ class PaperPositionRow(Base):
         DateTime(timezone=True)
     )
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_candle_end: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
 
     __table_args__ = (
         Index(

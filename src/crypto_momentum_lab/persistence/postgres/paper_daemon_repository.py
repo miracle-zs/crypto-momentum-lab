@@ -230,6 +230,7 @@ def paper_position_row(position: PaperPosition) -> dict[str, object]:
         "grace_exit_started_at": position.grace_exit_started_at,
         "grace_exit_deadline": position.grace_exit_deadline,
         "updated_at": position.updated_at,
+        "last_candle_end": position.last_candle_end,
     }
 
 
@@ -258,6 +259,7 @@ def paper_position_from_row(row: PaperPositionRow) -> PaperPosition:
         grace_exit_started_at=row.grace_exit_started_at,
         grace_exit_deadline=row.grace_exit_deadline,
         updated_at=row.updated_at,
+        last_candle_end=row.last_candle_end,
     )
 
 
