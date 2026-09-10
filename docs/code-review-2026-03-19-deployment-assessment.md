@@ -92,7 +92,7 @@ nginx 的 auth_basic 可以在 http/server 层生效并继承到 location，snip
 | D5 | 已修复 | market-data 每次刷新从 PostgreSQL 读取各账户最近一次 `ready` 对账；`position_count > 0` 的账户自动加入保护集合，因此停用但仍有仓位的账户无需手工列入 labels。singular/plural 配置仍作为启动提示并与自动发现结果合并；最近一次 ready 对账为零的账户会退出保护集合。 |
 | D9 | 已修复 | server manifest 的 required services、healthcheck 循环和 gainer10 特有断言均包含 `paper-orderflow-gainer10-pair`。 |
 | D4 | 已验收，不改 Compose | primary 的 Compose 环境变量仍可空以保持 paper-only 解析；应用在创建 Binance client 前对 READ/TRADE 凭证缺失或空白 fail-closed，已有 credential resolver 与 CLI 启动测试覆盖。 |
-| D6 | 保留条件性结论 | primary 的 allow-list 为空表示写入全部 exchange telemetry，附加账户的 `submit,cancel` 只保留写请求/响应遥测；两者都不改变 order/fill 账本。是否统一观测范围需先明确运维查询与写库成本目标。 |
+| D6 | 已完成 | 所有 live 账户默认只持久化 `submit,cancel` 写边界；CLI、Compose 和显式空值均采用该默认。只有明确传入 `all` 才启用全量 exchange telemetry，作为临时诊断开关；order/fill 账本不受该 allow-list 影响。 |
 | D7 | 第一阶段已修复 | profile/top-N 已改为环境单源，preflight 与 daemon 使用同一解析路径；其余 argv 差异是账户运行参数，不属于该项重复。 |
 | D8/D10 | 待外部证据 | 本地只能确认 dashboard Basic Auth 可选、仓库没有备份/恢复编排；仍需真实 nginx 上层鉴权和数据库恢复演练证据，不能用本地 Compose 结论替代。 |
 

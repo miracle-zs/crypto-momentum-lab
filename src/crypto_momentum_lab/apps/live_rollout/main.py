@@ -232,6 +232,7 @@ _LIVE_ENTRY_ORDER_TYPE = EntryType.LIMIT
 _LIVE_ENTRY_LIMIT_TTL_SECONDS = 900
 _LIVE_ORDERFLOW_PROFILE = LiveOrderFlowImpulseProfile()
 _LIVE_MARKET_WEBSOCKET_URL = "wss://fstream.binance.com/market/ws"
+_DEFAULT_PERSIST_EXCHANGE_OPERATIONS = frozenset({"submit", "cancel"})
 _GIT_COMMIT_HASH_LENGTH = 40
 _CONFIG_HASH_LENGTH = 64
 _HEX_HASH_PATTERN = re.compile(r"^[0-9a-f]+$")
@@ -1815,7 +1816,9 @@ async def _run_live_daemon(
     api_secret: str,
     entry_leverage: int,
     margin_type: str = "CROSSED",
-    persist_exchange_operations: Collection[str] | None = None,
+    persist_exchange_operations: Collection[str] | None = (
+        _DEFAULT_PERSIST_EXCHANGE_OPERATIONS
+    ),
     entry_policy_compare_only: bool = False,
     entry_policy_enforce: bool = False,
     acknowledge_missing_shadow_preflight: bool = False,
@@ -4113,14 +4116,16 @@ def _parse_exchange_operations(
 ) -> frozenset[str] | None:
     """Parse the durable exchange telemetry allow-list.
 
-    An empty value remains backwards-compatible with the original all-operation
-    behavior.  ``all`` is the explicit operator-facing spelling for that mode;
+    Empty values use the auditable ``submit,cancel`` default. ``all`` is the
+    explicit operator-facing spelling for temporary full-operation diagnostics;
     it must not be combined with an allow-list because the two policies are
     mutually exclusive.
     """
 
     normalized_value = raw_value.strip()
-    if not normalized_value or normalized_value.lower() == "all":
+    if not normalized_value:
+        return _DEFAULT_PERSIST_EXCHANGE_OPERATIONS
+    if normalized_value.lower() == "all":
         return None
     operations = tuple(operation.strip() for operation in raw_value.split(","))
     if any(not operation for operation in operations):

@@ -192,8 +192,8 @@ def test_live_run_rejects_conflicting_entry_policy_modes() -> None:
 @pytest.mark.parametrize(
     ("raw_value", "expected"),
     [
-        ("", None),
-        ("  ", None),
+        ("", frozenset({"submit", "cancel"})),
+        ("  ", frozenset({"submit", "cancel"})),
         ("all", None),
         (" ALL ", None),
         ("submit, cancel,submit", frozenset({"submit", "cancel"})),
