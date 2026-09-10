@@ -239,7 +239,7 @@ def test_research_collector_stops_before_market_data_restart() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
 
     assert script.index('research_stop_started_at="$(date +%s)"') < script.index(
-        "if should_run_phase market-data"
+        "deploy_phase=dashboard-market-data"
     )
 
 
@@ -249,6 +249,70 @@ def test_volume_initialization_precedes_dashboard_restart() -> None:
     assert script.index("deploy_phase=volume-init") < script.index(
         "# Nginx exposes the dashboard"
     )
+
+
+def test_live_recovery_always_revalidates_preflight() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    active_pairs_start = script.index("active_pairs=()")
+    active_pairs_end = script.index("# market-data discovers", active_pairs_start)
+    active_pairs = script[active_pairs_start:active_pairs_end]
+
+    assert "should_run_phase live-preflight" not in script
+    assert (
+        '$(phase_rank "$resume_from_phase") > $(phase_rank live-preflight)'
+        not in script
+    )
+    assert '"$recovery_run" != 1 && "$refresh_approvals" != 1' in active_pairs
+    assert script.index("deploy_phase=live-preflight") < script.index(
+        "# Nginx exposes the dashboard"
+    )
+
+
+def test_health_wait_detects_restart_loops() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    health_start = script.index("service_restart_info()")
+    health_end = script.index("up_and_wait()", health_start)
+    health_wait = script[health_start:health_end]
+
+    assert "service_restart_info" in health_wait
+    assert "RestartCount" in health_wait
+    assert "State.Restarting" in health_wait
+    assert "service restart loop detected" in health_wait
+    assert "record_restart_baseline" in health_wait
+    assert "declare -A" not in health_wait
+
+
+def test_health_timeout_reports_the_pending_service() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    health_start = script.index("wait_for_services_healthy()")
+    health_end = script.index("up_and_wait()", health_start)
+    health_wait = script[health_start:health_end]
+
+    assert "pending_service" in health_wait
+    assert 'failure_service="${pending_service:-unknown}"' in health_wait
+    assert 'failure_service="${service:-unknown}"' not in health_wait
+
+
+def test_dashboard_and_market_data_share_a_start_wave_with_health_barriers() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    rank_start = script.index("phase_rank()")
+    rank_end = script.index("should_run_phase()", rank_start)
+    wave_start = script.index("deploy_phase=dashboard-market-data")
+    consumer_start = script.index("consumer_candidates=()", wave_start)
+    wave = script[wave_start:consumer_start]
+    health_start = script.index("wait_for_dashboard_market_health()")
+    health_end = script.index("verify_service_target()", health_start)
+    health = script[health_start:health_end]
+
+    assert "dashboard|research-stop) echo 6" in script[rank_start:rank_end]
+    assert "dashboard-market-data|market-data) echo 7" in script[rank_start:rank_end]
+    assert "compose-up:dashboard+market-data" in wave
+    assert '"${dashboard_market_candidates[@]}"' in wave
+    assert "wait_for_dashboard_market_health" in wave
+    assert 'wait_for_services_healthy "$deploy_wait_timeout" dashboard' in health
+    assert 'wait_for_services_healthy "$market_data_wait_timeout" market-data' in health
+    assert script.index("if should_run_phase research-stop") < wave_start
+    assert wave_start < consumer_start
 
 
 def test_release_identity_does_not_precede_dependency_layer() -> None:

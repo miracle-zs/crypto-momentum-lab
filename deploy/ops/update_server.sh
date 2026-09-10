@@ -518,14 +518,15 @@ phase_rank() {
     build) echo 2 ;;
     migrate) echo 3 ;;
     volume-init) echo 4 ;;
-    dashboard) echo 5 ;;
-    live-preflight) echo 6 ;;
-    research-stop) echo 7 ;;
-    market-data) echo 8 ;;
-    consumers) echo 9 ;;
-    live-restart) echo 10 ;;
-    verify) echo 11 ;;
-    complete) echo 12 ;;
+    live-preflight) echo 5 ;;
+    # dashboard is a legacy phase name from before the dashboard/market-data
+    # start wave. It must still retry the research stop before the wave.
+    dashboard|research-stop) echo 6 ;;
+    dashboard-market-data|market-data) echo 7 ;;
+    consumers) echo 8 ;;
+    live-restart) echo 9 ;;
+    verify) echo 10 ;;
+    complete) echo 11 ;;
     *) echo 0 ;;
   esac
 }
@@ -609,7 +610,62 @@ service_status() {
     return 0
   fi
   docker inspect -f '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+      "$container_id" 2>/dev/null || printf 'missing|missing\n'
+}
+
+service_restart_baseline_services=()
+service_restart_baseline_counts=()
+
+service_restart_info() {
+  local service="$1"
+  local container_id
+  container_id="$("${compose[@]}" ps -q "$service" 2>/dev/null || true)"
+  if [[ -z "$container_id" ]]; then
+    printf 'missing|missing\n'
+    return 0
+  fi
+  docker inspect -f '{{.RestartCount}}|{{if .State.Restarting}}1{{else}}0{{end}}' \
     "$container_id" 2>/dev/null || printf 'missing|missing\n'
+}
+
+record_restart_baseline() {
+  local service container_id restart_count index
+  for service in "$@"; do
+    container_id="$("${compose[@]}" ps -q "$service" 2>/dev/null || true)"
+    restart_count=""
+    if [[ -n "$container_id" ]]; then
+      restart_count="$(docker inspect -f '{{.RestartCount}}' \
+        "$container_id" 2>/dev/null || true)"
+    fi
+    index=0
+    while (( index < ${#service_restart_baseline_services[@]} )); do
+      if [[ "${service_restart_baseline_services[$index]}" == "$service" ]]; then
+        break
+      fi
+      index=$(( index + 1 ))
+    done
+    if (( index == ${#service_restart_baseline_services[@]} )); then
+      service_restart_baseline_services[$index]="$service"
+    fi
+    if [[ "$restart_count" =~ ^[0-9]+$ ]]; then
+      service_restart_baseline_counts[$index]="$restart_count"
+    else
+      service_restart_baseline_counts[$index]=0
+    fi
+  done
+}
+
+restart_baseline_for_service() {
+  local service="$1"
+  local index=0
+  while (( index < ${#service_restart_baseline_services[@]} )); do
+    if [[ "${service_restart_baseline_services[$index]}" == "$service" ]]; then
+      printf '%s' "${service_restart_baseline_counts[$index]}"
+      return 0
+    fi
+    index=$(( index + 1 ))
+  done
+  printf '0'
 }
 
 is_running() {
@@ -642,12 +698,14 @@ wait_for_services_healthy() {
     return 64
   fi
   local deadline=$(( $(date +%s) + timeout_seconds ))
-  local service status state health all_ready
+  local service status state health restart_info restart_count restarting baseline
+  local all_ready pending_service
   if (( $# == 0 )); then
     return 0
   fi
   while :; do
     all_ready=1
+    pending_service=""
     for service in "$@"; do
       status="$(service_status "$service")"
       state="${status%%|*}"
@@ -658,16 +716,33 @@ wait_for_services_healthy() {
         print_service_logs "$service"
         return 1
       fi
+      restart_info="$(service_restart_info "$service")"
+      restart_count="${restart_info%%|*}"
+      restarting="${restart_info#*|}"
+      baseline="$(restart_baseline_for_service "$service")"
+      if [[ "$restarting" == 1 ]] \
+        || { [[ "$restart_count" =~ ^[0-9]+$ ]] \
+          && (( restart_count > baseline )); }; then
+        failure_service="$service"
+        echo "service restart loop detected: service=$service" \
+          "restart_count=$restart_count baseline=$baseline" \
+          "restarting=$restarting" >&2
+        print_service_logs "$service"
+        return 1
+      fi
       if [[ "$state" != running \
         || ( "$health" != healthy && "$health" != none ) ]]; then
         all_ready=0
+        if [[ -z "$pending_service" ]]; then
+          pending_service="$service"
+        fi
       fi
     done
     if (( all_ready == 1 )); then
       return 0
     fi
     if (( $(date +%s) >= deadline )); then
-      failure_service="${service:-unknown}"
+      failure_service="${pending_service:-unknown}"
       echo "service health wait timed out: service=$failure_service timeout_seconds=$timeout_seconds" >&2
       print_service_logs "$failure_service"
       return 1
@@ -683,6 +758,7 @@ up_and_wait() {
     return 0
   fi
   failure_service="$1"
+  record_restart_baseline "$@"
   run_with_timeout "compose-up:$*" "$deploy_operation_timeout" \
     "${compose[@]}" up -d --force-recreate --no-deps "$@"
   wait_for_services_healthy "$health_timeout" "$@"
@@ -696,9 +772,53 @@ up_and_wait_parallel() {
     return 0
   fi
   failure_service="$1"
+  record_restart_baseline "$@"
   run_with_timeout "compose-up:$*" "$deploy_operation_timeout" \
     "${compose[@]}" --parallel "$parallel" up -d --force-recreate --no-deps "$@"
   wait_for_services_healthy "$health_timeout" "$@"
+}
+
+wait_for_dashboard_market_health() {
+  local dashboard_enabled="$1"
+  local market_enabled="$2"
+  local dashboard_pid=""
+  local market_pid=""
+  local failure=0
+
+  if [[ "$dashboard_enabled" == 1 ]]; then
+    (
+      trap - EXIT
+      health_started_at="$(date +%s)"
+      wait_for_services_healthy "$deploy_wait_timeout" dashboard
+      echo "phase=dashboard-health-wait elapsed_seconds=$(( $(date +%s) - health_started_at ))"
+    ) &
+    dashboard_pid="$!"
+  fi
+  if [[ "$market_enabled" == 1 ]]; then
+    (
+      trap - EXIT
+      health_started_at="$(date +%s)"
+      wait_for_services_healthy "$market_data_wait_timeout" market-data
+      echo "phase=market-data-health-wait elapsed_seconds=$(( $(date +%s) - health_started_at ))"
+    ) &
+    market_pid="$!"
+  fi
+
+  if [[ -n "$dashboard_pid" ]]; then
+    if ! wait "$dashboard_pid"; then
+      failure_service=dashboard
+      failure=1
+    fi
+  fi
+  if [[ -n "$market_pid" ]]; then
+    if ! wait "$market_pid"; then
+      if (( failure == 0 )); then
+        failure_service=market-data
+      fi
+      failure=1
+    fi
+  fi
+  return "$failure"
 }
 
 verify_service_target() {
@@ -720,10 +840,6 @@ verify_service_target() {
 }
 
 live_preflight_complete=0
-if [[ "$recovery_run" == 1 ]] \
-  && (( $(phase_rank "$resume_from_phase") > $(phase_rank live-preflight) )); then
-  live_preflight_complete=1
-fi
 if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   live_pairs=(
     "primary:execution-account-live:live-strategy"
@@ -852,7 +968,7 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   for pair in "${live_pairs[@]}"; do
     IFS=: read -r account execution_service strategy_service <<<"$pair"
     if is_running "$strategy_service"; then
-      if [[ "$refresh_approvals" != 1 ]] \
+      if [[ "$recovery_run" != 1 && "$refresh_approvals" != 1 ]] \
         && service_is_converged "$execution_service" \
         && service_is_converged "$strategy_service"; then
         echo "phase=live account=$account skipped converged=1"
@@ -899,6 +1015,7 @@ if should_run_phase migrate && [[ "$runtime_changed" == 1 ]]; then
   write_deploy_state running "$deploy_phase"
   migration_started_at="$(date +%s)"
   failure_service=migrate
+  record_restart_baseline postgres
   run_with_timeout "compose-up:postgres" "$deploy_operation_timeout" \
     "${compose[@]}" up -d postgres
   failure_service=postgres
@@ -953,65 +1070,15 @@ else
   echo "phase=volume-init skipped runtime_unchanged=$runtime_changed"
 fi
 
-# Nginx exposes the dashboard on the host's 8765 port. Keep an already
-# healthy dashboard in place, but recover a Created, stopped, or unhealthy
-# dashboard before reporting a successful application deployment. This does
-# not enable a disabled Live account; it protects the configured operator UI.
-dashboard_needs_start=0
-deploy_phase=dashboard
-if should_run_phase dashboard; then
-  write_deploy_state running "$deploy_phase"
-  if [[ "$dashboard_required" == 1 ]] && ! is_healthy dashboard; then
-    dashboard_needs_start=1
-  fi
-  if [[ "$dashboard_changed" == 1 || "$dashboard_needs_start" == 1 ]] \
-    && ! service_is_converged dashboard; then
-    dashboard_started_at="$(date +%s)"
-    up_and_wait "$deploy_wait_timeout" dashboard
-    echo "phase=dashboard elapsed_seconds=$(( $(date +%s) - dashboard_started_at ))"
-  else
-    echo "phase=dashboard skipped converged=1"
-  fi
-else
-  echo "phase=dashboard skipped resume_from_phase=$resume_from_phase"
-fi
-
-dashboard_check_required=0
-if [[ "$dashboard_required" == 1 || "$dashboard_changed" == 1 ]]; then
-  dashboard_check_required=1
-fi
-if [[ "$dashboard_check_required" == 1 ]]; then
-  dashboard_health_started_at="$(date +%s)"
-  if ! is_healthy dashboard; then
-    echo "dashboard is not healthy; refusing to report a successful deployment" >&2
-    exit 1
-  fi
-  if ! command -v curl >/dev/null 2>&1; then
-    echo "dashboard verification requires curl on the server" >&2
-    exit 69
-  fi
-  if ! curl --fail --silent --show-error --max-time 10 \
-    http://127.0.0.1:8765/api/health >/dev/null; then
-    echo "dashboard health endpoint is unavailable on 127.0.0.1:8765" >&2
-    exit 1
-  fi
-  if [[ "$dashboard_required" == 1 ]]; then
-    if ! curl --fail --silent --show-error --location --max-time 10 \
-      "$dashboard_proxy_url" >/dev/null; then
-      echo "dashboard reverse-proxy health endpoint is unavailable: $dashboard_proxy_url" >&2
-      exit 1
-    fi
-  fi
-  echo "phase=dashboard-health elapsed_seconds=$(( $(date +%s) - dashboard_health_started_at ))"
-fi
-
-if [[ "$live_update" == 1 && "$live_changed" == 1 ]] \
-  && should_run_phase live-preflight; then
+# Run the Live preflight before restarting any application service. Approval
+# and lease state are external, so a persisted deployment phase never proves
+# that this invocation is still authorized to restart Live services.
+if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   deploy_phase=live-preflight
   write_deploy_state running "$deploy_phase"
   # Validate approvals with the freshly built image before restarting any
-  # consumer or execution service. A bad approval now fails in seconds after
-  # the build instead of waiting for a Live healthcheck to turn unhealthy.
+  # application service. A bad approval now fails before the dashboard,
+  # consumers, or Live services are changed.
   if [[ "$refresh_approvals" == 1 ]]; then
     approval_refresh_started_at="$(date +%s)"
     if ! run_parallel_pairs refresh "${active_pairs[@]}"; then
@@ -1051,17 +1118,80 @@ if should_run_phase research-stop \
   echo "phase=research-stop elapsed_seconds=$(( $(date +%s) - research_stop_started_at ))"
 fi
 
-# market-data must be ready before research and strategy consumers restart.
-if should_run_phase market-data && [[ "$market_changed" == 1 ]]; then
-  deploy_phase=market-data
+# Nginx exposes the dashboard on the host's 8765 port. After the deployment's
+# prerequisite phases complete, Dashboard and market-data can be recreated in
+# one Compose wave. The health waits remain separate because market-data has a
+# longer startup budget.
+dashboard_needs_start=0
+dashboard_market_candidates=()
+dashboard_market_health_dashboard=0
+dashboard_market_health_market=0
+deploy_phase=dashboard-market-data
+if should_run_phase dashboard-market-data; then
   write_deploy_state running "$deploy_phase"
-  if service_is_converged market-data; then
-    echo "phase=market-data skipped converged=1"
-  else
-    market_started_at="$(date +%s)"
-    up_and_wait "$market_data_wait_timeout" market-data
-    echo "phase=market-data elapsed_seconds=$(( $(date +%s) - market_started_at ))"
+  if [[ "$dashboard_required" == 1 ]] && ! is_healthy dashboard; then
+    dashboard_needs_start=1
   fi
+  if [[ "$dashboard_changed" == 1 || "$dashboard_needs_start" == 1 ]] \
+    && ! service_is_converged dashboard; then
+    dashboard_market_candidates+=(dashboard)
+    dashboard_market_health_dashboard=1
+  else
+    echo "phase=dashboard skipped converged=1"
+  fi
+  if [[ "$market_changed" == 1 ]] && ! service_is_converged market-data; then
+    dashboard_market_candidates+=(market-data)
+    dashboard_market_health_market=1
+  else
+    echo "phase=market-data skipped converged=1"
+  fi
+  if (( ${#dashboard_market_candidates[@]} > 0 )); then
+    dashboard_market_started_at="$(date +%s)"
+    failure_service="${dashboard_market_candidates[0]}"
+    record_restart_baseline "${dashboard_market_candidates[@]}"
+    run_with_timeout "compose-up:dashboard+market-data" "$deploy_operation_timeout" \
+      "${compose[@]}" --parallel 2 up -d --force-recreate --no-deps \
+      "${dashboard_market_candidates[@]}"
+    if ! wait_for_dashboard_market_health \
+      "$dashboard_market_health_dashboard" "$dashboard_market_health_market"; then
+      exit 1
+    fi
+    echo "phase=dashboard-market-data elapsed_seconds=$(( $(date +%s) - dashboard_market_started_at ))"
+  else
+    echo "phase=dashboard-market-data skipped converged=1"
+  fi
+else
+  echo "phase=dashboard-market-data skipped resume_from_phase=$resume_from_phase"
+fi
+
+dashboard_check_required=0
+if [[ "$dashboard_required" == 1 || "$dashboard_changed" == 1 ]]; then
+  dashboard_check_required=1
+fi
+if [[ "$dashboard_check_required" == 1 ]]; then
+  dashboard_health_started_at="$(date +%s)"
+  failure_service=dashboard
+  if ! is_healthy dashboard; then
+    echo "dashboard is not healthy; refusing to report a successful deployment" >&2
+    exit 1
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "dashboard verification requires curl on the server" >&2
+    exit 69
+  fi
+  if ! curl --fail --silent --show-error --max-time 10 \
+    http://127.0.0.1:8765/api/health >/dev/null; then
+    echo "dashboard health endpoint is unavailable on 127.0.0.1:8765" >&2
+    exit 1
+  fi
+  if [[ "$dashboard_required" == 1 ]]; then
+    if ! curl --fail --silent --show-error --location --max-time 10 \
+      "$dashboard_proxy_url" >/dev/null; then
+      echo "dashboard reverse-proxy health endpoint is unavailable: $dashboard_proxy_url" >&2
+      exit 1
+    fi
+  fi
+  echo "phase=dashboard-health elapsed_seconds=$(( $(date +%s) - dashboard_health_started_at ))"
 fi
 
 consumer_candidates=()

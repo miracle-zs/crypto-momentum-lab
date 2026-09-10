@@ -63,7 +63,9 @@ same range, so a failed dashboard-only update does not restart market-data,
 research, Paper, or Live. A newer target arriving during a failed rollout also
 includes the unfinished range. Legacy state without a base uses the conservative
 recovery behavior once. Healthy Live account pairs already using the target
-image skip reconciliation unless `--refresh-approvals` is explicitly requested.
+image skip reconciliation on a normal repeat, but every recovery run rechecks
+their lease and strict preflight; `--refresh-approvals` additionally refreshes
+the approval binding.
 All timed external commands receive closed stdin to protect the SSH script input.
 
 The script:
@@ -77,19 +79,23 @@ The script:
    `.env.server`;
 5. validates the merged Compose graph;
 6. builds the image once using the dependency cache;
-7. starts a missing dashboard without recreating a healthy one and verifies its
-   health endpoint;
-8. waits for `market-data`, then updates only the affected research and paper
-   consumers;
-9. verifies the image and health state of every service it updated;
-10. prints separate remote and client-side timings, the checkout/runtime/image
+7. runs the Live approval, lease, and strict preflight before restarting any
+   application service when the Live path changed;
+8. recreates Dashboard and `market-data` in one Compose start wave when needed,
+   while keeping their separate health budgets;
+9. verifies the Dashboard endpoint, waits for `market-data` to be healthy, then
+   updates only the affected research and Paper consumers;
+10. verifies the image and health state of every service it updated;
+11. prints separate remote and client-side timings, the checkout/runtime/image
     commits, and the container health summary.
 
 The script uses bounded Compose operations and an explicit health wait. A
 healthy service with the expected image is left in place; a service that must
 be updated is recreated with `--force-recreate --no-deps` after migrations and
-the volume-ownership check complete. The volume initializer only runs its
-recursive `chown` when the mounted data directories are not owned by `cml`.
+the volume-ownership check complete. Dashboard and market-data are the only
+independent application start wave; research and Paper retain the
+market-data-health barrier. The volume initializer only runs its recursive
+`chown` when the mounted data directories are not owned by `cml`.
 
 The default health wait is 300 seconds for the dashboard, PostgreSQL,
 research/Paper, and Live services. `market-data` gets 900 seconds because its
@@ -101,8 +107,11 @@ bounded to 300 seconds and image builds to 900 seconds. Override them with
 `CML_DEPLOY_BUILD_TIMEOUT_SECONDS` when a host needs different limits. A
 broken operation or healthcheck now fails with diagnostics instead of waiting
 indefinitely. A container in `exited`, `restarting`, `paused`, or another
-non-running state fails immediately; the health-wait timeout applies only while
-the container is running but its healthcheck is still `starting`.
+non-running state fails immediately. The script also records each container's
+restart count before Compose recreation and fails immediately when the count
+increases or Docker reports an active restart; the health-wait timeout applies
+only while the container is running but its healthcheck is still `starting`, and
+the timeout names the first service still pending health.
 It also requires the dashboard by default: if the dashboard is stopped or
 unhealthy, the script starts it and verifies both its Compose healthcheck and
 `127.0.0.1:8765/api/health`, plus the local reverse-proxy endpoint
@@ -139,8 +148,9 @@ leave the default `2` to use two bounded restart waves.
 
 The Live path builds the target image, optionally refreshes active approvals,
 renews active leases, then runs strict `preflight` for every currently running
-strategy before restarting any consumer or Live container. Lease renewal and
-read-only preflight run in bounded parallel batches using
+strategy before restarting the dashboard, any consumer, or any Live container.
+On a recovery run it rechecks even pairs that already use the target image.
+Lease renewal and read-only preflight run in bounded parallel batches using
 `CML_LIVE_CONCURRENCY`. The checks cover the approval, runtime strategy hash,
 risk snapshot, target commit, migration revision, account readiness, and lease
 presence. If any check fails, the command exits before restarting services. It then updates the active execution
