@@ -29,9 +29,23 @@ def market_state_payload(state: MarketState15s) -> dict[str, JsonValue]:
         "liquidation_notional": str(state.liquidation_notional),
         "mark_price": _decimal_payload(state.mark_price),
         "closed_kline_count": state.closed_kline_count,
+        "closed_kline_1m_open_time": _datetime_payload(
+            state.closed_kline_1m_open_time
+        ),
+        "closed_kline_1m_close_time": _datetime_payload(
+            state.closed_kline_1m_close_time
+        ),
+        "closed_kline_1m_open_price": _decimal_payload(
+            state.closed_kline_1m_open_price
+        ),
+        "closed_kline_1m_close_price": _decimal_payload(
+            state.closed_kline_1m_close_price
+        ),
         "source_event_count": state.source_event_count,
         "first_received_at": _datetime_payload(state.first_received_at),
         "last_received_at": _datetime_payload(state.last_received_at),
+        "data_complete": state.data_complete,
+        "missing_agg_trade_count": state.missing_agg_trade_count,
     }
 
 
@@ -92,9 +106,25 @@ def market_state_from_payload(
         ),
         mark_price=_payload_decimal(payload.get("mark_price")),
         closed_kline_count=int(str(payload.get("closed_kline_count", 0))),
+        closed_kline_1m_open_time=_payload_datetime(
+            payload.get("closed_kline_1m_open_time")
+        ),
+        closed_kline_1m_close_time=_payload_datetime(
+            payload.get("closed_kline_1m_close_time")
+        ),
+        closed_kline_1m_open_price=_payload_decimal(
+            payload.get("closed_kline_1m_open_price")
+        ),
+        closed_kline_1m_close_price=_payload_decimal(
+            payload.get("closed_kline_1m_close_price")
+        ),
         source_event_count=int(str(payload.get("source_event_count", 0))),
         first_received_at=_payload_datetime(payload.get("first_received_at")),
         last_received_at=_payload_datetime(payload.get("last_received_at")),
+        data_complete=_payload_bool_default(payload, "data_complete", True),
+        missing_agg_trade_count=int(
+            str(payload.get("missing_agg_trade_count", 0))
+        ),
     )
 
 
@@ -123,3 +153,16 @@ def _payload_datetime(value: JsonValue) -> datetime | None:
     if value is None:
         return None
     return datetime.fromisoformat(str(value))
+
+
+def _payload_bool_default(
+    payload: dict[str, JsonValue],
+    key: str,
+    default: bool,
+) -> bool:
+    value = payload.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() == "true"
