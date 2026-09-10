@@ -183,6 +183,62 @@ def test_loads_websocket_capture_configuration(
     assert config.capture.archive.retention_check_interval_seconds == 3600
 
 
+def test_research_and_server_capture_configs_keep_shared_defaults_aligned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "CML_DATABASE_URL",
+        "postgresql+asyncpg://cml:cml@localhost:54329/cml",
+    )
+
+    research = load_runtime_config(
+        Path("configs/environments/research.yaml")
+    ).capture
+    server = load_runtime_config(
+        Path("configs/environments/server_paper.yaml")
+    ).capture
+
+    for field_name in (
+        "market_websocket_url",
+        "public_websocket_url",
+        "max_subscriptions_per_connection",
+        "ingress_queue_max_events",
+        "book_ticker_coalescing_interval_seconds",
+        "control_messages_per_second",
+        "control_ack_timeout_seconds",
+        "connection_lifetime_seconds",
+        "open_timeout_seconds",
+        "ping_interval_seconds",
+        "ping_timeout_seconds",
+        "silence_timeout_seconds",
+        "durable_closure_delay_seconds",
+        "backpressure_timeout_seconds",
+        "shutdown_timeout_seconds",
+    ):
+        assert getattr(research, field_name) == getattr(server, field_name)
+
+    for field_name in (
+        "root",
+        "zstd_level",
+        "group_commit_max_events",
+        "group_commit_max_milliseconds",
+        "disk_check_interval_seconds",
+        "pending_manifest_max_age_seconds",
+        "retention_days",
+        "retention_check_interval_seconds",
+    ):
+        assert getattr(research.archive, field_name) == getattr(
+            server.archive,
+            field_name,
+        )
+
+    assert research.enabled_streams != server.enabled_streams
+    assert research.archive.streams is None
+    assert server.archive.streams == ("forceOrder",)
+    assert research.realtime_closure_delay_seconds == 3
+    assert server.realtime_closure_delay_seconds == 1
+
+
 def test_capture_config_rejects_invalid_disk_hysteresis() -> None:
     with pytest.raises(
         ValueError,

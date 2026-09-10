@@ -47,7 +47,7 @@
 | A6 | 映射丢字段成立，已复现；生产影响需限定 | [checkpoint payload](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategies/runtime_checkpoint.py:8)漏 6 个 domain 字段：4 个 closed_kline_1m 字段，以及 data_complete、missing_agg_trade_count。复现质量信息 (False,7) 往返变成 (True,0)。[DB 映射](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/persistence/postgres/runtime_state_repository.py:94)保留这些字段。但 paper daemon [持久化紧凑 checkpoint](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/daemon.py:1456)明确剔除 buffers，再从市场数据恢复，因此不能声称所有生产重启必受该 JSON 丢失影响。应补序列化 round-trip 契约；ORM 还包含额外持久化元数据，不能要求 ORM/JSON/domain 字段集机械完全相等。 |
 | A7 | 重复成立，统一时必须保留优先级差异 | 多个 app 解析 database URL 属实：[live](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/live_rollout/main.py:4384)、[execution](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/execution_account/main.py:642)、[market](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/market_data/main.py:164)、[research collector](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/research_collector/main.py:239)。但 market 收到的是 config 默认值，其 plane env 优先于默认值；有些入口没有 CLI URL，不能一概称相同 CLI→env 链。可集中解析原语并保留每入口“显式覆盖/默认值/必填”规则，避免重构改变数据库平面选择。 |
 | A8 | 已完成验收，暂不删除 | 逐方法搜索与集成/E2E 测试确认：run summary、paper artifacts、quality count、latest process state 和 exact-time universe snapshot 都有测试契约；`MonitoringObligationProvider` 有真实的强制 symbol 端口和 Fake 实现。唯一没有调用证据的是 `save_command`，但它对应 rollback command 审计表和交易所写操作授权链；鉴权及其运营语义按当前要求暂缓，因此保留，不以删除 repository 方法冒充修复。 |
-| A9 | 重复属实，不足以要求 overlay | 两 capture 配置确有共享字段，但差异还包括 archive.streams、rotation 大小、writer 数、磁盘阈值等，不只是原文列的几项。[research 配置](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/configs/environments/research.yaml:1)与[server 配置](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/configs/environments/server_paper.yaml:1)本来就是环境到 universe/capture 的组合入口，“薄壳”合理。只有两份配置时，增加深合并语义也会带来列表覆盖和默认继承风险；优先核查共享默认值或一致性测试，不必为消除重复引入 overlay。 |
+| A9 | 已完成第一阶段 | 两 capture 配置确有共享字段，但差异还包括 `archive.streams`、rotation 大小、writer 数、磁盘阈值、realtime delay 和队列容量；两个 environment 文件也只是选择不同 universe/capture 组合。没有引入会改变列表覆盖和默认继承语义的深合并 overlay，新增配置一致性测试锁定共享传输/归档默认值，并显式断言环境差异。 |
 | A10 | 不作为缺陷 | 当前 compose 没有 liquidation 服务属实，但[registry](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/registry.py:65)表示运行器支持哪些策略，不表示哪些策略已部署或已验证适合实盘。liquidation 确实有可运行的 runtime，也用于研究/测试，因此 supported 列表并未虚假承诺。可补生命周期标签及文档，不能仅因无常驻生产服务就从 build_runtime_strategy 删除，避免破坏研究与 paper 工作流。 |
 | A11 | 重复成立，而且已有实际差异 | [run_market_data](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/market_data/main.py:936)与[run_market_data_for](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/market_data/main.py:1133)大段重复，但不是“仅停止条件不同”：正式入口监控 FIRST_COMPLETED、freshness、recovery metrics，先 cancel/drain 辅助任务再带 timeout 停 capture；定时入口 sleep 等待，先 stop capture 再取消 scheduler 等任务，health 参数也不同。建议让定时入口用停止事件复用正式入口，并保留“后台任务提前失败”传播，不只是抽两个机械 start/stop 函数。 |
 
@@ -69,6 +69,7 @@
 - **A3 已完成第一阶段**：orderflow 与 liquidation 共用组合式 runtime state 和 warmup/cooldown 状态机；保留各策略事件模型及 `market_state_buffers` checkpoint 兼容，compression 变体不强行合并。
 - **A5 已完成第一阶段**：live execution command 在 base/overlay 内各自收敛到 YAML 序列锚点，账户名通过 `CML_ACCOUNT_LABEL` 注入并保留 CLI 覆盖；live strategy 的 profile/top-N 选项通过已有环境解析器读取；market-data/dashboard 的八个 paper run-id 共用一个锚点。配置 manifest、CLI fallback 和 compose 展开回归均已补齐。
 - **A8 已完成验收**：原审查把测试/E2E 使用的 repository 查询误报为死代码；逐方法搜索后保留这些查询和 universe/monitoring port。`save_command` 没有调用方，但属于 rollback 审计/授权链，鉴权与运营语义暂缓，后续再决定接线或删除。
+- **A9 已完成第一阶段**：保留 research/server capture 的环境差异，不引入跨文件深合并；新增配置一致性测试，锁定两份配置的共享连接、队列和归档默认值，并锁定 `forceOrder` archive 与 realtime delay 等有意差异。
 - **#35 已完成第一阶段**：state/quote hub 共用字符串和 datetime 字段解析 helper；state 仍接受数值型 decimal、quote 仍只接受 decimal string，两个 hub 继续抛出各自协议异常。
 - **#36 已完成**：`order_repository` 与 `account_repository` 共用 PostgreSQL `jsonable` helper，保留原有枚举、Decimal、时区 datetime、容器和 fallback 字符串语义。
 - **#37 已完成**：paper 与 daemon 共用候选成交边界解析函数，统一目标时间、过期时间和闭合状态的判断；原有 paper/daemon 行为测试保持通过。
@@ -76,7 +77,7 @@
 - **#41 已完成**：配置了 coordinator 的 `MarketDataCaptureService.submit` 现在经过 coordinator，保留 service 的磁盘保护与队列溢出处理，同时让生产入口使用 coordinator 的 symbol 过滤路径。
 - **#42 已完成**：`load_active_entry_symbols_at` 直接在数据库端选择非 `EXTENDED` membership，保留最新 activated snapshot 与 `observed_at` 截止语义。
 
-本轮没有处理 A9 等仍需进一步权衡的维护项，也没有处理鉴权 D8；A8 的 `save_command` 仅保留待运营语义确认，不作为删除项。
+本轮没有处理鉴权 D8；A8 的 `save_command` 仅保留待运营语义确认，不作为删除项。
 
 ## 验证记录与建议顺序
 
@@ -87,6 +88,7 @@
 - A3 的 orderflow、liquidation、compression 与 runtime state/strategy runner 回归共 158 项通过；新增共享 runtime state 三个源文件的 mypy 检查通过。
 - A5 的 compose manifest、execution-account/live-rollout CLI 与 profile 解析回归 69 项通过；base/overlay `docker compose config --quiet` 展开通过，相关源文件 mypy 与 Ruff 通过。
 - A8 的 repository method 调用搜索覆盖 src/tests/scripts；strategy-run、capture、universe 的相关集成测试 10 项和 unit/rollback/universe 测试 18 项通过，未发现可安全删除的方法。`test_market_data_runtime_archives_and_updates_subscriptions` 两次单独运行都在既有行情归档收尾处缺少 ETHUSDT 文件，未归因于 A8，暂不混入本项修改。
+- A9 的配置一致性回归 6 项通过；共享字段和有意环境差异均由 `tests/unit/config/test_loader.py` 覆盖。
 - 本轮优先修正确性：#26、#25、启用相应配置时的 #27、价格边界契约明确后的 #29；A6 补 round-trip 并核查使用完整 buffer checkpoint 的路径。
 - 维护重构优先 A2、A4、A11，其次小型纯 helper 收敛。#39、#40、#43、A10 不应按当前运行 bug 修；A8 和 A1 的原描述应修订。
 
