@@ -9,11 +9,6 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from crypto_momentum_lab.apps.shadow_operation.main import (
-    _latest_account_state,
-    _latest_risk_config,
-    _load_trading_rules,
-)
 from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
     ExecutionAccountStatus,
@@ -61,6 +56,15 @@ from crypto_momentum_lab.persistence.postgres.order_repository import (
 )
 from crypto_momentum_lab.persistence.postgres.risk_repository import (
     PostgresRiskRepository,
+)
+from crypto_momentum_lab.persistence.postgres.runtime_context import (
+    load_latest_account_state as _latest_account_state,
+)
+from crypto_momentum_lab.persistence.postgres.runtime_context import (
+    load_latest_risk_config as _latest_risk_config,
+)
+from crypto_momentum_lab.persistence.postgres.runtime_context import (
+    load_trading_rules as _load_trading_rules,
 )
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
