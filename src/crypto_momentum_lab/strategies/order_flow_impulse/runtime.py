@@ -21,10 +21,10 @@ from crypto_momentum_lab.domain.strategy import (
     deterministic_signal_id,
 )
 from crypto_momentum_lab.strategies.order_flow_impulse.event_study import (
+    VOLUME_RATIO_TOTAL_BUCKETS,
     OrderFlowDirection,
     OrderFlowImpulseConfig,
     OrderFlowImpulseEvent,
-    VOLUME_RATIO_TOTAL_BUCKETS,
     find_order_flow_impulses,
 )
 from crypto_momentum_lab.strategies.runtime_checkpoint import (
@@ -185,6 +185,22 @@ class OrderFlowImpulseRuntimeStrategy:
             self.reset_symbol(symbol)
             evicted.append(symbol)
         return tuple(evicted)
+
+    def cooldown_buckets(self) -> int:
+        return self._config.event_config.cooldown_buckets
+
+    def on_market_state_without_cooldown(
+        self,
+        state: MarketState15s,
+    ) -> StrategyDecision:
+        """Evaluate one state without committing shared paired-run cooldown."""
+
+        saved_cooldown = self._cooldown_remaining
+        self._cooldown_remaining = {}
+        try:
+            return self.on_market_state(state)
+        finally:
+            self._cooldown_remaining = saved_cooldown
 
     def on_market_state(self, state: MarketState15s) -> StrategyDecision:
         self._last_processed[state.symbol] = state.bucket_start

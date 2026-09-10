@@ -15,10 +15,12 @@ from crypto_momentum_lab.domain.strategy import (
     EntryPolicyComparison,
     EntryPolicyComparisonRequest,
     OrderIntentCandidate,
+    RejectionReason,
     RunMode,
     StrategyCheckpoint,
     StrategyDataRequirement,
     StrategyDecision,
+    StrategyRejection,
     StrategyRunIdentity,
     StrategySide,
     StrategySignal,
@@ -294,6 +296,12 @@ def run_paired_paper_live_daemon(
             raise ValueError("paired accounts must share checkpoint phase")
 
     checkpoints = _load_paired_checkpoints(accounts)
+    cooldown_remaining_by_account: list[dict[str, int]] = [
+        {}
+        if checkpoint is None
+        else dict(checkpoint.cooldown_buckets_remaining_by_symbol)
+        for checkpoint in checkpoints
+    ]
     available_checkpoints = tuple(
         checkpoint for checkpoint in checkpoints if checkpoint is not None
     )
@@ -415,6 +423,8 @@ def run_paired_paper_live_daemon(
                 stale_symbols.add(state.symbol)
             if state.symbol not in gapped_symbols:
                 _reset_strategy_symbol(strategy, state.symbol)
+                for cooldown_remaining in cooldown_remaining_by_account:
+                    cooldown_remaining.pop(state.symbol, None)
                 gapped_symbols.add(state.symbol)
             continue
 
@@ -429,13 +439,16 @@ def run_paired_paper_live_daemon(
             stale_symbols.discard(state.symbol)
 
         if state.symbol not in gapped_symbols:
-            _reset_strategy_for_gap(
+            gap_reset = _reset_strategy_for_gap(
                 strategy=strategy,
                 symbol=state.symbol,
                 current_at=state.bucket_start,
                 last_processed_at=last_processed_at_by_symbol.get(state.symbol),
                 max_gap_seconds=max_gap_seconds,
             )
+            if gap_reset:
+                for cooldown_remaining in cooldown_remaining_by_account:
+                    cooldown_remaining.pop(state.symbol, None)
         gapped_symbols.discard(state.symbol)
 
         if entry_symbol_loader is not None and (
@@ -554,7 +567,8 @@ def run_paired_paper_live_daemon(
                         )
             position_updates_by_account.append(tuple(position_updates_by_id.values()))
 
-        decision = strategy.on_market_state(state)
+        decision = _strategy_decision_without_shared_cooldown(strategy, state)
+        cooldown_buckets = _strategy_cooldown_buckets(strategy)
         entry_filter_context = (
             None
             if entry_filter_context_loader is None
@@ -567,10 +581,18 @@ def run_paired_paper_live_daemon(
                 account.config.run_identity,
                 account.config.entry_filter,
                 context=entry_filter_context,
+                state=state,
+                cooldown_remaining=cooldown_remaining_by_account[index],
             )
             if entry_allowed and (
                 account_decision.signals or account_decision.candidates
             ):
+                if cooldown_buckets > 0:
+                    cooldown_remaining_by_account[index][state.symbol] = (
+                        cooldown_buckets
+                    )
+                else:
+                    cooldown_remaining_by_account[index].pop(state.symbol, None)
                 _run_async(
                     account.artifact_repository.save_decision(account_decision)
                 )
@@ -656,6 +678,9 @@ def run_paired_paper_live_daemon(
                 accounts=accounts,
                 checkpoint=checkpoint_to_save,
                 saved_at=now,
+                cooldown_remaining_by_account=tuple(
+                    cooldown_remaining_by_account
+                ),
             )
             _notify_checkpoint_persisted(on_checkpoint_persisted)
             checkpoint_dirty = False
@@ -671,6 +696,7 @@ def run_paired_paper_live_daemon(
             accounts=accounts,
             checkpoint=checkpoint_to_save,
             saved_at=saved_at,
+            cooldown_remaining_by_account=tuple(cooldown_remaining_by_account),
         )
         _notify_checkpoint_persisted(on_checkpoint_persisted)
         last_checkpoint_saved_at = saved_at
@@ -719,8 +745,18 @@ def _save_paired_checkpoints(
     accounts: tuple[PairedPaperLiveAccount, ...],
     checkpoint: StrategyCheckpoint,
     saved_at: datetime,
+    cooldown_remaining_by_account: tuple[dict[str, int], ...],
 ) -> None:
     """Write paired cursors in one transaction per repository."""
+    if len(cooldown_remaining_by_account) != len(accounts):
+        raise ValueError("paired cooldown state must match account count")
+    account_checkpoints = tuple(
+        replace(
+            checkpoint,
+            cooldown_buckets_remaining_by_symbol=dict(cooldown_remaining),
+        )
+        for cooldown_remaining in cooldown_remaining_by_account
+    )
     grouped: dict[
         int,
         tuple[
@@ -728,13 +764,17 @@ def _save_paired_checkpoints(
             list[tuple[str, StrategyCheckpoint, datetime]],
         ],
     ] = {}
-    for account in accounts:
+    for account, account_checkpoint in zip(
+        accounts,
+        account_checkpoints,
+        strict=True,
+    ):
         key = id(account.repository)
         repository, values = grouped.setdefault(
             key,
             (account.repository, []),
         )
-        values.append((account.config.run_id, checkpoint, saved_at))
+        values.append((account.config.run_id, account_checkpoint, saved_at))
 
     for repository, values in grouped.values():
         save_checkpoints = getattr(repository, "save_checkpoints", None)
@@ -778,13 +818,26 @@ def _decision_for_account(
     entry_filter: PaperEntryFilterConfig,
     *,
     context: PaperEntryFilterContext | None = None,
+    state: MarketState15s | None = None,
+    cooldown_remaining: dict[str, int] | None = None,
 ) -> StrategyDecision:
     if identity is None:
         raise ValueError("paired paper account requires run_identity")
     source_signal_ids = {signal.signal_id for signal in decision.signals}
+    active_cooldown: dict[str, int] = {}
+    if state is not None and cooldown_remaining is not None:
+        remaining = cooldown_remaining.get(state.symbol, 0)
+        if remaining > 0:
+            active_cooldown[state.symbol] = remaining
+            if remaining == 1:
+                cooldown_remaining.pop(state.symbol, None)
+            else:
+                cooldown_remaining[state.symbol] = remaining - 1
     signal_ids: dict[str, str] = {}
     signals: list[StrategySignal] = []
     for signal in decision.signals:
+        if signal.symbol in active_cooldown:
+            continue
         if not _signal_passes_entry_filter(
             signal,
             entry_filter,
@@ -817,10 +870,28 @@ def _decision_for_account(
                 run_id=identity.run_id,
             )
         )
+    cooldown_rejections = tuple(
+        StrategyRejection(
+            reason=RejectionReason.COOLDOWN_ACTIVE,
+            symbol=symbol,
+            bucket_start=(
+                state.bucket_start
+                if state is not None
+                else next(
+                    signal.source_state_at
+                    for signal in decision.signals
+                    if signal.symbol == symbol
+                )
+            ),
+            details={"remaining": remaining},
+        )
+        for symbol, remaining in active_cooldown.items()
+        if any(signal.symbol == symbol for signal in decision.signals)
+    )
     return StrategyDecision(
         signals=tuple(signals),
         candidates=tuple(candidates),
-        rejections=decision.rejections,
+        rejections=decision.rejections + cooldown_rejections,
         checkpoint=decision.checkpoint,
     )
 
@@ -1778,15 +1849,37 @@ def _reset_strategy_for_gap(
     current_at: datetime,
     last_processed_at: datetime | None,
     max_gap_seconds: int,
-) -> None:
+) -> bool:
     if last_processed_at is None:
-        return
+        return False
     if (current_at - last_processed_at).total_seconds() > max_gap_seconds:
         _reset_strategy_symbol(strategy, symbol)
+        return True
+    return False
 
 
 def _strategy_max_gap_seconds(strategy: RuntimeStrategy) -> int:
     return strategy.required_data().max_gap_seconds
+
+
+def _strategy_decision_without_shared_cooldown(
+    strategy: RuntimeStrategy,
+    state: MarketState15s,
+) -> StrategyDecision:
+    method = getattr(strategy, "on_market_state_without_cooldown", None)
+    if callable(method):
+        return method(state)
+    return strategy.on_market_state(state)
+
+
+def _strategy_cooldown_buckets(strategy: RuntimeStrategy) -> int:
+    method = getattr(strategy, "cooldown_buckets", None)
+    if not callable(method):
+        return 0
+    value = method()
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
 
 
 def _log_candle_gap_events(

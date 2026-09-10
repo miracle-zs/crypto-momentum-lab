@@ -290,6 +290,65 @@ class SignalStrategy(FakeStrategy):
         )
 
 
+class PerAccountCooldownStrategy(SignalStrategy):
+    def __init__(self, identity: StrategyRunIdentity) -> None:
+        super().__init__(identity)
+        self._signal_sequence = 0
+
+    def cooldown_buckets(self) -> int:
+        return 1
+
+    def on_market_state_without_cooldown(
+        self,
+        state: MarketState15s,
+    ) -> StrategyDecision:
+        decision = FakeStrategy.on_market_state(self, state)
+        sequence = self._signal_sequence
+        self._signal_sequence += 1
+        signal = StrategySignal(
+            signal_id=f"signal-{sequence}",
+            run_id=self._identity.run_id,
+            strategy_name=self._identity.strategy_name,
+            strategy_version=self._identity.strategy_version,
+            config_hash=self._identity.config_hash,
+            symbol=state.symbol,
+            side=(
+                StrategySide.SHORT
+                if sequence == 0
+                else StrategySide.LONG
+            ),
+            detected_at=state.bucket_end,
+            source_state_at=state.bucket_start,
+            reason="compression_breakout",
+            features={},
+            reference_prices={"close": str(state.close_price)},
+        )
+        candidate = OrderIntentCandidate(
+            candidate_id=f"candidate-{sequence}",
+            signal_id=signal.signal_id,
+            run_id=self._identity.run_id,
+            strategy_name=self._identity.strategy_name,
+            strategy_version=self._identity.strategy_version,
+            config_hash=self._identity.config_hash,
+            symbol=state.symbol,
+            side=signal.side,
+            entry_type=EntryType.MARKET,
+            limit_price=None,
+            desired_notional=Decimal("25"),
+            reduce_only=False,
+            expires_at=state.bucket_end + timedelta(seconds=60),
+            created_at=state.bucket_end,
+            reason=signal.reason,
+            features={},
+        )
+        return StrategyDecision(
+            signals=(signal,),
+            candidates=(candidate,),
+            rejections=(),
+            checkpoint=decision.checkpoint,
+        )
+
+
 class FakeArtifactRepository(PaperLiveArtifactRepository):
     def __init__(self) -> None:
         self.initialized: list[tuple[StrategyRunIdentity, str]] = []
@@ -959,6 +1018,62 @@ def test_paired_entry_filters_preserve_b2_and_c1_subsets() -> None:
     assert c1_artifacts.decisions == []
     assert len(b2_artifacts.fills) == 1
     assert c1_artifacts.fills == []
+
+
+def test_paired_cooldown_is_committed_after_each_account_accepts_signal() -> None:
+    states = (fixture_state("BTCUSDT", 0), fixture_state("BTCUSDT", 1))
+    long_only_identity = _identity("run-long-only")
+    baseline_identity = _identity("run-baseline")
+    long_only_repository = FakeRepository()
+    baseline_repository = FakeRepository()
+    long_only_artifacts = FakeArtifactRepository()
+    baseline_artifacts = FakeArtifactRepository()
+
+    run_paired_paper_live_daemon(
+        source=states,
+        strategy=PerAccountCooldownStrategy(long_only_identity),
+        accounts=(
+            PairedPaperLiveAccount(
+                repository=long_only_repository,
+                artifact_repository=long_only_artifacts,
+                config=_config(
+                    run_id=long_only_identity.run_id,
+                    run_identity=long_only_identity,
+                    execution=ReplayExecutionConfig(latency_buckets=0),
+                    entry_filter=PaperEntryFilterConfig(allow_short=False),
+                ),
+            ),
+            PairedPaperLiveAccount(
+                repository=baseline_repository,
+                artifact_repository=baseline_artifacts,
+                config=_config(
+                    run_id=baseline_identity.run_id,
+                    run_identity=baseline_identity,
+                    execution=ReplayExecutionConfig(latency_buckets=0),
+                ),
+            ),
+        ),
+        clock=FakeClock(states[-1].bucket_end + timedelta(seconds=1)),
+    )
+
+    assert [
+        decision.signals[0].side for decision in long_only_artifacts.decisions
+    ] == [StrategySide.LONG]
+    assert [
+        decision.signals[0].side for decision in baseline_artifacts.decisions
+    ] == [StrategySide.SHORT]
+    assert long_only_artifacts.fills[0].side is StrategySide.LONG
+    assert baseline_artifacts.fills[0].side is StrategySide.SHORT
+    assert (
+        long_only_repository.saved_checkpoints[-1][1]
+        .cooldown_buckets_remaining_by_symbol
+        == {"BTCUSDT": 1}
+    )
+    assert (
+        baseline_repository.saved_checkpoints[-1][1]
+        .cooldown_buckets_remaining_by_symbol
+        == {}
+    )
 
 
 def test_paired_long_only_filter_rejects_short_signal() -> None:

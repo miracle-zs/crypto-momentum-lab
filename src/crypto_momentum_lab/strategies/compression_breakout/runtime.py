@@ -152,6 +152,22 @@ class CompressionBreakoutRuntimeStrategy:
         self._cooldown_remaining.pop(symbol, None)
         self._last_processed.pop(symbol, None)
 
+    def cooldown_buckets(self) -> int:
+        return self._config.event_config.cooldown_buckets
+
+    def on_market_state_without_cooldown(
+        self,
+        state: MarketState15s,
+    ) -> StrategyDecision:
+        """Evaluate one state without committing shared paired-run cooldown."""
+
+        saved_cooldown = self._cooldown_remaining
+        self._cooldown_remaining = {}
+        try:
+            return self.on_market_state(state)
+        finally:
+            self._cooldown_remaining = saved_cooldown
+
     def on_market_state(self, state: MarketState15s) -> StrategyDecision:
         self._last_processed[state.symbol] = state.bucket_start
         if _state_price(state) is None:
