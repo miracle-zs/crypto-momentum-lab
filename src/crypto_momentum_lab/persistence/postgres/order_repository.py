@@ -1,7 +1,6 @@
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
-from enum import StrEnum
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
@@ -33,6 +32,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     OrderIntentExecutionRow,
     ShadowSuppressionEventRow,
 )
+from crypto_momentum_lab.persistence.postgres.serialization import jsonable
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +73,7 @@ class PostgresOrderRepository:
             "symbol": intent.symbol,
             "state": ExchangeOrderState.INTENT_APPROVED.value,
             "approved_at": evaluation.evaluated_at,
-            "details": _jsonable(asdict(intent)),
+            "details": jsonable(asdict(intent)),
         }
         async with self._session_factory() as session:
             async with session.begin():
@@ -115,7 +115,7 @@ class PostgresOrderRepository:
             "symbol": intent.symbol,
             "state": ExchangeOrderState.SUBMITTING.value,
             "approved_at": evaluation.evaluated_at,
-            "details": _jsonable(asdict(intent)),
+            "details": jsonable(asdict(intent)),
         }
         order_values = {
             "client_order_id": plan.client_order_id,
@@ -154,7 +154,7 @@ class PostgresOrderRepository:
             "state": submitting_event.state.value,
             "occurred_at": submitting_event.occurred_at,
             "exchange_order_id": submitting_event.exchange_order_id,
-            "details": _jsonable(submitting_event.details),
+            "details": jsonable(submitting_event.details),
         }
         try:
             async with self._session_factory() as session:
@@ -270,7 +270,7 @@ class PostgresOrderRepository:
             "state": event.state.value,
             "occurred_at": event.occurred_at,
             "exchange_order_id": event.exchange_order_id,
-            "details": _jsonable(event.details),
+            "details": jsonable(event.details),
         }
         async with self._session_factory() as session:
             async with session.begin():
@@ -363,7 +363,7 @@ class PostgresOrderRepository:
                         fee=fill.fee,
                         fee_asset=fill.fee_asset,
                         filled_at=fill.filled_at,
-                        details=_jsonable(fill.details),
+                        details=jsonable(fill.details),
                     )
                     .on_conflict_do_nothing()
                     .returning(ExchangeFillRow.fill_id)
@@ -381,7 +381,7 @@ class PostgresOrderRepository:
                 "client_order_id": event.client_order_id,
                 "suppressed_at": event.suppressed_at,
                 "reason": event.reason,
-                "order_payload": _jsonable(event.order_payload),
+                "order_payload": jsonable(event.order_payload),
             },
         )
 
@@ -439,7 +439,7 @@ class PostgresOrderRepository:
                 "command": command,
                 "status": status,
                 "requested_at": requested_at,
-                "details": _jsonable(details),
+                "details": jsonable(details),
             },
         )
 
@@ -459,7 +459,7 @@ class PostgresOrderRepository:
                 "client_order_id": client_order_id,
                 "outcome": outcome,
                 "occurred_at": occurred_at,
-                "details": _jsonable(details),
+                "details": jsonable(details),
             },
         )
 
@@ -523,22 +523,3 @@ def _order_event_id(
         )
     )
 
-
-def _jsonable(value: object) -> JsonValue:
-    if isinstance(value, StrEnum):
-        return value.value
-    if isinstance(value, Decimal):
-        return format(value.normalize(), "f")
-    if isinstance(value, datetime):
-        return (
-            value.astimezone(UTC).isoformat()
-            if value.tzinfo is not None and value.utcoffset() is not None
-            else value.isoformat()
-        )
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, str | int | float | bool) or value is None:
-        return value
-    return str(value)

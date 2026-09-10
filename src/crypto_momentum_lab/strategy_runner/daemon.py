@@ -35,8 +35,7 @@ from crypto_momentum_lab.strategy_runner.candle_source import (
 from crypto_momentum_lab.strategy_runner.fills import (
     ReplayExecutionConfig,
     SimulatedFill,
-    candidate_target_fill_at,
-    simulate_candidate_fill,
+    resolve_candidate_fill_at_state,
 )
 from crypto_momentum_lab.strategy_runner.portfolio import (
     Candle15mAggregator,
@@ -1661,26 +1660,15 @@ def _resolve_pending_candidates(
         if candidate.symbol != state.symbol:
             remaining.append(candidate)
             continue
-        target_fill_at = candidate_target_fill_at(candidate, execution)
-        if state.bucket_end > candidate.expires_at:
-            fills.append(
-                simulate_candidate_fill(
-                    candidate=candidate,
-                    states=(),
-                    execution=execution,
-                )
-            )
-            continue
-        if state.bucket_end < target_fill_at:
-            remaining.append(candidate)
-            continue
-        fills.append(
-            simulate_candidate_fill(
-                candidate=candidate,
-                states=(state,),
-                execution=execution,
-            )
+        fill = resolve_candidate_fill_at_state(
+            candidate=candidate,
+            state=state,
+            execution=execution,
         )
+        if fill is None:
+            remaining.append(candidate)
+        else:
+            fills.append(fill)
     return remaining, fills
 
 

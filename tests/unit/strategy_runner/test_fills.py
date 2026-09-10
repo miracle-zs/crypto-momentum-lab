@@ -18,6 +18,7 @@ from crypto_momentum_lab.strategy_runner.fills import (
     deterministic_fill_id,
     fill_summary,
     pending_candidate_fill,
+    resolve_candidate_fill_at_state,
     simulate_candidate_fill,
 )
 
@@ -67,6 +68,35 @@ def test_zero_latency_fill_is_not_backdated_to_bucket_start() -> None:
     assert fill.status is SimulatedFillStatus.FILLED
     assert fill.target_fill_at == state.bucket_end
     assert fill.filled_at == state.bucket_end
+
+
+def test_resolve_candidate_fill_at_state_shares_expiry_boundaries() -> None:
+    identity = _identity()
+    candidate = _candidate(identity=identity, signal_id="sig_1")
+    execution = ReplayExecutionConfig(latency_buckets=1)
+
+    assert (
+        resolve_candidate_fill_at_state(
+            candidate=candidate,
+            state=_state(3, close=Decimal("101.4")),
+            execution=execution,
+        )
+        is None
+    )
+    filled = resolve_candidate_fill_at_state(
+        candidate=candidate,
+        state=_state(4, close=Decimal("101.4")),
+        execution=execution,
+    )
+    assert filled is not None
+    assert filled.status is SimulatedFillStatus.FILLED
+    expired = resolve_candidate_fill_at_state(
+        candidate=candidate,
+        state=_state(7, close=Decimal("101.4")),
+        execution=execution,
+    )
+    assert expired is not None
+    assert expired.status is SimulatedFillStatus.EXPIRED
 
 
 def test_pending_fill_records_source_ended_before_fill() -> None:

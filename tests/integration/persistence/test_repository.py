@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -165,3 +166,44 @@ async def test_load_active_memberships_at_uses_latest_activated_snapshot(
     memberships = await repository.load_active_memberships_at(first.observed_at)
 
     assert set(memberships) == {"BTCUSDT"}
+
+
+async def test_load_active_entry_symbols_at_filters_extended_memberships_in_sql(
+    repository: PostgresUniverseRepository,
+    snapshot_factory,
+) -> None:
+    active = snapshot_factory(
+        day=14,
+        hour=22,
+        activated=True,
+        symbol="BTCUSDT",
+    )
+    active = replace(
+        active,
+        memberships=(
+            TrackedMembership(
+                "BTCUSDT",
+                MembershipStatus.TARGET,
+                RankingSide.GAINER,
+                None,
+            ),
+            TrackedMembership(
+                "ETHUSDT",
+                MembershipStatus.EXTENDED,
+                RankingSide.GAINER,
+                None,
+            ),
+            TrackedMembership(
+                "SOLUSDT",
+                MembershipStatus.RETAINED,
+                RankingSide.GAINER,
+                None,
+            ),
+        ),
+    )
+
+    await repository.save_snapshot(active)
+
+    symbols = await repository.load_active_entry_symbols_at(active.observed_at)
+
+    assert symbols == frozenset({"BTCUSDT", "SOLUSDT"})

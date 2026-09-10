@@ -1,14 +1,12 @@
 import json
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from enum import StrEnum
 from pathlib import Path
-from typing import Any, cast
 
-from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
+from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     EntryPolicyComparison,
     EntryPolicyComparisonRequest,
@@ -38,6 +36,7 @@ from crypto_momentum_lab.strategy_runner.fills import (
     fill_summary,
     simulate_candidate_fills,
 )
+from crypto_momentum_lab.strategy_runner.serialization import jsonable
 
 _COMPARISON_INPUT_FIELDS = frozenset(("schema_version", "requests"))
 _COMPARISON_REQUEST_FIELDS = frozenset(
@@ -287,7 +286,7 @@ def write_strategy_replay_report(
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
-        json.dumps(_jsonable(report), indent=2, sort_keys=True) + "\n",
+        json.dumps(jsonable(report), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
 
@@ -467,7 +466,7 @@ def write_entry_policy_replay_report(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
-        json.dumps(_jsonable(report.as_details()), indent=2, sort_keys=True)
+        json.dumps(jsonable(report.as_details()), indent=2, sort_keys=True)
         + "\n",
         encoding="utf-8",
     )
@@ -680,24 +679,6 @@ def _summary_counts(
         "signals_by_side": dict(sorted(by_side.items())),
         "signals_by_symbol": dict(sorted(by_symbol.items())),
     }
-
-
-def _jsonable(value: object) -> JsonValue:
-    if is_dataclass(value) and not isinstance(value, type):
-        return _jsonable(asdict(cast(Any, value)))
-    if isinstance(value, StrEnum):
-        return value.value
-    if isinstance(value, Decimal):
-        return str(value)
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, str | int | float | bool) or value is None:
-        return value
-    return str(value)
 
 
 def _is_aware(value: datetime) -> bool:

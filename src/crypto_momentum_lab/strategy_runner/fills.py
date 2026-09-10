@@ -102,6 +102,29 @@ def candidate_target_fill_at(
     )
 
 
+def resolve_candidate_fill_at_state(
+    *,
+    candidate: OrderIntentCandidate,
+    state: MarketState15s,
+    execution: ReplayExecutionConfig,
+) -> SimulatedFill | None:
+    """Resolve one pending candidate against the next closed market state."""
+    target_fill_at = candidate_target_fill_at(candidate, execution)
+    if state.bucket_end > candidate.expires_at:
+        return simulate_candidate_fill(
+            candidate=candidate,
+            states=(),
+            execution=execution,
+        )
+    if target_fill_at <= state.bucket_end <= candidate.expires_at:
+        return simulate_candidate_fill(
+            candidate=candidate,
+            states=(state,),
+            execution=execution,
+        )
+    return None
+
+
 def simulate_candidate_fills(
     *,
     candidates: tuple[OrderIntentCandidate, ...],

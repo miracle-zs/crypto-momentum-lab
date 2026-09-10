@@ -1,7 +1,4 @@
 from dataclasses import asdict
-from datetime import UTC, datetime
-from decimal import Decimal
-from enum import StrEnum
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -19,7 +16,6 @@ from crypto_momentum_lab.domain.account import (
     AccountReconciliationRun,
     ExecutionAccountProcessState,
 )
-from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountBalanceSnapshotRow,
     AccountConfigSnapshotRow,
@@ -30,6 +26,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     AccountReconciliationRunRow,
     ExecutionAccountProcessStateRow,
 )
+from crypto_momentum_lab.persistence.postgres.serialization import jsonable
 
 
 def balance_snapshot_row(snapshot: AccountBalanceSnapshot) -> dict[str, object]:
@@ -48,7 +45,7 @@ def balance_snapshot_row(snapshot: AccountBalanceSnapshot) -> dict[str, object]:
         "available_balance": snapshot.available_balance,
         "unrealized_pnl": snapshot.unrealized_pnl,
         "observed_at": snapshot.observed_at,
-        "raw_payload": _jsonable(snapshot.raw_payload),
+        "raw_payload": jsonable(snapshot.raw_payload),
     }
 
 
@@ -359,7 +356,7 @@ def position_snapshot_row(snapshot: AccountPositionSnapshot) -> dict[str, object
         "notional": snapshot.notional,
         "leverage": snapshot.leverage,
         "margin_type": snapshot.margin_type,
-        "raw_payload": _jsonable(snapshot.raw_payload),
+        "raw_payload": jsonable(snapshot.raw_payload),
     }
 
 
@@ -378,7 +375,7 @@ def open_order_snapshot_row(order: AccountOpenOrderSnapshot) -> dict[str, object
         "executed_quantity": order.executed_quantity,
         "reduce_only": order.reduce_only,
         "observed_at": order.observed_at,
-        "raw_payload": _jsonable(order.raw_payload),
+        "raw_payload": jsonable(order.raw_payload),
     }
 
 
@@ -396,7 +393,7 @@ def fill_event_row(fill: AccountFillEvent) -> dict[str, object]:
         "fee": fill.fee,
         "fee_asset": fill.fee_asset,
         "trade_at": fill.trade_at,
-        "raw_payload": _jsonable(fill.raw_payload),
+        "raw_payload": jsonable(fill.raw_payload),
     }
 
 
@@ -419,7 +416,7 @@ def config_snapshot_row(snapshot: AccountConfigSnapshot) -> dict[str, object]:
         "multi_assets_mode": snapshot.multi_assets_mode,
         "hedge_mode": snapshot.hedge_mode,
         "fee_tier": snapshot.fee_tier,
-        "raw_payload": _jsonable(snapshot.raw_payload),
+        "raw_payload": jsonable(snapshot.raw_payload),
     }
 
 
@@ -435,29 +432,9 @@ def reconciliation_run_row(run: AccountReconciliationRun) -> dict[str, object]:
         "open_order_count": run.open_order_count,
         "fill_count": run.fill_count,
         "mismatch_count": run.mismatch_count,
-        "details": _jsonable(run.details),
+        "details": jsonable(run.details),
     }
 
 
 def _row_id(namespace: str, *parts: str) -> UUID:
     return uuid5(NAMESPACE_URL, ":".join((namespace, *parts)))
-
-
-def _jsonable(value: object) -> JsonValue:
-    if isinstance(value, StrEnum):
-        return value.value
-    if isinstance(value, Decimal):
-        return format(value.normalize(), "f")
-    if isinstance(value, datetime):
-        return (
-            value.astimezone(UTC).isoformat()
-            if value.tzinfo is not None and value.utcoffset() is not None
-            else value.isoformat()
-        )
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, str | int | float | bool) or value is None:
-        return value
-    return str(value)

@@ -63,6 +63,15 @@
 | MonitoringObligationProvider / NoMonitoringObligations | UniverseRefreshService 实际调用 forced_symbols；tests/unit/universe/test_refresh.py:176 注入 FakeObligations | 生产使用默认空实现成立，“全库只用默认”错误。生产持仓保护另经 protected-symbol loader/订阅 observer 接入，不能推导持仓完全没有保护。 |
 | UniverseRepository.load_snapshot | tests/integration/persistence/test_repository.py:73；tests/e2e/test_universe_refresh.py:103 | 无已发现生产调用，有测试调用；与 load_snapshot_at 的精确时点/截至时点语义需保留区分。 |
 
+### 本轮第二批维护收敛
+
+- **#36 已完成**：`order_repository` 与 `account_repository` 共用 PostgreSQL `jsonable` helper，保留原有枚举、Decimal、时区 datetime、容器和 fallback 字符串语义。
+- **#37 已完成**：paper 与 daemon 共用候选成交边界解析函数，统一目标时间、过期时间和闭合状态的判断；原有 paper/daemon 行为测试保持通过。
+- **#38 已完成**：paper 与 replay 共用 strategy report serialization helper，避免四个相同转换函数继续漂移。
+- **#42 已完成**：`load_active_entry_symbols_at` 直接在数据库端选择非 `EXTENDED` membership，保留最新 activated snapshot 与 `observed_at` 截止语义。
+
+本轮没有处理 #35、A1、A3、A5、A8、A9 等仍需进一步权衡的维护项，也没有处理鉴权 D8；这些不应被本轮测试通过数误记为已完成。
+
 ## 验证记录与建议顺序
 
 - 静态检查了以上全部 #24–#43、A1–A11，并将 A5a/A5b 和 A8 子项分别验收；对调用关系搜索范围包括 src、tests、scripts 和当前 compose 配置。

@@ -1,14 +1,13 @@
 import json
 from collections import Counter, deque
 from collections.abc import Iterator
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Protocol
 
-from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
+from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     RunMode,
@@ -30,9 +29,9 @@ from crypto_momentum_lab.strategy_runner.fills import (
     ReplayExecutionConfig,
     SimulatedFill,
     SimulatedFillStatus,
-    candidate_target_fill_at,
     fill_summary,
     pending_candidate_fill,
+    resolve_candidate_fill_at_state,
     simulate_candidate_fill,
 )
 from crypto_momentum_lab.strategy_runner.portfolio import (
@@ -50,6 +49,7 @@ from crypto_momentum_lab.strategy_runner.registry import (
     build_runtime_config,
     build_runtime_strategy,
 )
+from crypto_momentum_lab.strategy_runner.serialization import jsonable
 
 
 class PaperRunnerError(RuntimeError):
@@ -306,7 +306,7 @@ def write_paper_trading_report(
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
-        json.dumps(_jsonable(report), indent=2, sort_keys=True) + "\n",
+        json.dumps(jsonable(report), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
 
@@ -323,26 +323,15 @@ def _resolve_pending_candidates(
         if candidate.symbol != state.symbol:
             remaining.append(candidate)
             continue
-        target_fill_at = candidate_target_fill_at(candidate, execution)
-        if state.bucket_end > candidate.expires_at:
-            fills.append(
-                simulate_candidate_fill(
-                    candidate=candidate,
-                    states=(),
-                    execution=execution,
-                )
-            )
-            continue
-        if target_fill_at <= state.bucket_end <= candidate.expires_at:
-            fills.append(
-                simulate_candidate_fill(
-                    candidate=candidate,
-                    states=(state,),
-                    execution=execution,
-                )
-            )
-            continue
-        remaining.append(candidate)
+        fill = resolve_candidate_fill_at_state(
+            candidate=candidate,
+            state=state,
+            execution=execution,
+        )
+        if fill is None:
+            remaining.append(candidate)
+        else:
+            fills.append(fill)
     return remaining, fills
 
 
@@ -485,24 +474,6 @@ def _summary_counts(
     summary["positions_by_status"] = dict(sorted(positions_by_status.items()))
     summary["exits_by_reason"] = dict(sorted(exits_by_reason.items()))
     return summary
-
-
-def _jsonable(value: object) -> JsonValue:
-    if is_dataclass(value) and not isinstance(value, type):
-        return _jsonable(asdict(cast(Any, value)))
-    if isinstance(value, StrEnum):
-        return value.value
-    if isinstance(value, Decimal):
-        return str(value)
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, str | int | float | bool) or value is None:
-        return value
-    return str(value)
 
 
 def _is_aware(value: datetime) -> bool:
