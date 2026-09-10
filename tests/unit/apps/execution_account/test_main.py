@@ -8,6 +8,20 @@ from crypto_momentum_lab.config import BinanceCredentialRole
 runner = CliRunner()
 
 
+def test_account_label_prefers_explicit_option(monkeypatch) -> None:
+    monkeypatch.setenv("CML_ACCOUNT_LABEL", "from-environment")
+
+    assert main._resolve_account_label(" explicit ") == "explicit"
+
+
+def test_account_label_falls_back_to_environment_and_primary(monkeypatch) -> None:
+    monkeypatch.setenv("CML_ACCOUNT_LABEL", " account-2 ")
+    assert main._resolve_account_label(None) == "account-2"
+
+    monkeypatch.delenv("CML_ACCOUNT_LABEL")
+    assert main._resolve_account_label(None) == "primary"
+
+
 def test_execution_account_sync_once_requires_credentials(monkeypatch) -> None:
     monkeypatch.delenv("BINANCE_API_KEY", raising=False)
     monkeypatch.delenv("BINANCE_API_SECRET", raising=False)

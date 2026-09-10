@@ -42,8 +42,8 @@
 | A2 | 成立，值得重构 | [live CLI](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/live_rollout/main.py:25)与[live postgres runtime](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/live_rollout/postgres_runtime.py:12)导入 shadow CLI 的查询私有函数，形成下层依赖 app 入口的耦合。下沉账户/风险/规则查询服务有明确收益。不过导入的是读取 helper，不能推导 live 因而获得 shadow 的“抑制写”语义。 |
 | A3 | 已完成第一阶段 | [orderflow](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategies/order_flow_impulse/runtime.py:49)与[liquidation](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategies/liquidation_cascade/runtime.py:46)现在组合使用[StrategyRuntimeState](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategies/runtime_state.py:17)，共用 rolling buffer、warmup/cooldown、reset、checkpoint 恢复和事件前状态机；策略仍各自提供 required_data、事件发现和 signal/candidate 特征构造。payload 键仍由策略显式指定并保持 `market_state_buffers` 兼容；compression 的 `signal_buffers` 与 pending_signal_states 继续独立，不做基类或 checkpoint 迁移。 |
 | A4 | 成立，收益明确 | [pair CLI](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/strategy_runner/main.py:1440)确实七次构造 identity，并有序数化参数和多段 account config。适合内部先引入账户列表/统一构造器，再为新配置格式保留旧 CLI 转换层。不是必须一次性破坏部署命令。 |
-| A5a | 成立，配置维护债 | 对 YAML 解析后核对：primary 与 account-2/3/4 的 execution command 均 34 tokens，live-strategy 均 74 tokens，选项骨架重复。[附加账户配置](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.live.accounts.yaml:1)可由同一账户规格生成。现有 compose 已有共享锚点，问题主要在 command/account 差分；仅增加 extends 不会自动参数化列表。不能无条件把所有 CLI 参数改为 env，需同时改入口及配置测试。 |
-| A5b | 部分成立，healthcheck 推论已失效 | [market-data 列表](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.server.yaml:134)和[dashboard 列表](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.server.yaml:635)确实各硬编码相同 8 个 run-id。旧的 `CML_HEALTHCHECK_RUN_ID(S)` 环境变量及其 DB 探针消费者已删除，因此原“漏更新变量导致当前生产漏检查”的因果不再存在；账户规格统一仍属于 A5 的独立维护项。 |
+| A5a | 已完成第一阶段 | 对 YAML 解析后核对的命令重复已收敛：base 与附加账户 compose 各自用一个 `x-execution-account-command` 序列锚点，账户名移到显式 `CML_ACCOUNT_LABEL` 环境变量，CLI `--account-label` 仍保留并优先；live strategy 的 profile/top-N 参数改由既有环境解析器读取，账户、会话、hub、风险和退出差异仍显式保留。这样减少了可安全消除的复制，暂不引入跨文件生成器或无边界的 env 参数化。 |
+| A5b | 已完成第一阶段 | [market-data 列表](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.server.yaml:175)和[dashboard 列表](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.server.yaml:608)共用 `x-paper-account-run-ids` 锚点，保留原有两个环境变量名和八个 run-id。旧的 `CML_HEALTHCHECK_RUN_ID(S)` 环境变量及其 DB 探针消费者已删除，因此原“漏更新变量导致当前生产漏检查”的因果不再存在。 |
 | A6 | 映射丢字段成立，已复现；生产影响需限定 | [checkpoint payload](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategies/runtime_checkpoint.py:8)漏 6 个 domain 字段：4 个 closed_kline_1m 字段，以及 data_complete、missing_agg_trade_count。复现质量信息 (False,7) 往返变成 (True,0)。[DB 映射](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/persistence/postgres/runtime_state_repository.py:94)保留这些字段。但 paper daemon [持久化紧凑 checkpoint](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/daemon.py:1456)明确剔除 buffers，再从市场数据恢复，因此不能声称所有生产重启必受该 JSON 丢失影响。应补序列化 round-trip 契约；ORM 还包含额外持久化元数据，不能要求 ORM/JSON/domain 字段集机械完全相等。 |
 | A7 | 重复成立，统一时必须保留优先级差异 | 多个 app 解析 database URL 属实：[live](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/live_rollout/main.py:4384)、[execution](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/execution_account/main.py:642)、[market](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/market_data/main.py:164)、[research collector](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/research_collector/main.py:239)。但 market 收到的是 config 默认值，其 plane env 优先于默认值；有些入口没有 CLI URL，不能一概称相同 CLI→env 链。可集中解析原语并保留每入口“显式覆盖/默认值/必填”规则，避免重构改变数据库平面选择。 |
 | A8 | 部分成立，原“仅定义”多处不实 | 下表逐方法核实。没有生产调用可以是待收敛 API，但不能直接等同全库死代码，也不能把缺失的 command 审计写入通过删 repository 方法“修好”。 |
@@ -67,6 +67,7 @@
 
 - **A1 已完成第一阶段**：删除未被 Compose 使用的两个 DB readiness CLI、对应测试及旧的 `CML_HEALTHCHECK_RUN_ID(S)` 配置；生产只保留本地文件心跳探针。
 - **A3 已完成第一阶段**：orderflow 与 liquidation 共用组合式 runtime state 和 warmup/cooldown 状态机；保留各策略事件模型及 `market_state_buffers` checkpoint 兼容，compression 变体不强行合并。
+- **A5 已完成第一阶段**：live execution command 在 base/overlay 内各自收敛到 YAML 序列锚点，账户名通过 `CML_ACCOUNT_LABEL` 注入并保留 CLI 覆盖；live strategy 的 profile/top-N 选项通过已有环境解析器读取；market-data/dashboard 的八个 paper run-id 共用一个锚点。配置 manifest、CLI fallback 和 compose 展开回归均已补齐。
 - **#35 已完成第一阶段**：state/quote hub 共用字符串和 datetime 字段解析 helper；state 仍接受数值型 decimal、quote 仍只接受 decimal string，两个 hub 继续抛出各自协议异常。
 - **#36 已完成**：`order_repository` 与 `account_repository` 共用 PostgreSQL `jsonable` helper，保留原有枚举、Decimal、时区 datetime、容器和 fallback 字符串语义。
 - **#37 已完成**：paper 与 daemon 共用候选成交边界解析函数，统一目标时间、过期时间和闭合状态的判断；原有 paper/daemon 行为测试保持通过。
@@ -74,7 +75,7 @@
 - **#41 已完成**：配置了 coordinator 的 `MarketDataCaptureService.submit` 现在经过 coordinator，保留 service 的磁盘保护与队列溢出处理，同时让生产入口使用 coordinator 的 symbol 过滤路径。
 - **#42 已完成**：`load_active_entry_symbols_at` 直接在数据库端选择非 `EXTENDED` membership，保留最新 activated snapshot 与 `observed_at` 截止语义。
 
-本轮没有处理 A5、A8、A9 等仍需进一步权衡的维护项，也没有处理鉴权 D8；这些不应被本轮测试通过数误记为已完成。
+本轮没有处理 A8、A9 等仍需进一步权衡的维护项，也没有处理鉴权 D8；这些不应被本轮测试通过数误记为已完成。
 
 ## 验证记录与建议顺序
 
@@ -83,7 +84,8 @@
 - 本地只读样例复现 #26 最短持仓被 grace 绕过，以及 A6 质量字段往返丢失。
 - A1 删除后的健康检查回归由 Compose manifest、local shell probe 和相关应用启动测试覆盖；不再保留独立 DB readiness CLI 测试。
 - A3 的 orderflow、liquidation、compression 与 runtime state/strategy runner 回归共 158 项通过；新增共享 runtime state 三个源文件的 mypy 检查通过。
+- A5 的 compose manifest、execution-account/live-rollout CLI 与 profile 解析回归 69 项通过；base/overlay `docker compose config --quiet` 展开通过，相关源文件 mypy 与 Ruff 通过。
 - 本轮优先修正确性：#26、#25、启用相应配置时的 #27、价格边界契约明确后的 #29；A6 补 round-trip 并核查使用完整 buffer checkpoint 的路径。
-- 维护重构优先 A2、A4、A11，其次小型纯 helper 收敛。#39、#40、#43、A10 不应按当前运行 bug 修；A5b、A8 和 A1 的原描述应修订。
+- 维护重构优先 A2、A4、A11，其次小型纯 helper 收敛。#39、#40、#43、A10 不应按当前运行 bug 修；A8 和 A1 的原描述应修订。
 
 额外边界：A11 的正式入口已先取消并等待 scheduler 后停 capture，这也意味着原 #22 所述“正式生产关停中 scheduler 与 stop 并发”的特定推演不能照用；定时入口顺序不同，风险须分别分析。

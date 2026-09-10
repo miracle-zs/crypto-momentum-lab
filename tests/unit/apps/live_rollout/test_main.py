@@ -18,6 +18,22 @@ app = main.app
 runner = CliRunner()
 
 
+def test_live_entry_positive_gainer_top_count_resolves_environment(monkeypatch) -> None:
+    monkeypatch.setenv("CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT", "25")
+
+    assert main._resolve_live_entry_positive_gainer_top_count(None) == 25
+    assert main._resolve_live_entry_positive_gainer_top_count(12) == 12
+
+
+def test_live_entry_positive_gainer_top_count_rejects_invalid_environment(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT", "0")
+
+    with pytest.raises(BadParameter, match="must be positive"):
+        main._resolve_live_entry_positive_gainer_top_count(None)
+
+
 def test_cli_requires_confirmation_flag_for_live_run() -> None:
     result = runner.invoke(
         app,
@@ -217,6 +233,7 @@ def test_live_run_passes_exchange_operation_allowlist_to_daemon(monkeypatch) -> 
     )
     monkeypatch.setenv("BINANCE_TRADE_API_KEY", "test-key")
     monkeypatch.setenv("BINANCE_TRADE_API_SECRET", "test-secret")
+    monkeypatch.setenv("CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT", "25")
 
     result = runner.invoke(
         app,
@@ -236,6 +253,7 @@ def test_live_run_passes_exchange_operation_allowlist_to_daemon(monkeypatch) -> 
         {"submit", "cancel"}
     )
     assert captured["entry_policy_compare_only"] is True
+    assert captured["entry_positive_gainer_top_count"] == 25
 
 
 def test_live_run_passes_entry_policy_enforce_to_daemon(monkeypatch) -> None:

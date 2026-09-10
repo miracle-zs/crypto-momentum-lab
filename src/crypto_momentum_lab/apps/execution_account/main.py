@@ -1,4 +1,5 @@
 import asyncio
+import os
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Annotated
@@ -66,7 +67,7 @@ def sync_once_command(
         typer.Option("--database-url", help="Async PostgreSQL URL."),
     ] = None,
     environment: Annotated[str, typer.Option("--environment")] = "live",
-    account_label: Annotated[str, typer.Option("--account-label")] = "primary",
+    account_label: Annotated[str | None, typer.Option("--account-label")] = None,
     base_url: Annotated[
         str,
         typer.Option("--base-url"),
@@ -130,7 +131,7 @@ def sync_once_command(
         sync_once(
             database_url=resolved_database_url,
             environment=environment,
-            account_label=account_label,
+            account_label=_resolve_account_label(account_label),
             base_url=base_url,
             api_key=credentials.api_key,
             api_secret=credentials.api_secret,
@@ -155,7 +156,7 @@ def sync_command(
         typer.Option("--database-url", help="Async PostgreSQL URL."),
     ] = None,
     environment: Annotated[str, typer.Option("--environment")] = "live",
-    account_label: Annotated[str, typer.Option("--account-label")] = "primary",
+    account_label: Annotated[str | None, typer.Option("--account-label")] = None,
     base_url: Annotated[
         str,
         typer.Option("--base-url"),
@@ -297,7 +298,7 @@ def sync_command(
         sync_continuously(
             database_url=resolved_database_url,
             environment=environment,
-            account_label=account_label,
+            account_label=_resolve_account_label(account_label),
             base_url=base_url,
             api_key=credentials.api_key,
             api_secret=credentials.api_secret,
@@ -331,6 +332,12 @@ def sync_command(
             ),
         )
     )
+
+
+def _resolve_account_label(account_label: str | None) -> str:
+    if account_label is not None and account_label.strip():
+        return account_label.strip()
+    return os.environ.get("CML_ACCOUNT_LABEL", "primary").strip() or "primary"
 
 
 async def sync_once(

@@ -120,6 +120,12 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         ].split(",")
         if item.strip()
     } == configured_run_ids
+    assert manifest["x-paper-account-run-ids"] == services["market-data"][
+        "environment"
+    ]["CML_PAPER_EXIT_RUN_IDS"]
+    assert manifest["x-paper-account-run-ids"] == services["dashboard"][
+        "environment"
+    ]["CML_PAPER_ACCOUNT_RUN_IDS"]
     assert (
         _option_value(
             services["paper-orderflow-pair"]["command"],
@@ -201,9 +207,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         ),
     ]
     live_command = services["live-strategy"]["command"]
-    assert _option_value(live_command, "--entry-positive-gainer-top-count") == (
-        "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-10}"
-    )
+    assert "--entry-positive-gainer-top-count" not in live_command
     assert "--entry-long-only" in live_command
     assert "--no-entry-price-above-ema5" in live_command
     assert "--no-entry-price-above-ema10" in live_command
@@ -213,21 +217,32 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         live_command,
         "--candle-grace-decision-profit-pct",
     ) == "${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT:-0.001}"
-    assert _option_value(live_command, "--impulse-window-buckets") == (
-        "${CML_LIVE_IMPULSE_WINDOW_BUCKETS:-4}"
-    )
-    assert _option_value(live_command, "--min-imbalance") == (
-        "${CML_LIVE_MIN_IMBALANCE:-0.30}"
-    )
-    assert _option_value(live_command, "--min-intensity") == (
-        "${CML_LIVE_MIN_INTENSITY:-1.5}"
-    )
-    assert _option_value(live_command, "--min-notional-5m-vs-30m") == (
-        "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M:-1.50}"
-    )
+    for profile_option in (
+        "--impulse-window-buckets",
+        "--confirmation-buckets",
+        "--min-return-pct",
+        "--min-imbalance",
+        "--min-intensity",
+        "--min-notional-5m-vs-30m",
+        "--cooldown-buckets",
+    ):
+        assert profile_option not in live_command
+    assert services["live-strategy"]["environment"][
+        "CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT"
+    ] == "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-10}"
+    assert services["live-strategy"]["environment"][
+        "CML_LIVE_IMPULSE_WINDOW_BUCKETS"
+    ] == "${CML_LIVE_IMPULSE_WINDOW_BUCKETS:-4}"
     assert services["execution-account-live"]["environment"][
         "BINANCE_READ_API_KEY"
     ] == "${BINANCE_READ_API_KEY:-}"
+    assert services["execution-account-live"]["command"] == manifest[
+        "x-execution-account-command"
+    ]
+    assert services["execution-account-live"]["environment"][
+        "CML_ACCOUNT_LABEL"
+    ] == "${CML_LIVE_ACCOUNT_LABEL:-primary}"
+    assert "--account-label" not in services["execution-account-live"]["command"]
     assert services["live-strategy"]["environment"][
         "BINANCE_TRADE_API_KEY"
     ] == "${BINANCE_TRADE_API_KEY:-}"
@@ -275,10 +290,15 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
             "/usr/local/bin/cml-local-healthcheck",
             "300",
         ]
-        assert f"account-{account_number}" in execution["command"]
+        assert execution["environment"]["CML_ACCOUNT_LABEL"] == (
+            f"account-{account_number}"
+        )
+        assert execution["command"] == manifest["x-execution-account-command"]
+        assert "--account-label" not in execution["command"]
         assert f"account-{account_number}" in strategy["command"]
+        assert "--entry-policy-enforce" in strategy["command"]
         for option in (
-            "--entry-policy-enforce",
+            "--entry-positive-gainer-top-count",
             "--impulse-window-buckets",
             "--confirmation-buckets",
             "--min-return-pct",
@@ -287,7 +307,7 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
             "--min-notional-5m-vs-30m",
             "--cooldown-buckets",
         ):
-            assert option in strategy["command"]
+            assert option not in strategy["command"]
         assert "BINANCE_API_KEY" not in execution["environment"]
         assert "BINANCE_API_SECRET" not in execution["environment"]
         assert "BINANCE_API_KEY" not in strategy["environment"]

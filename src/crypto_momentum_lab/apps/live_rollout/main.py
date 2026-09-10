@@ -336,9 +336,9 @@ def strategy_config_hash_command(
         typer.Option("--cooldown-buckets", min=0),
     ] = None,
     entry_positive_gainer_top_count: Annotated[
-        int,
+        int | None,
         typer.Option("--entry-positive-gainer-top-count", min=1),
-    ] = _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT,
+    ] = None,
     entry_price_above_ema5: Annotated[
         bool,
         typer.Option("--entry-price-above-ema5/--no-entry-price-above-ema5"),
@@ -371,6 +371,9 @@ def strategy_config_hash_command(
         min_intensity=min_intensity,
         min_notional_5m_vs_30m=min_notional_5m_vs_30m,
         cooldown_buckets=cooldown_buckets,
+    )
+    entry_positive_gainer_top_count = _resolve_live_entry_positive_gainer_top_count(
+        entry_positive_gainer_top_count
     )
     typer.echo(
         _live_strategy_config_hash(
@@ -1071,9 +1074,9 @@ def run_command(
         typer.Option("--entry-long-only/--entry-all-sides"),
     ] = True,
     entry_positive_gainer_top_count: Annotated[
-        int,
+        int | None,
         typer.Option("--entry-positive-gainer-top-count", min=1),
-    ] = _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT,
+    ] = None,
     entry_price_above_ema5: Annotated[
         bool,
         typer.Option("--entry-price-above-ema5/--no-entry-price-above-ema5"),
@@ -1192,6 +1195,9 @@ def run_command(
         min_intensity=min_intensity,
         min_notional_5m_vs_30m=min_notional_5m_vs_30m,
         cooldown_buckets=cooldown_buckets,
+    )
+    entry_positive_gainer_top_count = _resolve_live_entry_positive_gainer_top_count(
+        entry_positive_gainer_top_count
     )
     credentials = _resolve_live_cli_credentials(
         api_key_env=api_key_env,
@@ -4018,6 +4024,25 @@ async def _save_approval(
 
 
 _UNLIMITED_VALUES = frozenset({"none", "unlimited"})
+
+
+def _resolve_live_entry_positive_gainer_top_count(value: int | None) -> int:
+    if value is not None:
+        return value
+    raw = os.environ.get("CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT", "").strip()
+    if not raw:
+        return _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT
+    try:
+        resolved = int(raw)
+    except ValueError as error:
+        raise typer.BadParameter(
+            "CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT must be an integer"
+        ) from error
+    if resolved <= 0:
+        raise typer.BadParameter(
+            "CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT must be positive"
+        )
+    return resolved
 
 
 def _resolve_live_profile_options(

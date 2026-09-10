@@ -28,6 +28,40 @@ x-live-account-depends: &live-account-depends
   volume-init:
     condition: service_completed_successfully
 
+x-execution-account-command: &execution-account-command
+  - sync
+  - --environment
+  - live
+  - --hedge-mode
+  - --interval-seconds
+  - "15"
+  - --fill-interval-seconds
+  - "300"
+  - --rest-reconciliation-interval-seconds
+  - "300"
+  - --historical-fill-reconciliation-interval-seconds
+  - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS:-21600}
+  - --request-interval-seconds
+  - ${CML_ACCOUNT_REQUEST_INTERVAL_SECONDS:-0.5}
+  - --shared-request-pacer-path
+  - /run/cml/binance-rest-pacer/private-read.lock
+  - --snapshot-retention-days
+  - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
+  - --equity-retention-days
+  - ${CML_ACCOUNT_EQUITY_RETENTION_DAYS:-370}
+  - --snapshot-retention-interval-seconds
+  - ${CML_ACCOUNT_SNAPSHOT_RETENTION_INTERVAL_SECONDS:-3600}
+  - --snapshot-retention-batch-size
+  - ${CML_ACCOUNT_SNAPSHOT_RETENTION_BATCH_SIZE:-250}
+  - --snapshot-retention-max-rows-per-table
+  - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_ROWS_PER_TABLE:-5000}
+  - --snapshot-retention-max-runtime-seconds
+  - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_RUNTIME_SECONDS:-45}
+  - --account-event-hub-host
+  - 0.0.0.0
+  - --account-event-hub-port
+  - "8767"
+
 services:
   execution-account-live-account-2:
     <<: *live-account-app
@@ -36,44 +70,11 @@ services:
       <<: *live-account-environment
       BINANCE_READ_API_KEY: ${BINANCE_READ_API_KEY_ACCOUNT_2:?set BINANCE_READ_API_KEY_ACCOUNT_2}
       BINANCE_READ_API_SECRET: ${BINANCE_READ_API_SECRET_ACCOUNT_2:?set BINANCE_READ_API_SECRET_ACCOUNT_2}
+      CML_ACCOUNT_LABEL: account-2
       CML_ACCOUNT_EVENT_HUB_HOST: 0.0.0.0
       CML_ACCOUNT_EVENT_HUB_PORT: "8767"
     entrypoint: ["cml-execution-account"]
-    command:
-      - sync
-      - --environment
-      - live
-      - --hedge-mode
-      - --interval-seconds
-      - "15"
-      - --fill-interval-seconds
-      - "300"
-      - --rest-reconciliation-interval-seconds
-      - "300"
-      - --historical-fill-reconciliation-interval-seconds
-      - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS:-21600}
-      - --request-interval-seconds
-      - ${CML_ACCOUNT_REQUEST_INTERVAL_SECONDS:-0.5}
-      - --shared-request-pacer-path
-      - /run/cml/binance-rest-pacer/private-read.lock
-      - --snapshot-retention-days
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
-      - --equity-retention-days
-      - ${CML_ACCOUNT_EQUITY_RETENTION_DAYS:-370}
-      - --snapshot-retention-interval-seconds
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_INTERVAL_SECONDS:-3600}
-      - --snapshot-retention-batch-size
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_BATCH_SIZE:-250}
-      - --snapshot-retention-max-rows-per-table
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_ROWS_PER_TABLE:-5000}
-      - --snapshot-retention-max-runtime-seconds
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_RUNTIME_SECONDS:-45}
-      - --account-event-hub-host
-      - 0.0.0.0
-      - --account-event-hub-port
-      - "8767"
-      - --account-label
-      - account-2
+    command: *execution-account-command
     depends_on: *live-account-depends
     volumes:
       - binance-rest-pacer:/run/cml/binance-rest-pacer
@@ -94,44 +95,11 @@ services:
       <<: *live-account-environment
       BINANCE_READ_API_KEY: ${BINANCE_READ_API_KEY_ACCOUNT_3:?set BINANCE_READ_API_KEY_ACCOUNT_3}
       BINANCE_READ_API_SECRET: ${BINANCE_READ_API_SECRET_ACCOUNT_3:?set BINANCE_READ_API_SECRET_ACCOUNT_3}
+      CML_ACCOUNT_LABEL: account-3
       CML_ACCOUNT_EVENT_HUB_HOST: 0.0.0.0
       CML_ACCOUNT_EVENT_HUB_PORT: "8767"
     entrypoint: ["cml-execution-account"]
-    command:
-      - sync
-      - --environment
-      - live
-      - --hedge-mode
-      - --interval-seconds
-      - "15"
-      - --fill-interval-seconds
-      - "300"
-      - --rest-reconciliation-interval-seconds
-      - "300"
-      - --historical-fill-reconciliation-interval-seconds
-      - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS:-21600}
-      - --request-interval-seconds
-      - ${CML_ACCOUNT_REQUEST_INTERVAL_SECONDS:-0.5}
-      - --shared-request-pacer-path
-      - /run/cml/binance-rest-pacer/private-read.lock
-      - --snapshot-retention-days
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
-      - --equity-retention-days
-      - ${CML_ACCOUNT_EQUITY_RETENTION_DAYS:-370}
-      - --snapshot-retention-interval-seconds
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_INTERVAL_SECONDS:-3600}
-      - --snapshot-retention-batch-size
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_BATCH_SIZE:-250}
-      - --snapshot-retention-max-rows-per-table
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_ROWS_PER_TABLE:-5000}
-      - --snapshot-retention-max-runtime-seconds
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_RUNTIME_SECONDS:-45}
-      - --account-event-hub-host
-      - 0.0.0.0
-      - --account-event-hub-port
-      - "8767"
-      - --account-label
-      - account-3
+    command: *execution-account-command
     depends_on: *live-account-depends
     volumes:
       - binance-rest-pacer:/run/cml/binance-rest-pacer
@@ -152,44 +120,11 @@ services:
       <<: *live-account-environment
       BINANCE_READ_API_KEY: ${BINANCE_READ_API_KEY_ACCOUNT_4:?set BINANCE_READ_API_KEY_ACCOUNT_4}
       BINANCE_READ_API_SECRET: ${BINANCE_READ_API_SECRET_ACCOUNT_4:?set BINANCE_READ_API_SECRET_ACCOUNT_4}
+      CML_ACCOUNT_LABEL: account-4
       CML_ACCOUNT_EVENT_HUB_HOST: 0.0.0.0
       CML_ACCOUNT_EVENT_HUB_PORT: "8767"
     entrypoint: ["cml-execution-account"]
-    command:
-      - sync
-      - --environment
-      - live
-      - --hedge-mode
-      - --interval-seconds
-      - "15"
-      - --fill-interval-seconds
-      - "300"
-      - --rest-reconciliation-interval-seconds
-      - "300"
-      - --historical-fill-reconciliation-interval-seconds
-      - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS:-21600}
-      - --request-interval-seconds
-      - ${CML_ACCOUNT_REQUEST_INTERVAL_SECONDS:-0.5}
-      - --shared-request-pacer-path
-      - /run/cml/binance-rest-pacer/private-read.lock
-      - --snapshot-retention-days
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
-      - --equity-retention-days
-      - ${CML_ACCOUNT_EQUITY_RETENTION_DAYS:-370}
-      - --snapshot-retention-interval-seconds
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_INTERVAL_SECONDS:-3600}
-      - --snapshot-retention-batch-size
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_BATCH_SIZE:-250}
-      - --snapshot-retention-max-rows-per-table
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_ROWS_PER_TABLE:-5000}
-      - --snapshot-retention-max-runtime-seconds
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_RUNTIME_SECONDS:-45}
-      - --account-event-hub-host
-      - 0.0.0.0
-      - --account-event-hub-port
-      - "8767"
-      - --account-label
-      - account-4
+    command: *execution-account-command
     depends_on: *live-account-depends
     volumes:
       - binance-rest-pacer:/run/cml/binance-rest-pacer
@@ -261,24 +196,8 @@ services:
       - "100"
       - --hedge-mode
       - --entry-long-only
-      - --entry-positive-gainer-top-count
-      - ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_2:-10}
       - --no-entry-price-above-ema5
       - --no-entry-price-above-ema10
-      - --impulse-window-buckets
-      - ${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_2:-4}
-      - --confirmation-buckets
-      - ${CML_LIVE_CONFIRMATION_BUCKETS_ACCOUNT_2:-1}
-      - --min-return-pct
-      - ${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_2:-0.005}
-      - --min-imbalance
-      - ${CML_LIVE_MIN_IMBALANCE_ACCOUNT_2:-0.30}
-      - --min-intensity
-      - ${CML_LIVE_MIN_INTENSITY_ACCOUNT_2:-1.5}
-      - --min-notional-5m-vs-30m
-      - ${CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_2:-1.50}
-      - --cooldown-buckets
-      - ${CML_LIVE_COOLDOWN_BUCKETS_ACCOUNT_2:-0}
       - --entry-policy-enforce
       - --acknowledge-missing-shadow-preflight
       - --entry-leverage
@@ -373,24 +292,8 @@ services:
       - "100"
       - --hedge-mode
       - --entry-long-only
-      - --entry-positive-gainer-top-count
-      - ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_3:-10}
       - --no-entry-price-above-ema5
       - --no-entry-price-above-ema10
-      - --impulse-window-buckets
-      - ${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_3:-2}
-      - --confirmation-buckets
-      - ${CML_LIVE_CONFIRMATION_BUCKETS_ACCOUNT_3:-1}
-      - --min-return-pct
-      - ${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_3:-0.005}
-      - --min-imbalance
-      - ${CML_LIVE_MIN_IMBALANCE_ACCOUNT_3:-0.30}
-      - --min-intensity
-      - ${CML_LIVE_MIN_INTENSITY_ACCOUNT_3:-4.0}
-      - --min-notional-5m-vs-30m
-      - ${CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_3:-1.50}
-      - --cooldown-buckets
-      - ${CML_LIVE_COOLDOWN_BUCKETS_ACCOUNT_3:-0}
       - --entry-policy-enforce
       - --acknowledge-missing-shadow-preflight
       - --entry-leverage
@@ -485,24 +388,8 @@ services:
       - "100"
       - --hedge-mode
       - --entry-long-only
-      - --entry-positive-gainer-top-count
-      - ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_4:-10}
       - --no-entry-price-above-ema5
       - --no-entry-price-above-ema10
-      - --impulse-window-buckets
-      - ${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_4:-2}
-      - --confirmation-buckets
-      - ${CML_LIVE_CONFIRMATION_BUCKETS_ACCOUNT_4:-1}
-      - --min-return-pct
-      - ${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_4:-0.005}
-      - --min-imbalance
-      - ${CML_LIVE_MIN_IMBALANCE_ACCOUNT_4:-0.30}
-      - --min-intensity
-      - ${CML_LIVE_MIN_INTENSITY_ACCOUNT_4:-4.0}
-      - --min-notional-5m-vs-30m
-      - ${CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_4:-1.50}
-      - --cooldown-buckets
-      - ${CML_LIVE_COOLDOWN_BUCKETS_ACCOUNT_4:-0}
       - --entry-policy-enforce
       - --acknowledge-missing-shadow-preflight
       - --entry-leverage

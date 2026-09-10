@@ -24,6 +24,50 @@ x-app: &app
   stop_grace_period: 20s
   logging: *default-logging
 
+x-paper-account-run-ids: &paper-account-run-ids >-
+  paper-account-05-orderflow-candle15m-v1,
+  paper-account-10-orderflow-b2-long-candle15m-v1,
+  paper-account-12-orderflow-b1-long-candle15m-v1,
+  paper-account-13-orderflow-b8-long-candle15m-v1,
+  paper-account-14-orderflow-b1-gainer100-v1,
+  paper-account-15-orderflow-b1-gainer100-ema-v1,
+  paper-account-16-orderflow-b8-gainer10-imbalance040-v1,
+  paper-account-17-orderflow-b1-gainer10-imbalance040-v1
+
+x-execution-account-command: &execution-account-command
+  - sync
+  - --environment
+  - live
+  - --hedge-mode
+  - --interval-seconds
+  - "15"
+  - --fill-interval-seconds
+  - "300"
+  - --rest-reconciliation-interval-seconds
+  - "300"
+  - --historical-fill-reconciliation-interval-seconds
+  - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS:-21600}
+  - --request-interval-seconds
+  - ${CML_ACCOUNT_REQUEST_INTERVAL_SECONDS:-0.5}
+  - --shared-request-pacer-path
+  - /run/cml/binance-rest-pacer/private-read.lock
+  - --snapshot-retention-days
+  - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
+  - --equity-retention-days
+  - ${CML_ACCOUNT_EQUITY_RETENTION_DAYS:-370}
+  - --snapshot-retention-interval-seconds
+  - ${CML_ACCOUNT_SNAPSHOT_RETENTION_INTERVAL_SECONDS:-3600}
+  - --snapshot-retention-batch-size
+  - ${CML_ACCOUNT_SNAPSHOT_RETENTION_BATCH_SIZE:-250}
+  - --snapshot-retention-max-rows-per-table
+  - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_ROWS_PER_TABLE:-5000}
+  - --snapshot-retention-max-runtime-seconds
+  - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_RUNTIME_SECONDS:-45}
+  - --account-event-hub-host
+  - ${CML_ACCOUNT_EVENT_HUB_HOST:-0.0.0.0}
+  - --account-event-hub-port
+  - ${CML_ACCOUNT_EVENT_HUB_PORT:-8767}
+
 x-paper: &paper
   <<: *app
   entrypoint: ["cml-strategy-runner"]
@@ -131,15 +175,7 @@ services:
     environment:
       <<: *app-environment
       CML_ENVIRONMENT_CONFIG: configs/environments/server_paper.yaml
-      CML_PAPER_EXIT_RUN_IDS: >-
-        paper-account-05-orderflow-candle15m-v1,
-        paper-account-10-orderflow-b2-long-candle15m-v1,
-        paper-account-12-orderflow-b1-long-candle15m-v1,
-        paper-account-13-orderflow-b8-long-candle15m-v1,
-        paper-account-14-orderflow-b1-gainer100-v1,
-        paper-account-15-orderflow-b1-gainer100-ema-v1,
-        paper-account-16-orderflow-b8-gainer10-imbalance040-v1,
-        paper-account-17-orderflow-b1-gainer10-imbalance040-v1
+      CML_PAPER_EXIT_RUN_IDS: *paper-account-run-ids
       # Market-data must protect the same live account used by the live
       # strategy and execution-account services. Fail closed if it is absent.
       CML_LIVE_POSITION_ACCOUNT_LABEL: ${CML_LIVE_ACCOUNT_LABEL:?set CML_LIVE_ACCOUNT_LABEL}
@@ -440,44 +476,11 @@ services:
       <<: *app-environment
       BINANCE_READ_API_KEY: ${BINANCE_READ_API_KEY:-}
       BINANCE_READ_API_SECRET: ${BINANCE_READ_API_SECRET:-}
+      CML_ACCOUNT_LABEL: ${CML_LIVE_ACCOUNT_LABEL:-primary}
       CML_ACCOUNT_EVENT_HUB_HOST: ${CML_ACCOUNT_EVENT_HUB_HOST:-0.0.0.0}
       CML_ACCOUNT_EVENT_HUB_PORT: ${CML_ACCOUNT_EVENT_HUB_PORT:-8767}
     entrypoint: ["cml-execution-account"]
-    command:
-      - sync
-      - --environment
-      - live
-      - --account-label
-      - ${CML_LIVE_ACCOUNT_LABEL:-primary}
-      - --hedge-mode
-      - --interval-seconds
-      - "15"
-      - --fill-interval-seconds
-      - "300"
-      - --rest-reconciliation-interval-seconds
-      - "300"
-      - --historical-fill-reconciliation-interval-seconds
-      - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS:-21600}
-      - --request-interval-seconds
-      - ${CML_ACCOUNT_REQUEST_INTERVAL_SECONDS:-0.5}
-      - --shared-request-pacer-path
-      - /run/cml/binance-rest-pacer/private-read.lock
-      - --snapshot-retention-days
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
-      - --equity-retention-days
-      - ${CML_ACCOUNT_EQUITY_RETENTION_DAYS:-370}
-      - --snapshot-retention-interval-seconds
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_INTERVAL_SECONDS:-3600}
-      - --snapshot-retention-batch-size
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_BATCH_SIZE:-250}
-      - --snapshot-retention-max-rows-per-table
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_ROWS_PER_TABLE:-5000}
-      - --snapshot-retention-max-runtime-seconds
-      - ${CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_RUNTIME_SECONDS:-45}
-      - --account-event-hub-host
-      - ${CML_ACCOUNT_EVENT_HUB_HOST:-0.0.0.0}
-      - --account-event-hub-port
-      - ${CML_ACCOUNT_EVENT_HUB_PORT:-8767}
+    command: *execution-account-command
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -524,20 +527,6 @@ services:
       - ${CML_LIVE_ACCOUNT_LABEL:-primary}
       - --strategy
       - ${CML_LIVE_STRATEGY:-orderflow_impulse}
-      - --impulse-window-buckets
-      - ${CML_LIVE_IMPULSE_WINDOW_BUCKETS:-4}
-      - --confirmation-buckets
-      - ${CML_LIVE_CONFIRMATION_BUCKETS:-1}
-      - --min-return-pct
-      - ${CML_LIVE_MIN_RETURN_PCT:-0.005}
-      - --min-imbalance
-      - ${CML_LIVE_MIN_IMBALANCE:-0.30}
-      - --min-intensity
-      - ${CML_LIVE_MIN_INTENSITY:-1.5}
-      - --min-notional-5m-vs-30m
-      - ${CML_LIVE_MIN_NOTIONAL_5M_VS_30M:-1.50}
-      - --cooldown-buckets
-      - ${CML_LIVE_COOLDOWN_BUCKETS:-0}
       - --market-environment
       - research
       - --market-state-source
@@ -568,8 +557,6 @@ services:
       - "100"
       - --hedge-mode
       - --entry-long-only
-      - --entry-positive-gainer-top-count
-      - ${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-10}
       - --no-entry-price-above-ema5
       - --no-entry-price-above-ema10
       - --entry-policy-enforce
@@ -621,15 +608,7 @@ services:
     image: ${CML_DASHBOARD_IMAGE:-crypto-momentum-lab-app:${CML_CODE_COMMIT:?set CML_CODE_COMMIT}}
     environment:
       <<: *app-environment
-      CML_PAPER_ACCOUNT_RUN_IDS: >-
-        paper-account-05-orderflow-candle15m-v1,
-        paper-account-10-orderflow-b2-long-candle15m-v1,
-        paper-account-12-orderflow-b1-long-candle15m-v1,
-        paper-account-13-orderflow-b8-long-candle15m-v1,
-        paper-account-14-orderflow-b1-gainer100-v1,
-        paper-account-15-orderflow-b1-gainer100-ema-v1,
-        paper-account-16-orderflow-b8-gainer10-imbalance040-v1,
-        paper-account-17-orderflow-b1-gainer10-imbalance040-v1
+      CML_PAPER_ACCOUNT_RUN_IDS: *paper-account-run-ids
       CML_DASHBOARD_LIVE_CASH_FLOWS_JSON: ${CML_DASHBOARD_LIVE_CASH_FLOWS_JSON:-}
       CML_DASHBOARD_COMMON_EQUITY_START_AT: "2026-08-21T02:45:00Z"
     entrypoint: ["cml-operator-dashboard"]
