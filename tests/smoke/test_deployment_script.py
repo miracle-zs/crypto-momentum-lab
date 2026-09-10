@@ -49,19 +49,70 @@ def test_deployment_script_is_valid_shell_and_has_recovery_guards() -> None:
     assert "logs --no-color --tail=200" in script
 
 
-def test_deployment_script_only_loads_live_overlay_for_live_updates() -> None:
+def test_deployment_script_loads_extra_live_overlay_only_when_needed() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    compose_start = script.index("compose=(\n")
+    compose_start = script.index("has_running_compose_service()")
     compose_end = script.index("dashboard_image=", compose_start)
     compose_block = script[compose_start:compose_end]
 
     assert "-f compose.server.yaml" in compose_block
-    assert 'if [[ "$live_update" == 1 ]]; then' in compose_block
+    assert "live_overlay_required=0" in compose_block
+    assert "has_running_compose_service()" in compose_block
     assert "-f compose.live.accounts.yaml" in compose_block
     assert "--profile live" in compose_block
-    live_overlay_guard = compose_block.index('if [[ "$live_update" == 1 ]]; then')
+    live_overlay_guard = compose_block.index(
+        'if [[ "$live_overlay_required" == 1 ]]; then'
+    )
     live_overlay = compose_block.index("-f compose.live.accounts.yaml")
     assert live_overlay_guard < live_overlay
+
+
+def test_live_overlay_detection_only_reports_running_extra_accounts(
+    tmp_path: Path,
+) -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    start = script.index("has_running_compose_service()")
+    end = script.index("compose=(\n", start)
+    detection = script[start:end]
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -Eeuo pipefail\n"
+        "service=''\n"
+        "for argument in \"$@\"; do\n"
+        "  case \"$argument\" in\n"
+        "    label=com.docker.compose.service=*) service=\"${argument##*=}\" ;;\n"
+        "  esac\n"
+        "done\n"
+        "case \",${RUNNING_EXTRA_SERVICES:-},\" in\n"
+        "  *,${service},*) printf 'container-id\\n' ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    command = (
+        "set -Eeuo pipefail\n"
+        "live_update=1\n"
+        f"{detection}\n"
+        "if has_running_compose_service live-strategy-account-2; then\n"
+        "  printf 'overlay\\n'\n"
+        "else\n"
+        "  printf 'base\\n'\n"
+        "fi\n"
+    )
+    base_env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+    primary_only = subprocess.check_output(
+        ["bash", "-c", command],
+        env={**base_env, "RUNNING_EXTRA_SERVICES": ""},
+        text=True,
+    )
+    with_extra = subprocess.check_output(
+        ["bash", "-c", command],
+        env={**base_env, "RUNNING_EXTRA_SERVICES": "live-strategy-account-2"},
+        text=True,
+    )
+    assert primary_only.strip() == "base"
+    assert with_extra.strip() == "overlay"
 
 
 def test_ancestor_target_reaches_reset_keep_branch(tmp_path: Path) -> None:

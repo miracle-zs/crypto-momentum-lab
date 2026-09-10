@@ -86,7 +86,7 @@ nginx 的 auth_basic 可以在 http/server 层生效并继承到 location，snip
 | 项目 | 当前状态 | 证据与剩余边界 |
 |---|---|---|
 | 回滚分支 | 已修复 | `update_server.sh` 先区分相等、可快进、祖先回退和分叉；祖先目标实际进入 `git reset --keep`，隔离 Git 回归覆盖。 |
-| D1 | 第一阶段已修复 | paper-only 不再加载 live overlay；显式 `--live` 仍会要求 overlay 中附加账户凭证，若只更新 primary，仍需进一步拆分 live 配置文件。 |
+| D1 | 已修复 | paper-only 不加载 live overlay；`--live` 只在检测到 account-2/3/4 已有运行中的 Compose 服务时加载附加 overlay，因此 primary-only live 更新不再要求附加账户凭证。停止中的附加账户仍不会被隐式启动，若要恢复它们需显式选择对应服务。 |
 | D2 | 已修复 | 分类匹配 `strategies/*` 和 `strategy_runner/*`，回归测试固定路径。 |
 | D3 | 第一阶段已修复 | ops monitor/systemd 现在加载 base+live compose、live profile、四账户服务和四组 session/lease；新增账户仍需同步 monitor 配置。 |
 | D5 | 第一阶段已修复 | singular/plural position labels 合并，live update 会拒绝未纳入保护列表的运行账户；停用但仍有仓位的账户仍需保留在 labels 中。 |

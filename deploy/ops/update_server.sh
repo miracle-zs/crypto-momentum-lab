@@ -22,10 +22,12 @@ Environment:
 
 The live profile is never touched unless --live is supplied. Live updates run
 preflight for every currently running account before restarting any live
-container. --refresh-approvals is an explicit opt-in that refreshes active
-approvals from the target runtime while preserving their existing limits and
-operator fields; it requires --live and an explicit git-ref. The SSH connection
-uses an agent/key by default. When
+container. The additional-account overlay is loaded only when an account-2/3/4
+service is already running; stopped accounts are not started implicitly.
+--refresh-approvals is an explicit opt-in that refreshes active approvals from
+the target runtime while preserving their existing limits and operator fields;
+it requires --live and an explicit git-ref. The SSH connection uses an
+agent/key by default. When
 CML_SSH_PASSWORD is set, sshpass reads it from the environment; the password
 is never a command-line argument, remote argument, or repository value.
 USAGE
@@ -462,12 +464,42 @@ else
 fi
 chmod 600 .env.server
 
+# Resolve the full graph before stopping anything. This also catches missing
+# account credentials and malformed environment overrides early. The base
+# file contains the primary live pair; the additional-account overlay is only
+# needed when one of those account services is already running. That keeps a
+# primary-only live update independent from unused account credentials while
+# preserving the existing rule that stopped accounts are not started by an
+# update.
+has_running_compose_service() {
+  local service="$1"
+  docker ps \
+    --filter "label=com.docker.compose.service=$service" \
+    --format '{{.ID}}' | grep -q .
+}
+
+live_overlay_required=0
+if [[ "$live_update" == 1 ]]; then
+  for service in \
+    execution-account-live-account-2 \
+    live-strategy-account-2 \
+    execution-account-live-account-3 \
+    live-strategy-account-3 \
+    execution-account-live-account-4 \
+    live-strategy-account-4; do
+    if has_running_compose_service "$service"; then
+      live_overlay_required=1
+      break
+    fi
+  done
+fi
+
 compose=(
   docker compose
   --env-file .env.server
   -f compose.server.yaml
 )
-if [[ "$live_update" == 1 ]]; then
+if [[ "$live_overlay_required" == 1 ]]; then
   compose+=(
     -f compose.live.accounts.yaml
     --profile live
