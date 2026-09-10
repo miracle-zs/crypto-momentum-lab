@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from crypto_momentum_lab.persistence.postgres.models import (
     OrderIntentCandidateRow,
     PaperFillRow,
+    PaperPositionRow,
     StrategyCheckpointRow,
     StrategyRunRow,
     StrategySignalRow,
@@ -32,6 +33,7 @@ async def strategy_run_repository(
     async with factory() as session:
         async with session.begin():
             for model in (
+                PaperPositionRow,
                 PaperFillRow,
                 OrderIntentCandidateRow,
                 StrategySignalRow,
@@ -89,4 +91,8 @@ async def test_load_paper_report_artifacts_orders_records(
         == report.candidates[0].candidate_id
     )
     assert artifacts["paper_fills"][0]["fill_id"] == report.paper_fills[0].fill_id
+    assert (
+        artifacts["paper_positions"][0]["position_id"]
+        == report.paper_positions[0].position_id
+    )
     assert artifacts["checkpoint"]["run_id"] == report.run.run_id

@@ -13,17 +13,20 @@ from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.persistence.postgres.models import (
     OrderIntentCandidateRow,
     PaperFillRow,
+    PaperPositionRow,
     StrategyCheckpointRow,
     StrategyRunRow,
     StrategySignalRow,
 )
 from crypto_momentum_lab.strategy_runner.paper import PaperTradingRunReport
+from crypto_momentum_lab.strategy_runner.portfolio import PaperPosition
 
 type RowModel = (
     type[StrategyRunRow]
     | type[StrategySignalRow]
     | type[OrderIntentCandidateRow]
     | type[PaperFillRow]
+    | type[PaperPositionRow]
     | type[StrategyCheckpointRow]
 )
 
@@ -34,6 +37,7 @@ class StrategyRunReportRows:
     signals: tuple[dict[str, object], ...]
     candidates: tuple[dict[str, object], ...]
     fills: tuple[dict[str, object], ...]
+    positions: tuple[dict[str, object], ...]
     checkpoint: dict[str, object]
 
 
@@ -70,6 +74,15 @@ def validate_paper_report(report: PaperTradingRunReport) -> None:
         if fill.signal_id not in signal_ids:
             raise ValueError("fill references unknown signal_id")
 
+    fill_ids = {fill.fill_id for fill in report.paper_fills}
+    for position in report.paper_positions:
+        if position.run_id != run_id:
+            raise ValueError("position run_id mismatch")
+        if position.entry_fill_id not in fill_ids:
+            raise ValueError("position references unknown fill_id")
+        if position.signal_id not in signal_ids:
+            raise ValueError("position references unknown signal_id")
+
 
 def strategy_run_report_rows(
     report: PaperTradingRunReport,
@@ -88,7 +101,12 @@ def strategy_run_report_rows(
             "schema_version": report.schema_version,
             "source_paths": list(report.run.source_paths),
             "source_description": report.source_description,
-            "execution_config": _jsonable(asdict(report.execution_config)),
+            "execution_config": _jsonable(
+                {
+                    **asdict(report.execution_config),
+                    "portfolio": asdict(report.portfolio_config),
+                }
+            ),
             "input_state_count": report.input_state_count,
             "processed_symbol_count": report.processed_symbol_count,
             "signal_count": len(report.signals),
@@ -107,6 +125,10 @@ def strategy_run_report_rows(
         fills=tuple(
             paper_fill_row(fill, run_id=report.run.run_id)
             for fill in report.paper_fills
+        ),
+        positions=tuple(
+            paper_position_row(position)
+            for position in report.paper_positions
         ),
         checkpoint={
             "run_id": report.run.run_id,
@@ -163,6 +185,12 @@ class PostgresStrategyRunRepository:
                     PaperFillRow,
                     rows.fills,
                     "paper fill conflict",
+                )
+                await _insert_many_idempotent(
+                    session,
+                    PaperPositionRow,
+                    rows.positions,
+                    "paper position conflict",
                 )
                 await _insert_idempotent(
                     session,
@@ -232,6 +260,18 @@ class PostgresStrategyRunRepository:
                     )
                 ).scalars()
             )
+            positions = tuple(
+                (
+                    await session.execute(
+                        select(PaperPositionRow)
+                        .where(PaperPositionRow.run_id == run_id)
+                        .order_by(
+                            PaperPositionRow.opened_at,
+                            PaperPositionRow.position_id,
+                        )
+                    )
+                ).scalars()
+            )
             checkpoint = await session.scalar(
                 select(StrategyCheckpointRow).where(
                     StrategyCheckpointRow.run_id == run_id
@@ -243,6 +283,9 @@ class PostgresStrategyRunRepository:
             "signals": tuple(_model_values(row) for row in signals),
             "candidates": tuple(_model_values(row) for row in candidates),
             "paper_fills": tuple(_model_values(row) for row in fills),
+            "paper_positions": tuple(
+                _model_values(row) for row in positions
+            ),
             "checkpoint": None
             if checkpoint is None
             else _model_values(checkpoint),
@@ -308,6 +351,35 @@ def paper_fill_row(fill: Any, *, run_id: str) -> dict[str, object]:
         "total_cost": fill.total_cost,
         "cost_bps": fill.cost_bps,
         "reason": fill.reason,
+    }
+
+
+def paper_position_row(position: PaperPosition) -> dict[str, object]:
+    return {
+        "position_id": position.position_id,
+        "run_id": position.run_id,
+        "entry_fill_id": position.entry_fill_id,
+        "signal_id": position.signal_id,
+        "symbol": position.symbol,
+        "side": position.side.value,
+        "status": position.status.value,
+        "opened_at": position.opened_at,
+        "closed_at": position.closed_at,
+        "entry_price": position.entry_price,
+        "exit_price": position.exit_price,
+        "quantity": position.quantity,
+        "entry_notional": position.entry_notional,
+        "entry_fee": position.entry_fee,
+        "exit_fee": position.exit_fee,
+        "last_mark_price": position.last_mark_price,
+        "unrealized_pnl": position.unrealized_pnl,
+        "realized_pnl": position.realized_pnl,
+        "return_pct": position.return_pct,
+        "close_reason": position.close_reason,
+        "grace_exit_started_at": position.grace_exit_started_at,
+        "grace_exit_deadline": position.grace_exit_deadline,
+        "updated_at": position.updated_at,
+        "last_candle_end": position.last_candle_end,
     }
 
 

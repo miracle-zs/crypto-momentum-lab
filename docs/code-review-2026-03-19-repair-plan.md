@@ -27,7 +27,7 @@
 
 ## 第二批：下一步实施
 
-1. **策略一致性**：#10 已完成第一阶段：paired daemon 使用不提交共享 cooldown 的原始策略决策，按账户过滤后独立递减、提交并写回 checkpoint；长短方向过滤的回归测试已覆盖。剩余是为批处理 paper 增加 position/exit 结果，建立与 daemon 的边界对照测试。
+1. **策略一致性**：#10、#13 已完成：paired daemon 使用不提交共享 cooldown 的原始策略决策，按账户过滤后独立递减、提交并写回 checkpoint；批处理 paper 复用 `mark_positions` 与 `Candle15mAggregator`，报告和 PostgreSQL 持久化均包含 open/closed position、exit reason/PnL 和 portfolio config。长短方向过滤、批处理持仓到最长持仓退出的边界测试已覆盖。
 2. **数据库资源隔离**：为 runtime state、quality/manifest、maintenance 查询定义并发预算，先以观测数据确认连接池大小，再拆 maintenance pool。
 3. **P2 正确性收敛**：继续处理 24–34，优先剩余边界；#24 的本地缺口可观测性、#25 的游标化官方 candle 顺序回补、#28 的陈旧状态告警与 source idle watchdog、#32 的 fill 待核对与重连节流、#26/#27/#29/#33/#34 已在第一批收敛。
 4. **架构收敛**：先抽取无业务语义差异的序列化/解析 helper；A2、A4、A6、A7 在补齐 round-trip 和调用方测试后再重构，暂不做大规模 compose 或入口重写。

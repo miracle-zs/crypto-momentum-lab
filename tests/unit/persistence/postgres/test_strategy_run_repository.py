@@ -24,6 +24,7 @@ from crypto_momentum_lab.strategy_runner.fills import (
     SimulatedFillStatus,
 )
 from crypto_momentum_lab.strategy_runner.paper import PaperTradingRunReport
+from crypto_momentum_lab.strategy_runner.portfolio import position_from_entry_fill
 
 
 def test_report_rows_convert_decimals_and_enums_to_json_values() -> None:
@@ -39,10 +40,24 @@ def test_report_rows_convert_decimals_and_enums_to_json_values() -> None:
         "slippage_bps": "0",
         "state_interval_seconds": 15,
         "taker_fee_rate": "0.0004",
+        "portfolio": {
+            "take_profit_pct": "0.02",
+            "stop_loss_pct": "0.01",
+            "max_holding_buckets": 80,
+            "state_interval_seconds": 15,
+            "initial_balance": "1000",
+            "exit_mode": "fixed",
+            "require_executable_quote": False,
+            "candle_minimum_holding_buckets": 0,
+            "candle_confirmation_count": 1,
+            "candle_grace_bars": 0,
+            "candle_grace_profit_pct": "0",
+        },
     }
     assert rows.signals[0]["side"] == "long"
     assert rows.candidates[0]["entry_type"] == "market"
     assert rows.fills[0]["status"] == "filled"
+    assert rows.positions[0]["entry_fill_id"] == "fill_1"
     assert rows.checkpoint["last_processed_at_by_symbol"] == {
         "BTCUSDT": "2026-06-22T00:01:15+00:00"
     }
@@ -161,6 +176,8 @@ def fixture_paper_report() -> PaperTradingRunReport:
         cooldown_buckets_remaining_by_symbol={"BTCUSDT": 3},
         payload={"last_signal_id": signal.signal_id},
     )
+    position = position_from_entry_fill(identity.run_id, fill)
+    assert position is not None
     return PaperTradingRunReport(
         schema_version=1,
         generated_at=datetime(2026, 6, 22, 0, 2, tzinfo=UTC),
@@ -189,4 +206,5 @@ def fixture_paper_report() -> PaperTradingRunReport:
             "fee_by_symbol": {"BTCUSDT": Decimal("0.0400")},
             "cost_by_symbol": {"BTCUSDT": Decimal("0.04986")},
         },
+        paper_positions=(position,),
     )

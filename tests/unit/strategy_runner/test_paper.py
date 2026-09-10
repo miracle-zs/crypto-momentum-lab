@@ -6,10 +6,14 @@ import pytest
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
+    EntryType,
+    OrderIntentCandidate,
     RunMode,
     StrategyCheckpoint,
     StrategyDataRequirement,
     StrategyDecision,
+    StrategySide,
+    StrategySignal,
 )
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
@@ -22,6 +26,10 @@ from crypto_momentum_lab.strategy_runner import (
     SimulatedFillStatus,
     run_paper_trading,
 )
+from crypto_momentum_lab.strategy_runner.portfolio import (
+    PaperExitConfig,
+    PaperPositionStatus,
+)
 
 
 def test_run_paper_trading_emits_incremental_fill_after_latency() -> None:
@@ -32,7 +40,7 @@ def test_run_paper_trading_emits_incremental_fill_after_latency() -> None:
         config=_paper_config(),
     )
 
-    assert report.schema_version == 1
+    assert report.schema_version == 2
     assert report.run.run_mode is RunMode.PAPER
     assert report.input_state_count == 6
     assert report.processed_symbol_count == 1
@@ -64,6 +72,116 @@ def test_run_paper_trading_zero_latency_fills_at_closed_state_end() -> None:
     assert report.paper_fills[0].status is SimulatedFillStatus.FILLED
     assert report.paper_fills[0].target_fill_at == states[-1].bucket_end
     assert report.paper_fills[0].filled_at == states[-1].bucket_end
+
+
+def test_run_paper_trading_marks_and_closes_filled_positions(monkeypatch) -> None:
+    class SingleEntryStrategy:
+        def __init__(self, identity) -> None:
+            self._identity = identity
+            self._processed = 0
+            self._checkpoint = StrategyCheckpoint(
+                last_processed_at_by_symbol={},
+                warmup_buckets_by_symbol={},
+                cooldown_buckets_remaining_by_symbol={},
+                payload={},
+            )
+
+        def required_data(self) -> StrategyDataRequirement:
+            return StrategyDataRequirement(
+                base_state_interval_seconds=15,
+                warmup_buckets=1,
+                required_fields=("close_price",),
+                max_gap_seconds=30,
+                allow_entries_before_warmup=True,
+            )
+
+        def reset_symbol(self, symbol: str) -> None:
+            del symbol
+
+        def on_market_state(self, state: MarketState15s) -> StrategyDecision:
+            self._processed += 1
+            self._checkpoint = StrategyCheckpoint(
+                last_processed_at_by_symbol={state.symbol: state.bucket_start},
+                warmup_buckets_by_symbol={state.symbol: self._processed},
+                cooldown_buckets_remaining_by_symbol={},
+                payload={},
+            )
+            if self._processed > 1:
+                return StrategyDecision(
+                    signals=(),
+                    candidates=(),
+                    rejections=(),
+                    checkpoint=self._checkpoint,
+                )
+            signal = StrategySignal(
+                signal_id="signal-1",
+                run_id=self._identity.run_id,
+                strategy_name=self._identity.strategy_name,
+                strategy_version=self._identity.strategy_version,
+                config_hash=self._identity.config_hash,
+                symbol=state.symbol,
+                side=StrategySide.LONG,
+                detected_at=state.bucket_end,
+                source_state_at=state.bucket_start,
+                reason="test_entry",
+                features={},
+                reference_prices={"close": str(state.close_price)},
+            )
+            candidate = OrderIntentCandidate(
+                candidate_id="candidate-1",
+                signal_id=signal.signal_id,
+                run_id=self._identity.run_id,
+                strategy_name=self._identity.strategy_name,
+                strategy_version=self._identity.strategy_version,
+                config_hash=self._identity.config_hash,
+                symbol=state.symbol,
+                side=signal.side,
+                entry_type=EntryType.MARKET,
+                limit_price=None,
+                desired_notional=Decimal("100"),
+                reduce_only=False,
+                expires_at=state.bucket_end + timedelta(seconds=30),
+                created_at=state.bucket_end,
+                reason=signal.reason,
+                features={},
+            )
+            return StrategyDecision(
+                signals=(signal,),
+                candidates=(candidate,),
+                rejections=(),
+                checkpoint=self._checkpoint,
+            )
+
+        def checkpoint(self) -> StrategyCheckpoint:
+            return self._checkpoint
+
+    monkeypatch.setattr(
+        "crypto_momentum_lab.strategy_runner.paper.build_runtime_strategy",
+        lambda _name, *, config, identity: SingleEntryStrategy(identity),
+    )
+    report = run_paper_trading(
+        source=InMemoryPaperMarketStateSource(
+            (_state(0, close=Decimal("100")), _state(1, close=Decimal("100")))
+        ),
+        config=_paper_config(
+            execution=ReplayExecutionConfig(latency_buckets=0),
+            portfolio=PaperExitConfig(
+                take_profit_pct=Decimal("0.50"),
+                stop_loss_pct=Decimal("0.50"),
+                max_holding_buckets=1,
+            ),
+        ),
+    )
+
+    assert len(report.paper_positions) == 1
+    position = report.paper_positions[0]
+    assert position.status is PaperPositionStatus.CLOSED
+    assert position.close_reason == "max_holding_period"
+    assert position.closed_at == datetime(2026, 6, 22, 0, 0, 30, tzinfo=UTC)
+    assert report.summary_counts["positions_by_status"] == {"closed": 1}
+    assert report.summary_counts["exits_by_reason"] == {
+        "max_holding_period": 1
+    }
 
 
 def test_run_paper_trading_leaves_candidate_pending_when_source_ends() -> None:
@@ -206,6 +324,7 @@ def _paper_config(
     *,
     strategy_name: str = "compression_breakout",
     execution: ReplayExecutionConfig | None = None,
+    portfolio: PaperExitConfig | None = None,
 ) -> PaperRunnerConfig:
     return PaperRunnerConfig(
         strategy_name=strategy_name,
@@ -229,6 +348,7 @@ def _paper_config(
             else execution
         ),
         max_states=max_states,
+        portfolio=portfolio or PaperExitConfig(),
     )
 
 

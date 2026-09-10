@@ -518,7 +518,8 @@ def paper_command(
         f"signals={len(report.signals)} "
         f"candidates={len(report.candidates)} "
         f"fills={len(report.paper_fills)} "
-        f"persisted={str(persisted).lower()}"
+        f"persisted={str(persisted).lower()} "
+        f"positions={len(getattr(report, 'paper_positions', ()))}"
     )
     typer.echo(output_path.as_posix())
 
@@ -682,7 +683,8 @@ def paper_live_source_command(
         f"signals={len(report.signals)} "
         f"candidates={len(report.candidates)} "
         f"fills={len(report.paper_fills)} "
-        f"persisted={str(persisted).lower()}"
+        f"persisted={str(persisted).lower()} "
+        f"positions={len(getattr(report, 'paper_positions', ()))}"
     )
     typer.echo(output_path.as_posix())
 
