@@ -2249,6 +2249,7 @@ async def _run_live_daemon(
                 return data.symbols
 
             entry_symbol_loader = load_entry_symbols_from_database
+        initial_entry_symbols: frozenset[str] = frozenset()
         if entry_symbol_loader is not None:
             assert client is not None
             try:
@@ -2260,42 +2261,44 @@ async def _run_live_daemon(
                     "live_entry_symbol_warmup_failed",
                     error_type=type(error).__name__,
                 )
-            else:
-                if margin_type is not None:
-                    try:
-                        await client.warm_entry_margin_type(initial_entry_symbols)
-                        log.info(
-                            "live_entry_margin_type_warmed",
-                            symbol_count=len(initial_entry_symbols),
-                            margin_type=margin_type,
-                        )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as error:
-                        # A failed warmup keeps the per-symbol confirmation
-                        # fallback in place. It remains fail-closed before
-                        # any affected entry is submitted.
-                        log.warning(
-                            "live_entry_margin_type_warmup_failed",
-                            error_type=type(error).__name__,
-                        )
-                if entry_leverage is not None:
-                    try:
-                        await client.warm_entry_leverage(initial_entry_symbols)
-                        log.info(
-                            "live_entry_leverage_warmed",
-                            symbol_count=len(initial_entry_symbols),
-                            leverage=entry_leverage,
-                        )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as error:
-                        # A failed warmup keeps the existing per-symbol
-                        # confirmation fallback in place.
-                        log.warning(
-                            "live_entry_leverage_warmup_failed",
-                            error_type=type(error).__name__,
-                        )
+        if margin_type is not None:
+            assert client is not None
+            try:
+                await client.warm_entry_margin_type(initial_entry_symbols)
+                log.info(
+                    "live_entry_margin_type_warmed",
+                    requested_symbol_count=len(initial_entry_symbols),
+                    cached_symbol_count=client.configured_margin_type_count,
+                    margin_type=margin_type,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                # A failed warmup keeps the per-symbol confirmation fallback
+                # in place. It remains fail-closed before any affected entry
+                # is submitted.
+                log.warning(
+                    "live_entry_margin_type_warmup_failed",
+                    error_type=type(error).__name__,
+                )
+        if entry_symbol_loader is not None and entry_leverage is not None:
+            assert client is not None
+            try:
+                await client.warm_entry_leverage(initial_entry_symbols)
+                log.info(
+                    "live_entry_leverage_warmed",
+                    symbol_count=len(initial_entry_symbols),
+                    leverage=entry_leverage,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                # A failed warmup keeps the existing per-symbol
+                # confirmation fallback in place.
+                log.warning(
+                    "live_entry_leverage_warmup_failed",
+                    error_type=type(error).__name__,
+                )
         entry_filter_cache_required = (
             ema_provider is not None and entry_symbol_loader is not None
         )

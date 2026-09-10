@@ -1232,6 +1232,123 @@ async def test_trade_client_warms_entry_margin_type_outside_order_path() -> None
     assert requested_paths == ["/fapi/v1/symbolConfig", "/fapi/v1/order"]
 
 
+async def test_trade_client_warms_all_margin_types_with_one_full_read() -> None:
+    requested_paths: list[str] = []
+    symbol_queries: list[str | None] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/fapi/v1/symbolConfig":
+            symbol_queries.append(request.url.params.get("symbol"))
+            return httpx.Response(
+                200,
+                json=[
+                    {"symbol": "BTCUSDT", "marginType": "CROSSED"},
+                    {"symbol": "ETHUSDT", "marginType": "CROSSED"},
+                ],
+            )
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": _order_plan().client_order_id,
+                "orderId": 12345,
+                "status": "FILLED",
+                "executedQty": "0.003",
+                "avgPrice": "30000",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        margin_type="CROSSED",
+    )
+
+    try:
+        await client.warm_entry_margin_type(())
+        await client.submit_order(_order_plan())
+    finally:
+        await client.aclose()
+
+    assert requested_paths == ["/fapi/v1/symbolConfig", "/fapi/v1/order"]
+    assert symbol_queries == [None]
+
+
+async def test_trade_client_warm_keeps_lazy_fallback_for_mismatched_symbol() -> None:
+    requested_paths: list[str] = []
+    symbol_queries: list[str | None] = []
+    margin_type_calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal margin_type_calls
+        requested_paths.append(request.url.path)
+        if request.url.path == "/fapi/v1/symbolConfig":
+            symbol_queries.append(request.url.params.get("symbol"))
+            if request.url.params.get("symbol") == "ETHUSDT":
+                payload = [{"symbol": "ETHUSDT", "marginType": "ISOLATED"}]
+            else:
+                payload = [
+                    {"symbol": "BTCUSDT", "marginType": "CROSSED"},
+                    {"symbol": "ETHUSDT", "marginType": "ISOLATED"},
+                ]
+            return httpx.Response(200, json=payload)
+        if request.url.path == "/fapi/v1/marginType":
+            margin_type_calls += 1
+            body = parse_qs(request.content.decode())
+            assert body["symbol"] == ["ETHUSDT"]
+            assert body["marginType"] == ["CROSSED"]
+            return httpx.Response(200, json={"code": 200, "msg": "success"})
+        return httpx.Response(
+            200,
+            json={
+                "clientOrderId": _order_plan().client_order_id,
+                "orderId": 12345,
+                "status": "FILLED",
+                "executedQty": "0.003",
+                "avgPrice": "30000",
+            },
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        margin_type="CROSSED",
+    )
+
+    try:
+        await client.warm_entry_margin_type(("ETHUSDT",))
+        await client.submit_order(replace(_order_plan(), symbol="ETHUSDT"))
+    finally:
+        await client.aclose()
+
+    assert requested_paths == [
+        "/fapi/v1/symbolConfig",
+        "/fapi/v1/symbolConfig",
+        "/fapi/v1/marginType",
+        "/fapi/v1/order",
+    ]
+    assert symbol_queries == [None, "ETHUSDT"]
+    assert margin_type_calls == 1
+
+
 async def test_margin_type_change_failure_does_not_submit_order() -> None:
     requested_paths: list[str] = []
 

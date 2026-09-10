@@ -424,6 +424,23 @@ class BinanceUsdMPrivateReadClient:
             )
         return None
 
+    async def fetch_symbol_margin_types(self) -> dict[str, str | None]:
+        """Read all exchange symbol-level futures margin modes at once."""
+        payload = await self._signed_get("/fapi/v1/symbolConfig")
+        margin_types: dict[str, str | None] = {}
+        for item in _require_sequence_of_mappings(payload):
+            raw_symbol = _optional_str(item.get("symbol"))
+            if raw_symbol is None:
+                continue
+            symbol = _normalize_symbols((raw_symbol,))[0]
+            raw_margin_type = _optional_str(item.get("marginType"))
+            margin_types[symbol] = (
+                None
+                if raw_margin_type is None
+                else _normalize_margin_type(raw_margin_type)
+            )
+        return margin_types
+
     async def fetch_open_orders(
         self,
         symbol: str | None = None,
@@ -700,6 +717,11 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         self._configured_margin_type_by_symbol: dict[str, str] = {}
         self._margin_type_lock = asyncio.Lock()
 
+    @property
+    def configured_margin_type_count(self) -> int:
+        """Return the number of symbols confirmed for the entry mode."""
+        return len(self._configured_margin_type_by_symbol)
+
     async def warm_entry_leverage(self, symbols: Iterable[str]) -> None:
         """Confirm entry leverage before the live market loop can submit."""
 
@@ -712,8 +734,11 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         for symbol in _normalize_symbols(symbols):
             await self._ensure_entry_leverage(symbol)
 
-    async def warm_entry_margin_type(self, symbols: Iterable[str]) -> None:
-        """Confirm entry margin type before the live market loop can submit."""
+    async def warm_entry_margin_type(
+        self,
+        symbols: Iterable[str] = (),
+    ) -> None:
+        """Preload all confirmed entry modes before the live market loop."""
 
         if not self._live_submit_enabled:
             raise LiveSubmissionDisabledError(
@@ -721,8 +746,38 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             )
         if self._entry_margin_type is None:
             return
+        normalized_symbols = _normalize_symbols(symbols)
+        desired_margin_type = self._entry_margin_type
+        try:
+            all_margin_types = await self.fetch_symbol_margin_types()
+        except asyncio.CancelledError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise ExchangeOrderRejectedError(
+                "Binance entry margin type warmup could not read symbol configs"
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise ExchangeOrderRejectedError(_exchange_error_message(exc)) from exc
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            raise ExchangeOrderRejectedError(
+                "Binance entry margin type warmup could not read symbol configs"
+            ) from exc
+
+        async with self._margin_type_lock:
+            self._configured_margin_type_by_symbol.update(
+                {
+                    symbol: margin_type
+                    for symbol, margin_type in all_margin_types.items()
+                    if margin_type == desired_margin_type
+                }
+            )
+
         errors: list[str] = []
-        for symbol in _normalize_symbols(symbols):
+        for symbol in normalized_symbols:
+            if self._configured_margin_type_by_symbol.get(symbol) == (
+                desired_margin_type
+            ):
+                continue
             try:
                 await self._ensure_entry_margin_type(symbol)
             except ExchangeOrderRejectedError as error:
