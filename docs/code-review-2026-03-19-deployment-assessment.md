@@ -2,7 +2,7 @@
 
 复核日期：2026-09-10。对象：code-review-2026-03-19.md 新增“部署脚本审查”。已覆盖 D1–D10、4 条小问题、7 条正面评价。
 
-依据为当前工作区，不代表线上实际配置。未连接服务器、未读取真实 .env.server、未启动或重启容器。仅执行本地配置解析、纯函数/隔离 Git 仓库复现及既有测试；仅新增本验收文档。
+依据为当前工作区，不代表线上实际配置。未连接服务器、未读取真实 .env.server、未启动或重启容器。初始 D1–D10 结论记录的是代码修复前的触发事实；`c62cd52` 已先行修复其中的回滚分支、D1/D2/D3/D5，后续二次验收状态见文末。仅执行本地配置解析、纯函数/隔离 Git 仓库复现及既有测试。
 
 ## D1–D10
 
@@ -79,3 +79,19 @@ nginx 的 auth_basic 可以在 http/server 层生效并继承到 location，snip
 - 条件性高优先：D8 若实际无外层鉴权、D10 若实际无可恢复备份。
 - 不照做：D4 直接在 base 加 :?、D7 删除 env、D9 宣称零覆盖、将 start_period 当启动等待时长。
 
+## 当前 HEAD 二次验收
+
+在 `c62cd52` 及后续修复后重新核对：
+
+| 项目 | 当前状态 | 证据与剩余边界 |
+|---|---|---|
+| 回滚分支 | 已修复 | `update_server.sh` 先区分相等、可快进、祖先回退和分叉；祖先目标实际进入 `git reset --keep`，隔离 Git 回归覆盖。 |
+| D1 | 第一阶段已修复 | paper-only 不再加载 live overlay；显式 `--live` 仍会要求 overlay 中附加账户凭证，若只更新 primary，仍需进一步拆分 live 配置文件。 |
+| D2 | 已修复 | 分类匹配 `strategies/*` 和 `strategy_runner/*`，回归测试固定路径。 |
+| D3 | 第一阶段已修复 | ops monitor/systemd 现在加载 base+live compose、live profile、四账户服务和四组 session/lease；新增账户仍需同步 monitor 配置。 |
+| D5 | 第一阶段已修复 | singular/plural position labels 合并，live update 会拒绝未纳入保护列表的运行账户；停用但仍有仓位的账户仍需保留在 labels 中。 |
+| D9 | 已修复 | server manifest 的 required services、healthcheck 循环和 gainer10 特有断言均包含 `paper-orderflow-gainer10-pair`。 |
+| D4/D6/D7 | 保留条件性结论 | 凭证解析仍在应用启动前 fail-closed；遥测 allow-list 和 env/argv 组合属于需明确运营语义的配置，不据此宣称账本错误。 |
+| D8/D10 | 待外部证据 | 本地只能确认 dashboard Basic Auth 可选、仓库没有备份/恢复编排；仍需真实 nginx 上层鉴权和数据库恢复演练证据，不能用本地 Compose 结论替代。 |
+
+当前部署回归：`tests/smoke/test_deployment_script.py`、`tests/smoke/test_server_deployment_manifest.py`、`tests/unit/ops/test_cml_ops_monitor.py` 共 25 passed。
