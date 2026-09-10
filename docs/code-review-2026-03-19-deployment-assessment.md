@@ -93,7 +93,7 @@ nginx 的 auth_basic 可以在 http/server 层生效并继承到 location，snip
 | D9 | 已修复 | server manifest 的 required services、healthcheck 循环和 gainer10 特有断言均包含 `paper-orderflow-gainer10-pair`。 |
 | D4 | 已验收，不改 Compose | primary 的 Compose 环境变量仍可空以保持 paper-only 解析；应用在创建 Binance client 前对 READ/TRADE 凭证缺失或空白 fail-closed，已有 credential resolver 与 CLI 启动测试覆盖。 |
 | D6 | 已完成 | 所有 live 账户默认只持久化 `submit,cancel` 写边界；CLI、Compose 和显式空值均采用该默认。只有明确传入 `all` 才启用全量 exchange telemetry，作为临时诊断开关；order/fill 账本不受该 allow-list 影响。 |
-| D7 | 第一阶段已修复 | profile/top-N 已改为环境单源，preflight 与 daemon 使用同一解析路径；其余 argv 差异是账户运行参数，不属于该项重复。 |
+| D7 | 已完成 | profile/top-N 已改为环境单源，preflight 与 daemon 使用同一解析路径；其余 argv 差异是账户、会话、hub、风险和退出运行参数，不属于重复注入。部署 manifest 已断言这些 profile 选项不再出现在 live strategy command。 |
 | D8/D10 | 待外部证据 | 本地只能确认 dashboard Basic Auth 可选、仓库没有备份/恢复编排；仍需真实 nginx 上层鉴权和数据库恢复演练证据，不能用本地 Compose 结论替代。 |
 
 当前部署回归：`tests/smoke/test_deployment_script.py`、`tests/smoke/test_server_deployment_manifest.py`、`tests/unit/ops/test_cml_ops_monitor.py` 共 29 passed。
