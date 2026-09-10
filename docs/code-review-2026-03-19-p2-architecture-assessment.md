@@ -1,6 +1,6 @@
 # P2 与架构条目逐项复核
 
-复核日期：2026-09-10。对象：docs/code-review-2026-03-19.md。依据为当前工作区代码及配置，不代表报告日期对应的历史版本或线上部署状态。本轮更新 #24–#28 的验收记录并包含对应的本地修复。
+复核日期：2026-09-10。对象：docs/code-review-2026-03-19.md。依据为当前工作区代码及配置，不代表报告日期对应的历史版本或线上部署状态。本轮更新 #24–#29 的验收记录并包含对应的本地修复。
 
 “成立”表示代码事实及问题方向有依据；“部分成立”表示事实存在，但影响、适用范围或建议需要修正；“不作为缺陷”表示属于有意设计或原结论证据不足。结构重复不等于运行错误。
 
@@ -13,7 +13,7 @@
 | #26 | 已完成 | [grace 分支](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/portfolio.py:459)现在统一按 `candle_minimum_holding_buckets × state_interval_seconds` 门控首次盈利平仓、恢复价触发、grace 超时和最长持仓；非 grace 路径继续使用相同的最短持仓策略。`test_candle_grace_respects_minimum_holding_period` 与普通 candle 最短持仓测试覆盖了 grace/非 grace 交叉边界。 |
 | #27 | 已完成 | [context loader](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/strategy_runner/main.py:1032)分别提供 LONG 的 ask 与 SHORT 的 bid；[过滤器](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/daemon.py:1020)按信号方向选择对应执行价，再比较 EMA。`test_short_ema_filter_uses_bid_side_entry_price` 覆盖 bid ≤ EMA < ask 时拒绝空头、bid 上穿 EMA 时放行。 |
 | #28 | 第一阶段已完成，退出仍等待新鲜行情 | [paper daemon stale 分支](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/daemon.py:1386)按 symbol 一次记录陈旧事件、重置策略并跳过策略与持仓标记；恢复后记录 `paper_market_state_recovered` 再继续处理，避免用陈旧价格模拟成交。[PostgreSQL source](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/live_source.py:118)在 idle timeout 记录结构化 error 并结束迭代，交由 Compose `restart: unless-stopped` 拉起。完全无行情时仍不会凭空生成退出成交；若需独立于 source 的强制退出或交易所保护单，需另定运营语义。 |
-| #29 | 成立，取决于 limit 的价格约束 | [价格量化](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/execution_account/orders/quantization.py:138)统一向下取整。若 SELL limit 表示最低接受价，100.05 在 tick=0.1 时变成 100.0，确实低于授权价格边界；应按最终 BUY/SELL 方向量化，BUY 向下、SELL 向上，并覆盖 reduce-only 的方向转换。如果输入只是可调参考价，则需另行明确策略语义。 |
+| #29 | 已完成 | [价格量化](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/execution_account/orders/quantization.py:114)现在按最终交易所方向选择 ROUND_DOWN/ROUND_UP：BUY 向下、SELL 向上；`_exchange_side` 同时考虑 reduce-only，因此平仓卖单也向上量化。`test_limit_price_rounds_outward_for_exchange_side` 覆盖普通多/空开仓与 reduce-only 平仓。 |
 | #30 | 部分成立，未找到当前生产调用 | [授权撤单方法](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/execution_account/binance/client.py:1077)只包装 Timeout/RequestError，不处理 HTTPStatusError，确实不同于 cancel_order_by_client_id。但全 src 中未找到这个带 command 参数方法的调用；当前 live 撤单走 coordinator/state_machine 或 cancel_order_by_client_id。因此不能写成已触达的紧急撤单事故。若保留此 API，应在授权后复用统一撤单实现。 |
 | #31 | 部分成立，属于指标语义 | [publish](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/market_data/hub.py:257)取本批次最大 bucket_start 后覆盖旧值，较旧批次可以令数值下降。若指标定义为“历史最大进度”，应累积 max；若定义为“最近发布批次的进度”，当前行为合法且可能帮助暴露倒序。未见它改变订单执行或回放游标。应先明确指标定义，避免直接写成数据正确性 bug。 |
 | #32 | 事实成立，影响是健康监测 | [missing fill 检测](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/execution_account/daemon.py:1008)在 request_reconnect 正常返回后，从 pending 集合移除 still_missing；甚至并未等待“成功重连”，只是重连请求返回。无 request_reconnect 方法时也会移除。原 fill 已由 REST 同步发现，此处不是成交记录丢失。若意图只触发一次重连，清理可以防止旧 fill 永远不会通过 WS 重播而引起重连风暴。建议明确一次性告警/重试语义，不能简单永远保留 still_missing。 |
