@@ -236,6 +236,100 @@ def test_build_config_supports_multiple_compose_files_and_live_accounts(
     ]
 
 
+def test_build_config_discovers_live_accounts_from_compose_files(
+    tmp_path, monkeypatch
+) -> None:
+    base_file = tmp_path / "compose.yaml"
+    overlay_file = tmp_path / "compose.live.yaml"
+    env_file = tmp_path / ".env.server"
+    base_file.write_text(
+        "services:\n"
+        "  postgres:\n"
+        "  market-data:\n"
+        "  execution-account-live:\n"
+        "  live-strategy:\n"
+        "volumes:\n"
+        "  postgres-data:\n",
+        encoding="utf-8",
+    )
+    overlay_file.write_text(
+        "services:\n"
+        "  execution-account-live-account-2:\n"
+        "  live-strategy-account-2:\n"
+        "  execution-account-live-account-4:\n"
+        "  live-strategy-account-4:\n",
+        encoding="utf-8",
+    )
+    env_file.write_text(
+        "CML_LIVE_SESSION_ID_ACCOUNT_2=custom-account-2\n"
+        "CML_LIVE_LEASE_OWNER_ACCOUNT_4=custom-worker-4\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CML_MONITOR_LIVE_ACCOUNTS", raising=False)
+    monkeypatch.delenv("CML_MONITOR_SERVICES", raising=False)
+    monkeypatch.setenv("CML_COMPOSE_ENV_FILE", str(env_file))
+    args = argparse.Namespace(
+        project_directory=str(tmp_path),
+        compose_file=f"{base_file},{overlay_file}",
+        services=None,
+        live_run_id=None,
+        interval_seconds=60.0,
+        log_window_seconds=120.0,
+        telemetry_stale_after_seconds=900.0,
+        rss_warning_fraction=0.75,
+        rss_critical_fraction=0.90,
+        rss_growth_bytes=64 * 1024 * 1024,
+        rss_growth_window_seconds=1_800.0,
+        alert_cooldown_seconds=900.0,
+        command_timeout_seconds=15.0,
+        state_path=str(tmp_path / "state.json"),
+    )
+
+    config = build_config(args)
+
+    assert config.live_accounts == (
+        ("primary", "live-primary-v1", "live-worker"),
+        ("account-2", "custom-account-2", "live-worker-account-2"),
+        ("account-4", "live-account-4-v1", "custom-worker-4"),
+    )
+    assert config.services == (
+        "postgres",
+        "market-data",
+        "execution-account-live",
+        "live-strategy",
+        "execution-account-live-account-2",
+        "live-strategy-account-2",
+        "execution-account-live-account-4",
+        "live-strategy-account-4",
+    )
+
+
+def test_container_id_uses_docker_service_labels(tmp_path) -> None:
+    class Runner:
+        last_args = None
+
+        def run(self, args, *, timeout_seconds):
+            del timeout_seconds
+            self.last_args = args
+            return "container-id\n"
+
+    runner = Runner()
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+        runner=runner,
+    )
+
+    assert monitor._container_id("live-strategy-account-2") == "container-id"
+    assert runner.last_args == [
+        "docker",
+        "ps",
+        "--filter",
+        "label=com.docker.compose.service=live-strategy-account-2",
+        "--format",
+        "{{.ID}}",
+    ]
+
+
 def test_serverchan_config_and_payload(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("SERVERCHAN_SENDKEY", "SCT-test-key")
     args = argparse.Namespace(

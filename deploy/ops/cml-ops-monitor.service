@@ -13,8 +13,9 @@ Environment=CML_PROJECT_DIRECTORY=/opt/crypto-momentum-lab
 Environment=CML_COMPOSE_FILE=/opt/crypto-momentum-lab/compose.server.yaml,/opt/crypto-momentum-lab/compose.live.accounts.yaml
 Environment=CML_COMPOSE_PROFILES=live
 Environment=CML_COMPOSE_ENV_FILE=/opt/crypto-momentum-lab/.env.server
-Environment=CML_MONITOR_SERVICES=postgres,market-data,execution-account-live,live-strategy,execution-account-live-account-2,live-strategy-account-2,execution-account-live-account-3,live-strategy-account-3,execution-account-live-account-4,live-strategy-account-4
-Environment=CML_MONITOR_LIVE_ACCOUNTS=primary|live-primary-v1|live-worker,account-2|live-account-2-v1|live-worker-account-2,account-3|live-account-3-v1|live-worker-account-3,account-4|live-account-4-v1|live-worker-account-4
+# cml_ops_monitor derives live services, sessions, and lease owners from the
+# Compose files above. CML_MONITOR_SERVICES and CML_MONITOR_LIVE_ACCOUNTS remain
+# supported in /etc/crypto-momentum-lab/ops-monitor.env for explicit overrides.
 EnvironmentFile=-/etc/crypto-momentum-lab/ops-monitor.env
 ExecStart=/usr/bin/python3 /opt/crypto-momentum-lab/deploy/ops/cml_ops_monitor.py
 Restart=always

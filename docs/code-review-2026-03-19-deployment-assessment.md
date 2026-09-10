@@ -88,7 +88,7 @@ nginx 的 auth_basic 可以在 http/server 层生效并继承到 location，snip
 | 回滚分支 | 已修复 | `update_server.sh` 先区分相等、可快进、祖先回退和分叉；祖先目标实际进入 `git reset --keep`，隔离 Git 回归覆盖。 |
 | D1 | 已修复 | paper-only 不加载 live overlay；`--live` 只在检测到 account-2/3/4 已有运行中的 Compose 服务时加载附加 overlay，因此 primary-only live 更新不再要求附加账户凭证。停止中的附加账户仍不会被隐式启动，若要恢复它们需显式选择对应服务。 |
 | D2 | 已修复 | 分类匹配 `strategies/*` 和 `strategy_runner/*`，回归测试固定路径。 |
-| D3 | 第一阶段已修复 | ops monitor/systemd 现在加载 base+live compose、live profile、四账户服务和四组 session/lease；新增账户仍需同步 monitor 配置。 |
+| D3 | 已修复 | systemd 只提供 base/overlay Compose 文件；monitor 直接从这些文件发现 live service、账户 label、session 和 lease owner，并用 Docker service label 查询容器，新增账户不再需要手工改 monitor 清单。`CML_MONITOR_SERVICES` 与 `CML_MONITOR_LIVE_ACCOUNTS` 仍可通过 ops-monitor.env 显式覆盖。 |
 | D5 | 第一阶段已修复 | singular/plural position labels 合并，live update 会拒绝未纳入保护列表的运行账户；停用但仍有仓位的账户仍需保留在 labels 中。 |
 | D9 | 已修复 | server manifest 的 required services、healthcheck 循环和 gainer10 特有断言均包含 `paper-orderflow-gainer10-pair`。 |
 | D4 | 已验收，不改 Compose | primary 的 Compose 环境变量仍可空以保持 paper-only 解析；应用在创建 Binance client 前对 READ/TRADE 凭证缺失或空白 fail-closed，已有 credential resolver 与 CLI 启动测试覆盖。 |
@@ -96,4 +96,4 @@ nginx 的 auth_basic 可以在 http/server 层生效并继承到 location，snip
 | D7 | 第一阶段已修复 | profile/top-N 已改为环境单源，preflight 与 daemon 使用同一解析路径；其余 argv 差异是账户运行参数，不属于该项重复。 |
 | D8/D10 | 待外部证据 | 本地只能确认 dashboard Basic Auth 可选、仓库没有备份/恢复编排；仍需真实 nginx 上层鉴权和数据库恢复演练证据，不能用本地 Compose 结论替代。 |
 
-当前部署回归：`tests/smoke/test_deployment_script.py`、`tests/smoke/test_server_deployment_manifest.py`、`tests/unit/ops/test_cml_ops_monitor.py` 共 25 passed。
+当前部署回归：`tests/smoke/test_deployment_script.py`、`tests/smoke/test_server_deployment_manifest.py`、`tests/unit/ops/test_cml_ops_monitor.py` 共 29 passed。

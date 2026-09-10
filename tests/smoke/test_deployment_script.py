@@ -181,6 +181,19 @@ def test_live_account_services_share_the_private_request_pacer_volume() -> None:
     assert "binance-rest-pacer:" in compose
 
 
+def test_ops_monitor_discovers_live_accounts_from_compose_files() -> None:
+    service = (ROOT / "deploy/ops/cml-ops-monitor.service").read_text(
+        encoding="utf-8"
+    )
+
+    assert "CML_COMPOSE_FILE=" in service
+    assert "compose.live.accounts.yaml" in service
+    assert "CML_MONITOR_SERVICES=" not in service
+    assert "CML_MONITOR_LIVE_ACCOUNTS=" not in service
+    assert "CML_MONITOR_SERVICES" in service
+    assert "CML_MONITOR_LIVE_ACCOUNTS" in service
+
+
 def test_retry_classification_preserves_dashboard_only_scope(tmp_path: Path) -> None:
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     def git(*args: str) -> str:

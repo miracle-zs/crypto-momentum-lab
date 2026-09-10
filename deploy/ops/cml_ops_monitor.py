@@ -39,6 +39,9 @@ _DEFAULT_RSS_GROWTH_BYTES = 64 * 1024 * 1024
 _DEFAULT_RSS_GROWTH_WINDOW_SECONDS = 1_800.0
 _DEFAULT_ALERT_COOLDOWN_SECONDS = 900.0
 _DEFAULT_COMMAND_TIMEOUT_SECONDS = 15.0
+_COMPOSE_SERVICE_HEADER = re.compile(
+    r"^  (?P<service>[A-Za-z0-9][A-Za-z0-9_-]*):\s*$"
+)
 
 
 def _live_strategy_service(account_label: str) -> str:
@@ -517,8 +520,17 @@ class OpsMonitor:
         return tuple(alerts)
 
     def _container_id(self, service: str) -> str | None:
-        command = self._compose_prefix()
-        command.extend(["ps", "-q", service])
+        # Docker labels avoid re-interpolating every Compose file on each
+        # monitor tick. An optional live overlay may contain required secret
+        # variables for accounts that are not enabled on this host.
+        command = [
+            "docker",
+            "ps",
+            "--filter",
+            f"label=com.docker.compose.service={service}",
+            "--format",
+            "{{.ID}}",
+        ]
         try:
             output = self._runner.run(
                 command,
@@ -1077,12 +1089,121 @@ def _parse_live_accounts(raw_value: str | None) -> tuple[tuple[str, str, str], .
     return tuple(accounts)
 
 
+def _compose_service_names(compose_files: Sequence[Path]) -> tuple[str, ...]:
+    """Read top-level service names without interpolating Compose secrets."""
+
+    service_names: list[str] = []
+    for compose_file in compose_files:
+        try:
+            lines = compose_file.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        in_services = False
+        for line in lines:
+            if line.strip() == "services:" and not line.startswith(" "):
+                in_services = True
+                continue
+            if in_services and line and not line.startswith(" "):
+                in_services = False
+            if not in_services:
+                continue
+            match = _COMPOSE_SERVICE_HEADER.match(line)
+            if match is not None:
+                service = match.group("service")
+                if service not in service_names:
+                    service_names.append(service)
+    return tuple(service_names)
+
+
+def _live_account_label_for_service(service: str) -> str | None:
+    for prefix in ("execution-account-live", "live-strategy"):
+        if service == prefix:
+            return "primary"
+        prefix_with_separator = f"{prefix}-"
+        if service.startswith(prefix_with_separator):
+            return service[len(prefix_with_separator) :]
+    return None
+
+
+def _discover_live_account_labels(
+    compose_files: Sequence[Path],
+) -> tuple[str, ...]:
+    labels: list[str] = []
+    for service in _compose_service_names(compose_files):
+        label = _live_account_label_for_service(service)
+        if label is not None and label not in labels:
+            labels.append(label)
+    if "primary" in labels:
+        labels.remove("primary")
+        labels.insert(0, "primary")
+    return tuple(labels) or ("primary",)
+
+
+def _live_account_env_suffix(account_label: str) -> str:
+    if account_label == "primary":
+        return ""
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", account_label).strip("_")
+    return f"_{normalized.upper()}"
+
+
+def _configured_env_value(
+    compose_env_file: Path | None,
+    name: str,
+) -> str | None:
+    return os.environ.get(name) or _read_env_value(compose_env_file, name)
+
+
+def _discover_live_accounts(
+    compose_files: Sequence[Path],
+    compose_env_file: Path | None,
+) -> tuple[tuple[str, str, str], ...]:
+    accounts: list[tuple[str, str, str]] = []
+    for account_label in _discover_live_account_labels(compose_files):
+        suffix = _live_account_env_suffix(account_label)
+        default_session = (
+            "live-primary-v1"
+            if account_label == "primary"
+            else f"live-{account_label}-v1"
+        )
+        default_lease_owner = (
+            "live-worker"
+            if account_label == "primary"
+            else f"live-worker-{account_label}"
+        )
+        session_id = (
+            _configured_env_value(
+                compose_env_file,
+                f"CML_LIVE_SESSION_ID{suffix}",
+            )
+            or default_session
+        )
+        lease_owner = (
+            _configured_env_value(
+                compose_env_file,
+                f"CML_LIVE_LEASE_OWNER{suffix}",
+            )
+            or default_lease_owner
+        )
+        accounts.append((account_label, session_id, lease_owner))
+    return tuple(accounts)
+
+
+def _monitor_services_for_accounts(
+    live_accounts: Sequence[tuple[str, str, str]],
+) -> tuple[str, ...]:
+    services = ["postgres", "market-data"]
+    for account_label, _run_id, _lease_owner in live_accounts:
+        suffix = "" if account_label == "primary" else f"-{account_label}"
+        services.extend(
+            (
+                f"execution-account-live{suffix}",
+                f"live-strategy{suffix}",
+            )
+        )
+    return tuple(dict.fromkeys(services))
+
+
 def build_config(args: argparse.Namespace) -> MonitorConfig:
-    services = tuple(
-        item.strip()
-        for item in args.services.split(",")
-        if item.strip()
-    )
     compose_env_file = _env_path("CML_COMPOSE_ENV_FILE", None)
     live_run_id = (
         args.live_run_id
@@ -1113,6 +1234,21 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         for item in os.environ.get("CML_COMPOSE_PROFILES", "").split(",")
         if item.strip()
     )
+    configured_live_accounts = os.environ.get("CML_MONITOR_LIVE_ACCOUNTS")
+    live_accounts = (
+        _parse_live_accounts(configured_live_accounts)
+        if configured_live_accounts is not None
+        else _discover_live_accounts(compose_files, compose_env_file)
+    )
+    configured_services = getattr(args, "services", None)
+    if configured_services is None:
+        configured_services = os.environ.get("CML_MONITOR_SERVICES")
+    if configured_services:
+        services = tuple(
+            item.strip() for item in configured_services.split(",") if item.strip()
+        )
+    else:
+        services = _monitor_services_for_accounts(live_accounts)
     return MonitorConfig(
         project_directory=Path(args.project_directory),
         compose_file=(
@@ -1124,9 +1260,7 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         compose_profiles=profile_values,
         compose_env_file=compose_env_file,
         services=services or _DEFAULT_SERVICES,
-        live_accounts=_parse_live_accounts(
-            os.environ.get("CML_MONITOR_LIVE_ACCOUNTS")
-        ),
+        live_accounts=live_accounts,
         live_run_id=live_run_id,
         live_account_label=live_account_label,
         live_lease_owner=live_lease_owner,
@@ -1164,7 +1298,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--services",
-        default=os.environ.get("CML_MONITOR_SERVICES", ",".join(_DEFAULT_SERVICES)),
+        default=None,
     )
     parser.add_argument(
         "--live-run-id",
