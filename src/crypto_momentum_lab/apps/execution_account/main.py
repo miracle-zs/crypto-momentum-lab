@@ -1,5 +1,4 @@
 import asyncio
-import os
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Annotated
@@ -11,6 +10,7 @@ from crypto_momentum_lab.config import (
     BinanceCredentialRole,
     CredentialResolutionError,
     ResolvedBinanceCredentials,
+    resolve_database_url,
     resolve_role_credentials,
 )
 from crypto_momentum_lab.domain.account import AccountFillEvent
@@ -630,8 +630,10 @@ def _resolve_cli_credentials(
 
 
 def _execution_database_url(value: str | None) -> str:
-    resolved = value or os.environ.get("CML_EXECUTION_DATABASE_URL") or os.environ.get(
-        "CML_DATABASE_URL"
+    resolved = resolve_database_url(
+        value,
+        "CML_EXECUTION_DATABASE_URL",
+        "CML_DATABASE_URL",
     )
     if not resolved:
         raise typer.BadParameter(

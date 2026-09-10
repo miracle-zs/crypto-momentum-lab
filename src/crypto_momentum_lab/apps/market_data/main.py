@@ -14,6 +14,7 @@ import typer
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from crypto_momentum_lab.config.database_url import resolve_database_url
 from crypto_momentum_lab.config.loader import (
     behavior_hash,
     load_runtime_config,
@@ -168,7 +169,7 @@ def resolve_config_path(value: Path | None) -> Path:
 def _market_database_url(default_url: str) -> str:
     """Use the market plane when configured, otherwise the shared database."""
 
-    return os.environ.get("CML_MARKET_DATABASE_URL") or default_url
+    return resolve_database_url(None, "CML_MARKET_DATABASE_URL") or default_url
 
 
 def parse_paper_exit_run_ids(value: str | None = None) -> frozenset[str]:
@@ -1342,9 +1343,10 @@ def partition_runtime_states_command(
 ) -> None:
     """Prepare or cut over the runtime market-state partitioned table."""
 
-    database_url = (
-        os.environ.get("CML_MARKET_DATABASE_URL")
-        or os.environ.get("CML_DATABASE_URL")
+    database_url = resolve_database_url(
+        None,
+        "CML_MARKET_DATABASE_URL",
+        "CML_DATABASE_URL",
     )
     if not database_url:
         raise typer.BadParameter(

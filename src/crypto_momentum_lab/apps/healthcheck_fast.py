@@ -10,6 +10,8 @@ from typing import Protocol
 
 import psycopg
 
+from crypto_momentum_lab.config.database_url import resolve_database_url
+
 _DEFAULT_MAX_AGE_SECONDS = 180.0
 
 
@@ -46,7 +48,7 @@ def main() -> int:
     parser.add_argument("--lease-owner", default="live-worker")
     args = parser.parse_args()
 
-    database_url = os.environ.get("CML_DATABASE_URL")
+    database_url = resolve_database_url(None, "CML_DATABASE_URL")
     if not database_url or (
         not args.ignore_age and args.max_age_seconds <= 0
     ):

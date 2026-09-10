@@ -13,6 +13,7 @@ import structlog
 import typer
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from crypto_momentum_lab.config import resolve_database_url
 from crypto_momentum_lab.market_data.hub import (
     MarketStateHubConfig,
     WebSocketMarketStateSource,
@@ -234,10 +235,10 @@ async def _run_collector(
     late_tolerance_seconds: int,
     max_spool_gib: float,
 ) -> None:
-    resolved_database_url = (
-        database_url
-        or os.environ.get("CML_MARKET_DATABASE_URL")
-        or os.environ.get("CML_DATABASE_URL")
+    resolved_database_url = resolve_database_url(
+        database_url,
+        "CML_MARKET_DATABASE_URL",
+        "CML_DATABASE_URL",
     )
     if not resolved_database_url:
         raise CollectorError(

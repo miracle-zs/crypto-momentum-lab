@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -9,6 +8,7 @@ from typing import Annotated
 import typer
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from crypto_momentum_lab.config import resolve_database_url
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderEvent,
     ExchangeOrderFill,
@@ -343,7 +343,7 @@ async def _record_drill(database_url: str, run_id: str, drill_name: str) -> None
 
 
 def _database_url(value: str | None) -> str:
-    resolved = value or os.environ.get("CML_DATABASE_URL")
+    resolved = resolve_database_url(value, "CML_DATABASE_URL")
     if not resolved:
         raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
     return resolved

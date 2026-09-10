@@ -1,5 +1,4 @@
 import asyncio
-import os
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -11,6 +10,7 @@ import typer
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.build_info import resolve_code_commit
+from crypto_momentum_lab.config import resolve_database_url
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     RunMode,
@@ -505,7 +505,10 @@ def paper_command(
     write_paper_trading_report(report, output_path)
     persisted = False
     if persist:
-        resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
+        resolved_database_url = resolve_database_url(
+            database_url,
+            "CML_DATABASE_URL",
+        )
         if not resolved_database_url:
             raise typer.BadParameter(
                 "--persist requires --database-url or CML_DATABASE_URL"
@@ -635,7 +638,7 @@ def paper_live_source_command(
         ),
     ] = False,
 ) -> None:
-    resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
+    resolved_database_url = resolve_database_url(database_url, "CML_DATABASE_URL")
     if not resolved_database_url:
         raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
     created_at = _parse_generated_at(generated_at)
@@ -908,7 +911,7 @@ def paper_live_daemon_command(
             "--entry-policy-compare-output requires "
             "--entry-policy-compare-only"
         )
-    resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
+    resolved_database_url = resolve_database_url(database_url, "CML_DATABASE_URL")
     if not resolved_database_url:
         raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
     health = LocalHealthWriter.from_environment()
@@ -1407,7 +1410,7 @@ def paper_live_pair_command(
 ) -> None:
     if candle_run_id is None:
         raise typer.BadParameter("--candle-run-id is required")
-    resolved_database_url = database_url or os.environ.get("CML_DATABASE_URL")
+    resolved_database_url = resolve_database_url(database_url, "CML_DATABASE_URL")
     if not resolved_database_url:
         raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
     health = LocalHealthWriter.from_environment()

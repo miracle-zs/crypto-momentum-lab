@@ -6,6 +6,7 @@ from crypto_momentum_lab.config.credentials import (
     resolve_binance_credentials,
     resolve_role_credentials,
 )
+from crypto_momentum_lab.config.database_url import resolve_database_url
 from crypto_momentum_lab.config.loader import behavior_hash, load_runtime_config
 from crypto_momentum_lab.config.models import (
     BinanceCredentialConfig,
@@ -28,5 +29,6 @@ __all__ = [
     "credential_config_for_role",
     "load_runtime_config",
     "resolve_binance_credentials",
+    "resolve_database_url",
     "resolve_role_credentials",
 ]

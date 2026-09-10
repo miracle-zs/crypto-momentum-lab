@@ -26,6 +26,7 @@ from crypto_momentum_lab.config import (
     BinanceCredentialRole,
     CredentialResolutionError,
     ResolvedBinanceCredentials,
+    resolve_database_url,
     resolve_role_credentials,
 )
 from crypto_momentum_lab.domain.execution import (
@@ -4396,8 +4397,10 @@ def _observability_database_url(value: str | None) -> str:
 
 
 def _resolve_database_url(value: str | None, plane_env_var: str) -> str:
-    resolved = value or os.environ.get(plane_env_var) or os.environ.get(
-        "CML_DATABASE_URL"
+    resolved = resolve_database_url(
+        value,
+        plane_env_var,
+        "CML_DATABASE_URL",
     )
     if not resolved:
         raise typer.BadParameter(
