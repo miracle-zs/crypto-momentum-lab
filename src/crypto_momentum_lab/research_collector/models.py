@@ -192,6 +192,10 @@ class CollectorHealth:
     disk_free_bytes: int
     warning: bool
     paused: bool
+    market_state_gap_count: int = 0
+    last_market_state_gap_start: datetime | None = None
+    last_market_state_gap_end: datetime | None = None
+    last_market_state_gap_buckets: int = 0
 
 
 @dataclass(frozen=True, slots=True)

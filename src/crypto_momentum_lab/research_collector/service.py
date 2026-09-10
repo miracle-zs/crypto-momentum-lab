@@ -58,6 +58,7 @@ from crypto_momentum_lab.research_collector.storage import (
 log = structlog.get_logger()
 
 _STATE_KEY = tuple[str, str, datetime]
+_MARKET_STATE_BUCKET = timedelta(seconds=15)
 
 
 class ResearchStateCollector:
@@ -112,6 +113,10 @@ class ResearchStateCollector:
         self._persisted_rows = 0
         self._duplicate_rows = 0
         self._gap_count = 0
+        self._market_state_gap_count = 0
+        self._last_market_state_gap_start: datetime | None = None
+        self._last_market_state_gap_end: datetime | None = None
+        self._last_market_state_gap_buckets = 0
         self._connected = False
         self._paused = False
         self._stopping = False
@@ -175,7 +180,10 @@ class ResearchStateCollector:
             self._validate_collection_batch(record.collection_batch)
             self._pending_records[record.path] = record
             self._record_committed_keys[record.path] = set()
-            self._observe_received_states(record.collection_batch.states)
+            self._observe_received_states(
+                record.collection_batch.states,
+                source_kind=record.collection_batch.source_kind,
+            )
             await asyncio.to_thread(
                 self._sink.append,
                 record.collection_batch,
@@ -205,10 +213,16 @@ class ResearchStateCollector:
                 raise CollectorSequenceGap("Hub sequence must be positive")
             await self._prepare_hub_stream(collection_batch)
             if not self._accept_hub_cursor(collection_batch):
-                self._observe_received_states(collection_batch.states)
+                self._observe_received_states(
+                    collection_batch.states,
+                    source_kind=collection_batch.source_kind,
+                )
                 return _receipt_for_skipped_batch(collection_batch)
 
-        self._observe_received_states(collection_batch.states)
+        self._observe_received_states(
+            collection_batch.states,
+            source_kind=collection_batch.source_kind,
+        )
         observed_at = min(state.bucket_start for state in collection_batch.states)
         selection = await self._selector.selection_at(observed_at)
         selection = _materialize_selection(
@@ -328,6 +342,10 @@ class ResearchStateCollector:
             disk_free_bytes=snapshot.disk_free_bytes,
             warning=snapshot.state is CapacityState.WARNING,
             paused=self._paused or snapshot.state is CapacityState.PAUSED,
+            market_state_gap_count=self._market_state_gap_count,
+            last_market_state_gap_start=self._last_market_state_gap_start,
+            last_market_state_gap_end=self._last_market_state_gap_end,
+            last_market_state_gap_buckets=self._last_market_state_gap_buckets,
         )
 
     async def _consume_source_once(self) -> None:
@@ -540,6 +558,20 @@ class ResearchStateCollector:
                     ).isoformat()
                 ),
                 "capacity_state": None if snapshot is None else snapshot.state.value,
+                "market_state_gap_count": self._market_state_gap_count,
+                "last_market_state_gap_start": (
+                    None
+                    if self._last_market_state_gap_start is None
+                    else self._last_market_state_gap_start.isoformat()
+                ),
+                "last_market_state_gap_end": (
+                    None
+                    if self._last_market_state_gap_end is None
+                    else self._last_market_state_gap_end.isoformat()
+                ),
+                "last_market_state_gap_buckets": (
+                    self._last_market_state_gap_buckets
+                ),
                 "collector_bytes": None
                 if snapshot is None
                 else snapshot.collector_bytes,
@@ -651,10 +683,42 @@ class ResearchStateCollector:
     def _observe_received_states(
         self,
         states: tuple[MarketState15s, ...],
+        *,
+        source_kind: SourceKind,
     ) -> None:
-        latest = max(state.bucket_start for state in states)
-        if self._last_received_bucket is None or latest > self._last_received_bucket:
-            self._last_received_bucket = latest
+        buckets = sorted(
+            {
+                require_utc(state.bucket_start, "bucket_start")
+                for state in states
+            }
+        )
+        previous = self._last_received_bucket
+        for bucket in buckets:
+            if previous is not None and bucket > previous + _MARKET_STATE_BUCKET:
+                missing_buckets = int(
+                    (bucket - previous).total_seconds()
+                    // _MARKET_STATE_BUCKET.total_seconds()
+                ) - 1
+                gap_start = previous + _MARKET_STATE_BUCKET
+                gap_end = bucket - _MARKET_STATE_BUCKET
+                self._market_state_gap_count += 1
+                self._last_market_state_gap_start = gap_start
+                self._last_market_state_gap_end = gap_end
+                self._last_market_state_gap_buckets = missing_buckets
+                log.warning(
+                    "research_collector_market_state_gap",
+                    environment=self._config.environment,
+                    source_kind=source_kind.value,
+                    previous_bucket=previous.isoformat(),
+                    next_bucket=bucket.isoformat(),
+                    gap_start=gap_start.isoformat(),
+                    gap_end=gap_end.isoformat(),
+                    missing_bucket_count=missing_buckets,
+                )
+            if previous is None or bucket > previous:
+                previous = bucket
+        if previous is not None:
+            self._last_received_bucket = previous
 
     def _ensure_capacity(self) -> CapacitySnapshot:
         try:

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -205,6 +205,41 @@ async def test_collector_recovers_after_hub_stream_reset(tmp_path: Path) -> None
     assert health.last_sequence == 1
     assert health.last_persisted_bucket == recovered.bucket_start
     assert health.pending_spool_files == 0
+
+
+async def test_collector_records_market_state_time_gap(tmp_path: Path) -> None:
+    config = CollectorConfig(
+        environment="research",
+        root=tmp_path,
+        soft_limit_bytes=1024**2,
+        hard_limit_bytes=2 * 1024**2,
+        global_warning_free_bytes=2,
+        global_pause_free_bytes=1,
+        window_seconds=15,
+        late_tolerance_seconds=0,
+        max_spool_bytes=1024**2,
+    )
+    collector = ResearchStateCollector(
+        config=config,
+        source=_IdleSource(),
+        selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
+    )
+
+    first = fixture_state("BTCUSDT", 0)
+    after_gap = fixture_state("BTCUSDT", 2)
+    await collector.ingest(_batch(first, 1))
+    await collector.ingest(_batch(after_gap, 2))
+
+    health = await collector.health()
+    assert health.market_state_gap_count == 1
+    assert health.last_market_state_gap_start == first.bucket_start + timedelta(
+        seconds=15
+    )
+    assert health.last_market_state_gap_end == first.bucket_start + timedelta(
+        seconds=15
+    )
+    assert health.last_market_state_gap_buckets == 1
+    assert health.selected_rows == 2
 
 
 async def test_health_marker_tracks_durable_progress_pause_and_stop(tmp_path):
