@@ -436,6 +436,11 @@ def run_paired_paper_live_daemon(
             closed_candle = (
                 None if aggregator is None else aggregator.observe(state)
             )
+            if aggregator is not None:
+                _log_candle_gap_events(
+                    aggregator=aggregator,
+                    account_index=index,
+                )
             if (
                 closed_candle is None
                 and config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
@@ -1273,6 +1278,8 @@ def run_paper_live_daemon(
                 if candle_aggregator is None
                 else candle_aggregator.observe(state)
             )
+            if candle_aggregator is not None:
+                _log_candle_gap_events(aggregator=candle_aggregator)
             if (
                 closed_candle is None
                 and config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
@@ -1643,6 +1650,24 @@ def _reset_strategy_for_gap(
 
 def _strategy_max_gap_seconds(strategy: RuntimeStrategy) -> int:
     return strategy.required_data().max_gap_seconds
+
+
+def _log_candle_gap_events(
+    *,
+    aggregator: Candle15mAggregator,
+    account_index: int | None = None,
+) -> None:
+    for gap in aggregator.drain_gap_events():
+        log.warning(
+            "paper_closed_candle_gap_detected",
+            symbol=gap.symbol,
+            account_index=account_index,
+            previous_candle_start=gap.previous_candle_start,
+            observed_candle_start=gap.observed_candle_start,
+            dropped_minute_count=gap.dropped_minute_count,
+            missing_candle_count=gap.missing_candle_count,
+            cumulative_gap_count=aggregator.gap_count,
+        )
 
 
 def _run_async[T](awaitable: Coroutine[object, object, T]) -> T:

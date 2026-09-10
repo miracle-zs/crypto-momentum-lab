@@ -1,3 +1,4 @@
+from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -18,7 +19,7 @@ from crypto_momentum_lab.strategy_runner.position_exit import (
     position_exit_reason,
 )
 
-__all__ = ["ClosedCandle15m"]
+__all__ = ["Candle15mAggregator", "Candle15mGap", "ClosedCandle15m"]
 
 
 class PaperPositionStatus(StrEnum):
@@ -78,10 +79,52 @@ class _OfficialCandleAccumulator:
     closed_minute_starts: set[datetime]
 
 
+@dataclass(frozen=True, slots=True)
+class Candle15mGap:
+    """A local aggregation window that was discarded before completion."""
+
+    symbol: str
+    previous_candle_start: datetime
+    observed_candle_start: datetime
+    dropped_minute_count: int
+    missing_candle_count: int
+
+    def __post_init__(self) -> None:
+        if not self.symbol.strip():
+            raise ValueError("symbol must not be empty")
+        for value, field_name in (
+            (self.previous_candle_start, "previous_candle_start"),
+            (self.observed_candle_start, "observed_candle_start"),
+        ):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError(f"{field_name} must be timezone-aware")
+        if self.observed_candle_start <= self.previous_candle_start:
+            raise ValueError("observed_candle_start must be after previous")
+        if self.dropped_minute_count < 0 or self.dropped_minute_count > 15:
+            raise ValueError("dropped_minute_count must be in [0, 15]")
+        if self.missing_candle_count < 0:
+            raise ValueError("missing_candle_count must be non-negative")
+
+
 class Candle15mAggregator:
     def __init__(self) -> None:
         self._candles: dict[str, _OfficialCandleAccumulator] = {}
         self._last_closed_candle_start: dict[str, datetime] = {}
+        self._gap_events: deque[Candle15mGap] = deque(maxlen=256)
+        self._gap_count = 0
+
+    @property
+    def gap_count(self) -> int:
+        """Return the cumulative number of discarded aggregation windows."""
+
+        return self._gap_count
+
+    def drain_gap_events(self) -> tuple[Candle15mGap, ...]:
+        """Return and clear recently observed gaps."""
+
+        events = tuple(self._gap_events)
+        self._gap_events.clear()
+        return events
 
     def observe(self, state: MarketState15s) -> ClosedCandle15m | None:
         if (
@@ -98,6 +141,13 @@ class Candle15mAggregator:
             return None
         current = self._candles.get(state.symbol)
         if current is None:
+            if last_closed_start is not None and candle_start > last_closed_start:
+                self._record_gap(
+                    symbol=state.symbol,
+                    previous_candle_start=last_closed_start,
+                    observed_candle_start=candle_start,
+                    dropped_minute_count=0,
+                )
             current = _new_official_candle_accumulator(
                 candle_start=candle_start,
                 open_price=state.closed_kline_1m_open_price,
@@ -107,6 +157,15 @@ class Candle15mAggregator:
         elif candle_start < current.candle_start:
             return None
         elif candle_start > current.candle_start:
+            self._record_gap(
+                symbol=state.symbol,
+                previous_candle_start=current.candle_start,
+                observed_candle_start=candle_start,
+                dropped_minute_count=max(
+                    0,
+                    15 - len(current.closed_minute_starts),
+                ),
+            )
             current = _new_official_candle_accumulator(
                 candle_start=candle_start,
                 open_price=state.closed_kline_1m_open_price,
@@ -138,6 +197,30 @@ class Candle15mAggregator:
         self._last_closed_candle_start[state.symbol] = candle_start
         self._candles.pop(state.symbol, None)
         return closed
+
+    def _record_gap(
+        self,
+        *,
+        symbol: str,
+        previous_candle_start: datetime,
+        observed_candle_start: datetime,
+        dropped_minute_count: int,
+    ) -> None:
+        interval_seconds = 15 * 60
+        elapsed_seconds = (
+            observed_candle_start - previous_candle_start
+        ).total_seconds()
+        interval_count = int(elapsed_seconds // interval_seconds)
+        self._gap_events.append(
+            Candle15mGap(
+                symbol=symbol,
+                previous_candle_start=previous_candle_start,
+                observed_candle_start=observed_candle_start,
+                dropped_minute_count=dropped_minute_count,
+                missing_candle_count=max(0, interval_count - 1),
+            )
+        )
+        self._gap_count += 1
 
 
 @dataclass(frozen=True, slots=True)

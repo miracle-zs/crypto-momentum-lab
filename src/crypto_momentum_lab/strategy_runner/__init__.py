@@ -53,6 +53,7 @@ from crypto_momentum_lab.strategy_runner.paper import (
 )
 from crypto_momentum_lab.strategy_runner.portfolio import (
     Candle15mAggregator,
+    Candle15mGap,
     ClosedCandle15m,
     PaperExitConfig,
     PaperExitMode,
@@ -106,6 +107,7 @@ __all__ = [
     "PaperExitConfig",
     "PaperExitMode",
     "Candle15mAggregator",
+    "Candle15mGap",
     "ClosedCandle15m",
     "PaperPosition",
     "PaperPositionStatus",

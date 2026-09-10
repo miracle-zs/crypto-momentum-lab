@@ -10,6 +10,7 @@ from crypto_momentum_lab.strategy_runner.fills import (
 )
 from crypto_momentum_lab.strategy_runner.portfolio import (
     Candle15mAggregator,
+    Candle15mGap,
     ClosedCandle15m,
     PaperExitConfig,
     PaperExitMode,
@@ -169,6 +170,72 @@ def test_15m_aggregator_does_not_emit_an_incomplete_official_candle() -> None:
     )
 
     assert closed is None
+
+
+def test_15m_aggregator_reports_incomplete_and_skipped_windows() -> None:
+    aggregator = Candle15mAggregator()
+    candle_start = datetime(2026, 7, 26, 0, 0, tzinfo=UTC)
+
+    assert aggregator.observe(
+        _state_with_closed_1m(
+            candle_start=candle_start,
+            minute_index=0,
+            open_price=Decimal("100"),
+            close_price=Decimal("100.5"),
+        )
+    ) is None
+    assert aggregator.observe(
+        _state_with_closed_1m(
+            candle_start=candle_start + timedelta(minutes=30),
+            minute_index=14,
+            open_price=Decimal("101"),
+            close_price=Decimal("99"),
+        )
+    ) is None
+
+    assert aggregator.gap_count == 1
+    assert aggregator.drain_gap_events() == (
+        Candle15mGap(
+            symbol="BTCUSDT",
+            previous_candle_start=candle_start,
+            observed_candle_start=candle_start + timedelta(minutes=30),
+            dropped_minute_count=14,
+            missing_candle_count=1,
+        ),
+    )
+    assert aggregator.drain_gap_events() == ()
+
+
+def test_15m_aggregator_reports_gap_after_completed_candle() -> None:
+    aggregator = Candle15mAggregator()
+    candle_start = datetime(2026, 7, 26, 0, 0, tzinfo=UTC)
+    for minute_index in range(15):
+        aggregator.observe(
+            _state_with_closed_1m(
+                candle_start=candle_start,
+                minute_index=minute_index,
+                open_price=Decimal("100"),
+                close_price=Decimal("100.5"),
+            )
+        )
+
+    assert aggregator.observe(
+        _state_with_closed_1m(
+            candle_start=candle_start + timedelta(minutes=30),
+            minute_index=0,
+            open_price=Decimal("101"),
+            close_price=Decimal("101.5"),
+        )
+    ) is None
+    assert aggregator.drain_gap_events() == (
+        Candle15mGap(
+            symbol="BTCUSDT",
+            previous_candle_start=candle_start,
+            observed_candle_start=candle_start + timedelta(minutes=30),
+            dropped_minute_count=0,
+            missing_candle_count=1,
+        ),
+    )
 
 
 def test_15m_aggregator_ignores_late_state_from_a_closed_candle() -> None:

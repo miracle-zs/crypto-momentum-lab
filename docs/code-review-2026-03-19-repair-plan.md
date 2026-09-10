@@ -17,6 +17,7 @@
 - P1 #14–#19：WebSocket 实时旁路有界异步化、durable 背压超时、磁盘保护接线、manifest journal 回放、aggTrade 恢复游标、archive 坏 writer 隔离。
 - P1 #21–#23：portfolio 批量查询与 commit 后缓存、connection pool 关闭锁、quality event 批量写入。
 - P2 #26、#27、#29、#33、#34：grace 平仓遵守最短持仓时间；EMA 入场过滤按 LONG/SHORT 选择 ask/bid；LIMIT 价格按最终交易所 BUY/SELL 方向向外量化；删除不可达 URL 校验；重复 client order 冲突会回滚整笔 prepare 事务。
+- P2 #24（第一阶段）：本地 15m 聚合器对不完整窗口、缺分钟和跳过窗口生成有界 gap 事件；paper daemon 输出告警，仍拒绝合成残缺 K 线。权威官方 candle source 的历史补取继续作为部署配置项。
 - D1–D3、D5、D9：按需选择 live compose、修正 strategies 路径、多账户 ops monitor、live position label 预检、补齐 gainer10 的部署断言。
 
 验收方式：相关 unit/smoke/e2e 测试、PostgreSQL `tests/integration`（50 passed）、ruff、compileall 和 `git diff --check` 已通过。Docker Compose 的 `migrate` 一次性任务仍受 Docker Hub BuildKit frontend 拉取 EOF 影响；已在同一 PostgreSQL 容器上用本地 `.venv` 的 Alembic 成功升级到 head。一个既有的 market-data cleanup 测试会挂起，已单独隔离。未连接真实服务器，也未执行容器重启。
@@ -25,7 +26,7 @@
 
 1. **策略一致性**：按账户提交 cooldown；为批处理 paper 增加 position/exit 结果，建立与 daemon 的边界对照测试。
 2. **数据库资源隔离**：为 runtime state、quality/manifest、maintenance 查询定义并发预算，先以观测数据确认连接池大小，再拆 maintenance pool。
-3. **P2 正确性收敛**：继续处理 24–34，优先 candle 缺口与 stale/fill 监测语义；#26/#27/#29/#33/#34 已在第一批收敛。
+3. **P2 正确性收敛**：继续处理 24–34，优先官方 candle 历史补取与 stale/fill 监测语义；#24 的本地缺口可观测性、#26/#27/#29/#33/#34 已在第一批收敛。
 4. **架构收敛**：先抽取无业务语义差异的序列化/解析 helper；A2、A4、A6、A7 在补齐 round-trip 和调用方测试后再重构，暂不做大规模 compose 或入口重写。
 5. **部署条件项**：确认真实 nginx 上层鉴权和数据库备份/恢复演练证据；若证据不足，再分别补 health probe 兼容的应用鉴权和可演练的备份作业。
 
