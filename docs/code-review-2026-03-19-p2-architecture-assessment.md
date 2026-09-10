@@ -40,7 +40,7 @@
 |---|---|---|
 | A1 | 已完成第一阶段 | 两个未被 Compose 使用的 PostgreSQL readiness CLI（SQLAlchemy 与 psycopg）及其测试已删除；Compose 继续只使用不启动 Python、不连接数据库的 `cml-local-healthcheck`。同时移除只供旧 DB 探针读取的 `CML_HEALTHCHECK_RUN_ID(S)` 环境变量。research_collector 的独立健康检查保留，因为它检查的是 collector 自己的状态文件。 |
 | A2 | 成立，值得重构 | [live CLI](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/live_rollout/main.py:25)与[live postgres runtime](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/live_rollout/postgres_runtime.py:12)导入 shadow CLI 的查询私有函数，形成下层依赖 app 入口的耦合。下沉账户/风险/规则查询服务有明确收益。不过导入的是读取 helper，不能推导 live 因而获得 shadow 的“抑制写”语义。 |
-| A3 | 重复成立，统一基类和 payload 键不宜照做 | [orderflow](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategies/order_flow_impulse/runtime.py:50)与[liquidation](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategies/liquidation_cascade/runtime.py:47)存在相同状态管理；orderflow 已另有缓存保护/淘汰。compression 的[signal_buffers](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategies/compression_breakout/runtime.py:107)保存按 signal_interval_seconds 聚合后的状态，并有 pending_signal_states，和 15s market buffer 不同。已有 runtime_checkpoint helper 可继续抽取少量组合逻辑，但强行同基类、同键会掩盖差异并需要旧 checkpoint 兼容迁移。 |
+| A3 | 已完成第一阶段 | [orderflow](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategies/order_flow_impulse/runtime.py:49)与[liquidation](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategies/liquidation_cascade/runtime.py:46)现在组合使用[StrategyRuntimeState](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategies/runtime_state.py:17)，共用 rolling buffer、warmup/cooldown、reset、checkpoint 恢复和事件前状态机；策略仍各自提供 required_data、事件发现和 signal/candidate 特征构造。payload 键仍由策略显式指定并保持 `market_state_buffers` 兼容；compression 的 `signal_buffers` 与 pending_signal_states 继续独立，不做基类或 checkpoint 迁移。 |
 | A4 | 成立，收益明确 | [pair CLI](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/strategy_runner/main.py:1440)确实七次构造 identity，并有序数化参数和多段 account config。适合内部先引入账户列表/统一构造器，再为新配置格式保留旧 CLI 转换层。不是必须一次性破坏部署命令。 |
 | A5a | 成立，配置维护债 | 对 YAML 解析后核对：primary 与 account-2/3/4 的 execution command 均 34 tokens，live-strategy 均 74 tokens，选项骨架重复。[附加账户配置](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.live.accounts.yaml:1)可由同一账户规格生成。现有 compose 已有共享锚点，问题主要在 command/account 差分；仅增加 extends 不会自动参数化列表。不能无条件把所有 CLI 参数改为 env，需同时改入口及配置测试。 |
 | A5b | 部分成立，healthcheck 推论已失效 | [market-data 列表](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.server.yaml:134)和[dashboard 列表](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.server.yaml:635)确实各硬编码相同 8 个 run-id。旧的 `CML_HEALTHCHECK_RUN_ID(S)` 环境变量及其 DB 探针消费者已删除，因此原“漏更新变量导致当前生产漏检查”的因果不再存在；账户规格统一仍属于 A5 的独立维护项。 |
@@ -66,6 +66,7 @@
 ### 本轮第二批维护收敛
 
 - **A1 已完成第一阶段**：删除未被 Compose 使用的两个 DB readiness CLI、对应测试及旧的 `CML_HEALTHCHECK_RUN_ID(S)` 配置；生产只保留本地文件心跳探针。
+- **A3 已完成第一阶段**：orderflow 与 liquidation 共用组合式 runtime state 和 warmup/cooldown 状态机；保留各策略事件模型及 `market_state_buffers` checkpoint 兼容，compression 变体不强行合并。
 - **#35 已完成第一阶段**：state/quote hub 共用字符串和 datetime 字段解析 helper；state 仍接受数值型 decimal、quote 仍只接受 decimal string，两个 hub 继续抛出各自协议异常。
 - **#36 已完成**：`order_repository` 与 `account_repository` 共用 PostgreSQL `jsonable` helper，保留原有枚举、Decimal、时区 datetime、容器和 fallback 字符串语义。
 - **#37 已完成**：paper 与 daemon 共用候选成交边界解析函数，统一目标时间、过期时间和闭合状态的判断；原有 paper/daemon 行为测试保持通过。
@@ -73,7 +74,7 @@
 - **#41 已完成**：配置了 coordinator 的 `MarketDataCaptureService.submit` 现在经过 coordinator，保留 service 的磁盘保护与队列溢出处理，同时让生产入口使用 coordinator 的 symbol 过滤路径。
 - **#42 已完成**：`load_active_entry_symbols_at` 直接在数据库端选择非 `EXTENDED` membership，保留最新 activated snapshot 与 `observed_at` 截止语义。
 
-本轮没有处理 A3、A5、A8、A9 等仍需进一步权衡的维护项，也没有处理鉴权 D8；这些不应被本轮测试通过数误记为已完成。
+本轮没有处理 A5、A8、A9 等仍需进一步权衡的维护项，也没有处理鉴权 D8；这些不应被本轮测试通过数误记为已完成。
 
 ## 验证记录与建议顺序
 
@@ -81,6 +82,7 @@
 - AST 比较确认 #36、#38 完全相同，#37 为不同写法的等价分支。
 - 本地只读样例复现 #26 最短持仓被 grace 绕过，以及 A6 质量字段往返丢失。
 - A1 删除后的健康检查回归由 Compose manifest、local shell probe 和相关应用启动测试覆盖；不再保留独立 DB readiness CLI 测试。
+- A3 的 orderflow、liquidation、compression 与 runtime state/strategy runner 回归共 158 项通过；新增共享 runtime state 三个源文件的 mypy 检查通过。
 - 本轮优先修正确性：#26、#25、启用相应配置时的 #27、价格边界契约明确后的 #29；A6 补 round-trip 并核查使用完整 buffer checkpoint 的路径。
 - 维护重构优先 A2、A4、A11，其次小型纯 helper 收敛。#39、#40、#43、A10 不应按当前运行 bug 修；A5b、A8 和 A1 的原描述应修订。
 

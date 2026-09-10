@@ -1,4 +1,3 @@
-from collections import deque
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -8,12 +7,10 @@ from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
-    RejectionReason,
     StrategyCheckpoint,
     StrategyDataRequirement,
     StrategyDecision,
     StrategyMetadata,
-    StrategyRejection,
     StrategyRunIdentity,
     StrategySide,
     StrategySignal,
@@ -27,9 +24,9 @@ from crypto_momentum_lab.strategies.order_flow_impulse.event_study import (
     OrderFlowImpulseEvent,
     find_order_flow_impulses,
 )
-from crypto_momentum_lab.strategies.runtime_checkpoint import (
-    market_state_payload,
-    restore_market_state_buffers,
+from crypto_momentum_lab.strategies.runtime_state import (
+    StrategyRuntimeState,
+    evaluate_buffered_state,
 )
 
 
@@ -55,11 +52,9 @@ class OrderFlowImpulseRuntimeStrategy:
     ) -> None:
         self._config = config
         self._identity = identity
-        self._buffers: dict[str, deque[MarketState15s]] = {}
-        self._warmup: dict[str, int] = {}
-        self._cooldown_remaining: dict[str, int] = {}
-        self._last_processed: dict[str, datetime] = {}
-        self._signal_sequence = 0
+        self._runtime = StrategyRuntimeState(
+            buffer_payload_key="market_state_buffers"
+        )
 
     def metadata(self) -> StrategyMetadata:
         return StrategyMetadata(name="orderflow_impulse", version="v0")
@@ -80,21 +75,10 @@ class OrderFlowImpulseRuntimeStrategy:
         )
 
     def restore(self, checkpoint: StrategyCheckpoint) -> None:
-        self._warmup = dict(checkpoint.warmup_buckets_by_symbol)
-        self._cooldown_remaining = dict(checkpoint.cooldown_buckets_remaining_by_symbol)
-        self._last_processed = dict(checkpoint.last_processed_at_by_symbol)
-        restored_buffers = checkpoint.payload.get("market_state_buffers")
-        if isinstance(restored_buffers, dict):
-            self._buffers = restore_market_state_buffers(
-                restored_buffers,
-                maxlen=self.required_data().warmup_buckets + 16,
-            )
-            for symbol, buffer in self._buffers.items():
-                self._warmup[symbol] = len(buffer)
-        else:
-            self._buffers = {}
-            self._warmup = {}
-        self._signal_sequence = _checkpoint_sequence(checkpoint.payload)
+        self._runtime.restore(
+            checkpoint,
+            max_buffer_length=self.required_data().warmup_buckets + 16,
+        )
 
     def restore_checkpoint(self, checkpoint: StrategyCheckpoint) -> None:
         self.restore(checkpoint)
@@ -106,40 +90,33 @@ class OrderFlowImpulseRuntimeStrategy:
         market-state table replays this method during restart so warming does
         not advance cooldowns or signal-id sequences.
         """
-        if state.close_price is None:
-            return
-        buffer = self._buffers.setdefault(
-            state.symbol,
-            deque(maxlen=self.required_data().warmup_buckets + 16),
+        self._runtime.warm_market_state(
+            state,
+            max_buffer_length=self.required_data().warmup_buckets + 16,
         )
-        buffer.append(state)
-        self._warmup[state.symbol] = len(buffer)
 
     def reset_symbol(self, symbol: str) -> None:
         """Drop buffered state after the live source skips a data gap."""
-        self._buffers.pop(symbol, None)
-        self._warmup.pop(symbol, None)
-        self._cooldown_remaining.pop(symbol, None)
-        self._last_processed.pop(symbol, None)
+        self._runtime.reset_symbol(symbol)
 
     @property
     def buffered_symbol_count(self) -> int:
         """Return the number of symbols with a derived rolling buffer."""
 
-        return len(self._buffers)
+        return len(self._runtime.buffers)
 
     @property
     def buffered_state_count(self) -> int:
         """Return the total number of retained rolling states."""
 
-        return sum(len(buffer) for buffer in self._buffers.values())
+        return sum(len(buffer) for buffer in self._runtime.buffers.values())
 
     def cache_protected_symbols(self) -> frozenset[str]:
         """Return symbols whose strategy cooldown must survive cache pruning."""
 
         return frozenset(
             symbol
-            for symbol, remaining in self._cooldown_remaining.items()
+            for symbol, remaining in self._runtime.cooldown_remaining.items()
             if remaining > 0
         )
 
@@ -170,16 +147,16 @@ class OrderFlowImpulseRuntimeStrategy:
         protected.update(self.cache_protected_symbols())
         cutoff = now - inactive_after
         candidates = (
-            set(self._buffers)
-            | set(self._warmup)
-            | set(self._cooldown_remaining)
-            | set(self._last_processed)
+            set(self._runtime.buffers)
+            | set(self._runtime.warmup)
+            | set(self._runtime.cooldown_remaining)
+            | set(self._runtime.last_processed)
         )
         evicted: list[str] = []
         for symbol in sorted(candidates):
             if symbol in protected:
                 continue
-            last_processed = self._last_processed.get(symbol)
+            last_processed = self._runtime.last_processed.get(symbol)
             if last_processed is not None and last_processed >= cutoff:
                 continue
             self.reset_symbol(symbol)
@@ -195,139 +172,47 @@ class OrderFlowImpulseRuntimeStrategy:
     ) -> StrategyDecision:
         """Evaluate one state without committing shared paired-run cooldown."""
 
-        saved_cooldown = self._cooldown_remaining
-        self._cooldown_remaining = {}
+        saved_cooldown = self._runtime.cooldown_remaining
+        self._runtime.cooldown_remaining = {}
         try:
             return self.on_market_state(state)
         finally:
-            self._cooldown_remaining = saved_cooldown
+            self._runtime.cooldown_remaining = saved_cooldown
 
     def on_market_state(self, state: MarketState15s) -> StrategyDecision:
-        self._last_processed[state.symbol] = state.bucket_start
-        if state.close_price is None:
-            return self._decision(
-                rejections=(
-                    StrategyRejection(
-                        reason=RejectionReason.MISSING_REQUIRED_PRICE,
-                        symbol=state.symbol,
-                        bucket_start=state.bucket_start,
-                        details={"field": "close_price"},
-                    ),
-                )
-            )
-
         requirement = self.required_data()
-        buffer = self._buffers.setdefault(
-            state.symbol,
-            deque(maxlen=requirement.warmup_buckets + 16),
-        )
-        buffer.append(state)
-        self._warmup[state.symbol] = len(buffer)
-        if len(buffer) < requirement.warmup_buckets:
-            return self._decision(
-                rejections=(
-                    StrategyRejection(
-                        reason=RejectionReason.INSUFFICIENT_WARMUP,
-                        symbol=state.symbol,
-                        bucket_start=state.bucket_start,
-                        details={
-                            "have": len(buffer),
-                            "need": requirement.warmup_buckets,
-                        },
-                    ),
-                )
-            )
-
-        cooldown = self._cooldown_remaining.get(state.symbol, 0)
-        if cooldown > 0:
-            self._cooldown_remaining[state.symbol] = cooldown - 1
-            return self._decision(
-                rejections=(
-                    StrategyRejection(
-                        reason=RejectionReason.COOLDOWN_ACTIVE,
-                        symbol=state.symbol,
-                        bucket_start=state.bucket_start,
-                        details={"remaining": cooldown},
-                    ),
-                )
-            )
-
-        event = _latest_event_for_state(
-            tuple(buffer),
-            self._config.event_config,
+        return evaluate_buffered_state(
+            self._runtime,
             state,
+            warmup_buckets=requirement.warmup_buckets,
+            max_buffer_length=requirement.warmup_buckets + 16,
+            cooldown_buckets=self._config.event_config.cooldown_buckets,
+            find_event=self._find_event,
+            build_signal_and_candidate=self._build_signal_and_candidate,
         )
-        if event is None:
-            return self._decision(
-                rejections=(
-                    StrategyRejection(
-                        reason=RejectionReason.NO_SIGNAL,
-                        symbol=state.symbol,
-                        bucket_start=state.bucket_start,
-                        details={"state": "evaluated"},
-                    ),
-                )
-            )
-
-        signal, candidate = self._build_signal_and_candidate(
-            event,
-            detected_at=state.bucket_end,
-        )
-        self._cooldown_remaining[state.symbol] = (
-            self._config.event_config.cooldown_buckets
-        )
-        return self._decision(signals=(signal,), candidates=(candidate,))
 
     def checkpoint(
         self,
         *,
         include_market_state_buffers: bool = True,
     ) -> StrategyCheckpoint:
-        payload: dict[str, JsonValue] = {
-            "buffer_sizes": {
-                symbol: len(buffer) for symbol, buffer in self._buffers.items()
-            },
-            "signal_sequence": self._signal_sequence,
-        }
-        if include_market_state_buffers:
-            payload["market_state_buffers"] = {
-                symbol: [market_state_payload(state) for state in buffer]
-                for symbol, buffer in self._buffers.items()
-            }
-        return StrategyCheckpoint(
-            last_processed_at_by_symbol=dict(self._last_processed),
-            warmup_buckets_by_symbol=dict(self._warmup),
-            cooldown_buckets_remaining_by_symbol=dict(self._cooldown_remaining),
-            payload=payload,
-        )
-
-    def _decision(
-        self,
-        *,
-        signals: tuple[StrategySignal, ...] = (),
-        candidates: tuple[OrderIntentCandidate, ...] = (),
-        rejections: tuple[StrategyRejection, ...] = (),
-    ) -> StrategyDecision:
-        return StrategyDecision(
-            signals=signals,
-            candidates=candidates,
-            rejections=rejections,
+        return self._runtime.checkpoint(
+            include_market_state_buffers=include_market_state_buffers
         )
 
     def _build_signal_and_candidate(
         self,
         event: OrderFlowImpulseEvent,
-        *,
         detected_at: datetime,
     ) -> tuple[StrategySignal, OrderIntentCandidate]:
-        self._signal_sequence += 1
+        self._runtime.signal_sequence += 1
         side = _strategy_side(event.direction)
         signal_id = deterministic_signal_id(
             identity=self._identity,
             symbol=event.symbol,
             side=side,
             detected_at=detected_at,
-            sequence=self._signal_sequence,
+            sequence=self._runtime.signal_sequence,
         )
         features = _features(event)
         signal = StrategySignal(
@@ -371,6 +256,13 @@ class OrderFlowImpulseRuntimeStrategy:
             features=features,
         )
         return signal, candidate
+
+    def _find_event(
+        self,
+        states: tuple[MarketState15s, ...],
+        state: MarketState15s,
+    ) -> OrderFlowImpulseEvent | None:
+        return _latest_event_for_state(states, self._config.event_config, state)
 
 
 def _latest_event_for_state(
@@ -427,15 +319,6 @@ def _features(event: OrderFlowImpulseEvent) -> dict[str, JsonValue]:
 
 def _optional_decimal(value: Decimal | None) -> str | None:
     return None if value is None else str(value)
-
-
-def _checkpoint_sequence(payload: dict[str, JsonValue]) -> int:
-    value = payload.get("signal_sequence", 0)
-    try:
-        sequence = int(str(value))
-    except (TypeError, ValueError):
-        return 0
-    return max(sequence, 0)
 
 
 def _require_aware_datetime(value: datetime, field_name: str) -> None:
