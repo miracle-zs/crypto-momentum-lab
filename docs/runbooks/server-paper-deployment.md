@@ -40,13 +40,16 @@ run IDs are retained for historical analysis.
 
 For all `candle_15m` exits, the candle containing the entry is observation-only;
 the first eligible exit candle is the next complete 15-minute candle.
+The configured Binance REST source is authoritative for these exits. If its
+request, response, or completeness check fails, the runner keeps the position
+open, records the source error, and retries on the next backoff window; it does
+not synthesize a partial candle or fall back to a different close price.
 
 The previously deployed Compression, 45-minute, and C1 imbalance accounts are
 kept in the database for historical analysis but are no longer active runners.
 
 No Liquidation trading account is deployed. The preregistered C0/C1/C2 replay
-found no candidate that passed both train and validation gates; see
-`docs/research/liquidation-entry-replay-study-2026-08-11.md`.
+found no candidate that passed both train and validation gates.
 
 The B1, B2, and B8 filters are applied after the shared baseline Orderflow decision.
 Rejected signals still advance the baseline strategy cooldown, so these accounts

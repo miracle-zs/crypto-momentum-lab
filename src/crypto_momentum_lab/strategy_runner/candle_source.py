@@ -310,16 +310,28 @@ class BinanceRestClosedCandle15mSource:
                     "limit": limit,
                 },
             )
-            rows = response.json()
+            try:
+                rows = response.json()
+            except ValueError as error:
+                raise ClosedCandleSourceError(
+                    f"Binance returned invalid 15m candle JSON for {symbol}"
+                ) from error
             if not isinstance(rows, list):
-                raise ValueError("Binance kline response must be a list")
-            parsed = tuple(
-                candle
-                for row in rows
-                if (candle := _parse_kline(symbol, row)) is not None
-                and start <= candle.candle_start < end
-                and candle.candle_end <= end
-            )
+                raise ClosedCandleSourceError(
+                    f"Binance 15m candle response for {symbol} must be a list"
+                )
+            try:
+                parsed = tuple(
+                    candle
+                    for row in rows
+                    if (candle := _parse_kline(symbol, row)) is not None
+                    and start <= candle.candle_start < end
+                    and candle.candle_end <= end
+                )
+            except (ArithmeticError, TypeError, ValueError) as error:
+                raise ClosedCandleSourceError(
+                    f"Binance returned malformed 15m candle data for {symbol}"
+                ) from error
             for candle in parsed:
                 self._candles.setdefault(symbol, {})[candle.candle_start] = candle
             if not parsed:
@@ -364,8 +376,16 @@ class BinanceRestClosedCandle15mSource:
                     error.response.status_code in {418, 429}
                     or error.response.status_code >= 500
                 )
-                if not retryable or attempt == len(self._retry_delays):
-                    raise
+                if not retryable:
+                    raise ClosedCandleSourceError(
+                        "Binance 15m candle request failed with HTTP "
+                        f"{error.response.status_code}"
+                    ) from error
+                if attempt == len(self._retry_delays):
+                    raise ClosedCandleSourceError(
+                        "Binance 15m candle request failed after retries "
+                        f"with HTTP {error.response.status_code}"
+                    ) from error
                 retry_after = error.response.headers.get("Retry-After")
                 try:
                     server_delay = float(retry_after) if retry_after else 0.0
@@ -379,12 +399,16 @@ class BinanceRestClosedCandle15mSource:
                 httpx.ReadError,
                 httpx.RemoteProtocolError,
                 httpx.TimeoutException,
-            ):
+            ) as error:
                 if attempt == len(self._retry_delays):
-                    raise
+                    raise ClosedCandleSourceError(
+                        "Binance 15m candle request failed after retries"
+                    ) from error
             delay = self._retry_delays[attempt]
             time.sleep(delay + random.uniform(0.0, delay * 0.25))
-        raise AssertionError("retry loop exhausted")
+        raise ClosedCandleSourceError(
+            "Binance 15m candle request retry loop exhausted"
+        )
 
     def _prune(
         self,

@@ -217,6 +217,52 @@ def test_binance_candle_source_fails_closed_when_a_candle_is_missing() -> None:
         source.close()
 
 
+def test_binance_candle_source_normalizes_http_failures() -> None:
+    source = BinanceRestClosedCandle15mSource(
+        base_url="https://fapi.binance.test",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(400, json={"code": -1121})
+        ),
+        clock=lambda: datetime(2026, 8, 1, 13, 0, tzinfo=UTC),
+    )
+    try:
+        with pytest.raises(ClosedCandleSourceError, match="HTTP 400"):
+            source.load_closed_candles(
+                symbol="BTCUSDT",
+                start=datetime(2026, 8, 1, 12, 30, tzinfo=UTC),
+                end=datetime(2026, 8, 1, 13, 0, tzinfo=UTC),
+            )
+    finally:
+        source.close()
+
+
+def test_binance_candle_source_normalizes_exhausted_transport_failures() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ReadTimeout("temporary timeout", request=request)
+
+    source = BinanceRestClosedCandle15mSource(
+        base_url="https://fapi.binance.test",
+        transport=httpx.MockTransport(handler),
+        clock=lambda: datetime(2026, 8, 1, 13, 0, tzinfo=UTC),
+    )
+    source._retry_delays = (0.0,)
+    try:
+        with pytest.raises(ClosedCandleSourceError, match="after retries"):
+            source.load_closed_candles(
+                symbol="BTCUSDT",
+                start=datetime(2026, 8, 1, 12, 30, tzinfo=UTC),
+                end=datetime(2026, 8, 1, 13, 0, tzinfo=UTC),
+            )
+    finally:
+        source.close()
+
+    assert attempts == 2
+
+
 def test_binance_candle_source_retries_read_timeout() -> None:
     attempts = 0
 
