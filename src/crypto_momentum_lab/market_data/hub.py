@@ -25,6 +25,10 @@ from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.market_data.protocol_parsing import (
+    require_datetime,
+    require_string,
+)
 
 log = structlog.get_logger()
 
@@ -1040,10 +1044,7 @@ def _encode_subscription(
 
 
 def _require_string(payload: dict[str, object], name: str) -> str:
-    value = payload.get(name)
-    if not isinstance(value, str) or not value.strip():
-        raise MarketStateHubProtocolError(f"{name} must be a non-empty string")
-    return value
+    return require_string(payload, name, error=MarketStateHubProtocolError)
 
 
 def _optional_string(payload: dict[str, object], name: str) -> str | None:
@@ -1088,16 +1089,14 @@ def _optional_bool_default(
 
 
 def _require_datetime(payload: dict[str, object], name: str) -> datetime:
-    value = payload.get(name)
-    if not isinstance(value, str):
-        raise MarketStateHubProtocolError(f"{name} must be an ISO timestamp")
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError as error:
-        raise MarketStateHubProtocolError(f"{name} is not a valid timestamp") from error
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise MarketStateHubProtocolError(f"{name} must include a timezone")
-    return parsed
+    return require_datetime(
+        payload,
+        name,
+        error=MarketStateHubProtocolError,
+        value_message="must be an ISO timestamp",
+        invalid_message="is not a valid timestamp",
+        timezone_message="must include a timezone",
+    )
 
 
 def _optional_datetime(

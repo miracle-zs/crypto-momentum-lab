@@ -65,6 +65,7 @@
 
 ### 本轮第二批维护收敛
 
+- **#35 已完成第一阶段**：state/quote hub 共用字符串和 datetime 字段解析 helper；state 仍接受数值型 decimal、quote 仍只接受 decimal string，两个 hub 继续抛出各自协议异常。
 - **#36 已完成**：`order_repository` 与 `account_repository` 共用 PostgreSQL `jsonable` helper，保留原有枚举、Decimal、时区 datetime、容器和 fallback 字符串语义。
 - **#37 已完成**：paper 与 daemon 共用候选成交边界解析函数，统一目标时间、过期时间和闭合状态的判断；原有 paper/daemon 行为测试保持通过。
 - **#38 已完成**：paper 与 replay 共用 strategy report serialization helper，避免四个相同转换函数继续漂移。
