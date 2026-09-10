@@ -30,7 +30,7 @@
 1. **策略一致性**：#10、#13 已完成：paired daemon 使用不提交共享 cooldown 的原始策略决策，按账户过滤后独立递减、提交并写回 checkpoint；批处理 paper 复用 `mark_positions` 与 `Candle15mAggregator`，报告和 PostgreSQL 持久化均包含 open/closed position、exit reason/PnL 和 portfolio config。长短方向过滤、批处理持仓到最长持仓退出的边界测试已覆盖。
 2. **数据库资源隔离**：#20 已完成第一阶段：market-data runtime 将 runtime state/universe 保留在 market pool（2/0/2s），quality/process state 使用 observability pool（1/0/1s），manifest/archive retention、paper protected-symbol、live protected-symbol 与 operational retention 使用 maintenance pool（1/0/60s）；raw archive retention 改走 maintenance repository，旧的单 pool fallback 仅保留给测试适配。session factory 和 market-data lifecycle 单测已覆盖。
 3. **P2 正确性收敛**：继续处理 24–34，优先剩余边界；#24 的本地缺口可观测性、#25 的游标化官方 candle 顺序回补、#28 的陈旧状态告警与 source idle watchdog、#32 的 fill 待核对与重连节流、#26/#27/#29/#33/#34 已在第一批收敛。
-4. **架构收敛**：A2、A6、A7 已完成第一阶段：A2 将账户状态、风险配置和交易规则查询下沉到 PostgreSQL 查询模块，live 不再依赖 shadow CLI 私有函数，原调用别名保留以兼容测试；A6 让运行时 checkpoint 保留 1m 闭合 K 线元数据、数据完整性和缺失 aggTrade 计数，并通过完整字段与旧 checkpoint 默认值的 round-trip 回归测试；A7 用统一 `resolve_database_url` 收敛显式参数、plane 环境变量和共享环境变量的优先级，同时保留各入口的错误类型和 market/research fallback。A4 在补齐调用方测试后再重构，暂不做大规模 compose 或入口重写。
+4. **架构收敛**：A2、A6、A7、A11 已完成第一阶段：A2 将账户状态、风险配置和交易规则查询下沉到 PostgreSQL 查询模块，live 不再依赖 shadow CLI 私有函数，原调用别名保留以兼容测试；A6 让运行时 checkpoint 保留 1m 闭合 K 线元数据、数据完整性和缺失 aggTrade 计数，并通过完整字段与旧 checkpoint 默认值的 round-trip 回归测试；A7 用统一 `resolve_database_url` 收敛显式参数、plane 环境变量和共享环境变量的优先级，同时保留各入口的错误类型和 market/research fallback；A11 让定时行情运行复用正式入口的监控、故障传播和有序收尾，仅用计时事件请求停止。A4 在补齐调用方测试后再重构，暂不做大规模 compose 或入口重写。
 5. **部署条件项**：确认真实 nginx 上层鉴权和数据库备份/恢复演练证据；若证据不足，再分别补 health probe 兼容的应用鉴权和可演练的备份作业。
 
 每一项都需要对应的回归测试、运行指标或部署隔离复现；不以“字符串存在”作为验收标准。

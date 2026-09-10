@@ -1200,113 +1200,26 @@ async def run_market_data_with_signal_handlers(config_path: Path) -> None:
 
 
 async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
-    async with build_market_data_runtime(config_path) as runtime:
-        capture_task: asyncio.Task[None] | None = None
-        scheduler_task: asyncio.Task[None] | None = None
-        subscription_task: asyncio.Task[None] | None = None
-        retention_task: asyncio.Task[None] | None = None
-        operational_retention_task: asyncio.Task[None] | None = None
-        health_task: asyncio.Task[None] | None = None
-        quote_hub = getattr(runtime, "quote_hub", None)
-        try:
-            await runtime.state_hub.start()
-            if quote_hub is not None:
-                await quote_hub.start()
-            await runtime.runtime_state_publisher.start()
-            await runtime.capture.start(
-                symbols=runtime.initial_symbols,
-                streams=runtime.enabled_streams,
-                generation=1,
-            )
-            startup_observed_at = datetime.now(UTC).replace(
-                second=0,
-                microsecond=0,
-            )
-            await runtime.universe.refresh(observed_at=startup_observed_at)
-            capture_task = asyncio.create_task(runtime.capture.run())
-            scheduler_task = asyncio.create_task(
-                run_scheduler_loop(
-                    LoggingRefreshService(runtime.universe),
-                    activation_minute=runtime.universe_activation_minute,
-                    refresh_interval_minutes=(
-                        runtime.universe_refresh_interval_minutes
-                    ),
-                )
-            )
-            subscription_task = asyncio.create_task(
-                reconcile_paper_exit_subscriptions(
-                    runtime.subscription_observer
-                )
-            )
-            retention_task = asyncio.create_task(
-                run_raw_archive_retention_loop(
-                    _archive_retention_repository(runtime),
-                    runtime.archive_root,
-                    retention_days=runtime.archive_retention_days,
-                    interval_seconds=runtime.archive_retention_interval_seconds,
-                )
-            )
-            operational_retention = getattr(
-                runtime,
-                "operational_retention",
-                None,
-            )
-            if operational_retention is not None:
-                operational_retention_task = asyncio.create_task(
-                    run_operational_database_retention_loop(
-                        operational_retention,
-                        interval_seconds=(
-                            runtime.database_retention_interval_seconds
-                        ),
-                        contract_metadata_retention_hours=(
-                            runtime.contract_metadata_retention_hours
-                        ),
-                        runtime_state_retention_hours=(
-                            runtime.runtime_state_retention_hours
-                        ),
-                    )
-                )
-            health_task = asyncio.create_task(
-                monitor_market_data_health(
-                    capture_metrics=runtime.capture.metrics_snapshot,
-                    connection_metrics=runtime.connection_pool.metrics_snapshot,
-                    runtime_state_metrics=(
-                        runtime.runtime_state_publisher.lateness_metrics_snapshot
-                    ),
-                )
-            )
-            await asyncio.sleep(seconds)
-        finally:
-            await runtime.capture.stop()
-            if capture_task is not None:
-                capture_task.cancel()
-            for task in (
-                scheduler_task,
-                subscription_task,
-                retention_task,
-                operational_retention_task,
-                health_task,
-            ):
-                if task is not None:
-                    task.cancel()
-            tasks = tuple(
-                task
-                for task in (
-                    capture_task,
-                    scheduler_task,
-                    subscription_task,
-                    retention_task,
-                    operational_retention_task,
-                    health_task,
-                )
-                if task is not None
-            )
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            await runtime.runtime_state_publisher.stop()
-            if quote_hub is not None:
-                await quote_hub.stop()
-            await runtime.state_hub.stop()
+    stop_requested = asyncio.Event()
+    timer_task = asyncio.create_task(
+        _request_stop_after(seconds, stop_requested)
+    )
+    try:
+        await run_market_data(
+            config_path,
+            stop_requested=stop_requested,
+        )
+    finally:
+        timer_task.cancel()
+        await asyncio.gather(timer_task, return_exceptions=True)
+
+
+async def _request_stop_after(
+    seconds: float,
+    stop_requested: asyncio.Event,
+) -> None:
+    await asyncio.sleep(seconds)
+    stop_requested.set()
 
 
 @app.command()
