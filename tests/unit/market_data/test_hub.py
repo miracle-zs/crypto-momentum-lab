@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -228,6 +229,47 @@ async def test_market_state_source_fails_closed_when_hub_is_unavailable() -> Non
 
     with pytest.raises(RuntimeError, match="market-state hub unavailable"):
         await anext(source.__aiter__())
+
+
+async def test_market_state_source_retries_batch_iterator_close_race(
+    monkeypatch,
+) -> None:
+    state = fixture_state("BTCUSDT", 0)
+
+    class BusyBatchIterator:
+        def __init__(self) -> None:
+            self._yielded = False
+            self.close_calls = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._yielded:
+                raise StopAsyncIteration
+            self._yielded = True
+            return SimpleNamespace(states=(state,))
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise RuntimeError(
+                    "aclose(): asynchronous generator is already running"
+                )
+
+    batches = BusyBatchIterator()
+    source = WebSocketMarketStateSource(
+        url="ws://unused",
+        environment="research",
+        consumer_id="test-live",
+    )
+    monkeypatch.setattr(source, "_iterate_batches", lambda: batches)
+
+    iterator = source.__aiter__()
+    assert await anext(iterator) == state
+    await iterator.aclose()
+
+    assert batches.close_calls == 2
 
 
 async def test_market_state_source_reports_reconnect_to_resilient_consumer(

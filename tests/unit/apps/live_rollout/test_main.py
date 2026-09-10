@@ -957,6 +957,106 @@ async def test_resilient_account_event_stream_retries_after_hub_failure() -> Non
     assert source.attempts == 2
 
 
+@pytest.mark.asyncio
+async def test_account_event_reconciles_order_before_publishing_snapshot(
+    monkeypatch,
+) -> None:
+    event = SimpleNamespace(
+        event_type="ORDER_TRADE_UPDATE",
+        client_order_id="entry-1",
+        has_fill=False,
+        symbols=("BTCUSDT",),
+    )
+    ordering: list[str] = []
+
+    async def reconcile(**_kwargs) -> None:
+        ordering.append("reconcile")
+
+    monkeypatch.setattr(main, "_reconcile_account_event_order", reconcile)
+
+    def publish_snapshot(_event) -> None:
+        ordering.append("snapshot")
+
+    class Source:
+        def __aiter__(self):
+            async def stream():
+                yield event
+
+            return stream()
+
+    latest_market_states = SimpleNamespace(for_symbols=lambda _symbols: ())
+    await main._run_account_event_channel(
+        source=Source(),
+        daemon=None,
+        latest_market_states=latest_market_states,
+        latest_market_quotes=None,
+        order_repository=None,
+        state_machine=None,
+        run_id="run-1",
+        on_account_snapshot=publish_snapshot,
+    )
+
+    assert ordering == ["reconcile", "snapshot"]
+
+
+@pytest.mark.asyncio
+async def test_account_event_retries_transient_unmanaged_position(
+    monkeypatch,
+) -> None:
+    event = SimpleNamespace(
+        event_type="ACCOUNT_UPDATE",
+        client_order_id=None,
+        has_fill=False,
+        symbols=("BTCUSDT",),
+    )
+    state = SimpleNamespace(symbol="BTCUSDT")
+    delays: list[float] = []
+    failures: list[tuple[str, str | None]] = []
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(main.asyncio, "sleep", sleep)
+
+    class Daemon:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def process_account_event(self, _state, *, quote):
+            del quote
+            self.calls += 1
+            if self.calls == 1:
+                return "unmanaged_live_positions:BTCUSDT"
+            return None
+
+    class Source:
+        def __aiter__(self):
+            async def stream():
+                yield event
+
+            return stream()
+
+    daemon = Daemon()
+    await main._run_account_event_channel(
+        source=Source(),
+        daemon=daemon,
+        latest_market_states=SimpleNamespace(
+            for_symbols=lambda _symbols: (state,)
+        ),
+        latest_market_quotes=SimpleNamespace(for_symbols=lambda _symbols: ()),
+        order_repository=None,
+        state_machine=None,
+        run_id="run-1",
+        on_exit_failure=lambda symbol, failure: failures.append(
+            (symbol, failure)
+        ),
+    )
+
+    assert daemon.calls == 2
+    assert delays == [0.25]
+    assert failures == [("BTCUSDT", None)]
+
+
 async def test_shadow_preflight_accepts_an_old_matching_session() -> None:
     class FakeSession:
         def __init__(self) -> None:

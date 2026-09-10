@@ -37,6 +37,10 @@ _SUBSCRIBE_MESSAGE = "subscribe_market_states"
 _READY_MESSAGE = "market_state_hub_ready"
 _BATCH_MESSAGE = "market_state_batch"
 _CLIENT_RECEIVE_QUEUE_SIZE = 2
+_ASYNC_GENERATOR_CLOSE_RACE = (
+    "aclose(): asynchronous generator is already running"
+)
+_ASYNC_GENERATOR_CLOSE_RETRIES = 3
 
 
 class MarketStateHubError(RuntimeError):
@@ -85,6 +89,29 @@ class _MarketStateQueueOverflow:
 
 
 _MarketStateQueueItem = MarketStateBatch | _MarketStateQueueOverflow | Exception
+
+
+async def _close_async_iterator(iterator: object) -> None:
+    """Close an async iterator after a nested cancellation race settles."""
+
+    close = getattr(iterator, "aclose", None)
+    if not callable(close):
+        return
+    for attempt in range(_ASYNC_GENERATOR_CLOSE_RETRIES):
+        try:
+            await close()
+            return
+        except RuntimeError as error:
+            if (
+                str(error) != _ASYNC_GENERATOR_CLOSE_RACE
+                or attempt == _ASYNC_GENERATOR_CLOSE_RETRIES - 1
+            ):
+                raise
+            log.warning(
+                "market_state_async_iterator_close_raced",
+                retry=attempt + 1,
+            )
+            await asyncio.sleep(0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -534,9 +561,7 @@ class WebSocketMarketStateSource:
                 for state in batch.states:
                     yield state
         finally:
-            close = getattr(batches, "aclose", None)
-            if callable(close):
-                await close()
+            await _close_async_iterator(batches)
 
     async def _iterate_batches(self) -> AsyncIterator[MarketStateBatch]:
         self._notify_connection_change(False, "connecting")

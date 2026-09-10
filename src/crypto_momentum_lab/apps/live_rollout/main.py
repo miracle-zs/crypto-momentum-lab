@@ -236,6 +236,7 @@ _DEFAULT_PERSIST_EXCHANGE_OPERATIONS = frozenset({"submit", "cancel"})
 _GIT_COMMIT_HASH_LENGTH = 40
 _CONFIG_HASH_LENGTH = 64
 _HEX_HASH_PATTERN = re.compile(r"^[0-9a-f]+$")
+_UNMANAGED_POSITION_RETRY_DELAYS_SECONDS = (0.25, 0.5, 1.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3371,8 +3372,6 @@ async def _run_account_event_channel(
 ) -> None:
     async for event in _resilient_account_event_stream(source):
         try:
-            if on_account_snapshot is not None:
-                on_account_snapshot(event)
             if telemetry is not None and event.has_fill:
                 await telemetry.account_fill(
                     event,
@@ -3385,6 +3384,12 @@ async def _run_account_event_channel(
                     state_machine=state_machine,
                     run_id=run_id,
                 )
+            # ORDER_TRADE_UPDATE can carry both the account projection and
+            # the order identity.  Reconcile the order first so the live
+            # context cannot observe a newly opened position before its
+            # matching entry fill/order state is durable.
+            if on_account_snapshot is not None:
+                on_account_snapshot(event)
             for state in latest_market_states.for_symbols(event.symbols):
                 quote = next(
                     iter(latest_market_quotes.for_symbols((state.symbol,))),
@@ -3394,6 +3399,34 @@ async def _run_account_event_channel(
                     state,
                     quote=quote,
                 )
+                if failure is not None and failure.startswith(
+                    "unmanaged_live_positions:"
+                ):
+                    for attempt, delay in enumerate(
+                        _UNMANAGED_POSITION_RETRY_DELAYS_SECONDS,
+                        start=1,
+                    ):
+                        log.warning(
+                            "live_account_event_unmanaged_retry",
+                            run_id=run_id,
+                            symbol=state.symbol,
+                            attempt=attempt,
+                            delay_seconds=delay,
+                            reason=failure,
+                        )
+                        await asyncio.sleep(delay)
+                        failure = await daemon.process_account_event(
+                            state,
+                            quote=quote,
+                        )
+                        if failure is None:
+                            log.info(
+                                "live_account_event_unmanaged_recovered",
+                                run_id=run_id,
+                                symbol=state.symbol,
+                                attempt=attempt,
+                            )
+                            break
                 if failure is not None:
                     if on_exit_failure is not None:
                         on_exit_failure(state.symbol, failure)

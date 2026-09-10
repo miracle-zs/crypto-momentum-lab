@@ -94,6 +94,14 @@ class StrategyRuntimeState:
             state,
             max_buffer_length=max_buffer_length,
         )
+        previous = self.last_processed.get(state.symbol)
+        if previous is None or state.bucket_start >= previous:
+            # Recovery replays market data without evaluating it, but the
+            # replayed watermark still represents the latest contiguous state
+            # known to the strategy.  Keeping the old checkpoint watermark
+            # would make the first live state look like a gap and immediately
+            # erase the buffer we just restored.
+            self.last_processed[state.symbol] = state.bucket_start
 
     def reset_symbol(self, symbol: str) -> None:
         self.buffers.pop(symbol, None)

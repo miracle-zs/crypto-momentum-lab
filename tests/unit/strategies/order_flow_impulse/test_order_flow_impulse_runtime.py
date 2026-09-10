@@ -95,6 +95,21 @@ def test_orderflow_impulse_compact_checkpoint_omits_market_buffer_payload() -> N
     assert checkpoint.payload["signal_sequence"] == 1
 
 
+def test_orderflow_impulse_warm_recovery_advances_last_processed_watermark() -> None:
+    strategy = _strategy()
+    state = _state(0, Decimal("100"), notional=Decimal("100"))
+
+    strategy.warm_market_state(state)
+
+    checkpoint = strategy.checkpoint(include_market_state_buffers=False)
+
+    assert checkpoint.last_processed_at_by_symbol == {
+        "BTCUSDT": state.bucket_start,
+    }
+    assert checkpoint.payload["buffer_sizes"] == {"BTCUSDT": 1}
+    assert checkpoint.payload["signal_sequence"] == 0
+
+
 def test_orderflow_impulse_resets_symbol_after_a_market_data_gap() -> None:
     strategy = _strategy()
     _last_decision(strategy, _impulse_states())
