@@ -565,9 +565,11 @@ services:
       - ${CML_LIVE_ENTRY_LEVERAGE:-5}
       - --margin-type
       - ${CML_LIVE_MARGIN_TYPE:-CROSSED}
-      # Production rollout explicitly retains only auditable write boundaries.
+      # Production rollout retains only auditable write boundaries by default.
+      # Set CML_LIVE_PERSIST_EXCHANGE_OPERATIONS=all for a temporary
+      # full-operation diagnostic capture.
       - --persist-exchange-operations
-      - ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-}
+      - ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-submit,cancel}
       - --exit-mode
       - ${CML_LIVE_EXIT_MODE:-candle_15m}
       - --take-profit-pct

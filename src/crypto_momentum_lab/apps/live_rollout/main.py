@@ -1171,11 +1171,12 @@ def run_command(
         typer.Option(
             "--persist-exchange-operations",
             help=(
-                "Comma-separated exchange operations to persist; omit to "
-                "persist all operations."
+                "Comma-separated exchange operations to persist (default: "
+                "submit,cancel); use 'all' for a temporary full-operation "
+                "diagnostic capture."
             ),
         ),
-    ] = "",
+    ] = "submit,cancel",
     confirmation: Annotated[
         bool, typer.Option("--i-understand-this-places-real-orders")
     ] = False,
@@ -4110,15 +4111,26 @@ def _resolve_live_profile_options(
 def _parse_exchange_operations(
     raw_value: str,
 ) -> frozenset[str] | None:
-    """Parse the explicit durable exchange telemetry allow-list."""
+    """Parse the durable exchange telemetry allow-list.
 
-    if not raw_value.strip():
+    An empty value remains backwards-compatible with the original all-operation
+    behavior.  ``all`` is the explicit operator-facing spelling for that mode;
+    it must not be combined with an allow-list because the two policies are
+    mutually exclusive.
+    """
+
+    normalized_value = raw_value.strip()
+    if not normalized_value or normalized_value.lower() == "all":
         return None
     operations = tuple(operation.strip() for operation in raw_value.split(","))
     if any(not operation for operation in operations):
         raise typer.BadParameter(
             "--persist-exchange-operations must be a comma-separated list "
             "of non-empty operation names"
+        )
+    if any(operation.lower() == "all" for operation in operations):
+        raise typer.BadParameter(
+            "--persist-exchange-operations accepts 'all' only by itself"
         )
     return frozenset(operations)
 

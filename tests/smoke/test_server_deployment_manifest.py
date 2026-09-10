@@ -207,6 +207,10 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         ),
     ]
     live_command = services["live-strategy"]["command"]
+    assert _option_value(
+        live_command,
+        "--persist-exchange-operations",
+    ) == "${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-submit,cancel}"
     assert "--entry-positive-gainer-top-count" not in live_command
     assert "--entry-long-only" in live_command
     assert "--no-entry-price-above-ema5" in live_command
@@ -334,6 +338,13 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
         assert "BINANCE_API_SECRET" not in execution["environment"]
         assert "BINANCE_API_KEY" not in strategy["environment"]
         assert "BINANCE_API_SECRET" not in strategy["environment"]
+        assert _option_value(
+            strategy["command"],
+            "--persist-exchange-operations",
+        ) == (
+            "${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS_ACCOUNT_"
+            f"{account_number}:-submit,cancel}}"
+        )
         assert strategy["depends_on"][
             f"execution-account-live-account-{account_number}"
         ]["condition"] == "service_healthy"

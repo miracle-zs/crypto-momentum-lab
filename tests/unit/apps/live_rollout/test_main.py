@@ -194,6 +194,8 @@ def test_live_run_rejects_conflicting_entry_policy_modes() -> None:
     [
         ("", None),
         ("  ", None),
+        ("all", None),
+        (" ALL ", None),
         ("submit, cancel,submit", frozenset({"submit", "cancel"})),
     ],
 )
@@ -209,7 +211,24 @@ def test_live_exchange_operation_option_rejects_empty_tokens() -> None:
         main._parse_exchange_operations("submit,,cancel")
 
 
-def test_live_run_passes_exchange_operation_allowlist_to_daemon(monkeypatch) -> None:
+def test_live_exchange_operation_option_rejects_mixed_all_mode() -> None:
+    with pytest.raises(BadParameter, match="'all' only by itself"):
+        main._parse_exchange_operations("submit,all")
+
+
+@pytest.mark.parametrize(
+    ("option_value", "expected"),
+    [
+        ("submit,cancel", frozenset({"submit", "cancel"})),
+        ("all", None),
+        (None, frozenset({"submit", "cancel"})),
+    ],
+)
+def test_live_run_passes_exchange_operation_allowlist_to_daemon(
+    monkeypatch,
+    option_value: str | None,
+    expected: frozenset[str] | None,
+) -> None:
     captured: dict[str, object] = {}
 
     async def fake_run_live_daemon(**kwargs: object):
@@ -235,23 +254,25 @@ def test_live_run_passes_exchange_operation_allowlist_to_daemon(monkeypatch) -> 
     monkeypatch.setenv("BINANCE_TRADE_API_SECRET", "test-secret")
     monkeypatch.setenv("CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT", "25")
 
-    result = runner.invoke(
-        app,
+    arguments = [
+        "run",
+        "--database-url",
+        "postgresql+asyncpg://unused",
+    ]
+    if option_value is not None:
+        arguments.extend(
+            ["--persist-exchange-operations", option_value]
+        )
+    arguments.extend(
         [
-            "run",
-            "--database-url",
-            "postgresql+asyncpg://unused",
-            "--persist-exchange-operations",
-            "submit,cancel",
             "--entry-policy-compare-only",
             "--i-understand-this-places-real-orders",
-        ],
+        ]
     )
+    result = runner.invoke(app, arguments)
 
     assert result.exit_code == 0
-    assert captured["persist_exchange_operations"] == frozenset(
-        {"submit", "cancel"}
-    )
+    assert captured["persist_exchange_operations"] == expected
     assert captured["entry_policy_compare_only"] is True
     assert captured["entry_positive_gainer_top_count"] == 25
 
