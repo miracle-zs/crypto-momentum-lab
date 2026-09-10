@@ -40,6 +40,15 @@ class FakeRepository:
         return None
 
 
+class FakeCoordinator:
+    def __init__(self) -> None:
+        self.envelopes: list[RawEnvelope] = []
+        self.filtered_book_ticker_events = 0
+
+    async def submit(self, envelope: RawEnvelope) -> None:
+        self.envelopes.append(envelope)
+
+
 def build_service(
     *,
     queue_max_events: int,
@@ -71,6 +80,28 @@ async def test_unrecoverable_queue_input_halts_service(
         await service.submit(raw_envelope)
 
     assert service.state is MarketDataState.HALTED
+
+
+async def test_submit_delegates_to_coordinator_when_configured(
+    raw_envelope: RawEnvelope,
+) -> None:
+    coordinator = FakeCoordinator()
+    service = MarketDataCaptureService(
+        queue=BoundedEnvelopeQueue(max_events=10, max_bytes=100000),
+        repository=FakeRepository(),
+        connection_pool=FakeConnectionPool(),
+        disk_guard=DiskSpaceGuard(
+            warning_free_bytes=300,
+            halt_free_bytes=200,
+            recovery_free_bytes=250,
+        ),
+        coordinator=coordinator,
+    )
+
+    await service.submit(raw_envelope)
+
+    assert coordinator.envelopes == [raw_envelope]
+    assert service.metrics_snapshot().queue_events == 0
 
 
 def test_metrics_snapshot_reports_queue_and_state() -> None:

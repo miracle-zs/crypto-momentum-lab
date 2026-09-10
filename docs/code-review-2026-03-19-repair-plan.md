@@ -32,6 +32,6 @@
 3. **P2 正确性收敛**：继续处理 24–34，优先剩余边界；#24 的本地缺口可观测性、#25 的游标化官方 candle 顺序回补、#28 的陈旧状态告警与 source idle watchdog、#32 的 fill 待核对与重连节流、#26/#27/#29/#33/#34 已在第一批收敛。
 4. **架构收敛**：A2、A4、A6、A7、A11 已完成第一阶段：A2 将账户状态、风险配置和交易规则查询下沉到 PostgreSQL 查询模块，live 不再依赖 shadow CLI 私有函数，原调用别名保留以兼容测试；A4 用 `_PairedAccountSpec` 和统一 account builder 收敛 identity、daemon config、portfolio/entry filter 的重复组装，同时保留原有序数 CLI 选项；A6 让运行时 checkpoint 保留 1m 闭合 K 线元数据、数据完整性和缺失 aggTrade 计数，并通过完整字段与旧 checkpoint 默认值的 round-trip 回归测试；A7 用统一 `resolve_database_url` 收敛显式参数、plane 环境变量和共享环境变量的优先级，同时保留各入口的错误类型和 market/research fallback；A11 让定时行情运行复用正式入口的监控、故障传播和有序收尾，仅用计时事件请求停止。暂不做大规模 compose 或入口重写。
 5. **部署条件项**：回滚分支、D1/D2/D3/D5/D9 已完成第一阶段，部署回归 25 项通过；D4/D6/D7 保留为需明确运营语义的条件项。仍需确认真实 nginx 上层鉴权和数据库备份/恢复演练证据；若证据不足，再分别补 health probe 兼容的应用鉴权和可演练的备份作业。
-6. **本地维护收敛（本轮追加）**：#36 将 PostgreSQL JSON 序列化收敛到共享 helper；#37 将 paper/daemon 候选成交边界收敛到共享解析函数；#38 将 paper/replay 报告序列化收敛到共享 helper；#42 将 active entry symbol 的 EXTENDED 过滤下推到 SQL。相关 strategy runner 与 PostgreSQL persistence 回归共 155 项通过。鉴权 D8 按当前要求暂缓。
+6. **本地维护收敛（本轮追加）**：#36 将 PostgreSQL JSON 序列化收敛到共享 helper；#37 将 paper/daemon 候选成交边界收敛到共享解析函数；#38 将 paper/replay 报告序列化收敛到共享 helper；#41 让配置了 coordinator 的 capture service 通过 coordinator 提交，保留磁盘保护与队列溢出状态机；#42 将 active entry symbol 的 EXTENDED 过滤下推到 SQL。相关 strategy runner、PostgreSQL persistence 与 market-data capture 回归共 301 项通过（含 1 项需本机回环权限的既有跳过项）。鉴权 D8 按当前要求暂缓。
 
 每一项都需要对应的回归测试、运行指标或部署隔离复现；不以“字符串存在”作为验收标准。

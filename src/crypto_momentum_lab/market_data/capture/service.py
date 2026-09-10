@@ -183,7 +183,10 @@ class MarketDataCaptureService:
             raise CaptureQueueFull("capture is halted")
         await self.ensure_disk_space()
         try:
-            await self._queue.put(envelope)
+            if self._coordinator is None:
+                await self._queue.put(envelope)
+            else:
+                await self._coordinator.submit(envelope)
         except CaptureQueueFull:
             self._halted_by_disk = False
             await self._transition(

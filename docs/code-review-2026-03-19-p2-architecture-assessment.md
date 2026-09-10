@@ -68,6 +68,7 @@
 - **#36 已完成**：`order_repository` 与 `account_repository` 共用 PostgreSQL `jsonable` helper，保留原有枚举、Decimal、时区 datetime、容器和 fallback 字符串语义。
 - **#37 已完成**：paper 与 daemon 共用候选成交边界解析函数，统一目标时间、过期时间和闭合状态的判断；原有 paper/daemon 行为测试保持通过。
 - **#38 已完成**：paper 与 replay 共用 strategy report serialization helper，避免四个相同转换函数继续漂移。
+- **#41 已完成**：配置了 coordinator 的 `MarketDataCaptureService.submit` 现在经过 coordinator，保留 service 的磁盘保护与队列溢出处理，同时让生产入口使用 coordinator 的 symbol 过滤路径。
 - **#42 已完成**：`load_active_entry_symbols_at` 直接在数据库端选择非 `EXTENDED` membership，保留最新 activated snapshot 与 `observed_at` 截止语义。
 
 本轮没有处理 #35、A1、A3、A5、A8、A9 等仍需进一步权衡的维护项，也没有处理鉴权 D8；这些不应被本轮测试通过数误记为已完成。
