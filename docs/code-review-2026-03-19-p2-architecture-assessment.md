@@ -1,6 +1,6 @@
 # P2 与架构条目逐项复核
 
-复核日期：2026-09-10。对象：docs/code-review-2026-03-19.md。依据为当前工作区代码及配置，不代表报告日期对应的历史版本或线上部署状态。本轮更新 #24–#31 的验收记录并包含对应的本地修复。
+复核日期：2026-09-10。对象：docs/code-review-2026-03-19.md。依据为当前工作区代码及配置，不代表报告日期对应的历史版本或线上部署状态。本轮更新 #24–#32 的验收记录并包含对应的本地修复。
 
 “成立”表示代码事实及问题方向有依据；“部分成立”表示事实存在，但影响、适用范围或建议需要修正；“不作为缺陷”表示属于有意设计或原结论证据不足。结构重复不等于运行错误。
 
@@ -16,7 +16,7 @@
 | #29 | 已完成 | [价格量化](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/execution_account/orders/quantization.py:114)现在按最终交易所方向选择 ROUND_DOWN/ROUND_UP：BUY 向下、SELL 向上；`_exchange_side` 同时考虑 reduce-only，因此平仓卖单也向上量化。`test_limit_price_rounds_outward_for_exchange_side` 覆盖普通多/空开仓与 reduce-only 平仓。 |
 | #30 | 部分成立，未找到当前生产调用 | [授权撤单方法](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/execution_account/binance/client.py:1077)只包装 Timeout/RequestError，不处理 HTTPStatusError，确实不同于 cancel_order_by_client_id。但全 src 中未找到这个带 command 参数方法的调用；当前 live 撤单走 coordinator/state_machine 或 cancel_order_by_client_id。因此不能写成已触达的紧急撤单事故。若保留此 API，应在授权后复用统一撤单实现。 |
 | #31 | 已完成，指标定义为全局历史最大进度 | [publish](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/market_data/hub.py:262)现在仅在批次最大 `bucket_start` 超过已有值时更新 `latest_bucket_start`，跨环境或乱序批次不会回拨监控进度；该字段只用于 hub metrics，不参与订单执行或回放游标。`test_market_state_hub_metrics_keep_latest_bucket_start_monotonic` 覆盖旧批次回拨场景。 |
-| #32 | 事实成立，影响是健康监测 | [missing fill 检测](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/execution_account/daemon.py:1008)在 request_reconnect 正常返回后，从 pending 集合移除 still_missing；甚至并未等待“成功重连”，只是重连请求返回。无 request_reconnect 方法时也会移除。原 fill 已由 REST 同步发现，此处不是成交记录丢失。若意图只触发一次重连，清理可以防止旧 fill 永远不会通过 WS 重播而引起重连风暴。建议明确一次性告警/重试语义，不能简单永远保留 still_missing。 |
+| #32 | 第一阶段已完成，影响限定为健康监测 | [missing fill 检测](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/execution_account/daemon.py:1008)现在把 REST 新发现但 WS 未见的 fill key 保留在 pending，只有 stream 指标真正出现该 key 才清除；重连请求按 60 秒节流并记录请求时间，避免重复重连风暴。REST 已同步的成交记录不因 WS 缺失而丢失；若未来要求“重连成功”而非“stream 看到 key”作为确认，需另定义协议。 |
 | #33 | 成立，低优先级清理 | [_execution_database_url](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/execution_account/main.py:642)无值必抛异常，返回值保证非空；调用后的[再次判断](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/execution_account/main.py:122)不可达。同文件另一调用点也有重复判断。删除冗余判断即可。 |
 | #34 | 部分成立，需身份冲突前提 | [事务](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/persistence/postgres/order_repository.py:155)中 return None 是正常退出，会提交前面的 intent INSERT。但普通同一 intent 重试时，该 INSERT 自身也因冲突 no-op，不会新增孤儿。只有不同 intent 复用已占用的 client_order_id 等不一致输入才会留下新 SUBMITTING intent；正常量化路径的 ID 由 run/candidate 决定。应验证已存在订单所属身份，并对不一致冲突回滚或显式拒绝，不能宣称所有幂等重试均污染数据。 |
 
