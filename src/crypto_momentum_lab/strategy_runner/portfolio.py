@@ -176,10 +176,13 @@ class Candle15mAggregator:
         if minute_start in current.closed_minute_starts:
             return None
         current.closed_minute_starts.add(minute_start)
-        current.close_price = state.closed_kline_1m_close_price
         final_minute_start = candle_start + timedelta(minutes=14)
-        if minute_start != final_minute_start:
-            return None
+        if minute_start == candle_start:
+            # A late first minute still defines the official 15m open.
+            current.open_price = state.closed_kline_1m_open_price
+        if minute_start == final_minute_start:
+            # Keep the 15m close tied to minute 14 even when it arrives first.
+            current.close_price = state.closed_kline_1m_close_price
 
         expected_minutes = {
             candle_start + timedelta(minutes=offset)

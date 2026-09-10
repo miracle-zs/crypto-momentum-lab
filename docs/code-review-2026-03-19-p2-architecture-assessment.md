@@ -1,6 +1,6 @@
 # P2 与架构条目逐项复核
 
-复核日期：2026-09-10。对象：docs/code-review-2026-03-19.md。依据为当前工作区代码及配置，不代表报告日期对应的历史版本或线上部署状态。仅新增本验收记录，未修改业务代码。
+复核日期：2026-09-10。对象：docs/code-review-2026-03-19.md。依据为当前工作区代码及配置，不代表报告日期对应的历史版本或线上部署状态。本轮更新 #24 的验收记录并包含对应的本地聚合修复。
 
 “成立”表示代码事实及问题方向有依据；“部分成立”表示事实存在，但影响、适用范围或建议需要修正；“不作为缺陷”表示属于有意设计或原结论证据不足。结构重复不等于运行错误。
 
@@ -8,7 +8,7 @@
 
 | 编号 | 结论 | 证据、适用范围与处理意见 |
 |---|---|---|
-| #24 | 部分成立 | [Candle15mAggregator](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/portfolio.py:85)要求最终分钟到达时收齐 15 个分钟；不足返回 None，进入下一窗口后旧窗口被替换。确实无缺口通知，也不能可靠处理最终分钟先到、缺失分钟后补到的情况。不过拒绝合成不完整 K 线是正确约束，不应放宽为用残缺数据平仓。影响限于本地聚合路径；daemon 配置官方 candle source 时不使用此聚合器。建议补缺口可观测性与官方数据补取。 |
+| #24 | 第一阶段已完成，官方补取仍是边界 | [Candle15mAggregator](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/portfolio.py:85)现在对不完整、缺分钟和跳过窗口记录有界 gap 事件；即使最后一分钟先到，后续分钟补齐后也会按第 0/14 分钟修正 15m 开收盘并只发出完整 K 线。仍不会用残缺数据平仓，也不会在本地聚合器内自动调用官方历史接口；daemon 配置官方 candle source 时不使用此聚合器。官方历史补取与回放/部署语义仍需单独明确。 |
 | #25 | 成立，收窄 grace 描述 | [加载函数](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/daemon.py:1025)只请求当前最近闭合的一个 15m 窗口；[重启初始化](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/daemon.py:1141)清空 candle history，未按持仓退出进度补齐离线区间。因此多根确认历史丢失，停机期间首次 adverse candle 也可能漏掉。但已经持久化的 grace started_at/deadline 会[随持仓恢复](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/persistence/postgres/paper_daemon_repository.py:258)，不是所有 grace 状态都丢失。应保存退出处理游标并顺序补取历史；回补后的成交时间、价格也需明确，不能伪装成宕机期间真实成交。 |
 | #26 | 成立，已复现 | [grace 分支](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/portfolio.py:356)及其 adverse 判断未检查最短持仓时间，而[非 grace 路径](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/portfolio.py:339)会传 minimum_holding_seconds。准确配置名为 candle_minimum_holding_buckets。使用相同持仓和 K 线、最短持仓 15000 秒、实际持仓 1800 秒：grace=0 为 OPEN，grace=1 已 CLOSED。建议修复组合配置语义，并补最短持仓与 grace 的交叉测试。 |
 | #27 | 成立，有启用条件 | [context loader](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/strategy_runner/main.py:1026)无论信号方向都选 ask；[过滤器](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/daemon.py:766)对 SHORT 仍判断 entry_price > EMA。在 bid ≤ EMA < ask 时，空头实际可执行入场价不满足条件却能通过。仅影响单账户、允许 SHORT 且启用 above-EMA 过滤的配置；不是所有空头或当前 long-only 部署都受影响。context 应包含 bid/ask，由信号方向选执行价。 |

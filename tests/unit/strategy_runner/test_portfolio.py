@@ -172,6 +172,38 @@ def test_15m_aggregator_does_not_emit_an_incomplete_official_candle() -> None:
     assert closed is None
 
 
+def test_15m_aggregator_emits_when_closed_minutes_arrive_out_of_order() -> None:
+    aggregator = Candle15mAggregator()
+    candle_start = datetime(2026, 7, 26, 0, 0, tzinfo=UTC)
+
+    closed: ClosedCandle15m | None = None
+    for minute_index in (14, *range(14)):
+        closed = aggregator.observe(
+            _state_with_closed_1m(
+                candle_start=candle_start,
+                minute_index=minute_index,
+                open_price=(
+                    Decimal("100")
+                    if minute_index == 0
+                    else Decimal("101")
+                ),
+                close_price=(
+                    Decimal("99")
+                    if minute_index == 14
+                    else Decimal("100.5")
+                ),
+            )
+        )
+
+    assert closed == ClosedCandle15m(
+        symbol="BTCUSDT",
+        candle_start=candle_start,
+        candle_end=candle_start + timedelta(minutes=15),
+        open_price=Decimal("100"),
+        close_price=Decimal("99"),
+    )
+
+
 def test_15m_aggregator_reports_incomplete_and_skipped_windows() -> None:
     aggregator = Candle15mAggregator()
     candle_start = datetime(2026, 7, 26, 0, 0, tzinfo=UTC)
