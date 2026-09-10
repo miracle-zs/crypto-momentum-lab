@@ -1,6 +1,6 @@
 # P2 与架构条目逐项复核
 
-复核日期：2026-09-10。对象：docs/code-review-2026-03-19.md。依据为当前工作区代码及配置，不代表报告日期对应的历史版本或线上部署状态。本轮更新 #24–#26 的验收记录并包含对应的本地修复。
+复核日期：2026-09-10。对象：docs/code-review-2026-03-19.md。依据为当前工作区代码及配置，不代表报告日期对应的历史版本或线上部署状态。本轮更新 #24–#27 的验收记录并包含对应的本地修复。
 
 “成立”表示代码事实及问题方向有依据；“部分成立”表示事实存在，但影响、适用范围或建议需要修正；“不作为缺陷”表示属于有意设计或原结论证据不足。结构重复不等于运行错误。
 
@@ -11,7 +11,7 @@
 | #24 | 第一阶段已完成，官方补取仍是边界 | [Candle15mAggregator](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/portfolio.py:85)现在对不完整、缺分钟和跳过窗口记录有界 gap 事件；即使最后一分钟先到，后续分钟补齐后也会按第 0/14 分钟修正 15m 开收盘并只发出完整 K 线。仍不会用残缺数据平仓，也不会在本地聚合器内自动调用官方历史接口；daemon 配置官方 candle source 时不使用此聚合器。官方历史补取与回放/部署语义仍需单独明确。 |
 | #25 | 第一阶段已完成，遗留空游标仍是边界 | [paper position](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/persistence/postgres/paper_daemon_repository.py:233)现在持久化 `last_candle_end`；[回补函数](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/daemon.py:1203)按该游标请求区间并逐根处理，覆盖 `confirmation_count>1` 与 grace 的历史顺序，回补成交时间使用官方 candle 结束时间、价格使用官方收盘价。迁移前已存在且游标为 NULL 的持仓仍只能从当前最近闭合 candle 开始，不能凭空恢复旧历史；如需覆盖这类存量持仓，需另定初始化游标/运营语义。 |
 | #26 | 已完成 | [grace 分支](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/portfolio.py:459)现在统一按 `candle_minimum_holding_buckets × state_interval_seconds` 门控首次盈利平仓、恢复价触发、grace 超时和最长持仓；非 grace 路径继续使用相同的最短持仓策略。`test_candle_grace_respects_minimum_holding_period` 与普通 candle 最短持仓测试覆盖了 grace/非 grace 交叉边界。 |
-| #27 | 成立，有启用条件 | [context loader](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/strategy_runner/main.py:1026)无论信号方向都选 ask；[过滤器](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/daemon.py:766)对 SHORT 仍判断 entry_price > EMA。在 bid ≤ EMA < ask 时，空头实际可执行入场价不满足条件却能通过。仅影响单账户、允许 SHORT 且启用 above-EMA 过滤的配置；不是所有空头或当前 long-only 部署都受影响。context 应包含 bid/ask，由信号方向选执行价。 |
+| #27 | 已完成 | [context loader](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/strategy_runner/main.py:1032)分别提供 LONG 的 ask 与 SHORT 的 bid；[过滤器](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/daemon.py:1020)按信号方向选择对应执行价，再比较 EMA。`test_short_ema_filter_uses_bid_side_entry_price` 覆盖 bid ≤ EMA < ask 时拒绝空头、bid 上穿 EMA 时放行。 |
 | #28 | 部分成立，不能直接取消 stale 检查 | [循环](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/daemon.py:1172)在 mark_positions 前跳过陈旧行情，确实会延后平仓及最长持仓判断。但完全无行情时根本不会进入循环；使用陈旧价格模拟当前成交也不正确。这是行情中断时退出策略不完整，不是“continue 本身必然错误”。建议独立监控超时、明确是否获取新鲜报价以及恢复后的退出规则。 |
 | #29 | 成立，取决于 limit 的价格约束 | [价格量化](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/execution_account/orders/quantization.py:138)统一向下取整。若 SELL limit 表示最低接受价，100.05 在 tick=0.1 时变成 100.0，确实低于授权价格边界；应按最终 BUY/SELL 方向量化，BUY 向下、SELL 向上，并覆盖 reduce-only 的方向转换。如果输入只是可调参考价，则需另行明确策略语义。 |
 | #30 | 部分成立，未找到当前生产调用 | [授权撤单方法](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/execution_account/binance/client.py:1077)只包装 Timeout/RequestError，不处理 HTTPStatusError，确实不同于 cancel_order_by_client_id。但全 src 中未找到这个带 command 参数方法的调用；当前 live 撤单走 coordinator/state_machine 或 cancel_order_by_client_id。因此不能写成已触达的紧急撤单事故。若保留此 API，应在授权后复用统一撤单实现。 |
