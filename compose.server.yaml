@@ -176,8 +176,9 @@ services:
       <<: *app-environment
       CML_ENVIRONMENT_CONFIG: configs/environments/server_paper.yaml
       CML_PAPER_EXIT_RUN_IDS: *paper-account-run-ids
-      # Market-data must protect the same live account used by the live
-      # strategy and execution-account services. Fail closed if it is absent.
+      # Keep the primary label as a compatibility/startup hint. Market-data
+      # also discovers every live account with a latest ready open-position
+      # reconciliation, including accounts whose services are stopped.
       CML_LIVE_POSITION_ACCOUNT_LABEL: ${CML_LIVE_ACCOUNT_LABEL:?set CML_LIVE_ACCOUNT_LABEL}
       CML_LIVE_POSITION_ACCOUNT_LABELS: ${CML_LIVE_POSITION_ACCOUNT_LABELS:-}
       CML_MARKET_STATE_HUB_HOST: 0.0.0.0

@@ -89,7 +89,7 @@ nginx 的 auth_basic 可以在 http/server 层生效并继承到 location，snip
 | D1 | 已修复 | paper-only 不加载 live overlay；`--live` 只在检测到 account-2/3/4 已有运行中的 Compose 服务时加载附加 overlay，因此 primary-only live 更新不再要求附加账户凭证。停止中的附加账户仍不会被隐式启动，若要恢复它们需显式选择对应服务。 |
 | D2 | 已修复 | 分类匹配 `strategies/*` 和 `strategy_runner/*`，回归测试固定路径。 |
 | D3 | 已修复 | systemd 只提供 base/overlay Compose 文件；monitor 直接从这些文件发现 live service、账户 label、session 和 lease owner，并用 Docker service label 查询容器，新增账户不再需要手工改 monitor 清单。`CML_MONITOR_SERVICES` 与 `CML_MONITOR_LIVE_ACCOUNTS` 仍可通过 ops-monitor.env 显式覆盖。 |
-| D5 | 第一阶段已修复 | singular/plural position labels 合并，live update 会拒绝未纳入保护列表的运行账户；停用但仍有仓位的账户仍需保留在 labels 中。 |
+| D5 | 已修复 | market-data 每次刷新从 PostgreSQL 读取各账户最近一次 `ready` 对账；`position_count > 0` 的账户自动加入保护集合，因此停用但仍有仓位的账户无需手工列入 labels。singular/plural 配置仍作为启动提示并与自动发现结果合并；最近一次 ready 对账为零的账户会退出保护集合。 |
 | D9 | 已修复 | server manifest 的 required services、healthcheck 循环和 gainer10 特有断言均包含 `paper-orderflow-gainer10-pair`。 |
 | D4 | 已验收，不改 Compose | primary 的 Compose 环境变量仍可空以保持 paper-only 解析；应用在创建 Binance client 前对 READ/TRADE 凭证缺失或空白 fail-closed，已有 credential resolver 与 CLI 启动测试覆盖。 |
 | D6 | 保留条件性结论 | primary 的 allow-list 为空表示写入全部 exchange telemetry，附加账户的 `submit,cancel` 只保留写请求/响应遥测；两者都不改变 order/fill 账本。是否统一观测范围需先明确运维查询与写库成本目标。 |

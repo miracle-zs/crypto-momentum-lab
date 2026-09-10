@@ -156,6 +156,54 @@ def test_parse_live_position_account_labels_rejects_empty_tokens() -> None:
         main.parse_live_position_account_labels("primary,,account-2")
 
 
+async def test_protected_symbols_discover_live_accounts_with_positions() -> None:
+    class FakePaperRepository:
+        async def load_open_position_symbols(
+            self,
+            run_ids: frozenset[str],
+        ) -> frozenset[str]:
+            assert run_ids == frozenset({"paper-run"})
+            return frozenset({"PAPERUSDT"})
+
+    class FakeAccountRepository:
+        def __init__(self) -> None:
+            self.labels_calls: list[str] = []
+            self.symbol_calls: list[str] = []
+
+        async def load_active_position_account_labels(
+            self,
+            *,
+            environment: str,
+        ) -> frozenset[str]:
+            self.labels_calls.append(environment)
+            return frozenset({"primary", "account-2"})
+
+        async def load_active_position_symbols(
+            self,
+            *,
+            environment: str,
+            account_label: str,
+        ) -> frozenset[str]:
+            assert environment == "live"
+            self.symbol_calls.append(account_label)
+            return frozenset({f"{account_label.upper()}USDT"})
+
+    accounts = FakeAccountRepository()
+
+    symbols = await main._load_protected_symbols(
+        paper_repository=FakePaperRepository(),
+        account_repository=accounts,
+        protected_run_ids=frozenset({"paper-run"}),
+        configured_live_position_account_labels=frozenset({"primary"}),
+    )
+
+    assert symbols == frozenset(
+        {"PAPERUSDT", "PRIMARYUSDT", "ACCOUNT-2USDT"}
+    )
+    assert accounts.labels_calls == ["live"]
+    assert set(accounts.symbol_calls) == {"primary", "account-2"}
+
+
 async def test_operational_retention_uses_bounded_batches() -> None:
     class RecordingRetention:
         def __init__(self) -> None:

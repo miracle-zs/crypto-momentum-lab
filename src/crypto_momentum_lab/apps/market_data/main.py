@@ -225,6 +225,41 @@ def parse_live_position_account_labels(
     return frozenset(labels)
 
 
+async def _load_protected_symbols(
+    *,
+    paper_repository: PostgresPaperDaemonRepository,
+    account_repository: PostgresAccountRepository,
+    protected_run_ids: frozenset[str],
+    configured_live_position_account_labels: frozenset[str],
+) -> frozenset[str]:
+    """Load paper symbols plus every live account with a durable open position.
+
+    The configured labels remain an explicit startup hint for compatibility,
+    while the latest ready account reconciliation runs discover labels for
+    stopped or newly added live accounts automatically.
+    """
+    paper_symbols = await paper_repository.load_open_position_symbols(
+        protected_run_ids
+    )
+    discovered_labels = (
+        await account_repository.load_active_position_account_labels(
+            environment="live"
+        )
+    )
+    live_position_account_labels = (
+        configured_live_position_account_labels | discovered_labels
+    )
+    live_symbols: set[str] = set()
+    for account_label in live_position_account_labels:
+        live_symbols.update(
+            await account_repository.load_active_position_symbols(
+                environment="live",
+                account_label=account_label,
+            )
+        )
+    return paper_symbols | live_symbols
+
+
 def parse_market_state_hub_port(value: str | None = None) -> int:
     raw_value = (
         os.environ.get(_MARKET_STATE_HUB_PORT_ENV, str(_MARKET_STATE_HUB_DEFAULT_PORT))
@@ -711,21 +746,19 @@ async def build_market_data_runtime(
         on_durable_state_persisted=on_durable_state_persisted,
     )
     protected_run_ids = parse_paper_exit_run_ids()
-    live_position_account_labels = parse_live_position_account_labels()
+    configured_live_position_account_labels = (
+        parse_live_position_account_labels()
+    )
 
     async def load_protected_symbols() -> frozenset[str]:
-        paper_symbols = await paper_repository.load_open_position_symbols(
-            protected_run_ids
+        return await _load_protected_symbols(
+            paper_repository=paper_repository,
+            account_repository=account_repository,
+            protected_run_ids=protected_run_ids,
+            configured_live_position_account_labels=(
+                configured_live_position_account_labels
+            ),
         )
-        live_symbols: set[str] = set()
-        for account_label in live_position_account_labels:
-            live_symbols.update(
-                await account_repository.load_active_position_symbols(
-                    environment="live",
-                    account_label=account_label,
-                )
-            )
-        return paper_symbols | live_symbols
 
     initial_memberships = await universe_repository.load_active_memberships()
     initial_symbols = (

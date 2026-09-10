@@ -158,15 +158,13 @@ def test_strategy_runtime_path_is_classified_without_market_restart() -> None:
     assert "src/crypto_momentum_lab/strategy/*" not in classification
 
 
-def test_live_update_checks_position_labels_for_running_accounts() -> None:
+def test_live_update_does_not_require_manual_position_labels() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
 
-    assert "position_label_is_configured()" in script
-    assert "validate_live_position_labels()" in script
     assert "CML_LIVE_POSITION_ACCOUNT_LABELS" in script
-    assert script.index("validate_live_position_labels()") < script.index(
-        "if ! validate_live_position_labels; then"
-    )
+    assert "latest ready PostgreSQL" in script
+    assert "position_label_is_configured()" not in script
+    assert "validate_live_position_labels()" not in script
 
 
 def test_live_account_services_share_the_private_request_pacer_volume() -> None:

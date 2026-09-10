@@ -302,6 +302,53 @@ class PostgresAccountRepository:
             )
             return frozenset(symbols.all())
 
+    async def load_active_position_account_labels(
+        self,
+        *,
+        environment: str,
+    ) -> frozenset[str]:
+        """Return live account labels whose latest ready run has positions.
+
+        The latest run is selected per account so a stopped account remains
+        discoverable while its last durable snapshot is still open, but an
+        older open-position run does not keep protecting an account after a
+        newer ready run reports zero positions.
+        """
+        if not environment.strip():
+            raise ValueError("environment must not be empty")
+        async with self._session_factory() as session:
+            latest_runs = (
+                select(
+                    AccountReconciliationRunRow.account_label.label(
+                        "account_label"
+                    ),
+                    AccountReconciliationRunRow.position_count.label(
+                        "position_count"
+                    ),
+                    func.row_number()
+                    .over(
+                        partition_by=AccountReconciliationRunRow.account_label,
+                        order_by=(
+                            AccountReconciliationRunRow.observed_at.desc(),
+                            AccountReconciliationRunRow.reconciliation_id.desc(),
+                        ),
+                    )
+                    .label("row_number"),
+                )
+                .where(
+                    AccountReconciliationRunRow.environment == environment,
+                    AccountReconciliationRunRow.status == "ready",
+                )
+                .subquery()
+            )
+            labels = await session.scalars(
+                select(latest_runs.c.account_label).where(
+                    latest_runs.c.row_number == 1,
+                    latest_runs.c.position_count > 0,
+                )
+            )
+            return frozenset(labels.all())
+
     async def _insert(self, model: Any, values: dict[str, object]) -> None:
         async with self._session_factory() as session:
             async with session.begin():

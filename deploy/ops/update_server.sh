@@ -745,46 +745,6 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     printf '%s' "${value:-$fallback}"
   }
 
-  position_label_is_configured() {
-    local required_label="$1"
-    local configured_labels="$2"
-    local label
-    local -a labels=()
-    IFS=',' read -r -a labels <<<"$configured_labels"
-    for label in "${labels[@]}"; do
-      # Match the same comma-separated, whitespace-tolerant format accepted
-      # by market-data. Empty entries are ignored here; the application parser
-      # still rejects malformed values before starting the service.
-      label="${label#${label%%[![:space:]]*}}"
-      label="${label%${label##*[![:space:]]}}"
-      if [[ "$label" == "$required_label" ]]; then
-        return 0
-      fi
-    done
-    return 1
-  }
-
-  validate_live_position_labels() {
-    local pair account execution_service strategy_service required_label
-    local configured_labels
-    configured_labels="$(env_value CML_LIVE_ACCOUNT_LABEL primary),$(env_value CML_LIVE_POSITION_ACCOUNT_LABELS '')"
-    for pair in "${live_pairs[@]}"; do
-      IFS=: read -r account execution_service strategy_service <<<"$pair"
-      if ! is_running "$strategy_service" && ! is_running "$execution_service"; then
-        continue
-      fi
-      if [[ "$account" == primary ]]; then
-        required_label="$(env_value CML_LIVE_ACCOUNT_LABEL primary)"
-      else
-        required_label="$account"
-      fi
-      if ! position_label_is_configured "$required_label" "$configured_labels"; then
-        echo "Refusing live update: running account $account ($required_label) is absent from CML_LIVE_POSITION_ACCOUNT_LABELS" >&2
-        return 1
-      fi
-    done
-  }
-
   lease_owner_for_account() {
     local account="$1"
     case "$account" in
@@ -901,9 +861,11 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
       fi
     fi
   done
-  if ! validate_live_position_labels; then
-    exit 1
-  fi
+  # market-data discovers every account whose latest ready PostgreSQL
+  # reconciliation still has positions. The optional
+  # CML_LIVE_POSITION_ACCOUNT_LABEL and CML_LIVE_POSITION_ACCOUNT_LABELS
+  # remain startup hints for compatibility, so a running account no longer
+  # requires a manually maintained label list before an update can proceed.
 
 fi
 

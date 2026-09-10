@@ -14,11 +14,14 @@ COMPOSE="docker compose --env-file .env.server \
   -f compose.server.yaml -f compose.live.accounts.yaml --profile live"
 ```
 
-Before starting any additional service, set
-`CML_LIVE_POSITION_ACCOUNT_LABELS=primary,account-2,account-3,account-4` in the
-server environment. The market-data process must protect the union of all
-four accounts' open-position symbols. Leaving this as the old single-label
-value is not safe for a multi-account rollout.
+The market-data process protects the union of the configured startup hints and
+the labels discovered from each account's latest ready PostgreSQL
+reconciliation. A stopped account with an open position therefore remains
+protected, while an account whose latest ready reconciliation reports zero
+positions is removed from the protected set. `CML_LIVE_POSITION_ACCOUNT_LABELS`
+can still be set to provide immediate startup hints for accounts that have not
+yet produced their first reconciliation; it no longer has to be kept as an
+exhaustive list.
 
 ## Account profiles
 
