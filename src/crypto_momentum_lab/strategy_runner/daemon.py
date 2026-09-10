@@ -80,6 +80,7 @@ class RuntimeStrategy(Protocol):
 
 _PAPER_RECOVERY_STATE_LIMIT = 100_000
 _CANDLE_SOURCE_RETRY_SECONDS = 30.0
+_LEGACY_CANDLE_CURSOR_LOOKBACK = timedelta(minutes=15)
 
 
 class PaperLiveDaemonRepository(Protocol):
@@ -325,6 +326,7 @@ def run_paired_paper_live_daemon(
     open_positions_by_account: list[dict[str, PaperPosition]] = []
     last_position_persisted_at_by_account: list[dict[str, datetime]] = []
     last_candle_end_by_account: list[dict[str, datetime]] = []
+    legacy_candle_cursor_symbols_by_account: list[set[str]] = []
     candle_aggregators: list[Candle15mAggregator | None] = []
     candle_history_by_account: list[
         dict[str, deque[ClosedCandle15m]]
@@ -364,6 +366,7 @@ def run_paired_paper_live_daemon(
         last_candle_end_by_account.append(
             _initial_candle_cursors(open_positions)
         )
+        legacy_candle_cursor_symbols_by_account.append(set())
         candle_aggregators.append(
             Candle15mAggregator()
             if (
@@ -487,6 +490,35 @@ def run_paired_paper_live_daemon(
                     state.symbol
                 )
                 if retry_after is None or now >= retry_after:
+                    after = last_candle_end_by_account[index].get(state.symbol)
+                    if (
+                        candle_source is not None
+                        and after is None
+                        and state.symbol
+                        not in legacy_candle_cursor_symbols_by_account[index]
+                    ):
+                        legacy_position_count = sum(
+                            1
+                            for position in open_positions_by_account[index].values()
+                            if (
+                                position.status is PaperPositionStatus.OPEN
+                                and position.symbol == state.symbol
+                                and position.last_candle_end is None
+                            )
+                        )
+                        if legacy_position_count:
+                            log.warning(
+                                "paper_legacy_candle_cursor_fallback",
+                                symbol=state.symbol,
+                                account_index=index,
+                                position_count=legacy_position_count,
+                                lookback_seconds=(
+                                    _LEGACY_CANDLE_CURSOR_LOOKBACK.total_seconds()
+                                ),
+                            )
+                            legacy_candle_cursor_symbols_by_account[index].add(
+                                state.symbol
+                            )
                     try:
                         closed_candles = _load_closed_candles_for_positions(
                             positions=tuple(
@@ -495,9 +527,7 @@ def run_paired_paper_live_daemon(
                             state=state,
                             source=candle_source,
                             not_before=identity.created_at,
-                            after=last_candle_end_by_account[index].get(
-                                state.symbol
-                            ),
+                            after=after,
                         )
                     except ClosedCandleSourceError as error:
                         log.warning(
@@ -1208,6 +1238,13 @@ def _load_closed_candles_for_positions(
     not_before: datetime,
     after: datetime | None,
 ) -> tuple[ClosedCandle15m, ...]:
+    """Load candles without inventing history for legacy positions.
+
+    Positions created before ``last_candle_end`` was persisted have no known
+    replay boundary. Those positions intentionally inspect only the latest
+    complete 15-minute window; the first successfully processed candle then
+    becomes their durable cursor through ``mark_positions``.
+    """
     if source is None:
         return ()
     candle_end = _candle_start_15m(state.bucket_start)
@@ -1225,7 +1262,9 @@ def _load_closed_candles_for_positions(
     if not matching:
         return ()
     candle_start = (
-        after if after is not None else candle_end - timedelta(minutes=15)
+        after
+        if after is not None
+        else candle_end - _LEGACY_CANDLE_CURSOR_LOOKBACK
     )
     candle_start = max(candle_start, _candle_start_15m(not_before))
     candles = source.load_closed_candles(
@@ -1351,6 +1390,7 @@ def run_paper_live_daemon(
     )
     last_equity_snapshot_at: datetime | None = None
     last_candle_end_by_symbol: dict[str, datetime] = initial_candle_cursors
+    legacy_candle_cursor_symbols: set[str] = set()
     candle_retry_after_by_symbol: dict[str, datetime] = {}
     candle_history_by_symbol: dict[str, deque[ClosedCandle15m]] = {}
     entry_symbols: frozenset[str] | None = None
@@ -1449,13 +1489,38 @@ def run_paper_live_daemon(
             ):
                 retry_after = candle_retry_after_by_symbol.get(state.symbol)
                 if retry_after is None or now >= retry_after:
+                    after = last_candle_end_by_symbol.get(state.symbol)
+                    if (
+                        candle_source is not None
+                        and after is None
+                        and state.symbol not in legacy_candle_cursor_symbols
+                    ):
+                        legacy_position_count = sum(
+                            1
+                            for position in open_positions.values()
+                            if (
+                                position.status is PaperPositionStatus.OPEN
+                                and position.symbol == state.symbol
+                                and position.last_candle_end is None
+                            )
+                        )
+                        if legacy_position_count:
+                            log.warning(
+                                "paper_legacy_candle_cursor_fallback",
+                                symbol=state.symbol,
+                                position_count=legacy_position_count,
+                                lookback_seconds=(
+                                    _LEGACY_CANDLE_CURSOR_LOOKBACK.total_seconds()
+                                ),
+                            )
+                            legacy_candle_cursor_symbols.add(state.symbol)
                     try:
                         closed_candles = _load_closed_candles_for_positions(
                             positions=tuple(open_positions.values()),
                             state=state,
                             source=candle_source,
                             not_before=candle_not_before,
-                            after=last_candle_end_by_symbol.get(state.symbol),
+                            after=after,
                         )
                     except ClosedCandleSourceError as error:
                         log.warning(

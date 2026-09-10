@@ -44,6 +44,9 @@ The configured Binance REST source is authoritative for these exits. If its
 request, response, or completeness check fails, the runner keeps the position
 open, records the source error, and retries on the next backoff window; it does
 not synthesize a partial candle or fall back to a different close price.
+Positions created before the candle cursor migration have no replay boundary;
+the runner checks only the latest complete 15-minute window, persists the first
+successful candle as the new cursor, and emits a one-time legacy-cursor warning.
 
 The previously deployed Compression, 45-minute, and C1 imbalance accounts are
 kept in the database for historical analysis but are no longer active runners.
