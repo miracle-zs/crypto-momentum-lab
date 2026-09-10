@@ -88,7 +88,9 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
+    create_maintenance_database_engine,
     create_market_database_engine,
+    create_observability_database_engine,
     create_partitioning_database_engine,
 )
 from crypto_momentum_lab.persistence.raw_files.archive import ZstdJsonlArchive
@@ -624,12 +626,22 @@ class MarketDataRuntime:
     universe_refresh_interval_minutes: int
     enabled_streams: tuple[CaptureStream, ...]
     initial_symbols: frozenset[str]
+    maintenance_capture_repository: PostgresCaptureRepository | None = None
     operational_retention: PostgresOperationalRetentionRepository | None = None
     database_retention_interval_seconds: float = (
         _DATABASE_RETENTION_INTERVAL_SECONDS
     )
     contract_metadata_retention_hours: float = _CONTRACT_METADATA_RETENTION_HOURS
     runtime_state_retention_hours: float = _RUNTIME_STATE_RETENTION_HOURS
+
+
+def _archive_retention_repository(
+    runtime: MarketDataRuntime,
+) -> PostgresCaptureRepository:
+    return (
+        getattr(runtime, "maintenance_capture_repository", None)
+        or runtime.capture_repository
+    )
 
 
 @asynccontextmanager
@@ -639,14 +651,32 @@ async def build_market_data_runtime(
     on_durable_state_persisted: Callable[[datetime], None] | None = None,
 ) -> AsyncIterator[MarketDataRuntime]:
     runtime = load_runtime_config(config_path)
-    engine = create_market_database_engine(_market_database_url(runtime.database_url))
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
-    universe_repository = PostgresUniverseRepository(sessions)
-    capture_repository = PostgresCaptureRepository(sessions)
-    operational_retention = PostgresOperationalRetentionRepository(sessions)
-    paper_repository = PostgresPaperDaemonRepository(sessions)
-    account_repository = PostgresAccountRepository(sessions)
-    runtime_state_repository = PostgresRuntimeMarketStateRepository(sessions)
+    database_url = _market_database_url(runtime.database_url)
+    market_engine = create_market_database_engine(database_url)
+    observability_engine = create_observability_database_engine(database_url)
+    maintenance_engine = create_maintenance_database_engine(database_url)
+    market_sessions = async_sessionmaker(market_engine, expire_on_commit=False)
+    observability_sessions = async_sessionmaker(
+        observability_engine,
+        expire_on_commit=False,
+    )
+    maintenance_sessions = async_sessionmaker(
+        maintenance_engine,
+        expire_on_commit=False,
+    )
+    universe_repository = PostgresUniverseRepository(market_sessions)
+    capture_repository = PostgresCaptureRepository(observability_sessions)
+    maintenance_capture_repository = PostgresCaptureRepository(
+        maintenance_sessions
+    )
+    operational_retention = PostgresOperationalRetentionRepository(
+        maintenance_sessions
+    )
+    paper_repository = PostgresPaperDaemonRepository(maintenance_sessions)
+    account_repository = PostgresAccountRepository(maintenance_sessions)
+    runtime_state_repository = PostgresRuntimeMarketStateRepository(
+        market_sessions
+    )
     state_hub = MarketStateHub(
         MarketStateHubConfig(
             host=os.environ.get(
@@ -705,6 +735,7 @@ async def build_market_data_runtime(
     )
     capture_version = behavior_hash(runtime)
     archive_config = runtime.capture.archive
+    archive_config.root.mkdir(parents=True, exist_ok=True)
     manifest_journal = PendingManifestJournal(
         archive_config.root / ".pending-manifests"
     )
@@ -739,7 +770,7 @@ async def build_market_data_runtime(
 
     async def save_manifest(manifest: ArchiveManifest) -> None:
         try:
-            await capture_repository.save_manifest(manifest)
+            await maintenance_capture_repository.save_manifest(manifest)
         except SQLAlchemyError:
             await manifest_journal.append(manifest)
 
@@ -754,7 +785,7 @@ async def build_market_data_runtime(
         # A replay must fail and leave its journal entry in place when the
         # database is still unavailable. Calling the normal fallback writer
         # here would append the same entry and then let replay delete it.
-        await capture_repository.save_manifest(manifest)
+        await maintenance_capture_repository.save_manifest(manifest)
 
     replayed_manifest_count = await manifest_journal.replay(
         save_replayed_manifest
@@ -766,7 +797,7 @@ async def build_market_data_runtime(
         )
 
     await prune_expired_raw_archives(
-        capture_repository,
+        maintenance_capture_repository,
         archive_config.root,
         retention_days=archive_config.retention_days,
     )
@@ -926,11 +957,14 @@ async def build_market_data_runtime(
             ),
             enabled_streams=enabled_streams,
             initial_symbols=initial_symbols,
+            maintenance_capture_repository=maintenance_capture_repository,
             operational_retention=operational_retention,
         )
     finally:
         await rest_client.aclose()
-        await engine.dispose()
+        await market_engine.dispose()
+        await observability_engine.dispose()
+        await maintenance_engine.dispose()
 
 
 @app.command()
@@ -1048,7 +1082,7 @@ async def run_market_data(
                 ),
                 asyncio.create_task(
                     run_raw_archive_retention_loop(
-                        runtime.capture_repository,
+                        _archive_retention_repository(runtime),
                         runtime.archive_root,
                         retention_days=runtime.archive_retention_days,
                         interval_seconds=runtime.archive_retention_interval_seconds,
@@ -1205,7 +1239,7 @@ async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
             )
             retention_task = asyncio.create_task(
                 run_raw_archive_retention_loop(
-                    runtime.capture_repository,
+                    _archive_retention_repository(runtime),
                     runtime.archive_root,
                     retention_days=runtime.archive_retention_days,
                     interval_seconds=runtime.archive_retention_interval_seconds,

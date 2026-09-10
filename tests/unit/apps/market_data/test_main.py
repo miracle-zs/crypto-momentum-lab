@@ -347,8 +347,12 @@ async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
     )
 
     @asynccontextmanager
-    async def fake_runtime(config_path: Path):
-        del config_path
+    async def fake_runtime(
+        config_path: Path,
+        *,
+        on_durable_state_persisted=None,
+    ):
+        del config_path, on_durable_state_persisted
         yield runtime
 
     monkeypatch.setattr(main, "build_market_data_runtime", fake_runtime)
