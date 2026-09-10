@@ -57,6 +57,17 @@ class FakeClock:
         return self._now
 
 
+class RecordingLogger:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, dict[str, object]]] = []
+
+    def warning(self, event: str, **kwargs: object) -> None:
+        self.events.append(("warning", event, kwargs))
+
+    def info(self, event: str, **kwargs: object) -> None:
+        self.events.append(("info", event, kwargs))
+
+
 class FakeClosedCandleSource:
     def __init__(self, candles: tuple[ClosedCandle15m, ...]) -> None:
         self._candles = candles
@@ -443,9 +454,11 @@ def test_daemon_resumes_from_checkpoint_cursor() -> None:
     assert strategy.processed == [second]
 
 
-def test_daemon_skips_stale_market_state_without_halting() -> None:
+def test_daemon_skips_stale_market_state_without_halting(monkeypatch) -> None:
     stale_state = fixture_state("BTCUSDT", 0)
     repository = FakeRepository()
+    logger = RecordingLogger()
+    monkeypatch.setattr("crypto_momentum_lab.strategy_runner.daemon.log", logger)
 
     result = run_paper_live_daemon(
         source=(stale_state,),
@@ -458,13 +471,32 @@ def test_daemon_skips_stale_market_state_without_halting() -> None:
     assert result.processed_state_count == 0
     assert result.halt_reason is None
     assert repository.saved_checkpoints == []
+    assert logger.events == [
+        (
+            "warning",
+            "paper_market_state_stale",
+            {
+                "symbol": "BTCUSDT",
+                "state_bucket_end": stale_state.bucket_end.isoformat(),
+                "observed_at": (
+                    stale_state.bucket_end + timedelta(seconds=11)
+                ).isoformat(),
+                "age_seconds": 11.0,
+                "max_market_state_age_seconds": 10,
+                "open_position_count": 0,
+                "exit_action": "defer_until_fresh_market_state",
+            },
+        )
+    ]
 
 
-def test_daemon_skips_stale_state_and_processes_fresh_state() -> None:
+def test_daemon_skips_stale_state_and_processes_fresh_state(monkeypatch) -> None:
     stale_state = fixture_state("BTCUSDT", 0)
     fresh_state = fixture_state("BTCUSDT", 1)
     repository = FakeRepository()
     strategy = FakeStrategy()
+    logger = RecordingLogger()
+    monkeypatch.setattr("crypto_momentum_lab.strategy_runner.daemon.log", logger)
 
     result = run_paper_live_daemon(
         source=(stale_state, fresh_state),
@@ -479,6 +511,10 @@ def test_daemon_skips_stale_state_and_processes_fresh_state() -> None:
     assert result.processed_state_count == 1
     assert result.halt_reason is None
     assert strategy.reset_symbols == ["BTCUSDT"]
+    assert [event[1] for event in logger.events] == [
+        "paper_market_state_stale",
+        "paper_market_state_recovered",
+    ]
 
 
 def test_daemon_resets_restored_symbol_after_data_gap() -> None:

@@ -383,6 +383,7 @@ def run_paired_paper_live_daemon(
     entry_symbols: frozenset[str] | None = None
     entry_symbols_loaded_at: datetime | None = None
     gapped_symbols: set[str] = set()
+    stale_symbols: set[str] = set()
     last_processed_at_by_symbol = (
         {}
         if restored_checkpoint is None
@@ -401,10 +402,31 @@ def run_paired_paper_live_daemon(
             _state_age_seconds(now, state)
             > first_config.max_market_state_age_seconds
         ):
+            if state.symbol not in stale_symbols:
+                _log_stale_market_state(
+                    state=state,
+                    now=now,
+                    max_age_seconds=first_config.max_market_state_age_seconds,
+                    open_position_count=sum(
+                        len(positions)
+                        for positions in open_positions_by_account
+                    ),
+                )
+                stale_symbols.add(state.symbol)
             if state.symbol not in gapped_symbols:
                 _reset_strategy_symbol(strategy, state.symbol)
                 gapped_symbols.add(state.symbol)
             continue
+
+        if state.symbol in stale_symbols:
+            _log_stale_market_state_recovered(
+                state=state,
+                now=now,
+                open_position_count=sum(
+                    len(positions) for positions in open_positions_by_account
+                ),
+            )
+            stale_symbols.discard(state.symbol)
 
         if state.symbol not in gapped_symbols:
             _reset_strategy_for_gap(
@@ -1264,6 +1286,7 @@ def run_paper_live_daemon(
     entry_symbols: frozenset[str] | None = None
     entry_symbols_loaded_at: datetime | None = None
     gapped_symbols: set[str] = set()
+    stale_symbols: set[str] = set()
     last_processed_at_by_symbol = (
         {}
         if checkpoint is None
@@ -1294,10 +1317,26 @@ def run_paper_live_daemon(
         if (
             _state_age_seconds(now, state) > config.max_market_state_age_seconds
         ):
+            if state.symbol not in stale_symbols:
+                _log_stale_market_state(
+                    state=state,
+                    now=now,
+                    max_age_seconds=config.max_market_state_age_seconds,
+                    open_position_count=len(open_positions),
+                )
+                stale_symbols.add(state.symbol)
             if state.symbol not in gapped_symbols:
                 _reset_strategy_symbol(strategy, state.symbol)
                 gapped_symbols.add(state.symbol)
             continue
+
+        if state.symbol in stale_symbols:
+            _log_stale_market_state_recovered(
+                state=state,
+                now=now,
+                open_position_count=len(open_positions),
+            )
+            stale_symbols.discard(state.symbol)
 
         if state.symbol not in gapped_symbols:
             _reset_strategy_for_gap(
@@ -1687,6 +1726,43 @@ def _state_age_seconds(now: datetime, state: MarketState15s) -> float:
     _require_aware(now, "now")
     _require_aware(state.bucket_end, "bucket_end")
     return (now - state.bucket_end).total_seconds()
+
+
+def _log_stale_market_state(
+    *,
+    state: MarketState15s,
+    now: datetime,
+    max_age_seconds: float,
+    open_position_count: int,
+) -> None:
+    """Record why stale states defer paper exits and strategy processing."""
+
+    log.warning(
+        "paper_market_state_stale",
+        symbol=state.symbol,
+        state_bucket_end=state.bucket_end.isoformat(),
+        observed_at=now.isoformat(),
+        age_seconds=_state_age_seconds(now, state),
+        max_market_state_age_seconds=max_age_seconds,
+        open_position_count=open_position_count,
+        exit_action="defer_until_fresh_market_state",
+    )
+
+
+def _log_stale_market_state_recovered(
+    *,
+    state: MarketState15s,
+    now: datetime,
+    open_position_count: int,
+) -> None:
+    log.info(
+        "paper_market_state_recovered",
+        symbol=state.symbol,
+        state_bucket_end=state.bucket_end.isoformat(),
+        observed_at=now.isoformat(),
+        open_position_count=open_position_count,
+        exit_action="resume_on_fresh_market_state",
+    )
 
 
 def _reset_strategy_symbol(strategy: RuntimeStrategy, symbol: str) -> None:
