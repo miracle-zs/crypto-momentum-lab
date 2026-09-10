@@ -1,6 +1,6 @@
 # P2 与架构条目逐项复核
 
-复核日期：2026-09-10。对象：docs/code-review-2026-03-19.md。依据为当前工作区代码及配置，不代表报告日期对应的历史版本或线上部署状态。本轮更新 #24–#34、A2、A4、A6 的验收记录并包含对应的本地修复。
+复核日期：2026-09-10。对象：docs/code-review-2026-03-19.md。依据为当前工作区代码及配置，不代表报告日期对应的历史版本或线上部署状态。本轮更新 #24–#34、A2、A4、A6、A7 的验收记录并包含对应的本地修复。
 
 “成立”表示代码事实及问题方向有依据；“部分成立”表示事实存在，但影响、适用范围或建议需要修正；“不作为缺陷”表示属于有意设计或原结论证据不足。结构重复不等于运行错误。
 
@@ -45,7 +45,7 @@
 | A5a | 已完成第一阶段 | 对 YAML 解析后核对的命令重复已收敛：base 与附加账户 compose 各自用一个 `x-execution-account-command` 序列锚点，账户名移到显式 `CML_ACCOUNT_LABEL` 环境变量，CLI `--account-label` 仍保留并优先；live strategy 的 profile/top-N 参数改由既有环境解析器读取，账户、会话、hub、风险和退出差异仍显式保留。这样减少了可安全消除的复制，暂不引入跨文件生成器或无边界的 env 参数化。 |
 | A5b | 已完成第一阶段 | [market-data 列表](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.server.yaml:175)和[dashboard 列表](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/compose.server.yaml:608)共用 `x-paper-account-run-ids` 锚点，保留原有两个环境变量名和八个 run-id。旧的 `CML_HEALTHCHECK_RUN_ID(S)` 环境变量及其 DB 探针消费者已删除，因此原“漏更新变量导致当前生产漏检查”的因果不再存在。 |
 | A6 | 已完成第一阶段，紧凑 checkpoint 边界保留 | [checkpoint payload](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategies/runtime_checkpoint.py:8)现在包含 4 个 `closed_kline_1m` 字段、`data_complete`、`missing_agg_trade_count`；缺省旧 payload 仍分别回退到 `None`、`True`、`0`。round-trip 测试覆盖质量字段与旧 payload 兼容。paper daemon 的[紧凑 checkpoint](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/daemon.py:1456)仍有意不保存 market buffers，重启从市场数据恢复，不能据此要求 JSON、ORM、domain 字段机械完全相等。 |
-| A7 | 重复成立，统一时必须保留优先级差异 | 多个 app 解析 database URL 属实：[live](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/live_rollout/main.py:4384)、[execution](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/execution_account/main.py:642)、[market](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/market_data/main.py:164)、[research collector](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/apps/research_collector/main.py:239)。但 market 收到的是 config 默认值，其 plane env 优先于默认值；有些入口没有 CLI URL，不能一概称相同 CLI→env 链。可集中解析原语并保留每入口“显式覆盖/默认值/必填”规则，避免重构改变数据库平面选择。 |
+| A7 | 已完成第一阶段 | 各 app 现在复用[`resolve_database_url`](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/config/database_url.py:4)，显式 URL 仍优先于按声明顺序的 plane/shared 环境变量；market 保留 config 默认值 fallback，execution/live/research 等入口继续各自执行必填校验或错误类型转换。7 个 resolver/CLI 回归测试覆盖优先级、fallback 和缺失值，不把不同入口强行改成同一必填语义。 |
 | A8 | 已完成验收，暂不删除 | 逐方法搜索与集成/E2E 测试确认：run summary、paper artifacts、quality count、latest process state 和 exact-time universe snapshot 都有测试契约；`MonitoringObligationProvider` 有真实的强制 symbol 端口和 Fake 实现。唯一没有调用证据的是 `save_command`，但它对应 rollback command 审计表和交易所写操作授权链；鉴权及其运营语义按当前要求暂缓，因此保留，不以删除 repository 方法冒充修复。 |
 | A9 | 已完成第一阶段 | 两 capture 配置确有共享字段，但差异还包括 `archive.streams`、rotation 大小、writer 数、磁盘阈值、realtime delay 和队列容量；两个 environment 文件也只是选择不同 universe/capture 组合。没有引入会改变列表覆盖和默认继承语义的深合并 overlay，新增配置一致性测试锁定共享传输/归档默认值，并显式断言环境差异。 |
 | A10 | 不作为缺陷 | 当前 compose 没有 liquidation 服务属实，但[registry](/Users/zhangshuai/PycharmProjects/crypto-momentum-lab/src/crypto_momentum_lab/strategy_runner/registry.py:65)表示运行器支持哪些策略，不表示哪些策略已部署或已验证适合实盘。liquidation 确实有可运行的 runtime，也用于研究/测试，因此 supported 列表并未虚假承诺。可补生命周期标签及文档，不能仅因无常驻生产服务就从 build_runtime_strategy 删除，避免破坏研究与 paper 工作流。 |
