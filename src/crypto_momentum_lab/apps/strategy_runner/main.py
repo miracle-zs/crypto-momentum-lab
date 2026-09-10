@@ -1078,7 +1078,7 @@ def paper_live_daemon_command(
                 run_identity=identity,
                 source_description=source.description,
                 execution=ReplayExecutionConfig(
-                    latency_buckets=1,
+                    latency_buckets=0,
                     require_market_quote=require_market_quote,
                 ),
                 portfolio=PaperExitConfig(
@@ -1792,7 +1792,7 @@ def _build_paired_account(
             run_identity=spec.run_identity,
             source_description=source_description,
             execution=ReplayExecutionConfig(
-                latency_buckets=1,
+                latency_buckets=0,
                 require_market_quote=require_market_quote,
             ),
             portfolio=spec.portfolio,
