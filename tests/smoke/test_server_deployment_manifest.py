@@ -227,6 +227,17 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         "--cooldown-buckets",
     ):
         assert profile_option not in live_command
+    for profile_env in (
+        "CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT",
+        "CML_LIVE_IMPULSE_WINDOW_BUCKETS",
+        "CML_LIVE_CONFIRMATION_BUCKETS",
+        "CML_LIVE_MIN_RETURN_PCT",
+        "CML_LIVE_MIN_IMBALANCE",
+        "CML_LIVE_MIN_INTENSITY",
+        "CML_LIVE_MIN_NOTIONAL_5M_VS_30M",
+        "CML_LIVE_COOLDOWN_BUCKETS",
+    ):
+        assert profile_env in services["live-strategy"]["environment"]
     assert services["live-strategy"]["environment"][
         "CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT"
     ] == "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-10}"
@@ -308,6 +319,17 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
             "--cooldown-buckets",
         ):
             assert option not in strategy["command"]
+        for profile_env in (
+            "CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT",
+            "CML_LIVE_IMPULSE_WINDOW_BUCKETS",
+            "CML_LIVE_CONFIRMATION_BUCKETS",
+            "CML_LIVE_MIN_RETURN_PCT",
+            "CML_LIVE_MIN_IMBALANCE",
+            "CML_LIVE_MIN_INTENSITY",
+            "CML_LIVE_MIN_NOTIONAL_5M_VS_30M",
+            "CML_LIVE_COOLDOWN_BUCKETS",
+        ):
+            assert profile_env in strategy["environment"]
         assert "BINANCE_API_KEY" not in execution["environment"]
         assert "BINANCE_API_SECRET" not in execution["environment"]
         assert "BINANCE_API_KEY" not in strategy["environment"]
