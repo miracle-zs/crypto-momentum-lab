@@ -1124,21 +1124,22 @@ async def test_trade_client_confirms_entry_leverage_before_order() -> None:
     assert requested_paths == ["/fapi/v1/leverage", "/fapi/v1/order"]
 
 
-async def test_trade_client_confirms_entry_margin_type_before_order() -> None:
+async def test_trade_client_sets_entry_margin_type_once_before_orders() -> None:
     requested_paths: list[str] = []
-    symbol_config_calls = 0
+    margin_type_calls = 0
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal symbol_config_calls
+        nonlocal margin_type_calls
         requested_paths.append(request.url.path)
         if request.url.path == "/fapi/v1/symbolConfig":
-            symbol_config_calls += 1
-            margin_type = "ISOLATED" if symbol_config_calls == 1 else "CROSSED"
             return httpx.Response(
                 200,
-                json=[{"symbol": "BTCUSDT", "marginType": margin_type}],
+                # A symbol-config read can briefly lag the successful mode
+                # change. The order path must not require a second read-back.
+                json=[{"symbol": "BTCUSDT", "marginType": "ISOLATED"}],
             )
         if request.url.path == "/fapi/v1/marginType":
+            margin_type_calls += 1
             body = parse_qs(request.content.decode())
             assert body["symbol"] == ["BTCUSDT"]
             assert body["marginType"] == ["CROSSED"]
@@ -1169,17 +1170,21 @@ async def test_trade_client_confirms_entry_margin_type_before_order() -> None:
         margin_type="CROSSED",
     )
 
+    first_plan = _order_plan()
+    second_plan = replace(first_plan, client_order_id="entry-second")
     try:
-        await client.submit_order(_order_plan())
+        await client.submit_order(first_plan)
+        await client.submit_order(second_plan)
     finally:
         await client.aclose()
 
     assert requested_paths == [
         "/fapi/v1/symbolConfig",
         "/fapi/v1/marginType",
-        "/fapi/v1/symbolConfig",
+        "/fapi/v1/order",
         "/fapi/v1/order",
     ]
+    assert margin_type_calls == 1
 
 
 async def test_trade_client_warms_entry_margin_type_outside_order_path() -> None:
