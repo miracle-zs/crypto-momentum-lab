@@ -224,6 +224,9 @@ live_rollout/
   发布和租约自动恢复转移到 `live_rollout/control_plane.py` 的
   `LiveControlPlaneRuntime`；`main.py` 只负责组装数据库恢复策略、heartbeat、
   gap 通知和 entry gate 回调，控制面状态不再由 composition root 的嵌套闭包持有。
+- 已将本地 health marker 的周期 heartbeat、关键 task 停止时的 degraded 状态和
+  marker 写入异常隔离到 `live_rollout/health_monitor.py` 的 `LiveHealthMonitor`；
+  live 装配层只提供 task 状态谓词并管理 task 生命周期。
 - 这是 P0-1 的渐进切片，属于转移实现所有权而非增加转发壳；`session.py` 当前仍是
   手工 one-shot session，不应把本次改动写成整个 P0-1 已完成。
 

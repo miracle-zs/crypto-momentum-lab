@@ -129,6 +129,7 @@ from crypto_momentum_lab.live_rollout.exits import (
     LiveExitManager,
 )
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext, evaluate_live_gate
+from crypto_momentum_lab.live_rollout.health_monitor import LiveHealthMonitor
 from crypto_momentum_lab.live_rollout.lease import (
     LeaseHeartbeatConfig,
     LiveLeaseHeartbeat,
@@ -3436,30 +3437,22 @@ async def _run_live_daemon(
         )
         local_health_task: asyncio.Task[None] | None = None
 
-        async def refresh_local_health() -> None:
-            while True:
-                await asyncio.sleep(_LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS)
-                if health is None:
-                    continue
-                try:
-                    if (
-                        market_task.done()
-                        or account_task.done()
-                        or lease_task.done()
-                        or (
-                            risk_control_task is not None
-                            and risk_control_task.done()
-                        )
-                    ):
-                        health.degraded()
-                    else:
-                        health.heartbeat()
-                except Exception:
-                    log.exception("live_health_marker_failed")
-
         if health is not None:
+            health_monitor = LiveHealthMonitor(
+                health=health,
+                interval_seconds=_LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS,
+                is_degraded=lambda: (
+                    market_task.done()
+                    or account_task.done()
+                    or lease_task.done()
+                    or (
+                        risk_control_task is not None
+                        and risk_control_task.done()
+                    )
+                ),
+            )
             local_health_task = asyncio.create_task(
-                refresh_local_health(),
+                health_monitor.run(),
                 name=f"live-local-health:{session_id}",
             )
         try:
