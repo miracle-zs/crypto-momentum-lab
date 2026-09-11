@@ -3143,10 +3143,6 @@ async def _run_live_daemon(
                 else closed_candle_feed.set_symbols
             ),
         )
-        entry_filter_cache_ready = not (
-            entry_filter_cache_required or entry_symbol_cache_required
-        )
-        exit_failure_by_symbol: dict[str, str] = {}
         assert live_repository is not None
         risk_control_dispatcher = RiskControlCommandDispatcher(
             repository=live_repository,
@@ -3181,39 +3177,19 @@ async def _run_live_daemon(
                 risk_blocked,
                 reason=risk_reason,
             )
-            if control_plane_runtime.lease_heartbeat_degraded:
-                daemon.set_entry_enabled(
-                    False,
-                    reason="lease_heartbeat_degraded",
-                )
-            elif draining:
-                daemon.set_entry_enabled(False, reason="session_draining")
-            elif exit_failure_by_symbol:
-                symbol, reason = next(iter(exit_failure_by_symbol.items()))
-                daemon.set_entry_enabled(
-                    False,
-                    reason=f"exit_failure:{symbol}:{reason}",
-                )
-            elif not control_plane_runtime.market_state_available:
-                daemon.set_entry_enabled(
-                    False,
-                    reason=control_plane_runtime.market_state_unavailable_reason,
-                )
-            elif not control_plane_runtime.account_snapshot_available:
-                daemon.set_entry_enabled(
-                    False,
-                    reason="account_snapshot_recovering",
-                )
-            elif not entry_filter_cache_ready:
-                daemon.set_entry_enabled(
-                    False,
-                    reason="entry_cache_warming",
-                )
-            else:
-                daemon.set_entry_enabled(
-                    True,
-                    reason="live_entry_prerequisites_ready",
-                )
+            daemon.refresh_entry_prerequisites(
+                lease_heartbeat_degraded=(
+                    control_plane_runtime.lease_heartbeat_degraded
+                ),
+                session_draining=draining,
+                market_state_available=control_plane_runtime.market_state_available,
+                market_state_unavailable_reason=(
+                    control_plane_runtime.market_state_unavailable_reason
+                ),
+                account_snapshot_available=(
+                    control_plane_runtime.account_snapshot_available
+                ),
+            )
 
         async def reacquire_live_lease(
             gate_context: LiveGateContext,
@@ -3270,16 +3246,16 @@ async def _run_live_daemon(
         )
 
         def on_exit_failure(symbol: str, failure: str | None) -> None:
-            if failure is None:
-                exit_failure_by_symbol.pop(symbol, None)
-            else:
-                exit_failure_by_symbol[symbol] = failure
+            daemon.set_exit_failure(symbol, failure)
             refresh_entry_enabled()
 
         def on_entry_filter_cache_ready(ready: bool) -> None:
-            nonlocal entry_filter_cache_ready
-            entry_filter_cache_ready = ready
+            daemon.set_entry_filter_cache_ready(ready)
             refresh_entry_enabled()
+
+        daemon.set_entry_filter_cache_ready(
+            not (entry_filter_cache_required or entry_symbol_cache_required)
+        )
 
         if entry_filter_cache_required:
             assert ema_provider is not None

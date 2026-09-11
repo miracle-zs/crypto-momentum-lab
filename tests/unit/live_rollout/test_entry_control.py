@@ -80,3 +80,66 @@ def test_entry_control_validates_gate_inputs() -> None:
         gate.set_entry_enabled("yes", reason="test")  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         gate.set_entry_enabled(False, reason=" ")
+
+
+def test_entry_control_owns_external_prerequisite_priority() -> None:
+    gate = LiveEntryControlGate(run_id="run-1", state_machine=_StateMachine())
+    gate.set_entry_filter_cache_ready(False)
+    gate.refresh_entry_prerequisites(
+        lease_heartbeat_degraded=False,
+        session_draining=False,
+        market_state_available=True,
+        market_state_unavailable_reason="market_state_hub_ready",
+        account_snapshot_available=True,
+    )
+    assert gate.entry_enabled is False
+    assert gate.entry_enabled_reason == "entry_cache_warming"
+
+    gate.set_exit_failure("BTCUSDT", "exit request failed")
+    gate.refresh_entry_prerequisites(
+        lease_heartbeat_degraded=False,
+        session_draining=False,
+        market_state_available=True,
+        market_state_unavailable_reason="market_state_hub_ready",
+        account_snapshot_available=True,
+    )
+    assert gate.entry_enabled_reason == (
+        "exit_failure:BTCUSDT:exit request failed"
+    )
+
+    gate.set_exit_failure("BTCUSDT", None)
+    gate.set_entry_filter_cache_ready(True)
+    gate.refresh_entry_prerequisites(
+        lease_heartbeat_degraded=False,
+        session_draining=False,
+        market_state_available=False,
+        market_state_unavailable_reason="market_state_consumer_lagged",
+        account_snapshot_available=True,
+    )
+    assert gate.entry_enabled_reason == "market_state_consumer_lagged"
+
+    gate.refresh_entry_prerequisites(
+        lease_heartbeat_degraded=False,
+        session_draining=False,
+        market_state_available=True,
+        market_state_unavailable_reason="market_state_hub_ready",
+        account_snapshot_available=True,
+    )
+    assert gate.entry_enabled is True
+
+
+def test_entry_control_validates_external_prerequisites() -> None:
+    gate = LiveEntryControlGate(run_id="run-1", state_machine=_StateMachine())
+
+    with pytest.raises(TypeError):
+        gate.set_entry_filter_cache_ready("yes")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        gate.set_exit_failure("BTCUSDT", " ")
+    with pytest.raises(ValueError):
+        gate.refresh_entry_prerequisites(
+            lease_heartbeat_degraded=False,
+            session_draining=False,
+            market_state_available=True,
+            market_state_unavailable_reason=" ",
+            account_snapshot_available=True,
+        )

@@ -196,6 +196,9 @@ live_rollout/
 - 已将 prerequisite、risk-control、scheduled window 和 pending-position 的 entry gate
   组合转移到 `live_rollout/entry_control.py`；coordinator 的 block/unblock 由该模块
   统一执行，重开失败时保持 fail-closed，daemon 只保留兼容性委托方法。
+- `LiveEntryControlGate` 进一步接管 exit failure、entry-cache warming，以及 lease、
+  draining、market 和 account 外部前置条件的优先级；`main.py` 不再持有这些 entry
+  gate 的字典/布尔状态。
 - 已将 pending entry 的本地 reservation、terminal order event release、durable
   unresolved-order sync 和 exposure reservation 转移到 `live_rollout/pending_entries.py`；
   submission、scheduled controller 和 runtime cache 通过窄 adapter 使用它，daemon

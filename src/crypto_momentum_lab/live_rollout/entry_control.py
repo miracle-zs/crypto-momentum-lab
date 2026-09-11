@@ -24,6 +24,8 @@ class LiveEntryControlGate:
         self._scheduled_entry_blocked = False
         self._scheduled_entry_block_reason = "outside_scheduled_risk_window"
         self._pending_position_symbols: frozenset[str] = frozenset()
+        self._entry_filter_cache_ready = True
+        self._exit_failure_by_symbol: dict[str, str] = {}
 
     @property
     def entry_enabled(self) -> bool:
@@ -71,6 +73,82 @@ class LiveEntryControlGate:
             reason=reason,
             run_id=self._run_id,
         )
+
+    def set_exit_failure(
+        self,
+        symbol: str,
+        failure: str | None,
+    ) -> None:
+        """Remember an exit failure until that symbol recovers."""
+
+        if not symbol.strip():
+            raise ValueError("symbol must not be empty")
+        if failure is None:
+            self._exit_failure_by_symbol.pop(symbol, None)
+            return
+        if not failure.strip():
+            raise ValueError("failure must not be empty when present")
+        self._exit_failure_by_symbol[symbol] = failure
+
+    def set_entry_filter_cache_ready(self, ready: bool) -> None:
+        """Set whether the configured entry filter cache can admit entries."""
+
+        if not isinstance(ready, bool):
+            raise TypeError("ready must be a bool")
+        self._entry_filter_cache_ready = ready
+
+    def refresh_entry_prerequisites(
+        self,
+        *,
+        lease_heartbeat_degraded: bool,
+        session_draining: bool,
+        market_state_available: bool,
+        market_state_unavailable_reason: str,
+        account_snapshot_available: bool,
+    ) -> None:
+        """Apply external live prerequisites in their fail-closed priority."""
+
+        for value, field_name in (
+            (lease_heartbeat_degraded, "lease_heartbeat_degraded"),
+            (session_draining, "session_draining"),
+            (market_state_available, "market_state_available"),
+            (account_snapshot_available, "account_snapshot_available"),
+        ):
+            if not isinstance(value, bool):
+                raise TypeError(f"{field_name} must be a bool")
+        if not market_state_unavailable_reason.strip():
+            raise ValueError("market_state_unavailable_reason must not be empty")
+
+        if lease_heartbeat_degraded:
+            self.set_entry_enabled(
+                False,
+                reason="lease_heartbeat_degraded",
+            )
+        elif session_draining:
+            self.set_entry_enabled(False, reason="session_draining")
+        elif self._exit_failure_by_symbol:
+            symbol, failure = next(iter(self._exit_failure_by_symbol.items()))
+            self.set_entry_enabled(
+                False,
+                reason=f"exit_failure:{symbol}:{failure}",
+            )
+        elif not market_state_available:
+            self.set_entry_enabled(
+                False,
+                reason=market_state_unavailable_reason,
+            )
+        elif not account_snapshot_available:
+            self.set_entry_enabled(
+                False,
+                reason="account_snapshot_recovering",
+            )
+        elif not self._entry_filter_cache_ready:
+            self.set_entry_enabled(False, reason="entry_cache_warming")
+        else:
+            self.set_entry_enabled(
+                True,
+                reason="live_entry_prerequisites_ready",
+            )
 
     def set_risk_control_entry_blocked(
         self,

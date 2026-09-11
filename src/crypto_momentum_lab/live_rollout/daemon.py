@@ -437,6 +437,33 @@ class LiveStrategyDaemon:
     def set_entry_enabled(self, enabled: bool, *, reason: str) -> None:
         self._entry_control.set_entry_enabled(enabled, reason=reason)
 
+    def set_exit_failure(
+        self,
+        symbol: str,
+        failure: str | None,
+    ) -> None:
+        self._entry_control.set_exit_failure(symbol, failure)
+
+    def set_entry_filter_cache_ready(self, ready: bool) -> None:
+        self._entry_control.set_entry_filter_cache_ready(ready)
+
+    def refresh_entry_prerequisites(
+        self,
+        *,
+        lease_heartbeat_degraded: bool,
+        session_draining: bool,
+        market_state_available: bool,
+        market_state_unavailable_reason: str,
+        account_snapshot_available: bool,
+    ) -> None:
+        self._entry_control.refresh_entry_prerequisites(
+            lease_heartbeat_degraded=lease_heartbeat_degraded,
+            session_draining=session_draining,
+            market_state_available=market_state_available,
+            market_state_unavailable_reason=market_state_unavailable_reason,
+            account_snapshot_available=account_snapshot_available,
+        )
+
     def set_risk_control_entry_blocked(
         self,
         blocked: bool,
