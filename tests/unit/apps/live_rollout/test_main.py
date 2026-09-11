@@ -17,6 +17,7 @@ from crypto_momentum_lab.live_rollout.order_reconciliation import (
     LiveOrderReconciliation,
 )
 from crypto_momentum_lab.live_rollout.stream_recovery import (
+    resilient_account_event_stream,
     resilient_market_state_stream,
 )
 from crypto_momentum_lab.market_data.hub import MarketStateHubError
@@ -1329,7 +1330,7 @@ async def test_resilient_account_event_stream_retries_after_hub_failure() -> Non
     source = Source()
     observed = []
 
-    async for item in main._resilient_account_event_stream(
+    async for item in resilient_account_event_stream(
         source,
         retry_delay_seconds=0,
     ):

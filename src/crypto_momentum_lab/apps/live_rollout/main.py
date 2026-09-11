@@ -94,6 +94,9 @@ from crypto_momentum_lab.execution_account.risk_control_hub import (
     WebSocketRiskControlSource,
 )
 from crypto_momentum_lab.health import LocalHealthWriter
+from crypto_momentum_lab.live_rollout.account_channel import (
+    LiveAccountEventRuntime,
+)
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     BinanceClosedCandle15mFeed,
     ClosedCandle15mFeedConfig,
@@ -127,12 +130,6 @@ from crypto_momentum_lab.live_rollout.entry_order_cancellation import (
 from crypto_momentum_lab.live_rollout.entry_orders import LiveLimitOrderLifecycle
 from crypto_momentum_lab.live_rollout.exit_channels import (
     LiveExitChannelRuntime,
-)
-from crypto_momentum_lab.live_rollout.exit_channels import (
-    is_pending_position_sync_failure as _is_pending_position_sync_failure,
-)
-from crypto_momentum_lab.live_rollout.exit_channels import (
-    promote_pending_position_failure as _promote_pending_position_failure,
 )
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitConfig,
@@ -180,9 +177,6 @@ from crypto_momentum_lab.live_rollout.signal_recorder import (
 )
 from crypto_momentum_lab.live_rollout.startup_market_buffer import (
     StartupMarketStateBuffer,
-)
-from crypto_momentum_lab.live_rollout.stream_recovery import (
-    resilient_account_event_stream as _resilient_account_event_stream,
 )
 from crypto_momentum_lab.live_rollout.stream_recovery import (
     resilient_market_state_stream as _resilient_market_state_stream,
@@ -3268,6 +3262,18 @@ async def _run_live_daemon(
             on_exit_failure=on_exit_failure,
             pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
         )
+        account_event_runtime = LiveAccountEventRuntime(
+            daemon=daemon,
+            latest_market_states=latest_market_states,
+            latest_market_quotes=latest_market_quotes,
+            order_reconciliation=order_reconciliation,
+            run_id=session_id,
+            telemetry=telemetry,
+            is_transient_error=_is_transient_live_runtime_error,
+            on_exit_failure=on_exit_failure,
+            on_account_snapshot=control_plane_runtime.on_account_snapshot,
+            pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
+        )
         if risk_control_enabled:
             assert risk_control_hub_url is not None
             risk_control_source = WebSocketRiskControlSource(
@@ -3309,16 +3315,8 @@ async def _run_live_daemon(
             daemon.run(_observe_market_states(state_stream, latest_market_states))
         )
         account_task = asyncio.create_task(
-            _run_account_event_channel(
-                source=account_source,
-                daemon=daemon,
-                latest_market_states=latest_market_states,
-                latest_market_quotes=latest_market_quotes,
-                order_reconciliation=order_reconciliation,
-                telemetry=telemetry,
-                on_exit_failure=on_exit_failure,
-                on_account_snapshot=control_plane_runtime.on_account_snapshot,
-            )
+            account_event_runtime.run(account_source),
+            name=f"live-account-events:{session_id}",
         )
         if risk_control_source is not None:
             risk_control_task = asyncio.create_task(
@@ -3656,103 +3654,19 @@ async def _run_account_event_channel(
             state_machine=state_machine,
             run_id=run_id,
         )
-    reconciliation_run_id = (
-        order_reconciliation.run_id
-        if order_reconciliation is not None
-        else (run_id or "unknown")
+    runtime = LiveAccountEventRuntime(
+        daemon=daemon,
+        latest_market_states=latest_market_states,
+        latest_market_quotes=latest_market_quotes,
+        order_reconciliation=order_reconciliation,
+        run_id=run_id,
+        telemetry=telemetry,
+        is_transient_error=_is_transient_live_runtime_error,
+        on_exit_failure=on_exit_failure,
+        on_account_snapshot=on_account_snapshot,
+        pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
     )
-    async for event in _resilient_account_event_stream(source):
-        try:
-            if telemetry is not None and event.has_fill:
-                await telemetry.account_fill(
-                    event,
-                    occurred_at=event.received_at,
-                )
-            if event.event_type == "ORDER_TRADE_UPDATE" and event.client_order_id:
-                if order_reconciliation is None:
-                    log.warning(
-                        "live_account_event_order_reconciliation_unavailable",
-                        run_id=reconciliation_run_id,
-                        client_order_id=event.client_order_id,
-                    )
-                else:
-                    await order_reconciliation.reconcile_account_event(event)
-            event_run_id = (
-                order_reconciliation.run_id
-                if order_reconciliation is not None
-                else run_id
-            )
-            # ORDER_TRADE_UPDATE can carry both the account projection and
-            # the order identity.  Reconcile the order first so the live
-            # context cannot observe a newly opened position before its
-            # matching entry fill/order state is durable.
-            if on_account_snapshot is not None:
-                on_account_snapshot(event)
-            for state in latest_market_states.for_symbols(event.symbols):
-                quote = next(
-                    iter(latest_market_quotes.for_symbols((state.symbol,))),
-                    None,
-                )
-                failure = await daemon.process_account_event(
-                    state,
-                    quote=quote,
-                )
-                if _is_pending_position_sync_failure(failure):
-                    for attempt, delay in enumerate(
-                        _PENDING_POSITION_RETRY_DELAYS_SECONDS,
-                        start=1,
-                    ):
-                        log.warning(
-                            "live_account_event_position_sync_retry",
-                            run_id=event_run_id,
-                            symbol=state.symbol,
-                            attempt=attempt,
-                            delay_seconds=delay,
-                            reason=failure,
-                        )
-                        await asyncio.sleep(delay)
-                        failure = await daemon.process_account_event(
-                            state,
-                            quote=quote,
-                        )
-                        if not _is_pending_position_sync_failure(failure):
-                            log.info(
-                                "live_account_event_position_sync_recovered",
-                                run_id=event_run_id,
-                                symbol=state.symbol,
-                                attempt=attempt,
-                            )
-                            break
-                    failure = (
-                        _promote_pending_position_failure(failure)
-                        if failure is not None
-                        else None
-                    )
-                if failure is not None:
-                    if on_exit_failure is not None:
-                        on_exit_failure(state.symbol, failure)
-                    log.error(
-                        "live_account_event_exit_degraded",
-                        symbol=state.symbol,
-                        reason=failure,
-                    )
-                    continue
-                if on_exit_failure is not None:
-                    on_exit_failure(state.symbol, None)
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            if not _is_transient_live_runtime_error(error):
-                raise
-            # The account stream itself is still healthy.  Do not kill the
-            # process because persistence is briefly unavailable; periodic
-            # reconciliation and the next market state provide retry paths.
-            log.warning(
-                "live_account_event_processing_degraded",
-                run_id=event_run_id,
-                event_type=event.event_type,
-                error_type=type(error).__name__,
-            )
+    await runtime.run(source)
 
 
 def _is_transient_live_runtime_error(error: Exception) -> bool:

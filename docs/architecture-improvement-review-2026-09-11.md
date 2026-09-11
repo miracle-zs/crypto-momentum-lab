@@ -231,6 +231,10 @@ live_rollout/
 - 已将 quote、closed-candle、grace 三路 reduce-only exit channel 的退避、瞬态故障
   重试和 pending-position promotion 收拢到 `live_rollout/exit_channels.py`；main 只
   负责注入 daemon/cache 与启动独立任务，account channel 的兼容入口保持不变。
+- 已将 account event 的订单先对账、snapshot 发布顺序、按 symbol 的 exit fan-out、
+  pending-position retry/promotion 和瞬态数据库故障降级收拢到
+  `live_rollout/account_channel.py` 的 `LiveAccountEventRuntime`；main 只保留旧入口的
+  兼容适配，长运行 daemon 直接注入该 runtime。
 - 已将手工 `submit-plan` 与长运行 live daemon 共用的提交前 lease、generation、
   strategy、halt 和 entry/draining 复核收拢到 `live_rollout/submission_fence.py`；它
   仍位于 durable prepare/Coordinator 之前，不改变提交屏障的顺序或 reduce-only 放行。
