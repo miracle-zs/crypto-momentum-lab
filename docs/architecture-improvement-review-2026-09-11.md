@@ -438,7 +438,7 @@ accounts:
 
 ### P2-3 Dashboard 查询域拆分
 
-`operator_dashboard/queries.py`（~3.4k 行）按 API 域拆分（overview / risk / execution / equity）。优先级低于 live 巨石与控制面。
+`operator_dashboard/queries.py`（当前约 1.7k 行）按 API 域拆分（overview / risk / execution / equity）。优先级低于 live 巨石与控制面。
 
 **本次落地状态（2026-09-11）**
 
@@ -446,9 +446,10 @@ accounts:
 - 又抽出 operational overview 域：新增 `operator_dashboard/overview_queries.py`，集中负责 health、collector、live accounts、system overview 和 universe 查询，并对外提供窄的 live-account summary seam。
 - 再抽出 risk / execution 域：新增 `operator_dashboard/risk_execution_queries.py`，集中负责 active halt、risk decision、exchange order 查询，以及未知订单状态的 fail-closed 分类。
 - equity 域开始分阶段抽取：新增 `operator_dashboard/live_account_metrics_queries.py`，集中负责 live account 的时间范围、限点采样、权益 / 保证金查询及回撤指标聚合。
-- common-equity 计算也已独立到 `operator_dashboard/common_equity.py`，负责纸面 / 实盘观测归一化、现金流校正、共同起点和 bounded 曲线；paper SQL 编排仍保留在 facade，待下一刀继续收窄。
+- common-equity 计算也已独立到 `operator_dashboard/common_equity.py`，负责纸面 / 实盘观测归一化、现金流校正、共同起点和 bounded 曲线。
+- paper equity SQL 编排已独立到 `operator_dashboard/paper_equity_queries.py`，集中负责纸面权益的 bounded bucket 查询、实盘共同权益查询和 `PaperAccountsEquityResponse` 组装；run selection 与 exit labeling 通过窄回调注入，避免模块反向依赖 facade。
 - `DashboardQueries` 保留原有外部接口与 API 路由，只作为兼容 facade 组合各查询模块；因此本次不会改变 Dashboard API 的调用方式或响应契约。
-- paper account 的 SQL 编排尚未宣称完成，后续继续按有实际深度的 seam 抽取，避免用纯转发 wrapper 制造“拆分完成”的假象。
+- 仍留在 facade 的是 paper run selection、paper account summary、history 与 strategy-run 详情；下一刀应继续围绕这些真实的策略/账户 seam 评估，而不是再做纯转发 wrapper。
 
 ---
 
