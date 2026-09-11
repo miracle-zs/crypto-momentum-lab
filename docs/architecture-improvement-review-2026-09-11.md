@@ -234,6 +234,10 @@ live_rollout/
 - 已将手工 `submit-plan` 与长运行 live daemon 共用的提交前 lease、generation、
   strategy、halt 和 entry/draining 复核收拢到 `live_rollout/submission_fence.py`；它
   仍位于 durable prepare/Coordinator 之前，不改变提交屏障的顺序或 reduce-only 放行。
+- 已将 scheduled controller 的已知开仓单撤销、exchange orphan scan、durable adoption
+  和统一的 state-machine cancellation confirmation 收拢到
+  `live_rollout/entry_order_cancellation.py`；已知单与交易所孤儿单仍走同一 Coordinator，
+  reduce-only 单继续跳过，避免控制命令旁路 durable order lifecycle。
 - 已将 RiskControlHub 的连接状态、durable state reload、fail-closed entry gate、
   one-shot action dispatch、reconcile task 和 telemetry 转移到
   `live_rollout/risk_control.py` 的 `LiveRiskControlRuntime`；`main.py` 只负责创建
