@@ -110,6 +110,39 @@ def _paper_first_equity_statement(
     )
 
 
+def _paper_latest_equity_statement(
+    run_ids: Sequence[str],
+) -> Select[tuple[str, Decimal, Decimal, Decimal, Decimal, Decimal]]:
+    """Fetch one narrow latest-equity row per run with an index probe."""
+    run_values = _paper_run_values(run_ids)
+    snapshot = aliased(PaperEquitySnapshotRow)
+    latest_equity = (
+        select(
+            snapshot.balance.label("balance"),
+            snapshot.equity.label("equity"),
+            snapshot.realized_pnl.label("realized_pnl"),
+            snapshot.unrealized_pnl.label("unrealized_pnl"),
+            snapshot.total_fees.label("total_fees"),
+        )
+        .where(snapshot.run_id == run_values.c.run_id)
+        .order_by(snapshot.observed_at.desc(), snapshot.snapshot_id.desc())
+        .limit(1)
+        .lateral("latest_equity")
+    )
+    return (
+        select(
+            run_values.c.run_id,
+            latest_equity.c.balance,
+            latest_equity.c.equity,
+            latest_equity.c.realized_pnl,
+            latest_equity.c.unrealized_pnl,
+            latest_equity.c.total_fees,
+        )
+        .select_from(run_values.join(latest_equity, true()))
+        .order_by(run_values.c.run_id)
+    )
+
+
 def _paper_common_equity_statement(
     run_ids: Sequence[str],
     common_start_at: datetime,
@@ -629,5 +662,6 @@ __all__ = [
     "_paper_common_equity_statement",
     "_paper_equity_statement",
     "_paper_first_equity_statement",
+    "_paper_latest_equity_statement",
     "_paper_run_values",
 ]

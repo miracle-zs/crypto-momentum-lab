@@ -438,7 +438,7 @@ accounts:
 
 ### P2-3 Dashboard 查询域拆分
 
-`operator_dashboard/queries.py`（当前约 1.7k 行）按 API 域拆分（overview / risk / execution / equity）。优先级低于 live 巨石与控制面。
+`operator_dashboard/queries.py`（当前约 0.95k 行）按 API 域拆分（overview / risk / execution / equity）。优先级低于 live 巨石与控制面。
 
 **本次落地状态（2026-09-11）**
 
@@ -448,8 +448,9 @@ accounts:
 - equity 域开始分阶段抽取：新增 `operator_dashboard/live_account_metrics_queries.py`，集中负责 live account 的时间范围、限点采样、权益 / 保证金查询及回撤指标聚合。
 - common-equity 计算也已独立到 `operator_dashboard/common_equity.py`，负责纸面 / 实盘观测归一化、现金流校正、共同起点和 bounded 曲线。
 - paper equity SQL 编排已独立到 `operator_dashboard/paper_equity_queries.py`，集中负责纸面权益的 bounded bucket 查询、实盘共同权益查询和 `PaperAccountsEquityResponse` 组装；run selection 与 exit labeling 通过窄回调注入，避免模块反向依赖 facade。
+- paper account read model 已独立到 `operator_dashboard/paper_account_queries.py`，集中负责 paper run selection、account summary、history、strategy-run detail 及 position/event projection；原有 `strategy_run(..., _session=...)` facade 签名保持不变。
 - `DashboardQueries` 保留原有外部接口与 API 路由，只作为兼容 facade 组合各查询模块；因此本次不会改变 Dashboard API 的调用方式或响应契约。
-- 仍留在 facade 的是 paper run selection、paper account summary、history 与 strategy-run 详情；下一刀应继续围绕这些真实的策略/账户 seam 评估，而不是再做纯转发 wrapper。
+- 仍留在 facade 的主要是 live account detail、reports 及少量跨域兼容查询；下一刀继续围绕 live account detail 的真实 read model seam 评估，而不是再做纯转发 wrapper。
 
 ---
 
