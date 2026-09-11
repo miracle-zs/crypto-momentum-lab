@@ -1109,6 +1109,44 @@ async def test_account_event_does_not_retry_confirmed_unmanaged_position(
     assert failures == [("BTCUSDT", "unmanaged_live_positions:BTCUSDT")]
 
 
+@pytest.mark.asyncio
+async def test_grace_timeout_channel_degrades_on_order_identity_conflict(
+    monkeypatch,
+) -> None:
+    state = SimpleNamespace(symbol="BTCUSDT")
+    failures: list[tuple[str, str | None]] = []
+
+    async def stop_after_first_cycle(_delay: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(main.asyncio, "sleep", stop_after_first_cycle)
+
+    class Daemon:
+        managed_position_symbols = frozenset({"BTCUSDT"})
+
+        async def process_grace_timeout(self, _state, *, now, latest_quote):
+            del now, latest_quote
+            raise ValueError(
+                "client order ID is already bound to a different order"
+            )
+
+    with pytest.raises(asyncio.CancelledError):
+        await main._run_grace_timeout_channel(
+            daemon=Daemon(),
+            latest_market_states=SimpleNamespace(
+                for_symbols=lambda _symbols: (state,),
+            ),
+            latest_market_quotes=SimpleNamespace(
+                for_symbols=lambda _symbols: (),
+            ),
+            on_exit_failure=lambda symbol, failure: failures.append(
+                (symbol, failure)
+            ),
+        )
+
+    assert failures == [("BTCUSDT", "order_identity_conflict")]
+
+
 async def test_shadow_preflight_accepts_an_old_matching_session() -> None:
     class FakeSession:
         def __init__(self) -> None:

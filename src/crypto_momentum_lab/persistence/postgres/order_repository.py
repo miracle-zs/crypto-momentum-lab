@@ -89,6 +89,33 @@ def _same_order_identity(
     )
 
 
+def _same_active_reduce_only_intent(
+    existing_order: ExchangeOrderRow,
+    expected_values: Mapping[str, object],
+) -> bool:
+    """Recognize a safe retry of an already-active reduce-only intent.
+
+    Exit plans may be repriced or switch from a resting limit to a market
+    fallback while keeping the same durable intent.  The exchange-visible
+    order remains the authoritative protection in that case; submitting a
+    second order under the same client ID would be both invalid and unsafe.
+    """
+
+    terminal_states = {
+        state.value for state in ExchangeOrderState if state.terminal
+    }
+    return (
+        bool(expected_values["reduce_only"])
+        and existing_order.reduce_only
+        and existing_order.intent_id == expected_values["intent_id"]
+        and existing_order.run_id == expected_values["run_id"]
+        and existing_order.symbol == expected_values["symbol"]
+        and existing_order.side == expected_values["side"]
+        and existing_order.position_side == expected_values["position_side"]
+        and existing_order.state not in terminal_states
+    )
+
+
 class PostgresOrderRepository:
     def __init__(
         self,
@@ -503,6 +530,16 @@ class PostgresOrderRepository:
                             existing_order,
                             order_values,
                         ):
+                            if _same_active_reduce_only_intent(
+                                existing_order,
+                                order_values,
+                            ):
+                                # Repricing or switching the fallback order
+                                # type must not duplicate an active protective
+                                # order. Keep the durable exchange order and
+                                # let the caller retry after it reaches a
+                                # terminal state.
+                                raise _SubmissionAlreadyPrepared
                             raise ValueError(
                                 "client order ID is already bound to a "
                                 "different order"

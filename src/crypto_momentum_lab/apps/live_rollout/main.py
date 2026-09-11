@@ -247,6 +247,10 @@ _PENDING_POSITION_RETRY_DELAYS_SECONDS = (
     16.0,
     32.0,
 )
+_ORDER_IDENTITY_CONFLICT_MESSAGE = (
+    "client order ID is already bound to a different order"
+)
+_ORDER_IDENTITY_CONFLICT_REASON = "order_identity_conflict"
 
 
 @dataclass(frozen=True, slots=True)
@@ -3349,12 +3353,26 @@ async def _run_quote_channel(
             try:
                 failure = await daemon.process_market_quote(quote, state)
             except Exception as error:
-                if not _is_transient_live_runtime_error(error):
+                if not (
+                    _is_transient_live_runtime_error(error)
+                    or _is_order_identity_conflict(error)
+                ):
                     raise
+                failure = (
+                    _ORDER_IDENTITY_CONFLICT_REASON
+                    if _is_order_identity_conflict(error)
+                    else type(error).__name__
+                )
+                if (
+                    failure == _ORDER_IDENTITY_CONFLICT_REASON
+                    and on_exit_failure is not None
+                ):
+                    on_exit_failure(quote.symbol, failure)
                 log.warning(
                     "live_market_quote_processing_degraded",
                     symbol=quote.symbol,
                     error_type=type(error).__name__,
+                    reason=failure,
                 )
                 continue
             if failure is not None:
@@ -3413,6 +3431,9 @@ async def _run_closed_candle_channel(
             except asyncio.CancelledError:
                 raise
             except Exception as error:
+                if _is_order_identity_conflict(error):
+                    failure = _ORDER_IDENTITY_CONFLICT_REASON
+                    break
                 if not _is_transient_live_runtime_error(error):
                     raise
                 if attempt == 2:
@@ -3510,6 +3531,29 @@ async def _run_grace_timeout_channel(
             except asyncio.CancelledError:
                 raise
             except Exception as error:
+                if _is_order_identity_conflict(error):
+                    failure = _ORDER_IDENTITY_CONFLICT_REASON
+                    if on_exit_failure is not None:
+                        on_exit_failure(state.symbol, failure)
+                    retry_delay = min(
+                        retry_delay_by_symbol.get(state.symbol, 1.0),
+                        60.0,
+                    )
+                    retry_delay_by_symbol[state.symbol] = min(
+                        retry_delay * 2,
+                        60.0,
+                    )
+                    retry_at_by_symbol[state.symbol] = (
+                        asyncio.get_running_loop().time() + retry_delay
+                    )
+                    log.warning(
+                        "live_grace_timeout_processing_degraded",
+                        symbol=state.symbol,
+                        error_type=type(error).__name__,
+                        reason=failure,
+                        retry_delay_seconds=retry_delay,
+                    )
+                    continue
                 if not _is_transient_live_runtime_error(error):
                     raise
                 log.warning(
@@ -3639,6 +3683,19 @@ async def _run_account_event_channel(
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            if _is_order_identity_conflict(error):
+                failure = _ORDER_IDENTITY_CONFLICT_REASON
+                if on_exit_failure is not None:
+                    for symbol in event.symbols:
+                        on_exit_failure(symbol, failure)
+                log.warning(
+                    "live_account_event_processing_degraded",
+                    run_id=run_id,
+                    event_type=event.event_type,
+                    error_type=type(error).__name__,
+                    reason=failure,
+                )
+                continue
             if not _is_transient_live_runtime_error(error):
                 raise
             # The account stream itself is still healthy.  Do not kill the
@@ -3670,6 +3727,13 @@ def _is_transient_live_runtime_error(error: Exception) -> bool:
     return isinstance(
         error,
         (SQLAlchemyError, TimeoutError, ConnectionError, OSError),
+    )
+
+
+def _is_order_identity_conflict(error: Exception) -> bool:
+    return (
+        isinstance(error, ValueError)
+        and str(error) == _ORDER_IDENTITY_CONFLICT_MESSAGE
     )
 
 
