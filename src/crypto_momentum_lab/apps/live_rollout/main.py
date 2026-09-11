@@ -107,6 +107,10 @@ from crypto_momentum_lab.live_rollout.commands import (
     EMERGENCY_FLATTEN_CONFIRMATION,
 )
 from crypto_momentum_lab.live_rollout.context import LiveEntryFilterContext
+from crypto_momentum_lab.live_rollout.control_plane import (
+    LiveControlPlaneRuntime,
+    is_consumer_lag_reason,
+)
 from crypto_momentum_lab.live_rollout.daemon import (
     LiveDaemonConfig,
     LiveDaemonResult,
@@ -233,20 +237,6 @@ app = typer.Typer(no_args_is_help=True)
 log = structlog.get_logger()
 
 
-def _consumer_reason_is_lag(reason: str | None) -> bool:
-    if reason is None:
-        return False
-    normalized = reason.lower()
-    return any(
-        marker in normalized
-        for marker in (
-            "lag",
-            "overflow",
-            "sequence_gap",
-            "sequencegap",
-            "replay_unavailable",
-        )
-    )
 _PREPARE_CONFIRMATION = "PREPARE LIVE RISK GATES"
 _RENEW_LEASE_CONFIRMATION = "RENEW LIVE RISK LEASE"
 _RESOLVE_MISSING_ORDER_CONFIRMATION = "RESOLVE MISSING LIVE ORDER"
@@ -2387,7 +2377,6 @@ async def _run_live_daemon(
     market_websocket_url: str = _LIVE_MARKET_WEBSOCKET_URL,
     risk_control_hub_url: str | None = None,
 ) -> LiveDaemonResult:
-    account_snapshot_available = True
     risk_control_enabled = bool(
         risk_control_hub_url is not None and risk_control_hub_url.strip()
     )
@@ -2446,6 +2435,7 @@ async def _run_live_daemon(
     risk_control_source: WebSocketRiskControlSource | None = None
     risk_control_task: asyncio.Task[None] | None = None
     risk_control_runtime: LiveRiskControlRuntime | None = None
+    control_plane_runtime: LiveControlPlaneRuntime | None = None
     risk_config_hash = ""
     startup_phase = True
     try:
@@ -3013,117 +3003,6 @@ async def _run_live_daemon(
         )
         latest_market_states = _LatestMarketStateCache()
         latest_market_quotes = _LatestMarketQuoteCache()
-
-        def on_account_snapshot(event: AccountEvent) -> None:
-            nonlocal account_snapshot_available
-            was_available = account_snapshot_available
-            snapshot = event.account_snapshot
-            account_state = event.account_state
-            if snapshot is None or account_state is None:
-                # Older Hub publishers may still send notification-only
-                # events during a rolling deploy.  The provider will retain
-                # its database bootstrap view until a complete snapshot is
-                # received.
-                return
-            context_provider.update_account_snapshot(
-                snapshot,
-                sequence=event.sequence,
-                account_state=account_state,
-            )
-            heartbeat_context_provider.update_account_snapshot(
-                snapshot,
-                sequence=event.sequence,
-                account_state=account_state,
-            )
-            account_snapshot_available = True
-            if telemetry is not None and event.snapshot_kind == "full":
-                telemetry.consumer_health(
-                    consumer="account_event_hub",
-                    available=True,
-                    occurred_at=event.received_at,
-                    reason="full_snapshot_received",
-                    recovery=not was_available,
-                    sequence=event.sequence,
-                )
-            refresh_entry_enabled()
-
-        def on_account_snapshot_recovery(reason: str) -> None:
-            nonlocal account_snapshot_available
-            account_snapshot_available = False
-            context_provider.invalidate_account_snapshot()
-            heartbeat_context_provider.invalidate_account_snapshot()
-            if telemetry is not None:
-                telemetry.consumer_health(
-                    consumer="account_event_hub",
-                    available=False,
-                    occurred_at=datetime.now(tz=UTC),
-                    reason=reason,
-                    lag=_consumer_reason_is_lag(reason),
-                )
-            refresh_entry_enabled()
-            log.warning(
-                "live_account_snapshot_recovery_requested",
-                reason=reason,
-                session_id=session_id,
-            )
-
-        async def recover_live_lease() -> TradingLease | None:
-            states = latest_market_states.for_symbols(())
-            if not states:
-                return None
-            latest_state = states[-1]
-            heartbeat_context_provider.invalidate_cache()
-            recovery_context = await heartbeat_context_provider(latest_state)
-            return await _maybe_auto_reacquire_live_lease(
-                factory=heartbeat_factory,
-                risk_repository=heartbeat_risk_repository,
-                gate_context=recovery_context.gate_context,
-                session_id=session_id,
-                draining=await _session_is_draining(
-                    heartbeat_factory,
-                    session_id,
-                ),
-            )
-
-        lease_heartbeat_degraded = False
-
-        def on_lease_renewed(lease: TradingLease) -> None:
-            nonlocal lease_heartbeat_degraded
-            lease_heartbeat_degraded = False
-            context_provider.update_lease(lease)
-            heartbeat_context_provider.update_lease(lease)
-            refresh_entry_enabled()
-            mark_live_database_ok()
-            log.info(
-                "live_lease_renewed",
-                session_id=session_id,
-                lease_id=lease.lease_id,
-                lease_expires_at=lease.expires_at.isoformat(),
-            )
-
-        def on_lease_error(error: Exception) -> None:
-            nonlocal lease_heartbeat_degraded
-            lease_heartbeat_degraded = True
-            refresh_entry_enabled()
-            log.warning(
-                "live_lease_renewal_failed",
-                session_id=session_id,
-                error_type=type(error).__name__,
-            )
-
-        lease_heartbeat = LiveLeaseHeartbeat(
-            repository=heartbeat_risk_repository,
-            lease=active_lease,
-            owner=lease_owner,
-            config=LeaseHeartbeatConfig(
-                lease_ttl_seconds=_LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS,
-                renew_before_seconds=_LIVE_LEASE_RENEW_BEFORE_SECONDS,
-                poll_interval_seconds=_LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS,
-            ),
-            on_renewed=on_lease_renewed,
-            on_error=on_lease_error,
-            recover=recover_live_lease,
-        )
         entry_universe_context_provider: (
             Callable[[str, datetime], dict[str, object] | None] | None
         ) = None
@@ -3298,12 +3177,13 @@ async def _run_live_daemon(
 
         def refresh_entry_enabled() -> None:
             assert risk_control_runtime is not None
+            assert control_plane_runtime is not None
             risk_blocked, risk_reason = risk_control_runtime.entry_gate()
             daemon.set_risk_control_entry_blocked(
                 risk_blocked,
                 reason=risk_reason,
             )
-            if lease_heartbeat_degraded:
+            if control_plane_runtime.lease_heartbeat_degraded:
                 daemon.set_entry_enabled(
                     False,
                     reason="lease_heartbeat_degraded",
@@ -3321,7 +3201,7 @@ async def _run_live_daemon(
                     False,
                     reason=market_state_unavailable_reason,
                 )
-            elif not account_snapshot_available:
+            elif not control_plane_runtime.account_snapshot_available:
                 daemon.set_entry_enabled(
                     False,
                     reason="account_snapshot_recovering",
@@ -3337,6 +3217,32 @@ async def _run_live_daemon(
                     reason="live_entry_prerequisites_ready",
                 )
 
+        async def reacquire_live_lease(
+            gate_context: LiveGateContext,
+        ) -> TradingLease | None:
+            return await _maybe_auto_reacquire_live_lease(
+                factory=heartbeat_factory,
+                risk_repository=heartbeat_risk_repository,
+                gate_context=gate_context,
+                session_id=session_id,
+                draining=await _session_is_draining(
+                    heartbeat_factory,
+                    session_id,
+                ),
+            )
+
+        control_plane_runtime = LiveControlPlaneRuntime(
+            session_id=session_id,
+            context_provider=context_provider,
+            heartbeat_context_provider=heartbeat_context_provider,
+            latest_market_states=latest_market_states,
+            reacquire_lease=reacquire_live_lease,
+            refresh_entry_gate=refresh_entry_enabled,
+            mark_database_ok=mark_live_database_ok,
+            telemetry=telemetry,
+            clock=lambda: datetime.now(tz=UTC),
+        )
+
         risk_control_runtime = LiveRiskControlRuntime(
             enabled=risk_control_enabled,
             session_id=session_id,
@@ -3346,6 +3252,19 @@ async def _run_live_daemon(
             refresh_entry_gate=refresh_entry_enabled,
             telemetry=telemetry,
             clock=lambda: datetime.now(tz=UTC),
+        )
+        lease_heartbeat = LiveLeaseHeartbeat(
+            repository=heartbeat_risk_repository,
+            lease=active_lease,
+            owner=lease_owner,
+            config=LeaseHeartbeatConfig(
+                lease_ttl_seconds=_LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS,
+                renew_before_seconds=_LIVE_LEASE_RENEW_BEFORE_SECONDS,
+                poll_interval_seconds=_LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS,
+            ),
+            on_renewed=control_plane_runtime.on_lease_renewed,
+            on_error=control_plane_runtime.on_lease_error,
+            recover=control_plane_runtime.recover_live_lease,
         )
 
         def on_exit_failure(symbol: str, failure: str | None) -> None:
@@ -3415,7 +3334,7 @@ async def _run_live_daemon(
                         occurred_at=datetime.now(tz=UTC),
                         reason=reason,
                         recovery=available and not was_available,
-                        lag=_consumer_reason_is_lag(reason),
+                        lag=is_consumer_lag_reason(reason),
                     )
                 if available:
                     market_state_unavailable_reason = "market_state_hub_ready"
@@ -3453,7 +3372,7 @@ async def _run_live_daemon(
             environment="live",
             account_label=account_label,
             consumer_id=f"live-exit:{session_id}",
-            on_recovery=on_account_snapshot_recovery,
+            on_recovery=control_plane_runtime.on_account_snapshot_recovery,
         )
         if risk_control_enabled:
             assert risk_control_hub_url is not None
@@ -3518,7 +3437,7 @@ async def _run_live_daemon(
                 run_id=session_id,
                 telemetry=telemetry,
                 on_exit_failure=on_exit_failure,
-                on_account_snapshot=on_account_snapshot,
+                on_account_snapshot=control_plane_runtime.on_account_snapshot,
             )
         )
         if risk_control_source is not None:
