@@ -216,6 +216,10 @@ live_rollout/
 - 已为 `LiveExitEventCoordinator` 增加独立契约测试，覆盖 account lane、quote symbol
   mismatch、closed-candle synthetic state 和 grace-timeout 路由；这些入口不再只能
   通过完整 daemon fixture 间接验证。
+- 已将 RiskControlHub 的连接状态、durable state reload、fail-closed entry gate、
+  one-shot action dispatch、reconcile task 和 telemetry 转移到
+  `live_rollout/risk_control.py` 的 `LiveRiskControlRuntime`；`main.py` 只负责创建
+  source、注入 callback 和收尾任务，PostgreSQL 仍是控制面权威。
 - 这是 P0-1 的渐进切片，属于转移实现所有权而非增加转发壳；`session.py` 当前仍是
   手工 one-shot session，不应把本次改动写成整个 P0-1 已完成。
 

@@ -8,10 +8,11 @@ idempotent and prevents an unaudited publisher from creating exchange work.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import structlog
 
@@ -29,6 +30,9 @@ from crypto_momentum_lab.live_rollout.commands import (
 )
 
 log = structlog.get_logger()
+
+if TYPE_CHECKING:
+    from crypto_momentum_lab.live_rollout.telemetry import LiveTelemetrySink
 
 
 class RiskControlCommandRepository(Protocol):
@@ -157,7 +161,236 @@ class RiskControlCommandDispatcher:
         return failure
 
 
+class LiveRiskControlRuntime:
+    """Own the live risk-control stream state and durable recovery loop."""
+
+    _ACTION_BLOCKING = frozenset(
+        {
+            RiskControlAction.DISABLE_ENTRIES,
+            RiskControlAction.DRAIN,
+            RiskControlAction.HALT,
+            RiskControlAction.CANCEL_ALL_OPEN_ENTRIES,
+            RiskControlAction.REQUEST_FLATTEN,
+        }
+    )
+    _ONE_SHOT_ACTIONS = frozenset(
+        {
+            RiskControlAction.CANCEL_ALL_OPEN_ENTRIES,
+            RiskControlAction.REQUEST_FLATTEN,
+        }
+    )
+
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        session_id: str,
+        load_durable_state: Callable[[], Awaitable[tuple[bool, bool]]],
+        dispatch: Callable[[RiskControlEvent], Awaitable[str | None]],
+        invalidate_contexts: Callable[[], None],
+        refresh_entry_gate: Callable[[], None],
+        telemetry: LiveTelemetrySink | None,
+        clock: Callable[[], datetime],
+    ) -> None:
+        if not session_id.strip():
+            raise ValueError("session_id must not be empty")
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be a bool")
+        self._enabled = enabled
+        self._session_id = session_id
+        self._load_durable_state = load_durable_state
+        self._dispatch = dispatch
+        self._invalidate_contexts = invalidate_contexts
+        self._refresh_entry_gate = refresh_entry_gate
+        self._telemetry = telemetry
+        self._clock = clock
+        self._stream_available = not enabled
+        self._state_ready = not enabled
+        self._entry_blocked = False
+        self._entry_block_reason = "risk_control_clear"
+        self._reconcile_task: asyncio.Task[None] | None = None
+
+    @property
+    def stream_available(self) -> bool:
+        return self._stream_available
+
+    @property
+    def state_ready(self) -> bool:
+        return self._state_ready
+
+    @property
+    def entry_blocked(self) -> bool:
+        return self._entry_blocked
+
+    @property
+    def entry_block_reason(self) -> str:
+        return self._entry_block_reason
+
+    def entry_gate(self) -> tuple[bool, str]:
+        if not self._enabled:
+            return False, "risk_control_disabled"
+        if not self._stream_available or not self._state_ready:
+            return (
+                True,
+                "risk_control_stream_unavailable"
+                if not self._stream_available
+                else "risk_control_state_recovering",
+            )
+        return self._entry_blocked, self._entry_block_reason
+
+    def on_connection_change(
+        self,
+        available: bool,
+        reason: str | None,
+    ) -> None:
+        if not self._enabled:
+            return
+        was_available = self._stream_available
+        self._stream_available = available
+        self._state_ready = False
+        if not available:
+            self._entry_blocked = True
+            self._entry_block_reason = (
+                reason or "risk_control_stream_unavailable"
+            )
+            self._invalidate_contexts()
+        else:
+            self._invalidate_contexts()
+            self._schedule_reconcile()
+        if self._telemetry is not None:
+            self._telemetry.consumer_health(
+                consumer="risk_control_hub",
+                available=available,
+                occurred_at=self._clock(),
+                reason=reason,
+                recovery=available and not was_available,
+                lag=_risk_control_reason_is_lag(reason),
+            )
+        self._refresh_entry_gate()
+        log.warning(
+            "live_risk_control_stream_state_changed",
+            session_id=self._session_id,
+            available=available,
+            reason=reason,
+        )
+
+    async def on_event(self, event: RiskControlEvent) -> None:
+        if not self._enabled:
+            return
+        self._state_ready = False
+        if event.action in self._ACTION_BLOCKING:
+            self._entry_blocked = True
+            self._entry_block_reason = (
+                f"risk_control_{event.action.value}:{event.reason}"
+            )
+        self._invalidate_contexts()
+        self._refresh_entry_gate()
+        if event.action in self._ONE_SHOT_ACTIONS:
+            try:
+                failure = await self._dispatch(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                failure = (
+                    "risk_control_action_dispatch_failed:"
+                    f"{type(error).__name__}"
+                )
+                log.exception(
+                    "live_risk_control_action_dispatch_failed",
+                    session_id=self._session_id,
+                    action=event.action.value,
+                    command_id=event.command_id,
+                    error_type=type(error).__name__,
+                )
+            if failure is not None:
+                self._state_ready = True
+                self._entry_blocked = True
+                self._entry_block_reason = (
+                    f"risk_control_{event.action.value}_failed:{failure}"
+                )
+                self._refresh_entry_gate()
+                log.error(
+                    "live_risk_control_action_failed",
+                    session_id=self._session_id,
+                    action=event.action.value,
+                    command_id=event.command_id,
+                    reason=failure,
+                )
+                return
+        self._schedule_reconcile()
+        log.warning(
+            "live_risk_control_event_received",
+            session_id=self._session_id,
+            action=event.action.value,
+            command_id=event.command_id,
+            sequence=event.sequence,
+            reason=event.reason,
+        )
+
+    async def reconcile(self) -> None:
+        try:
+            draining, active_halt = await self._load_durable_state()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._state_ready = False
+            self._entry_blocked = True
+            self._entry_block_reason = "risk_control_state_reload_failed"
+            log.warning(
+                "live_risk_control_state_reload_failed",
+                session_id=self._session_id,
+                error_type=type(error).__name__,
+            )
+        else:
+            self._entry_blocked = draining or active_halt
+            self._entry_block_reason = (
+                "session_draining"
+                if draining
+                else "active_risk_halt"
+                if active_halt
+                else "risk_control_clear"
+            )
+            self._state_ready = True
+            self._invalidate_contexts()
+        self._refresh_entry_gate()
+
+    def _schedule_reconcile(self) -> None:
+        task = self._reconcile_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._reconcile_task = asyncio.create_task(
+            self.reconcile(),
+            name=f"live-risk-control-reconcile:{self._session_id}",
+        )
+
+    async def close(self) -> None:
+        task = self._reconcile_task
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self._reconcile_task = None
+
+
+def _risk_control_reason_is_lag(reason: str | None) -> bool:
+    if reason is None:
+        return False
+    normalized = reason.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "lag",
+            "overflow",
+            "sequence_gap",
+            "sequencegap",
+            "replay_unavailable",
+        )
+    )
+
+
 __all__ = [
     "RiskControlCommandDispatcher",
     "RiskControlCommandRepository",
+    "LiveRiskControlRuntime",
 ]

@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -11,6 +12,7 @@ from crypto_momentum_lab.live_rollout.commands import (
     CANCEL_ALL_OPEN_ENTRIES_CONFIRMATION,
 )
 from crypto_momentum_lab.live_rollout.risk_control import (
+    LiveRiskControlRuntime,
     RiskControlCommandDispatcher,
 )
 
@@ -142,6 +144,85 @@ async def test_dispatcher_rejects_event_without_matching_command_type() -> None:
     assert repository.claim_count == 0
 
 
+async def test_risk_control_runtime_reconciles_and_fails_closed_on_disconnect() -> None:
+    refreshes: list[tuple[bool, str]] = []
+    invalidations: list[bool] = []
+
+    async def load_durable_state() -> tuple[bool, bool]:
+        return False, True
+
+    runtime = LiveRiskControlRuntime(
+        enabled=True,
+        session_id="live-1",
+        load_durable_state=load_durable_state,
+        dispatch=lambda _event: _record_failure(),
+        invalidate_contexts=lambda: invalidations.append(True),
+        refresh_entry_gate=lambda: refreshes.append(runtime.entry_gate()),
+        telemetry=None,
+        clock=lambda: NOW,
+    )
+
+    assert runtime.entry_gate() == (
+        True,
+        "risk_control_stream_unavailable",
+    )
+    runtime.on_connection_change(False, "risk_control_queue_overflow")
+    assert runtime.entry_gate() == (
+        True,
+        "risk_control_stream_unavailable",
+    )
+    assert runtime.entry_block_reason == "risk_control_queue_overflow"
+
+    await runtime.reconcile()
+
+    assert runtime.entry_gate() == (
+        True,
+        "risk_control_stream_unavailable",
+    )
+    assert invalidations == [True, True]
+    assert refreshes
+    await runtime.close()
+
+
+async def test_risk_control_runtime_dispatch_failure_keeps_entries_blocked() -> None:
+    refreshes: list[tuple[bool, str]] = []
+    dispatched: list[str] = []
+
+    async def load_durable_state() -> tuple[bool, bool]:
+        return False, False
+
+    async def dispatch(event: RiskControlEvent) -> str:
+        dispatched.append(event.command_id)
+        return "command_failed"
+
+    runtime = LiveRiskControlRuntime(
+        enabled=True,
+        session_id="live-1",
+        load_durable_state=load_durable_state,
+        dispatch=dispatch,
+        invalidate_contexts=lambda: None,
+        refresh_entry_gate=lambda: refreshes.append(runtime.entry_gate()),
+        telemetry=None,
+        clock=lambda: NOW,
+    )
+    runtime.on_connection_change(True, None)
+    await asyncio.sleep(0)
+    await runtime.close()
+
+    await runtime.on_event(_event())
+
+    assert dispatched == ["command-1"]
+    assert runtime.entry_gate() == (
+        True,
+        "risk_control_cancel_all_open_entries_failed:command_failed",
+    )
+    assert refreshes
+
+
 async def _record(calls: list[str], value: str) -> None:
     calls.append(value)
     return None
+
+
+async def _record_failure() -> str:
+    return "unused"

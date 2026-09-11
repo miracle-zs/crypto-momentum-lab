@@ -138,6 +138,7 @@ from crypto_momentum_lab.live_rollout.postgres_runtime import (
 )
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
 from crypto_momentum_lab.live_rollout.risk_control import (
+    LiveRiskControlRuntime,
     RiskControlCommandDispatcher,
 )
 from crypto_momentum_lab.live_rollout.runtime_manifest import (
@@ -2390,10 +2391,6 @@ async def _run_live_daemon(
     risk_control_enabled = bool(
         risk_control_hub_url is not None and risk_control_hub_url.strip()
     )
-    risk_control_stream_available = not risk_control_enabled
-    risk_control_state_ready = not risk_control_enabled
-    risk_control_entry_blocked = False
-    risk_control_entry_block_reason = "risk_control_clear"
     if market_state_source not in {"hub", "postgres"}:
         raise ValueError("market_state_source must be 'hub' or 'postgres'")
     if market_state_source == "hub" and not market_state_hub_url.strip():
@@ -2448,7 +2445,7 @@ async def _run_live_daemon(
     daemon: LiveStrategyDaemon | None = None
     risk_control_source: WebSocketRiskControlSource | None = None
     risk_control_task: asyncio.Task[None] | None = None
-    risk_control_reconcile_task: asyncio.Task[None] | None = None
+    risk_control_runtime: LiveRiskControlRuntime | None = None
     risk_config_hash = ""
     startup_phase = True
     try:
@@ -3284,28 +3281,28 @@ async def _run_live_daemon(
             clock=lambda: datetime.now(tz=UTC),
         )
 
+        async def load_risk_control_state() -> tuple[bool, bool]:
+            draining_now = await _session_is_draining(
+                heartbeat_factory,
+                session_id,
+            )
+            active_halts = await heartbeat_risk_repository.load_active_halts(
+                "live",
+                account_label,
+            )
+            return draining_now, bool(active_halts)
+
+        def invalidate_live_contexts() -> None:
+            context_provider.invalidate_cache()
+            heartbeat_context_provider.invalidate_cache()
+
         def refresh_entry_enabled() -> None:
-            if risk_control_enabled and (
-                not risk_control_stream_available or not risk_control_state_ready
-            ):
-                daemon.set_risk_control_entry_blocked(
-                    True,
-                    reason=(
-                        "risk_control_stream_unavailable"
-                        if not risk_control_stream_available
-                        else "risk_control_state_recovering"
-                    ),
-                )
-            elif risk_control_enabled:
-                daemon.set_risk_control_entry_blocked(
-                    risk_control_entry_blocked,
-                    reason=risk_control_entry_block_reason,
-                )
-            else:
-                daemon.set_risk_control_entry_blocked(
-                    False,
-                    reason="risk_control_disabled",
-                )
+            assert risk_control_runtime is not None
+            risk_blocked, risk_reason = risk_control_runtime.entry_gate()
+            daemon.set_risk_control_entry_blocked(
+                risk_blocked,
+                reason=risk_reason,
+            )
             if lease_heartbeat_degraded:
                 daemon.set_entry_enabled(
                     False,
@@ -3340,156 +3337,16 @@ async def _run_live_daemon(
                     reason="live_entry_prerequisites_ready",
                 )
 
-        async def reconcile_risk_control_state() -> None:
-            nonlocal risk_control_state_ready
-            nonlocal risk_control_entry_blocked, risk_control_entry_block_reason
-            try:
-                draining_now = await _session_is_draining(
-                    heartbeat_factory,
-                    session_id,
-                )
-                active_halts = await heartbeat_risk_repository.load_active_halts(
-                    "live",
-                    account_label,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                risk_control_state_ready = False
-                risk_control_entry_blocked = True
-                risk_control_entry_block_reason = (
-                    "risk_control_state_reload_failed"
-                )
-                log.warning(
-                    "live_risk_control_state_reload_failed",
-                    session_id=session_id,
-                    error_type=type(error).__name__,
-                )
-            else:
-                risk_control_entry_blocked = draining_now or bool(active_halts)
-                risk_control_entry_block_reason = (
-                    "session_draining"
-                    if draining_now
-                    else "active_risk_halt"
-                    if active_halts
-                    else "risk_control_clear"
-                )
-                risk_control_state_ready = True
-                context_provider.invalidate_cache()
-                heartbeat_context_provider.invalidate_cache()
-            refresh_entry_enabled()
-
-        def schedule_risk_control_reconcile() -> None:
-            nonlocal risk_control_reconcile_task
-            if (
-                risk_control_reconcile_task is not None
-                and not risk_control_reconcile_task.done()
-            ):
-                risk_control_reconcile_task.cancel()
-            risk_control_reconcile_task = asyncio.create_task(
-                reconcile_risk_control_state(),
-                name=f"live-risk-control-reconcile:{session_id}",
-            )
-
-        def on_risk_control_connection_change(
-            available: bool,
-            reason: str | None,
-        ) -> None:
-            nonlocal risk_control_stream_available, risk_control_state_ready
-            nonlocal risk_control_entry_blocked, risk_control_entry_block_reason
-            was_available = risk_control_stream_available
-            risk_control_stream_available = available
-            risk_control_state_ready = False
-            if not available:
-                risk_control_entry_blocked = True
-                risk_control_entry_block_reason = (
-                    reason or "risk_control_stream_unavailable"
-                )
-                context_provider.invalidate_cache()
-                heartbeat_context_provider.invalidate_cache()
-            else:
-                context_provider.invalidate_cache()
-                heartbeat_context_provider.invalidate_cache()
-                schedule_risk_control_reconcile()
-            if telemetry is not None:
-                telemetry.consumer_health(
-                    consumer="risk_control_hub",
-                    available=available,
-                    occurred_at=datetime.now(tz=UTC),
-                    reason=reason,
-                    recovery=available and not was_available,
-                    lag=_consumer_reason_is_lag(reason),
-                )
-            refresh_entry_enabled()
-            log.warning(
-                "live_risk_control_stream_state_changed",
-                session_id=session_id,
-                available=available,
-                reason=reason,
-            )
-
-        async def on_risk_control_event(event: RiskControlEvent) -> None:
-            nonlocal risk_control_state_ready
-            nonlocal risk_control_entry_blocked, risk_control_entry_block_reason
-            risk_control_state_ready = False
-            if event.action in {
-                RiskControlAction.DISABLE_ENTRIES,
-                RiskControlAction.DRAIN,
-                RiskControlAction.HALT,
-                RiskControlAction.CANCEL_ALL_OPEN_ENTRIES,
-                RiskControlAction.REQUEST_FLATTEN,
-            }:
-                risk_control_entry_blocked = True
-                risk_control_entry_block_reason = (
-                    f"risk_control_{event.action.value}:{event.reason}"
-                )
-            context_provider.invalidate_cache()
-            heartbeat_context_provider.invalidate_cache()
-            refresh_entry_enabled()
-            if event.action in {
-                RiskControlAction.CANCEL_ALL_OPEN_ENTRIES,
-                RiskControlAction.REQUEST_FLATTEN,
-            }:
-                try:
-                    failure = await risk_control_dispatcher.dispatch(event)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    failure = (
-                        "risk_control_action_dispatch_failed:"
-                        f"{type(error).__name__}"
-                    )
-                    log.exception(
-                        "live_risk_control_action_dispatch_failed",
-                        session_id=session_id,
-                        action=event.action.value,
-                        command_id=event.command_id,
-                        error_type=type(error).__name__,
-                    )
-                if failure is not None:
-                    risk_control_state_ready = True
-                    risk_control_entry_blocked = True
-                    risk_control_entry_block_reason = (
-                        f"risk_control_{event.action.value}_failed:{failure}"
-                    )
-                    refresh_entry_enabled()
-                    log.error(
-                        "live_risk_control_action_failed",
-                        session_id=session_id,
-                        action=event.action.value,
-                        command_id=event.command_id,
-                        reason=failure,
-                    )
-                    return
-            schedule_risk_control_reconcile()
-            log.warning(
-                "live_risk_control_event_received",
-                session_id=session_id,
-                action=event.action.value,
-                command_id=event.command_id,
-                sequence=event.sequence,
-                reason=event.reason,
-            )
+        risk_control_runtime = LiveRiskControlRuntime(
+            enabled=risk_control_enabled,
+            session_id=session_id,
+            load_durable_state=load_risk_control_state,
+            dispatch=risk_control_dispatcher.dispatch,
+            invalidate_contexts=invalidate_live_contexts,
+            refresh_entry_gate=refresh_entry_enabled,
+            telemetry=telemetry,
+            clock=lambda: datetime.now(tz=UTC),
+        )
 
         def on_exit_failure(symbol: str, failure: str | None) -> None:
             if failure is None:
@@ -3607,7 +3464,7 @@ async def _run_live_daemon(
                 strategy_name=strategy_name,
                 session_id=session_id,
                 consumer_id=f"live-risk-control:{session_id}",
-                on_connection_change=on_risk_control_connection_change,
+                on_connection_change=risk_control_runtime.on_connection_change,
             )
         quote_task: asyncio.Task[None] | None = None
         closed_candle_task: asyncio.Task[None] | None = None
@@ -3668,7 +3525,7 @@ async def _run_live_daemon(
             risk_control_task = asyncio.create_task(
                 _run_risk_control_channel(
                     source=risk_control_source,
-                    on_event=on_risk_control_event,
+                    on_event=risk_control_runtime.on_event,
                 ),
                 name=f"live-risk-control:{session_id}",
             )
@@ -3808,11 +3665,8 @@ async def _run_live_daemon(
                 account_task.cancel()
             if risk_control_task is not None and not risk_control_task.done():
                 risk_control_task.cancel()
-            if (
-                risk_control_reconcile_task is not None
-                and not risk_control_reconcile_task.done()
-            ):
-                risk_control_reconcile_task.cancel()
+            if risk_control_runtime is not None:
+                await risk_control_runtime.close()
             if quote_task is not None and not quote_task.done():
                 quote_task.cancel()
             if (
@@ -3865,11 +3719,6 @@ async def _run_live_daemon(
                 *(
                     (entry_symbol_cache_task,)
                     if entry_symbol_cache_task is not None
-                    else ()
-                ),
-                *(
-                    (risk_control_reconcile_task,)
-                    if risk_control_reconcile_task is not None
                     else ()
                 ),
                 return_exceptions=True,
