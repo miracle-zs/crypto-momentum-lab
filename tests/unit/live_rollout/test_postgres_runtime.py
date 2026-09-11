@@ -759,6 +759,145 @@ def test_overdrawn_bound_exit_is_reassigned_before_reconciling_reopened_batch() 
     ] == [("BTCUSDT:LONG:reopened-entry", Decimal("386"), reopened_at)]
 
 
+def test_reused_client_id_exit_attempts_are_kept_as_separate_batches() -> None:
+    old_at = NOW
+    first_exit_at = old_at + timedelta(minutes=10)
+    second_exit_at = old_at + timedelta(minutes=11)
+    current_at = old_at + timedelta(hours=1)
+    orders = [
+        _order(
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("1786"),
+            executed_quantity=Decimal("1786"),
+            created_at=old_at,
+            updated_at=old_at,
+            exchange_order_id="old-entry-exchange",
+            client_order_id="old-entry",
+        ),
+        _order(
+            reduce_only=True,
+            side="SELL",
+            quantity=Decimal("1371"),
+            executed_quantity=Decimal("1371"),
+            created_at=first_exit_at,
+            updated_at=first_exit_at,
+            exchange_order_id="reused-exit-a",
+            client_order_id="reused-exit",
+        ),
+        _order(
+            reduce_only=True,
+            side="SELL",
+            quantity=Decimal("415"),
+            executed_quantity=Decimal("415"),
+            created_at=second_exit_at,
+            updated_at=second_exit_at,
+            exchange_order_id="reused-exit-b",
+            client_order_id="reused-exit",
+        ),
+        _order(
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("4595"),
+            executed_quantity=Decimal("4595"),
+            created_at=current_at,
+            updated_at=current_at,
+            exchange_order_id="current-entry-exchange",
+            client_order_id="current-entry",
+        ),
+    ]
+
+    managed, unmanaged = _classify_live_positions(
+        [_position(position_amt=Decimal("4595"))],
+        orders,
+        exit_batch_ids={
+            "reused-exit": "BTCUSDT:LONG:old-entry",
+        },
+    )
+
+    assert unmanaged == frozenset()
+    assert len(managed) == 1
+    assert [
+        (batch.batch_id, batch.quantity, batch.opened_at)
+        for batch in managed[0].batches
+    ] == [("BTCUSDT:LONG:current-entry", Decimal("4595"), current_at)]
+
+
+def test_reused_client_id_is_split_from_event_ledger_before_batch_attribution() -> None:
+    old_at = NOW
+    first_exit_at = old_at + timedelta(minutes=10)
+    second_exit_at = old_at + timedelta(minutes=11)
+    current_at = old_at + timedelta(hours=1)
+    reused_exit = _order(
+        reduce_only=True,
+        side="SELL",
+        quantity=Decimal("1371"),
+        executed_quantity=Decimal("1371"),
+        created_at=second_exit_at,
+        updated_at=second_exit_at,
+        exchange_order_id="reused-exit-b",
+        client_order_id="reused-exit",
+    )
+    identity_events = {
+        "reused-exit": (
+            SimpleNamespace(
+                exchange_order_id="reused-exit-a",
+                state=ExchangeOrderState.FILLED.value,
+                occurred_at=first_exit_at,
+                details={"executed_quantity": "1371"},
+            ),
+            SimpleNamespace(
+                exchange_order_id="reused-exit-b",
+                state=ExchangeOrderState.FILLED.value,
+                occurred_at=second_exit_at,
+                details={"executed_quantity": "415"},
+            ),
+        )
+    }
+
+    managed, unmanaged = _classify_live_positions(
+        [_position(position_amt=Decimal("4595"))],
+        [
+            _order(
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("1786"),
+                executed_quantity=Decimal("1786"),
+                created_at=old_at,
+                updated_at=old_at,
+                exchange_order_id="old-entry-exchange",
+                client_order_id="old-entry",
+            ),
+            reused_exit,
+            _order(
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("4595"),
+                executed_quantity=Decimal("4595"),
+                created_at=current_at,
+                updated_at=current_at,
+                exchange_order_id="current-entry-exchange",
+                client_order_id="current-entry",
+            ),
+        ],
+        exit_batch_ids={
+            "reused-exit": "BTCUSDT:LONG:old-entry",
+        },
+        order_identity_events=identity_events,
+        account_fill_quantities={
+            "reused-exit-a": Decimal("1371"),
+            "reused-exit-b": Decimal("415"),
+        },
+    )
+
+    assert unmanaged == frozenset()
+    assert len(managed) == 1
+    assert [
+        (batch.batch_id, batch.quantity, batch.opened_at)
+        for batch in managed[0].batches
+    ] == [("BTCUSDT:LONG:current-entry", Decimal("4595"), current_at)]
+
+
 def test_legacy_exit_history_does_not_keep_an_old_batch_active() -> None:
     old_at = NOW
     current_at = NOW + timedelta(days=20)

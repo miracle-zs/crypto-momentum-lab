@@ -65,6 +65,17 @@ def test_log_signals_alert_on_persist_failure_and_dead_task() -> None:
     assert all(isinstance(alert, Alert) for alert in alerts)
 
 
+def test_log_signals_alert_on_legacy_order_identity_conflict() -> None:
+    alerts = evaluate_log_signals(
+        LogSignals(legacy_order_identity_conflicts=1)
+    )
+
+    assert [alert.name for alert in alerts] == [
+        "live_legacy_order_identity_conflict"
+    ]
+    assert alerts[0].severity == "critical"
+
+
 def test_container_alerts_on_oom_and_rss_limit() -> None:
     alerts = evaluate_container(
         ContainerSnapshot(

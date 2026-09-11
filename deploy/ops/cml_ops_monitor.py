@@ -78,6 +78,7 @@ class ContainerSnapshot:
 @dataclass(frozen=True, slots=True)
 class LogSignals:
     telemetry_persist_failures: int = 0
+    legacy_order_identity_conflicts: int = 0
     dead_connection_tasks: tuple[str, ...] = ()
     latest_rss_bytes: int | None = None
     rss_observed_at: datetime | None = None
@@ -187,6 +188,19 @@ def evaluate_log_signals(signals: LogSignals) -> tuple[Alert, ...]:
                 severity,
                 "Runtime telemetry batches failed to persist",
                 {"failure_count": signals.telemetry_persist_failures},
+            )
+        )
+    if signals.legacy_order_identity_conflicts:
+        alerts.append(
+            Alert(
+                "live_legacy_order_identity_conflict",
+                "critical",
+                "Live order identity was reused across multiple exchange orders",
+                {
+                    "conflict_count": (
+                        signals.legacy_order_identity_conflicts
+                    )
+                },
             )
         )
     if signals.dead_connection_tasks:
@@ -437,6 +451,10 @@ class OpsMonitor:
                     combined_signals.telemetry_persist_failures
                     + signals.telemetry_persist_failures
                 ),
+                legacy_order_identity_conflicts=(
+                    combined_signals.legacy_order_identity_conflicts
+                    + signals.legacy_order_identity_conflicts
+                ),
                 dead_connection_tasks=(
                     *combined_signals.dead_connection_tasks,
                     *signals.dead_connection_tasks,
@@ -603,6 +621,7 @@ class OpsMonitor:
         since_seconds: float,
     ) -> LogSignals:
         telemetry_failures = 0
+        legacy_order_identity_conflicts = 0
         dead_tasks: list[str] = []
         latest_rss: int | None = None
         latest_rss_at: datetime | None = None
@@ -628,6 +647,8 @@ class OpsMonitor:
                 event = str(record.get("event", ""))
                 if event == "live_runtime_telemetry_persist_failed":
                     telemetry_failures += 1
+                elif event == "live_legacy_order_identity_conflict":
+                    legacy_order_identity_conflicts += 1
                 elif event == "market_data_connection_task_not_alive":
                     values = record.get("group_ids")
                     if isinstance(values, list | tuple):
@@ -644,6 +665,7 @@ class OpsMonitor:
                         latest_rss_at = _record_timestamp(record)
         return LogSignals(
             telemetry_persist_failures=telemetry_failures,
+            legacy_order_identity_conflicts=legacy_order_identity_conflicts,
             dead_connection_tasks=tuple(sorted(set(dead_tasks))),
             latest_rss_bytes=latest_rss,
             rss_observed_at=latest_rss_at,
