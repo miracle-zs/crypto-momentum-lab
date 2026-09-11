@@ -47,7 +47,7 @@
 | #22 | 已修复 | 新增持久化 `runtime_market_state_gaps`，gap 幂等记录并在状态插入时重新应用完整性标记 |
 | #23 | 已修复 | `exchange_fills(client_order_id, exchange_trade_id)` 增加唯一索引和迁移 |
 | #24 | 已修复 | `strategy_live_states` upsert 只接受不早于当前行的 `changed_at` |
-| #11 | 已修复 | Hub 记录发布量、订阅者队列溢出和 replay 请求；客户端记录队列溢出、snapshot recovery 次数及最近原因；原有 fail-closed recovery 保持不变 |
+| #11 | 已修复（含 bootstrap 保留） | Hub 记录发布量、订阅者队列溢出和 replay 请求；队列溢出时优先替换为当前最新完整 snapshot，避免 bootstrap 被 delta 覆盖后只能重连恢复；客户端仍保留队列溢出后的 fail-closed recovery |
 | #12 | 已修复 | 未知 exchange-visible 入场单先写入 synthetic intent/order，再经 Coordinator/state machine 撤单，不再直调 client cancel |
 | #13 | 已修复 | risk telemetry await 后、submission scheduler 内和 POST 前均复检 context/entry gate；数据库 claim 再提供跨 writer 仲裁 |
 | #14 | 已修复（代码路径） | Coordinator 关停先阻断新入场、等待已在执行 operation，再关闭 scheduler；caller 取消后的 in-flight 等待已有回归测试。真实 SIGTERM/超时演练仍是发布验收 |
@@ -330,7 +330,7 @@ replay_buffer.append((sequence, message))
 |---|---|---|---|---|
 | 9 | `execution_account/sync.py:616, 796-804` + `daemon.py:800-825, 919-953` | 延迟 persist 的 fill cursor 用旧快照推进，B 轮可能基于 C0 计算并回写，回退 `from_id` | 重复拉 fill 或（重叠窗口不足时）漏 fill | `_known_fill_keys` 去重；`_FILL_FETCH_OVERLAP_MS=60s` |
 | 10 | `daemon.py:831-845, 694-732` | `_recover_pipeline` 过程中新触发的 recovery 信号被 `clear()` 吞掉 | 流仍可能 overflow，最迟等下一个 heartbeat/snapshot 周期（~30s） | 后续 overflow 再次抬升指标并触发 |
-| 11 | `execution_account/hub.py:366-384, 507-517, 567-575` | 订阅者队列满时 `_enqueue_latest` 丢弃 bootstrap + replay，只保留最新 live 消息 | 可能触发 SequenceGap → 全量 snapshot recovery 风暴；这是当前的 fail-closed backpressure 策略，不等同于静默数据丢失 | 客户端 `_materialize_event` 检测不连续 |
+| 11 | `execution_account/hub.py:562-584` | 订阅者队列满时需要保留可用的最新完整 snapshot，避免 bootstrap/replay 被 delta 覆盖 | 现在溢出会优先放入当前最新完整 snapshot；客户端队列自身溢出仍会触发 fail-closed recovery，主要是可用性边界 | Hub 溢出指标；客户端 `_materialize_event` 和 queue-overflow recovery |
 
 ### Live rollout
 
@@ -436,7 +436,7 @@ replay_buffer.append((sequence, message))
 依赖：前面几阶段稳定后，按实际部署拓扑决定是否提升优先级。
 
 - #9：已使用单调 upsert/time fencing，避免延迟 persist 回退游标；
-- #10/#11：已记录队列溢出、replay 请求、SequenceGap 和 snapshot recovery 次数；生产仍需设置告警阈值；
+- #10/#11：已记录队列溢出、replay 请求、SequenceGap 和 snapshot recovery 次数；Hub 溢出时保留当前最新完整 snapshot；生产仍需设置告警阈值；
 - #12：未知 exchange-visible entry 已先 adopt 到 durable order journal，再经 Coordinator/state machine cancel；
 - #13：已补 risk await 后和 submission scheduler 内的 generation/entry gate 检查；
 - #14–#15：Coordinator 会先阻断新入场并等待 in-flight operation，schedule gate 再执行撤单、flatten 和交易所归零确认；真实 SIGTERM/滚动切换以及 flatten 归零仍需发布演练；

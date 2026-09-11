@@ -114,6 +114,61 @@ async def test_account_event_hub_metrics_report_subscriber_backpressure() -> Non
     assert source.metrics.last_recovery_reason == "test_recovery"
 
 
+async def test_account_event_hub_overflow_preserves_latest_full_snapshot() -> None:
+    previous = _snapshot()
+    current = replace(
+        previous,
+        balances=(replace(previous.balances[0], wallet_balance=Decimal("120")),),
+    )
+    hub = AccountEventHub(AccountEventHubConfig(subscriber_queue_size=1))
+    writer_task = asyncio.create_task(asyncio.sleep(0))
+    subscriber = hub_module._Subscriber(
+        connection=object(),
+        environment="live",
+        account_label="primary",
+        queue=asyncio.Queue(maxsize=1),
+        writer_start=asyncio.Event(),
+        writer_task=writer_task,
+    )
+    hub.publish(
+        replace(
+            _event(),
+            snapshot_kind="full",
+            account_snapshot=previous,
+            account_state=ExecutionAccountStatus.READY_READONLY,
+        )
+    )
+    bootstrap = hub._bootstrap_message(("live", "primary"))
+    assert bootstrap is not None
+    subscriber.queue.put_nowait(bootstrap)
+
+    hub.publish(
+        replace(
+            _event(),
+            event_id="event-2",
+            snapshot_kind="delta",
+            account_snapshot=current,
+            account_delta=diff_account_snapshots(previous, current),
+        )
+    )
+    hub._enqueue_latest(
+        subscriber,
+        hub._latest_messages[("live", "primary")],
+    )
+
+    replacement = decode_account_event(
+        subscriber.queue.get_nowait(),
+        expected_environment="live",
+        expected_account_label="primary",
+    )
+    await writer_task
+
+    assert hub.metrics.subscriber_queue_overflow_count == 1
+    assert replacement.snapshot_kind == "full"
+    assert replacement.sequence == 2
+    assert replacement.account_snapshot == current
+
+
 def test_account_position_expectation_round_trips() -> None:
     expectation = AccountPositionExpectation(
         environment="live",

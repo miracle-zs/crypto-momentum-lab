@@ -560,6 +560,7 @@ class AccountEventHub:
         return replay, False, False
 
     def _enqueue_latest(self, subscriber: _Subscriber, message: str) -> None:
+        replacement = message
         if subscriber.queue.full():
             self._subscriber_queue_overflow_count += 1
             log.warning(
@@ -573,8 +574,16 @@ class AccountEventHub:
                     subscriber.queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break
+            # A subscriber may still be waiting for its bootstrap snapshot when
+            # live events arrive. Replacing that bootstrap with a delta would
+            # force the client into a recovery/reconnect window. The latest
+            # Hub snapshot already includes the event being fanned out, so use
+            # it as the single replacement message whenever it is available.
+            replacement = self._bootstrap_message(
+                (subscriber.environment, subscriber.account_label)
+            ) or message
         try:
-            subscriber.queue.put_nowait(message)
+            subscriber.queue.put_nowait(replacement)
         except asyncio.QueueFull:
             pass
 
