@@ -188,6 +188,9 @@ from crypto_momentum_lab.live_rollout.stream_recovery import (
 from crypto_momentum_lab.live_rollout.stream_recovery import (
     resilient_risk_control_stream as _resilient_risk_control_stream,
 )
+from crypto_momentum_lab.live_rollout.submission_fence import (
+    LiveSubmissionFence,
+)
 from crypto_momentum_lab.live_rollout.telemetry import (
     PERSISTED_OPERATIONAL_TELEMETRY_EVENTS,
     PERSISTED_ORDER_TELEMETRY_EVENTS,
@@ -1899,37 +1902,16 @@ async def _run_live_plan(
             account_label=account_label,
         )
 
-        async def validate_live_submission(
-            checked_plan: OrderExecutionPlan,
-            checked_at: datetime,
-        ) -> None:
-            """Fence manual live submissions immediately before the POST."""
-            if checked_plan.reduce_only:
-                return
-            if await _session_is_draining(factory, session_id):
-                raise OrderPreSubmissionError("live session entries are disabled")
-            current_lease = await risk_repository.load_active_lease(
-                "live",
-                account_label,
-                checked_at,
-            )
-            if current_lease is None:
-                raise OrderPreSubmissionError("active lease disappeared")
-            if current_lease.owner != lease_owner:
-                raise OrderPreSubmissionError("active lease owner changed")
-            if current_lease.strategy_name != strategy_name:
-                raise OrderPreSubmissionError("active lease strategy changed")
-            if current_lease.code_generation != git_commit_hash:
-                raise OrderPreSubmissionError(
-                    "active lease code generation changed"
-                )
-            if (
-                context.active_lease is not None
-                and current_lease.lease_id != context.active_lease.lease_id
-            ):
-                raise OrderPreSubmissionError("active lease fencing token changed")
-            if await risk_repository.load_active_halts("live", account_label):
-                raise OrderPreSubmissionError("active risk halt")
+        submission_fence = LiveSubmissionFence(
+            risk_state=risk_repository,
+            environment="live",
+            account_label=account_label,
+            strategy_name=strategy_name,
+            lease_owner=lease_owner,
+            code_generation=git_commit_hash,
+            active_lease=lambda: context.active_lease,
+            is_draining=lambda: _session_is_draining(factory, session_id),
+        )
 
         machine = OrderExecutionStateMachine(
             exchange=client,
@@ -1938,7 +1920,7 @@ async def _run_live_plan(
             live_submit_enabled=True,
             clock=lambda: datetime.now(tz=UTC),
             on_before_submit=register_expected_entry,
-            on_before_exchange_submit=validate_live_submission,
+            on_before_exchange_submit=submission_fence.validate,
             serialize_commands=False,
         )
         execution_coordinator = OrderExecutionCoordinator(
@@ -2572,41 +2554,18 @@ async def _run_live_daemon(
                 if daemon is not None:
                     daemon.observe_entry_order_event(plan, event)
 
-        async def validate_live_submission(
-            plan: OrderExecutionPlan,
-            checked_at: datetime,
-        ) -> None:
-            """Revalidate control-plane state immediately before an entry POST."""
-            if plan.reduce_only:
-                return
-            if daemon is None or not daemon.entry_enabled:
-                raise OrderPreSubmissionError("live entry lane is disabled")
-            current_lease = await heartbeat_risk_repository.load_active_lease(
-                "live",
-                account_label,
-                checked_at,
-            )
-            if current_lease is None:
-                raise OrderPreSubmissionError("active lease disappeared")
-            if current_lease.owner != lease_owner:
-                raise OrderPreSubmissionError("active lease owner changed")
-            if current_lease.strategy_name != strategy_name:
-                raise OrderPreSubmissionError("active lease strategy changed")
-            if current_lease.code_generation != git_commit_hash:
-                raise OrderPreSubmissionError(
-                    "active lease code generation changed"
-                )
-            if (
-                active_lease is not None
-                and current_lease.lease_id != active_lease.lease_id
-            ):
-                raise OrderPreSubmissionError("active lease fencing token changed")
-            active_halts = await heartbeat_risk_repository.load_active_halts(
-                "live",
-                account_label,
-            )
-            if active_halts:
-                raise OrderPreSubmissionError("active risk halt")
+        submission_fence = LiveSubmissionFence(
+            risk_state=heartbeat_risk_repository,
+            environment="live",
+            account_label=account_label,
+            strategy_name=strategy_name,
+            lease_owner=lease_owner,
+            code_generation=git_commit_hash,
+            active_lease=lambda: active_lease,
+            entry_enabled=lambda: (
+                daemon is not None and daemon.entry_enabled
+            ),
+        )
 
         state_machine = OrderExecutionStateMachine(
             exchange=client,
@@ -2616,7 +2575,7 @@ async def _run_live_daemon(
             clock=lambda: datetime.now(tz=UTC),
             on_event=on_live_order_event,
             on_before_submit=register_expected_entry,
-            on_before_exchange_submit=validate_live_submission,
+            on_before_exchange_submit=submission_fence.validate,
             on_exchange_request=telemetry.exchange_request_started,
             on_exchange_response=telemetry.exchange_response_received,
             serialize_commands=False,

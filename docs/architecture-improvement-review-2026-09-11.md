@@ -231,6 +231,9 @@ live_rollout/
 - 已将 quote、closed-candle、grace 三路 reduce-only exit channel 的退避、瞬态故障
   重试和 pending-position promotion 收拢到 `live_rollout/exit_channels.py`；main 只
   负责注入 daemon/cache 与启动独立任务，account channel 的兼容入口保持不变。
+- 已将手工 `submit-plan` 与长运行 live daemon 共用的提交前 lease、generation、
+  strategy、halt 和 entry/draining 复核收拢到 `live_rollout/submission_fence.py`；它
+  仍位于 durable prepare/Coordinator 之前，不改变提交屏障的顺序或 reduce-only 放行。
 - 已将 RiskControlHub 的连接状态、durable state reload、fail-closed entry gate、
   one-shot action dispatch、reconcile task 和 telemetry 转移到
   `live_rollout/risk_control.py` 的 `LiveRiskControlRuntime`；`main.py` 只负责创建
