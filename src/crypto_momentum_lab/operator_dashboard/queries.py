@@ -1,6 +1,6 @@
 import json
 import os
-from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -25,6 +25,9 @@ from sqlalchemy.sql.selectable import Values
 
 from crypto_momentum_lab.domain.execution import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.operator_dashboard import (
+    common_equity as _common_equity,
+)
 from crypto_momentum_lab.operator_dashboard import (
     live_account_metrics_queries as _live_account_metrics_queries,
 )
@@ -98,6 +101,25 @@ _decision_slo_response = _telemetry_queries._decision_slo_response
 RiskExecutionQueries = _risk_execution_queries.RiskExecutionQueries
 _split_exchange_orders = _risk_execution_queries.split_exchange_orders
 _exchange_order = _risk_execution_queries.exchange_order
+LiveCashFlowAdjustment = _common_equity.LiveCashFlowAdjustment
+_EquityObservation = _common_equity.EquityObservation
+_common_equity_interval_seconds = _common_equity.common_equity_interval_seconds
+_build_common_equity_curve = _common_equity.build_common_equity_curve
+_build_common_equity_result = _common_equity.build_common_equity_result
+_live_account_equity_point = _common_equity.live_account_equity_point
+_live_cash_flow_payload = _common_equity.live_cash_flow_payload
+_common_equity_note = _common_equity.common_equity_note
+_paper_equity_observations = _common_equity.paper_equity_observations
+_paper_equity_observations_from_values = (
+    _common_equity.paper_equity_observations_from_values
+)
+_live_equity_observations = _common_equity.live_equity_observations
+_live_aggregated_equity_observations = (
+    _common_equity.live_aggregated_equity_observations
+)
+_apply_live_cash_flow_adjustments = (
+    _common_equity.apply_live_cash_flow_adjustments
+)
 LiveAccountMetricsQueries = _live_account_metrics_queries.LiveAccountMetricsQueries
 _AccountEquityPoint = _live_account_metrics_queries.AccountEquityPoint
 _account_equity_range = _live_account_metrics_queries.account_equity_range
@@ -119,14 +141,6 @@ _live_observation = _overview_queries.live_observation
 _age = _overview_queries.age
 _universe_entry = _overview_queries.universe_entry
 _universe_membership = _overview_queries.universe_membership
-
-
-@dataclass(frozen=True, slots=True)
-class LiveCashFlowAdjustment:
-    account_label: str
-    effective_at: datetime
-    amount: Decimal
-    cash_flow_type: str = "deposit"
 
 
 @dataclass(frozen=True, slots=True)
@@ -762,7 +776,6 @@ class DashboardQueries:
         paper_first_at_by_run: dict[str, datetime] = {}
         live_first_at_by_account: dict[str, datetime | None] = {}
         common_start_at: datetime | None = None
-        common_source_end_at: datetime | None = None
         common_equity_interval_seconds: int | None = None
         async with self._session_factory() as session:
             selected_runs = await self._selected_paper_runs(session)
@@ -907,91 +920,24 @@ class DashboardQueries:
                         ).all()
                     ]
 
-        common_equity_by_run: dict[str, list[dict[str, JsonValue]]] = {}
-        common_baseline_by_run: dict[str, Decimal] = {}
-        common_end_at: datetime | None = None
-        common_anchor_accounts: list[str] = []
-        common_cash_flows: list[dict[str, JsonValue]] = []
-        common_note: str | None = None
-        if common_start_at is not None:
-            common_observations: dict[str, list[_EquityObservation]] = {
-                run_id: _paper_equity_observations_from_values(
-                    (
-                        row_run_id,
-                        observed_at,
-                        equity,
-                    )
-                    for row_run_id, observed_at, equity in common_paper_rows
-                    if row_run_id == run_id
-                )
-                for run_id in run_ids
-            }
-            for (
-                account_label,
-                equity_rows,
-            ) in common_live_equity_rows_by_account.items():
-                live_run_id = f"live-{account_label}-b1"
-                common_observations[live_run_id] = (
-                    _live_aggregated_equity_observations(
-                        equity_rows,
-                        account_label=account_label,
-                        cash_flow_adjustments=self._live_cash_flow_adjustments,
-                    )
-                )
-            available_observations = {
-                run_id: observations
-                for run_id, observations in common_observations.items()
-                if observations
-            }
-            if len(available_observations) >= 2:
-                common_source_end_at = min(
-                    max(
-                        observation.source_observed_at
-                        for observation in observations
-                    )
-                    for observations in available_observations.values()
-                )
-                assert common_equity_interval_seconds is not None
-                curve_end_at = _relative_bucket_end(
-                    common_start_at,
-                    common_source_end_at,
-                    common_equity_interval_seconds,
-                )
-                for run_id, observations in available_observations.items():
-                    curve, baseline = _build_common_equity_curve(
-                        observations,
-                        common_start_at=common_start_at,
-                        end_at=curve_end_at,
-                        interval_seconds=common_equity_interval_seconds,
-                        source_end_at=common_source_end_at,
-                        max_points=_EQUITY_MAX_POINTS,
-                    )
-                    if len(curve) >= 2 and baseline is not None:
-                        common_equity_by_run[run_id] = curve
-                        common_baseline_by_run[run_id] = baseline
-                if common_equity_by_run:
-                    common_end_at = common_source_end_at
-                common_anchor_accounts = [
-                    run_id
-                    for run_id, first_at in first_buckets.items()
-                    if run_id in common_equity_by_run
-                    and first_at == common_start_at
-                ]
-                common_cash_flows = [
-                    _live_cash_flow_payload(adjustment)
-                    for adjustment in self._live_cash_flow_adjustments
-                    if (
-                        adjustment.account_label in live_balance_rows_by_account
-                        and (
-                            common_end_at is not None
-                            and adjustment.effective_at <= common_end_at
-                        )
-                    )
-                ]
-                common_note = _common_equity_note(
-                    common_cash_flows,
-                    interval_seconds=common_equity_interval_seconds,
-                )
+        common_equity_result = _build_common_equity_result(
+            paper_rows=common_paper_rows,
+            live_rows_by_account=common_live_equity_rows_by_account,
+            run_ids=run_ids,
+            common_start_at=common_start_at,
+            window_end=window_end,
+            first_buckets=first_buckets,
+            live_account_labels=live_balance_rows_by_account,
+            cash_flow_adjustments=self._live_cash_flow_adjustments,
+        )
+        common_equity_by_run = common_equity_result.curves_by_run
+        common_baseline_by_run = common_equity_result.baselines_by_run
+        common_end_at = common_equity_result.end_at
+        common_anchor_accounts = common_equity_result.anchor_accounts
+        common_cash_flows = common_equity_result.cash_flows
+        common_note = common_equity_result.note
+        common_start_at = common_equity_result.start_at
+        common_equity_interval_seconds = common_equity_result.interval_seconds
 
         rows_by_run: dict[str, list[_PaperEquityPoint]] = {}
         for row in rows:
@@ -1968,13 +1914,6 @@ def _downsample_equity_snapshots(
     return ordered[-max_points:]
 
 
-@dataclass(frozen=True, slots=True)
-class _EquityObservation:
-    observed_at: datetime
-    equity: Decimal
-    source_observed_at: datetime
-
-
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
@@ -2010,332 +1949,6 @@ def _relative_bucket_end(
 ) -> datetime:
     """Return the last complete relative bucket at or before ``value``."""
     return _relative_bucket_start(value, origin, interval_seconds)
-
-
-def _common_equity_interval_seconds(
-    common_start_at: datetime,
-    window_end: datetime,
-    *,
-    max_points: int = _EQUITY_MAX_POINTS,
-) -> int:
-    """Choose a bounded interval while retaining the common equity history."""
-    if max_points <= 0:
-        raise ValueError("max_points must be positive")
-    if common_start_at > window_end:
-        raise ValueError("common_start_at must not be later than window_end")
-
-    base_interval = _COMMON_EQUITY_BUCKET_SECONDS
-    span_seconds = max(
-        0,
-        int((_as_utc(window_end) - _as_utc(common_start_at)).total_seconds()),
-    )
-    base_intervals = span_seconds // base_interval
-    if base_intervals + 1 <= max_points:
-        return base_interval
-
-    if max_points == 1:
-        return base_interval * (base_intervals + 1)
-
-    # Round up to a multiple of the native 15-minute resolution.  The number
-    # of generated buckets is then at most ``max_points`` for any history.
-    multiplier = (base_intervals + max_points - 2) // (max_points - 1)
-    return base_interval * max(multiplier, 1)
-
-
-def _bucket_equity_observations(
-    observations: Iterable[_EquityObservation],
-    *,
-    interval_seconds: int,
-    bucket_origin: datetime | None = None,
-) -> dict[datetime, _EquityObservation]:
-    ordered = sorted(
-        (
-            _EquityObservation(
-                observed_at=_as_utc(observation.observed_at),
-                equity=observation.equity,
-                source_observed_at=_as_utc(observation.source_observed_at),
-            )
-            for observation in observations
-        ),
-        key=lambda observation: observation.observed_at,
-    )
-    latest_by_bucket: dict[datetime, _EquityObservation] = {}
-    for observation in ordered:
-        bucket = (
-            _bucket_start(observation.observed_at, interval_seconds)
-            if bucket_origin is None
-            else _relative_bucket_start(
-                observation.observed_at,
-                bucket_origin,
-                interval_seconds,
-            )
-        )
-        latest_by_bucket[bucket] = _EquityObservation(
-            observed_at=bucket,
-            equity=observation.equity,
-            source_observed_at=observation.source_observed_at,
-        )
-    if ordered:
-        first = ordered[0]
-        first_bucket = _bucket_start(first.observed_at, interval_seconds)
-        latest_by_bucket[first_bucket] = _EquityObservation(
-            observed_at=first_bucket,
-            equity=first.equity,
-            source_observed_at=first.source_observed_at,
-        )
-    return latest_by_bucket
-
-
-def _paper_equity_observations(
-    rows: Iterable[PaperEquitySnapshotRow],
-) -> list[_EquityObservation]:
-    return [
-        _EquityObservation(
-            observed_at=_as_utc(row.observed_at),
-            equity=row.equity,
-            source_observed_at=_as_utc(row.observed_at),
-        )
-        for row in rows
-        if row.equity is not None and row.equity > 0
-    ]
-
-
-def _paper_equity_observations_from_values(
-    rows: Iterable[tuple[str, datetime, Decimal]],
-) -> list[_EquityObservation]:
-    return [
-        _EquityObservation(
-            observed_at=_as_utc(observed_at),
-            equity=equity,
-            source_observed_at=_as_utc(observed_at),
-        )
-        for _, observed_at, equity in rows
-        if equity > 0
-    ]
-
-
-def _live_equity_observations(
-    rows: Iterable[AccountBalanceSnapshotRow],
-    *,
-    account_label: str,
-    cash_flow_adjustments: Sequence[LiveCashFlowAdjustment],
-) -> list[_EquityObservation]:
-    raw_by_timestamp: dict[datetime, Decimal] = {}
-    for row in rows:
-        if row.account_label != account_label:
-            continue
-        observed_at = _as_utc(row.observed_at)
-        raw_by_timestamp[observed_at] = raw_by_timestamp.get(
-            observed_at,
-            Decimal("0"),
-        ) + row.wallet_balance + (row.unrealized_pnl or Decimal("0"))
-
-    return _apply_live_cash_flow_adjustments(
-        (
-            _EquityObservation(
-                observed_at=observed_at,
-                equity=equity,
-                source_observed_at=observed_at,
-            )
-            for observed_at, equity in raw_by_timestamp.items()
-        ),
-        account_label=account_label,
-        cash_flow_adjustments=cash_flow_adjustments,
-    )
-
-
-def _live_aggregated_equity_observations(
-    rows: Iterable[tuple[datetime, Decimal]],
-    *,
-    account_label: str,
-    cash_flow_adjustments: Sequence[LiveCashFlowAdjustment],
-) -> list[_EquityObservation]:
-    return _apply_live_cash_flow_adjustments(
-        (
-            _EquityObservation(
-                observed_at=_as_utc(observed_at),
-                equity=equity,
-                source_observed_at=_as_utc(observed_at),
-            )
-            for observed_at, equity in rows
-        ),
-        account_label=account_label,
-        cash_flow_adjustments=cash_flow_adjustments,
-    )
-
-
-def _apply_live_cash_flow_adjustments(
-    observations: Iterable[_EquityObservation],
-    *,
-    account_label: str,
-    cash_flow_adjustments: Sequence[LiveCashFlowAdjustment],
-) -> list[_EquityObservation]:
-    ordered_observations = sorted(
-        observations,
-        key=lambda observation: observation.source_observed_at,
-    )
-
-    adjustments = sorted(
-        (
-            adjustment
-            for adjustment in cash_flow_adjustments
-            if adjustment.account_label == account_label
-        ),
-        key=lambda adjustment: adjustment.effective_at,
-    )
-    adjusted_observations: list[_EquityObservation] = []
-    cumulative_cash_flow = Decimal("0")
-    adjustment_index = 0
-    for observation in ordered_observations:
-        source_observed_at = observation.source_observed_at
-        while (
-            adjustment_index < len(adjustments)
-            and adjustments[adjustment_index].effective_at <= source_observed_at
-        ):
-            cumulative_cash_flow += adjustments[adjustment_index].amount
-            adjustment_index += 1
-        equity = observation.equity - cumulative_cash_flow
-        if equity <= 0:
-            continue
-        adjusted_observations.append(
-            _EquityObservation(
-                observed_at=observation.observed_at,
-                equity=equity,
-                source_observed_at=source_observed_at,
-            )
-        )
-    return adjusted_observations
-
-
-def _build_common_equity_curve(
-    observations: Iterable[_EquityObservation],
-    *,
-    common_start_at: datetime,
-    end_at: datetime,
-    interval_seconds: int = _COMMON_EQUITY_BUCKET_SECONDS,
-    source_end_at: datetime | None = None,
-    max_points: int = _EQUITY_MAX_POINTS,
-) -> tuple[list[dict[str, JsonValue]], Decimal | None]:
-    if interval_seconds <= 0:
-        raise ValueError("interval_seconds must be positive")
-    if max_points <= 0:
-        raise ValueError("max_points must be positive")
-    resolved_source_end_at = (
-        None if source_end_at is None else _as_utc(source_end_at)
-    )
-    bucket_origin = _as_utc(common_start_at)
-    buckets = _bucket_equity_observations(
-        (
-            observation
-            for observation in observations
-            if (
-                resolved_source_end_at is None
-                or _as_utc(observation.source_observed_at)
-                <= resolved_source_end_at
-            )
-        ),
-        interval_seconds=interval_seconds,
-        bucket_origin=bucket_origin,
-    )
-    if not buckets:
-        return [], None
-    start_at = bucket_origin
-    end_bucket = _relative_bucket_end(
-        bucket_origin,
-        end_at,
-        interval_seconds,
-    )
-    if end_bucket < start_at:
-        return [], None
-
-    # Keep this seam safe even if a future caller passes an unbounded
-    # observation source.  The normal query path chooses an adaptive interval
-    # first, so this is a defensive final cap rather than the hot path.
-    latest_start_at = end_bucket - timedelta(
-        seconds=interval_seconds * (max_points - 1)
-    )
-    if latest_start_at > start_at:
-        start_at = latest_start_at
-
-    baseline_observation = buckets.get(start_at)
-    if baseline_observation is None:
-        prior_buckets = [bucket for bucket in buckets if bucket <= start_at]
-        if prior_buckets:
-            baseline_observation = buckets[max(prior_buckets)]
-        else:
-            future_buckets = [bucket for bucket in buckets if bucket > start_at]
-            if not future_buckets:
-                return [], None
-            baseline_observation = buckets[min(future_buckets)]
-    baseline = baseline_observation.equity
-    current = baseline_observation
-    points: list[dict[str, JsonValue]] = []
-    cursor = start_at
-    while cursor <= end_bucket:
-        observation = buckets.get(cursor)
-        if observation is not None:
-            current = observation
-        delta = current.equity - baseline
-        return_pct = None if baseline == 0 else delta / baseline * 100
-        points.append(
-            {
-                "observed_at": cursor.isoformat(),
-                "equity": str(current.equity),
-                "delta": str(delta),
-                "return_pct": None if return_pct is None else str(return_pct),
-                "source_observed_at": current.source_observed_at.isoformat(),
-            }
-        )
-        cursor += timedelta(seconds=interval_seconds)
-    return points, baseline
-
-
-def _live_cash_flow_payload(
-    adjustment: LiveCashFlowAdjustment,
-) -> dict[str, JsonValue]:
-    return {
-        "account_label": adjustment.account_label,
-        "effective_at": _as_utc(adjustment.effective_at).isoformat(),
-        "amount": str(adjustment.amount),
-        "cash_flow_type": adjustment.cash_flow_type,
-    }
-
-
-def _common_equity_note(
-    cash_flows: Sequence[dict[str, JsonValue]],
-    *,
-    interval_seconds: int | None = None,
-) -> str:
-    note = (
-        "统一起点固定为 2026-08-21 02:45 UTC（北京时间 10:45），"
-        "共同曲线按历史跨度自适应采样并限制点数；"
-        "曲线展示现金流校正后的权益金额变化（USDT），该时点各账号均归零。"
-    )
-    if interval_seconds is not None:
-        note = (
-            f"{note} 当前采样间隔为 {interval_seconds // 60} 分钟。"
-        )
-    if not cash_flows:
-        return f"{note} 当前未配置外部现金流校正。"
-    details = "、".join(
-        f"{flow.get('cash_flow_type', '现金流')} {flow.get('amount')} USDT "
-        f"@ {flow.get('effective_at')}"
-        for flow in cash_flows
-    )
-    return f"{note} 实盘已扣除：{details}。"
-
-
-def _live_account_equity_point(
-    row: AccountBalanceSnapshotRow | _AccountEquityPoint,
-) -> dict[str, JsonValue]:
-    equity = row.wallet_balance + row.unrealized_pnl
-    return {
-        "observed_at": row.observed_at.isoformat(),
-        "balance": str(row.wallet_balance),
-        "equity": str(equity),
-        "realized_pnl": None,
-        "unrealized_pnl": str(row.unrealized_pnl),
-    }
 
 
 def _paper_exit_details(run: StrategyRunRow) -> tuple[str, str]:
