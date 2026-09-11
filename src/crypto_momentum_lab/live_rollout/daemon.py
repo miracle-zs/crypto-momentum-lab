@@ -1,11 +1,10 @@
-import asyncio
 from collections.abc import (
     AsyncIterable,
     Awaitable,
     Callable,
     Mapping,
 )
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
@@ -50,6 +49,9 @@ from crypto_momentum_lab.live_rollout.context import (
 from crypto_momentum_lab.live_rollout.context_prefetch import (
     LiveContextPrefetcher,
 )
+from crypto_momentum_lab.live_rollout.daemon_lifecycle import (
+    LiveDaemonLifecycle,
+)
 from crypto_momentum_lab.live_rollout.entry_control import (
     LiveEntryControlGate,
 )
@@ -60,7 +62,6 @@ from crypto_momentum_lab.live_rollout.entry_lane import (
 )
 from crypto_momentum_lab.live_rollout.exit_lane import (
     ExitExecutionLane,
-    ExitLaneOutcome,
 )
 from crypto_momentum_lab.live_rollout.exit_processor import (
     ExitProcessorConfig,
@@ -249,7 +250,6 @@ class LiveStrategyDaemon:
         )
         self._run_active = False
         self._exit_enabled = True
-        self._scheduled_task: asyncio.Task[None] | None = None
         self._pending_entries = LivePendingEntryRegistry(clock=self._clock)
         self._runtime_cache = LiveRuntimeCacheMaintenance(
             run_id=config.run_id,
@@ -374,6 +374,18 @@ class LiveStrategyDaemon:
             entry_lane=self._entry_lane,
             state_machine=self._state_machine,
             clock=self._clock,
+        )
+        self._lifecycle = LiveDaemonLifecycle(
+            run_id=config.run_id,
+            checkpoint_coordinator=self._checkpoint_coordinator,
+            exit_lane=self._exit_lane,
+            exit_manager=self._exit_manager,
+            scheduled_controller=self._scheduled_controller,
+            scheduled_risk_window_enabled=(
+                config.scheduled_risk_window is not None
+            ),
+            run_market_loop=self._run_market_loop,
+            set_run_active=self._set_run_active,
         )
 
     async def _publish_managed_position_symbols(
@@ -676,54 +688,10 @@ class LiveStrategyDaemon:
         self,
         states: AsyncIterable[MarketState15s],
     ) -> LiveDaemonResult:
-        self._run_active = True
-        await self._checkpoint_coordinator.start()
-        result: LiveDaemonResult | None = None
-        exit_outcome = ExitLaneOutcome()
-        try:
-            if self._exit_manager is not None:
-                await self._exit_lane.start()
-            if self._config.scheduled_risk_window is not None:
-                self._scheduled_task = asyncio.create_task(
-                    self._scheduled_controller.run(),
-                    name=f"live-scheduled-risk-window:{self._config.run_id}",
-                )
-            result = await self._run_market_loop(states)
-        finally:
-            if self._scheduled_task is not None:
-                self._scheduled_task.cancel()
-                await asyncio.gather(
-                    self._scheduled_task,
-                    return_exceptions=True,
-                )
-                self._scheduled_task = None
-            if self._exit_manager is not None:
-                exit_outcome = await self._exit_lane.stop()
-            await self._checkpoint_coordinator.stop()
-            self._run_active = False
-        if result is None:
-            raise RuntimeError("live daemon stopped without a result")
-        return replace(
-            result,
-            approved_intent_count=(
-                result.approved_intent_count
-                + exit_outcome.approved_intent_count
-                + self._scheduled_controller.approved_intent_count
-            ),
-            submitted_order_count=(
-                result.submitted_order_count
-                + exit_outcome.submitted_order_count
-                + self._scheduled_controller.submitted_order_count
-            ),
-            halt_reason=(
-                result.halt_reason
-                or (
-                    exit_outcome.failure
-                    if exit_outcome.fatal_failure
-                    else None
-                )
-            ),
-        )
+        return await self._lifecycle.run(states)
+
+    def _set_run_active(self, active: bool) -> None:
+        self._run_active = active
 
     async def process_scheduled_risk_window(
         self,

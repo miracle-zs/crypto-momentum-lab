@@ -197,6 +197,9 @@ live_rollout/
 - 已将有序 market-state loop、gap reset、reconcile retry、admission/lane dispatch
   转移到 `live_rollout/market_loop.py`；daemon 只保留生命周期启动/停止、exit/account
   事件入口和 composition wiring，旧的 `_is_transient_live_gate` helper 仅保留兼容导出。
+- 已将 checkpoint、exit lane、scheduled risk-window task 的启动/停止及 lane outcome
+  合并转移到 `live_rollout/daemon_lifecycle.py`；`LiveStrategyDaemon.run()` 现在只是
+  对外兼容入口，`daemon.py` 不再持有这些生命周期状态。
 - 这是 P0-1 的渐进切片，属于转移实现所有权而非增加转发壳；`session.py` 当前仍是
   手工 one-shot session，不应把本次改动写成整个 P0-1 已完成。
 
