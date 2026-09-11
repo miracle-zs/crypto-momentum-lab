@@ -1,4 +1,5 @@
 import argparse
+import json
 import urllib.parse
 from datetime import UTC, datetime
 
@@ -397,3 +398,109 @@ def test_serverchan_form_is_url_encoded_for_post() -> None:
 
     assert decoded["title"] == [form["title"]]
     assert decoded["desp"] == [form["desp"]]
+
+
+def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
+    tmp_path,
+) -> None:
+    class Runner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def run(self, args, *, timeout_seconds):
+            del timeout_seconds
+            command = list(args)
+            self.calls.append(command)
+            if command[:3] == ["docker", "ps", "--filter"]:
+                service = command[3].rsplit("=", 1)[1]
+                if service == "live-strategy-account-2":
+                    return "account-2-container\n"
+                if service == "postgres":
+                    return "postgres-container\n"
+                return ""
+            if command[:2] == ["docker", "inspect"]:
+                return json.dumps(
+                    [
+                        {
+                            "State": {
+                                "Health": {"Status": "unhealthy"},
+                                "OOMKilled": False,
+                            },
+                            "RestartCount": 0,
+                            "HostConfig": {"Memory": 512 * 1024 * 1024},
+                        }
+                    ]
+                )
+            if command[:2] == ["docker", "stats"]:
+                return "10MiB / 512MiB\n"
+            if command[:2] == ["docker", "logs"]:
+                return ""
+            if command[:2] == ["docker", "exec"]:
+                return (
+                    "checkpoint_age\t12\n"
+                    "live_ready\ttrue\n"
+                    "pg_stat_statements\ttrue\n"
+                    "track_io_timing\ton\n"
+                    "track_wal_io_timing\ton\n"
+                    "parallel_maintenance\t0\n"
+                )
+            if command[:2] == ["docker", "compose"]:
+                return "restarted\n"
+            raise AssertionError(f"unexpected command: {command}")
+
+    now = [1000.0]
+    runner = Runner()
+    monitor = OpsMonitor(
+        MonitorConfig(
+            project_directory=tmp_path,
+            compose_file=tmp_path / "compose.yaml",
+            compose_files=(tmp_path / "compose.yaml",),
+            compose_profiles=("live",),
+            compose_env_file=None,
+            services=("live-strategy-account-2",),
+            live_accounts=(
+                ("account-2", "live-account-2-v1", "live-worker-account-2"),
+            ),
+            state_path=tmp_path / "state.json",
+            auto_restart_stale_live_services=True,
+            live_restart_cooldown_seconds=900.0,
+            live_restart_max_attempts=2,
+        ),
+        runner=runner,
+        clock=lambda: now[0],
+    )
+
+    first_alerts = monitor.run_once()
+    restart_commands = [
+        call
+        for call in runner.calls
+        if call[:2] == ["docker", "compose"]
+    ]
+    assert len(restart_commands) == 1
+    assert restart_commands[0][-2:] == ["restart", "live-strategy-account-2"]
+    assert any(
+        alert.name == "live_heartbeat_stale:account-2"
+        for alert in first_alerts
+    )
+
+    now[0] += 10
+    monitor.run_once()
+    assert len(
+        [call for call in runner.calls if call[:2] == ["docker", "compose"]]
+    ) == 1
+
+    now[0] += 900
+    monitor.run_once()
+    assert len(
+        [call for call in runner.calls if call[:2] == ["docker", "compose"]]
+    ) == 2
+
+    now[0] += 900
+    final_alerts = monitor.run_once()
+    assert len(
+        [call for call in runner.calls if call[:2] == ["docker", "compose"]]
+    ) == 2
+    assert any(
+        alert.name == "live_heartbeat_restart_suppressed:account-2"
+        for alert in final_alerts
+    )

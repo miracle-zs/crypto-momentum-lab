@@ -39,6 +39,8 @@ _DEFAULT_RSS_GROWTH_BYTES = 64 * 1024 * 1024
 _DEFAULT_RSS_GROWTH_WINDOW_SECONDS = 1_800.0
 _DEFAULT_ALERT_COOLDOWN_SECONDS = 900.0
 _DEFAULT_COMMAND_TIMEOUT_SECONDS = 15.0
+_DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS = 900.0
+_DEFAULT_LIVE_RESTART_MAX_ATTEMPTS = 3
 _COMPOSE_SERVICE_HEADER = re.compile(
     r"^  (?P<service>[A-Za-z0-9][A-Za-z0-9_-]*):\s*$"
 )
@@ -362,6 +364,9 @@ class MonitorConfig:
     rss_growth_window_seconds: float = _DEFAULT_RSS_GROWTH_WINDOW_SECONDS
     alert_cooldown_seconds: float = _DEFAULT_ALERT_COOLDOWN_SECONDS
     command_timeout_seconds: float = _DEFAULT_COMMAND_TIMEOUT_SECONDS
+    auto_restart_stale_live_services: bool = True
+    live_restart_cooldown_seconds: float = _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS
+    live_restart_max_attempts: int = _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS
     state_path: Path = Path("/var/lib/crypto-momentum-lab/ops-monitor.json")
     webhook_url: str | None = None
     serverchan_sendkey: str | None = None
@@ -382,6 +387,10 @@ class OpsMonitor:
             raise ValueError("log_window_seconds must be positive")
         if not 0 < config.rss_warning_fraction < config.rss_critical_fraction <= 1:
             raise ValueError("RSS thresholds are invalid")
+        if config.live_restart_cooldown_seconds <= 0:
+            raise ValueError("live_restart_cooldown_seconds must be positive")
+        if config.live_restart_max_attempts <= 0:
+            raise ValueError("live_restart_max_attempts must be positive")
         self._config = config
         self._runner = runner or SubprocessRunner()
         self._clock = clock
@@ -410,6 +419,10 @@ class OpsMonitor:
         now = self._clock()
         alerts: list[Alert] = []
         containers = self._container_snapshots()
+        live_strategy_accounts = {
+            _live_strategy_service(account_label): account_label
+            for account_label, _run_id, _lease_owner in self._config.live_accounts
+        }
         seen_services = {snapshot.service for snapshot in containers}
         for service in self._config.services:
             if service not in seen_services:
@@ -432,6 +445,11 @@ class OpsMonitor:
             alerts.extend(
                 self._rss_alerts(snapshot.service, snapshot.memory_bytes, now)
             )
+            account_label = live_strategy_accounts.get(snapshot.service)
+            if account_label is not None:
+                alerts.extend(
+                    self._live_heartbeat_alerts(snapshot, account_label, now)
+                )
 
         market_id = self._container_id("market-data")
         strategy_services = tuple(
@@ -535,6 +553,212 @@ class OpsMonitor:
             self._emit(alert, now=now)
         self._emit_resolutions(active_keys, now=now)
         _save_state(self._config.state_path, self._state)
+        return tuple(alerts)
+
+    def _live_heartbeat_alerts(
+        self,
+        snapshot: ContainerSnapshot,
+        account_label: str,
+        now: float,
+    ) -> tuple[Alert, ...]:
+        """Alert on a stale live marker and restart that account's service.
+
+        Docker's healthcheck reads the worker's local heartbeat marker, so an
+        ``unhealthy`` live strategy is the host-side representation of a
+        stale heartbeat.  Restart state is kept per Compose service so one
+        frozen account cannot restart another account or consume its retry
+        budget.
+        """
+
+        restart_states = self._state.setdefault("live_restart_state", {})
+        if not isinstance(restart_states, dict):
+            restart_states = {}
+            self._state["live_restart_state"] = restart_states
+
+        state = restart_states.get(snapshot.service)
+        if not isinstance(state, dict):
+            state = {}
+            restart_states[snapshot.service] = state
+
+        if snapshot.health == "healthy":
+            restart_states.pop(snapshot.service, None)
+            return ()
+
+        last_restart_at = state.get("last_restart_at")
+        if not isinstance(last_restart_at, int | float) or isinstance(
+            last_restart_at, bool
+        ):
+            last_restart_at = None
+        restart_attempts = state.get("restart_attempts", 0)
+        if not isinstance(restart_attempts, int) or isinstance(
+            restart_attempts, bool
+        ):
+            restart_attempts = 0
+
+        details = {
+            "account_label": account_label,
+            "service": snapshot.service,
+            "health": snapshot.health,
+            "container_id": snapshot.container_id,
+            "restart_count": snapshot.restart_count,
+        }
+        if "first_unhealthy_at" not in state:
+            state["first_unhealthy_at"] = now
+        stale = snapshot.health in {"unhealthy", "dead"}
+        if not stale:
+            if last_restart_at is None:
+                restart_states.pop(snapshot.service, None)
+                return ()
+            details.update(
+                {
+                    "restart_attempts": restart_attempts,
+                    "last_restart_at": last_restart_at,
+                }
+            )
+            if state.get("last_restart_succeeded") is False:
+                return (
+                    Alert(
+                        f"live_heartbeat_restart_failed:{account_label}",
+                        "critical",
+                        "Automatic live strategy restart failed",
+                        {
+                            **details,
+                            "error_type": state.get("last_restart_error_type"),
+                            "error": state.get("last_restart_error"),
+                        },
+                    ),
+                )
+            return (
+                Alert(
+                    f"live_heartbeat_auto_restarted:{account_label}",
+                    "warning",
+                    "Live strategy restart is in progress",
+                    details,
+                ),
+            )
+
+        stale_alert = Alert(
+            f"live_heartbeat_stale:{account_label}",
+            "critical",
+            "Live strategy heartbeat is stale",
+            {
+                **details,
+                "first_unhealthy_at": state["first_unhealthy_at"],
+            },
+        )
+        alerts = [stale_alert]
+        if not self._config.auto_restart_stale_live_services:
+            return tuple(alerts)
+
+        if restart_attempts >= self._config.live_restart_max_attempts:
+            alerts.append(
+                Alert(
+                    f"live_heartbeat_restart_suppressed:{account_label}",
+                    "critical",
+                    "Automatic live strategy restart limit reached",
+                    {
+                        **details,
+                        "restart_attempts": restart_attempts,
+                        "max_attempts": self._config.live_restart_max_attempts,
+                        "cooldown_seconds": (
+                            self._config.live_restart_cooldown_seconds
+                        ),
+                    },
+                )
+            )
+            return tuple(alerts)
+
+        if (
+            last_restart_at is not None
+            and now - last_restart_at < self._config.live_restart_cooldown_seconds
+        ):
+            details.update(
+                {
+                    "restart_attempts": restart_attempts,
+                    "last_restart_at": last_restart_at,
+                    "cooldown_seconds": self._config.live_restart_cooldown_seconds,
+                }
+            )
+            if state.get("last_restart_succeeded") is False:
+                alerts.append(
+                    Alert(
+                        f"live_heartbeat_restart_failed:{account_label}",
+                        "critical",
+                        "Automatic live strategy restart failed",
+                        {
+                            **details,
+                            "error_type": state.get("last_restart_error_type"),
+                            "error": state.get("last_restart_error"),
+                        },
+                    )
+                )
+            else:
+                alerts.append(
+                    Alert(
+                        f"live_heartbeat_auto_restarted:{account_label}",
+                        "warning",
+                        "Live strategy restart is awaiting health recovery",
+                        details,
+                    )
+                )
+            return tuple(alerts)
+
+        attempt = restart_attempts + 1
+        state.update(
+            {
+                "last_restart_at": now,
+                "restart_attempts": attempt,
+                "last_restart_succeeded": False,
+            }
+        )
+        restart_command = [
+            *self._compose_prefix(),
+            "restart",
+            snapshot.service,
+        ]
+        try:
+            self._runner.run(
+                restart_command,
+                timeout_seconds=self._config.command_timeout_seconds,
+            )
+        except Exception as error:
+            state.update(
+                {
+                    "last_restart_error_type": type(error).__name__,
+                    "last_restart_error": str(error),
+                }
+            )
+            alerts.append(
+                Alert(
+                    f"live_heartbeat_restart_failed:{account_label}",
+                    "critical",
+                    "Automatic live strategy restart failed",
+                    {
+                        **details,
+                        "attempt": attempt,
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                    },
+                )
+            )
+        else:
+            state["last_restart_succeeded"] = True
+            state.pop("last_restart_error_type", None)
+            state.pop("last_restart_error", None)
+            alerts.append(
+                Alert(
+                    f"live_heartbeat_auto_restarted:{account_label}",
+                    "warning",
+                    "Stale live strategy heartbeat triggered an automatic restart",
+                    {
+                        **details,
+                        "attempt": attempt,
+                        "cooldown_seconds": (
+                            self._config.live_restart_cooldown_seconds
+                        ),
+                    },
+                )
+            )
         return tuple(alerts)
 
     def _container_id(self, service: str) -> str | None:
@@ -912,6 +1136,19 @@ def _parse_bool(value: str | None) -> bool:
     """Parse the boolean spellings emitted by PostgreSQL's text output."""
 
     return (value or "").strip().lower() in {"1", "on", "t", "true", "yes"}
+
+
+def _parse_env_bool(value: str | None, *, default: bool) -> bool:
+    """Parse a monitor boolean and fail closed on an invalid override."""
+
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "on", "t", "true", "yes"}:
+        return True
+    if normalized in {"0", "off", "f", "false", "no"}:
+        return False
+    raise ValueError(f"invalid boolean value: {value!r}")
 
 
 def _sql_literal(value: str) -> str:
@@ -1295,6 +1532,22 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         rss_growth_window_seconds=args.rss_growth_window_seconds,
         alert_cooldown_seconds=args.alert_cooldown_seconds,
         command_timeout_seconds=args.command_timeout_seconds,
+        auto_restart_stale_live_services=_parse_env_bool(
+            os.environ.get("CML_AUTO_RESTART_STALE_LIVE_SERVICES"),
+            default=True,
+        ),
+        live_restart_cooldown_seconds=float(
+            os.environ.get(
+                "CML_LIVE_RESTART_COOLDOWN_SECONDS",
+                _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS,
+            )
+        ),
+        live_restart_max_attempts=int(
+            os.environ.get(
+                "CML_LIVE_RESTART_MAX_ATTEMPTS",
+                _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS,
+            )
+        ),
         state_path=Path(args.state_path),
         webhook_url=os.environ.get("CML_ALERT_WEBHOOK_URL") or None,
         serverchan_sendkey=(
