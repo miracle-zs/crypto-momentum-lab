@@ -2,7 +2,7 @@
 
 - Status: Proposed
 - Date: 2026-09-04
-- Context: [`ARCHITECTURE_REVIEW.md`](../ARCHITECTURE_REVIEW.md)
+- Context: [`project architecture design`](../superpowers/specs/2026-06-14-project-architecture-design.md)
 
 ## Context
 
@@ -81,4 +81,3 @@ Costs and follow-up:
   expands the blast radius of that process.
 - **Use a proxy as the first step:** adds another availability and failure
   boundary before the simpler credential split is measured.
-

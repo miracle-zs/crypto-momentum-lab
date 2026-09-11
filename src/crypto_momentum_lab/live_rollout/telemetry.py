@@ -39,6 +39,8 @@ LIVE_LANE_UNKNOWN: LiveLane = "unknown"
 
 SOURCE_RECEIVED = "source_received"
 TRACE_TERMINATED = "trace_terminated"
+CONSUMER_HEALTH = "consumer_health"
+TERMINAL_REASON = "terminal_reason"
 
 LIVE_TRIGGER_SOURCE_ACCOUNT: LiveTriggerSource = "account"
 LIVE_TRIGGER_SOURCE_QUOTE: LiveTriggerSource = "quote"
@@ -113,9 +115,34 @@ PERSISTED_ORDER_TELEMETRY_EVENTS = frozenset(
         ACCOUNT_FILL,
     }
 )
+PERSISTED_OPERATIONAL_TELEMETRY_EVENTS = frozenset(
+    {CONSUMER_HEALTH, TERMINAL_REASON}
+)
+
+_DECISION_SLO_LATENCY_KEY = "decision_slo_latency_ms"
+_DECISION_SLO_TRANSITIONS: dict[str, tuple[tuple[str, str], ...]] = {
+    CANDIDATE_ACCEPTED: (
+        (MARKET_STATE_RECEIVED, CONTEXT_READY),
+        (CONTEXT_READY, CANDIDATE_ACCEPTED),
+    ),
+    INTENT_SAVED: ((CANDIDATE_ACCEPTED, INTENT_SAVED),),
+    EXCHANGE_REQUEST_STARTED: ((INTENT_SAVED, EXCHANGE_REQUEST_STARTED),),
+}
 
 
 class LiveTelemetrySink(Protocol):
+    def consumer_health(
+        self,
+        *,
+        consumer: str,
+        available: bool,
+        occurred_at: datetime,
+        reason: str | None = None,
+        recovery: bool = False,
+        lag: bool = False,
+        sequence: int | None = None,
+    ) -> None: ...
+
     async def source_received(self, ingress: "SourceIngress") -> None: ...
 
     async def trace_terminated(
@@ -580,6 +607,44 @@ class LiveRuntimeTelemetry:
             details=ingress.details(),
         )
 
+    def consumer_health(
+        self,
+        *,
+        consumer: str,
+        available: bool,
+        occurred_at: datetime,
+        reason: str | None = None,
+        recovery: bool = False,
+        lag: bool = False,
+        sequence: int | None = None,
+    ) -> None:
+        """Record one low-cardinality consumer health transition.
+
+        Hub callbacks are synchronous, so this seam deliberately does not
+        require an await.  The event is added to the same bounded queue as
+        lifecycle telemetry; database persistence remains best effort and
+        never blocks the decision path.
+        """
+
+        _require_non_empty_text(consumer, "consumer")
+        _require_aware(occurred_at, "occurred_at")
+        if sequence is not None and sequence < 0:
+            raise ValueError("sequence must not be negative")
+        if reason is not None:
+            _require_non_empty_text(reason, "reason")
+        self._record_observation(
+            event_type=CONSUMER_HEALTH,
+            occurred_at=occurred_at,
+            details={
+                "consumer": consumer,
+                "available": available,
+                "recovery": recovery,
+                "lag": lag,
+                "reason": reason,
+                "sequence": sequence,
+            },
+        )
+
     async def trace_terminated(
         self,
         ingress: SourceIngress,
@@ -603,6 +668,16 @@ class LiveRuntimeTelemetry:
             **(details or {}),
             "reason": reason,
         }
+        source = ingress.trigger_source or LIVE_LANE_UNKNOWN
+        self._record_observation(
+            event_type=TERMINAL_REASON,
+            occurred_at=occurred_at,
+            details={
+                "lane": ingress.lane,
+                "trigger_source": source,
+                "reason": reason,
+            },
+        )
         await self._record_phase(
             phase=TRACE_TERMINATED,
             trace_id=ingress.trace_id,
@@ -612,7 +687,6 @@ class LiveRuntimeTelemetry:
             occurred_at=occurred_at,
             details=event_details,
         )
-        source = ingress.trigger_source or LIVE_LANE_UNKNOWN
         counter_key = (ingress.lane, source, reason)
         self._terminal_reason_counts[counter_key] = (
             self._terminal_reason_counts.get(counter_key, 0) + 1
@@ -1015,6 +1089,35 @@ class LiveRuntimeTelemetry:
             },
         )
 
+    def _record_observation(
+        self,
+        *,
+        event_type: str,
+        occurred_at: datetime,
+        details: Mapping[str, JsonValue],
+    ) -> None:
+        """Record an event without requiring an async caller."""
+
+        _require_aware(occurred_at, "occurred_at")
+        event = LiveRuntimeEvent(
+            event_id=str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"live-runtime:{self._run_id}:{event_type}:"
+                    f"{occurred_at.isoformat()}:{self._recorded_event_count}",
+                )
+            ),
+            run_id=self._run_id,
+            event_type=event_type,
+            occurred_at=occurred_at,
+            symbol=None,
+            bucket_start=None,
+            details={key: _json_value(value) for key, value in details.items()},
+        )
+        self._recorded_event_count += 1
+        self._recent_events.append(event)
+        self._enqueue(event)
+
     def latency_summary(
         self,
     ) -> dict[str, dict[str, dict[str, dict[str, float | int]]]]:
@@ -1085,6 +1188,14 @@ class LiveRuntimeTelemetry:
                 "trace_id": trace_id,
             }
         )
+        decision_slo_latencies = _decision_slo_latencies(
+            trace,
+            phase=phase,
+            occurred_at=occurred_at,
+            details=event_details,
+        )
+        if decision_slo_latencies:
+            event_details[_DECISION_SLO_LATENCY_KEY] = decision_slo_latencies
         if include_derived_latency:
             previous_phase = _previous_phase(phase, trace.phase_at)
             if previous_phase is not None:
@@ -1346,6 +1457,35 @@ def _ingress_details(ingress: SourceIngress | None) -> dict[str, JsonValue]:
     return {} if ingress is None else ingress.details()
 
 
+def _decision_slo_latencies(
+    trace: _Trace,
+    *,
+    phase: str,
+    occurred_at: datetime,
+    details: Mapping[str, JsonValue],
+) -> dict[str, JsonValue]:
+    transitions = _DECISION_SLO_TRANSITIONS.get(phase)
+    if not transitions:
+        return {}
+    if phase == EXCHANGE_REQUEST_STARTED and (
+        details.get("operation") != "submit"
+        or details.get("request_attempt") != 1
+    ):
+        return {}
+    phase_at = dict(trace.phase_at)
+    phase_at[phase] = occurred_at
+    result: dict[str, JsonValue] = {}
+    for previous_phase, current_phase in transitions:
+        previous_at = phase_at.get(previous_phase)
+        current_at = phase_at.get(current_phase)
+        if previous_at is None or current_at is None:
+            continue
+        latency_ms = (current_at - previous_at).total_seconds() * 1000
+        if latency_ms >= 0:
+            result[f"{previous_phase}->{current_phase}"] = latency_ms
+    return result
+
+
 def _json_value(value: object) -> JsonValue:
     if isinstance(value, str | int | float | bool) or value is None:
         return value
@@ -1366,6 +1506,7 @@ def _require_aware(value: datetime, field_name: str) -> None:
 __all__ = [
     "ACCOUNT_FILL",
     "CANDIDATE_ACCEPTED",
+    "CONSUMER_HEALTH",
     "CONTEXT_READY",
     "EXCHANGE_FILLED",
     "ENTRY_FILTER_READY",
@@ -1387,12 +1528,14 @@ __all__ = [
     "LiveTriggerSource",
     "MARKET_STATE_RECEIVED",
     "PERSISTED_ORDER_TELEMETRY_EVENTS",
+    "PERSISTED_OPERATIONAL_TELEMETRY_EVENTS",
     "RISK_APPROVED",
     "SIGNAL_RECORDED",
     "SOURCE_RECEIVED",
     "SourceIngress",
     "STRATEGY_DECISION",
     "SUBMITTING",
+    "TERMINAL_REASON",
     "TerminalReasonSummary",
     "TRACE_TERMINATED",
     "TraceKey",

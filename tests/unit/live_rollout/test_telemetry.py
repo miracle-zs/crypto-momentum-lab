@@ -10,6 +10,7 @@ from crypto_momentum_lab.domain.execution import (
 )
 from crypto_momentum_lab.execution_account.hub import AccountEvent
 from crypto_momentum_lab.live_rollout.telemetry import (
+    CONSUMER_HEALTH,
     EXCHANGE_REQUEST_STARTED,
     EXCHANGE_RESPONSE_RECEIVED,
     MARKET_STATE_RECEIVED,
@@ -149,6 +150,102 @@ async def test_live_telemetry_persists_events_in_batches_without_blocking_record
     assert len(batches) == 1
     assert batches[0][0]["event_type"] == "market_state_received"
     assert batches[0][0]["details"]["lane"] == "entry"
+
+
+async def test_consumer_health_persists_low_cardinality_operational_event() -> None:
+    batches: list[tuple[dict[str, object], ...]] = []
+
+    async def persist(events) -> None:
+        batches.append(tuple(dict(event) for event in events))
+
+    telemetry = LiveRuntimeTelemetry(
+        run_id="run-1",
+        persist=persist,
+        persist_event_types=frozenset({CONSUMER_HEALTH}),
+    )
+    occurred_at = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+    await telemetry.start()
+    telemetry.consumer_health(
+        consumer="market_state_hub",
+        available=False,
+        occurred_at=occurred_at,
+        reason="market_state_consumer_lagged",
+        lag=True,
+    )
+    await telemetry.stop()
+
+    event = batches[0][0]
+    assert event["event_type"] == CONSUMER_HEALTH
+    assert event["symbol"] is None
+    assert event["bucket_start"] is None
+    assert event["details"] == {
+        "consumer": "market_state_hub",
+        "available": False,
+        "recovery": False,
+        "lag": True,
+        "reason": "market_state_consumer_lagged",
+        "sequence": None,
+    }
+
+
+async def test_persisted_order_events_carry_decision_slo_transition_samples() -> None:
+    state = _state()
+    candidate = _intent()
+    telemetry = LiveRuntimeTelemetry(run_id="run-1")
+    start = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+
+    await telemetry.market_state_received(state, occurred_at=start)
+    await telemetry.context_ready(
+        state,
+        occurred_at=start + timedelta(milliseconds=100),
+        prefetched=True,
+        reloaded=False,
+    )
+    await telemetry.candidate_accepted(
+        candidate,
+        state=state,
+        occurred_at=start + timedelta(milliseconds=300),
+        lane="entry",
+    )
+    await telemetry.intent_saved(
+        candidate,
+        state=state,
+        occurred_at=start + timedelta(milliseconds=500),
+        lane="entry",
+    )
+    plan = OrderExecutionPlan(
+        intent_id=candidate.candidate_id,
+        run_id=candidate.run_id,
+        client_order_id="cml_12345678901234567890123456789012",
+        symbol=state.symbol,
+        side="BUY",
+        order_type="MARKET",
+        quantity=Decimal("0.003"),
+        price=None,
+        reduce_only=False,
+        created_at=start + timedelta(milliseconds=500),
+        quantized=True,
+    )
+    await telemetry.exchange_request_started(
+        plan,
+        "submit_request_started",
+        start + timedelta(milliseconds=700),
+    )
+
+    events = {event.event_type: event for event in telemetry.recent_events}
+
+    assert events["candidate_accepted"].details["decision_slo_latency_ms"] == {
+        "market_state_received->context_ready": 100.0,
+        "context_ready->candidate_accepted": 200.0,
+    }
+    assert events["intent_saved"].details["decision_slo_latency_ms"] == {
+        "candidate_accepted->intent_saved": 200.0,
+    }
+    assert events[EXCHANGE_REQUEST_STARTED].details[
+        "decision_slo_latency_ms"
+    ] == {
+        "intent_saved->exchange_request_started": 200.0,
+    }
 
 
 async def test_exchange_latency_pairs_each_operation_attempt() -> None:

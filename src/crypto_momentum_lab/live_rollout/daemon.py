@@ -1,25 +1,20 @@
 import asyncio
 from collections.abc import (
     AsyncIterable,
-    AsyncIterator,
     Awaitable,
     Callable,
     Mapping,
 )
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from inspect import Parameter, signature
-from time import perf_counter
 from typing import Protocol
-from uuid import NAMESPACE_URL, uuid5
 
 import structlog
 from sqlalchemy.exc import SQLAlchemyError
 
 from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
-    ExecutionAccountStatus,
 )
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderEvent,
@@ -27,84 +22,85 @@ from crypto_momentum_lab.domain.execution import (
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.market.models import (
-    JsonValue,
     MarketState15s,
     RealtimeMarketQuote,
 )
-from crypto_momentum_lab.domain.risk import (
-    RiskConfigSnapshot,
-    RiskDecision,
-    RiskEvaluation,
-    RiskHalt,
-    StrategyLiveState,
-    TradingLease,
-)
 from crypto_momentum_lab.domain.strategy import (
-    EntryPolicyComparison,
-    EntryPolicyComparisonRequest,
     EntryType,
     OrderIntentCandidate,
     StrategyCheckpoint,
     StrategyDecision,
-    StrategySide,
     UniverseRankingSnapshot,
-    compare_entry_policy_request,
-    summarize_entry_policy_comparisons,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
 )
-from crypto_momentum_lab.execution_account.orders.quantization import (
-    QuantizationRejection,
-    SymbolTradingRules,
-    quantize_order_plan,
-)
 from crypto_momentum_lab.execution_account.orders.recovery import (
     ExitRecoveryClient,
-    ExitRecoveryInspectionUnknownError,
 )
-from crypto_momentum_lab.execution_account.orders.state_machine import (
-    OrderExecutionResult,
-    PreparedOrderSubmission,
+from crypto_momentum_lab.live_rollout.checkpoint_coordinator import (
+    LiveCheckpointCoordinator,
 )
-from crypto_momentum_lab.execution_account.sync import AccountSnapshot
 from crypto_momentum_lab.live_rollout.checkpoint_writer import CheckpointWriter
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     ClosedCandle15mEvent,
 )
-from crypto_momentum_lab.live_rollout.exits import (
-    LiveExitCancellationRequest,
-    LiveExitManager,
-    LiveExitRequest,
-    ManagedLivePosition,
+from crypto_momentum_lab.live_rollout.context import (
+    LiveContextProvider,
+    LiveDaemonRuntimeContext,
+    LiveEntryFilterContext,
 )
-from crypto_momentum_lab.live_rollout.gates import (
-    LiveGateContext,
-    evaluate_live_gate,
-    order_state_is_uncertain,
+from crypto_momentum_lab.live_rollout.context_prefetch import (
+    LiveContextPrefetcher,
 )
-from crypto_momentum_lab.live_rollout.limits import (
-    FixedLiveLimits,
-    LiveLimitContext,
-    evaluate_fixed_live_limits,
+from crypto_momentum_lab.live_rollout.entry_control import (
+    LiveEntryControlGate,
+)
+from crypto_momentum_lab.live_rollout.entry_lane import (
+    EntryExecutionLane,
+    EntryLaneConfig,
+    _live_signal_account_context,
+)
+from crypto_momentum_lab.live_rollout.exit_lane import (
+    ExitExecutionLane,
+    ExitLaneOutcome,
+)
+from crypto_momentum_lab.live_rollout.exit_processor import (
+    ExitProcessorConfig,
+    LiveExitProcessor,
+)
+from crypto_momentum_lab.live_rollout.exits import LiveExitManager
+from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
+from crypto_momentum_lab.live_rollout.market_admission import (
+    LiveMarketStateAdmission,
+)
+from crypto_momentum_lab.live_rollout.pending_entries import (
+    LivePendingEntryRegistry,
+)
+from crypto_momentum_lab.live_rollout.runtime_cache import (
+    LiveRuntimeCacheMaintenance,
+)
+from crypto_momentum_lab.live_rollout.scheduled_controller import (
+    ScheduledRiskWindowController,
+    ScheduledRiskWindowControllerConfig,
 )
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
-    ScheduledRiskWindowPhase,
 )
 from crypto_momentum_lab.live_rollout.signal_recorder import (
     LiveSignalRecorderPort,
 )
+from crypto_momentum_lab.live_rollout.submission import (
+    LiveCandidateSubmission,
+    LiveEntryOrderLifecycle,
+    LiveSubmissionConfig,
+    LiveSubmissionRepository,
+)
 from crypto_momentum_lab.live_rollout.telemetry import (
     LIVE_LANE_ENTRY,
-    LIVE_LANE_EXIT,
     LiveTelemetrySink,
-    state_trace_id,
 )
-from crypto_momentum_lab.persistence.postgres.order_repository import (
-    PersistedExchangeOrder,
-)
-from crypto_momentum_lab.risk.gateway import RiskContext, RiskGateway
+from crypto_momentum_lab.risk.gateway import RiskGateway
 from crypto_momentum_lab.strategy_runner.position_exit import ClosedCandle15m
 
 log = structlog.get_logger()
@@ -112,9 +108,6 @@ log = structlog.get_logger()
 _EXIT_RECOVERY_PREFIX = "live-exit-recovery-"
 _EXIT_RECOVERY_MAX_ATTEMPTS = 3
 _EXIT_RECOVERY_RETRY_DELAYS_SECONDS = (2.0, 5.0, 15.0)
-_CACHE_MAINTENANCE_INTERVAL = timedelta(minutes=1)
-_STRATEGY_CACHE_INACTIVE_AFTER = timedelta(minutes=15)
-_TELEMETRY_CACHE_INACTIVE_AFTER = timedelta(hours=1)
 
 
 class LiveRuntimeStrategy(Protocol):
@@ -129,47 +122,12 @@ class LiveRuntimeStrategy(Protocol):
     def warm_market_state(self, state: MarketState15s) -> None: ...
 
 
-class LiveDaemonRepository(Protocol):
-    async def save_approved_intent(
-        self,
-        intent: OrderIntentCandidate,
-        evaluation: RiskEvaluation,
-    ) -> None: ...
-
-    async def prepare_submission(
-        self,
-        *,
-        intent: OrderIntentCandidate,
-        evaluation: RiskEvaluation,
-        plan: OrderExecutionPlan,
-        prepared_at: datetime,
-        environment: str | None = None,
-        account_label: str | None = None,
-        strategy_name: str | None = None,
-        required_lease_owner: str | None = None,
-        required_lease_id: str | None = None,
-        max_open_positions: int | None = None,
-        max_daily_loss: Decimal | None = None,
-        max_gross_exposure: Decimal | None = None,
-        current_daily_pnl: Decimal | None = None,
-        current_gross_exposure: Decimal | None = None,
-        open_position_symbols: frozenset[str] | None = None,
-        exposure_notional: Decimal | None = None,
-    ) -> PreparedOrderSubmission | None: ...
-
+class LiveDaemonRepository(LiveSubmissionRepository, Protocol):
     async def save_checkpoint(
         self,
         run_id: str,
         checkpoint: StrategyCheckpoint,
         saved_at: datetime,
-    ) -> None: ...
-
-
-class LiveEntryOrderLifecycle(Protocol):
-    async def track(
-        self,
-        plan: OrderExecutionPlan,
-        result: OrderExecutionResult,
     ) -> None: ...
 
 
@@ -227,430 +185,12 @@ class LiveDaemonConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class LiveEntryFilterContext:
-    entry_price: Decimal | None
-    ema5: Decimal | None = None
-    ema10: Decimal | None = None
-    ema_observed_at: datetime | None = None
-    ema_snapshot_id: str | None = None
-    ema_config_hash: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.ema_observed_at is not None and (
-            self.ema_observed_at.tzinfo is None
-            or self.ema_observed_at.utcoffset() is None
-        ):
-            raise ValueError("ema_observed_at must be timezone-aware")
-        for value, field_name in (
-            (self.ema_snapshot_id, "ema_snapshot_id"),
-            (self.ema_config_hash, "ema_config_hash"),
-        ):
-            if value is not None and not value.strip():
-                raise ValueError(f"{field_name} must not be empty")
-
-
-@dataclass(frozen=True, slots=True)
-class LiveDaemonRuntimeContext:
-    now: datetime
-    gate_context: LiveGateContext
-    active_lease: TradingLease | None
-    account_state: ExecutionAccountStatus
-    account_observed_at: datetime | None
-    open_position_symbols: frozenset[str] | None
-    realized_pnl: Decimal | None
-    unrealized_pnl: Decimal | None
-    gross_exposure: Decimal | None
-    active_halts: tuple[RiskHalt, ...]
-    unresolved_order_states: tuple[ExchangeOrderState, ...]
-    risk_config: RiskConfigSnapshot
-    strategy_state: StrategyLiveState
-    trading_rules: dict[str, SymbolTradingRules]
-    managed_positions: tuple[ManagedLivePosition, ...] = ()
-    pending_position_symbols: frozenset[str] = frozenset()
-    unmanaged_position_symbols: frozenset[str] = frozenset()
-    unresolved_orders: tuple[PersistedExchangeOrder, ...] = ()
-    account_snapshot: AccountSnapshot | None = None
-    account_snapshot_version: int | None = None
-    context_epoch: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class LiveDaemonResult:
     processed_state_count: int
     approved_intent_count: int
     submitted_order_count: int
     halt_reason: str | None
     final_state_at: datetime | None
-
-
-@dataclass(frozen=True, slots=True)
-class _PrefetchedContext:
-    state: MarketState15s
-    generation: int
-    received_at: datetime
-    context: LiveDaemonRuntimeContext | None
-    error: Exception | None
-
-
-@dataclass(frozen=True, slots=True)
-class _EntryPolicyEvaluation:
-    """One immutable Policy evaluation shared by execution and telemetry."""
-
-    comparisons: tuple[EntryPolicyComparison, ...] = ()
-    skip_reason: str | None = None
-    universe_snapshot_error: str | None = None
-
-    def comparison_for(
-        self,
-        candidate_id: str,
-    ) -> EntryPolicyComparison | None:
-        return next(
-            (
-                comparison
-                for comparison in self.comparisons
-                if comparison.candidate_id == candidate_id
-            ),
-            None,
-        )
-
-
-@dataclass(slots=True)
-class _PendingContext:
-    state: MarketState15s
-    generation: int
-    received_at: datetime
-    task: asyncio.Task[LiveDaemonRuntimeContext]
-
-
-@dataclass(frozen=True, slots=True)
-class _ExitLaneOutcome:
-    approved_intent_count: int = 0
-    submitted_order_count: int = 0
-    failure: str | None = None
-    fatal_failure: bool = False
-
-    def merge(self, other: "_ExitLaneOutcome") -> "_ExitLaneOutcome":
-        return _ExitLaneOutcome(
-            approved_intent_count=(
-                self.approved_intent_count + other.approved_intent_count
-            ),
-            submitted_order_count=(
-                self.submitted_order_count + other.submitted_order_count
-            ),
-            failure=self.failure or other.failure,
-            fatal_failure=self.fatal_failure or other.fatal_failure,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class _ExitLaneWork:
-    state: MarketState15s
-    context: LiveDaemonRuntimeContext
-    completion: asyncio.Future[_ExitLaneOutcome] | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _QuoteLaneWork:
-    quote: RealtimeMarketQuote
-    state: MarketState15s
-    context: LiveDaemonRuntimeContext
-    completion: asyncio.Future[_ExitLaneOutcome] | None = None
-
-
-class _ExitExecutionLane:
-    """Run account exits independently from the market-state consumer.
-
-    The market worker deliberately keeps only the newest pending state for a
-    symbol.  A slow candle lookup for one symbol therefore cannot build a
-    queue of stale exit decisions for that symbol.  Account events have a
-    separate worker so they are not queued behind unrelated market work.
-    """
-
-    _MARKET_WORKER_COUNT = 4
-
-    def __init__(
-        self,
-        processor: Callable[
-            [MarketState15s, LiveDaemonRuntimeContext],
-            Awaitable[_ExitLaneOutcome],
-        ],
-        quote_processor: Callable[
-            [RealtimeMarketQuote, MarketState15s, LiveDaemonRuntimeContext],
-            Awaitable[_ExitLaneOutcome],
-        ],
-    ) -> None:
-        self._processor = processor
-        self._quote_processor = quote_processor
-        self._started = False
-        self._account_queue: asyncio.Queue[_ExitLaneWork | None] | None = None
-        self._market_queue: asyncio.Queue[str | None] | None = None
-        self._quote_queue: asyncio.Queue[str | None] | None = None
-        self._market_state_lock: asyncio.Lock | None = None
-        self._market_latest: dict[str, _ExitLaneWork] = {}
-        self._market_enqueued: set[str] = set()
-        self._quote_latest: dict[str, _QuoteLaneWork] = {}
-        self._quote_enqueued: set[str] = set()
-        self._account_worker: asyncio.Task[None] | None = None
-        self._market_workers: tuple[asyncio.Task[None], ...] = ()
-        self._quote_workers: tuple[asyncio.Task[None], ...] = ()
-        self._idle: asyncio.Event | None = None
-        self._outstanding_work = 0
-        self._outcome = _ExitLaneOutcome()
-
-    @property
-    def started(self) -> bool:
-        return self._started
-
-    @property
-    def failure(self) -> str | None:
-        if not self._outcome.fatal_failure:
-            return None
-        return self._outcome.failure
-
-    async def start(self) -> None:
-        if self._started:
-            return
-        self._account_queue = asyncio.Queue()
-        self._market_queue = asyncio.Queue()
-        self._quote_queue = asyncio.Queue()
-        self._market_state_lock = asyncio.Lock()
-        self._market_latest = {}
-        self._market_enqueued = set()
-        self._quote_latest = {}
-        self._quote_enqueued = set()
-        self._outstanding_work = 0
-        self._outcome = _ExitLaneOutcome()
-        self._idle = asyncio.Event()
-        self._idle.set()
-        self._started = True
-        self._account_worker = asyncio.create_task(
-            self._run_account_worker(),
-            name="live-exit-account-worker",
-        )
-        self._market_workers = tuple(
-            asyncio.create_task(
-                self._run_market_worker(),
-                name=f"live-exit-market-worker-{index}",
-            )
-            for index in range(self._MARKET_WORKER_COUNT)
-        )
-        self._quote_workers = tuple(
-            asyncio.create_task(
-                self._run_quote_worker(),
-                name=f"live-exit-quote-worker-{index}",
-            )
-            for index in range(self._MARKET_WORKER_COUNT)
-        )
-
-    async def submit_account(
-        self,
-        state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-    ) -> _ExitLaneOutcome:
-        if not self._started or self._account_queue is None or self._idle is None:
-            raise RuntimeError("exit lane is not started")
-        completion: asyncio.Future[_ExitLaneOutcome] = (
-            asyncio.get_running_loop().create_future()
-        )
-        self._outstanding_work += 1
-        self._idle.clear()
-        await self._account_queue.put(_ExitLaneWork(state, context, completion))
-        return await completion
-
-    async def submit_market(
-        self,
-        state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-    ) -> None:
-        if (
-            not self._started
-            or self._market_queue is None
-            or self._market_state_lock is None
-            or self._idle is None
-        ):
-            raise RuntimeError("exit lane is not started")
-        async with self._market_state_lock:
-            if state.symbol not in self._market_latest:
-                self._outstanding_work += 1
-            self._idle.clear()
-            self._market_latest[state.symbol] = _ExitLaneWork(state, context)
-            if state.symbol not in self._market_enqueued:
-                self._market_enqueued.add(state.symbol)
-                self._market_queue.put_nowait(state.symbol)
-
-    async def submit_quote(
-        self,
-        quote: RealtimeMarketQuote,
-        state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-        *,
-        wait: bool = False,
-    ) -> _ExitLaneOutcome | None:
-        if (
-            not self._started
-            or self._quote_queue is None
-            or self._market_state_lock is None
-            or self._idle is None
-        ):
-            raise RuntimeError("exit lane is not started")
-        completion: asyncio.Future[_ExitLaneOutcome] | None = None
-        if wait:
-            completion = asyncio.get_running_loop().create_future()
-        async with self._market_state_lock:
-            if quote.symbol not in self._quote_latest:
-                self._outstanding_work += 1
-            self._idle.clear()
-            self._quote_latest[quote.symbol] = _QuoteLaneWork(
-                quote,
-                state,
-                context,
-                completion,
-            )
-            if quote.symbol not in self._quote_enqueued:
-                self._quote_enqueued.add(quote.symbol)
-                self._quote_queue.put_nowait(quote.symbol)
-        if completion is None:
-            return None
-        return await completion
-
-    async def stop(self) -> _ExitLaneOutcome:
-        if not self._started:
-            return _ExitLaneOutcome()
-        await self.drain()
-        account_queue = self._account_queue
-        market_queue = self._market_queue
-        quote_queue = self._quote_queue
-        account_worker = self._account_worker
-        market_workers = self._market_workers
-        quote_workers = self._quote_workers
-        if account_queue is not None:
-            account_queue.put_nowait(None)
-        if market_queue is not None:
-            for _ in market_workers:
-                market_queue.put_nowait(None)
-        if quote_queue is not None:
-            for _ in quote_workers:
-                quote_queue.put_nowait(None)
-        workers: tuple[asyncio.Task[None], ...] = (
-            (account_worker,) if account_worker is not None else ()
-        )
-        workers += market_workers
-        workers += quote_workers
-        if workers:
-            await asyncio.gather(*workers)
-        outcome = self._outcome
-        self._started = False
-        self._market_workers = ()
-        self._quote_workers = ()
-        return outcome
-
-    async def drain(self) -> None:
-        if self._started and self._idle is not None:
-            await self._idle.wait()
-
-    async def _run_account_worker(self) -> None:
-        assert self._account_queue is not None
-        while True:
-            work = await self._account_queue.get()
-            if work is None:
-                return
-            outcome = await self._run_work(work)
-            self._record_outcome(outcome)
-            if work.completion is not None and not work.completion.done():
-                work.completion.set_result(outcome)
-            self._outstanding_work -= 1
-            self._mark_idle_if_ready()
-
-    async def _run_market_worker(self) -> None:
-        assert self._market_queue is not None
-        assert self._market_state_lock is not None
-        while True:
-            symbol = await self._market_queue.get()
-            if symbol is None:
-                return
-            async with self._market_state_lock:
-                work = self._market_latest.pop(symbol, None)
-                self._market_enqueued.discard(symbol)
-            if work is None:
-                self._mark_idle_if_ready()
-                continue
-            outcome = await self._run_work(work)
-            self._record_outcome(outcome)
-            self._outstanding_work -= 1
-            self._mark_idle_if_ready()
-
-    async def _run_quote_worker(self) -> None:
-        assert self._quote_queue is not None
-        assert self._market_state_lock is not None
-        while True:
-            symbol = await self._quote_queue.get()
-            if symbol is None:
-                return
-            async with self._market_state_lock:
-                work = self._quote_latest.pop(symbol, None)
-                self._quote_enqueued.discard(symbol)
-            if work is None:
-                self._mark_idle_if_ready()
-                continue
-            outcome = await self._run_quote_work(work)
-            self._record_outcome(outcome)
-            if work.completion is not None and not work.completion.done():
-                work.completion.set_result(outcome)
-            self._outstanding_work -= 1
-            self._mark_idle_if_ready()
-
-    async def _run_work(self, work: _ExitLaneWork) -> _ExitLaneOutcome:
-        try:
-            return await self._processor(work.state, work.context)
-        except Exception as error:
-            log.exception(
-                "live_exit_lane_work_failed",
-                symbol=work.state.symbol,
-                error_type=type(error).__name__,
-            )
-            return _ExitLaneOutcome(
-                failure=f"exit_execution_failed:{type(error).__name__}",
-                fatal_failure=True,
-            )
-
-    async def _run_quote_work(self, work: _QuoteLaneWork) -> _ExitLaneOutcome:
-        try:
-            return await self._quote_processor(
-                work.quote,
-                work.state,
-                work.context,
-            )
-        except Exception as error:
-            log.exception(
-                "live_quote_exit_lane_work_failed",
-                symbol=work.quote.symbol,
-                error_type=type(error).__name__,
-            )
-            return _ExitLaneOutcome(
-                failure=f"quote_exit_execution_failed:{type(error).__name__}",
-                fatal_failure=True,
-            )
-
-    def _record_outcome(self, outcome: _ExitLaneOutcome) -> None:
-        self._outcome = self._outcome.merge(outcome)
-        if outcome.failure is not None:
-            if outcome.fatal_failure:
-                log.error(
-                    "live_exit_lane_failed_closed",
-                    reason=outcome.failure,
-                )
-            else:
-                log.warning(
-                    "live_exit_lane_recoverable_failure",
-                    reason=outcome.failure,
-                )
-
-    def _mark_idle_if_ready(self) -> None:
-        if (
-            self._idle is not None
-            and self._outstanding_work == 0
-        ):
-            self._idle.set()
 
 
 class LiveStrategyDaemon:
@@ -662,10 +202,7 @@ class LiveStrategyDaemon:
         limits: FixedLiveLimits,
         repository: LiveDaemonRepository,
         state_machine: OrderExecutionPort,
-        context_provider: Callable[
-            [MarketState15s],
-            Awaitable[LiveDaemonRuntimeContext],
-        ],
+        context_provider: LiveContextProvider,
         config: LiveDaemonConfig,
         exit_manager: LiveExitManager | None = None,
         exit_recovery_client: ExitRecoveryClient | None = None,
@@ -689,22 +226,22 @@ class LiveStrategyDaemon:
         self._limits = limits
         self._repository = repository
         self._state_machine = state_machine
+        self._entry_control = LiveEntryControlGate(
+            run_id=config.run_id,
+            state_machine=self._state_machine,
+        )
         self._context_provider = context_provider
         self._config = config
         self._exit_manager = exit_manager
         self._exit_recovery_client = exit_recovery_client
         self._reconcile_orders = reconcile_orders
-        self._exit_symbol_locks: dict[str, asyncio.Lock] = {}
-        self._exit_recovery_locks: dict[tuple[str, str], asyncio.Lock] = {}
-        self._exit_recovery_attempts: dict[str, int] = {}
-        self._exit_recovery_next_attempt_at: dict[str, datetime] = {}
-        self._exit_lane = _ExitExecutionLane(
-            self._process_exit_work,
-            self._process_quote_work,
-        )
-        self._checkpoint_writer = CheckpointWriter(
-            run_id=config.run_id,
-            persist=self._repository.save_checkpoint,
+        self._checkpoint_coordinator = LiveCheckpointCoordinator(
+            writer=CheckpointWriter(
+                run_id=config.run_id,
+                persist=self._repository.save_checkpoint,
+            ),
+            strategy=self._strategy,
+            checkpoint_every_states=config.checkpoint_every_states,
         )
         self._telemetry = telemetry
         self._signal_recorder = signal_recorder
@@ -714,36 +251,122 @@ class LiveStrategyDaemon:
         self._cancel_unfilled_entry_orders = cancel_unfilled_entry_orders
         self._fetch_exchange_positions = fetch_exchange_positions
         self._managed_position_symbols: frozenset[str] = frozenset()
-        self._managed_order_symbols: frozenset[str] = frozenset()
-        self._pending_position_symbols: frozenset[str] = frozenset()
-        self._managed_position_symbols_known = False
-        self._last_cache_maintenance_at: datetime | None = None
         self._context_generation = 0
+        self._context_prefetcher = LiveContextPrefetcher(
+            context_provider=self._context_provider,
+            context_generation=lambda: self._context_generation,
+            clock=self._clock,
+        )
         self._run_active = False
-        self._entry_enabled = True
         self._exit_enabled = True
-        self._entry_enabled_reason = "initializing"
-        self._scheduled_entry_blocked = False
-        self._scheduled_entry_block_reason = "outside_scheduled_risk_window"
-        self._latest_market_states: dict[str, MarketState15s] = {}
-        self._scheduled_window_lock = asyncio.Lock()
-        self._scheduled_window_day: date | None = None
-        self._scheduled_entry_orders_cancelled = False
-        self._scheduled_deadline_entry_orders_cancelled = False
-        self._scheduled_flatten_attempt = 0
-        self._scheduled_flatten_last_attempt_at: datetime | None = None
-        self._scheduled_positions_verified = False
-        self._scheduled_last_verification_at: datetime | None = None
-        self._scheduled_approved_intent_count = 0
-        self._scheduled_submitted_order_count = 0
         self._scheduled_task: asyncio.Task[None] | None = None
-        self._pending_entry_plans: dict[
-            str,
-            tuple[OrderExecutionPlan, Decimal],
-        ] = {}
+        self._pending_entries = LivePendingEntryRegistry(clock=self._clock)
+        self._runtime_cache = LiveRuntimeCacheMaintenance(
+            run_id=config.run_id,
+            strategy=self._strategy,
+            telemetry=self._telemetry,
+            pending_entry_symbols=self._pending_entries.pending_symbols,
+        )
+        self._market_admission = LiveMarketStateAdmission(
+            context_provider=self._context_provider,
+            context_generation=lambda: self._context_generation,
+            sync_pending_entry_plans=self._pending_entries.sync,
+            publish_managed_position_symbols=self._publish_managed_position_symbols,
+            telemetry=self._telemetry,
+            clock=self._clock,
+        )
         self._market_gap_generation = 0
         self._strategy_gap_reset_generation_by_symbol: dict[str, int] = {}
         self._last_transient_gate_reasons: tuple[str, ...] | None = None
+        self._submission = LiveCandidateSubmission(
+            risk_gateway=self._risk_gateway,
+            limits=self._limits,
+            repository=self._repository,
+            state_machine=self._state_machine,
+            config=LiveSubmissionConfig(
+                run_id=config.run_id,
+                resize_tolerance=config.resize_tolerance,
+                hedge_mode=config.hedge_mode,
+                entry_order_type=config.entry_order_type,
+                entry_limit_ttl_seconds=config.entry_limit_ttl_seconds,
+            ),
+            clock=self._clock,
+            entry_enabled=lambda: self.entry_enabled,
+            entry_enabled_reason=lambda: self.entry_enabled_reason,
+            context_is_current=self._context_is_current,
+            pending_entry_reservation=self._pending_entries.reservation,
+            remember_pending_entry=self._pending_entries.remember,
+            record_signal_candidate=self._record_signal_candidate,
+            telemetry=self._telemetry,
+            entry_order_lifecycle=self._entry_order_lifecycle,
+        )
+        self._exit_processor = LiveExitProcessor(
+            config=ExitProcessorConfig(run_id=config.run_id),
+            exit_manager=self._exit_manager,
+            exit_recovery_client=self._exit_recovery_client,
+            state_machine=self._state_machine,
+            submission=self._submission,
+            telemetry=self._telemetry,
+            clock=self._clock,
+            is_exit_enabled=lambda: self.exit_enabled,
+            context_provider=self._context_provider,
+            sync_pending_entry_plans=self._pending_entries.sync,
+            publish_managed_position_symbols=self._publish_managed_position_symbols,
+            invalidate_context_cache=self._invalidate_context_cache,
+            context_is_current=self._context_is_current,
+        )
+        self._exit_lane = ExitExecutionLane(
+            self._exit_processor.process_state,
+            self._exit_processor.process_quote,
+        )
+        self._scheduled_controller = ScheduledRiskWindowController(
+            config=ScheduledRiskWindowControllerConfig(
+                run_id=config.run_id,
+                scheduled_risk_window=config.scheduled_risk_window,
+            ),
+            exit_manager=self._exit_manager,
+            state_machine=self._state_machine,
+            context_provider=self._context_provider,
+            sync_pending_entry_plans=self._pending_entries.sync,
+            publish_managed_position_symbols=self._publish_managed_position_symbols,
+            invalidate_context_cache=self._invalidate_context_cache,
+            process_exit_requests=self._exit_processor.process_requests,
+            set_entry_blocked=self.set_scheduled_entry_blocked,
+            pending_entry_plans=self._pending_entries.snapshot,
+            cancel_unfilled_entry_orders=self._cancel_unfilled_entry_orders,
+            fetch_exchange_positions=self._fetch_exchange_positions,
+            clock=self._clock,
+        )
+        self._entry_lane = EntryExecutionLane(
+            config=EntryLaneConfig(
+                run_id=config.run_id,
+                entry_symbol_loader=config.entry_symbol_loader,
+                entry_symbol_refresh_seconds=(
+                    config.entry_symbol_refresh_seconds
+                ),
+                entry_filter_context_loader=config.entry_filter_context_loader,
+                entry_universe_context_provider=(
+                    config.entry_universe_context_provider
+                ),
+                entry_universe_snapshot_provider=(
+                    config.entry_universe_snapshot_provider
+                ),
+                entry_long_only=config.entry_long_only,
+                require_price_above_ema5=config.require_price_above_ema5,
+                require_price_above_ema10=config.require_price_above_ema10,
+                entry_policy_compare_only=config.entry_policy_compare_only,
+                entry_policy_enforce=config.entry_policy_enforce,
+                entry_order_type=config.entry_order_type,
+                entry_limit_ttl_seconds=config.entry_limit_ttl_seconds,
+            ),
+            clock=self._clock,
+            entry_enabled=lambda: self.entry_enabled,
+            entry_enabled_reason=lambda: self.entry_enabled_reason,
+            execute_candidate=self._submission.execute,
+            invalidate_context=self._invalidate_context_cache,
+            telemetry=self._telemetry,
+            signal_recorder=self._signal_recorder,
+        )
 
     async def _publish_managed_position_symbols(
         self,
@@ -761,13 +384,18 @@ class LiveStrategyDaemon:
             | context.pending_position_symbols
         )
         self._managed_position_symbols = symbols
-        self._pending_position_symbols = context.pending_position_symbols
-        self._managed_order_symbols = frozenset(
+        self._entry_control.set_pending_position_symbols(
+            context.pending_position_symbols
+        )
+        managed_order_symbols = frozenset(
             order.plan.symbol.strip().upper()
             for order in context.unresolved_orders
             if order.plan.symbol.strip()
         )
-        self._managed_position_symbols_known = True
+        self._runtime_cache.update_managed_symbols(
+            position_symbols=symbols,
+            order_symbols=managed_order_symbols,
+        )
         if self._on_managed_position_symbols is not None:
             await self._on_managed_position_symbols(symbols)
 
@@ -785,107 +413,6 @@ class LiveStrategyDaemon:
             )
             return False
 
-    def _maybe_prune_runtime_caches(
-        self,
-        *,
-        now: datetime,
-        current_symbol: str,
-        active_symbols: frozenset[str] | None = None,
-    ) -> None:
-        """Incrementally prune cold derived state without blocking the loop."""
-
-        if not self._managed_position_symbols_known:
-            return
-        previous = self._last_cache_maintenance_at
-        if (
-            previous is not None
-            and now - previous < _CACHE_MAINTENANCE_INTERVAL
-        ):
-            return
-
-        protected = {
-            symbol.strip().upper()
-            for symbol in self._managed_position_symbols
-            if symbol.strip()
-        }
-        protected.update(self._managed_order_symbols)
-        protected.add(current_symbol.strip().upper())
-        if active_symbols is not None:
-            protected.update(
-                symbol.strip().upper()
-                for symbol in active_symbols
-                if symbol.strip()
-            )
-        protected.update(
-            plan.symbol.strip().upper()
-            for plan, _notional in self._pending_entry_plans.values()
-            if plan.symbol.strip()
-        )
-        strategy_protected = getattr(
-            self._strategy,
-            "cache_protected_symbols",
-            None,
-        )
-        if callable(strategy_protected):
-            protected.update(strategy_protected())
-        protected_symbols = frozenset(protected)
-
-        strategy_prune = getattr(
-            self._strategy,
-            "prune_inactive_symbols",
-            None,
-        )
-        evicted_strategy_symbols: tuple[str, ...] = ()
-        if callable(strategy_prune):
-            evicted_strategy_symbols = strategy_prune(
-                now=now,
-                protected_symbols=protected_symbols,
-                inactive_after=_STRATEGY_CACHE_INACTIVE_AFTER,
-            )
-
-        evicted_telemetry_series = 0
-        if self._telemetry is not None:
-            telemetry_prune = getattr(
-                self._telemetry,
-                "prune_inactive_symbols",
-                None,
-            )
-            if callable(telemetry_prune):
-                evicted_telemetry_series = telemetry_prune(
-                    now=now,
-                    protected_symbols=protected_symbols,
-                    inactive_after=_TELEMETRY_CACHE_INACTIVE_AFTER,
-                )
-
-        self._last_cache_maintenance_at = now
-        if evicted_strategy_symbols or evicted_telemetry_series:
-            log.info(
-                "live_runtime_cache_pruned",
-                run_id=self._config.run_id,
-                protected_symbol_count=len(protected_symbols),
-                evicted_strategy_symbols=len(evicted_strategy_symbols),
-                evicted_telemetry_series=evicted_telemetry_series,
-                buffered_symbol_count=getattr(
-                    self._strategy,
-                    "buffered_symbol_count",
-                    None,
-                ),
-                buffered_state_count=getattr(
-                    self._strategy,
-                    "buffered_state_count",
-                    None,
-                ),
-                telemetry_sample_series_count=(
-                    None
-                    if self._telemetry is None
-                    else getattr(
-                        self._telemetry,
-                        "sample_series_count",
-                        None,
-                    )
-                ),
-            )
-
     def _invalidate_context_cache(self) -> None:
         self._context_generation += 1
         invalidate = getattr(self._context_provider, "invalidate_cache", None)
@@ -894,20 +421,11 @@ class LiveStrategyDaemon:
 
     @property
     def entry_enabled(self) -> bool:
-        return (
-            self._entry_enabled
-            and not self._scheduled_entry_blocked
-            and not self._pending_position_symbols
-        )
+        return self._entry_control.entry_enabled
 
     @property
     def entry_enabled_reason(self) -> str:
-        if self._scheduled_entry_blocked:
-            return self._scheduled_entry_block_reason
-        if self._pending_position_symbols:
-            symbols = ",".join(sorted(self._pending_position_symbols))
-            return f"account_position_sync_pending:{symbols}"
-        return self._entry_enabled_reason
+        return self._entry_control.entry_enabled_reason
 
     @property
     def exit_enabled(self) -> bool:
@@ -918,24 +436,17 @@ class LiveStrategyDaemon:
         return self._managed_position_symbols
 
     def set_entry_enabled(self, enabled: bool, *, reason: str) -> None:
-        if not isinstance(enabled, bool):
-            raise TypeError("enabled must be a bool")
-        if not reason.strip():
-            raise ValueError("reason must not be empty")
-        if (
-            self._entry_enabled == enabled
-            and self._entry_enabled_reason == reason
-        ):
-            return
-        state_changed = self._entry_enabled != enabled
-        self._entry_enabled = enabled
-        self._entry_enabled_reason = reason
-        log.warning(
-            "live_entry_lane_state_changed",
-            enabled=enabled,
-            state_changed=state_changed,
+        self._entry_control.set_entry_enabled(enabled, reason=reason)
+
+    def set_risk_control_entry_blocked(
+        self,
+        blocked: bool,
+        *,
+        reason: str,
+    ) -> None:
+        self._entry_control.set_risk_control_entry_blocked(
+            blocked,
             reason=reason,
-            run_id=self._config.run_id,
         )
 
     def set_scheduled_entry_blocked(
@@ -944,70 +455,10 @@ class LiveStrategyDaemon:
         *,
         reason: str,
     ) -> None:
-        """Set the schedule-owned entry gate without touching prerequisites.
-
-        The live app refreshes its normal entry prerequisites from several
-        asynchronous channels.  Keeping the schedule gate separate prevents
-        one of those callbacks from accidentally reopening entries during the
-        07:45--10:00 protection window.
-        """
-
-        if not isinstance(blocked, bool):
-            raise TypeError("blocked must be a bool")
-        if not reason.strip():
-            raise ValueError("reason must not be empty")
-        if (
-            self._scheduled_entry_blocked == blocked
-            and self._scheduled_entry_block_reason == reason
-        ):
-            return
-        state_changed = self._scheduled_entry_blocked != blocked
-        if blocked:
-            # Flip the daemon gate before asking the coordinator to drain.  A
-            # coordinator failure therefore remains fail-closed at the
-            # application-level POST guard as well.
-            self._scheduled_entry_blocked = True
-            self._scheduled_entry_block_reason = reason
-            self._set_coordinator_entry_gate(blocked=True)
-        else:
-            # Keep the daemon gate closed until the coordinator has accepted
-            # the reopen request; this avoids a half-open schedule boundary.
-            self._set_coordinator_entry_gate(blocked=False)
-            self._scheduled_entry_blocked = False
-            self._scheduled_entry_block_reason = reason
-        log.warning(
-            "live_scheduled_entry_gate_changed",
-            blocked=blocked,
-            state_changed=state_changed,
+        self._entry_control.set_scheduled_entry_blocked(
+            blocked,
             reason=reason,
-            run_id=self._config.run_id,
         )
-
-    def _set_coordinator_entry_gate(self, *, blocked: bool) -> None:
-        method_name = (
-            "block_entry_submissions"
-            if blocked
-            else "unblock_entry_submissions"
-        )
-        method = getattr(self._state_machine, method_name, None)
-        if not callable(method):
-            return
-        try:
-            method()
-        except Exception as error:
-            log.exception(
-                "live_coordinator_entry_gate_update_failed",
-                run_id=self._config.run_id,
-                blocked=blocked,
-                error_type=type(error).__name__,
-            )
-            if not blocked:
-                # Reopening is fail-closed.  The next schedule poll can retry
-                # the coordinator transition while entries stay disabled.
-                self._scheduled_entry_blocked = True
-                self._scheduled_entry_block_reason = (
-                    "scheduled_entry_gate_update_failed"
-                )
 
     def set_exit_enabled(self, enabled: bool, *, reason: str) -> None:
         if not isinstance(enabled, bool):
@@ -1034,12 +485,7 @@ class LiveStrategyDaemon:
         canceled limit entry from consuming gross-exposure capacity for the
         remainder of its 15-minute lifetime.
         """
-
-        if plan.reduce_only:
-            return
-        state = getattr(event, "state", None)
-        if state is not None and getattr(state, "terminal", False):
-            self._pending_entry_plans.pop(plan.client_order_id, None)
+        self._pending_entries.observe_order_event(plan, event)
 
     def notify_market_state_gap(self, *, reason: str) -> None:
         """Force each symbol to rebuild indicators after a skipped batch."""
@@ -1071,7 +517,7 @@ class LiveStrategyDaemon:
             return None
         self._invalidate_context_cache()
         context = await self._context_provider(state)
-        self._sync_pending_entry_plans(context)
+        self._pending_entries.sync(context)
         await self._publish_managed_position_symbols(context)
         if state.symbol in context.pending_position_symbols:
             symbols = ",".join(sorted(context.pending_position_symbols))
@@ -1088,12 +534,20 @@ class LiveStrategyDaemon:
                 # quote-triggered check directly here so an account update
                 # cannot be replaced by a newer ticker in the coalescing
                 # quote queue.
-                outcome = await self._process_quote_work(quote, state, context)
+                outcome = await self._exit_processor.process_quote(
+                    quote,
+                    state,
+                    context,
+                )
         else:
             outcome = (
-                await self._process_exit_work(state, context)
+                await self._exit_processor.process_state(state, context)
                 if quote is None
-                else await self._process_quote_work(quote, state, context)
+                else await self._exit_processor.process_quote(
+                    quote,
+                    state,
+                    context,
+                )
             )
         self._invalidate_context_cache()
         if outcome.failure is not None:
@@ -1118,7 +572,7 @@ class LiveStrategyDaemon:
         # bucket.  No invalidation happens on ticker arrival; account events
         # are the explicit cache-refresh seam.
         context = await self._context_provider(state)
-        self._sync_pending_entry_plans(context)
+        self._pending_entries.sync(context)
         await self._publish_managed_position_symbols(context)
         if state.symbol in context.pending_position_symbols:
             symbols = ",".join(sorted(context.pending_position_symbols))
@@ -1130,7 +584,11 @@ class LiveStrategyDaemon:
             await self._exit_lane.start()
             await self._exit_lane.submit_quote(quote, state, context)
             return None
-        outcome = await self._process_quote_work(quote, state, context)
+        outcome = await self._exit_processor.process_quote(
+            quote,
+            state,
+            context,
+        )
         if outcome.failure is not None:
             log.error(
                 "live_quote_exit_failed",
@@ -1158,7 +616,7 @@ class LiveStrategyDaemon:
         # bucket.  Reuse the provider's snapshot across that burst; account
         # events and order execution remain the explicit invalidation seams.
         context = await self._context_provider(state)
-        self._sync_pending_entry_plans(context)
+        self._pending_entries.sync(context)
         await self._publish_managed_position_symbols(context)
         if state.symbol in context.pending_position_symbols:
             symbols = ",".join(sorted(context.pending_position_symbols))
@@ -1166,7 +624,7 @@ class LiveStrategyDaemon:
         if state.symbol in context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
             return f"unmanaged_live_positions:{symbols}"
-        outcome = await self._process_closed_candle_work(
+        outcome = await self._exit_processor.process_closed_candle(
             event,
             state,
             context,
@@ -1192,7 +650,7 @@ class LiveStrategyDaemon:
         if self._exit_manager is None or not self._exit_enabled:
             return None
         context = await self._context_provider(state)
-        self._sync_pending_entry_plans(context)
+        self._pending_entries.sync(context)
         await self._publish_managed_position_symbols(context)
         if state.symbol in context.pending_position_symbols:
             symbols = ",".join(sorted(context.pending_position_symbols))
@@ -1200,7 +658,7 @@ class LiveStrategyDaemon:
         if state.symbol in context.unmanaged_position_symbols:
             symbols = ",".join(sorted(context.unmanaged_position_symbols))
             return f"unmanaged_live_positions:{symbols}"
-        outcome = await self._process_grace_timeout_work(
+        outcome = await self._exit_processor.process_grace_timeout(
             state,
             now,
             context,
@@ -1219,16 +677,15 @@ class LiveStrategyDaemon:
         states: AsyncIterable[MarketState15s],
     ) -> LiveDaemonResult:
         self._run_active = True
-        self._last_cache_maintenance_at = None
-        await self._checkpoint_writer.start()
+        await self._checkpoint_coordinator.start()
         result: LiveDaemonResult | None = None
-        exit_outcome = _ExitLaneOutcome()
+        exit_outcome = ExitLaneOutcome()
         try:
             if self._exit_manager is not None:
                 await self._exit_lane.start()
             if self._config.scheduled_risk_window is not None:
                 self._scheduled_task = asyncio.create_task(
-                    self._run_scheduled_risk_window(),
+                    self._scheduled_controller.run(),
                     name=f"live-scheduled-risk-window:{self._config.run_id}",
                 )
             result = await self._run_market_loop(states)
@@ -1242,7 +699,7 @@ class LiveStrategyDaemon:
                 self._scheduled_task = None
             if self._exit_manager is not None:
                 exit_outcome = await self._exit_lane.stop()
-            await self._checkpoint_writer.stop()
+            await self._checkpoint_coordinator.stop()
             self._run_active = False
         if result is None:
             raise RuntimeError("live daemon stopped without a result")
@@ -1251,12 +708,12 @@ class LiveStrategyDaemon:
             approved_intent_count=(
                 result.approved_intent_count
                 + exit_outcome.approved_intent_count
-                + self._scheduled_approved_intent_count
+                + self._scheduled_controller.approved_intent_count
             ),
             submitted_order_count=(
                 result.submitted_order_count
                 + exit_outcome.submitted_order_count
-                + self._scheduled_submitted_order_count
+                + self._scheduled_controller.submitted_order_count
             ),
             halt_reason=(
                 result.halt_reason
@@ -1273,1006 +730,25 @@ class LiveStrategyDaemon:
         *,
         now: datetime | None = None,
     ) -> str | None:
-        """Apply the daily 07:45--10:00 entry and flattening controls.
-
-        This method is public so a supervisor can invoke it independently in
-        tests or during a controlled recovery.  The normal live run starts a
-        one-second wall-clock task that calls it continuously; it does not
-        depend on a market-state bucket arriving at the exact boundary.
-        """
-
-        schedule = self._config.scheduled_risk_window
-        if schedule is None:
-            return None
-        observed_at = self._clock() if now is None else now
-        local_observed_at = schedule.localize(observed_at)
-        phase = schedule.phase(observed_at)
-        async with self._scheduled_window_lock:
-            new_scheduled_window_day = (
-                self._scheduled_window_day != local_observed_at.date()
-            )
-            self._reset_scheduled_window_day(local_observed_at.date())
-            if phase is ScheduledRiskWindowPhase.PRE_WINDOW:
-                return None
-
-            # A daemon started after the window cannot tell whether current
-            # positions were opened before or after today's flattening window.
-            # Treat that already-reopened day as complete instead of replaying
-            # the previous window's forced flatten against normal positions.
-            if (
-                phase is ScheduledRiskWindowPhase.REOPENED
-                and new_scheduled_window_day
-            ):
-                self._scheduled_positions_verified = True
-                return None
-
-            if (
-                phase is ScheduledRiskWindowPhase.REOPENED
-                and self._scheduled_positions_verified
-            ):
-                if self._scheduled_entry_blocked:
-                    self.set_scheduled_entry_blocked(
-                        False,
-                        reason="scheduled_risk_window_complete",
-                    )
-                return None
-
-            self.set_scheduled_entry_blocked(
-                True,
-                reason="scheduled_risk_window",
-            )
-            if not self._scheduled_entry_orders_cancelled:
-                cancellation_failure = (
-                    await self._cancel_scheduled_entry_orders()
-                )
-                if cancellation_failure is not None:
-                    return cancellation_failure
-                self._scheduled_entry_orders_cancelled = True
-                if phase is not ScheduledRiskWindowPhase.FLATTENING:
-                    self._scheduled_deadline_entry_orders_cancelled = True
-
-            if (
-                phase is ScheduledRiskWindowPhase.DEADLINE
-                and not self._scheduled_deadline_entry_orders_cancelled
-            ):
-                cancellation_failure = (
-                    await self._cancel_scheduled_entry_orders()
-                )
-                if cancellation_failure is not None:
-                    return cancellation_failure
-                self._scheduled_deadline_entry_orders_cancelled = True
-
-            if phase is ScheduledRiskWindowPhase.FLATTENING:
-                return await self._submit_scheduled_flatten(
-                    observed_at,
-                    force=False,
-                )
-            if phase is ScheduledRiskWindowPhase.DEADLINE:
-                return await self._submit_scheduled_flatten(
-                    observed_at,
-                    force=True,
-                )
-
-            failure: str | None = None
-            if not self._scheduled_positions_verified:
-                # If the process first sees the window after 07:58, still make
-                # one market reduce-only attempt before the authoritative
-                # position read.  This keeps a late-started daemon safe while
-                # preserving the same idempotent order path.
-                if self._scheduled_flatten_attempt == 0:
-                    failure = await self._submit_scheduled_flatten(
-                        observed_at,
-                        force=True,
-                    )
-                verification_failure, residual = (
-                    await self._verify_scheduled_positions(observed_at)
-                )
-                if verification_failure is not None:
-                    failure = failure or verification_failure
-                elif residual:
-                    # A residual position is both an alert condition and a
-                    # reason to issue another reduce-only attempt.  The entry
-                    # gate remains blocked until a later verification reads
-                    # zero on the exchange.
-                    flatten_failure = await self._submit_scheduled_flatten(
-                        observed_at,
-                        force=True,
-                    )
-                    failure = failure or flatten_failure
-
-            if (
-                phase is ScheduledRiskWindowPhase.REOPENED
-                and self._scheduled_positions_verified
-            ):
-                self.set_scheduled_entry_blocked(
-                    False,
-                    reason="scheduled_risk_window_complete",
-                )
-            return failure
-
-    async def _run_scheduled_risk_window(self) -> None:
-        schedule = self._config.scheduled_risk_window
-        if schedule is None:
-            return
-        while True:
-            try:
-                failure = await self.process_scheduled_risk_window()
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                # A schedule read or cancellation failure must not terminate
-                # the market/exit daemon.  The entry gate remains closed and
-                # the next poll retries the control operation.
-                log.exception(
-                    "live_scheduled_risk_window_failed",
-                    run_id=self._config.run_id,
-                    error_type=type(error).__name__,
-                )
-            else:
-                if failure is not None:
-                    log.error(
-                        "live_scheduled_risk_window_action_failed",
-                        run_id=self._config.run_id,
-                        reason=failure,
-                    )
-            await asyncio.sleep(schedule.poll_interval_seconds)
-
-    def _reset_scheduled_window_day(self, local_day: date) -> None:
-        if self._scheduled_window_day == local_day:
-            return
-        self._scheduled_window_day = local_day
-        self._scheduled_entry_orders_cancelled = False
-        self._scheduled_deadline_entry_orders_cancelled = False
-        self._scheduled_flatten_attempt = 0
-        self._scheduled_flatten_last_attempt_at = None
-        self._scheduled_positions_verified = False
-        self._scheduled_last_verification_at = None
-        self.set_scheduled_entry_blocked(
-            False,
-            reason="outside_scheduled_risk_window",
-        )
-
-    async def _cancel_scheduled_entry_orders(self) -> str | None:
-        wait_for_idle = getattr(
-            self._state_machine,
-            "wait_for_entry_submissions_idle",
-            None,
-        )
-        if callable(wait_for_idle):
-            try:
-                await wait_for_idle()
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                log.error(
-                    "live_scheduled_entry_submission_drain_failed",
-                    run_id=self._config.run_id,
-                    error_type=type(error).__name__,
-                )
-                return (
-                    "scheduled_entry_submission_drain_failed:"
-                    f"{type(error).__name__}"
-                )
-        known_plans: dict[str, OrderExecutionPlan] = {}
-        context: LiveDaemonRuntimeContext | None = None
-        state = self._latest_scheduled_state()
-        if state is not None:
-            try:
-                self._invalidate_context_cache()
-                context = await self._context_provider(state)
-                self._sync_pending_entry_plans(context)
-            except Exception as error:
-                if self._cancel_unfilled_entry_orders is None:
-                    return (
-                        "scheduled_entry_order_context_failed:"
-                        f"{type(error).__name__}"
-                    )
-                log.warning(
-                    "live_scheduled_entry_order_context_unavailable",
-                    run_id=self._config.run_id,
-                    error_type=type(error).__name__,
-                )
-        if context is not None:
-            for item in context.unresolved_orders:
-                if (
-                    not item.plan.reduce_only
-                    and not item.state.terminal
-                ):
-                    known_plans[item.plan.client_order_id] = item.plan
-            if context.account_snapshot is not None:
-                known_ids = set(known_plans)
-                unknown_open_entries = tuple(
-                    order
-                    for order in context.account_snapshot.open_orders
-                    if not order.reduce_only
-                    and order.client_order_id not in known_ids
-                )
-                if (
-                    unknown_open_entries
-                    and self._cancel_unfilled_entry_orders is None
-                ):
-                    return "scheduled_entry_order_cancellation_unavailable"
-        for plan, _executed_quantity in self._pending_entry_plans.values():
-            known_plans.setdefault(plan.client_order_id, plan)
-
-        plans = tuple(
-            sorted(
-                known_plans.values(),
-                key=lambda item: (item.symbol, item.client_order_id),
-            )
-        )
-        try:
-            if self._cancel_unfilled_entry_orders is not None:
-                cancelled_count = await self._cancel_unfilled_entry_orders(plans)
-            else:
-                cancelled_count = 0
-                for plan in plans:
-                    result = await self._state_machine.cancel_order(plan)
-                    if not result.state.terminal:
-                        return "scheduled_entry_order_cancel_not_confirmed"
-                    cancelled_count += 1
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            log.error(
-                "live_scheduled_entry_order_cancel_failed",
-                run_id=self._config.run_id,
-                error_type=type(error).__name__,
-            )
-            return f"scheduled_entry_order_cancel_failed:{type(error).__name__}"
-        self._invalidate_context_cache()
-        log.info(
-            "live_scheduled_entry_orders_cancelled",
-            run_id=self._config.run_id,
-            known_plan_count=len(plans),
-            cancelled_count=cancelled_count,
-        )
-        return None
-
-    async def _submit_scheduled_flatten(
-        self,
-        now: datetime,
-        *,
-        force: bool,
-    ) -> str | None:
-        schedule = self._config.scheduled_risk_window
-        exit_manager = self._exit_manager
-        if schedule is None or exit_manager is None:
-            return "scheduled_flatten_exit_manager_unavailable"
-        last_attempt = self._scheduled_flatten_last_attempt_at
-        if (
-            not force
-            and last_attempt is not None
-            and (now - last_attempt).total_seconds()
-            < schedule.retry_interval_seconds
-        ):
-            return None
-        states = self._latest_scheduled_states()
-        if not states:
-            log.error(
-                "live_scheduled_flatten_market_state_unavailable",
-                run_id=self._config.run_id,
-            )
-            return "scheduled_flatten_market_state_unavailable"
-
-        self._scheduled_flatten_attempt += 1
-        attempt = self._scheduled_flatten_attempt
-        self._scheduled_flatten_last_attempt_at = now
-        total_approved = 0
-        total_submitted = 0
-        failure: str | None = None
-        for state in states:
-            try:
-                self._invalidate_context_cache()
-                context = await self._context_provider(state)
-                self._sync_pending_entry_plans(context)
-                await self._publish_managed_position_symbols(context)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                failure = (
-                    "scheduled_flatten_context_failed:"
-                    f"{type(error).__name__}"
-                )
-                log.error(
-                    "live_scheduled_flatten_context_failed",
-                    run_id=self._config.run_id,
-                    symbol=state.symbol,
-                    error_type=type(error).__name__,
-                )
-                continue
-            if state.symbol in context.pending_position_symbols:
-                symbols = ",".join(
-                    sorted(context.pending_position_symbols)
-                )
-                failure = f"pending_live_positions:{symbols}"
-                log.warning(
-                    "live_scheduled_flatten_position_sync_pending",
-                    run_id=self._config.run_id,
-                    symbols=symbols,
-                )
-                continue
-            if state.symbol in context.unmanaged_position_symbols:
-                symbols = ",".join(sorted(context.unmanaged_position_symbols))
-                failure = f"unmanaged_live_positions:{symbols}"
-                log.error(
-                    "live_scheduled_flatten_unmanaged_position",
-                    run_id=self._config.run_id,
-                    symbols=symbols,
-                )
-                continue
-            positions = tuple(
-                position
-                for position in context.managed_positions
-                if position.symbol == state.symbol
-            )
-            if not positions:
-                continue
-            requests = await exit_manager.requests_for_scheduled_flatten(
-                positions,
-                now=now,
-                symbol=state.symbol,
-                reference_prices={
-                    state.symbol: _scheduled_reference_price(state)
-                },
-                attempt=attempt,
-            )
-            if not requests:
-                continue
-            active_exit_plans = tuple(
-                item.plan
-                for item in context.unresolved_orders
-                if item.plan.symbol == state.symbol
-                and item.plan.reduce_only
-                and not item.state.terminal
-            )
-            cancellation_ids = {
-                request.cancel_plan.client_order_id
-                for request in requests
-                if isinstance(request, LiveExitCancellationRequest)
-            }
-            active_exit_plans_to_cancel = tuple(
-                plan
-                for plan in active_exit_plans
-                if plan.client_order_id not in cancellation_ids
-            )
-            if active_exit_plans_to_cancel and not force:
-                log.warning(
-                    "live_scheduled_flatten_waiting_for_active_exit",
-                    run_id=self._config.run_id,
-                    symbol=state.symbol,
-                    client_order_ids=sorted(
-                        plan.client_order_id
-                        for plan in active_exit_plans_to_cancel
-                    ),
-                )
-                continue
-            if active_exit_plans_to_cancel:
-                cancel_failure = (
-                    await self._cancel_active_scheduled_exit_orders(
-                        active_exit_plans_to_cancel
-                    )
-                )
-                if cancel_failure is not None:
-                    failure = cancel_failure
-                    continue
-                self._invalidate_context_cache()
-                try:
-                    context = await self._context_provider(state)
-                    self._sync_pending_entry_plans(context)
-                    await self._publish_managed_position_symbols(context)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    failure = (
-                        "scheduled_flatten_context_failed:"
-                        f"{type(error).__name__}"
-                    )
-                    continue
-                if state.symbol in context.pending_position_symbols:
-                    symbols = ",".join(
-                        sorted(context.pending_position_symbols)
-                    )
-                    failure = f"pending_live_positions:{symbols}"
-                    continue
-                if state.symbol in context.unmanaged_position_symbols:
-                    symbols = ",".join(
-                        sorted(context.unmanaged_position_symbols)
-                    )
-                    failure = f"unmanaged_live_positions:{symbols}"
-                    continue
-                positions = tuple(
-                    position
-                    for position in context.managed_positions
-                    if position.symbol == state.symbol
-                )
-                if not positions:
-                    continue
-                requests = await exit_manager.requests_for_scheduled_flatten(
-                    positions,
-                    now=now,
-                    symbol=state.symbol,
-                    reference_prices={
-                        state.symbol: _scheduled_reference_price(state)
-                    },
-                    attempt=attempt,
-                )
-                if not requests:
-                    continue
-                if any(
-                    item.plan.reduce_only
-                    and not item.state.terminal
-                    and item.plan.symbol == state.symbol
-                    for item in context.unresolved_orders
-                ):
-                    failure = "scheduled_active_exit_cancel_not_confirmed"
-                    continue
-            lock = self._exit_symbol_locks.setdefault(
-                state.symbol,
-                asyncio.Lock(),
-            )
-            try:
-                async with lock:
-                    approved, submitted, request_failure = (
-                        await self._process_exit_requests(
-                            requests,
-                            state=state,
-                            context=context,
-                            reference_price=_scheduled_reference_price(state),
-                        )
-                    )
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                approved = submitted = 0
-                request_failure = (
-                    "scheduled_flatten_execution_failed:"
-                    f"{type(error).__name__}"
-                )
-                log.error(
-                    "live_scheduled_flatten_execution_failed",
-                    run_id=self._config.run_id,
-                    symbol=state.symbol,
-                    error_type=type(error).__name__,
-                )
-            total_approved += approved
-            total_submitted += submitted
-            if request_failure is not None:
-                failure = request_failure
-
-        self._scheduled_approved_intent_count += total_approved
-        self._scheduled_submitted_order_count += total_submitted
-        log.info(
-            "live_scheduled_flatten_attempted",
-            run_id=self._config.run_id,
-            attempt=attempt,
-            approved_intent_count=total_approved,
-            submitted_order_count=total_submitted,
-            failure=failure,
-        )
-        return failure
-
-    async def _cancel_active_scheduled_exit_orders(
-        self,
-        plans: tuple[OrderExecutionPlan, ...],
-    ) -> str | None:
-        for plan in plans:
-            try:
-                result = await self._state_machine.cancel_order(plan)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                log.error(
-                    "live_scheduled_active_exit_cancel_failed",
-                    run_id=self._config.run_id,
-                    symbol=plan.symbol,
-                    client_order_id=plan.client_order_id,
-                    error_type=type(error).__name__,
-                )
-                return f"scheduled_active_exit_cancel_failed:{type(error).__name__}"
-            if result.state is ExchangeOrderState.REJECTED:
-                return "scheduled_active_exit_cancel_rejected"
-            if not result.state.terminal:
-                log.warning(
-                    "live_scheduled_active_exit_cancel_unconfirmed",
-                    run_id=self._config.run_id,
-                    symbol=plan.symbol,
-                    client_order_id=plan.client_order_id,
-                    state=result.state.value,
-                )
-                return "scheduled_active_exit_cancel_not_confirmed"
-        return None
-
-    async def _verify_scheduled_positions(
-        self,
-        now: datetime,
-    ) -> tuple[str | None, tuple[AccountPositionSnapshot, ...] | None]:
-        schedule = self._config.scheduled_risk_window
-        if schedule is None:
-            return None, ()
-        last_verification = self._scheduled_last_verification_at
-        if (
-            last_verification is not None
-            and (now - last_verification).total_seconds()
-            < schedule.verify_retry_interval_seconds
-        ):
-            return None, None
-        self._scheduled_last_verification_at = now
-        if self._fetch_exchange_positions is None:
-            log.error(
-                "live_scheduled_position_verification_unavailable",
-                run_id=self._config.run_id,
-            )
-            return "scheduled_position_verification_unavailable", None
-        try:
-            positions = tuple(await self._fetch_exchange_positions())
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            log.error(
-                "live_scheduled_position_verification_failed",
-                run_id=self._config.run_id,
-                error_type=type(error).__name__,
-            )
-            return (
-                f"scheduled_position_verification_failed:{type(error).__name__}",
-                None,
-            )
-        residual = tuple(
-            position
-            for position in positions
-            if position.position_amt != 0
-        )
-        if residual:
-            log.error(
-                "live_scheduled_risk_window_residual_positions",
-                run_id=self._config.run_id,
-                positions=[
-                    {
-                        "symbol": position.symbol,
-                        "position_side": position.position_side,
-                        "position_amt": str(position.position_amt),
-                    }
-                    for position in residual
-                ],
-            )
-            return None, residual
-        self._scheduled_positions_verified = True
-        log.info(
-            "live_scheduled_risk_window_positions_flat",
-            run_id=self._config.run_id,
-        )
-        return None, ()
-
-    def _latest_scheduled_state(self) -> MarketState15s | None:
-        states = self._latest_scheduled_states()
-        return states[-1] if states else None
-
-    def _latest_scheduled_states(self) -> tuple[MarketState15s, ...]:
-        return tuple(
-            sorted(
-                self._latest_market_states.values(),
-                key=lambda state: (state.bucket_end, state.symbol),
-            )
-        )
-
-    async def _states_with_prefetched_context(
-        self,
-        states: AsyncIterable[MarketState15s],
-    ) -> AsyncIterator[_PrefetchedContext]:
-        """Read one state ahead and overlap its context I/O with live work.
-
-        Strategy evaluation remains strictly ordered.  Only the context
-        lookup is overlapped.  A generation change caused by an account event
-        or a completed order invalidates the prefetched result before it can
-        authorize a decision.
-        """
-
-        queue: asyncio.Queue[_PendingContext | None] = asyncio.Queue(maxsize=2)
-        pending_tasks: set[asyncio.Task[LiveDaemonRuntimeContext]] = set()
-        producer_error: BaseException | None = None
-
-        async def producer() -> None:
-            nonlocal producer_error
-            try:
-                async for state in states:
-                    generation = self._context_generation
-                    received_at = self._clock()
-                    context_task: asyncio.Task[LiveDaemonRuntimeContext] = (
-                        asyncio.ensure_future(self._context_provider(state))
-                    )
-                    pending_tasks.add(context_task)
-                    await queue.put(
-                        _PendingContext(
-                            state=state,
-                            generation=generation,
-                            received_at=received_at,
-                            task=context_task,
-                        )
-                    )
-            except asyncio.CancelledError:
-                raise
-            except BaseException as error:
-                producer_error = error
-            finally:
-                await queue.put(None)
-
-        producer_task = asyncio.create_task(
-            producer(),
-            name="live-market-state-prefetch",
-        )
-        try:
-            while True:
-                pending = await queue.get()
-                if pending is None:
-                    await producer_task
-                    if producer_error is not None:
-                        raise producer_error
-                    return
-                try:
-                    context = await pending.task
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    yield _PrefetchedContext(
-                        state=pending.state,
-                        generation=pending.generation,
-                        received_at=pending.received_at,
-                        context=None,
-                        error=error,
-                    )
-                else:
-                    yield _PrefetchedContext(
-                        state=pending.state,
-                        generation=pending.generation,
-                        received_at=pending.received_at,
-                        context=context,
-                        error=None,
-                    )
-                finally:
-                    pending_tasks.discard(pending.task)
-        finally:
-            if not producer_task.done():
-                producer_task.cancel()
-            await asyncio.gather(producer_task, return_exceptions=True)
-            for task in pending_tasks:
-                if not task.done():
-                    task.cancel()
-            if pending_tasks:
-                await asyncio.gather(*pending_tasks, return_exceptions=True)
-
-    def _evaluate_entry_policy(
-        self,
-        *,
-        decision: StrategyDecision,
-        state: MarketState15s,
-        recorded_at: datetime,
-        context: LiveDaemonRuntimeContext | None,
-        gate_reasons: tuple[str, ...],
-        entry_symbols: frozenset[str] | None,
-        entry_filter_context: LiveEntryFilterContext | None,
-        filter_context: Mapping[str, object] | None,
-    ) -> _EntryPolicyEvaluation:
-        if not (
-            self._config.entry_policy_compare_only
-            or self._config.entry_policy_enforce
-        ):
-            return _EntryPolicyEvaluation()
-        context_available = (filter_context or {}).get(
-            "context_available",
-            context is not None,
-        )
-        if context_available is False:
-            return _EntryPolicyEvaluation(skip_reason="context_unavailable")
-
-        universe_snapshot: UniverseRankingSnapshot | None = None
-        universe_snapshot_error: str | None = None
-        universe_snapshot_provider = (
-            self._config.entry_universe_snapshot_provider
-        )
-        if universe_snapshot_provider is not None:
-            try:
-                universe_snapshot = universe_snapshot_provider(
-                    state.bucket_end
-                )
-            except Exception as error:
-                universe_snapshot_error = type(error).__name__
-                log.warning(
-                    "live_strategy_signal_universe_snapshot_failed",
-                    run_id=self._config.run_id,
-                    symbol=state.symbol,
-                    error_type=type(error).__name__,
-                )
-
-        entry_price = (
-            None
-            if entry_filter_context is None
-            else entry_filter_context.entry_price
-        )
-        ema5 = (
-            None
-            if entry_filter_context is None
-            else entry_filter_context.ema5
-        )
-        ema10 = (
-            None
-            if entry_filter_context is None
-            else entry_filter_context.ema10
-        )
-        source_trace = state_trace_id(state, LIVE_LANE_ENTRY)
-        comparisons: list[EntryPolicyComparison] = []
-        for candidate in decision.candidates:
-            if candidate.reduce_only:
-                continue
-            legacy_rejection_reason = _live_entry_candidate_rejection_reason(
-                candidate,
-                entry_enabled=self.entry_enabled,
-                entry_long_only=self._config.entry_long_only,
-                entry_symbols=entry_symbols,
-                context=entry_filter_context,
-                require_price_above_ema5=self._config.require_price_above_ema5,
-                require_price_above_ema10=self._config.require_price_above_ema10,
-                now=recorded_at,
-            )
-            comparisons.append(
-                compare_entry_policy_request(
-                    EntryPolicyComparisonRequest(
-                        candidate=candidate,
-                        source_trace_id=source_trace,
-                        legacy_rejection_reason=legacy_rejection_reason,
-                        gate_reasons=gate_reasons,
-                        entry_enabled=self.entry_enabled,
-                        entry_long_only=self._config.entry_long_only,
-                        entry_symbols=entry_symbols,
-                        universe_snapshot=universe_snapshot,
-                        entry_price=entry_price,
-                        ema5=ema5,
-                        ema10=ema10,
-                        require_price_above_ema5=(
-                            self._config.require_price_above_ema5
-                        ),
-                        require_price_above_ema10=(
-                            self._config.require_price_above_ema10
-                        ),
-                        observed_at=recorded_at,
-                        ema_observed_at=(
-                            None
-                            if entry_filter_context is None
-                            else entry_filter_context.ema_observed_at
-                        ),
-                        ema_snapshot_id=(
-                            None
-                            if entry_filter_context is None
-                            else entry_filter_context.ema_snapshot_id
-                        ),
-                        ema_config_hash=(
-                            None
-                            if entry_filter_context is None
-                            else entry_filter_context.ema_config_hash
-                        ),
-                    )
-                )
-            )
-        return _EntryPolicyEvaluation(
-            comparisons=tuple(comparisons),
-            universe_snapshot_error=universe_snapshot_error,
-        )
-
-    def _record_strategy_decision(
-        self,
-        *,
-        decision: StrategyDecision,
-        state: MarketState15s,
-        recorded_at: datetime,
-        context: LiveDaemonRuntimeContext | None = None,
-        gate_reasons: tuple[str, ...] = (),
-        entry_symbols: frozenset[str] | None = None,
-        entry_filter_context: LiveEntryFilterContext | None = None,
-        filter_context: Mapping[str, object] | None = None,
-        policy_evaluation: _EntryPolicyEvaluation | None = None,
-    ) -> None:
-        recorder = self._signal_recorder
-        if recorder is None:
-            return
-        candidate_filter_results: dict[str, object] = {}
-        legacy_rejection_reasons: dict[str, str | None] = {}
-        for candidate in decision.candidates:
-            rejection_reason = _live_entry_candidate_rejection_reason(
-                candidate,
-                entry_enabled=self.entry_enabled,
-                entry_long_only=self._config.entry_long_only,
-                entry_symbols=entry_symbols,
-                context=entry_filter_context,
-                require_price_above_ema5=self._config.require_price_above_ema5,
-                require_price_above_ema10=self._config.require_price_above_ema10,
-                now=recorded_at,
-            )
-            legacy_rejection_reasons[candidate.candidate_id] = rejection_reason
-            candidate_filter_results[candidate.candidate_id] = {
-                "symbol": candidate.symbol,
-                "side": _enum_text(candidate.side),
-                "reduce_only": candidate.reduce_only,
-                "passed": rejection_reason is None,
-                "rejection_reason": rejection_reason,
-            }
-        if policy_evaluation is None:
-            policy_evaluation = self._evaluate_entry_policy(
-                decision=decision,
-                state=state,
-                recorded_at=recorded_at,
-                context=context,
-                gate_reasons=gate_reasons,
-                entry_symbols=entry_symbols,
-                entry_filter_context=entry_filter_context,
-                filter_context=filter_context,
-            )
-        policy_comparisons = [
-            comparison.as_details()
-            for comparison in policy_evaluation.comparisons
-        ]
-        policy_comparison_summary: dict[str, object] | None = None
-        if (
-            self._config.entry_policy_compare_only
-            or self._config.entry_policy_enforce
-        ) and (
-            policy_evaluation.comparisons
-            or policy_evaluation.skip_reason is None
-        ):
-            policy_comparison_summary = summarize_entry_policy_comparisons(
-                policy_evaluation.comparisons,
-                reduce_only_skipped=sum(
-                    candidate.reduce_only for candidate in decision.candidates
-                ),
-            ).as_details()
-        policy_enforce_skip_reason = policy_evaluation.skip_reason
-        if (
-            policy_enforce_skip_reason is None
-            and self._config.entry_policy_enforce
-            and policy_evaluation.universe_snapshot_error is not None
-        ):
-            policy_enforce_skip_reason = "universe_snapshot_error"
-        details: dict[str, object] = dict(filter_context or {})
-        universe_context_provider = (
-            self._config.entry_universe_context_provider
-        )
-        if universe_context_provider is not None:
-            try:
-                universe_context = universe_context_provider(
-                    state.symbol,
-                    state.bucket_end,
-                )
-            except Exception as error:
-                log.warning(
-                    "live_strategy_signal_universe_context_failed",
-                    run_id=self._config.run_id,
-                    symbol=state.symbol,
-                    error_type=type(error).__name__,
-                )
-            else:
-                if universe_context is not None:
-                    details["universe"] = dict(universe_context)
-        effective_entry_candidates = {
-            candidate.candidate_id: _planned_entry_execution_context(
-                candidate,
-                state=state,
-                execution_now=recorded_at,
-                entry_order_type=self._config.entry_order_type,
-                limit_ttl_seconds=self._config.entry_limit_ttl_seconds,
-            )
-            for candidate in decision.candidates
-            if not candidate.reduce_only
-        }
-        details.update(
-            {
-                "entry_enabled": self.entry_enabled,
-                "entry_enabled_reason": self.entry_enabled_reason,
-                "entry_long_only": self._config.entry_long_only,
-                "entry_symbol_pool_configured": entry_symbols is not None,
-                "entry_symbol_pool_size": (
-                    None if entry_symbols is None else len(entry_symbols)
-                ),
-                "require_price_above_ema5": (
-                    self._config.require_price_above_ema5
-                ),
-                "require_price_above_ema10": (
-                    self._config.require_price_above_ema10
-                ),
-                "gate_reasons": list(gate_reasons),
-                "signal_count": len(decision.signals),
-                "candidate_count": len(decision.candidates),
-                "rejection_count": len(decision.rejections),
-                "strategy_rejections": [
-                    {
-                        "reason": _enum_text(rejection.reason),
-                        "symbol": rejection.symbol,
-                        "bucket_start": rejection.bucket_start,
-                        "details": rejection.details,
-                    }
-                    for rejection in decision.rejections
-                ],
-                "entry_filter_values": _entry_filter_values(
-                    entry_filter_context
-                ),
-                "market_state_bucket_start": state.bucket_start,
-                "market_state_bucket_end": state.bucket_end,
-                "market_state_last_received_at": state.last_received_at,
-                "market_state_age_seconds": round(
-                    _market_state_age_seconds(state, recorded_at),
-                    3,
-                ),
-                "candidate_filter_results": candidate_filter_results,
-                "entry_policy_compare_only": (
-                    self._config.entry_policy_compare_only
-                ),
-                "entry_policy_enforce": self._config.entry_policy_enforce,
-                "entry_policy_mode": (
-                    "enforce"
-                    if self._config.entry_policy_enforce
-                    else (
-                        "compare_only"
-                        if self._config.entry_policy_compare_only
-                        else "legacy"
-                    )
-                ),
-                "entry_policy_comparisons": policy_comparisons,
-                "entry_policy_comparison_summary": policy_comparison_summary,
-                "entry_policy_compare_skip_reason": policy_evaluation.skip_reason,
-                "entry_policy_enforce_skip_reason": policy_enforce_skip_reason,
-                "entry_policy_universe_snapshot_error": (
-                    policy_evaluation.universe_snapshot_error
-                ),
-                "effective_entry_candidates": effective_entry_candidates,
-            }
-        )
-        try:
-            recorder.record_decision(
-                decision=decision,
-                state=state,
-                recorded_at=recorded_at,
-                account_context=_live_signal_account_context(
-                    context,
-                    gate_reasons=gate_reasons,
-                ),
-                filter_context=details,
-            )
-        except Exception as error:
-            # A third-party recorder implementation is observational only.
-            # Never let it alter the decision or order path.
-            log.warning(
-                "live_strategy_signal_recorder_failed",
-                run_id=self._config.run_id,
-                error_type=type(error).__name__,
-            )
-
+        """Run the scheduled-risk controller for one observation."""
+        return await self._scheduled_controller.process(now=now)
     async def _run_market_loop(
         self,
         states: AsyncIterable[MarketState15s],
     ) -> LiveDaemonResult:
+        self._entry_lane.reset()
         processed = approved = submitted = 0
         final_state_at: datetime | None = None
-        checkpoint_dirty = False
-        last_checkpoint_saved_at: datetime | None = None
         last_reconciled_bucket: datetime | None = None
-        last_processed_at_by_symbol = dict(
-            _checkpoint_for_persistence(self._strategy)
-            .last_processed_at_by_symbol
-        )
         max_gap_seconds = _strategy_max_gap_seconds(self._strategy)
-        entry_symbols: frozenset[str] | None = None
-        entry_symbols_loaded_at: datetime | None = None
-        async for prefetched in self._states_with_prefetched_context(states):
+        async for prefetched in self._context_prefetcher.stream(states):
             state = prefetched.state
-            self._maybe_prune_runtime_caches(
+            self._runtime_cache.prune(
                 now=self._clock(),
                 current_symbol=state.symbol,
-                active_symbols=entry_symbols,
+                active_symbols=self._entry_lane.entry_symbols,
             )
-            previous_state = self._latest_market_states.get(state.symbol)
-            if (
-                previous_state is None
-                or state.bucket_end >= previous_state.bucket_end
-            ):
-                self._latest_market_states[state.symbol] = state
+            self._scheduled_controller.observe_state(state)
             if self._config.scheduled_risk_window is not None:
                 try:
                     await self.process_scheduled_risk_window(
@@ -2297,10 +773,7 @@ class LiveStrategyDaemon:
                 )
             exit_lane_failure = self._exit_lane.failure
             if exit_lane_failure is not None:
-                await self._save_final_checkpoint(
-                    dirty=checkpoint_dirty,
-                    saved_at=last_checkpoint_saved_at,
-                )
+                await self._checkpoint_coordinator.save_final()
                 return LiveDaemonResult(
                     processed,
                     approved,
@@ -2328,10 +801,7 @@ class LiveStrategyDaemon:
                             error_type=type(error).__name__,
                         )
                         continue
-                    await self._save_final_checkpoint(
-                        dirty=checkpoint_dirty,
-                        saved_at=last_checkpoint_saved_at,
-                    )
+                    await self._checkpoint_coordinator.save_final()
                     return LiveDaemonResult(
                         processed,
                         approved,
@@ -2350,7 +820,7 @@ class LiveStrategyDaemon:
                 reset = getattr(self._strategy, "reset_symbol", None)
                 if callable(reset):
                     reset(state.symbol)
-                    last_processed_at_by_symbol.pop(state.symbol, None)
+                    self._checkpoint_coordinator.forget_symbol(state.symbol)
                     log.info(
                         "live_strategy_symbol_reset_after_market_gap",
                         run_id=self._config.run_id,
@@ -2364,36 +834,28 @@ class LiveStrategyDaemon:
                 strategy=self._strategy,
                 symbol=state.symbol,
                 current_at=state.bucket_start,
-                last_processed_at=last_processed_at_by_symbol.get(state.symbol),
+                last_processed_at=self._checkpoint_coordinator.last_processed_at(
+                    state.symbol
+                ),
                 max_gap_seconds=max_gap_seconds,
             )
-            context_reloaded = prefetched.generation != self._context_generation
-            try:
-                if context_reloaded:
-                    context = await self._context_provider(state)
-                elif prefetched.error is not None:
-                    raise prefetched.error
-                else:
-                    if prefetched.context is None:
-                        raise RuntimeError("prefetched live context is missing")
-                    context = prefetched.context
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                if not _is_transient_runtime_error(error):
-                    raise
+            admission = await self._market_admission.prepare(prefetched)
+            if admission.error is not None:
+                admission_error = admission.error
+                if not _is_transient_runtime_error(admission_error):
+                    raise admission_error
                 # Keep the strategy's in-memory indicators moving, but do not
                 # authorize or submit anything without a fresh risk context.
                 # Once PostgreSQL recovers, the next state reloads the full
                 # context and trading resumes without a process restart.
                 decision = self._strategy.on_market_state(state)
-                self._record_strategy_decision(
+                self._entry_lane.record_decision(
                     decision=decision,
                     state=state,
                     recorded_at=self._clock(),
                     filter_context={
                         "context_available": False,
-                        "context_error_type": type(error).__name__,
+                        "context_error_type": type(admission_error).__name__,
                     },
                 )
                 if self._telemetry is not None:
@@ -2405,49 +867,21 @@ class LiveStrategyDaemon:
                     )
                 processed += 1
                 final_state_at = state.bucket_start
-                last_processed_at_by_symbol[state.symbol] = state.bucket_start
-                checkpoint_dirty = True
-                last_checkpoint_saved_at = state.bucket_end
-                if processed % self._config.checkpoint_every_states == 0:
-                    self._checkpoint_writer.submit(
-                        _checkpoint_for_persistence(self._strategy),
-                        state.bucket_end,
-                    )
-                    checkpoint_dirty = False
-                    last_checkpoint_saved_at = None
+                self._checkpoint_coordinator.record_processed_state(
+                    state,
+                    saved_at=state.bucket_end,
+                )
                 log.warning(
                     "live_runtime_context_degraded",
                     run_id=self._config.run_id,
                     symbol=state.symbol,
-                    error_type=type(error).__name__,
+                    error_type=type(admission_error).__name__,
                 )
                 continue
-            self._sync_pending_entry_plans(context)
-            if self._telemetry is not None:
-                await self._telemetry.context_ready(
-                    state,
-                    occurred_at=self._clock(),
-                    prefetched=not context_reloaded,
-                    reloaded=context_reloaded,
-                )
-            await self._publish_managed_position_symbols(context)
-            gate = evaluate_live_gate(
-                replace(
-                    context.gate_context,
-                    now=context.now,
-                    active_lease=context.active_lease,
-                    account_state=context.account_state,
-                    active_halts=context.active_halts,
-                    unresolved_order_states=context.unresolved_order_states,
-                )
-            )
-            if self._telemetry is not None:
-                await self._telemetry.gate_evaluated(
-                    state,
-                    occurred_at=self._clock(),
-                    approved=gate.approved,
-                    reasons=gate.reasons,
-                )
+            if admission.context is None or admission.gate is None:
+                raise RuntimeError("market state admission is incomplete")
+            context = admission.context
+            gate = admission.gate
             if not gate.approved:
                 if _is_transient_live_gate(gate.reasons):
                     if self._last_transient_gate_reasons != gate.reasons:
@@ -2460,7 +894,7 @@ class LiveStrategyDaemon:
                     # Process the state for indicator continuity while the
                     # risk gate is closed.  No entry or exit is evaluated.
                     decision = self._strategy.on_market_state(state)
-                    self._record_strategy_decision(
+                    self._entry_lane.record_decision(
                         decision=decision,
                         state=state,
                         recorded_at=self._clock(),
@@ -2480,22 +914,13 @@ class LiveStrategyDaemon:
                         )
                     processed += 1
                     final_state_at = state.bucket_start
-                    last_processed_at_by_symbol[state.symbol] = state.bucket_start
-                    checkpoint_dirty = True
-                    last_checkpoint_saved_at = context.now
-                    if processed % self._config.checkpoint_every_states == 0:
-                        self._checkpoint_writer.submit(
-                            _checkpoint_for_persistence(self._strategy),
-                            context.now,
-                        )
-                        checkpoint_dirty = False
-                        last_checkpoint_saved_at = None
+                    self._checkpoint_coordinator.record_processed_state(
+                        state,
+                        saved_at=context.now,
+                    )
                     continue
                 self._last_transient_gate_reasons = None
-                await self._save_final_checkpoint(
-                    dirty=checkpoint_dirty,
-                    saved_at=last_checkpoint_saved_at,
-                )
+                await self._checkpoint_coordinator.save_final()
                 return LiveDaemonResult(
                     processed,
                     approved,
@@ -2505,10 +930,7 @@ class LiveStrategyDaemon:
                 )
             self._last_transient_gate_reasons = None
             if context.unmanaged_position_symbols:
-                await self._save_final_checkpoint(
-                    dirty=checkpoint_dirty,
-                    saved_at=last_checkpoint_saved_at,
-                )
+                await self._checkpoint_coordinator.save_final()
                 symbols = ",".join(sorted(context.unmanaged_position_symbols))
                 return LiveDaemonResult(
                     processed,
@@ -2519,10 +941,7 @@ class LiveStrategyDaemon:
                 )
             orphan_cancel_reason = await self._cancel_orphan_exit_orders(context)
             if orphan_cancel_reason is not None:
-                await self._save_final_checkpoint(
-                    dirty=checkpoint_dirty,
-                    saved_at=last_checkpoint_saved_at,
-                )
+                await self._checkpoint_coordinator.save_final()
                 return LiveDaemonResult(
                     processed,
                     approved,
@@ -2541,10 +960,7 @@ class LiveStrategyDaemon:
                 await asyncio.sleep(0)
                 exit_lane_failure = self._exit_lane.failure
                 if exit_lane_failure is not None:
-                    await self._save_final_checkpoint(
-                        dirty=checkpoint_dirty,
-                        saved_at=last_checkpoint_saved_at,
-                    )
+                    await self._checkpoint_coordinator.save_final()
                     return LiveDaemonResult(
                         processed,
                         approved,
@@ -2561,151 +977,22 @@ class LiveStrategyDaemon:
                     signal_count=len(decision.signals),
                     candidate_count=len(decision.candidates),
                 )
-            has_entry_candidates = self.entry_enabled and any(
-                not candidate.reduce_only for candidate in decision.candidates
-            )
-            if has_entry_candidates and self._config.entry_symbol_loader is not None:
-                if (
-                    entry_symbols_loaded_at is None
-                    or (state.bucket_start - entry_symbols_loaded_at).total_seconds()
-                    >= self._config.entry_symbol_refresh_seconds
-                ):
-                    try:
-                        entry_symbols = await self._config.entry_symbol_loader(
-                            state.bucket_start
-                        )
-                    except Exception:
-                        # Entry-pool lookup is fail-closed. Exit handling above
-                        # still runs, so an outage cannot strand an open position.
-                        entry_symbols = frozenset()
-                    entry_symbols_loaded_at = state.bucket_start
-            entry_filter_context = None
-            if (
-                has_entry_candidates
-                and (
-                    self._config.require_price_above_ema5
-                    or self._config.require_price_above_ema10
-                )
-                and self._config.entry_filter_context_loader is not None
-            ):
-                try:
-                    entry_filter_context = (
-                        await self._config.entry_filter_context_loader(state)
-                    )
-                except Exception:
-                    # Missing or stale EMA data must not authorize a live entry.
-                    entry_filter_context = None
-            if self._telemetry is not None:
-                await self._telemetry.entry_filter_ready(
-                    state,
-                    occurred_at=self._clock(),
-                    candidate_count=len(decision.candidates),
-                    symbol_pool_loaded=(
-                        not has_entry_candidates
-                        or entry_symbols is not None
-                    ),
-                    ema_context_loaded=(
-                        not has_entry_candidates
-                        or not (
-                            self._config.require_price_above_ema5
-                            or self._config.require_price_above_ema10
-                        )
-                        or entry_filter_context is not None
-                    ),
-                )
-            policy_evaluation = self._evaluate_entry_policy(
+            entry_outcome = await self._entry_lane.process(
                 decision=decision,
                 state=state,
-                recorded_at=decision_recorded_at,
                 context=context,
                 gate_reasons=gate.reasons,
-                entry_symbols=entry_symbols,
-                entry_filter_context=entry_filter_context,
-                filter_context={
-                    "context_available": True,
-                    "gate_approved": True,
-                },
-            )
-            self._record_strategy_decision(
-                decision=decision,
-                state=state,
                 recorded_at=decision_recorded_at,
-                context=context,
-                gate_reasons=gate.reasons,
-                entry_symbols=entry_symbols,
-                entry_filter_context=entry_filter_context,
-                policy_evaluation=policy_evaluation,
             )
-            if self._telemetry is not None:
-                await self._telemetry.signal_recorded(
-                    state,
-                    occurred_at=self._clock(),
-                    candidate_count=len(decision.candidates),
-                )
+            approved += entry_outcome.approved_intent_count
+            submitted += entry_outcome.submitted_order_count
             processed += 1
             final_state_at = state.bucket_start
-            last_processed_at_by_symbol[state.symbol] = state.bucket_start
-            checkpoint_dirty = True
-            last_checkpoint_saved_at = context.now
-            for candidate in decision.candidates:
-                if not candidate.reduce_only and self._config.entry_policy_enforce:
-                    comparison = policy_evaluation.comparison_for(
-                        candidate.candidate_id
-                    )
-                    if (
-                        policy_evaluation.skip_reason is not None
-                        or policy_evaluation.universe_snapshot_error is not None
-                        or comparison is None
-                        or not comparison.policy_decision.eligible
-                    ):
-                        continue
-                elif _live_entry_candidate_rejection_reason(
-                    candidate,
-                    entry_enabled=self.entry_enabled,
-                    entry_long_only=self._config.entry_long_only,
-                    entry_symbols=entry_symbols,
-                    context=entry_filter_context,
-                    require_price_above_ema5=self._config.require_price_above_ema5,
-                    require_price_above_ema10=self._config.require_price_above_ema10,
-                    now=decision_recorded_at,
-                ) is not None:
-                    continue
-                result = await self._execute_candidate(
-                    candidate,
-                    requested_quantity=None,
-                    state=state,
-                    context=context,
-                )
-                if result is not None:
-                    self._invalidate_context_cache()
-                    approved += 1
-                    submitted += int(not result.suppressed)
-                    if (
-                        result.state
-                        is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
-                    ):
-                        log.warning(
-                            "live_order_outcome_pending_reconciliation",
-                            run_id=self._config.run_id,
-                            symbol=candidate.symbol,
-                            client_order_id=result.client_order_id,
-                        )
-                        # The durable order state is now fail-closed.  Stop
-                        # evaluating additional candidates from this snapshot;
-                        # the next context load will keep entries blocked until
-                        # reconciliation confirms the exchange state.
-                        break
-            if processed % self._config.checkpoint_every_states == 0:
-                self._checkpoint_writer.submit(
-                    _checkpoint_for_persistence(self._strategy),
-                    context.now,
-                )
-                checkpoint_dirty = False
-                last_checkpoint_saved_at = None
-        await self._save_final_checkpoint(
-            dirty=checkpoint_dirty,
-            saved_at=last_checkpoint_saved_at,
-        )
+            self._checkpoint_coordinator.record_processed_state(
+                state,
+                saved_at=context.now,
+            )
+        await self._checkpoint_coordinator.save_final()
         return LiveDaemonResult(
             processed,
             approved,
@@ -2713,1069 +1000,6 @@ class LiveStrategyDaemon:
             None,
             final_state_at,
         )
-
-    async def _process_exit_work(
-        self,
-        state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-    ) -> _ExitLaneOutcome:
-        if self._exit_manager is None or not self._exit_enabled:
-            return _ExitLaneOutcome()
-        if self._telemetry is not None:
-            await self._telemetry.market_state_received(
-                state,
-                occurred_at=self._clock(),
-                lane=LIVE_LANE_EXIT,
-            )
-        lock = self._exit_symbol_locks.setdefault(state.symbol, asyncio.Lock())
-        async with lock:
-            if not self._context_is_current(context):
-                return _ExitLaneOutcome()
-            recovery_outcome = await self._recover_pending_exit_orders(
-                state=state,
-                context=context,
-            )
-            if recovery_outcome is not None:
-                return recovery_outcome
-            if not self._context_is_current(context):
-                return _ExitLaneOutcome()
-            if not self._exit_manager.uses_market_state_exit:
-                return _ExitLaneOutcome()
-            requests = await self._exit_manager.requests_for_state(
-                state,
-                context.managed_positions,
-            )
-            approved, submitted, failure = await self._process_exit_requests(
-                requests,
-                state=state,
-                context=context,
-            )
-        return _ExitLaneOutcome(
-            approved_intent_count=approved,
-            submitted_order_count=submitted,
-            failure=failure,
-        )
-
-    async def _process_closed_candle_work(
-        self,
-        event: ClosedCandle15mEvent,
-        state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-        latest_quote: RealtimeMarketQuote | None,
-    ) -> _ExitLaneOutcome:
-        if self._exit_manager is None or not self._exit_enabled:
-            return _ExitLaneOutcome()
-        if self._telemetry is not None:
-            await self._telemetry.market_state_received(
-                state,
-                occurred_at=event.received_at,
-                lane=LIVE_LANE_EXIT,
-            )
-        lock = self._exit_symbol_locks.setdefault(
-            event.candle.symbol,
-            asyncio.Lock(),
-        )
-        async with lock:
-            if not self._context_is_current(context):
-                return _ExitLaneOutcome()
-            recovery_outcome = await self._recover_pending_exit_orders(
-                state=state,
-                context=context,
-            )
-            if recovery_outcome is not None:
-                return recovery_outcome
-            if not self._context_is_current(context):
-                return _ExitLaneOutcome()
-            requests = await self._exit_manager.requests_for_closed_candle(
-                event.candle,
-                context.managed_positions,
-                latest_quote=latest_quote,
-                received_at=event.received_at,
-            )
-            approved, submitted, failure = await self._process_exit_requests(
-                requests,
-                state=state,
-                context=context,
-                invalidate_context=False,
-            )
-        return _ExitLaneOutcome(
-            approved_intent_count=approved,
-            submitted_order_count=submitted,
-            failure=failure,
-        )
-
-    async def _process_grace_timeout_work(
-        self,
-        state: MarketState15s,
-        now: datetime,
-        context: LiveDaemonRuntimeContext,
-        latest_quote: RealtimeMarketQuote | None,
-    ) -> _ExitLaneOutcome:
-        if self._exit_manager is None or not self._exit_enabled:
-            return _ExitLaneOutcome()
-        lock = self._exit_symbol_locks.setdefault(state.symbol, asyncio.Lock())
-        async with lock:
-            if not self._context_is_current(context):
-                return _ExitLaneOutcome()
-            recovery_outcome = await self._recover_pending_exit_orders(
-                state=state,
-                context=context,
-            )
-            if recovery_outcome is not None:
-                return recovery_outcome
-            if not self._context_is_current(context):
-                return _ExitLaneOutcome()
-            requests = await self._exit_manager.requests_for_grace_timeout(
-                now=now,
-                state=state,
-                positions=context.managed_positions,
-                latest_quote=latest_quote,
-            )
-            approved, submitted, failure = await self._process_exit_requests(
-                requests,
-                state=state,
-                context=context,
-            )
-        return _ExitLaneOutcome(
-            approved_intent_count=approved,
-            submitted_order_count=submitted,
-            failure=failure,
-        )
-
-    async def _process_quote_work(
-        self,
-        quote: RealtimeMarketQuote,
-        state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-    ) -> _ExitLaneOutcome:
-        if self._exit_manager is None or not self._exit_enabled:
-            return _ExitLaneOutcome()
-        # Quote, candle, grace, and recovery decisions for one position share
-        # the same decision lock.  The execution coordinator still serializes
-        # exchange I/O, but it cannot deduplicate different candidate IDs
-        # after they have already been generated.
-        lock = self._exit_symbol_locks.setdefault(
-            quote.symbol,
-            asyncio.Lock(),
-        )
-        async with lock:
-            if not self._context_is_current(context):
-                return _ExitLaneOutcome()
-            recovery_outcome = await self._recover_pending_exit_orders(
-                state=state,
-                context=context,
-            )
-            if recovery_outcome is not None:
-                return recovery_outcome
-            if not self._context_is_current(context):
-                return _ExitLaneOutcome()
-            requests = await self._exit_manager.requests_for_quote(
-                quote,
-                context.managed_positions,
-            )
-            approved, submitted, failure = await self._process_exit_requests(
-                requests,
-                state=state,
-                context=context,
-            )
-        return _ExitLaneOutcome(
-            approved_intent_count=approved,
-            submitted_order_count=submitted,
-            failure=failure,
-        )
-
-    async def _recover_pending_exit_orders(
-        self,
-        *,
-        state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-    ) -> _ExitLaneOutcome | None:
-        """Act on unknown reduce-only orders before evaluating new exits."""
-        if self._exit_recovery_client is None:
-            return None
-        pending_by_root: dict[str, PersistedExchangeOrder] = {}
-        for order in context.unresolved_orders:
-            if (
-                order.plan.symbol != state.symbol
-                or not order.plan.reduce_only
-                or order.state
-                is not ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
-            ):
-                continue
-            root, attempt = _exit_recovery_identity(order.plan)
-            previous = pending_by_root.get(root)
-            if previous is None or attempt > _exit_recovery_identity(previous.plan)[1]:
-                pending_by_root[root] = order
-        has_pending_exit = bool(pending_by_root)
-        for order in sorted(
-            pending_by_root.values(),
-            key=lambda item: (item.updated_at, item.plan.client_order_id),
-        ):
-            result = await self._recover_unknown_exit(
-                plan=order.plan,
-                known_executed_quantity=order.executed_quantity,
-                state=state,
-                context=context,
-            )
-            if result is not None:
-                return _exit_recovery_outcome(
-                    original_client_order_id=order.plan.client_order_id,
-                    result=result,
-                )
-        # Even when the inspection is deferred, the original order is still
-        # unresolved. Do not let a normal exit evaluation create a second
-        # order while the recovery backoff is in effect.
-        return _ExitLaneOutcome() if has_pending_exit else None
-
-    async def _recover_unknown_exit(
-        self,
-        *,
-        plan: OrderExecutionPlan,
-        known_executed_quantity: Decimal,
-        state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-        source_candidate: OrderIntentCandidate | None = None,
-        reference_price: Decimal | None = None,
-        recovery_entry_type: EntryType | None = None,
-        recovery_limit_price: Decimal | None = None,
-    ) -> OrderExecutionResult | None:
-        """Confirm an unknown exit and submit at most one safe next attempt."""
-        recovery_client = self._exit_recovery_client
-        if recovery_client is None or not plan.reduce_only:
-            return None
-        root, current_attempt = _exit_recovery_identity(plan)
-        current_attempt = max(
-            current_attempt,
-            self._exit_recovery_attempts.get(root, 0),
-        )
-        if current_attempt >= _EXIT_RECOVERY_MAX_ATTEMPTS:
-            log.error(
-                "live_exit_recovery_attempts_exhausted",
-                run_id=self._config.run_id,
-                symbol=plan.symbol,
-                position_side=plan.position_side.value,
-                original_client_order_id=root,
-                attempts=current_attempt,
-            )
-            return None
-        now = self._clock()
-        next_attempt_at = self._exit_recovery_next_attempt_at.get(root)
-        if next_attempt_at is not None and now < next_attempt_at:
-            return None
-        lock_key = (plan.symbol, plan.position_side.value)
-        lock = self._exit_recovery_locks.setdefault(lock_key, asyncio.Lock())
-        async with lock:
-            now = self._clock()
-            current_attempt = max(
-                current_attempt,
-                self._exit_recovery_attempts.get(root, 0),
-            )
-            next_attempt_at = self._exit_recovery_next_attempt_at.get(root)
-            if next_attempt_at is not None and now < next_attempt_at:
-                return None
-            if current_attempt >= _EXIT_RECOVERY_MAX_ATTEMPTS:
-                return None
-            try:
-                observation = await recovery_client.inspect_exit_order(plan)
-            except ExitRecoveryInspectionUnknownError as error:
-                self._exit_recovery_next_attempt_at[root] = now + timedelta(
-                    seconds=_EXIT_RECOVERY_RETRY_DELAYS_SECONDS[0]
-                )
-                log.warning(
-                    "live_exit_recovery_inspection_deferred",
-                    run_id=self._config.run_id,
-                    symbol=plan.symbol,
-                    client_order_id=plan.client_order_id,
-                    error_type=type(error).__name__,
-                )
-                return None
-            except Exception as error:
-                # A malformed or incomplete read is still an unknown exchange
-                # outcome.  Keep the exit lane alive and retry after the same
-                # short backoff instead of making the whole daemon halt.
-                self._exit_recovery_next_attempt_at[root] = now + timedelta(
-                    seconds=_EXIT_RECOVERY_RETRY_DELAYS_SECONDS[0]
-                )
-                log.warning(
-                    "live_exit_recovery_inspection_deferred",
-                    run_id=self._config.run_id,
-                    symbol=plan.symbol,
-                    client_order_id=plan.client_order_id,
-                    error_type=type(error).__name__,
-                )
-                return None
-
-            observed_result: OrderExecutionResult | None = None
-            if observation.order is not None:
-                if not observation.order.state.terminal:
-                    log.info(
-                        "live_exit_recovery_original_order_still_active",
-                        run_id=self._config.run_id,
-                        symbol=plan.symbol,
-                        client_order_id=plan.client_order_id,
-                        active_order_client_ids=(
-                            list(observation.active_exit_order_client_ids)
-                        ),
-                    )
-                    return None
-                observed_result = await self._state_machine.apply_observed_snapshot(
-                    plan,
-                    observation.order,
-                )
-                if (
-                    observation.order.state is ExchangeOrderState.FILLED
-                    and observation.position_quantity <= 0
-                ):
-                    self._exit_recovery_attempts.pop(root, None)
-                    self._exit_recovery_next_attempt_at.pop(root, None)
-                    return observed_result
-            elif plan.client_order_id not in observation.active_exit_order_client_ids:
-                observed_result = await self._state_machine.mark_absent_reconciled(
-                    plan,
-                    details={
-                        "reason": "exit_recovery_original_absent",
-                        "recovery": True,
-                        "position_quantity": str(observation.position_quantity),
-                        "active_exit_order_client_ids": list(
-                            observation.active_exit_order_client_ids
-                        ),
-                        "observed_at": observation.observed_at.isoformat(),
-                    },
-                )
-            if observation.active_exit_order_client_ids:
-                log.info(
-                    "live_exit_recovery_other_exit_order_active",
-                    run_id=self._config.run_id,
-                    symbol=plan.symbol,
-                    client_order_id=plan.client_order_id,
-                    active_order_client_ids=(
-                        list(observation.active_exit_order_client_ids)
-                    ),
-                )
-                return observed_result
-            if observation.position_quantity <= 0:
-                if observed_result is not None:
-                    self._exit_recovery_attempts.pop(root, None)
-                    self._exit_recovery_next_attempt_at.pop(root, None)
-                    return observed_result
-                details: dict[str, JsonValue] = {
-                    "reason": "exit_recovery_position_flat",
-                    "recovery": True,
-                    "position_quantity": str(observation.position_quantity),
-                    "active_exit_order_client_ids": list(
-                        observation.active_exit_order_client_ids
-                    ),
-                    "observed_at": observation.observed_at.isoformat(),
-                }
-                resolved = await self._state_machine.mark_absent_reconciled(
-                    plan,
-                    details=details,
-                )
-                self._exit_recovery_attempts.pop(root, None)
-                self._exit_recovery_next_attempt_at.pop(root, None)
-                return resolved
-
-            # The exchange position is the authoritative remaining close
-            # quantity.  Do not cap it by the previous order's quantity: that
-            # would under-close after a partial fill on an earlier recovery
-            # attempt.  The order is reduce-only (or position-side scoped in
-            # hedge mode), so an exchange-side quantity check still prevents
-            # opening or reversing a position.
-            recovery_quantity = observation.position_quantity
-            if recovery_quantity <= 0:
-                log.error(
-                    "live_exit_recovery_position_quantity_inconsistent",
-                    run_id=self._config.run_id,
-                    symbol=plan.symbol,
-                    client_order_id=plan.client_order_id,
-                    position_quantity=str(observation.position_quantity),
-                    order_quantity=str(plan.quantity),
-                    known_executed_quantity=str(known_executed_quantity),
-                )
-                return observed_result
-            recovery_attempt = current_attempt + 1
-            recovery_candidate = _build_exit_recovery_candidate(
-                plan=plan,
-                source_candidate=source_candidate,
-                context=context,
-                state=state,
-                now=now,
-                reference_price=reference_price,
-                root_client_order_id=root,
-                attempt=recovery_attempt,
-                quantity=recovery_quantity,
-                recovery_entry_type=recovery_entry_type,
-                recovery_limit_price=recovery_limit_price,
-            )
-            if recovery_candidate is None:
-                return observed_result
-            self._exit_recovery_attempts[root] = recovery_attempt
-            delay_index = min(
-                recovery_attempt - 1,
-                len(_EXIT_RECOVERY_RETRY_DELAYS_SECONDS) - 1,
-            )
-            self._exit_recovery_next_attempt_at[root] = now + timedelta(
-                seconds=_EXIT_RECOVERY_RETRY_DELAYS_SECONDS[delay_index]
-            )
-            recovery_result = await self._execute_candidate(
-                recovery_candidate,
-                requested_quantity=recovery_quantity,
-                state=state,
-                context=context,
-                reference_price=reference_price,
-            )
-            if recovery_result is None:
-                log.error(
-                    "live_exit_recovery_not_submitted",
-                    run_id=self._config.run_id,
-                    symbol=plan.symbol,
-                    client_order_id=plan.client_order_id,
-                    recovery_attempt=recovery_attempt,
-                )
-                return observed_result
-            log.warning(
-                "live_exit_recovery_submitted",
-                run_id=self._config.run_id,
-                symbol=plan.symbol,
-                original_client_order_id=root,
-                recovery_client_order_id=recovery_result.client_order_id,
-                recovery_attempt=recovery_attempt,
-                order_type=recovery_candidate.entry_type.value,
-                quantity=str(recovery_quantity),
-                position_quantity=str(observation.position_quantity),
-                known_executed_quantity=str(known_executed_quantity),
-                outcome=recovery_result.state.value,
-            )
-            if recovery_result.state is ExchangeOrderState.FILLED:
-                self._exit_recovery_next_attempt_at.pop(root, None)
-            return recovery_result
-
-    async def _process_exit_requests(
-        self,
-        requests: tuple[LiveExitRequest, ...],
-        *,
-        state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-        reference_price: Decimal | None = None,
-        invalidate_context: bool = True,
-    ) -> tuple[int, int, str | None]:
-        approved = 0
-        submitted = 0
-        for request in requests:
-            if isinstance(request, LiveExitCancellationRequest):
-                cancel_result = await self._state_machine.cancel_order(
-                    request.cancel_plan
-                )
-                if invalidate_context:
-                    self._invalidate_context_cache()
-                if (
-                    cancel_result.state
-                    is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
-                ):
-                    if cancel_result.plan is not None:
-                        recovery_result = await self._recover_unknown_exit(
-                            plan=cancel_result.plan,
-                            known_executed_quantity=cancel_result.executed_quantity,
-                            source_candidate=request.fallback_candidate,
-                            state=state,
-                            context=context,
-                            reference_price=reference_price,
-                            recovery_entry_type=request.fallback_candidate.entry_type,
-                            recovery_limit_price=request.fallback_candidate.limit_price,
-                        )
-                        if (
-                            recovery_result is not None
-                            and recovery_result.client_order_id
-                            != cancel_result.client_order_id
-                        ):
-                            approved += 1
-                            submitted += int(not recovery_result.suppressed)
-                    log.warning(
-                        "live_cancel_outcome_pending_reconciliation",
-                        run_id=self._config.run_id,
-                        symbol=request.cancel_plan.symbol,
-                        client_order_id=request.cancel_plan.client_order_id,
-                    )
-                    return approved, submitted, None
-                if not cancel_result.state.terminal:
-                    return approved, submitted, "cancel_not_confirmed"
-                if cancel_result.state is ExchangeOrderState.REJECTED:
-                    return approved, submitted, "cancel_rejected"
-                if cancel_result.state is ExchangeOrderState.ABSENT_RECONCILED:
-                    # The cancel response proved that the old recovery order
-                    # is gone.  Refresh the account view before submitting a
-                    # market fallback so a late fill cannot make us reuse
-                    # the stale planned quantity.
-                    self._invalidate_context_cache()
-                    context = await self._context_provider(state)
-                    self._sync_pending_entry_plans(context)
-                    await self._publish_managed_position_symbols(context)
-                    if state.symbol in context.pending_position_symbols:
-                        symbols = ",".join(
-                            sorted(context.pending_position_symbols)
-                        )
-                        return approved, submitted, (
-                            f"pending_live_positions:{symbols}"
-                        )
-                    if state.symbol in context.unmanaged_position_symbols:
-                        symbols = ",".join(
-                            sorted(context.unmanaged_position_symbols)
-                        )
-                        return approved, submitted, (
-                            f"unmanaged_live_positions:{symbols}"
-                        )
-                remaining = max(
-                    Decimal("0"),
-                    request.cancel_plan.quantity - cancel_result.executed_quantity,
-                )
-                if remaining <= 0 and not request.fallback_to_current_position:
-                    continue
-                if request.fallback_to_current_position:
-                    # A scheduled flatten must size the fallback from a
-                    # freshly loaded position after canceling the recovery
-                    # order.  The recovery order may have partially filled or
-                    # been filled while the cancel request was in flight.
-                    self._invalidate_context_cache()
-                    context = await self._context_provider(state)
-                    self._sync_pending_entry_plans(context)
-                    await self._publish_managed_position_symbols(context)
-                    if state.symbol in context.pending_position_symbols:
-                        symbols = ",".join(
-                            sorted(context.pending_position_symbols)
-                        )
-                        return approved, submitted, (
-                            f"pending_live_positions:{symbols}"
-                        )
-                    if state.symbol in context.unmanaged_position_symbols:
-                        symbols = ",".join(
-                            sorted(context.unmanaged_position_symbols)
-                        )
-                        return approved, submitted, (
-                            f"unmanaged_live_positions:{symbols}"
-                        )
-                current_position_quantity = next(
-                    (
-                        position.quantity
-                        for position in context.managed_positions
-                        if position.symbol == request.cancel_plan.symbol
-                        and position.position_side
-                        is request.cancel_plan.position_side
-                    ),
-                    Decimal("0"),
-                )
-                fallback_quantity = min(
-                    request.fallback_quantity,
-                    current_position_quantity,
-                )
-                if not request.fallback_to_current_position:
-                    fallback_quantity = min(fallback_quantity, remaining)
-                if fallback_quantity <= 0:
-                    log.info(
-                        "live_exit_fallback_skipped_position_flat",
-                        run_id=self._config.run_id,
-                        symbol=request.cancel_plan.symbol,
-                        client_order_id=request.cancel_plan.client_order_id,
-                    )
-                    continue
-                fallback_candidate = _resize_reduce_only_candidate(
-                    request.fallback_candidate,
-                    fallback_quantity,
-                )
-                result = await self._execute_candidate(
-                    fallback_candidate,
-                    requested_quantity=fallback_quantity,
-                    state=state,
-                    context=context,
-                    reference_price=reference_price,
-                )
-                if result is None:
-                    continue
-                if invalidate_context:
-                    self._invalidate_context_cache()
-                approved += 1
-                submitted += int(not result.suppressed)
-                if (
-                    result.state
-                    is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION
-                ):
-                    if result.plan is not None:
-                        recovery_result = await self._recover_unknown_exit(
-                            plan=result.plan,
-                            known_executed_quantity=result.executed_quantity,
-                            source_candidate=fallback_candidate,
-                            state=state,
-                            context=context,
-                            reference_price=reference_price,
-                        )
-                        if (
-                            recovery_result is not None
-                            and recovery_result.client_order_id
-                            != result.client_order_id
-                        ):
-                            approved += 1
-                            submitted += int(not recovery_result.suppressed)
-                    log.warning(
-                        "live_exit_outcome_pending_reconciliation",
-                        run_id=self._config.run_id,
-                        symbol=request.fallback_candidate.symbol,
-                        client_order_id=result.client_order_id,
-                    )
-                    return approved, submitted, None
-                if result.state is ExchangeOrderState.REJECTED:
-                    return approved, submitted, "grace_timeout_market_close_rejected"
-                continue
-            result = await self._execute_candidate(
-                request.candidate,
-                requested_quantity=request.quantity,
-                state=state,
-                context=context,
-                reference_price=reference_price,
-            )
-            if result is None:
-                continue
-            if invalidate_context:
-                self._invalidate_context_cache()
-            approved += 1
-            submitted += int(not result.suppressed)
-            if result.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
-                if result.plan is not None:
-                    recovery_result = await self._recover_unknown_exit(
-                        plan=result.plan,
-                        known_executed_quantity=result.executed_quantity,
-                        source_candidate=request.candidate,
-                        state=state,
-                        context=context,
-                        reference_price=reference_price,
-                    )
-                    if (
-                        recovery_result is not None
-                        and recovery_result.client_order_id != result.client_order_id
-                    ):
-                        approved += 1
-                        submitted += int(not recovery_result.suppressed)
-                log.warning(
-                    "live_exit_outcome_pending_reconciliation",
-                    run_id=self._config.run_id,
-                    symbol=request.candidate.symbol,
-                    client_order_id=result.client_order_id,
-                )
-                return approved, submitted, None
-        return approved, submitted, None
-
-    async def _execute_candidate(
-        self,
-        candidate: OrderIntentCandidate,
-        *,
-        requested_quantity: Decimal | None,
-        state: MarketState15s,
-        context: LiveDaemonRuntimeContext,
-        reference_price: Decimal | None = None,
-    ) -> OrderExecutionResult | None:
-        execution_now = self._clock()
-        if not candidate.reduce_only and not self.entry_enabled:
-            log.info(
-                "live_entry_blocked_before_execution",
-                run_id=self._config.run_id,
-                candidate_id=candidate.candidate_id,
-                symbol=candidate.symbol,
-                reason=self.entry_enabled_reason,
-            )
-            return None
-        if candidate.expires_at <= execution_now:
-            log.warning(
-                "live_candidate_expired_before_execution",
-                run_id=self._config.run_id,
-                candidate_id=candidate.candidate_id,
-                symbol=candidate.symbol,
-                candidate_expires_at=candidate.expires_at,
-                execution_now=execution_now,
-                market_state_bucket_end=state.bucket_end,
-            )
-            return None
-        executable_candidate = self._prepare_entry_candidate(
-            candidate,
-            state=state,
-            execution_now=execution_now,
-        )
-        risk_open_position_symbols = context.open_position_symbols or frozenset()
-        if not candidate.reduce_only:
-            pending_notional, pending_symbols = self._pending_entry_reservation(
-                context.unresolved_orders
-            )
-            risk_open_position_symbols |= pending_symbols
-            limit_decision = evaluate_fixed_live_limits(
-                self._limits,
-                LiveLimitContext(
-                    symbol=candidate.symbol,
-                    requested_notional=candidate.desired_notional,
-                    open_position_symbols=risk_open_position_symbols,
-                    realized_pnl=context.realized_pnl,
-                    unrealized_pnl=context.unrealized_pnl,
-                    gross_exposure=(
-                        None
-                        if context.gross_exposure is None
-                        else context.gross_exposure + pending_notional
-                    ),
-                    min_notional=_min_notional(
-                        context.trading_rules.get(candidate.symbol)
-                    ),
-                    has_unresolved_order=any(
-                        order_state_is_uncertain(item)
-                        for item in context.unresolved_order_states
-                    ),
-                ),
-            )
-            if not limit_decision.allowed:
-                return None
-            executable_candidate = replace(
-                executable_candidate,
-                desired_notional=limit_decision.capped_notional,
-            )
-        else:
-            limit_decision = None
-        lane = LIVE_LANE_EXIT if executable_candidate.reduce_only else LIVE_LANE_ENTRY
-        if executable_candidate.reduce_only:
-            self._record_signal_candidate(
-                candidate=executable_candidate,
-                state=state,
-                recorded_at=self._clock(),
-                context=context,
-            )
-        if self._telemetry is not None:
-            await self._telemetry.candidate_accepted(
-                executable_candidate,
-                state=state,
-                occurred_at=self._clock(),
-                lane=lane,
-            )
-        if not self._context_is_current(context):
-            log.info(
-                "live_candidate_context_invalidated_before_risk",
-                run_id=self._config.run_id,
-                candidate_id=executable_candidate.candidate_id,
-                symbol=executable_candidate.symbol,
-            )
-            return None
-        evaluation = self._risk_gateway.evaluate(
-            executable_candidate,
-            RiskContext(
-                now=context.now,
-                active_lease=context.active_lease,
-                latest_market_state=state,
-                account_state=context.account_state,
-                open_position_symbols=risk_open_position_symbols,
-                active_halts=context.active_halts,
-                risk_config=context.risk_config,
-                strategy_state=context.strategy_state,
-                enforce_market_state_age=False,
-                required_lease_owner=context.gate_context.required_lease_owner,
-                required_lease_id=(
-                    None
-                    if context.active_lease is None
-                    else context.active_lease.lease_id
-                ),
-                required_account_label=context.gate_context.account_label,
-                required_strategy_name=context.gate_context.strategy_name,
-            ),
-        )
-        if evaluation.decision is not RiskDecision.APPROVED:
-            return None
-        if self._telemetry is not None:
-            await self._telemetry.risk_approved(
-                executable_candidate,
-                state=state,
-                occurred_at=self._clock(),
-                lane=lane,
-                evaluation_id=evaluation.evaluation_id,
-            )
-        if not self._context_is_current(context):
-            log.info(
-                "live_candidate_context_invalidated_after_risk",
-                run_id=self._config.run_id,
-                candidate_id=executable_candidate.candidate_id,
-                symbol=executable_candidate.symbol,
-            )
-            return None
-        rules = context.trading_rules.get(candidate.symbol)
-        execution_reference_price = reference_price
-        if execution_reference_price is None:
-            candidate_reference_price = executable_candidate.features.get(
-                "reference_price"
-            )
-            if isinstance(candidate_reference_price, str):
-                try:
-                    execution_reference_price = Decimal(candidate_reference_price)
-                except ArithmeticError:
-                    execution_reference_price = None
-        if execution_reference_price is None:
-            execution_reference_price = state.mark_price or state.close_price
-        if rules is None or execution_reference_price is None:
-            return None
-        plan = quantize_order_plan(
-            executable_candidate,
-            rules,
-            reference_price=execution_reference_price,
-            resize_tolerance=self._config.resize_tolerance,
-            hedge_mode=self._config.hedge_mode,
-            requested_quantity=requested_quantity,
-        )
-        if isinstance(plan, QuantizationRejection):
-            return None
-        if (
-            not executable_candidate.reduce_only
-            and self._config.entry_order_type is EntryType.LIMIT
-        ):
-            plan = replace(
-                plan,
-                time_in_force="GTD",
-                expires_at=executable_candidate.expires_at,
-            )
-        if not executable_candidate.reduce_only and not self.entry_enabled:
-            log.info(
-                "live_entry_blocked_before_persistence",
-                run_id=self._config.run_id,
-                candidate_id=executable_candidate.candidate_id,
-                symbol=executable_candidate.symbol,
-                reason=self.entry_enabled_reason,
-            )
-            return None
-        if not self._context_is_current(context):
-            log.info(
-                "live_candidate_context_invalidated_before_submission",
-                run_id=self._config.run_id,
-                candidate_id=executable_candidate.candidate_id,
-                symbol=executable_candidate.symbol,
-            )
-            return None
-        prepared_submission: PreparedOrderSubmission | None = None
-        prepare_submission = getattr(self._repository, "prepare_submission", None)
-        prepare_and_execute = getattr(
-            self._state_machine,
-            "prepare_and_execute",
-            None,
-        )
-        intent_saved_at = self._clock()
-        if callable(prepare_submission):
-            async def prepare_for_execution() -> PreparedOrderSubmission | None:
-                nonlocal prepared_submission, intent_saved_at
-                if not executable_candidate.reduce_only and not self.entry_enabled:
-                    log.info(
-                        "live_entry_blocked_inside_submission_scheduler",
-                        run_id=self._config.run_id,
-                        candidate_id=executable_candidate.candidate_id,
-                        symbol=executable_candidate.symbol,
-                        reason=self.entry_enabled_reason,
-                    )
-                    return None
-                if not self._context_is_current(context):
-                    log.info(
-                        "live_candidate_context_invalidated_inside_submission_scheduler",
-                        run_id=self._config.run_id,
-                        candidate_id=executable_candidate.candidate_id,
-                        symbol=executable_candidate.symbol,
-                    )
-                    return None
-                prepared_submission = await prepare_submission(
-                    intent=executable_candidate,
-                    evaluation=evaluation,
-                    plan=plan,
-                    prepared_at=self._clock(),
-                    environment=(
-                        None
-                        if context.active_lease is None
-                        else context.active_lease.environment
-                    ),
-                    account_label=context.gate_context.account_label,
-                    strategy_name=context.gate_context.strategy_name,
-                    required_lease_owner=(
-                        context.gate_context.required_lease_owner
-                    ),
-                    required_lease_id=(
-                        None
-                        if context.active_lease is None
-                        else context.active_lease.lease_id
-                    ),
-                    max_open_positions=(
-                        None
-                        if executable_candidate.reduce_only
-                        else self._limits.max_open_positions
-                    ),
-                    max_daily_loss=(
-                        None
-                        if executable_candidate.reduce_only
-                        else self._limits.max_daily_loss
-                    ),
-                    max_gross_exposure=(
-                        None
-                        if executable_candidate.reduce_only
-                        else self._limits.max_gross_exposure
-                    ),
-                    current_daily_pnl=(
-                        None
-                        if (
-                            executable_candidate.reduce_only
-                            or context.realized_pnl is None
-                            or context.unrealized_pnl is None
-                        )
-                        else context.realized_pnl + context.unrealized_pnl
-                    ),
-                    current_gross_exposure=(
-                        None
-                        if executable_candidate.reduce_only
-                        else context.gross_exposure
-                    ),
-                    open_position_symbols=(
-                        None
-                        if executable_candidate.reduce_only
-                        else risk_open_position_symbols
-                    ),
-                    exposure_notional=(
-                        None
-                        if limit_decision is None
-                        else limit_decision.capped_notional
-                    ),
-                )
-                if prepared_submission is not None:
-                    intent_saved_at = prepared_submission.submitting_event.occurred_at
-                return prepared_submission
-
-            if callable(prepare_and_execute):
-                result = await prepare_and_execute(
-                    plan,
-                    prepare_submission=prepare_for_execution,
-                )
-                if result is None:
-                    log.info(
-                        "live_duplicate_submission_suppressed",
-                        run_id=self._config.run_id,
-                        symbol=plan.symbol,
-                        client_order_id=plan.client_order_id,
-                    )
-                    return None
-            else:
-                prepared_submission = await prepare_for_execution()
-                if prepared_submission is None:
-                    log.info(
-                        "live_duplicate_submission_suppressed",
-                        run_id=self._config.run_id,
-                        symbol=plan.symbol,
-                        client_order_id=plan.client_order_id,
-                    )
-                    return None
-                result = await self._state_machine.execute_approved_intent(
-                    plan,
-                    prepared_submission=prepared_submission,
-                )
-        else:
-            await self._repository.save_approved_intent(
-                executable_candidate,
-                evaluation,
-            )
-            result = await self._state_machine.execute_approved_intent(plan)
-        if self._telemetry is not None:
-            await self._telemetry.intent_saved(
-                executable_candidate,
-                state=state,
-                occurred_at=intent_saved_at,
-                lane=lane,
-            )
-        if not plan.reduce_only:
-            self._remember_pending_entry(plan, result)
-            lifecycle = self._entry_order_lifecycle
-            if lifecycle is not None:
-                try:
-                    await lifecycle.track(plan, result)
-                except Exception as error:
-                    # Expiry bookkeeping is safety/observability support. It
-                    # must never turn a successful exchange submission into a
-                    # failed live command.
-                    log.warning(
-                        "live_entry_limit_lifecycle_track_failed",
-                        run_id=self._config.run_id,
-                        symbol=plan.symbol,
-                        client_order_id=plan.client_order_id,
-                        error_type=type(error).__name__,
-                    )
-        return result
-
-    def _prepare_entry_candidate(
-        self,
-        candidate: OrderIntentCandidate,
-        *,
-        state: MarketState15s,
-        execution_now: datetime,
-    ) -> OrderIntentCandidate:
-        return _prepare_entry_candidate_for_observation(
-            candidate,
-            state=state,
-            execution_now=execution_now,
-            entry_order_type=self._config.entry_order_type,
-            limit_ttl_seconds=self._config.entry_limit_ttl_seconds,
-        )
-
-    def _remember_pending_entry(
-        self,
-        plan: OrderExecutionPlan,
-        result: OrderExecutionResult,
-    ) -> None:
-        if result.state.terminal or result.executed_quantity >= plan.quantity:
-            self._pending_entry_plans.pop(plan.client_order_id, None)
-            return
-        self._pending_entry_plans[plan.client_order_id] = (
-            plan,
-            result.executed_quantity,
-        )
-
-    def _sync_pending_entry_plans(
-        self,
-        context: LiveDaemonRuntimeContext,
-    ) -> None:
-        persisted = {
-            item.plan.client_order_id: item
-            for item in context.unresolved_orders
-            if not item.plan.reduce_only
-        }
-        for client_order_id, (plan, executed_quantity) in tuple(
-            self._pending_entry_plans.items()
-        ):
-            item = persisted.get(client_order_id)
-            if item is None:
-                # Keep a just-submitted order until a fresh account/context
-                # read confirms its terminal state. This avoids releasing a
-                # reservation between two candidates in one market snapshot.
-                if plan.expires_at is not None and plan.expires_at <= self._clock():
-                    self._pending_entry_plans.pop(client_order_id, None)
-                continue
-            if item.state.terminal or item.executed_quantity >= plan.quantity:
-                self._pending_entry_plans.pop(client_order_id, None)
-            elif item.executed_quantity > executed_quantity:
-                self._pending_entry_plans[client_order_id] = (
-                    plan,
-                    item.executed_quantity,
-                )
-
-    def _pending_entry_reservation(
-        self,
-        persisted_orders: tuple[PersistedExchangeOrder, ...],
-    ) -> tuple[Decimal, frozenset[str]]:
-        pending: dict[str, tuple[OrderExecutionPlan, Decimal]] = {
-            item.plan.client_order_id: (item.plan, item.executed_quantity)
-            for item in persisted_orders
-            if not item.plan.reduce_only and not item.state.terminal
-        }
-        pending.update(self._pending_entry_plans)
-        reserved_notional = Decimal("0")
-        reserved_symbols: set[str] = set()
-        for plan, executed_quantity in pending.values():
-            remaining_quantity = max(
-                Decimal("0"),
-                plan.quantity - executed_quantity,
-            )
-            if remaining_quantity <= 0 or plan.price is None:
-                continue
-            reserved_notional += remaining_quantity * plan.price
-            reserved_symbols.add(plan.symbol)
-        return reserved_notional, frozenset(reserved_symbols)
 
     def _record_signal_candidate(
         self,
@@ -3835,20 +1059,6 @@ class LiveStrategyDaemon:
                 return "orphan_cancel_not_confirmed"
         return None
 
-    async def _save_final_checkpoint(
-        self,
-        *,
-        dirty: bool,
-        saved_at: datetime | None,
-    ) -> None:
-        if not dirty or saved_at is None:
-            return
-        await self._checkpoint_writer.save_now(
-            _checkpoint_for_persistence(self._strategy),
-            saved_at,
-        )
-
-
 def _market_state_for_closed_candle(
     candle: ClosedCandle15m,
     *,
@@ -3892,58 +1102,6 @@ def _market_state_for_closed_candle(
     )
 
 
-def _scheduled_reference_price(state: MarketState15s) -> Decimal:
-    for price in (
-        state.mark_price,
-        state.last_bid_price,
-        state.last_ask_price,
-        state.close_price,
-    ):
-        if price is not None and price > 0:
-            return price
-    raise ValueError(f"market state has no positive reference price: {state.symbol}")
-
-
-def _checkpoint_for_persistence(strategy: LiveRuntimeStrategy) -> StrategyCheckpoint:
-    """Build a compact checkpoint without breaking lightweight test adapters."""
-    started = perf_counter()
-    checkpoint_method = strategy.checkpoint
-    parameters: Mapping[str, Parameter] | None = None
-    try:
-        parameters = signature(checkpoint_method).parameters
-    except (TypeError, ValueError):
-        pass
-    if parameters is not None and "include_market_state_buffers" in parameters and (
-        parameters["include_market_state_buffers"].kind
-        in {Parameter.KEYWORD_ONLY, Parameter.POSITIONAL_OR_KEYWORD}
-    ):
-        checkpoint = checkpoint_method(include_market_state_buffers=False)
-        log.info(
-            "live_checkpoint_built",
-            build_ms=round((perf_counter() - started) * 1000, 3),
-            payload_keys=tuple(sorted(checkpoint.payload)),
-        )
-        return checkpoint
-
-    checkpoint = checkpoint_method()
-    payload = {
-        key: value
-        for key, value in checkpoint.payload.items()
-        if key not in {"market_state_buffers", "signal_buffers"}
-    }
-    compact = replace(checkpoint, payload=payload)
-    log.info(
-        "live_checkpoint_built",
-        build_ms=round((perf_counter() - started) * 1000, 3),
-        payload_keys=tuple(sorted(compact.payload)),
-    )
-    return compact
-
-
-def _min_notional(rules: SymbolTradingRules | None) -> Decimal | None:
-    return None if rules is None else rules.min_notional
-
-
 def _is_transient_runtime_error(error: Exception) -> bool:
     return isinstance(
         error,
@@ -3958,398 +1116,6 @@ def _is_transient_live_gate(reasons: tuple[str, ...]) -> bool:
         "account_not_ready",
         "unresolved_order_uncertainty",
     }
-
-
-def _live_entry_candidate_passes(
-    candidate: OrderIntentCandidate,
-    *,
-    context: LiveEntryFilterContext | None,
-    require_price_above_ema5: bool,
-    require_price_above_ema10: bool,
-) -> bool:
-    if candidate.reduce_only:
-        return True
-    if not require_price_above_ema5 and not require_price_above_ema10:
-        return True
-    if context is None or context.entry_price is None:
-        return False
-    if require_price_above_ema5 and (
-        context.ema5 is None or context.entry_price <= context.ema5
-    ):
-        return False
-    if require_price_above_ema10 and (
-        context.ema10 is None or context.entry_price <= context.ema10
-    ):
-        return False
-    return True
-
-
-def _live_entry_candidate_rejection_reason(
-    candidate: OrderIntentCandidate,
-    *,
-    entry_enabled: bool,
-    entry_long_only: bool,
-    entry_symbols: frozenset[str] | None,
-    context: LiveEntryFilterContext | None,
-    require_price_above_ema5: bool,
-    require_price_above_ema10: bool,
-    now: datetime | None = None,
-) -> str | None:
-    """Return the same entry-filter reason used by the live execution loop."""
-
-    if candidate.reduce_only:
-        return None
-    if not entry_enabled:
-        return "entry_disabled"
-    if now is not None and candidate.expires_at <= now:
-        return "candidate_expired"
-    if (
-        entry_long_only
-        and getattr(candidate.side, "value", candidate.side) != "long"
-    ):
-        return "short_entries_disabled"
-    if entry_symbols is not None and candidate.symbol not in entry_symbols:
-        return "outside_entry_symbol_pool"
-    if not _live_entry_candidate_passes(
-        candidate,
-        context=context,
-        require_price_above_ema5=require_price_above_ema5,
-        require_price_above_ema10=require_price_above_ema10,
-    ):
-        return "ema_filter_failed"
-    return None
-
-
-def _market_state_age_seconds(
-    state: MarketState15s,
-    now: datetime,
-) -> float:
-    return max(0.0, (now - state.bucket_end).total_seconds())
-
-
-def _entry_filter_values(
-    context: LiveEntryFilterContext | None,
-) -> dict[str, object]:
-    if context is None:
-        return {
-            "entry_price": None,
-            "ema5": None,
-            "ema10": None,
-            "ema_observed_at": None,
-            "ema_snapshot_id": None,
-            "ema_config_hash": None,
-        }
-    return {
-        "entry_price": context.entry_price,
-        "ema5": context.ema5,
-        "ema10": context.ema10,
-        "ema_observed_at": context.ema_observed_at,
-        "ema_snapshot_id": context.ema_snapshot_id,
-        "ema_config_hash": context.ema_config_hash,
-    }
-
-
-def _live_signal_account_context(
-    context: LiveDaemonRuntimeContext | None,
-    *,
-    gate_reasons: tuple[str, ...] = (),
-) -> dict[str, object]:
-    if context is None:
-        return {
-            "context_available": False,
-            "gate_reasons": list(gate_reasons),
-        }
-    lease = context.active_lease
-    return {
-        "context_available": True,
-        "account_state": _enum_text(context.account_state),
-        "account_observed_at": context.account_observed_at,
-        "account_snapshot_version": context.account_snapshot_version,
-        "realized_pnl": context.realized_pnl,
-        "unrealized_pnl": context.unrealized_pnl,
-        "gross_exposure": context.gross_exposure,
-        "open_position_symbols": sorted(context.open_position_symbols or ()),
-        "managed_position_symbols": sorted(
-            position.symbol for position in context.managed_positions
-        ),
-        "pending_position_symbols": sorted(
-            context.pending_position_symbols
-        ),
-        "unmanaged_position_symbols": sorted(
-            context.unmanaged_position_symbols
-        ),
-        "active_halt_count": len(context.active_halts),
-        "active_halt_reasons": [halt.reason for halt in context.active_halts],
-        "unresolved_order_count": len(context.unresolved_order_states),
-        "unresolved_order_states": [
-            _enum_text(state) for state in context.unresolved_order_states
-        ],
-        "active_lease_state": (
-            None if lease is None else _enum_text(lease.state)
-        ),
-        "active_lease_expires_at": (
-            None if lease is None else lease.expires_at
-        ),
-        "risk_config": {
-            "max_order_notional": context.risk_config.max_order_notional,
-            "max_gross_notional": context.risk_config.max_gross_notional,
-            "max_daily_loss": context.risk_config.max_daily_loss,
-            "max_open_positions": context.risk_config.max_open_positions,
-        },
-        "gate_reasons": list(gate_reasons),
-    }
-
-
-def _enum_text(value: object) -> str:
-    return str(getattr(value, "value", value))
-
-
-def _exit_recovery_identity(plan: OrderExecutionPlan) -> tuple[str, int]:
-    """Return the root client id and attempt encoded in a recovery plan."""
-    marker = plan.intent_id
-    if marker.startswith(_EXIT_RECOVERY_PREFIX):
-        payload = marker[len(_EXIT_RECOVERY_PREFIX) :]
-        root, separator, raw_attempt = payload.rpartition("-")
-        if separator and root and raw_attempt.isdigit():
-            return root, int(raw_attempt)
-    return plan.client_order_id, 0
-
-
-def _exit_recovery_outcome(
-    *,
-    original_client_order_id: str,
-    result: OrderExecutionResult,
-) -> _ExitLaneOutcome:
-    is_new_order = result.client_order_id != original_client_order_id
-    return _ExitLaneOutcome(
-        approved_intent_count=int(is_new_order),
-        submitted_order_count=int(is_new_order and not result.suppressed),
-    )
-
-
-def _build_exit_recovery_candidate(
-    *,
-    plan: OrderExecutionPlan,
-    source_candidate: OrderIntentCandidate | None,
-    context: LiveDaemonRuntimeContext,
-    state: MarketState15s,
-    now: datetime,
-    reference_price: Decimal | None,
-    root_client_order_id: str,
-    attempt: int,
-    quantity: Decimal,
-    recovery_entry_type: EntryType | None = None,
-    recovery_limit_price: Decimal | None = None,
-) -> OrderIntentCandidate | None:
-    order_type = (
-        plan.order_type.upper()
-        if recovery_entry_type is None
-        else recovery_entry_type.value.upper()
-    )
-    if order_type not in {"MARKET", "LIMIT"}:
-        log.error(
-            "live_exit_recovery_unsupported_order_type",
-            symbol=plan.symbol,
-            client_order_id=plan.client_order_id,
-            order_type=plan.order_type,
-        )
-        return None
-    resolved_reference_price = (
-        reference_price
-        or plan.price
-        or state.mark_price
-        or state.close_price
-        or state.midpoint
-    )
-    if resolved_reference_price is None or resolved_reference_price <= 0:
-        log.error(
-            "live_exit_recovery_missing_reference_price",
-            symbol=plan.symbol,
-            client_order_id=plan.client_order_id,
-        )
-        return None
-    limit_price = (
-        plan.price if recovery_entry_type is None else recovery_limit_price
-    )
-    if order_type == "LIMIT" and limit_price is None:
-        log.error(
-            "live_exit_recovery_missing_limit_price",
-            symbol=plan.symbol,
-            client_order_id=plan.client_order_id,
-        )
-        return None
-    candidate_id = f"{_EXIT_RECOVERY_PREFIX}{root_client_order_id}-{attempt}"
-    signal_id = f"live-exit-recovery-signal-{uuid5(NAMESPACE_URL, candidate_id)}"
-    base = source_candidate
-    features: dict[str, JsonValue] = (
-        {} if base is None else dict(base.features)
-    )
-    features.update(
-        {
-            "recovery": True,
-            "recovery_of": root_client_order_id,
-            "recovery_attempt": attempt,
-            "original_client_order_id": plan.client_order_id,
-            "original_order_type": plan.order_type.upper(),
-            "recovery_order_type": order_type,
-            "position_side": plan.position_side.value,
-            "quantity": str(quantity),
-            "reference_price": str(resolved_reference_price),
-            "state_bucket_end": state.bucket_end.astimezone(UTC).isoformat(),
-        }
-    )
-    return OrderIntentCandidate(
-        candidate_id=candidate_id,
-        signal_id=signal_id,
-        run_id=plan.run_id,
-        strategy_name=(
-            base.strategy_name
-            if base is not None
-            else context.gate_context.strategy_name
-        ),
-        strategy_version=base.strategy_version if base is not None else "v0",
-        config_hash=(
-            base.config_hash
-            if base is not None
-            else context.gate_context.strategy_config_hash
-        ),
-        symbol=plan.symbol,
-        side=_exit_strategy_side(plan),
-        entry_type=EntryType(order_type.lower()),
-        limit_price=limit_price if order_type == "LIMIT" else None,
-        desired_notional=quantity * resolved_reference_price,
-        reduce_only=True,
-        expires_at=now + timedelta(seconds=60),
-        created_at=now,
-        reason=f"exit_recovery_{order_type.lower()}_attempt_{attempt}",
-        features=features,
-    )
-
-
-def _resize_reduce_only_candidate(
-    candidate: OrderIntentCandidate,
-    quantity: Decimal,
-) -> OrderIntentCandidate:
-    """Keep fallback intent metadata aligned with its final quantity."""
-
-    if not candidate.reduce_only:
-        raise ValueError("only reduce-only candidates may be resized here")
-    if quantity <= 0:
-        raise ValueError("reduce-only candidate quantity must be positive")
-    features = dict(candidate.features)
-    features["quantity"] = str(quantity)
-    desired_notional = candidate.desired_notional
-    raw_reference_price = features.get("reference_price")
-    if desired_notional is not None and isinstance(raw_reference_price, str):
-        try:
-            reference_price = Decimal(raw_reference_price)
-        except ArithmeticError:
-            reference_price = None
-        if reference_price is not None and reference_price > 0:
-            desired_notional = quantity * reference_price
-    return replace(
-        candidate,
-        desired_notional=desired_notional,
-        features=features,
-    )
-
-
-def _exit_strategy_side(plan: OrderExecutionPlan) -> StrategySide:
-    if plan.position_side.value == "LONG":
-        return StrategySide.LONG
-    if plan.position_side.value == "SHORT":
-        return StrategySide.SHORT
-    if plan.side == "SELL":
-        return StrategySide.LONG
-    if plan.side == "BUY":
-        return StrategySide.SHORT
-    raise ValueError(f"unsupported exit side: {plan.side}")
-
-
-def _planned_entry_execution_context(
-    candidate: OrderIntentCandidate,
-    *,
-    state: MarketState15s,
-    execution_now: datetime,
-    entry_order_type: EntryType,
-    limit_ttl_seconds: int,
-) -> dict[str, object]:
-    prepared = _prepare_entry_candidate_for_observation(
-        candidate,
-        state=state,
-        execution_now=execution_now,
-        entry_order_type=entry_order_type,
-        limit_ttl_seconds=limit_ttl_seconds,
-    )
-    if prepared.entry_type is not EntryType.LIMIT:
-        price_source = None
-    else:
-        _, price_source = _entry_limit_price(candidate, state=state)
-    return {
-        "original_entry_type": _enum_text(candidate.entry_type),
-        "original_limit_price": candidate.limit_price,
-        "effective_entry_type": _enum_text(prepared.entry_type),
-        "effective_limit_price": prepared.limit_price,
-        "effective_limit_price_source": price_source,
-        "effective_expires_at": prepared.expires_at,
-        "desired_notional": candidate.desired_notional,
-    }
-
-
-def _entry_limit_price(
-    candidate: OrderIntentCandidate,
-    *,
-    state: MarketState15s,
-) -> tuple[Decimal | None, str | None]:
-    """Return the live entry limit and the price source used to derive it.
-
-    Production live entries are long-only, so the executable quote is the
-    current ask.  When both the ask and the state close are available, use the
-    lower of the two to keep a breakout signal from turning into an overly
-    aggressive limit.  Explicit strategy limits retain precedence.
-    """
-
-    if candidate.limit_price is not None:
-        return candidate.limit_price, "candidate.limit_price"
-
-    if (
-        _enum_text(candidate.side) == "long"
-        and state.last_ask_price is not None
-        and state.close_price is not None
-    ):
-        return (
-            min(state.last_ask_price, state.close_price),
-            "min(state.last_ask_price,state.close_price)",
-        )
-    if _enum_text(candidate.side) == "long" and state.last_ask_price is not None:
-        return state.last_ask_price, "state.last_ask_price"
-    if state.close_price is not None:
-        return state.close_price, "state.close_price"
-    if state.mark_price is not None:
-        return state.mark_price, "state.mark_price"
-    if state.midpoint is not None:
-        return state.midpoint, "state.midpoint"
-    return None, None
-
-
-def _prepare_entry_candidate_for_observation(
-    candidate: OrderIntentCandidate,
-    *,
-    state: MarketState15s,
-    execution_now: datetime,
-    entry_order_type: EntryType,
-    limit_ttl_seconds: int,
-) -> OrderIntentCandidate:
-    if candidate.reduce_only or entry_order_type is EntryType.MARKET:
-        return candidate
-    signal_price, _ = _entry_limit_price(candidate, state=state)
-    return replace(
-        candidate,
-        entry_type=EntryType.LIMIT,
-        limit_price=signal_price,
-        expires_at=execution_now + timedelta(seconds=limit_ttl_seconds),
-    )
-
 
 def _strategy_max_gap_seconds(strategy: LiveRuntimeStrategy) -> int | None:
     required_data = getattr(strategy, "required_data", None)

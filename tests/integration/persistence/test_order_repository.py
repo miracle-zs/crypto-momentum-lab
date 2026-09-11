@@ -32,6 +32,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ExecutionReconciliationEventRow,
     ExitEpisodeReservationRow,
     LiveExposureClaimRow,
+    LiveSessionTransitionRow,
     OrderIntentClaimRow,
     OrderIntentExecutionRow,
     TradingLeaseRow,
@@ -62,6 +63,7 @@ async def order_repository(
                 LiveExposureClaimRow,
                 OrderIntentClaimRow,
                 OrderIntentExecutionRow,
+                LiveSessionTransitionRow,
                 TradingLeaseRow,
                 ExecutionCommandRow,
                 ExecutionReconciliationEventRow,
@@ -304,6 +306,7 @@ async def test_live_entry_exposure_claim_is_atomic_and_released_on_terminal(
         "strategy_name": "compression_breakout",
         "required_lease_owner": "worker-1",
         "required_lease_id": "lease-test",
+        "required_code_generation": "test-generation",
         "max_open_positions": 5,
         "max_daily_loss": Decimal("1000"),
         "max_gross_exposure": Decimal("150"),
@@ -354,6 +357,67 @@ async def test_live_entry_exposure_claim_is_atomic_and_released_on_terminal(
     assert claim.active is True
 
 
+async def test_live_submission_rejects_stale_code_generation(
+    order_repository,
+) -> None:
+    repository, factory = order_repository
+    await _save_live_lease(factory)
+
+    with pytest.raises(
+        OrderPreSubmissionError,
+        match="version fencing",
+    ):
+        await repository.prepare_submission(
+            intent=_intent(),
+            evaluation=_evaluation(_intent(), "evaluation-stale-generation"),
+            plan=_plan(),
+            prepared_at=NOW + timedelta(seconds=1),
+            environment="live",
+            account_label="primary",
+            strategy_name="compression_breakout",
+            required_lease_owner="worker-1",
+            required_lease_id="lease-test",
+            required_code_generation="stale-generation",
+        )
+
+
+async def test_live_submission_rejects_draining_session(
+    order_repository,
+) -> None:
+    repository, factory = order_repository
+    await _save_live_lease(factory)
+    async with factory() as session:
+        async with session.begin():
+            session.add(
+                LiveSessionTransitionRow(
+                    transition_id="transition-draining-session",
+                    session_id="live-session-fence",
+                    state="draining",
+                    occurred_at=NOW,
+                    operator="operator",
+                    strategy_config_hash="strategy-hash",
+                    risk_config_hash="risk-hash",
+                    reason="operator_disabled_new_entries",
+                    details={},
+                )
+            )
+
+    with pytest.raises(OrderPreSubmissionError, match="session entries"):
+        await repository.prepare_submission(
+            intent=_intent(),
+            evaluation=_evaluation(_intent(), "evaluation-draining-session"),
+            plan=_plan(),
+            prepared_at=NOW + timedelta(seconds=1),
+            environment="live",
+            account_label="primary",
+            strategy_name="compression_breakout",
+            required_lease_owner="worker-1",
+            required_lease_id="lease-test",
+            required_code_generation="test-generation",
+            required_session_id="live-session-fence",
+        )
+
+
 async def test_live_exit_episode_reservation_survives_rolling_workers(
     order_repository,
 ) -> None:
@@ -389,6 +453,7 @@ async def test_live_exit_episode_reservation_survives_rolling_workers(
         "strategy_name": "compression_breakout",
         "required_lease_owner": "worker-1",
         "required_lease_id": "lease-test",
+        "required_code_generation": "test-generation",
     }
     results = await asyncio.gather(
         repository.prepare_submission(
@@ -653,6 +718,7 @@ async def _save_live_lease(factory: async_sessionmaker[AsyncSession]) -> None:
                     account_label="primary",
                     strategy_name="compression_breakout",
                     owner="worker-1",
+                    code_generation="test-generation",
                     state="active",
                     acquired_at=NOW,
                     expires_at=NOW + timedelta(hours=1),

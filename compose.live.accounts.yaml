@@ -18,6 +18,7 @@ x-live-account-app: &live-account-app
     CML_OBSERVABILITY_DATABASE_URL: ${CML_OBSERVABILITY_DATABASE_URL:-}
     CML_LOCAL_HEALTH_DIR: /run/cml/health
     CML_CODE_COMMIT: ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
+    CML_RISK_CONTROL_HUB_TOKEN: ${CML_RISK_CONTROL_HUB_TOKEN:-}
   restart: unless-stopped
   stop_grace_period: 60s
   logging: *default-logging
@@ -61,6 +62,10 @@ x-execution-account-command: &execution-account-command
   - 0.0.0.0
   - --account-event-hub-port
   - "8767"
+  - --risk-control-hub-host
+  - 0.0.0.0
+  - --risk-control-hub-port
+  - "8769"
 
 services:
   execution-account-live-account-2:
@@ -159,6 +164,7 @@ services:
       CML_MARKET_STATE_HUB_URL: ws://market-data:8766
       CML_MARKET_QUOTE_HUB_URL: ws://market-data:8768
       CML_ACCOUNT_EVENT_HUB_URL: ws://execution-account-live-account-2:8767
+      CML_RISK_CONTROL_HUB_URL: ws://execution-account-live-account-2:8769
     entrypoint: ["cml-live-rollout"]
     command:
       - run
@@ -166,6 +172,8 @@ services:
       - account-2
       - --strategy
       - ${CML_LIVE_STRATEGY_ACCOUNT_2:-orderflow_impulse}
+      - --runtime-manifest
+      - /app/deploy/live-runtime.yaml
       - --market-environment
       - research
       - --market-state-source
@@ -176,6 +184,8 @@ services:
       - ws://market-data:8768
       - --account-event-hub-url
       - ws://execution-account-live-account-2:8767
+      - --risk-control-hub-url
+      - ws://execution-account-live-account-2:8769
       - --session-id
       - ${CML_LIVE_SESSION_ID_ACCOUNT_2:-live-account-2-v1}
       - --operator
@@ -255,6 +265,7 @@ services:
       CML_MARKET_STATE_HUB_URL: ws://market-data:8766
       CML_MARKET_QUOTE_HUB_URL: ws://market-data:8768
       CML_ACCOUNT_EVENT_HUB_URL: ws://execution-account-live-account-3:8767
+      CML_RISK_CONTROL_HUB_URL: ws://execution-account-live-account-3:8769
     entrypoint: ["cml-live-rollout"]
     command:
       - run
@@ -262,6 +273,8 @@ services:
       - account-3
       - --strategy
       - ${CML_LIVE_STRATEGY_ACCOUNT_3:-orderflow_impulse}
+      - --runtime-manifest
+      - /app/deploy/live-runtime.yaml
       - --market-environment
       - research
       - --market-state-source
@@ -272,6 +285,8 @@ services:
       - ws://market-data:8768
       - --account-event-hub-url
       - ws://execution-account-live-account-3:8767
+      - --risk-control-hub-url
+      - ws://execution-account-live-account-3:8769
       - --session-id
       - ${CML_LIVE_SESSION_ID_ACCOUNT_3:-live-account-3-v1}
       - --operator
@@ -351,6 +366,7 @@ services:
       CML_MARKET_STATE_HUB_URL: ws://market-data:8766
       CML_MARKET_QUOTE_HUB_URL: ws://market-data:8768
       CML_ACCOUNT_EVENT_HUB_URL: ws://execution-account-live-account-4:8767
+      CML_RISK_CONTROL_HUB_URL: ws://execution-account-live-account-4:8769
     entrypoint: ["cml-live-rollout"]
     command:
       - run
@@ -358,6 +374,8 @@ services:
       - account-4
       - --strategy
       - ${CML_LIVE_STRATEGY_ACCOUNT_4:-orderflow_impulse}
+      - --runtime-manifest
+      - /app/deploy/live-runtime.yaml
       - --market-environment
       - research
       - --market-state-source
@@ -368,6 +386,8 @@ services:
       - ws://market-data:8768
       - --account-event-hub-url
       - ws://execution-account-live-account-4:8767
+      - --risk-control-hub-url
+      - ws://execution-account-live-account-4:8769
       - --session-id
       - ${CML_LIVE_SESSION_ID_ACCOUNT_4:-live-account-4-v1}
       - --operator

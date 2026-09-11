@@ -67,6 +67,10 @@ x-execution-account-command: &execution-account-command
   - ${CML_ACCOUNT_EVENT_HUB_HOST:-0.0.0.0}
   - --account-event-hub-port
   - ${CML_ACCOUNT_EVENT_HUB_PORT:-8767}
+  - --risk-control-hub-host
+  - ${CML_RISK_CONTROL_HUB_HOST:-0.0.0.0}
+  - --risk-control-hub-port
+  - ${CML_RISK_CONTROL_HUB_PORT:-8769}
 
 x-paper: &paper
   <<: *app
@@ -480,6 +484,7 @@ services:
       CML_ACCOUNT_LABEL: ${CML_LIVE_ACCOUNT_LABEL:-primary}
       CML_ACCOUNT_EVENT_HUB_HOST: ${CML_ACCOUNT_EVENT_HUB_HOST:-0.0.0.0}
       CML_ACCOUNT_EVENT_HUB_PORT: ${CML_ACCOUNT_EVENT_HUB_PORT:-8767}
+      CML_RISK_CONTROL_HUB_TOKEN: ${CML_RISK_CONTROL_HUB_TOKEN:-}
     entrypoint: ["cml-execution-account"]
     command: *execution-account-command
     depends_on:
@@ -521,6 +526,8 @@ services:
       CML_MARKET_STATE_HUB_URL: ${CML_MARKET_STATE_HUB_URL:-ws://market-data:8766}
       CML_MARKET_QUOTE_HUB_URL: ${CML_MARKET_QUOTE_HUB_URL:-ws://market-data:8768}
       CML_ACCOUNT_EVENT_HUB_URL: ${CML_ACCOUNT_EVENT_HUB_URL:-ws://execution-account-live:8767}
+      CML_RISK_CONTROL_HUB_URL: ${CML_RISK_CONTROL_HUB_URL:-ws://execution-account-live:8769}
+      CML_RISK_CONTROL_HUB_TOKEN: ${CML_RISK_CONTROL_HUB_TOKEN:-}
     entrypoint: ["cml-live-rollout"]
     command:
       - run
@@ -528,6 +535,8 @@ services:
       - ${CML_LIVE_ACCOUNT_LABEL:-primary}
       - --strategy
       - ${CML_LIVE_STRATEGY:-orderflow_impulse}
+      - --runtime-manifest
+      - /app/deploy/live-runtime.yaml
       - --market-environment
       - research
       - --market-state-source
@@ -538,6 +547,8 @@ services:
       - ${CML_MARKET_QUOTE_HUB_URL:-ws://market-data:8768}
       - --account-event-hub-url
       - ${CML_ACCOUNT_EVENT_HUB_URL:-ws://execution-account-live:8767}
+      - --risk-control-hub-url
+      - ${CML_RISK_CONTROL_HUB_URL:-ws://execution-account-live:8769}
       - --session-id
       - ${CML_LIVE_SESSION_ID:-live-primary-v1}
       - --operator

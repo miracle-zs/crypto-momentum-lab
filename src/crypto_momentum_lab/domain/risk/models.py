@@ -49,6 +49,7 @@ class TradingLease:
     account_label: str
     strategy_name: str
     owner: str
+    code_generation: str
     state: TradingLeaseState
     acquired_at: datetime
     expires_at: datetime
@@ -58,6 +59,7 @@ class TradingLease:
         _require_common(self.environment, self.account_label)
         _require_non_empty(self.strategy_name, "strategy_name")
         _require_non_empty(self.owner, "owner")
+        _require_non_empty(self.code_generation, "code_generation")
         if not isinstance(self.state, TradingLeaseState):
             raise ValueError("state must be a TradingLeaseState")
         _require_aware(self.acquired_at, "acquired_at")

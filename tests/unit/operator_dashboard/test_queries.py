@@ -14,6 +14,7 @@ from crypto_momentum_lab.operator_dashboard.queries import (
     _build_common_equity_curve,
     _checkpoint_times_statement,
     _common_equity_interval_seconds,
+    _decision_slo_response,
     _downsample_equity_snapshots,
     _EquityObservation,
     _is_dashboard_paper_run,
@@ -326,7 +327,150 @@ def test_dashboard_uses_latest_checkpoint_without_append_only_events() -> None:
     ).read_text(encoding="utf-8")
 
     assert "StrategyRuntimeCheckpointRow" in source
-    assert "StrategyRuntimeEventRow" not in source
+    assert "StrategyRuntimeEventRow" in source
+
+
+def test_decision_slo_response_aggregates_latency_health_and_reasons() -> None:
+    start = datetime(2026, 9, 11, tzinfo=UTC)
+    rows = [
+        SimpleNamespace(
+            event_type="candidate_accepted",
+            occurred_at=start + timedelta(milliseconds=300),
+            details={
+                "decision_slo_latency_ms": {
+                    "market_state_received->context_ready": 100.0,
+                    "context_ready->candidate_accepted": 200.0,
+                }
+            },
+        ),
+        SimpleNamespace(
+            event_type="intent_saved",
+            occurred_at=start + timedelta(milliseconds=500),
+            details={
+                "decision_slo_latency_ms": {
+                    "candidate_accepted->intent_saved": 200.0,
+                }
+            },
+        ),
+        SimpleNamespace(
+            event_type="exchange_request_started",
+            occurred_at=start + timedelta(milliseconds=700),
+            details={
+                "decision_slo_latency_ms": {
+                    "intent_saved->exchange_request_started": 200.0,
+                }
+            },
+        ),
+        SimpleNamespace(
+            event_type="terminal_reason",
+            occurred_at=start + timedelta(seconds=1),
+            details={
+                "lane": "entry",
+                "trigger_source": "market",
+                "reason": "risk_block",
+            },
+        ),
+        SimpleNamespace(
+            event_type="consumer_health",
+            occurred_at=start + timedelta(seconds=2),
+            details={
+                "consumer": "market_state_hub",
+                "available": False,
+                "recovery": False,
+                "lag": True,
+                "reason": "market_state_consumer_lagged",
+            },
+        ),
+        SimpleNamespace(
+            event_type="consumer_health",
+            occurred_at=start + timedelta(seconds=3),
+            details={
+                "consumer": "market_state_hub",
+                "available": True,
+                "recovery": True,
+                "lag": False,
+                "reason": "reconnected",
+            },
+        ),
+    ]
+
+    response = _decision_slo_response(
+        rows,
+        window="24h",
+        window_start=start,
+        window_end=start + timedelta(days=1),
+        truncated=False,
+    )
+
+    assert response.status is OperationalStatus.READY
+    assert response.persisted_event_count == len(rows)
+    assert response.phase_latency[
+        "market_state_received->context_ready"
+    ].p95_ms == 100.0
+    assert response.phase_latency[
+        "intent_saved->exchange_request_started"
+    ].max_ms == 200.0
+    assert response.terminal_reasons == {
+        "entry": {"market": {"risk_block": 1}}
+    }
+    assert response.consumers[0].consumer == "market_state_hub"
+    assert response.consumers[0].recovery_count == 1
+    assert response.consumers[0].unavailable_event_count == 1
+    assert response.consumers[0].lag_event_count == 1
+    assert response.consumers[0].last_available is True
+
+
+async def test_decision_slo_query_uses_bounded_historical_window() -> None:
+    window_end = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
+    event = SimpleNamespace(
+        event_type="consumer_health",
+        occurred_at=window_end,
+        details={
+            "consumer": "account_event_hub",
+            "available": True,
+            "recovery": False,
+            "lag": False,
+        },
+    )
+
+    class Session:
+        statement = None
+
+        async def scalars(self, statement):
+            self.statement = statement
+            return SimpleNamespace(all=lambda: (event,))
+
+    class SessionContext:
+        def __init__(self, session: Session) -> None:
+            self.session = session
+
+        async def __aenter__(self) -> Session:
+            return self.session
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+    class SessionFactory:
+        def __init__(self, session: Session) -> None:
+            self.session = session
+
+        def __call__(self) -> SessionContext:
+            return SessionContext(self.session)
+
+    session = Session()
+    queries = DashboardQueries(
+        SessionFactory(session),
+        clock=lambda: window_end,
+    )
+
+    response = await queries.decision_slo("6h")
+
+    assert response.window == "6h"
+    assert response.window_start == window_end - timedelta(hours=6)
+    assert response.window_end == window_end
+    assert response.persisted_event_count == 1
+    assert session.statement is not None
+    assert session.statement._limit_clause.value == 50_001
 
 
 def test_latest_checkpoint_query_selects_only_timestamp() -> None:

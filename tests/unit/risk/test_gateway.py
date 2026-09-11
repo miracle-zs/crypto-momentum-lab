@@ -149,6 +149,7 @@ def _lease() -> TradingLease:
         account_label="primary",
         strategy_name="compression_breakout",
         owner="worker-1",
+        code_generation="test-generation",
         state=TradingLeaseState.ACTIVE,
         acquired_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
         expires_at=datetime(2026, 7, 4, 0, 5, tzinfo=UTC),

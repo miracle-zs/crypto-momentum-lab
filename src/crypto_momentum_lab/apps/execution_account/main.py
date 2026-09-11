@@ -37,6 +37,10 @@ from crypto_momentum_lab.execution_account.retention import (
     AccountSnapshotRetentionConfig,
     run_account_snapshot_retention,
 )
+from crypto_momentum_lab.execution_account.risk_control_hub import (
+    RiskControlHub,
+    RiskControlHubConfig,
+)
 from crypto_momentum_lab.execution_account.sync import (
     ExecutionAccountSyncConfig,
     ExecutionAccountSyncResult,
@@ -210,6 +214,14 @@ def sync_command(
         int,
         typer.Option("--account-event-hub-port", min=0, max=65535),
     ] = 8767,
+    risk_control_hub_host: Annotated[
+        str,
+        typer.Option("--risk-control-hub-host"),
+    ] = "0.0.0.0",
+    risk_control_hub_port: Annotated[
+        int,
+        typer.Option("--risk-control-hub-port", min=0, max=65535),
+    ] = 8769,
     rest_reconciliation_interval_seconds: Annotated[
         float,
         typer.Option("--rest-reconciliation-interval-seconds", min=30),
@@ -310,6 +322,8 @@ def sync_command(
             websocket_url=websocket_url,
             account_event_hub_host=account_event_hub_host,
             account_event_hub_port=account_event_hub_port,
+            risk_control_hub_host=risk_control_hub_host,
+            risk_control_hub_port=risk_control_hub_port,
             rest_reconciliation_interval_seconds=(
                 rest_reconciliation_interval_seconds
             ),
@@ -427,6 +441,8 @@ async def sync_continuously(
     snapshot_retention_max_runtime_seconds: float,
     request_interval_seconds: float = 0.2,
     shared_request_pacer_path: str | None = None,
+    risk_control_hub_host: str = "0.0.0.0",
+    risk_control_hub_port: int = 8769,
 ) -> None:
     health = LocalHealthWriter.from_environment()
     health_callback = (
@@ -447,8 +463,16 @@ async def sync_continuously(
         ),
         on_position_expectation=expected_position_registry.register,
     )
-    await account_event_hub.start()
+    risk_control_hub = RiskControlHub(
+        RiskControlHubConfig(
+            host=risk_control_hub_host,
+            port=risk_control_hub_port,
+            publish_token=os.environ.get("CML_RISK_CONTROL_HUB_TOKEN") or None,
+        )
+    )
     try:
+        await account_event_hub.start()
+        await risk_control_hub.start()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         repository = PostgresAccountRepository(factory)
         historical_fill_symbols = await repository.load_historical_fill_symbols(
@@ -601,6 +625,7 @@ async def sync_continuously(
     finally:
         if health is not None:
             health.stopped()
+        await risk_control_hub.stop()
         await account_event_hub.stop()
         await retention_engine.dispose()
         await engine.dispose()

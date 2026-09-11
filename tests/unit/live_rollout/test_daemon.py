@@ -38,12 +38,14 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     ClosedCandle15mEvent,
 )
+from crypto_momentum_lab.live_rollout.context import LiveEntryFilterContext
 from crypto_momentum_lab.live_rollout.daemon import (
     LiveDaemonConfig,
     LiveDaemonRuntimeContext,
-    LiveEntryFilterContext,
     LiveStrategyDaemon,
     _is_transient_live_gate,
+)
+from crypto_momentum_lab.live_rollout.entry_lane import (
     _live_entry_candidate_passes,
 )
 from crypto_momentum_lab.live_rollout.exits import (
@@ -516,7 +518,7 @@ async def test_terminal_entry_event_releases_in_memory_reservation() -> None:
 
     await daemon.run(_states())
     plan = exchange.plans[0]
-    assert daemon._pending_entry_plans
+    assert daemon._pending_entries.snapshot()
 
     daemon.observe_entry_order_event(
         plan,
@@ -530,7 +532,7 @@ async def test_terminal_entry_event_releases_in_memory_reservation() -> None:
         ),
     )
 
-    assert daemon._pending_entry_plans == {}
+    assert daemon._pending_entries.snapshot() == ()
 
 
 async def test_live_daemon_allows_entry_with_confirmed_resting_order() -> None:
@@ -921,7 +923,7 @@ async def test_unknown_reduce_only_limit_exit_reuses_limit_recovery_type() -> No
         hedge_mode=True,
     )
 
-    approved, submitted, failure = await daemon._process_exit_requests(
+    approved, submitted, failure = await daemon._exit_processor.process_requests(
         (
             LiveExitOrderRequest(
                 candidate=candidate,
@@ -956,7 +958,7 @@ async def test_unknown_reduce_only_exit_does_not_duplicate_active_exit() -> None
         hedge_mode=True,
     )
 
-    approved, submitted, failure = await daemon._process_exit_requests(
+    approved, submitted, failure = await daemon._exit_processor.process_requests(
         (
             LiveExitOrderRequest(
                 candidate=candidate,
@@ -1005,7 +1007,7 @@ async def test_unknown_grace_limit_cancel_falls_back_to_market() -> None:
         hedge_mode=True,
     )
 
-    approved, submitted, failure = await daemon._process_exit_requests(
+    approved, submitted, failure = await daemon._exit_processor.process_requests(
         (
             LiveExitCancellationRequest(
                 cancel_plan=cancel_plan,
@@ -1102,7 +1104,7 @@ async def test_grace_timeout_resizes_intent_after_cancel_fill() -> None:
         hedge_mode=True,
     )
 
-    approved, submitted, failure = await daemon._process_exit_requests(
+    approved, submitted, failure = await daemon._exit_processor.process_requests(
         (
             LiveExitCancellationRequest(
                 cancel_plan=cancel_plan,
@@ -1822,7 +1824,7 @@ async def test_scheduled_risk_window_late_start_after_reopen_is_noop(
         cancel_unfilled_entry_orders=cancel_entries,
         fetch_exchange_positions=fetch_positions,
     )
-    daemon._latest_market_states["BTCUSDT"] = _state()
+    daemon._scheduled_controller.observe_state(_state())
 
     gate_calls: list[tuple[bool, str]] = []
     original_set_gate = daemon.set_scheduled_entry_blocked
@@ -1914,7 +1916,7 @@ async def test_scheduled_risk_window_flattens_verifies_and_reopens_entries(
         cancel_unfilled_entry_orders=cancel_entries,
         fetch_exchange_positions=fetch_positions,
     )
-    daemon._latest_market_states["BTCUSDT"] = _state()
+    daemon._scheduled_controller.observe_state(_state())
 
     failure = await daemon.process_scheduled_risk_window(now=scheduled_now)
 

@@ -22,7 +22,7 @@ from crypto_momentum_lab.execution_account.orders.quantization import (
     SymbolTradingRules,
 )
 from crypto_momentum_lab.execution_account.sync import AccountSnapshot
-from crypto_momentum_lab.live_rollout.daemon import LiveDaemonRuntimeContext
+from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
 from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,
     _classify_live_positions,

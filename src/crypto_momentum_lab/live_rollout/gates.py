@@ -98,6 +98,8 @@ def _check_lease(context: LiveGateContext, reasons: list[str]) -> None:
         reasons.append("lease_account_mismatch")
     if lease.strategy_name != context.strategy_name:
         reasons.append("lease_strategy_mismatch")
+    if lease.code_generation != context.git_commit_hash:
+        reasons.append("lease_code_generation_mismatch")
 
 
 def _check_approval(context: LiveGateContext, reasons: list[str]) -> None:

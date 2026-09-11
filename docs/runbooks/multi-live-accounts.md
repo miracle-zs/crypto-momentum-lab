@@ -52,20 +52,45 @@ hand:
 ```bash
 for account in 2 3 4; do
   $COMPOSE run --rm --no-deps live-strategy-account-$account \
-    strategy-config-hash --strategy orderflow_impulse
+    strategy-config-hash \
+    --account-label account-$account \
+    --runtime-manifest /app/deploy/live-runtime.yaml
 done
 ```
 
-Store the returned values as
+The command derives the hash from the account's `strategy_config` in the
+manifest, while the account-specific environment still supplies the manifest's
+explicit `${CML_LIVE_*}` references. Store the returned values as
 `CML_LIVE_STRATEGY_CONFIG_HASH_ACCOUNT_2/3/4`. Then, one account at a time:
 
-1. run `prepare` with that account's risk limits;
-2. record an approval with the account hash, risk hash, exact image commit,
+1. validate the desired runtime identity against the checked-in manifest:
+
+   ```bash
+   $COMPOSE run --rm --no-deps live-strategy-account-2 \
+     preflight --account-label account-2 \
+     --runtime-manifest /app/deploy/live-runtime.yaml --strict
+   ```
+
+   Use the corresponding service and account label for primary, account-3, or
+   account-4. This check compares the selected strategy, image commit,
+   migration revision, lease owner, and computed strategy hash before touching
+   the live session.
+2. run `prepare` with that account's risk limits and the same
+   `--runtime-manifest /app/deploy/live-runtime.yaml` option;
+3. record an approval with the account hash, risk hash, exact image commit,
    migration revision, and that account's notional/position/loss caps;
-3. run `preflight` and require runtime/configured/approved hashes to match;
-4. start only that account's `execution-account` and `live-strategy` pair;
-5. observe health, reconciliation, lease renewal, submit/cancel audit pairs,
+4. run the normal `preflight` checks and require runtime/configured/approved
+   hashes to match;
+5. start only that account's `execution-account` and `live-strategy` pair;
+6. observe health, reconciliation, lease renewal, submit/cancel audit pairs,
    and the absence of unexpected entries before moving to the next account.
+
+The long-running `live-strategy` commands include
+`--runtime-manifest /app/deploy/live-runtime.yaml`. At startup, `run` loads the
+account's typed strategy inputs from that file, derives the strategy hash, and
+uses the manifest's session, lease owner, image commit, and migration revision.
+An explicitly supplied conflicting value stops the worker before it reaches the
+database or exchange.
 
 For example, the first account should be started with explicit service names:
 

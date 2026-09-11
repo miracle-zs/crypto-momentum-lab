@@ -103,11 +103,22 @@ ws://execution-account-live:8767`.
 The old database consumer remains available only through the explicit
 `--market-state-source postgres` option for recovery and diagnostics.
 
-## Remaining hardening
+## Risk-control push seam
 
-The next optional seam is a typed risk-event stream for operator halts and
-emergency reduce-only controls. It can reuse the account-event transport
-pattern without putting PostgreSQL back on the normal decision path.
+The execution-account process also exposes a low-volume typed RiskControlHub
+on `execution-account-live:8769`. Operators persist the transition or halt in
+PostgreSQL first, then publish a notification with a `command_id`; the live
+worker uses the notification to close its entry gate immediately and reloads
+PostgreSQL before it can reopen entries. A missing connection, sequence gap,
+stream-epoch change, or queue overflow is fail-closed for entries while
+reduce-only exit and reconciliation lanes continue.
+
+The stream carries account-level sequence continuity even when a consumer is
+scoped to one strategy/session. Consumers filter after applying the sequence,
+so another session's command cannot create a false gap. An optional shared
+`CML_RISK_CONTROL_HUB_TOKEN` authenticates operator publishes; the token is
+never included in logs or event details. The dashboard remains read-only; the
+CLI `disable-new-entries` command is the audited durable write path.
 
 ## Live execution latency path
 

@@ -19,6 +19,42 @@ class ServiceStatusResponse(DashboardSchema):
     details: dict[str, JsonValue] = Field(default_factory=dict)
 
 
+class DecisionSLOLatencyResponse(DashboardSchema):
+    sample_count: int
+    p50_ms: float
+    p95_ms: float
+    max_ms: float
+
+
+class DecisionSLOConsumerResponse(DashboardSchema):
+    consumer: str
+    observed_event_count: int
+    recovery_count: int
+    unavailable_event_count: int
+    lag_event_count: int
+    last_available: bool | None = None
+    last_recovery_reason: str | None = None
+    last_observed_at: datetime | None = None
+
+
+class DecisionSLOResponse(DashboardSchema):
+    """Bounded historical decision-path SLO aggregates."""
+
+    status: OperationalStatus
+    window: Literal["1h", "6h", "24h", "7d"]
+    window_start: datetime
+    window_end: datetime
+    persisted_event_count: int
+    truncated: bool = False
+    phase_latency: dict[str, DecisionSLOLatencyResponse] = Field(
+        default_factory=dict
+    )
+    terminal_reasons: dict[str, dict[str, dict[str, int]]] = Field(
+        default_factory=dict
+    )
+    consumers: list[DecisionSLOConsumerResponse] = Field(default_factory=list)
+
+
 class LiveAccountSummaryResponse(DashboardSchema):
     """Operational state for one configured live account."""
 

@@ -24,6 +24,22 @@ monitor supports both the `SCT...` Turbo key and the `sctp...` Server酱³ key;
 the key is never written to Git or logs. A configured Server酱 key takes
 precedence over `CML_ALERT_WEBHOOK_URL`.
 
+For host-loss detection, configure an HTTPS endpoint outside the trading host:
+
+```dotenv
+CML_OPS_EXTERNAL_HEARTBEAT_URL=https://monitor.example.net/cml/heartbeat
+CML_OPS_EXTERNAL_HEARTBEAT_TOKEN=<dedicated-heartbeat-token>
+CML_OPS_EXTERNAL_HEARTBEAT_TIMEOUT_SECONDS=5
+```
+
+The monitor sends one authenticated `POST` per check with a short JSON status
+payload and a `Bearer` token in the header. The token is never included in the
+JSON payload or logs. The external checker should return a 2xx response, verify
+the token, alert after at least three missed intervals, and have no credentials
+or write access to PostgreSQL, Docker, Binance, or the operator API. A warning
+or critical status in an otherwise delivered heartbeat should also alert; the
+heartbeat is a liveness signal, not a replacement for local diagnosis.
+
 Install or refresh it after pulling a release:
 
 ```bash
@@ -54,5 +70,5 @@ RSS trend samples. It never changes Docker or PostgreSQL state.
 This monitor runs on the trading server itself. It can notify when the
 `live-strategy` container is missing, unhealthy, OOM-killed, or no longer
 producing a fresh live checkpoint. If the entire server loses power or network
-connectivity, a second monitor outside this host is required to send that
-notification.
+connectivity, the configured external heartbeat checker is responsible for
+sending the missed-heartbeat notification.

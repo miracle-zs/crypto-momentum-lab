@@ -52,6 +52,8 @@ Status meanings:
 
 The dashboard browser never calls Binance directly and never receives API keys,
 secrets, or credential environment names. It reads only the local FastAPI API,
-which reads PostgreSQL. Write actions remain disabled; every future halt, drain,
-cancel, flatten, or lease-release action requires a backend command record and
-durable audit event before a route may be enabled.
+which reads PostgreSQL. Dashboard write actions remain disabled. The live CLI
+`disable-new-entries` path now writes the durable transition first and then
+pushes a low-volume RiskControlHub notification; future halt, cancel, flatten,
+or lease-release actions require the same backend command record and durable
+audit event before a route may be enabled.

@@ -1,6 +1,10 @@
 import argparse
+import json
 import urllib.parse
+import urllib.request
 from datetime import UTC, datetime
+
+import pytest
 
 from deploy.ops.cml_ops_monitor import (
     Alert,
@@ -8,13 +12,72 @@ from deploy.ops.cml_ops_monitor import (
     LogSignals,
     MonitorConfig,
     OpsMonitor,
+    _deliver_external_heartbeat,
     _serverchan_endpoint,
     _serverchan_form,
     build_config,
+    build_deadman_heartbeat_payload,
     evaluate_container,
     evaluate_database_state,
     evaluate_log_signals,
 )
+
+
+def test_deadman_heartbeat_payload_is_low_sensitivity() -> None:
+    payload = build_deadman_heartbeat_payload(
+        now=datetime(2026, 9, 11, 1, 2, tzinfo=UTC),
+        alerts=(
+            Alert("container_unhealthy", "critical", "unhealthy"),
+            Alert("database_io_timing_disabled", "warning", "warning"),
+        ),
+    )
+
+    assert payload["event"] == "ops_heartbeat"
+    assert payload["status"] == "critical"
+    assert payload["critical_alerts"] == ("container_unhealthy",)
+    assert payload["warning_alerts"] == ("database_io_timing_disabled",)
+    assert "secret-token" not in json.dumps(payload)
+
+
+def test_external_heartbeat_uses_bearer_header_not_json(monkeypatch) -> None:
+    captured = {}
+
+    class Response:
+        status = 204
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    def fake_urlopen(request, *, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _deliver_external_heartbeat(
+        "https://monitor.example.net/cml/heartbeat",
+        "secret-token",
+        {"event": "ops_heartbeat", "status": "healthy"},
+        timeout_seconds=3,
+    )
+
+    request = captured["request"]
+    assert request.get_header("Authorization") == "Bearer secret-token"
+    assert b"secret-token" not in request.data
+    assert captured["timeout"] == 3
+
+
+def test_ops_monitor_requires_authenticated_external_heartbeat(tmp_path) -> None:
+    with pytest.raises(ValueError, match="configured together"):
+        OpsMonitor(
+            MonitorConfig(
+                state_path=tmp_path / "state.json",
+                external_heartbeat_url="https://monitor.example.net/cml",
+            )
+        )
 
 
 def test_database_state_alerts_when_live_checkpoint_is_stale() -> None:

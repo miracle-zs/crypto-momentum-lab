@@ -1,0 +1,112 @@
+schema_version: 1
+
+# Desired runtime identity is versioned separately from Compose process
+# wiring.  Secrets never belong in this file; deployment values may be
+# supplied through the explicit environment references below.
+runtime:
+  image_commit: "${CML_CODE_COMMIT:?set CML_CODE_COMMIT}"
+  migration_revision: "${CML_LIVE_MIGRATION_REVISION:-20260822_0018}"
+
+accounts:
+  - label: primary
+    strategy: "${CML_LIVE_STRATEGY:-orderflow_impulse}"
+    session_id: "${CML_LIVE_SESSION_ID:-live-primary-v1}"
+    lease_owner: "${CML_LIVE_LEASE_OWNER:-live-worker}"
+    strategy_config_hash: "${CML_LIVE_STRATEGY_CONFIG_HASH:-unset}"
+    strategy_config:
+      impulse_window_buckets: "${CML_LIVE_IMPULSE_WINDOW_BUCKETS:-4}"
+      confirmation_buckets: "${CML_LIVE_CONFIRMATION_BUCKETS:-1}"
+      min_return_pct: "${CML_LIVE_MIN_RETURN_PCT:-0.005}"
+      min_imbalance: "${CML_LIVE_MIN_IMBALANCE:-0.30}"
+      min_intensity: "${CML_LIVE_MIN_INTENSITY:-1.5}"
+      min_notional_5m_vs_30m: "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M:-1.50}"
+      cooldown_buckets: "${CML_LIVE_COOLDOWN_BUCKETS:-0}"
+      entry_positive_gainer_top_count: "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-10}"
+      require_price_above_ema5: false
+      require_price_above_ema10: false
+      entry_policy_mode: "${CML_LIVE_ENTRY_POLICY_MODE:-enforce}"
+      entry_order_type: limit
+      entry_limit_ttl_seconds: 900
+    profile_ref: compose.server.yaml#services.live-strategy
+    limits_ref: postgres:risk_config/primary
+    services:
+      - execution-account-live
+      - live-strategy
+
+  - label: account-2
+    strategy: "${CML_LIVE_STRATEGY_ACCOUNT_2:-orderflow_impulse}"
+    session_id: "${CML_LIVE_SESSION_ID_ACCOUNT_2:-live-account-2-v1}"
+    lease_owner: "${CML_LIVE_LEASE_OWNER_ACCOUNT_2:-live-worker-account-2}"
+    strategy_config_hash: "${CML_LIVE_STRATEGY_CONFIG_HASH_ACCOUNT_2:-unset}"
+    strategy_config:
+      impulse_window_buckets: "${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_2:-4}"
+      confirmation_buckets: "${CML_LIVE_CONFIRMATION_BUCKETS_ACCOUNT_2:-1}"
+      min_return_pct: "${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_2:-0.005}"
+      min_imbalance: "${CML_LIVE_MIN_IMBALANCE_ACCOUNT_2:-0.30}"
+      min_intensity: "${CML_LIVE_MIN_INTENSITY_ACCOUNT_2:-1.5}"
+      min_notional_5m_vs_30m: "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_2:-1.50}"
+      cooldown_buckets: "${CML_LIVE_COOLDOWN_BUCKETS_ACCOUNT_2:-0}"
+      entry_positive_gainer_top_count: "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_2:-10}"
+      require_price_above_ema5: false
+      require_price_above_ema10: false
+      entry_policy_mode: "${CML_LIVE_ENTRY_POLICY_MODE_ACCOUNT_2:-enforce}"
+      entry_order_type: limit
+      entry_limit_ttl_seconds: 900
+    migration_revision: "${CML_LIVE_MIGRATION_REVISION_ACCOUNT_2:-20260831_0029}"
+    profile_ref: compose.live.accounts.yaml#services.live-strategy-account-2
+    limits_ref: postgres:risk_config/account-2
+    services:
+      - execution-account-live-account-2
+      - live-strategy-account-2
+
+  - label: account-3
+    strategy: "${CML_LIVE_STRATEGY_ACCOUNT_3:-orderflow_impulse}"
+    session_id: "${CML_LIVE_SESSION_ID_ACCOUNT_3:-live-account-3-v1}"
+    lease_owner: "${CML_LIVE_LEASE_OWNER_ACCOUNT_3:-live-worker-account-3}"
+    strategy_config_hash: "${CML_LIVE_STRATEGY_CONFIG_HASH_ACCOUNT_3:-unset}"
+    strategy_config:
+      impulse_window_buckets: "${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_3:-2}"
+      confirmation_buckets: "${CML_LIVE_CONFIRMATION_BUCKETS_ACCOUNT_3:-1}"
+      min_return_pct: "${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_3:-0.005}"
+      min_imbalance: "${CML_LIVE_MIN_IMBALANCE_ACCOUNT_3:-0.30}"
+      min_intensity: "${CML_LIVE_MIN_INTENSITY_ACCOUNT_3:-4.0}"
+      min_notional_5m_vs_30m: "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_3:-1.50}"
+      cooldown_buckets: "${CML_LIVE_COOLDOWN_BUCKETS_ACCOUNT_3:-0}"
+      entry_positive_gainer_top_count: "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_3:-10}"
+      require_price_above_ema5: false
+      require_price_above_ema10: false
+      entry_policy_mode: "${CML_LIVE_ENTRY_POLICY_MODE_ACCOUNT_3:-enforce}"
+      entry_order_type: limit
+      entry_limit_ttl_seconds: 900
+    migration_revision: "${CML_LIVE_MIGRATION_REVISION_ACCOUNT_3:-20260831_0029}"
+    profile_ref: compose.live.accounts.yaml#services.live-strategy-account-3
+    limits_ref: postgres:risk_config/account-3
+    services:
+      - execution-account-live-account-3
+      - live-strategy-account-3
+
+  - label: account-4
+    strategy: "${CML_LIVE_STRATEGY_ACCOUNT_4:-orderflow_impulse}"
+    session_id: "${CML_LIVE_SESSION_ID_ACCOUNT_4:-live-account-4-v1}"
+    lease_owner: "${CML_LIVE_LEASE_OWNER_ACCOUNT_4:-live-worker-account-4}"
+    strategy_config_hash: "${CML_LIVE_STRATEGY_CONFIG_HASH_ACCOUNT_4:-unset}"
+    strategy_config:
+      impulse_window_buckets: "${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_4:-2}"
+      confirmation_buckets: "${CML_LIVE_CONFIRMATION_BUCKETS_ACCOUNT_4:-1}"
+      min_return_pct: "${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_4:-0.005}"
+      min_imbalance: "${CML_LIVE_MIN_IMBALANCE_ACCOUNT_4:-0.30}"
+      min_intensity: "${CML_LIVE_MIN_INTENSITY_ACCOUNT_4:-4.0}"
+      min_notional_5m_vs_30m: "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_4:-1.50}"
+      cooldown_buckets: "${CML_LIVE_COOLDOWN_BUCKETS_ACCOUNT_4:-0}"
+      entry_positive_gainer_top_count: "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_4:-10}"
+      require_price_above_ema5: false
+      require_price_above_ema10: false
+      entry_policy_mode: "${CML_LIVE_ENTRY_POLICY_MODE_ACCOUNT_4:-enforce}"
+      entry_order_type: limit
+      entry_limit_ttl_seconds: 900
+    migration_revision: "${CML_LIVE_MIGRATION_REVISION_ACCOUNT_4:-20260831_0029}"
+    profile_ref: compose.live.accounts.yaml#services.live-strategy-account-4
+    limits_ref: postgres:risk_config/account-4
+    services:
+      - execution-account-live-account-4
+      - live-strategy-account-4

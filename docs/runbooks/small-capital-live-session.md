@@ -44,7 +44,8 @@ Leave `CML_EXECUTION_DATABASE_URL`, `CML_MARKET_DATABASE_URL`, and
 deployment gets separate PostgreSQL endpoints, set those variables only after
 running the same Alembic migrations against each endpoint. High-frequency
 market/strategy telemetry remains in memory for latency summaries; durable
-telemetry is limited to order lifecycle events and uses best-effort commits.
+telemetry contains sparse order lifecycle samples plus low-cardinality hub
+health and terminal-reason events, and uses best-effort commits.
 
 ## 1. Start Read-Only Account Sync
 
@@ -236,6 +237,13 @@ $COMPOSE --profile live run --rm --no-deps live-strategy disable-new-entries \
   --strategy-config-hash "$CML_LIVE_STRATEGY_CONFIG_HASH" \
   --risk-config-hash "$RISK_CONFIG_HASH"
 ```
+
+The command commits the `DRAINING` transition before attempting the
+low-latency RiskControlHub push. Set `CML_RISK_CONTROL_HUB_TOKEN` in the
+operator environment when the account service is configured with a publish
+token. If the push is unavailable, the command reports the PostgreSQL fallback;
+the live worker still closes entries when its next durable context refresh
+observes the transition.
 
 Do not stop account sync or release the lease until Binance positions and open
 orders are flat and local reconciliation agrees. Review the final transition:

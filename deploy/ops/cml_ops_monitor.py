@@ -351,6 +351,9 @@ class MonitorConfig:
     state_path: Path = Path("/var/lib/crypto-momentum-lab/ops-monitor.json")
     webhook_url: str | None = None
     serverchan_sendkey: str | None = None
+    external_heartbeat_url: str | None = None
+    external_heartbeat_token: str | None = None
+    external_heartbeat_timeout_seconds: float = 5.0
 
 
 class OpsMonitor:
@@ -368,6 +371,18 @@ class OpsMonitor:
             raise ValueError("log_window_seconds must be positive")
         if not 0 < config.rss_warning_fraction < config.rss_critical_fraction <= 1:
             raise ValueError("RSS thresholds are invalid")
+        if bool(config.external_heartbeat_url) != bool(
+            config.external_heartbeat_token
+        ):
+            raise ValueError(
+                "external heartbeat URL and token must be configured together"
+            )
+        if config.external_heartbeat_url is not None:
+            parsed_url = urllib.parse.urlparse(config.external_heartbeat_url)
+            if parsed_url.scheme != "https" or not parsed_url.netloc:
+                raise ValueError("external heartbeat URL must be an HTTPS URL")
+        if config.external_heartbeat_timeout_seconds <= 0:
+            raise ValueError("external heartbeat timeout must be positive")
         self._config = config
         self._runner = runner or SubprocessRunner()
         self._clock = clock
@@ -517,7 +532,42 @@ class OpsMonitor:
             self._emit(alert, now=now)
         self._emit_resolutions(active_keys, now=now)
         _save_state(self._config.state_path, self._state)
+        self._send_external_heartbeat(
+            build_deadman_heartbeat_payload(
+                now=datetime.fromtimestamp(now, UTC),
+                alerts=alerts,
+            )
+        )
         return tuple(alerts)
+
+    def _send_external_heartbeat(
+        self,
+        payload: Mapping[str, object],
+    ) -> None:
+        if (
+            self._config.external_heartbeat_url is None
+            or self._config.external_heartbeat_token is None
+        ):
+            return
+        try:
+            _deliver_external_heartbeat(
+                self._config.external_heartbeat_url,
+                self._config.external_heartbeat_token,
+                payload,
+                timeout_seconds=self._config.external_heartbeat_timeout_seconds,
+            )
+        except Exception as error:  # pragma: no cover - external endpoint
+            print(
+                json.dumps(
+                    {
+                        "event": "ops_deadman_heartbeat_failed",
+                        "error_type": type(error).__name__,
+                    },
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
 
     def _container_id(self, service: str) -> str | None:
         # Docker labels avoid re-interpolating every Compose file on each
@@ -938,6 +988,61 @@ def _deliver_notification(
     _deliver_webhook(webhook_url, payload)
 
 
+def build_deadman_heartbeat_payload(
+    *,
+    now: datetime,
+    alerts: Sequence[Alert],
+) -> dict[str, object]:
+    """Build a low-sensitivity heartbeat payload for an external observer."""
+
+    critical_alerts = tuple(
+        alert.name for alert in alerts if alert.severity.lower() == "critical"
+    )
+    warning_alerts = tuple(
+        alert.name for alert in alerts if alert.severity.lower() == "warning"
+    )
+    status = (
+        "critical"
+        if critical_alerts
+        else "warning"
+        if warning_alerts
+        else "healthy"
+    )
+    return {
+        "event": "ops_heartbeat",
+        "source": "cml-ops-monitor",
+        "observed_at": now.astimezone(UTC).isoformat(),
+        "status": status,
+        "alert_count": len(alerts),
+        "critical_alerts": critical_alerts,
+        "warning_alerts": warning_alerts,
+    }
+
+
+def _deliver_external_heartbeat(
+    url: str,
+    token: str,
+    payload: Mapping[str, object],
+    *,
+    timeout_seconds: float,
+) -> None:
+    """Send one authenticated heartbeat without putting the token in JSON."""
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        status = getattr(response, "status", 200)
+        if not 200 <= status < 300:
+            raise RuntimeError(f"external heartbeat returned HTTP {status}")
+
+
 def _deliver_webhook(url: str | None, payload: Mapping[str, object]) -> None:
     if not url:
         return
@@ -1279,6 +1384,15 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
             os.environ.get("SERVERCHAN_SENDKEY")
             or os.environ.get("CML_SERVERCHAN_SENDKEY")
             or None
+        ),
+        external_heartbeat_url=(
+            os.environ.get("CML_OPS_EXTERNAL_HEARTBEAT_URL") or None
+        ),
+        external_heartbeat_token=(
+            os.environ.get("CML_OPS_EXTERNAL_HEARTBEAT_TOKEN") or None
+        ),
+        external_heartbeat_timeout_seconds=float(
+            os.environ.get("CML_OPS_EXTERNAL_HEARTBEAT_TIMEOUT_SECONDS", "5")
         ),
     )
 

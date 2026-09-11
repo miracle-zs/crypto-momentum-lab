@@ -187,6 +187,7 @@ def _lease(lease_id: str, owner: str) -> TradingLease:
         account_label="primary",
         strategy_name="compression_breakout",
         owner=owner,
+        code_generation="test-generation",
         state=TradingLeaseState.ACTIVE,
         acquired_at=NOW,
         expires_at=NOW + timedelta(minutes=1),

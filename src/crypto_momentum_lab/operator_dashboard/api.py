@@ -23,6 +23,7 @@ from crypto_momentum_lab.operator_dashboard.queries import (
 )
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
+    DecisionSLOResponse,
     LiveAccountMetricsResponse,
     LiveAccountsResponse,
     PaperAccountHistoryResponse,
@@ -152,6 +153,11 @@ class _ResponseCache:
 
 class DashboardQueryProtocol(Protocol):
     async def health(self) -> dict[str, str]: ...
+
+    async def decision_slo(
+        self,
+        window: str = "24h",
+    ) -> DecisionSLOResponse: ...
 
     async def overview(self) -> SystemOverviewResponse: ...
 
@@ -306,6 +312,20 @@ def create_dashboard_app(
                 status_code=503,
                 detail={"app_status": "UP", "database_status": "DOWN"},
             ) from exc
+
+    @dashboard.get(
+        "/api/decision-slo",
+        response_model=DecisionSLOResponse,
+        dependencies=[Depends(require_dashboard_auth)],
+    )
+    async def decision_slo(
+        window: Literal["1h", "6h", "24h", "7d"] = "24h",
+    ) -> DecisionSLOResponse:
+        return await response_cache.get(
+            f"decision-slo:{window}",
+            lambda: query_service().decision_slo(window),
+            ttl_seconds=15.0,
+        )
 
     @dashboard.get(
         "/api/overview",

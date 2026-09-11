@@ -87,15 +87,22 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     PreparedOrderSubmission,
     SubmitPolicy,
 )
+from crypto_momentum_lab.execution_account.risk_control_hub import (
+    RiskControlAction,
+    RiskControlEvent,
+    RiskControlHubError,
+    WebSocketRiskControlPublisher,
+    WebSocketRiskControlSource,
+)
 from crypto_momentum_lab.health import LocalHealthWriter
 from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     BinanceClosedCandle15mFeed,
     ClosedCandle15mFeedConfig,
 )
+from crypto_momentum_lab.live_rollout.context import LiveEntryFilterContext
 from crypto_momentum_lab.live_rollout.daemon import (
     LiveDaemonConfig,
     LiveDaemonResult,
-    LiveEntryFilterContext,
     LiveRuntimeStrategy,
     LiveStrategyDaemon,
 )
@@ -123,6 +130,11 @@ from crypto_momentum_lab.live_rollout.postgres_runtime import (
     poll_live_market_states,
 )
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
+from crypto_momentum_lab.live_rollout.runtime_manifest import (
+    LiveRuntimeAccount,
+    RuntimeManifestError,
+    load_live_runtime_manifest,
+)
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
 )
@@ -135,6 +147,7 @@ from crypto_momentum_lab.live_rollout.signal_recorder import (
     LiveStrategySignalRecorder,
 )
 from crypto_momentum_lab.live_rollout.telemetry import (
+    PERSISTED_OPERATIONAL_TELEMETRY_EVENTS,
     PERSISTED_ORDER_TELEMETRY_EVENTS,
     LiveRuntimeTelemetry,
     LiveTelemetrySink,
@@ -207,6 +220,22 @@ from crypto_momentum_lab.strategy_runner.registry import (
 
 app = typer.Typer(no_args_is_help=True)
 log = structlog.get_logger()
+
+
+def _consumer_reason_is_lag(reason: str | None) -> bool:
+    if reason is None:
+        return False
+    normalized = reason.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "lag",
+            "overflow",
+            "sequence_gap",
+            "sequencegap",
+            "replay_unavailable",
+        )
+    )
 _PREPARE_CONFIRMATION = "PREPARE LIVE RISK GATES"
 _RENEW_LEASE_CONFIRMATION = "RENEW LIVE RISK LEASE"
 _RESOLVE_MISSING_ORDER_CONFIRMATION = "RESOLVE MISSING LIVE ORDER"
@@ -319,6 +348,14 @@ def live_rollout_app() -> None:
 @app.command("strategy-config-hash")
 def strategy_config_hash_command(
     strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    account_label: Annotated[str, typer.Option("--account-label")] = "primary",
+    runtime_manifest: Annotated[
+        Path | None,
+        typer.Option(
+            "--runtime-manifest",
+            help="Derive hash inputs from the desired runtime manifest.",
+        ),
+    ] = None,
     impulse_window_buckets: Annotated[
         int | None,
         typer.Option("--impulse-window-buckets", min=2),
@@ -375,6 +412,14 @@ def strategy_config_hash_command(
         typer.Option("--entry-limit-ttl-seconds", min=601),
     ] = _LIVE_ENTRY_LIMIT_TTL_SECONDS,
 ) -> None:
+    if runtime_manifest is not None:
+        manifest_account = _runtime_manifest_account_for_cli(
+            runtime_manifest,
+            account_label=account_label,
+            strategy=strategy,
+        )
+        typer.echo(_runtime_manifest_strategy_config_hash(manifest_account))
+        return
     profile = _resolve_live_profile_options(
         impulse_window_buckets=impulse_window_buckets,
         confirmation_buckets=confirmation_buckets,
@@ -406,6 +451,13 @@ def prepare_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
     strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    runtime_manifest: Annotated[
+        Path | None,
+        typer.Option(
+            "--runtime-manifest",
+            help="Validate this account against the desired runtime manifest.",
+        ),
+    ] = None,
     impulse_window_buckets: Annotated[
         int | None,
         typer.Option("--impulse-window-buckets", min=2),
@@ -435,6 +487,14 @@ def prepare_command(
         typer.Option("--cooldown-buckets", min=0),
     ] = None,
     lease_owner: Annotated[str, typer.Option("--lease-owner")] = "live-worker",
+    git_commit_hash: Annotated[
+        str,
+        typer.Option("--git-commit-hash"),
+    ] = "",
+    migration_revision: Annotated[
+        str,
+        typer.Option("--migration-revision"),
+    ] = "",
     lease_ttl_seconds: Annotated[
         int,
         typer.Option("--lease-ttl-seconds", min=180),
@@ -486,21 +546,98 @@ def prepare_command(
 ) -> None:
     if confirmation != _PREPARE_CONFIRMATION:
         raise typer.BadParameter(f"--confirmation must equal '{_PREPARE_CONFIRMATION}'")
-    profile = _resolve_live_profile_options(
-        impulse_window_buckets=impulse_window_buckets,
-        confirmation_buckets=confirmation_buckets,
-        min_return_pct=min_return_pct,
-        min_imbalance=min_imbalance,
-        min_intensity=min_intensity,
-        min_notional_5m_vs_30m=min_notional_5m_vs_30m,
-        cooldown_buckets=cooldown_buckets,
+    manifest_account = (
+        None
+        if runtime_manifest is None
+        else _runtime_manifest_account_for_cli(
+            runtime_manifest,
+            account_label=account_label,
+            strategy=strategy,
+        )
     )
+    configured_git_commit = git_commit_hash.strip() or os.environ.get(
+        "CML_CODE_COMMIT",
+        "",
+    ).strip()
+    if manifest_account is not None:
+        manifest_git_commit = _validate_hex_hash(
+            manifest_account.image_commit,
+            "runtime manifest image_commit",
+            _GIT_COMMIT_HASH_LENGTH,
+        )
+        if (
+            configured_git_commit
+            and configured_git_commit.lower() != manifest_git_commit
+        ):
+            raise typer.BadParameter(
+                "git commit does not match the runtime manifest"
+            )
+        configured_git_commit = manifest_git_commit
+    git_commit_hash = _validate_hex_hash(
+        configured_git_commit,
+        "--git-commit-hash or CML_CODE_COMMIT",
+        _GIT_COMMIT_HASH_LENGTH,
+    )
+    if manifest_account is not None:
+        configured_migration_revision = migration_revision.strip() or os.environ.get(
+            "CML_LIVE_MIGRATION_REVISION",
+            "",
+        ).strip()
+        if (
+            configured_migration_revision
+            and configured_migration_revision != manifest_account.migration_revision
+        ):
+            raise typer.BadParameter(
+                "migration revision does not match the runtime manifest"
+            )
+    if manifest_account is not None and lease_owner != manifest_account.lease_owner:
+        raise typer.BadParameter("lease owner does not match the runtime manifest")
+    if manifest_account is None:
+        profile = _resolve_live_profile_options(
+            impulse_window_buckets=impulse_window_buckets,
+            confirmation_buckets=confirmation_buckets,
+            min_return_pct=min_return_pct,
+            min_imbalance=min_imbalance,
+            min_intensity=min_intensity,
+            min_notional_5m_vs_30m=min_notional_5m_vs_30m,
+            cooldown_buckets=cooldown_buckets,
+        )
+    else:
+        strategy_inputs = manifest_account.strategy_inputs
+        profile = strategy_inputs.profile
+        entry_positive_gainer_top_count = (
+            strategy_inputs.entry_positive_gainer_top_count
+        )
+        entry_price_above_ema5 = strategy_inputs.require_price_above_ema5
+        entry_price_above_ema10 = strategy_inputs.require_price_above_ema10
+        entry_policy_enforce = strategy_inputs.entry_policy_enforce
+        entry_order_type = strategy_inputs.entry_order_type
+        entry_limit_ttl_seconds = strategy_inputs.entry_limit_ttl_seconds
+    strategy_config_hash = _live_strategy_config_hash(
+        strategy,
+        profile=profile,
+        entry_positive_gainer_top_count=entry_positive_gainer_top_count,
+        require_price_above_ema5=entry_price_above_ema5,
+        require_price_above_ema10=entry_price_above_ema10,
+        entry_policy_enforce=entry_policy_enforce,
+        entry_order_type=entry_order_type,
+        entry_limit_ttl_seconds=entry_limit_ttl_seconds,
+    )
+    if (
+        manifest_account is not None
+        and strategy_config_hash
+        != _runtime_manifest_strategy_config_hash(manifest_account)
+    ):
+        raise typer.BadParameter(
+            "prepared strategy inputs do not match the runtime manifest hash"
+        )
     payload = asyncio.run(
         _prepare_live_risk_gates(
             database_url=_database_url(database_url),
             account_label=account_label,
             strategy_name=strategy,
             lease_owner=lease_owner,
+            code_generation=git_commit_hash,
             lease_ttl_seconds=lease_ttl_seconds,
             max_order_notional=_parse_optional_decimal_limit(
                 max_order_notional,
@@ -834,11 +971,66 @@ def refresh_approval_runtime_command(
     )
 
 
+def _runtime_manifest_account_for_cli(
+    path: Path,
+    *,
+    account_label: str,
+    strategy: str,
+) -> LiveRuntimeAccount:
+    try:
+        manifest = load_live_runtime_manifest(path)
+        account = manifest.account(account_label)
+    except RuntimeManifestError as error:
+        raise typer.BadParameter(str(error)) from error
+    if strategy != account.strategy:
+        raise typer.BadParameter(
+            "--strategy does not match the runtime manifest account"
+        )
+    return account
+
+
+def _runtime_manifest_strategy_config_hash(
+    account: LiveRuntimeAccount,
+) -> str:
+    inputs = account.strategy_inputs
+    computed = _live_strategy_config_hash(
+        account.strategy,
+        profile=inputs.profile,
+        entry_positive_gainer_top_count=(
+            inputs.entry_positive_gainer_top_count
+        ),
+        require_price_above_ema5=inputs.require_price_above_ema5,
+        require_price_above_ema10=inputs.require_price_above_ema10,
+        entry_policy_enforce=inputs.entry_policy_enforce,
+        entry_order_type=inputs.entry_order_type,
+        entry_limit_ttl_seconds=inputs.entry_limit_ttl_seconds,
+    )
+    if account.strategy_config_hash != "unset":
+        configured = _validate_hex_hash(
+            account.strategy_config_hash,
+            "runtime manifest strategy_config_hash",
+            _CONFIG_HASH_LENGTH,
+        )
+        if configured != computed:
+            raise typer.BadParameter(
+                "runtime manifest strategy_config_hash does not match "
+                "its strategy_config inputs"
+            )
+    return computed
+
+
 @app.command("preflight")
 def preflight_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
     strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    runtime_manifest: Annotated[
+        Path | None,
+        typer.Option(
+            "--runtime-manifest",
+            help="Validate this account against the desired runtime manifest.",
+        ),
+    ] = None,
     strict: Annotated[bool, typer.Option("--strict")] = False,
     expected_git_commit: Annotated[
         str | None, typer.Option("--expected-git-commit")
@@ -847,6 +1039,30 @@ def preflight_command(
         str | None, typer.Option("--expected-migration-revision")
     ] = None,
 ) -> None:
+    manifest_account = None
+    if runtime_manifest is not None:
+        manifest_account = _runtime_manifest_account_for_cli(
+            runtime_manifest,
+            account_label=account_label,
+            strategy=strategy,
+        )
+        manifest_git_commit = _validate_hex_hash(
+            manifest_account.image_commit,
+            "runtime manifest image_commit",
+            _GIT_COMMIT_HASH_LENGTH,
+        )
+        if expected_git_commit is None:
+            expected_git_commit = manifest_git_commit
+        elif expected_git_commit.lower() != manifest_git_commit:
+            raise typer.BadParameter(
+                "--expected-git-commit does not match the runtime manifest"
+            )
+        if expected_migration_revision is None:
+            expected_migration_revision = manifest_account.migration_revision
+        elif expected_migration_revision != manifest_account.migration_revision:
+            raise typer.BadParameter(
+                "--expected-migration-revision does not match the runtime manifest"
+            )
     if expected_git_commit is not None:
         expected_git_commit = _validate_hex_hash(
             expected_git_commit,
@@ -866,6 +1082,14 @@ def preflight_command(
             strategy,
             expected_git_commit=expected_git_commit,
             expected_migration_revision=expected_migration_revision,
+            expected_lease_owner=(
+                None if manifest_account is None else manifest_account.lease_owner
+            ),
+            expected_strategy_config_hash=(
+                None
+                if manifest_account is None
+                else _runtime_manifest_strategy_config_hash(manifest_account)
+            ),
         )
     )
     typer.echo(json.dumps(payload, sort_keys=True))
@@ -992,6 +1216,13 @@ def run_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
     strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    runtime_manifest: Annotated[
+        Path | None,
+        typer.Option(
+            "--runtime-manifest",
+            help="Use the desired runtime manifest for this worker.",
+        ),
+    ] = None,
     impulse_window_buckets: Annotated[
         int | None,
         typer.Option("--impulse-window-buckets", min=2),
@@ -1050,9 +1281,19 @@ def run_command(
         str,
         typer.Option("--account-event-hub-url"),
     ] = "ws://execution-account-live:8767",
-    session_id: Annotated[str, typer.Option("--session-id")] = "live-manual",
+    risk_control_hub_url: Annotated[
+        str,
+        typer.Option(
+            "--risk-control-hub-url",
+            help=(
+                "Low-volume operator control stream. PostgreSQL remains the "
+                "durable authority."
+            ),
+        ),
+    ] = "ws://execution-account-live:8769",
+    session_id: Annotated[str | None, typer.Option("--session-id")] = None,
     operator: Annotated[str, typer.Option("--operator")] = "",
-    lease_owner: Annotated[str, typer.Option("--lease-owner")] = "live-worker",
+    lease_owner: Annotated[str | None, typer.Option("--lease-owner")] = None,
     strategy_config_hash: Annotated[str, typer.Option("--strategy-config-hash")] = "",
     git_commit_hash: Annotated[str, typer.Option("--git-commit-hash")] = "",
     migration_revision: Annotated[str, typer.Option("--migration-revision")] = "",
@@ -1200,18 +1441,103 @@ def run_command(
         )
     if not confirmation:
         raise typer.BadParameter("--i-understand-this-places-real-orders is required")
-    profile = _resolve_live_profile_options(
-        impulse_window_buckets=impulse_window_buckets,
-        confirmation_buckets=confirmation_buckets,
-        min_return_pct=min_return_pct,
-        min_imbalance=min_imbalance,
-        min_intensity=min_intensity,
-        min_notional_5m_vs_30m=min_notional_5m_vs_30m,
-        cooldown_buckets=cooldown_buckets,
+    manifest_account = (
+        None
+        if runtime_manifest is None
+        else _runtime_manifest_account_for_cli(
+            runtime_manifest,
+            account_label=account_label,
+            strategy=strategy,
+        )
     )
-    entry_positive_gainer_top_count = _resolve_live_entry_positive_gainer_top_count(
-        entry_positive_gainer_top_count
-    )
+    if manifest_account is None:
+        session_id = session_id or "live-manual"
+        lease_owner = lease_owner or "live-worker"
+        profile = _resolve_live_profile_options(
+            impulse_window_buckets=impulse_window_buckets,
+            confirmation_buckets=confirmation_buckets,
+            min_return_pct=min_return_pct,
+            min_imbalance=min_imbalance,
+            min_intensity=min_intensity,
+            min_notional_5m_vs_30m=min_notional_5m_vs_30m,
+            cooldown_buckets=cooldown_buckets,
+        )
+        entry_positive_gainer_top_count = (
+            _resolve_live_entry_positive_gainer_top_count(
+                entry_positive_gainer_top_count
+            )
+        )
+    else:
+        if session_id is not None and session_id != manifest_account.session_id:
+            raise typer.BadParameter(
+                "session id does not match the runtime manifest"
+            )
+        if lease_owner is not None and lease_owner != manifest_account.lease_owner:
+            raise typer.BadParameter(
+                "lease owner does not match the runtime manifest"
+            )
+        session_id = manifest_account.session_id
+        lease_owner = manifest_account.lease_owner
+        strategy_inputs = manifest_account.strategy_inputs
+        profile = strategy_inputs.profile
+        entry_positive_gainer_top_count = (
+            strategy_inputs.entry_positive_gainer_top_count
+        )
+        entry_price_above_ema5 = strategy_inputs.require_price_above_ema5
+        entry_price_above_ema10 = strategy_inputs.require_price_above_ema10
+        entry_policy_compare_only = (
+            strategy_inputs.entry_policy_mode == "compare_only"
+        )
+        entry_policy_enforce = strategy_inputs.entry_policy_enforce
+        entry_order_type = strategy_inputs.entry_order_type
+        entry_limit_ttl_seconds = strategy_inputs.entry_limit_ttl_seconds
+
+        configured_git_commit = git_commit_hash.strip() or os.environ.get(
+            "CML_CODE_COMMIT",
+            "",
+        ).strip()
+        manifest_git_commit = _validate_hex_hash(
+            manifest_account.image_commit,
+            "runtime manifest image_commit",
+            _GIT_COMMIT_HASH_LENGTH,
+        )
+        if (
+            configured_git_commit
+            and configured_git_commit.lower() != manifest_git_commit
+        ):
+            raise typer.BadParameter(
+                "git commit does not match the runtime manifest"
+            )
+        git_commit_hash = manifest_git_commit
+
+        configured_migration_revision = migration_revision.strip() or os.environ.get(
+            "CML_LIVE_MIGRATION_REVISION",
+            "",
+        ).strip()
+        if (
+            configured_migration_revision
+            and configured_migration_revision != manifest_account.migration_revision
+        ):
+            raise typer.BadParameter(
+                "migration revision does not match the runtime manifest"
+            )
+        migration_revision = manifest_account.migration_revision
+
+        manifest_strategy_hash = _runtime_manifest_strategy_config_hash(
+            manifest_account
+        )
+        configured_strategy_hash = strategy_config_hash.strip().lower()
+        if configured_strategy_hash not in {"", "unset"}:
+            configured_strategy_hash = _validate_hex_hash(
+                configured_strategy_hash,
+                "--strategy-config-hash",
+                _CONFIG_HASH_LENGTH,
+            )
+            if configured_strategy_hash != manifest_strategy_hash:
+                raise typer.BadParameter(
+                    "strategy config hash does not match the runtime manifest"
+                )
+        strategy_config_hash = manifest_strategy_hash
     credentials = _resolve_live_cli_credentials(
         api_key_env=api_key_env,
         api_secret_env=api_secret_env,
@@ -1231,6 +1557,7 @@ def run_command(
             market_quote_hub_url=market_quote_hub_url,
             market_websocket_url=market_websocket_url,
             account_event_hub_url=account_event_hub_url,
+            risk_control_hub_url=risk_control_hub_url,
             session_id=session_id,
             operator=operator,
             lease_owner=lease_owner,
@@ -1293,9 +1620,26 @@ def disable_new_entries_command(
     operator: Annotated[str, typer.Option("--operator")],
     strategy_config_hash: Annotated[str, typer.Option("--strategy-config-hash")],
     risk_config_hash: Annotated[str, typer.Option("--risk-config-hash")],
+    account_label: Annotated[str, typer.Option("--account-label")] = "primary",
+    strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    risk_control_hub_url: Annotated[
+        str,
+        typer.Option("--risk-control-hub-url"),
+    ] = "",
+    risk_control_hub_token: Annotated[
+        str | None,
+        typer.Option(
+            "--risk-control-hub-token",
+            help="Optional token; CML_RISK_CONTROL_HUB_TOKEN is used when omitted.",
+        ),
+    ] = None,
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
 ) -> None:
-    asyncio.run(
+    resolved_risk_control_hub_url = (
+        risk_control_hub_url.strip()
+        or os.environ.get("CML_RISK_CONTROL_HUB_URL", "").strip()
+    )
+    transition = asyncio.run(
         _save_transition(
             _database_url(database_url),
             session_id,
@@ -1306,7 +1650,41 @@ def disable_new_entries_command(
             "operator_disabled_new_entries",
         )
     )
-    typer.echo("Live session is draining")
+    push_error: Exception | None = None
+    if resolved_risk_control_hub_url:
+        event = RiskControlEvent(
+            environment="live",
+            account_label=account_label,
+            strategy_name=strategy,
+            session_id=session_id,
+            action=RiskControlAction.DRAIN,
+            event_id=transition.transition_id,
+            command_id=transition.transition_id,
+            reason="operator_disabled_new_entries",
+            issued_at=transition.occurred_at,
+            details={"transition_id": transition.transition_id},
+        )
+        try:
+            asyncio.run(
+                _publish_risk_control_event(
+                    url=resolved_risk_control_hub_url,
+                    token=risk_control_hub_token,
+                    event=event,
+                )
+            )
+        except Exception as error:
+            push_error = error
+            log.warning(
+                "risk_control_push_failed_db_fallback_active",
+                error_type=type(error).__name__,
+            )
+    if push_error is None:
+        typer.echo("Live session is draining")
+    else:
+        typer.echo(
+            "Live session is draining "
+            "(risk-control push unavailable; PostgreSQL fallback remains active)"
+        )
 
 
 @app.command("report")
@@ -1415,6 +1793,38 @@ async def _run_live_plan(
             account_label=account_label,
         )
 
+        async def validate_live_submission(
+            checked_plan: OrderExecutionPlan,
+            checked_at: datetime,
+        ) -> None:
+            """Fence manual live submissions immediately before the POST."""
+            if checked_plan.reduce_only:
+                return
+            if await _session_is_draining(factory, session_id):
+                raise OrderPreSubmissionError("live session entries are disabled")
+            current_lease = await risk_repository.load_active_lease(
+                "live",
+                account_label,
+                checked_at,
+            )
+            if current_lease is None:
+                raise OrderPreSubmissionError("active lease disappeared")
+            if current_lease.owner != lease_owner:
+                raise OrderPreSubmissionError("active lease owner changed")
+            if current_lease.strategy_name != strategy_name:
+                raise OrderPreSubmissionError("active lease strategy changed")
+            if current_lease.code_generation != git_commit_hash:
+                raise OrderPreSubmissionError(
+                    "active lease code generation changed"
+                )
+            if (
+                context.active_lease is not None
+                and current_lease.lease_id != context.active_lease.lease_id
+            ):
+                raise OrderPreSubmissionError("active lease fencing token changed")
+            if await risk_repository.load_active_halts("live", account_label):
+                raise OrderPreSubmissionError("active risk halt")
+
         machine = OrderExecutionStateMachine(
             exchange=client,
             repository=order_repository,
@@ -1422,6 +1832,7 @@ async def _run_live_plan(
             live_submit_enabled=True,
             clock=lambda: datetime.now(tz=UTC),
             on_before_submit=register_expected_entry,
+            on_before_exchange_submit=validate_live_submission,
             serialize_commands=False,
         )
         execution_coordinator = OrderExecutionCoordinator(
@@ -1430,7 +1841,7 @@ async def _run_live_plan(
         )
         session = LiveRolloutSession(
             repository=live_repository,
-            state_machine=execution_coordinator,
+            execute_plan=execution_coordinator.execute_approved_intent,
             config=LiveSessionConfig(
                 session_id=session_id,
                 operator=operator,
@@ -1800,6 +2211,7 @@ async def _maybe_auto_reacquire_live_lease(
         account_label=gate_context.account_label,
         strategy_name=gate_context.strategy_name,
         owner=gate_context.required_lease_owner,
+        code_generation=gate_context.git_commit_hash,
         state=TradingLeaseState.ACTIVE,
         acquired_at=now,
         expires_at=now + timedelta(seconds=_LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS),
@@ -1882,8 +2294,16 @@ async def _run_live_daemon(
     entry_policy_enforce: bool = False,
     acknowledge_missing_shadow_preflight: bool = False,
     market_websocket_url: str = _LIVE_MARKET_WEBSOCKET_URL,
+    risk_control_hub_url: str | None = None,
 ) -> LiveDaemonResult:
     account_snapshot_available = True
+    risk_control_enabled = bool(
+        risk_control_hub_url is not None and risk_control_hub_url.strip()
+    )
+    risk_control_stream_available = not risk_control_enabled
+    risk_control_state_ready = not risk_control_enabled
+    risk_control_entry_blocked = False
+    risk_control_entry_block_reason = "risk_control_clear"
     if market_state_source not in {"hub", "postgres"}:
         raise ValueError("market_state_source must be 'hub' or 'postgres'")
     if market_state_source == "hub" and not market_state_hub_url.strip():
@@ -1936,6 +2356,9 @@ async def _run_live_daemon(
     volume_cache: Binance24hQuoteVolumeCache | None = None
     signal_recorder: LiveStrategySignalRecorder | None = None
     daemon: LiveStrategyDaemon | None = None
+    risk_control_source: WebSocketRiskControlSource | None = None
+    risk_control_task: asyncio.Task[None] | None = None
+    risk_control_reconcile_task: asyncio.Task[None] | None = None
     risk_config_hash = ""
     startup_phase = True
     try:
@@ -1980,7 +2403,10 @@ async def _run_live_daemon(
         telemetry = LiveRuntimeTelemetry(
             run_id=session_id,
             persist=telemetry_repository.save_runtime_events,
-            persist_event_types=PERSISTED_ORDER_TELEMETRY_EVENTS,
+            persist_event_types=(
+                PERSISTED_ORDER_TELEMETRY_EVENTS
+                | PERSISTED_OPERATIONAL_TELEMETRY_EVENTS
+            ),
             persist_exchange_operations=persist_exchange_operations,
         )
         await telemetry.start()
@@ -2061,6 +2487,10 @@ async def _run_live_daemon(
                 raise OrderPreSubmissionError("active lease owner changed")
             if current_lease.strategy_name != strategy_name:
                 raise OrderPreSubmissionError("active lease strategy changed")
+            if current_lease.code_generation != git_commit_hash:
+                raise OrderPreSubmissionError(
+                    "active lease code generation changed"
+                )
             if (
                 active_lease is not None
                 and current_lease.lease_id != active_lease.lease_id
@@ -2499,6 +2929,7 @@ async def _run_live_daemon(
 
         def on_account_snapshot(event: AccountEvent) -> None:
             nonlocal account_snapshot_available
+            was_available = account_snapshot_available
             snapshot = event.account_snapshot
             account_state = event.account_state
             if snapshot is None or account_state is None:
@@ -2518,6 +2949,15 @@ async def _run_live_daemon(
                 account_state=account_state,
             )
             account_snapshot_available = True
+            if telemetry is not None and event.snapshot_kind == "full":
+                telemetry.consumer_health(
+                    consumer="account_event_hub",
+                    available=True,
+                    occurred_at=event.received_at,
+                    reason="full_snapshot_received",
+                    recovery=not was_available,
+                    sequence=event.sequence,
+                )
             refresh_entry_enabled()
 
         def on_account_snapshot_recovery(reason: str) -> None:
@@ -2525,6 +2965,14 @@ async def _run_live_daemon(
             account_snapshot_available = False
             context_provider.invalidate_account_snapshot()
             heartbeat_context_provider.invalidate_account_snapshot()
+            if telemetry is not None:
+                telemetry.consumer_health(
+                    consumer="account_event_hub",
+                    available=False,
+                    occurred_at=datetime.now(tz=UTC),
+                    reason=reason,
+                    lag=_consumer_reason_is_lag(reason),
+                )
             refresh_entry_enabled()
             log.warning(
                 "live_account_snapshot_recovery_requested",
@@ -2737,6 +3185,27 @@ async def _run_live_daemon(
         exit_failure_by_symbol: dict[str, str] = {}
 
         def refresh_entry_enabled() -> None:
+            if risk_control_enabled and (
+                not risk_control_stream_available or not risk_control_state_ready
+            ):
+                daemon.set_risk_control_entry_blocked(
+                    True,
+                    reason=(
+                        "risk_control_stream_unavailable"
+                        if not risk_control_stream_available
+                        else "risk_control_state_recovering"
+                    ),
+                )
+            elif risk_control_enabled:
+                daemon.set_risk_control_entry_blocked(
+                    risk_control_entry_blocked,
+                    reason=risk_control_entry_block_reason,
+                )
+            else:
+                daemon.set_risk_control_entry_blocked(
+                    False,
+                    reason="risk_control_disabled",
+                )
             if lease_heartbeat_degraded:
                 daemon.set_entry_enabled(
                     False,
@@ -2770,6 +3239,120 @@ async def _run_live_daemon(
                     True,
                     reason="live_entry_prerequisites_ready",
                 )
+
+        async def reconcile_risk_control_state() -> None:
+            nonlocal risk_control_state_ready
+            nonlocal risk_control_entry_blocked, risk_control_entry_block_reason
+            try:
+                draining_now = await _session_is_draining(
+                    heartbeat_factory,
+                    session_id,
+                )
+                active_halts = await heartbeat_risk_repository.load_active_halts(
+                    "live",
+                    account_label,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                risk_control_state_ready = False
+                risk_control_entry_blocked = True
+                risk_control_entry_block_reason = (
+                    "risk_control_state_reload_failed"
+                )
+                log.warning(
+                    "live_risk_control_state_reload_failed",
+                    session_id=session_id,
+                    error_type=type(error).__name__,
+                )
+            else:
+                risk_control_entry_blocked = draining_now or bool(active_halts)
+                risk_control_entry_block_reason = (
+                    "session_draining"
+                    if draining_now
+                    else "active_risk_halt"
+                    if active_halts
+                    else "risk_control_clear"
+                )
+                risk_control_state_ready = True
+                context_provider.invalidate_cache()
+                heartbeat_context_provider.invalidate_cache()
+            refresh_entry_enabled()
+
+        def schedule_risk_control_reconcile() -> None:
+            nonlocal risk_control_reconcile_task
+            if (
+                risk_control_reconcile_task is not None
+                and not risk_control_reconcile_task.done()
+            ):
+                risk_control_reconcile_task.cancel()
+            risk_control_reconcile_task = asyncio.create_task(
+                reconcile_risk_control_state(),
+                name=f"live-risk-control-reconcile:{session_id}",
+            )
+
+        def on_risk_control_connection_change(
+            available: bool,
+            reason: str | None,
+        ) -> None:
+            nonlocal risk_control_stream_available, risk_control_state_ready
+            nonlocal risk_control_entry_blocked, risk_control_entry_block_reason
+            was_available = risk_control_stream_available
+            risk_control_stream_available = available
+            risk_control_state_ready = False
+            if not available:
+                risk_control_entry_blocked = True
+                risk_control_entry_block_reason = (
+                    reason or "risk_control_stream_unavailable"
+                )
+                context_provider.invalidate_cache()
+                heartbeat_context_provider.invalidate_cache()
+            else:
+                context_provider.invalidate_cache()
+                heartbeat_context_provider.invalidate_cache()
+                schedule_risk_control_reconcile()
+            if telemetry is not None:
+                telemetry.consumer_health(
+                    consumer="risk_control_hub",
+                    available=available,
+                    occurred_at=datetime.now(tz=UTC),
+                    reason=reason,
+                    recovery=available and not was_available,
+                    lag=_consumer_reason_is_lag(reason),
+                )
+            refresh_entry_enabled()
+            log.warning(
+                "live_risk_control_stream_state_changed",
+                session_id=session_id,
+                available=available,
+                reason=reason,
+            )
+
+        def on_risk_control_event(event: RiskControlEvent) -> None:
+            nonlocal risk_control_state_ready
+            nonlocal risk_control_entry_blocked, risk_control_entry_block_reason
+            risk_control_state_ready = False
+            if event.action in {
+                RiskControlAction.DISABLE_ENTRIES,
+                RiskControlAction.DRAIN,
+                RiskControlAction.HALT,
+            }:
+                risk_control_entry_blocked = True
+                risk_control_entry_block_reason = (
+                    f"risk_control_{event.action.value}:{event.reason}"
+                )
+            context_provider.invalidate_cache()
+            heartbeat_context_provider.invalidate_cache()
+            refresh_entry_enabled()
+            schedule_risk_control_reconcile()
+            log.warning(
+                "live_risk_control_event_received",
+                session_id=session_id,
+                action=event.action.value,
+                command_id=event.command_id,
+                sequence=event.sequence,
+                reason=event.reason,
+            )
 
         def on_exit_failure(symbol: str, failure: str | None) -> None:
             if failure is None:
@@ -2829,7 +3412,17 @@ async def _run_live_daemon(
                 reason: str | None,
             ) -> None:
                 nonlocal market_state_available, market_state_unavailable_reason
+                was_available = market_state_available
                 market_state_available = available
+                if telemetry is not None:
+                    telemetry.consumer_health(
+                        consumer="market_state_hub",
+                        available=available,
+                        occurred_at=datetime.now(tz=UTC),
+                        reason=reason,
+                        recovery=available and not was_available,
+                        lag=_consumer_reason_is_lag(reason),
+                    )
                 if available:
                     market_state_unavailable_reason = "market_state_hub_ready"
                 else:
@@ -2868,6 +3461,17 @@ async def _run_live_daemon(
             consumer_id=f"live-exit:{session_id}",
             on_recovery=on_account_snapshot_recovery,
         )
+        if risk_control_enabled:
+            assert risk_control_hub_url is not None
+            risk_control_source = WebSocketRiskControlSource(
+                url=risk_control_hub_url,
+                environment="live",
+                account_label=account_label,
+                strategy_name=strategy_name,
+                session_id=session_id,
+                consumer_id=f"live-risk-control:{session_id}",
+                on_connection_change=on_risk_control_connection_change,
+            )
         quote_task: asyncio.Task[None] | None = None
         closed_candle_task: asyncio.Task[None] | None = None
         grace_timeout_task: asyncio.Task[None] | None = None
@@ -2923,6 +3527,14 @@ async def _run_live_daemon(
                 on_account_snapshot=on_account_snapshot,
             )
         )
+        if risk_control_source is not None:
+            risk_control_task = asyncio.create_task(
+                _run_risk_control_channel(
+                    source=risk_control_source,
+                    on_event=on_risk_control_event,
+                ),
+                name=f"live-risk-control:{session_id}",
+            )
         if entry_filter_cache is not None:
             entry_filter_cache_task = asyncio.create_task(
                 entry_filter_cache.run()
@@ -2951,6 +3563,10 @@ async def _run_live_daemon(
                         market_task.done()
                         or account_task.done()
                         or lease_task.done()
+                        or (
+                            risk_control_task is not None
+                            and risk_control_task.done()
+                        )
                     ):
                         health.degraded()
                     else:
@@ -2981,6 +3597,8 @@ async def _run_live_daemon(
                 lease_task,
                 reconcile_task,
             }
+            if risk_control_task is not None:
+                monitored_tasks.add(risk_control_task)
             if entry_filter_cache_task is not None:
                 monitored_tasks.add(entry_filter_cache_task)
             if entry_symbol_cache_task is not None:
@@ -2992,6 +3610,9 @@ async def _run_live_daemon(
             if account_task.done():
                 await account_task
                 raise RuntimeError("account event channel stopped unexpectedly")
+            if risk_control_task is not None and risk_control_task.done():
+                await risk_control_task
+                raise RuntimeError("risk-control channel stopped unexpectedly")
             if quote_task is not None and quote_task.done():
                 await quote_task
                 raise RuntimeError("market quote channel stopped unexpectedly")
@@ -3042,10 +3663,19 @@ async def _run_live_daemon(
             if quote_source is not None:
                 quote_source.stop()
             account_source.stop()
+            if risk_control_source is not None:
+                risk_control_source.stop()
             if not market_task.done():
                 market_task.cancel()
             if not account_task.done():
                 account_task.cancel()
+            if risk_control_task is not None and not risk_control_task.done():
+                risk_control_task.cancel()
+            if (
+                risk_control_reconcile_task is not None
+                and not risk_control_reconcile_task.done()
+            ):
+                risk_control_reconcile_task.cancel()
             if quote_task is not None and not quote_task.done():
                 quote_task.cancel()
             if (
@@ -3071,6 +3701,7 @@ async def _run_live_daemon(
             await asyncio.gather(
                 market_task,
                 account_task,
+                *((risk_control_task,) if risk_control_task is not None else ()),
                 *((quote_task,) if quote_task is not None else ()),
                 *(
                     (closed_candle_task,)
@@ -3097,6 +3728,11 @@ async def _run_live_daemon(
                 *(
                     (entry_symbol_cache_task,)
                     if entry_symbol_cache_task is not None
+                    else ()
+                ),
+                *(
+                    (risk_control_reconcile_task,)
+                    if risk_control_reconcile_task is not None
                     else ()
                 ),
                 return_exceptions=True,
@@ -3311,6 +3947,48 @@ async def _resilient_account_event_stream(
                 await asyncio.sleep(retry_delay_seconds)
         else:
             return
+
+
+async def _resilient_risk_control_stream(
+    source: WebSocketRiskControlSource,
+    *,
+    retry_delay_seconds: float = 1.0,
+) -> AsyncIterator[RiskControlEvent]:
+    """Keep the live process alive while control notifications reconnect.
+
+    The source reports every unavailable/recovery transition synchronously to
+    the live entry gate.  This loop only provides transport retry; durable
+    state is reloaded by that gate before entries can reopen.
+    """
+
+    if retry_delay_seconds < 0:
+        raise ValueError("retry_delay_seconds must not be negative")
+    while True:
+        try:
+            async for event in source:
+                yield event
+        except asyncio.CancelledError:
+            raise
+        except RiskControlHubError as error:
+            log.warning(
+                "live_risk_control_stream_retry",
+                error_type=type(error).__name__,
+                error=str(error),
+                retry_delay_seconds=retry_delay_seconds,
+            )
+            if retry_delay_seconds > 0:
+                await asyncio.sleep(retry_delay_seconds)
+        else:
+            return
+
+
+async def _run_risk_control_channel(
+    *,
+    source: WebSocketRiskControlSource,
+    on_event: Callable[[RiskControlEvent], None],
+) -> None:
+    async for event in _resilient_risk_control_stream(source):
+        on_event(event)
 
 
 def _is_pending_position_sync_failure(failure: str | None) -> bool:
@@ -3703,6 +4381,8 @@ class _LiveDaemonRepositoryAdapter:
         strategy_name: str | None = None,
         required_lease_owner: str | None = None,
         required_lease_id: str | None = None,
+        required_code_generation: str | None = None,
+        required_session_id: str | None = None,
         max_open_positions: int | None = None,
         max_daily_loss: Decimal | None = None,
         max_gross_exposure: Decimal | None = None,
@@ -3721,6 +4401,8 @@ class _LiveDaemonRepositoryAdapter:
             strategy_name=strategy_name,
             required_lease_owner=required_lease_owner,
             required_lease_id=required_lease_id,
+            required_code_generation=required_code_generation,
+            required_session_id=required_session_id,
             max_open_positions=max_open_positions,
             max_daily_loss=max_daily_loss,
             max_gross_exposure=max_gross_exposure,
@@ -4162,6 +4844,7 @@ async def _prepare_live_risk_gates(
     account_label: str,
     strategy_name: str,
     lease_owner: str,
+    code_generation: str,
     lease_ttl_seconds: int,
     max_order_notional: Decimal | None,
     max_gross_notional: Decimal | None,
@@ -4194,6 +4877,7 @@ async def _prepare_live_risk_gates(
         account_label=account_label,
         strategy_name=strategy_name,
         owner=lease_owner,
+        code_generation=code_generation,
         state=TradingLeaseState.ACTIVE,
         acquired_at=now,
         expires_at=now + timedelta(seconds=lease_ttl_seconds),
@@ -4460,6 +5144,8 @@ async def _preflight_summary(
     *,
     expected_git_commit: str | None = None,
     expected_migration_revision: str | None = None,
+    expected_lease_owner: str | None = None,
+    expected_strategy_config_hash: str | None = None,
 ) -> dict[str, object]:
     now = datetime.now(tz=UTC)
     engine = create_execution_database_engine(database_url)
@@ -4534,6 +5220,14 @@ async def _preflight_summary(
             checks["approval_migration_matches_expected"] = (
                 approval_migration_revision == expected_migration_revision.strip()
             )
+        if expected_lease_owner is not None:
+            checks["lease_owner_matches_expected"] = (
+                lease is not None and lease.owner == expected_lease_owner
+            )
+        if expected_strategy_config_hash is not None:
+            checks["runtime_strategy_config_matches_manifest"] = (
+                runtime_strategy_config_hash == expected_strategy_config_hash
+            )
         preflight_errors = [name for name, passed in checks.items() if not passed]
         return {
             "approval_present": approval is not None,
@@ -4547,6 +5241,8 @@ async def _preflight_summary(
             "approved_strategy_config_hash": approved_strategy_config_hash,
             "approved_git_commit_hash": approval_git_commit_hash,
             "approved_migration_revision": approval_migration_revision,
+            "expected_lease_owner": expected_lease_owner,
+            "expected_strategy_config_hash": expected_strategy_config_hash,
             "preflight_checks": checks,
             "preflight_errors": preflight_errors,
             "preflight_ok": not preflight_errors,
@@ -4659,7 +5355,7 @@ async def _save_transition(
     risk_config_hash: str,
     state: LiveSessionState,
     reason: str,
-) -> None:
+) -> LiveSessionTransition:
     now = datetime.now(tz=UTC)
     transition = LiveSessionTransition(
         transition_id=f"transition-{uuid4()}",
@@ -4679,6 +5375,20 @@ async def _save_transition(
         ).save_transition(transition)
     finally:
         await engine.dispose()
+    return transition
+
+
+async def _publish_risk_control_event(
+    *,
+    url: str,
+    token: str | None,
+    event: RiskControlEvent,
+) -> RiskControlEvent:
+    publisher = WebSocketRiskControlPublisher(
+        url=url,
+        token=token or os.environ.get("CML_RISK_CONTROL_HUB_TOKEN") or None,
+    )
+    return await publisher.publish(event)
 
 
 def _execution_database_url(value: str | None) -> str:

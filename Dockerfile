@@ -22,6 +22,7 @@ COPY src ./src
 COPY configs ./configs
 COPY alembic.ini ./
 COPY alembic ./alembic
+COPY deploy/live-runtime.yaml ./deploy/live-runtime.yaml
 COPY docker/local-healthcheck /usr/local/bin/cml-local-healthcheck
 
 RUN chmod 0755 /usr/local/bin/cml-local-healthcheck

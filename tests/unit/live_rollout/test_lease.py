@@ -19,6 +19,7 @@ def _lease(*, expires_at: datetime) -> TradingLease:
         account_label="primary",
         strategy_name="orderflow_impulse",
         owner="live-worker",
+        code_generation="test-generation",
         state=TradingLeaseState.ACTIVE,
         acquired_at=acquired_at,
         expires_at=expires_at,

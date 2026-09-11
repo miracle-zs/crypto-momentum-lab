@@ -29,6 +29,7 @@ def test_trading_lease_row_preserves_owner_and_expiration() -> None:
 
     assert row["state"] == "active"
     assert row["owner"] == "worker-1"
+    assert row["code_generation"] == "test-generation"
     assert row["expires_at"] == NOW + timedelta(minutes=1)
 
 
@@ -92,6 +93,7 @@ def _lease() -> TradingLease:
         account_label="primary",
         strategy_name="compression_breakout",
         owner="worker-1",
+        code_generation="test-generation",
         state=TradingLeaseState.ACTIVE,
         acquired_at=NOW,
         expires_at=NOW + timedelta(minutes=1),

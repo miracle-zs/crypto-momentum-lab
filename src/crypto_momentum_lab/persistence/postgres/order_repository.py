@@ -42,6 +42,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ExecutionReconciliationEventRow,
     ExitEpisodeReservationRow,
     LiveExposureClaimRow,
+    LiveSessionTransitionRow,
     OrderIntentClaimRow,
     OrderIntentExecutionRow,
     RiskHaltRow,
@@ -136,6 +137,8 @@ class PostgresOrderRepository:
         strategy_name: str | None = None,
         required_lease_owner: str | None = None,
         required_lease_id: str | None = None,
+        required_code_generation: str | None = None,
+        required_session_id: str | None = None,
         max_open_positions: int | None = None,
         max_daily_loss: Decimal | None = None,
         max_gross_exposure: Decimal | None = None,
@@ -158,6 +161,8 @@ class PostgresOrderRepository:
             raise ValueError("order plan must reference the approved intent")
         if prepared_at.tzinfo is None or prepared_at.utcoffset() is None:
             raise ValueError("prepared_at must be timezone-aware")
+        if required_session_id is not None and not required_session_id.strip():
+            raise ValueError("required_session_id must not be blank when present")
 
         intent_values = {
             "intent_id": intent.candidate_id,
@@ -218,6 +223,7 @@ class PostgresOrderRepository:
                         strategy_name,
                         required_lease_owner,
                         required_lease_id,
+                        required_code_generation,
                     )
                     if any(value is not None for value in fencing_fields):
                         if not all(value is not None for value in fencing_fields):
@@ -230,6 +236,7 @@ class PostgresOrderRepository:
                         assert strategy_name is not None
                         assert required_lease_owner is not None
                         assert required_lease_id is not None
+                        assert required_code_generation is not None
                         active_lease = await session.scalar(
                             select(TradingLeaseRow)
                             .where(
@@ -245,9 +252,10 @@ class PostgresOrderRepository:
                             or active_lease.owner != required_lease_owner
                             or active_lease.lease_id != required_lease_id
                             or active_lease.strategy_name != strategy_name
+                            or active_lease.code_generation != required_code_generation
                         ):
                             raise OrderPreSubmissionError(
-                                "live lease fencing check failed"
+                                "live lease/version fencing check failed"
                             )
                         active_halt = await session.scalar(
                             select(RiskHaltRow.halt_id)
@@ -260,6 +268,31 @@ class PostgresOrderRepository:
                         )
                         if active_halt is not None:
                             raise OrderPreSubmissionError("active risk halt")
+                        if required_session_id is not None:
+                            latest_session_state = await session.scalar(
+                                select(LiveSessionTransitionRow.state)
+                                .where(
+                                    LiveSessionTransitionRow.session_id
+                                    == required_session_id,
+                                )
+                                .order_by(
+                                    LiveSessionTransitionRow.occurred_at.desc()
+                                )
+                                .limit(1)
+                            )
+                            if latest_session_state is None:
+                                raise OrderPreSubmissionError(
+                                    "live session control state is missing"
+                                )
+                            if latest_session_state in {
+                                "draining",
+                                "halted",
+                                "reconciling",
+                                "completed",
+                            }:
+                                raise OrderPreSubmissionError(
+                                    "live session entries are disabled"
+                                )
 
                     exposure_fields = (
                         max_open_positions,

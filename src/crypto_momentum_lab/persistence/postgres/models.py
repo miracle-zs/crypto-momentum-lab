@@ -614,6 +614,10 @@ class StrategyRuntimeEventRow(Base):
             "event_type",
             "occurred_at",
         ),
+        Index(
+            "ix_strategy_runtime_events_time",
+            "occurred_at",
+        ),
     )
 
 
@@ -864,6 +868,7 @@ class TradingLeaseRow(Base):
     account_label: Mapped[str] = mapped_column(String(64))
     strategy_name: Mapped[str] = mapped_column(String(64))
     owner: Mapped[str] = mapped_column(String(128))
+    code_generation: Mapped[str] = mapped_column(String(128))
     state: Mapped[str] = mapped_column(String(16))
     acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

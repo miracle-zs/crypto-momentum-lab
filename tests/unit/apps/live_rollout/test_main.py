@@ -2,6 +2,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from inspect import signature
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -32,6 +33,131 @@ def test_live_entry_positive_gainer_top_count_rejects_invalid_environment(
 
     with pytest.raises(BadParameter, match="must be positive"):
         main._resolve_live_entry_positive_gainer_top_count(None)
+
+
+def test_strategy_hash_can_be_derived_from_runtime_manifest(monkeypatch) -> None:
+    monkeypatch.setenv("CML_CODE_COMMIT", "a" * 40)
+
+    result = runner.invoke(
+        app,
+        [
+            "strategy-config-hash",
+            "--account-label",
+            "account-3",
+            "--runtime-manifest",
+            "deploy/live-runtime.yaml",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert len(result.stdout.strip()) == 64
+
+
+def test_live_run_uses_runtime_manifest_identity_and_strategy_inputs(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "runtime.yaml"
+    manifest_path.write_text(
+        """
+schema_version: 1
+runtime:
+  image_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  migration_revision: "20260911_0040"
+accounts:
+  - label: account-2
+    strategy: orderflow_impulse
+    session_id: live-account-2-v1
+    lease_owner: live-worker-account-2
+    profile_ref: profile.yaml
+    limits_ref: limits.yaml
+    services: [live-strategy-account-2]
+    strategy_config:
+      impulse_window_buckets: 2
+      confirmation_buckets: 1
+      min_return_pct: 0.007
+      min_imbalance: 0.35
+      min_intensity: 2.5
+      min_notional_5m_vs_30m: 1.75
+      cooldown_buckets: 2
+      entry_positive_gainer_top_count: 17
+      require_price_above_ema5: true
+      require_price_above_ema10: false
+      entry_policy_mode: compare_only
+      entry_order_type: limit
+      entry_limit_ttl_seconds: 1200
+""",
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_run_live_daemon(**kwargs: object):
+        captured.update(kwargs)
+        return main.LiveDaemonResult(
+            processed_state_count=0,
+            approved_intent_count=0,
+            submitted_order_count=0,
+            halt_reason=None,
+            final_state_at=None,
+        )
+
+    async def fake_startup_backoff(run_once):
+        return await run_once()
+
+    monkeypatch.setattr(main, "_run_live_daemon", fake_run_live_daemon)
+    monkeypatch.setattr(
+        main,
+        "_run_with_live_startup_backoff",
+        fake_startup_backoff,
+    )
+    monkeypatch.setattr(
+        main,
+        "_resolve_live_cli_credentials",
+        lambda **_: SimpleNamespace(api_key="test-key", api_secret="test-secret"),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--account-label",
+            "account-2",
+            "--runtime-manifest",
+            str(manifest_path),
+            "--git-commit-hash",
+            "a" * 40,
+            "--migration-revision",
+            "20260911_0040",
+            "--i-understand-this-places-real-orders",
+        ],
+    )
+
+    account = main._runtime_manifest_account_for_cli(
+        manifest_path,
+        account_label="account-2",
+        strategy="orderflow_impulse",
+    )
+    expected_hash = main._runtime_manifest_strategy_config_hash(account)
+
+    assert result.exit_code == 0
+    assert captured["session_id"] == "live-account-2-v1"
+    assert captured["lease_owner"] == "live-worker-account-2"
+    assert captured["git_commit_hash"] == "a" * 40
+    assert captured["migration_revision"] == "20260911_0040"
+    assert captured["strategy_config_hash"] == expected_hash
+    profile = captured["profile"]
+    assert isinstance(profile, main.LiveOrderFlowImpulseProfile)
+    assert profile.impulse_window_buckets == 2
+    assert profile.min_notional_5m_vs_30m == Decimal("1.75")
+    assert captured["entry_positive_gainer_top_count"] == 17
+    assert captured["require_price_above_ema5"] is True
+    assert captured["require_price_above_ema10"] is False
+    assert captured["entry_policy_compare_only"] is True
+    assert captured["entry_policy_enforce"] is False
+    assert captured["entry_order_type"] is main.EntryType.LIMIT
+    assert captured["entry_limit_ttl_seconds"] == 1200
 
 
 def test_cli_requires_confirmation_flag_for_live_run() -> None:
@@ -88,6 +214,7 @@ def test_renew_live_lease_checks_owner_and_extends_expiration(monkeypatch) -> No
         account_label="account-2",
         strategy_name="orderflow_impulse",
         owner="live-worker-account-2",
+        code_generation="test-generation",
         state=TradingLeaseState.ACTIVE,
         acquired_at=now - timedelta(minutes=5),
         expires_at=now + timedelta(minutes=5),
@@ -116,6 +243,7 @@ def test_renew_live_lease_checks_owner_and_extends_expiration(monkeypatch) -> No
                 account_label=lease.account_label,
                 strategy_name=lease.strategy_name,
                 owner=lease.owner,
+                code_generation=lease.code_generation,
                 state=lease.state,
                 acquired_at=lease.acquired_at,
                 expires_at=expires_at,
@@ -640,6 +768,185 @@ def test_strict_preflight_returns_failure_exit_code(monkeypatch) -> None:
 
     assert result.exit_code == 1
     assert "approval_present" in result.stdout
+
+
+def test_preflight_passes_runtime_manifest_expectations_to_summary(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "runtime.yaml"
+    manifest_path.write_text(
+        """
+schema_version: 1
+runtime:
+  image_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  migration_revision: "20260911_0040"
+accounts:
+  - label: primary
+    strategy: orderflow_impulse
+    session_id: live-primary-v1
+    lease_owner: live-worker
+    profile_ref: profile.yaml
+    limits_ref: limits.yaml
+    services: [live-strategy]
+    strategy_config:
+      impulse_window_buckets: 4
+      confirmation_buckets: 1
+      min_return_pct: 0.005
+      min_imbalance: 0.30
+      min_intensity: 1.5
+      min_notional_5m_vs_30m: 1.50
+      cooldown_buckets: 0
+      entry_positive_gainer_top_count: 10
+      require_price_above_ema5: false
+      require_price_above_ema10: false
+      entry_policy_mode: enforce
+      entry_order_type: limit
+      entry_limit_ttl_seconds: 900
+""",
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_summary(*args, **kwargs):
+        captured.update(kwargs)
+        return {"preflight_ok": True, "preflight_errors": []}
+
+    monkeypatch.setattr(main, "_preflight_summary", fake_summary)
+
+    result = runner.invoke(
+        app,
+        [
+            "preflight",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--runtime-manifest",
+            str(manifest_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["expected_git_commit"] == "a" * 40
+    assert captured["expected_migration_revision"] == "20260911_0040"
+    assert captured["expected_lease_owner"] == "live-worker"
+    assert isinstance(captured["expected_strategy_config_hash"], str)
+    assert len(captured["expected_strategy_config_hash"]) == 64
+
+
+def test_prepare_uses_runtime_manifest_identity_before_writing_risk_gates(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "runtime.yaml"
+    manifest_path.write_text(
+        """
+schema_version: 1
+runtime:
+  image_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  migration_revision: "20260911_0040"
+accounts:
+  - label: primary
+    strategy: orderflow_impulse
+    session_id: live-primary-v1
+    lease_owner: live-worker
+    profile_ref: profile.yaml
+    limits_ref: limits.yaml
+    services: [live-strategy]
+    strategy_config:
+      impulse_window_buckets: 4
+      confirmation_buckets: 1
+      min_return_pct: 0.005
+      min_imbalance: 0.30
+      min_intensity: 1.5
+      min_notional_5m_vs_30m: 1.50
+      cooldown_buckets: 0
+      entry_positive_gainer_top_count: 10
+      require_price_above_ema5: false
+      require_price_above_ema10: false
+      entry_policy_mode: enforce
+      entry_order_type: limit
+      entry_limit_ttl_seconds: 900
+""",
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_prepare(**kwargs):
+        captured.update(kwargs)
+        return {
+            "risk_config_hash": "b" * 64,
+            "strategy_config_hash": "c" * 64,
+        }
+
+    monkeypatch.setattr(main, "_prepare_live_risk_gates", fake_prepare)
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--runtime-manifest",
+            str(manifest_path),
+            "--confirmation",
+            "PREPARE LIVE RISK GATES",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["code_generation"] == "a" * 40
+    assert captured["lease_owner"] == "live-worker"
+
+
+def test_prepare_rejects_manifest_lease_owner_mismatch(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "runtime.yaml"
+    manifest_path.write_text(
+        """
+schema_version: 1
+runtime:
+  image_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  migration_revision: "20260911_0040"
+accounts:
+  - label: primary
+    strategy: orderflow_impulse
+    session_id: live-primary-v1
+    lease_owner: manifest-worker
+    profile_ref: profile.yaml
+    limits_ref: limits.yaml
+    services: [live-strategy]
+    strategy_config:
+      impulse_window_buckets: 4
+      confirmation_buckets: 1
+      min_return_pct: 0.005
+      min_imbalance: 0.30
+      min_intensity: 1.5
+      min_notional_5m_vs_30m: 1.50
+      cooldown_buckets: 0
+      entry_positive_gainer_top_count: 10
+      require_price_above_ema5: false
+      require_price_above_ema10: false
+      entry_policy_mode: enforce
+      entry_order_type: limit
+      entry_limit_ttl_seconds: 900
+""",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--runtime-manifest",
+            str(manifest_path),
+            "--confirmation",
+            "PREPARE LIVE RISK GATES",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "lease owner does not match" in result.output
 
 
 def test_strategy_config_hash_includes_live_entry_filters() -> None:

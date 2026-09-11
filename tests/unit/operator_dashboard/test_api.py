@@ -32,6 +32,7 @@ def test_all_read_only_dashboard_routes_are_available() -> None:
         create_dashboard_app(queries=FakeQueries(), **DASHBOARD_AUTH_KWARGS)
     ) as client:
         for route in (
+            "/api/decision-slo",
             "/api/research-collector",
             "/api/universe",
             "/api/strategy-runs/current",
@@ -46,6 +47,14 @@ def test_all_read_only_dashboard_routes_are_available() -> None:
             "/api/reports",
         ):
             assert client.get(route, auth=DASHBOARD_BASIC_AUTH).status_code == 200
+
+
+def test_decision_slo_endpoint_accepts_a_bounded_window() -> None:
+    with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
+        response = client.get("/api/decision-slo?window=7d")
+
+    assert response.status_code == 200
+    assert response.json()["window"] == "7d"
 
 
 def test_account_endpoint_accepts_an_account_label() -> None:

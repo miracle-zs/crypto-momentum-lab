@@ -47,6 +47,15 @@ def test_live_gate_rejects_when_strategy_lease_missing() -> None:
     assert "missing_active_lease" in decision.reasons
 
 
+def test_live_gate_rejects_when_lease_generation_differs_from_worker() -> None:
+    decision = evaluate_live_gate(
+        replace(_context(), git_commit_hash="def456")
+    )
+
+    assert decision.status is LiveGateStatus.BLOCKED
+    assert "lease_code_generation_mismatch" in decision.reasons
+
+
 def test_live_gate_accepts_complete_preflight_context() -> None:
     decision = evaluate_live_gate(_context())
 
@@ -139,6 +148,7 @@ def _context() -> LiveGateContext:
             account_label="primary",
             strategy_name="compression_breakout",
             owner="live-worker",
+            code_generation="abc123",
             state=TradingLeaseState.ACTIVE,
             acquired_at=NOW - timedelta(minutes=1),
             expires_at=NOW + timedelta(minutes=5),

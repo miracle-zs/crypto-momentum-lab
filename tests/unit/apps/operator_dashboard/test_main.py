@@ -1,10 +1,12 @@
 from datetime import UTC, datetime
+from typing import Literal
 
 from fastapi.testclient import TestClient
 
 from crypto_momentum_lab.operator_dashboard.api import create_dashboard_app
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
+    DecisionSLOResponse,
     LiveAccountMetricsResponse,
     LiveAccountsResponse,
     LiveAccountSummaryResponse,
@@ -62,6 +64,18 @@ def test_dashboard_app_mounts_static_index() -> None:
 class FakeQueries:
     async def health(self) -> dict[str, str]:
         return {"app_status": "UP", "database_status": "UP"}
+
+    async def decision_slo(
+        self,
+        window: Literal["1h", "6h", "24h", "7d"] = "24h",
+    ) -> DecisionSLOResponse:
+        return DecisionSLOResponse(
+            status=OperationalStatus.NO_DATA,
+            window=window,
+            window_start=NOW,
+            window_end=NOW,
+            persisted_event_count=0,
+        )
 
     async def overview(self) -> SystemOverviewResponse:
         return SystemOverviewResponse(

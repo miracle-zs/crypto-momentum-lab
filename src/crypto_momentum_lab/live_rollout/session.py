@@ -11,9 +11,6 @@ from crypto_momentum_lab.domain.live_rollout import (
     LiveSessionState,
     LiveSessionTransition,
 )
-from crypto_momentum_lab.execution_account.orders.coordinator import (
-    OrderExecutionPort,
-)
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
 )
@@ -23,6 +20,10 @@ from crypto_momentum_lab.live_rollout.gates import LiveGateContext, evaluate_liv
 class LiveTransitionRepository(Protocol):
     async def save_transition(self, transition: LiveSessionTransition) -> None:
         pass
+
+
+class LivePlanExecutor(Protocol):
+    async def __call__(self, plan: OrderExecutionPlan) -> OrderExecutionResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,12 +46,12 @@ class LiveRolloutSession:
         self,
         *,
         repository: LiveTransitionRepository,
-        state_machine: OrderExecutionPort,
+        execute_plan: LivePlanExecutor,
         config: LiveSessionConfig,
         clock: Callable[[], datetime],
     ) -> None:
         self._repository = repository
-        self._state_machine = state_machine
+        self._execute_plan = execute_plan
         self._config = config
         self._clock = clock
 
@@ -75,7 +76,7 @@ class LiveRolloutSession:
             await self._transition(LiveSessionState.HALTED, ",".join(gate.reasons))
             return LiveSessionResult(gate, LiveSessionState.HALTED, None)
         await self._transition(LiveSessionState.LIVE_ENABLED)
-        order_result = await self._state_machine.execute_approved_intent(plan)
+        order_result = await self._execute_plan(plan)
         return LiveSessionResult(gate, LiveSessionState.LIVE_ENABLED, order_result)
 
     async def _transition(

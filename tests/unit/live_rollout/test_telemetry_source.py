@@ -14,6 +14,7 @@ from crypto_momentum_lab.live_rollout.telemetry import (
     LIVE_LANE_EXIT,
     LIVE_TRIGGER_SOURCE_QUOTE,
     SOURCE_RECEIVED,
+    TERMINAL_REASON,
     TRACE_TERMINATED,
     LiveRuntimeTelemetry,
     SourceIngress,
@@ -161,6 +162,42 @@ async def test_trace_terminated_rejects_an_empty_reason() -> None:
             occurred_at=datetime(2026, 9, 4, tzinfo=UTC),
             reason=" ",
         )
+
+
+async def test_trace_terminated_persists_only_low_cardinality_reason_rollup() -> None:
+    batches: list[tuple[dict[str, object], ...]] = []
+
+    async def persist(events) -> None:
+        batches.append(tuple(dict(event) for event in events))
+
+    ingress = SourceIngress(
+        run_id="run-1",
+        source_event_id="quote-1",
+        lane=LIVE_LANE_EXIT,
+        trigger_source=LIVE_TRIGGER_SOURCE_QUOTE,
+        received_at=datetime(2026, 9, 4, tzinfo=UTC),
+    )
+    telemetry = LiveRuntimeTelemetry(
+        run_id="run-1",
+        persist=persist,
+        persist_event_types=frozenset({TERMINAL_REASON}),
+    )
+
+    await telemetry.start()
+    await telemetry.trace_terminated(
+        ingress,
+        occurred_at=datetime(2026, 9, 4, 0, 0, 1, tzinfo=UTC),
+        reason="no_exit_request",
+    )
+    await telemetry.stop()
+
+    assert len(batches) == 1
+    assert batches[0][0]["event_type"] == TERMINAL_REASON
+    assert batches[0][0]["details"] == {
+        "lane": "exit",
+        "trigger_source": "quote",
+        "reason": "no_exit_request",
+    }
 
 
 async def test_terminal_reason_summary_groups_by_lane_and_source() -> None:
