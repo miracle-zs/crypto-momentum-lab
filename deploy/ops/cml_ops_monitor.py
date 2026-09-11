@@ -364,12 +364,12 @@ class MonitorConfig:
     rss_growth_window_seconds: float = _DEFAULT_RSS_GROWTH_WINDOW_SECONDS
     alert_cooldown_seconds: float = _DEFAULT_ALERT_COOLDOWN_SECONDS
     command_timeout_seconds: float = _DEFAULT_COMMAND_TIMEOUT_SECONDS
-    auto_restart_stale_live_services: bool = True
-    live_restart_cooldown_seconds: float = _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS
-    live_restart_max_attempts: int = _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS
     state_path: Path = Path("/var/lib/crypto-momentum-lab/ops-monitor.json")
     webhook_url: str | None = None
     serverchan_sendkey: str | None = None
+    auto_restart_stale_live_services: bool = True
+    live_restart_cooldown_seconds: float = _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS
+    live_restart_max_attempts: int = _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS
 
 
 class OpsMonitor:
