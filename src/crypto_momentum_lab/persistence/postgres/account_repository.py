@@ -2,7 +2,7 @@ from dataclasses import asdict
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, case, delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -131,6 +131,19 @@ class PostgresAccountRepository:
         """Persist one account observation atomically across all tables."""
         async with self._session_factory() as session:
             async with session.begin():
+                # Open-order snapshots are a replace-all projection.  A
+                # transaction advisory lock serializes writers across
+                # processes, including the empty-snapshot case where there is
+                # no row whose observed_at could act as a fence.
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                    {
+                        "lock_key": (
+                            f"account-open-orders:{config.environment}:"
+                            f"{config.account_label}"
+                        )
+                    },
+                )
                 await self._insert_in_session(
                     session,
                     AccountConfigSnapshotRow,
@@ -146,17 +159,32 @@ class PostgresAccountRepository:
                     AccountPositionSnapshotRow,
                     [position_snapshot_row(item) for item in positions],
                 )
-                await session.execute(
-                    delete(AccountOpenOrderRow).where(
-                        AccountOpenOrderRow.environment == config.environment,
-                        AccountOpenOrderRow.account_label == config.account_label,
+                latest_reconciliation_observed_at = await session.scalar(
+                    select(func.max(AccountReconciliationRunRow.observed_at)).where(
+                        AccountReconciliationRunRow.environment
+                        == config.environment,
+                        AccountReconciliationRunRow.account_label
+                        == config.account_label,
+                        AccountReconciliationRunRow.status == "ready",
                     )
                 )
-                await self._insert_in_session(
-                    session,
-                    AccountOpenOrderRow,
-                    [open_order_snapshot_row(item) for item in open_orders],
-                )
+                snapshot_observed_at = max(config.observed_at, run.observed_at)
+                if (
+                    latest_reconciliation_observed_at is None
+                    or snapshot_observed_at >= latest_reconciliation_observed_at
+                ):
+                    await session.execute(
+                        delete(AccountOpenOrderRow).where(
+                            AccountOpenOrderRow.environment == config.environment,
+                            AccountOpenOrderRow.account_label
+                            == config.account_label,
+                        )
+                    )
+                    await self._insert_in_session(
+                        session,
+                        AccountOpenOrderRow,
+                        [open_order_snapshot_row(item) for item in open_orders],
+                    )
                 await self._insert_in_session(
                     session,
                     AccountFillEventRow,
@@ -252,10 +280,44 @@ class PostgresAccountRepository:
                         "symbol",
                     ],
                     set_={
-                        "from_id": statement.excluded.from_id,
-                        "start_time_ms": statement.excluded.start_time_ms,
+                        # Reconciliation persistence is intentionally
+                        # asynchronous.  A slower result must never move a
+                        # cursor backwards after a newer result committed.
+                        # The cursor mode is part of the versioned value: an
+                        # id cursor clears the time cursor and vice versa, so
+                        # the one-position check constraint remains valid.
+                        "from_id": case(
+                            (
+                                statement.excluded.from_id.is_not(None),
+                                func.greatest(
+                                    func.coalesce(
+                                        AccountFillReconciliationCursorRow.from_id,
+                                        0,
+                                    ),
+                                    statement.excluded.from_id,
+                                ),
+                            ),
+                            else_=None,
+                        ),
+                        "start_time_ms": case(
+                            (
+                                statement.excluded.start_time_ms.is_not(None),
+                                func.greatest(
+                                    func.coalesce(
+                                        AccountFillReconciliationCursorRow.start_time_ms,
+                                        0,
+                                    ),
+                                    statement.excluded.start_time_ms,
+                                ),
+                            ),
+                            else_=None,
+                        ),
                         "last_checked_at": statement.excluded.last_checked_at,
                     },
+                    where=(
+                        AccountFillReconciliationCursorRow.last_checked_at
+                        <= statement.excluded.last_checked_at
+                    ),
                 )
                 await session.execute(statement)
 
@@ -270,8 +332,19 @@ class PostgresAccountRepository:
         if not account_label.strip():
             raise ValueError("account_label must not be empty")
         async with self._session_factory() as session:
-            reconciliation = await session.scalar(
-                select(AccountReconciliationRunRow)
+            # Keep the run fence and the position timestamp in one SQL
+            # statement.  Two independent reads can otherwise observe a
+            # newer position snapshot with an older ready-run row while a
+            # reconciliation transaction is committing.
+            latest_ready_run = (
+                select(
+                    AccountReconciliationRunRow.observed_at.label(
+                        "reconciliation_observed_at"
+                    ),
+                    AccountReconciliationRunRow.position_count.label(
+                        "position_count"
+                    ),
+                )
                 .where(
                     AccountReconciliationRunRow.environment == environment,
                     AccountReconciliationRunRow.account_label == account_label,
@@ -279,28 +352,48 @@ class PostgresAccountRepository:
                 )
                 .order_by(AccountReconciliationRunRow.observed_at.desc())
                 .limit(1)
+                .subquery()
             )
-            if reconciliation is None or reconciliation.position_count == 0:
-                return frozenset()
-            latest_observed_at = await session.scalar(
-                select(func.max(AccountPositionSnapshotRow.observed_at)).where(
+            latest_position_observed_at = (
+                select(func.max(AccountPositionSnapshotRow.observed_at))
+                .where(
                     AccountPositionSnapshotRow.environment == environment,
                     AccountPositionSnapshotRow.account_label == account_label,
+                    AccountPositionSnapshotRow.observed_at
+                    <= latest_ready_run.c.reconciliation_observed_at,
+                )
+                .correlate(latest_ready_run)
+                .scalar_subquery()
+            )
+            statement = (
+                select(
+                    latest_ready_run.c.position_count,
+                    AccountPositionSnapshotRow.symbol,
+                )
+                .select_from(latest_ready_run)
+                .outerjoin(
+                    AccountPositionSnapshotRow,
+                    and_(
+                        AccountPositionSnapshotRow.environment == environment,
+                        AccountPositionSnapshotRow.account_label == account_label,
+                        AccountPositionSnapshotRow.observed_at
+                        == latest_position_observed_at,
+                        AccountPositionSnapshotRow.position_amt != 0,
+                    ),
                 )
             )
-            if latest_observed_at is None:
+            rows = (await session.execute(statement)).all()
+            if not rows:
+                return frozenset()
+            position_count = rows[0].position_count
+            result = frozenset(
+                symbol for _position_count, symbol in rows if symbol is not None
+            )
+            if position_count > 0 and not result:
                 raise RuntimeError(
                     "ready reconciliation is missing active position snapshots"
                 )
-            symbols = await session.scalars(
-                select(AccountPositionSnapshotRow.symbol).where(
-                    AccountPositionSnapshotRow.environment == environment,
-                    AccountPositionSnapshotRow.account_label == account_label,
-                    AccountPositionSnapshotRow.observed_at == latest_observed_at,
-                    AccountPositionSnapshotRow.position_amt != 0,
-                )
-            )
-            return frozenset(symbols.all())
+            return result
 
     async def load_active_position_account_labels(
         self,

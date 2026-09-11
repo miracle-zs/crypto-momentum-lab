@@ -47,6 +47,23 @@ class FakeBinanceWebSocketServer:
             await asyncio.wait_for(self._control_event.wait(), timeout=5)
             self._control_event.clear()
 
+    async def wait_for_control(
+        self,
+        *,
+        method: str,
+        names: set[str],
+    ) -> None:
+        while not names.issubset(
+            {
+                name
+                for event_method, request_names in self.control_events
+                if event_method == method
+                for name in request_names
+            }
+        ):
+            await asyncio.wait_for(self._control_event.wait(), timeout=5)
+            self._control_event.clear()
+
     async def stop(self) -> None:
         self.server.close()
         await self.server.wait_closed()
@@ -60,15 +77,19 @@ class FakeBinanceWebSocketServer:
             method = request.get("method")
             if method == "SUBSCRIBE":
                 names = tuple(request.get("params", ()))
-                self.subscribe_requests.append(names)
-                self.control_events.append(("SUBSCRIBE", names))
-                self._control_event.set()
                 if self.acknowledge_controls:
                     await connection.send(
                         json.dumps({"result": None, "id": request.get("id")})
                     )
                 for sequence, name in enumerate(names, start=connection_index):
                     await connection.send(json.dumps(_stream_message(name, sequence)))
+                # Do not wake subscription waiters until the corresponding
+                # data frames have been handed to the websocket; recording
+                # only after the sends prevents a test from stopping the
+                # connection before the fake exchange delivers the first event.
+                self.subscribe_requests.append(names)
+                self.control_events.append(("SUBSCRIBE", names))
+                self._control_event.set()
                 if self.close_first_connection and connection_index == 1:
                     await connection.close()
                     return

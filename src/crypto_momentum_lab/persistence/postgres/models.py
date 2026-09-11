@@ -255,6 +255,40 @@ class RuntimeMarketState15sRow(Base):
     )
 
 
+class RuntimeMarketStateGapRow(Base):
+    __tablename__ = "runtime_market_state_gaps"
+
+    environment: Mapped[str] = mapped_column(String(32), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    previous_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    current_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    previous_event_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True)
+    )
+    current_event_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    first_bucket_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True)
+    )
+    last_bucket_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    missing_count: Mapped[int] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "missing_count > 0",
+            name="runtime_market_state_gap_positive",
+        ),
+        Index(
+            "ix_runtime_market_state_gaps_bucket",
+            "environment",
+            "symbol",
+            "first_bucket_start",
+            "last_bucket_start",
+        ),
+    )
+
+
 class StrategyRunRow(Base):
     __tablename__ = "strategy_runs"
 
@@ -971,6 +1005,78 @@ class OrderIntentClaimRow(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class ExitEpisodeReservationRow(Base):
+    """Durable single-owner reservation for one live position episode."""
+
+    __tablename__ = "exit_episode_reservations"
+
+    environment: Mapped[str] = mapped_column(String(32), primary_key=True)
+    account_label: Mapped[str] = mapped_column(String(64), primary_key=True)
+    strategy_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    position_side: Mapped[str] = mapped_column(String(8), primary_key=True)
+    episode_key: Mapped[str] = mapped_column(String(256), primary_key=True)
+    intent_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("order_intents.intent_id", ondelete="CASCADE"),
+        unique=True,
+    )
+    client_order_id: Mapped[str] = mapped_column(String(36), unique=True)
+    active: Mapped[bool] = mapped_column(Boolean)
+    state: Mapped[str] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index(
+            "ix_exit_episode_reservations_active",
+            "environment",
+            "account_label",
+            "strategy_name",
+            "active",
+        ),
+    )
+
+
+class LiveExposureClaimRow(Base):
+    """Durable entry exposure reservation shared by rolling workers."""
+
+    __tablename__ = "live_exposure_claims"
+
+    intent_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("order_intents.intent_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    environment: Mapped[str] = mapped_column(String(32))
+    account_label: Mapped[str] = mapped_column(String(64))
+    strategy_name: Mapped[str] = mapped_column(String(64))
+    symbol: Mapped[str] = mapped_column(String(32))
+    position_side: Mapped[str] = mapped_column(String(8))
+    notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    active: Mapped[bool] = mapped_column(Boolean)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index(
+            "ix_live_exposure_claims_scope_active",
+            "environment",
+            "account_label",
+            "strategy_name",
+            "active",
+        ),
+        Index(
+            "ix_live_exposure_claims_scope_symbol_active",
+            "environment",
+            "account_label",
+            "strategy_name",
+            "symbol",
+            "active",
+        ),
+    )
+
+
 class ExchangeOrderRow(Base):
     __tablename__ = "exchange_orders"
 
@@ -1047,6 +1153,12 @@ class ExchangeFillRow(Base):
 
     __table_args__ = (
         Index("ix_exchange_fills_order_time", "client_order_id", "filled_at"),
+        Index(
+            "uq_exchange_fills_client_trade",
+            "client_order_id",
+            "exchange_trade_id",
+            unique=True,
+        ),
     )
 
 

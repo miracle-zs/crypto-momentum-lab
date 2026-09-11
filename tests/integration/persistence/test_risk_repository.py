@@ -10,6 +10,8 @@ from crypto_momentum_lab.domain.risk import (
     RiskDecision,
     RiskEvaluation,
     RiskHalt,
+    StrategyLiveState,
+    StrategyLiveStateRecord,
     TradingLease,
     TradingLeaseState,
 )
@@ -141,6 +143,41 @@ async def test_load_active_halt_returns_account_halt(
     await repository.save_halt(halt)
 
     assert await repository.load_active_halts("live", "primary") == (halt,)
+
+
+async def test_stale_strategy_live_state_cannot_overwrite_newer_state(
+    risk_repository: tuple[PostgresRiskRepository, async_sessionmaker],
+) -> None:
+    repository, factory = risk_repository
+    current = StrategyLiveStateRecord(
+        environment="live",
+        account_label="primary",
+        strategy_name="compression_breakout",
+        state=StrategyLiveState.ACTIVE,
+        changed_at=NOW + timedelta(minutes=2),
+        reason="started",
+    )
+    stale = StrategyLiveStateRecord(
+        environment="live",
+        account_label="primary",
+        strategy_name="compression_breakout",
+        state=StrategyLiveState.DRAINING,
+        changed_at=NOW + timedelta(minutes=1),
+        reason="old_operator_command",
+    )
+
+    await repository.save_strategy_live_state(current)
+    await repository.save_strategy_live_state(stale)
+
+    async with factory() as session:
+        row = await session.get(
+            StrategyLiveStateRow,
+            ("live", "primary", "compression_breakout"),
+        )
+
+    assert row is not None
+    assert row.state == StrategyLiveState.ACTIVE.value
+    assert row.changed_at == current.changed_at
 
 
 def _lease(lease_id: str, owner: str) -> TradingLease:

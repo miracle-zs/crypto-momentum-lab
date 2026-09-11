@@ -21,6 +21,7 @@ from crypto_momentum_lab.domain.execution import (
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
+    OrderPreSubmissionError,
     PreparedOrderSubmission,
 )
 
@@ -168,6 +169,26 @@ class OrderExecutionCoordinator:
         self._schedulers: dict[OrderExecutionKey, _KeyCommandScheduler] = {}
         self._scheduler_lock = asyncio.Lock()
         self._closed = False
+        self._entry_submissions_blocked = False
+        self._active_entry_submissions = 0
+        self._entry_submissions_idle = asyncio.Event()
+        self._entry_submissions_idle.set()
+
+    def block_entry_submissions(self) -> None:
+        """Reject queued/future entries and drain the one already in flight."""
+        self._entry_submissions_blocked = True
+        if self._active_entry_submissions == 0:
+            self._entry_submissions_idle.set()
+
+    def unblock_entry_submissions(self) -> None:
+        """Reopen entries after the caller has completed its safety gate."""
+        if self._closed:
+            return
+        self._entry_submissions_blocked = False
+
+    async def wait_for_entry_submissions_idle(self) -> None:
+        """Wait until no entry operation can still reach the exchange."""
+        await self._entry_submissions_idle.wait()
 
     async def submit(
         self,
@@ -180,15 +201,56 @@ class OrderExecutionCoordinator:
         )
 
         async def operation() -> OrderExecutionResult:
-            if prepared_submission is None:
-                return await self._backend.execute_approved_intent(plan)
-            return await self._backend.execute_approved_intent(
-                plan,
-                prepared_submission=prepared_submission,
-            )
+            async def submit() -> OrderExecutionResult:
+                if prepared_submission is None:
+                    return await self._backend.execute_approved_intent(plan)
+                return await self._backend.execute_approved_intent(
+                    plan,
+                    prepared_submission=prepared_submission,
+                )
+
+            return await self._run_entry_submission(plan, submit)
 
         return cast(
             OrderExecutionResult,
+            await self._schedule(plan, priority=priority, operation=operation),
+        )
+
+    async def prepare_and_execute(
+        self,
+        plan: OrderExecutionPlan,
+        *,
+        prepare_submission: Callable[
+            [], Awaitable[PreparedOrderSubmission | None]
+        ],
+    ) -> OrderExecutionResult | None:
+        """Prepare and submit one plan inside the same per-key scheduler.
+
+        A durable ``SUBMITTING`` row must not become visible to reconciliation
+        while the corresponding exchange POST is still waiting to enter the
+        coordinator.  The callback is deliberately executed by the scheduler
+        worker, immediately followed by the backend submit, so reconcile and
+        cancel operations for this key cannot interleave the two steps.
+        """
+
+        priority = (
+            self._EXIT_PRIORITY if plan.reduce_only else self._ENTRY_PRIORITY
+        )
+
+        async def operation() -> OrderExecutionResult | None:
+            async def prepare_and_submit() -> OrderExecutionResult | None:
+                prepared = await prepare_submission()
+                if prepared is None:
+                    return None
+                return await self._backend.execute_approved_intent(
+                    plan,
+                    prepared_submission=prepared,
+                )
+
+            return await self._run_entry_submission(plan, prepare_and_submit)
+
+        return cast(
+            OrderExecutionResult | None,
             await self._schedule(plan, priority=priority, operation=operation),
         )
 
@@ -270,6 +332,7 @@ class OrderExecutionCoordinator:
         )
 
     async def aclose(self) -> None:
+        self.block_entry_submissions()
         async with self._scheduler_lock:
             if self._closed:
                 return
@@ -299,6 +362,24 @@ class OrderExecutionCoordinator:
                 scheduler = _KeyCommandScheduler(key)
                 self._schedulers[key] = scheduler
         return await scheduler.submit(priority=priority, operation=operation)
+
+    async def _run_entry_submission(
+        self,
+        plan: OrderExecutionPlan,
+        operation: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        if plan.reduce_only:
+            return await operation()
+        if self._entry_submissions_blocked:
+            raise OrderPreSubmissionError("entry submissions are blocked")
+        self._active_entry_submissions += 1
+        self._entry_submissions_idle.clear()
+        try:
+            return await operation()
+        finally:
+            self._active_entry_submissions -= 1
+            if self._active_entry_submissions == 0:
+                self._entry_submissions_idle.set()
 
 
 __all__ = [

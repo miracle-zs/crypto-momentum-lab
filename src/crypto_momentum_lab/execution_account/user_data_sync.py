@@ -66,6 +66,11 @@ class AccountUserDataState:
         self._last_order_received_at = {
             key: item.observed_at for key, item in self._open_orders.items()
         }
+        self._last_account_exchange_event_at: datetime | None = None
+        self._last_order_exchange_event_at: dict[
+            tuple[str, str], datetime
+        ] = {}
+        self._last_exchange_update_id: dict[str, int] = {}
         self._seen_event_ids: deque[str] = deque(maxlen=4096)
         self._seen_event_id_set: set[str] = set()
         self._seen_trade_ids: deque[tuple[str, str]] = deque(
@@ -100,6 +105,7 @@ class AccountUserDataState:
                 delta=diff_account_snapshots(previous_snapshot, snapshot),
             )
 
+        self._validate_exchange_update_watermark(event)
         needs_reconciliation = False
         reason: str | None = None
         fills: tuple[AccountFillEvent, ...] = ()
@@ -116,6 +122,7 @@ class AccountUserDataState:
         elif event.event_type == "listenKeyExpired":
             needs_reconciliation = True
             reason = "listen_key_expired"
+        self._remember_exchange_update_watermark(event)
         self._remember_event(event.event_id)
         snapshot = self.snapshot(event.received_at)
         return AccountUserDataUpdate(
@@ -157,6 +164,13 @@ class AccountUserDataState:
         self,
         event: BinanceUserDataEvent,
     ) -> tuple[bool, str | None]:
+        if event.exchange_event_at is not None:
+            if (
+                self._last_account_exchange_event_at is not None
+                and event.exchange_event_at < self._last_account_exchange_event_at
+            ):
+                return False, "stale_exchange_event"
+            self._last_account_exchange_event_at = event.exchange_event_at
         account = _require_mapping(event.payload.get("a"), "ACCOUNT_UPDATE.a")
         balance_rows = _require_mapping_list(account.get("B"), "ACCOUNT_UPDATE.a.B")
         position_rows = _require_mapping_list(account.get("P"), "ACCOUNT_UPDATE.a.P")
@@ -266,10 +280,22 @@ class AccountUserDataState:
         symbol = _required_text(row.get("s"), "ORDER_TRADE_UPDATE symbol")
         order_id = _required_text(row.get("i"), "ORDER_TRADE_UPDATE order id")
         key = (symbol, order_id)
-        last_received_at = self._last_order_received_at.get(key)
-        if last_received_at is not None and event.received_at < last_received_at:
-            return False, (), None
-        self._last_order_received_at[key] = event.received_at
+        if event.exchange_event_at is not None:
+            last_exchange_event_at = self._last_order_exchange_event_at.get(key)
+            if (
+                last_exchange_event_at is not None
+                and event.exchange_event_at < last_exchange_event_at
+            ):
+                return False, (), "stale_exchange_event"
+            self._last_order_exchange_event_at[key] = event.exchange_event_at
+        else:
+            last_received_at = self._last_order_received_at.get(key)
+            if (
+                last_received_at is not None
+                and event.received_at < last_received_at
+            ):
+                return False, (), "stale_local_event"
+            self._last_order_received_at[key] = event.received_at
 
         status = _required_text(row.get("X"), "ORDER_TRADE_UPDATE status")
         order = AccountOpenOrderSnapshot(
@@ -353,6 +379,35 @@ class AccountUserDataState:
         )
         self._remember_trade(trade_key)
         return True, (fill,), None
+
+    def _validate_exchange_update_watermark(
+        self,
+        event: BinanceUserDataEvent,
+    ) -> None:
+        update_id = event.exchange_update_id
+        if update_id is None:
+            return
+        last_update_id = self._last_exchange_update_id.get(event.event_type)
+        if last_update_id is None:
+            return
+        previous_update_id = event.exchange_previous_update_id
+        if previous_update_id is not None and previous_update_id != last_update_id:
+            raise UserDataStateError(
+                "exchange user-data update sequence is not contiguous"
+            )
+        if update_id <= last_update_id:
+            raise UserDataStateError(
+                "exchange user-data update watermark moved backwards"
+            )
+
+    def _remember_exchange_update_watermark(
+        self,
+        event: BinanceUserDataEvent,
+    ) -> None:
+        update_id = event.exchange_update_id
+        if update_id is None:
+            return
+        self._last_exchange_update_id[event.event_type] = update_id
 
     def _remember_event(self, event_id: str) -> None:
         if len(self._seen_event_ids) == self._seen_event_ids.maxlen:

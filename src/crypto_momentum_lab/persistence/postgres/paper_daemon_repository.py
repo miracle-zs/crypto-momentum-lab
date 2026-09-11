@@ -8,7 +8,7 @@ from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid5
 
 import structlog
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -288,14 +288,20 @@ class PostgresPaperDaemonRepository:
         )
         async with self._session_factory() as session:
             async with session.begin():
+                await session.execute(
+                    insert(StrategyRunRow)
+                    .values(values)
+                    .on_conflict_do_nothing(
+                        index_elements=[StrategyRunRow.run_id]
+                    )
+                )
                 existing = await session.scalar(
                     select(StrategyRunRow).where(
                         StrategyRunRow.run_id == identity.run_id
                     )
                 )
                 if existing is None:
-                    await session.execute(insert(StrategyRunRow).values(values))
-                    return
+                    raise RuntimeError("paper run disappeared after initialization")
                 expected = {
                     key: values[key]
                     for key in (
@@ -371,7 +377,7 @@ class PostgresPaperDaemonRepository:
         run_id = next(iter(run_ids))
         async with self._session_factory() as session:
             async with session.begin():
-                run = await _load_run(session, run_id)
+                await _load_run(session, run_id)
                 inserted_signal_count = 0
                 for signal in decision.signals:
                     inserted_signal_count += int(
@@ -392,12 +398,27 @@ class PostgresPaperDaemonRepository:
                             "order intent candidate conflict",
                         )
                     )
-                run.signal_count += inserted_signal_count
-                run.candidate_count += inserted_candidate_count
-                run.pending_candidate_count = max(
-                    run.candidate_count - run.fill_count,
-                    0,
-                )
+                if inserted_signal_count or inserted_candidate_count:
+                    await session.execute(
+                        update(StrategyRunRow)
+                        .where(StrategyRunRow.run_id == run_id)
+                        .values(
+                            signal_count=(
+                                StrategyRunRow.signal_count
+                                + inserted_signal_count
+                            ),
+                            candidate_count=(
+                                StrategyRunRow.candidate_count
+                                + inserted_candidate_count
+                            ),
+                            pending_candidate_count=func.greatest(
+                                StrategyRunRow.candidate_count
+                                + inserted_candidate_count
+                                - StrategyRunRow.fill_count,
+                                0,
+                            ),
+                        )
+                    )
 
     async def save_fills(
         self,
@@ -409,7 +430,7 @@ class PostgresPaperDaemonRepository:
         opened_positions: list[PaperPosition] = []
         async with self._session_factory() as session:
             async with session.begin():
-                run = await _load_run(session, run_id)
+                await _load_run(session, run_id)
                 inserted_fill_count = 0
                 for fill in fills:
                     inserted = await _insert_idempotent(
@@ -431,11 +452,21 @@ class PostgresPaperDaemonRepository:
                         "paper position conflict",
                     )
                     opened_positions.append(position)
-                run.fill_count += inserted_fill_count
-                run.pending_candidate_count = max(
-                    run.candidate_count - run.fill_count,
-                    0,
-                )
+                if inserted_fill_count:
+                    await session.execute(
+                        update(StrategyRunRow)
+                        .where(StrategyRunRow.run_id == run_id)
+                        .values(
+                            fill_count=StrategyRunRow.fill_count
+                            + inserted_fill_count,
+                            pending_candidate_count=func.greatest(
+                                StrategyRunRow.candidate_count
+                                - StrategyRunRow.fill_count
+                                - inserted_fill_count,
+                                0,
+                            ),
+                        )
+                    )
         if opened_positions:
             # A newly filled candidate creates an open position before the next
             # mark update. Reconcile the cached aggregate on the next snapshot.
@@ -579,6 +610,10 @@ class PostgresPaperDaemonRepository:
                             for key in values
                             if key != "run_id"
                         },
+                        where=(
+                            StrategyRuntimeCheckpointRow.saved_at
+                            <= statement.excluded.saved_at
+                        ),
                     )
                 )
                 execute_finished_at = perf_counter()
@@ -636,6 +671,10 @@ class PostgresPaperDaemonRepository:
                             for key in values[0]
                             if key != "run_id"
                         },
+                        where=(
+                            StrategyRuntimeCheckpointRow.saved_at
+                            <= statement.excluded.saved_at
+                        ),
                     )
                 )
                 execute_finished_at = perf_counter()

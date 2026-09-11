@@ -7,6 +7,7 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.domain.account import (
+    AccountFillReconciliationCursor,
     AccountPositionSnapshot,
     AccountReconciliationRun,
 )
@@ -14,6 +15,7 @@ from crypto_momentum_lab.persistence.postgres.account_repository import (
     PostgresAccountRepository,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
+    AccountFillReconciliationCursorRow,
     AccountPositionSnapshotRow,
     AccountReconciliationRunRow,
 )
@@ -34,6 +36,11 @@ async def account_repository(
     async with factory() as session:
         async with session.begin():
             await session.execute(
+                delete(AccountFillReconciliationCursorRow).where(
+                    AccountFillReconciliationCursorRow.environment == ENVIRONMENT
+                )
+            )
+            await session.execute(
                 delete(AccountPositionSnapshotRow).where(
                     AccountPositionSnapshotRow.environment == ENVIRONMENT
                 )
@@ -46,6 +53,11 @@ async def account_repository(
     yield PostgresAccountRepository(factory)
     async with factory() as session:
         async with session.begin():
+            await session.execute(
+                delete(AccountFillReconciliationCursorRow).where(
+                    AccountFillReconciliationCursorRow.environment == ENVIRONMENT
+                )
+            )
             await session.execute(
                 delete(AccountPositionSnapshotRow).where(
                     AccountPositionSnapshotRow.environment == ENVIRONMENT
@@ -83,11 +95,16 @@ def _run(
     )
 
 
-def _position(account_label: str, observed_at: datetime) -> AccountPositionSnapshot:
+def _position(
+    account_label: str,
+    observed_at: datetime,
+    *,
+    symbol: str = "BTCUSDT",
+) -> AccountPositionSnapshot:
     return AccountPositionSnapshot(
         environment=ENVIRONMENT,
         account_label=account_label,
-        symbol="BTCUSDT",
+        symbol=symbol,
         position_side="BOTH",
         position_amt=Decimal("1"),
         entry_price=Decimal("100"),
@@ -137,3 +154,80 @@ async def test_load_active_position_account_labels_uses_latest_ready_run(
     assert await account_repository.load_active_position_account_labels(
         environment=ENVIRONMENT
     ) == frozenset({"open"})
+
+
+async def test_load_active_position_symbols_uses_ready_run_timestamp_fence(
+    account_repository: PostgresAccountRepository,
+) -> None:
+    ready_at = NOW
+    await account_repository.save_position_snapshot(
+        _position("primary", ready_at)
+    )
+    await account_repository.save_reconciliation_run(
+        _run("primary", ready_at, position_count=1)
+    )
+    # This observation is newer than the ready run and may belong to a
+    # reconciliation that has not committed its run row yet.  It must not be
+    # mixed into the result of the older ready run.
+    await account_repository.save_position_snapshot(
+        _position(
+            "primary",
+            ready_at + timedelta(minutes=1),
+            symbol="ETHUSDT",
+        )
+    )
+
+    assert await account_repository.load_active_position_symbols(
+        environment=ENVIRONMENT,
+        account_label="primary",
+    ) == frozenset({"BTCUSDT"})
+
+
+async def test_fill_cursor_upsert_is_monotonic_and_switches_modes(
+    account_repository: PostgresAccountRepository,
+) -> None:
+    await account_repository.save_fill_reconciliation_cursors(
+        (
+            AccountFillReconciliationCursor(
+                environment=ENVIRONMENT,
+                account_label="primary",
+                symbol="BTCUSDT",
+                from_id=10,
+                start_time_ms=None,
+                last_checked_at=NOW + timedelta(minutes=1),
+            ),
+        )
+    )
+    await account_repository.save_fill_reconciliation_cursors(
+        (
+            AccountFillReconciliationCursor(
+                environment=ENVIRONMENT,
+                account_label="primary",
+                symbol="BTCUSDT",
+                from_id=None,
+                start_time_ms=100,
+                last_checked_at=NOW + timedelta(minutes=2),
+            ),
+        )
+    )
+    await account_repository.save_fill_reconciliation_cursors(
+        (
+            AccountFillReconciliationCursor(
+                environment=ENVIRONMENT,
+                account_label="primary",
+                symbol="BTCUSDT",
+                from_id=5,
+                start_time_ms=None,
+                last_checked_at=NOW + timedelta(minutes=1),
+            ),
+        )
+    )
+
+    loaded = await account_repository.load_fill_reconciliation_cursors(
+        environment=ENVIRONMENT,
+        account_label="primary",
+    )
+
+    assert loaded["BTCUSDT"].from_id is None
+    assert loaded["BTCUSDT"].start_time_ms == 100
+    assert loaded["BTCUSDT"].last_checked_at == NOW + timedelta(minutes=2)

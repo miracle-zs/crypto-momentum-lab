@@ -143,6 +143,18 @@ class LiveDaemonRepository(Protocol):
         evaluation: RiskEvaluation,
         plan: OrderExecutionPlan,
         prepared_at: datetime,
+        environment: str | None = None,
+        account_label: str | None = None,
+        strategy_name: str | None = None,
+        required_lease_owner: str | None = None,
+        required_lease_id: str | None = None,
+        max_open_positions: int | None = None,
+        max_daily_loss: Decimal | None = None,
+        max_gross_exposure: Decimal | None = None,
+        current_daily_pnl: Decimal | None = None,
+        current_gross_exposure: Decimal | None = None,
+        open_position_symbols: frozenset[str] | None = None,
+        exposure_notional: Decimal | None = None,
     ) -> PreparedOrderSubmission | None: ...
 
     async def save_checkpoint(
@@ -259,6 +271,7 @@ class LiveDaemonRuntimeContext:
     unresolved_orders: tuple[PersistedExchangeOrder, ...] = ()
     account_snapshot: AccountSnapshot | None = None
     account_snapshot_version: int | None = None
+    context_epoch: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -682,7 +695,6 @@ class LiveStrategyDaemon:
         self._exit_recovery_client = exit_recovery_client
         self._reconcile_orders = reconcile_orders
         self._exit_symbol_locks: dict[str, asyncio.Lock] = {}
-        self._quote_symbol_locks: dict[str, asyncio.Lock] = {}
         self._exit_recovery_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._exit_recovery_attempts: dict[str, int] = {}
         self._exit_recovery_next_attempt_at: dict[str, datetime] = {}
@@ -737,6 +749,12 @@ class LiveStrategyDaemon:
         self,
         context: LiveDaemonRuntimeContext,
     ) -> None:
+        if not self._context_is_current(context):
+            log.info(
+                "live_managed_position_symbols_stale_context_ignored",
+                run_id=self._config.run_id,
+            )
+            return
         symbols = frozenset(
             (context.open_position_symbols or frozenset())
             | context.unmanaged_position_symbols
@@ -752,6 +770,20 @@ class LiveStrategyDaemon:
         self._managed_position_symbols_known = True
         if self._on_managed_position_symbols is not None:
             await self._on_managed_position_symbols(symbols)
+
+    def _context_is_current(self, context: LiveDaemonRuntimeContext) -> bool:
+        checker = getattr(self._context_provider, "is_context_current", None)
+        if not callable(checker):
+            return True
+        try:
+            return bool(checker(context))
+        except Exception as error:
+            log.warning(
+                "live_context_currentness_check_failed",
+                run_id=self._config.run_id,
+                error_type=type(error).__name__,
+            )
+            return False
 
     def _maybe_prune_runtime_caches(
         self,
@@ -930,8 +962,19 @@ class LiveStrategyDaemon:
         ):
             return
         state_changed = self._scheduled_entry_blocked != blocked
-        self._scheduled_entry_blocked = blocked
-        self._scheduled_entry_block_reason = reason
+        if blocked:
+            # Flip the daemon gate before asking the coordinator to drain.  A
+            # coordinator failure therefore remains fail-closed at the
+            # application-level POST guard as well.
+            self._scheduled_entry_blocked = True
+            self._scheduled_entry_block_reason = reason
+            self._set_coordinator_entry_gate(blocked=True)
+        else:
+            # Keep the daemon gate closed until the coordinator has accepted
+            # the reopen request; this avoids a half-open schedule boundary.
+            self._set_coordinator_entry_gate(blocked=False)
+            self._scheduled_entry_blocked = False
+            self._scheduled_entry_block_reason = reason
         log.warning(
             "live_scheduled_entry_gate_changed",
             blocked=blocked,
@@ -939,6 +982,32 @@ class LiveStrategyDaemon:
             reason=reason,
             run_id=self._config.run_id,
         )
+
+    def _set_coordinator_entry_gate(self, *, blocked: bool) -> None:
+        method_name = (
+            "block_entry_submissions"
+            if blocked
+            else "unblock_entry_submissions"
+        )
+        method = getattr(self._state_machine, method_name, None)
+        if not callable(method):
+            return
+        try:
+            method()
+        except Exception as error:
+            log.exception(
+                "live_coordinator_entry_gate_update_failed",
+                run_id=self._config.run_id,
+                blocked=blocked,
+                error_type=type(error).__name__,
+            )
+            if not blocked:
+                # Reopening is fail-closed.  The next schedule poll can retry
+                # the coordinator transition while entries stay disabled.
+                self._scheduled_entry_blocked = True
+                self._scheduled_entry_block_reason = (
+                    "scheduled_entry_gate_update_failed"
+                )
 
     def set_exit_enabled(self, enabled: bool, *, reason: str) -> None:
         if not isinstance(enabled, bool):
@@ -1364,6 +1433,26 @@ class LiveStrategyDaemon:
         )
 
     async def _cancel_scheduled_entry_orders(self) -> str | None:
+        wait_for_idle = getattr(
+            self._state_machine,
+            "wait_for_entry_submissions_idle",
+            None,
+        )
+        if callable(wait_for_idle):
+            try:
+                await wait_for_idle()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                log.error(
+                    "live_scheduled_entry_submission_drain_failed",
+                    run_id=self._config.run_id,
+                    error_type=type(error).__name__,
+                )
+                return (
+                    "scheduled_entry_submission_drain_failed:"
+                    f"{type(error).__name__}"
+                )
         known_plans: dict[str, OrderExecutionPlan] = {}
         context: LiveDaemonRuntimeContext | None = None
         state = self._latest_scheduled_state()
@@ -2640,12 +2729,16 @@ class LiveStrategyDaemon:
             )
         lock = self._exit_symbol_locks.setdefault(state.symbol, asyncio.Lock())
         async with lock:
+            if not self._context_is_current(context):
+                return _ExitLaneOutcome()
             recovery_outcome = await self._recover_pending_exit_orders(
                 state=state,
                 context=context,
             )
             if recovery_outcome is not None:
                 return recovery_outcome
+            if not self._context_is_current(context):
+                return _ExitLaneOutcome()
             if not self._exit_manager.uses_market_state_exit:
                 return _ExitLaneOutcome()
             requests = await self._exit_manager.requests_for_state(
@@ -2683,12 +2776,16 @@ class LiveStrategyDaemon:
             asyncio.Lock(),
         )
         async with lock:
+            if not self._context_is_current(context):
+                return _ExitLaneOutcome()
             recovery_outcome = await self._recover_pending_exit_orders(
                 state=state,
                 context=context,
             )
             if recovery_outcome is not None:
                 return recovery_outcome
+            if not self._context_is_current(context):
+                return _ExitLaneOutcome()
             requests = await self._exit_manager.requests_for_closed_candle(
                 event.candle,
                 context.managed_positions,
@@ -2718,12 +2815,16 @@ class LiveStrategyDaemon:
             return _ExitLaneOutcome()
         lock = self._exit_symbol_locks.setdefault(state.symbol, asyncio.Lock())
         async with lock:
+            if not self._context_is_current(context):
+                return _ExitLaneOutcome()
             recovery_outcome = await self._recover_pending_exit_orders(
                 state=state,
                 context=context,
             )
             if recovery_outcome is not None:
                 return recovery_outcome
+            if not self._context_is_current(context):
+                return _ExitLaneOutcome()
             requests = await self._exit_manager.requests_for_grace_timeout(
                 now=now,
                 state=state,
@@ -2749,21 +2850,25 @@ class LiveStrategyDaemon:
     ) -> _ExitLaneOutcome:
         if self._exit_manager is None or not self._exit_enabled:
             return _ExitLaneOutcome()
-        # This lock is intentionally separate from the 15-minute candle exit
-        # lock.  A slow REST candle lookup must never hold the realtime quote
-        # lane behind it; the execution coordinator still serializes the
-        # resulting reduce-only exchange commands per symbol.
-        lock = self._quote_symbol_locks.setdefault(
+        # Quote, candle, grace, and recovery decisions for one position share
+        # the same decision lock.  The execution coordinator still serializes
+        # exchange I/O, but it cannot deduplicate different candidate IDs
+        # after they have already been generated.
+        lock = self._exit_symbol_locks.setdefault(
             quote.symbol,
             asyncio.Lock(),
         )
         async with lock:
+            if not self._context_is_current(context):
+                return _ExitLaneOutcome()
             recovery_outcome = await self._recover_pending_exit_orders(
                 state=state,
                 context=context,
             )
             if recovery_outcome is not None:
                 return recovery_outcome
+            if not self._context_is_current(context):
+                return _ExitLaneOutcome()
             requests = await self._exit_manager.requests_for_quote(
                 quote,
                 context.managed_positions,
@@ -3326,6 +3431,8 @@ class LiveStrategyDaemon:
                 executable_candidate,
                 desired_notional=limit_decision.capped_notional,
             )
+        else:
+            limit_decision = None
         lane = LIVE_LANE_EXIT if executable_candidate.reduce_only else LIVE_LANE_ENTRY
         if executable_candidate.reduce_only:
             self._record_signal_candidate(
@@ -3341,6 +3448,14 @@ class LiveStrategyDaemon:
                 occurred_at=self._clock(),
                 lane=lane,
             )
+        if not self._context_is_current(context):
+            log.info(
+                "live_candidate_context_invalidated_before_risk",
+                run_id=self._config.run_id,
+                candidate_id=executable_candidate.candidate_id,
+                symbol=executable_candidate.symbol,
+            )
+            return None
         evaluation = self._risk_gateway.evaluate(
             executable_candidate,
             RiskContext(
@@ -3353,6 +3468,14 @@ class LiveStrategyDaemon:
                 risk_config=context.risk_config,
                 strategy_state=context.strategy_state,
                 enforce_market_state_age=False,
+                required_lease_owner=context.gate_context.required_lease_owner,
+                required_lease_id=(
+                    None
+                    if context.active_lease is None
+                    else context.active_lease.lease_id
+                ),
+                required_account_label=context.gate_context.account_label,
+                required_strategy_name=context.gate_context.strategy_name,
             ),
         )
         if evaluation.decision is not RiskDecision.APPROVED:
@@ -3365,6 +3488,14 @@ class LiveStrategyDaemon:
                 lane=lane,
                 evaluation_id=evaluation.evaluation_id,
             )
+        if not self._context_is_current(context):
+            log.info(
+                "live_candidate_context_invalidated_after_risk",
+                run_id=self._config.run_id,
+                candidate_id=executable_candidate.candidate_id,
+                symbol=executable_candidate.symbol,
+            )
+            return None
         rules = context.trading_rules.get(candidate.symbol)
         execution_reference_price = reference_price
         if execution_reference_price is None:
@@ -3408,30 +3539,139 @@ class LiveStrategyDaemon:
                 reason=self.entry_enabled_reason,
             )
             return None
+        if not self._context_is_current(context):
+            log.info(
+                "live_candidate_context_invalidated_before_submission",
+                run_id=self._config.run_id,
+                candidate_id=executable_candidate.candidate_id,
+                symbol=executable_candidate.symbol,
+            )
+            return None
         prepared_submission: PreparedOrderSubmission | None = None
         prepare_submission = getattr(self._repository, "prepare_submission", None)
+        prepare_and_execute = getattr(
+            self._state_machine,
+            "prepare_and_execute",
+            None,
+        )
+        intent_saved_at = self._clock()
         if callable(prepare_submission):
-            prepared_submission = await prepare_submission(
-                intent=executable_candidate,
-                evaluation=evaluation,
-                plan=plan,
-                prepared_at=self._clock(),
-            )
-            if prepared_submission is None:
-                log.info(
-                    "live_duplicate_submission_suppressed",
-                    run_id=self._config.run_id,
-                    symbol=plan.symbol,
-                    client_order_id=plan.client_order_id,
+            async def prepare_for_execution() -> PreparedOrderSubmission | None:
+                nonlocal prepared_submission, intent_saved_at
+                if not executable_candidate.reduce_only and not self.entry_enabled:
+                    log.info(
+                        "live_entry_blocked_inside_submission_scheduler",
+                        run_id=self._config.run_id,
+                        candidate_id=executable_candidate.candidate_id,
+                        symbol=executable_candidate.symbol,
+                        reason=self.entry_enabled_reason,
+                    )
+                    return None
+                if not self._context_is_current(context):
+                    log.info(
+                        "live_candidate_context_invalidated_inside_submission_scheduler",
+                        run_id=self._config.run_id,
+                        candidate_id=executable_candidate.candidate_id,
+                        symbol=executable_candidate.symbol,
+                    )
+                    return None
+                prepared_submission = await prepare_submission(
+                    intent=executable_candidate,
+                    evaluation=evaluation,
+                    plan=plan,
+                    prepared_at=self._clock(),
+                    environment=(
+                        None
+                        if context.active_lease is None
+                        else context.active_lease.environment
+                    ),
+                    account_label=context.gate_context.account_label,
+                    strategy_name=context.gate_context.strategy_name,
+                    required_lease_owner=(
+                        context.gate_context.required_lease_owner
+                    ),
+                    required_lease_id=(
+                        None
+                        if context.active_lease is None
+                        else context.active_lease.lease_id
+                    ),
+                    max_open_positions=(
+                        None
+                        if executable_candidate.reduce_only
+                        else self._limits.max_open_positions
+                    ),
+                    max_daily_loss=(
+                        None
+                        if executable_candidate.reduce_only
+                        else self._limits.max_daily_loss
+                    ),
+                    max_gross_exposure=(
+                        None
+                        if executable_candidate.reduce_only
+                        else self._limits.max_gross_exposure
+                    ),
+                    current_daily_pnl=(
+                        None
+                        if (
+                            executable_candidate.reduce_only
+                            or context.realized_pnl is None
+                            or context.unrealized_pnl is None
+                        )
+                        else context.realized_pnl + context.unrealized_pnl
+                    ),
+                    current_gross_exposure=(
+                        None
+                        if executable_candidate.reduce_only
+                        else context.gross_exposure
+                    ),
+                    open_position_symbols=(
+                        None
+                        if executable_candidate.reduce_only
+                        else risk_open_position_symbols
+                    ),
+                    exposure_notional=(
+                        None
+                        if limit_decision is None
+                        else limit_decision.capped_notional
+                    ),
                 )
-                return None
-            intent_saved_at = prepared_submission.submitting_event.occurred_at
+                if prepared_submission is not None:
+                    intent_saved_at = prepared_submission.submitting_event.occurred_at
+                return prepared_submission
+
+            if callable(prepare_and_execute):
+                result = await prepare_and_execute(
+                    plan,
+                    prepare_submission=prepare_for_execution,
+                )
+                if result is None:
+                    log.info(
+                        "live_duplicate_submission_suppressed",
+                        run_id=self._config.run_id,
+                        symbol=plan.symbol,
+                        client_order_id=plan.client_order_id,
+                    )
+                    return None
+            else:
+                prepared_submission = await prepare_for_execution()
+                if prepared_submission is None:
+                    log.info(
+                        "live_duplicate_submission_suppressed",
+                        run_id=self._config.run_id,
+                        symbol=plan.symbol,
+                        client_order_id=plan.client_order_id,
+                    )
+                    return None
+                result = await self._state_machine.execute_approved_intent(
+                    plan,
+                    prepared_submission=prepared_submission,
+                )
         else:
             await self._repository.save_approved_intent(
                 executable_candidate,
                 evaluation,
             )
-            intent_saved_at = self._clock()
+            result = await self._state_machine.execute_approved_intent(plan)
         if self._telemetry is not None:
             await self._telemetry.intent_saved(
                 executable_candidate,
@@ -3439,10 +3679,6 @@ class LiveStrategyDaemon:
                 occurred_at=intent_saved_at,
                 lane=lane,
             )
-        result = await self._state_machine.execute_approved_intent(
-            plan,
-            prepared_submission=prepared_submission,
-        )
         if not plan.reduce_only:
             self._remember_pending_entry(plan, result)
             lifecycle = self._entry_order_lifecycle

@@ -65,6 +65,55 @@ def test_account_event_round_trips() -> None:
     assert decoded == event
 
 
+def test_account_event_round_trips_exchange_watermark() -> None:
+    event = replace(
+        _event(),
+        exchange_event_at=datetime(2026, 8, 21, 8, 59, tzinfo=UTC),
+        exchange_update_id=42,
+        exchange_previous_update_id=41,
+    )
+
+    decoded = decode_account_event(
+        encode_account_event(event, sequence=1),
+        expected_environment="live",
+        expected_account_label="primary",
+    )
+
+    assert decoded.exchange_event_at == event.exchange_event_at
+    assert decoded.exchange_update_id == 42
+    assert decoded.exchange_previous_update_id == 41
+
+
+async def test_account_event_hub_metrics_report_subscriber_backpressure() -> None:
+    hub = AccountEventHub(AccountEventHubConfig(subscriber_queue_size=1))
+    writer_task = asyncio.create_task(asyncio.sleep(0))
+    subscriber = hub_module._Subscriber(
+        connection=object(),
+        environment="live",
+        account_label="primary",
+        queue=asyncio.Queue(maxsize=1),
+        writer_start=asyncio.Event(),
+        writer_task=writer_task,
+    )
+    hub._enqueue_latest(subscriber, "event-1")
+    hub._enqueue_latest(subscriber, "event-2")
+    await writer_task
+
+    assert hub.metrics.subscriber_queue_overflow_count == 1
+    assert hub.metrics.published_event_count == 0
+    assert subscriber.queue.get_nowait() == "event-2"
+
+    source = WebSocketAccountEventSource(
+        url="ws://127.0.0.1:1",
+        environment="live",
+        account_label="primary",
+        consumer_id="test-metrics",
+    )
+    source._prepare_full_snapshot_recovery("test_recovery")
+    assert source.metrics.recovery_count == 1
+    assert source.metrics.last_recovery_reason == "test_recovery"
+
+
 def test_account_position_expectation_round_trips() -> None:
     expectation = AccountPositionExpectation(
         environment="live",

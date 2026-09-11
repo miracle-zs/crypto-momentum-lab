@@ -63,6 +63,10 @@ async def test_market_data_runtime_archives_and_updates_subscriptions(
             await fake_binance_server.wait_for_subscriptions(
                 _subscription_names("ETHUSDT")
             )
+            await fake_binance_server.wait_for_control(
+                method="UNSUBSCRIBE",
+                names=_subscription_names("BTCUSDT"),
+            )
         finally:
             await runtime.capture.stop()
             await asyncio.wait_for(capture_task, timeout=5)

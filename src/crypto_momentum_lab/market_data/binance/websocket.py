@@ -38,6 +38,8 @@ type LifecycleSink = Callable[[ConnectionLifecycleEvent], Awaitable[None]]
 
 log = structlog.get_logger(__name__)
 
+_GRACEFUL_DISPATCH_DRAIN_TIMEOUT_SECONDS = 5.0
+
 
 @dataclass(frozen=True, slots=True)
 class BinanceWebSocketMetricsSnapshot:
@@ -508,18 +510,48 @@ class BinanceWebSocketConnection:
                     if desired_changed:
                         await self._maybe_start_next_control(connection)
             finally:
-                child_tasks: tuple[asyncio.Future[Any], ...] = tuple(
-                    task
-                    for task in (
-                        reader_task,
-                        dispatch_task,
-                        realtime_dispatch_task,
-                        ack_task,
-                        desired_task,
+                if self._stopping:
+                    # A close can race with frames already accepted by the
+                    # socket reader.  Let the dispatchers drain those frames
+                    # before cancelling them; otherwise a normal shutdown
+                    # can silently drop the last fills/trades in their local
+                    # queues.  Control waiters are no longer useful, but the
+                    # reader must stay alive long enough to consume frames
+                    # already buffered by the websocket implementation.
+                    await connection.close()
+                    await _cancel_and_drain_tasks(
+                        tuple(
+                            task for task in (ack_task, desired_task)
+                            if task is not None
+                        )
                     )
-                    if task is not None
-                )
-                await _cancel_and_drain_tasks(child_tasks)
+                    await _drain_or_cancel_tasks(
+                        tuple(
+                            task
+                            for task in (
+                                reader_task,
+                                dispatch_task,
+                                realtime_dispatch_task,
+                            )
+                            if task is not None
+                        ),
+                        timeout_seconds=(
+                            _GRACEFUL_DISPATCH_DRAIN_TIMEOUT_SECONDS
+                        ),
+                    )
+                else:
+                    child_tasks: tuple[asyncio.Future[Any], ...] = tuple(
+                        task
+                        for task in (
+                            reader_task,
+                            dispatch_task,
+                            realtime_dispatch_task,
+                            ack_task,
+                            desired_task,
+                        )
+                        if task is not None
+                    )
+                    await _cancel_and_drain_tasks(child_tasks)
                 self._reader_task = None
                 self._dispatch_task = None
                 self._realtime_dispatch_task = None
@@ -537,7 +569,7 @@ class BinanceWebSocketConnection:
         realtime_queue: asyncio.Queue[RawEnvelope],
     ) -> None:
         local_sequence = 0
-        while not self._stopping:
+        while True:
             message = await connection.recv()
             self._received_messages += 1
             self._received_bytes += (
@@ -1069,6 +1101,26 @@ async def _cancel_and_drain_tasks(
             task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _drain_or_cancel_tasks(
+    tasks: tuple[asyncio.Future[Any], ...],
+    *,
+    timeout_seconds: float,
+) -> None:
+    active_tasks = tuple(task for task in tasks if not task.done())
+    if active_tasks:
+        done, pending = await asyncio.wait(
+            active_tasks,
+            timeout=timeout_seconds,
+        )
+        if pending:
+            await _cancel_and_drain_tasks(tuple(pending))
+        if done:
+            await asyncio.gather(*done, return_exceptions=True)
+    completed_tasks = tuple(task for task in tasks if task.done())
+    if completed_tasks:
+        await asyncio.gather(*completed_tasks, return_exceptions=True)
 
 
 def should_replace_connection(

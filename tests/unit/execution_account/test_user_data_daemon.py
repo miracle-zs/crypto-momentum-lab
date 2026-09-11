@@ -259,6 +259,87 @@ class BlockingPersistService(FakeService):
         )
 
 
+class BlockingSyncService(FakeService):
+    def __init__(self, snapshot: AccountSnapshot) -> None:
+        super().__init__(snapshot)
+        self.block_next_sync = False
+        self.sync_entered = asyncio.Event()
+        self.release_sync = asyncio.Event()
+
+    async def sync_once(
+        self,
+        *,
+        observed_at,
+        publish_transient_states,
+        include_fills,
+    ):
+        if self.block_next_sync:
+            self.block_next_sync = False
+            self.sync_entered.set()
+            await self.release_sync.wait()
+        return await super().sync_once(
+            observed_at=observed_at,
+            publish_transient_states=publish_transient_states,
+            include_fills=include_fills,
+        )
+
+
+async def test_events_received_during_reconciliation_are_replayed() -> None:
+    service = BlockingSyncService(_snapshot())
+    applied = []
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=FakeStream(),
+        config=UserDataAccountSyncConfig(),
+        on_event_applied=lambda event, result: applied.append((event, result)),
+    )
+    await daemon._reconcile(include_fills=True)
+    daemon._start_pipeline()
+    service.block_next_sync = True
+    service.sync_entered.clear()
+    service.release_sync.clear()
+
+    reconcile_task = asyncio.create_task(daemon._reconcile(include_fills=True))
+    try:
+        await asyncio.wait_for(service.sync_entered.wait(), timeout=1)
+        event = parse_user_data_event(
+            {
+                "e": "ACCOUNT_UPDATE",
+                "E": 1783123201000,
+                "a": {
+                    "B": [{"a": "USDT", "wb": "101", "cw": "81"}],
+                    "P": [],
+                },
+            },
+            received_at=datetime(2026, 7, 4, 0, 0, 1, tzinfo=UTC),
+        )
+
+        await daemon._on_event(event)
+        assert len(daemon._deferred_events) == 1
+        assert applied == []
+
+        service.release_sync.set()
+        await asyncio.wait_for(reconcile_task, timeout=1)
+        assert daemon._event_queue is not None
+        assert daemon._persistence_queue is not None
+        await daemon._event_queue.join()
+        await daemon._persistence_queue.join()
+
+        assert len(applied) == 1
+        assert applied[0][0] is event
+        assert len(service.persisted) == 1
+        assert service.persisted[0][1] is event
+        assert service.persisted[0][0].balances[0].wallet_balance == Decimal("101")
+        assert not daemon._deferred_events
+    finally:
+        service.release_sync.set()
+        if not reconcile_task.done():
+            reconcile_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await reconcile_task
+        await daemon._stop_pipeline()
+
+
 class FailingPersistService(FakeService):
     def __init__(self, snapshot: AccountSnapshot) -> None:
         super().__init__(snapshot)

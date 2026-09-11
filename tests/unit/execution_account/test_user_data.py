@@ -24,6 +24,7 @@ from crypto_momentum_lab.execution_account.sync import (
 )
 from crypto_momentum_lab.execution_account.user_data_sync import (
     AccountUserDataState,
+    UserDataStateError,
 )
 
 
@@ -46,8 +47,33 @@ def test_parse_user_data_event_is_deterministic_and_preserves_payload() -> None:
 
     assert first.event_type == "ACCOUNT_UPDATE"
     assert first.event_at == datetime(2026, 7, 4, 0, 0, 0, 123000, tzinfo=UTC)
+    assert first.exchange_event_at == datetime(
+        2026,
+        7,
+        4,
+        0,
+        0,
+        tzinfo=UTC,
+    )
     assert first.payload["a"] == payload["a"]
     assert first.event_id == second.event_id
+
+
+def test_parse_user_data_event_preserves_optional_exchange_update_watermark() -> None:
+    event = parse_user_data_event(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "E": 1783123200000,
+            "T": 1783123200000,
+            "u": 42,
+            "pu": 41,
+            "a": {"B": [], "P": []},
+        },
+        received_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    assert event.exchange_update_id == 42
+    assert event.exchange_previous_update_id == 41
 
 
 def test_parse_user_data_event_accepts_listen_key_expired() -> None:
@@ -188,6 +214,82 @@ def test_account_user_data_state_deduplicates_trade_event_and_closes_order() -> 
     assert closed.snapshot.open_orders == ()
     assert closed.delta is not None
     assert closed.delta.removed_open_orders == (("BTCUSDT", "1001"),)
+
+
+def test_account_user_data_state_uses_exchange_time_for_order_ordering() -> None:
+    state = AccountUserDataState(_initial_snapshot())
+    first = {
+        "e": "ORDER_TRADE_UPDATE",
+        "E": 1783123203000,
+        "T": 1783123203000,
+        "o": {
+            "s": "BTCUSDT",
+            "c": "entry-1",
+            "S": "BUY",
+            "o": "LIMIT",
+            "q": "0.002",
+            "p": "50000",
+            "x": "TRADE",
+            "X": "PARTIALLY_FILLED",
+            "i": 1001,
+            "t": 5002,
+            "z": "0.001",
+            "l": "0.001",
+            "L": "50100",
+            "rp": "0.1",
+            "n": "0.01",
+            "N": "USDT",
+            "R": False,
+        },
+    }
+    state.apply(
+        parse_user_data_event(
+            first,
+            received_at=datetime(2026, 7, 4, 0, 0, 3, tzinfo=UTC),
+        )
+    )
+
+    stale = state.apply(
+        parse_user_data_event(
+            {
+                **first,
+                "E": 1783123202000,
+                "T": 1783123202000,
+                "o": {**first["o"], "X": "CANCELED", "x": "CANCELED"},
+            },
+            # The local receive time is newer, but the exchange transaction
+            # time is older and must not overwrite the newer order state.
+            received_at=datetime(2026, 7, 4, 0, 0, 4, tzinfo=UTC),
+        )
+    )
+
+    assert stale.needs_reconciliation is True
+    assert stale.reason == "stale_exchange_event"
+    assert stale.snapshot.open_orders[0].status == "PARTIALLY_FILLED"
+
+
+def test_account_user_data_state_rejects_exchange_update_gap() -> None:
+    state = AccountUserDataState(_initial_snapshot())
+    base = {
+        "e": "ACCOUNT_UPDATE",
+        "E": 1783123201000,
+        "T": 1783123201000,
+        "a": {"B": [], "P": []},
+    }
+    state.apply(parse_user_data_event({**base, "u": 10}))
+
+    with pytest.raises(UserDataStateError, match="not contiguous"):
+        state.apply(
+            parse_user_data_event(
+                {
+                    **base,
+                    "E": 1783123202000,
+                    "T": 1783123202000,
+                    "u": 12,
+                    "pu": 9,
+                }
+            )
+        )
 
 
 def test_account_user_data_trade_deduplication_cache_is_bounded() -> None:

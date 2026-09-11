@@ -42,6 +42,12 @@ class BinanceUserDataEvent:
     received_at: datetime
     payload: dict[str, JsonValue]
     event_id: str
+    # ``received_at`` is a local transport timestamp.  Binance's event or
+    # transaction timestamp is the only ordering evidence available on the
+    # user-data stream for event types that do not expose a sequence number.
+    exchange_event_at: datetime | None = None
+    exchange_update_id: int | None = None
+    exchange_previous_update_id: int | None = None
 
     def __post_init__(self) -> None:
         if not self.event_type.strip():
@@ -52,6 +58,22 @@ class BinanceUserDataEvent:
             raise ValueError("received_at must be timezone-aware")
         if len(self.event_id) != 64:
             raise ValueError("event_id must be a SHA-256 hex digest")
+        if (
+            self.exchange_event_at is not None
+            and (
+                self.exchange_event_at.tzinfo is None
+                or self.exchange_event_at.utcoffset() is None
+            )
+        ):
+            raise ValueError("exchange_event_at must be timezone-aware")
+        for value, field_name in (
+            (self.exchange_update_id, "exchange_update_id"),
+            (self.exchange_previous_update_id, "exchange_previous_update_id"),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+            ):
+                raise ValueError(f"{field_name} must be a non-negative integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,13 +128,32 @@ def parse_user_data_event(
         int | float | str,
     ):
         raise BinancePayloadError("user data event is missing numeric field E")
-    try:
-        event_at = datetime.fromtimestamp(
-            float(str(event_timestamp)) / 1000,
-            tz=UTC,
-        )
-    except (TypeError, ValueError, OverflowError, OSError) as error:
-        raise BinancePayloadError("user data event has invalid timestamp E") from error
+    event_at = _timestamp_from_millis(event_timestamp, "E")
+    exchange_timestamp = normalized.get("T")
+    if exchange_timestamp is None and event_type == "ORDER_TRADE_UPDATE":
+        order = normalized.get("o")
+        if isinstance(order, dict):
+            exchange_timestamp = order.get("T")
+    exchange_event_at = (
+        event_at
+        if exchange_timestamp is None
+        else _timestamp_from_millis(exchange_timestamp, "T")
+    )
+    exchange_update_id = _optional_update_id(normalized.get("u"), "u")
+    exchange_previous_update_id = _optional_update_id(
+        normalized.get("pu"),
+        "pu",
+    )
+    if event_type == "ORDER_TRADE_UPDATE":
+        order = normalized.get("o")
+        if isinstance(order, dict):
+            if exchange_update_id is None:
+                exchange_update_id = _optional_update_id(order.get("u"), "o.u")
+            if exchange_previous_update_id is None:
+                exchange_previous_update_id = _optional_update_id(
+                    order.get("pu"),
+                    "o.pu",
+                )
     resolved_received_at = received_at or datetime.now(tz=UTC)
     if (
         resolved_received_at.tzinfo is None
@@ -133,6 +174,9 @@ def parse_user_data_event(
         received_at=resolved_received_at,
         payload=normalized,
         event_id=event_id,
+        exchange_event_at=exchange_event_at,
+        exchange_update_id=exchange_update_id,
+        exchange_previous_update_id=exchange_previous_update_id,
     )
 
 
@@ -481,6 +525,37 @@ def _json_value(value: object) -> JsonValue:
     if isinstance(value, list | tuple):
         return [_json_value(item) for item in value]
     raise BinancePayloadError(f"unsupported JSON value type: {type(value).__name__}")
+
+
+def _timestamp_from_millis(value: object, field_name: str) -> datetime:
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        raise BinancePayloadError(
+            f"user data event is missing numeric field {field_name}"
+        )
+    try:
+        return datetime.fromtimestamp(float(str(value)) / 1000, tz=UTC)
+    except (TypeError, ValueError, OverflowError, OSError) as error:
+        raise BinancePayloadError(
+            f"user data event has invalid timestamp {field_name}"
+        ) from error
+
+
+def _optional_update_id(value: object, field_name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        raise BinancePayloadError(f"user data event field {field_name} is not numeric")
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError, OverflowError) as error:
+        raise BinancePayloadError(
+            f"user data event field {field_name} is not an integer"
+        ) from error
+    if parsed < 0:
+        raise BinancePayloadError(
+            f"user data event field {field_name} must be non-negative"
+        )
+    return parsed
 
 
 def _is_fill_event(event: BinanceUserDataEvent) -> bool:

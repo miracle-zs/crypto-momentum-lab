@@ -188,6 +188,7 @@ class MarketStateHub:
         self._stream_id = str(uuid4())
         self._sequence_by_environment: dict[str, int] = {}
         self._replay_buffers: dict[str, deque[tuple[int, str]]] = {}
+        self._publish_locks: dict[str, asyncio.Lock] = {}
         self._published_batch_count = 0
         self._dropped_batch_count = 0
         self._latest_bucket_start: datetime | None = None
@@ -267,41 +268,47 @@ class MarketStateHub:
             environment_states = tuple(
                 state for state in states if state.environment == environment
             )
-            sequence = self._sequence_by_environment.get(environment, 0) + 1
-            self._sequence_by_environment[environment] = sequence
-            # Snapshot payload encoding can be sizeable when many symbols
-            # close together. Run it off the publisher loop so one batch does
-            # not create an event-loop-lag spike for the Binance reader.
-            message = await asyncio.to_thread(
-                encode_market_state_batch,
-                environment_states,
-                sequence=sequence,
-                published_at=published_at,
-                stream_id=self._stream_id,
-            )
-            replay_buffer = self._replay_buffers.setdefault(
+            publish_lock = self._publish_locks.setdefault(
                 environment,
-                deque(maxlen=self._config.replay_batch_count),
+                asyncio.Lock(),
             )
-            replay_buffer.append((sequence, message))
-            self._published_batch_count += 1
-            self._latest_published_at = published_at
-            batch_latest_bucket_start = max(
-                state.bucket_start for state in environment_states
-            )
-            if (
-                self._latest_bucket_start is None
-                or batch_latest_bucket_start > self._latest_bucket_start
-            ):
-                self._latest_bucket_start = batch_latest_bucket_start
-            async with self._subscriber_lock:
-                subscribers = tuple(
-                    item
-                    for item in self._subscribers.values()
-                    if item.environment == environment
+            async with publish_lock:
+                sequence = self._sequence_by_environment.get(environment, 0) + 1
+                # Snapshot payload encoding can be sizeable when many symbols
+                # close together.  Keep the sequence private until encoding
+                # completes so reconnects cannot observe a replay gap that is
+                # only an in-flight background-thread operation.
+                message = await asyncio.to_thread(
+                    encode_market_state_batch,
+                    environment_states,
+                    sequence=sequence,
+                    published_at=published_at,
+                    stream_id=self._stream_id,
                 )
-            for subscriber in subscribers:
-                self._enqueue_latest(subscriber, message)
+                self._sequence_by_environment[environment] = sequence
+                replay_buffer = self._replay_buffers.setdefault(
+                    environment,
+                    deque(maxlen=self._config.replay_batch_count),
+                )
+                replay_buffer.append((sequence, message))
+                self._published_batch_count += 1
+                self._latest_published_at = published_at
+                batch_latest_bucket_start = max(
+                    state.bucket_start for state in environment_states
+                )
+                if (
+                    self._latest_bucket_start is None
+                    or batch_latest_bucket_start > self._latest_bucket_start
+                ):
+                    self._latest_bucket_start = batch_latest_bucket_start
+                async with self._subscriber_lock:
+                    subscribers = tuple(
+                        item
+                        for item in self._subscribers.values()
+                        if item.environment == environment
+                    )
+                for subscriber in subscribers:
+                    self._enqueue_latest(subscriber, message)
 
     def _enqueue_latest(self, subscriber: _Subscriber, message: str) -> None:
         if subscriber.queue.full():

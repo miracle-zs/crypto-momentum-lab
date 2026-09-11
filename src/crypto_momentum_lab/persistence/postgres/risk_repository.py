@@ -249,10 +249,9 @@ class PostgresRiskRepository:
         values = strategy_live_state_row(state)
         async with self._session_factory() as session:
             async with session.begin():
+                statement = insert(StrategyLiveStateRow).values(values)
                 await session.execute(
-                    insert(StrategyLiveStateRow)
-                    .values(values)
-                    .on_conflict_do_update(
+                    statement.on_conflict_do_update(
                         index_elements=[
                             StrategyLiveStateRow.environment,
                             StrategyLiveStateRow.account_label,
@@ -263,6 +262,10 @@ class PostgresRiskRepository:
                             "changed_at": state.changed_at,
                             "reason": state.reason,
                         },
+                        where=(
+                            StrategyLiveStateRow.changed_at
+                            <= statement.excluded.changed_at
+                        ),
                     )
                 )
 

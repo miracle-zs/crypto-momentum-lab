@@ -216,6 +216,23 @@ class PostgresLiveContextProvider:
         self,
         state: MarketState15s,
     ) -> LiveDaemonRuntimeContext:
+        """Load a context and refuse to return one invalidated in-flight.
+
+        Account events and lease heartbeats can invalidate the provider while
+        the parallel database reads below are waiting.  A stale context is
+        unsafe for both entry and exit decisions, so retry a bounded number of
+        times and fail closed if the inputs never become stable.
+        """
+        for _attempt in range(3):
+            context = await self._load_context_once(state)
+            if self.is_context_current(context):
+                return context
+        raise RuntimeError("live context changed during load")
+
+    async def _load_context_once(
+        self,
+        state: MarketState15s,
+    ) -> LiveDaemonRuntimeContext:
         now = datetime.now(tz=UTC)
         cached_context = self._cached_context
         if (
@@ -380,6 +397,7 @@ class PostgresLiveContextProvider:
                 if realtime_account_snapshot is not None
                 else None
             ),
+            context_epoch=cache_epoch,
         )
         if (
             self._cache_epoch == cache_epoch
@@ -392,6 +410,20 @@ class PostgresLiveContextProvider:
             self._cached_context = context
             self._cached_loaded_at = now
         return context
+
+    def is_context_current(self, context: LiveDaemonRuntimeContext) -> bool:
+        """Return whether a context still matches the live provider inputs."""
+        context_epoch = context.context_epoch
+        current_epoch = getattr(self, "_cache_epoch", 0)
+        if context_epoch is not None and context_epoch != current_epoch:
+            return False
+        if context.account_snapshot is not None:
+            return context.account_snapshot_version == getattr(
+                self,
+                "_realtime_account_sequence",
+                0,
+            )
+        return True
 
     def update_account_snapshot(
         self,
@@ -440,16 +472,12 @@ class PostgresLiveContextProvider:
         with the lease that was just committed to PostgreSQL.
         """
 
-        if lease.owner != self._lease_owner or self._cached_context is None:
+        if lease.owner != self._lease_owner:
             return
-        self._cached_context = replace(
-            self._cached_context,
-            active_lease=lease,
-            gate_context=replace(
-                self._cached_context.gate_context,
-                active_lease=lease,
-            ),
-        )
+        # Invalidate in-flight loads as well as the cached object.  Updating
+        # only ``_cached_context`` allows a load that captured an older lease
+        # to repopulate the cache after this callback returns.
+        self.invalidate_cache()
 
     def invalidate_cache(self) -> None:
         """Force the next state to reload account and risk state.

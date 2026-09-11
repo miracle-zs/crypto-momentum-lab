@@ -82,6 +82,24 @@ class AccountEventHubSequenceGap(AccountEventHubError):
 
 
 @dataclass(frozen=True, slots=True)
+class AccountEventHubMetrics:
+    """Counters used to detect account-event backpressure and recovery loops."""
+
+    published_event_count: int
+    subscriber_queue_overflow_count: int
+    replay_request_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class AccountEventHubClientMetrics:
+    """Consumer-side recovery counters for the account-event stream."""
+
+    recovery_count: int
+    queue_overflow_count: int
+    last_recovery_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class AccountEvent:
     environment: str
     account_label: str
@@ -96,6 +114,9 @@ class AccountEvent:
     reason: str | None = None
     has_fill: bool = False
     trade_id: str | None = None
+    exchange_event_at: datetime | None = field(default=None, compare=False)
+    exchange_update_id: int | None = field(default=None, compare=False)
+    exchange_previous_update_id: int | None = field(default=None, compare=False)
     # Transport metadata.  Zero means the event has not yet been assigned a
     # Hub sequence; equality intentionally remains about the account event
     # itself rather than which transport envelope carried it.
@@ -139,6 +160,22 @@ class AccountEvent:
         ):
             if optional_value is not None and not optional_value.strip():
                 raise ValueError(f"{field_name} must not be blank when present")
+        if (
+            self.exchange_event_at is not None
+            and (
+                self.exchange_event_at.tzinfo is None
+                or self.exchange_event_at.utcoffset() is None
+            )
+        ):
+            raise ValueError("exchange_event_at must be timezone-aware")
+        for value, field_name in (
+            (self.exchange_update_id, "exchange_update_id"),
+            (self.exchange_previous_update_id, "exchange_previous_update_id"),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+            ):
+                raise ValueError(f"{field_name} must be a non-negative integer")
         if not isinstance(self.has_fill, bool):
             raise TypeError("has_fill must be a bool")
         if (
@@ -264,6 +301,9 @@ class AccountEventHub:
         self._replay_buffers: dict[
             tuple[str, str], deque[_ReplayEntry]
         ] = {}
+        self._published_event_count = 0
+        self._subscriber_queue_overflow_count = 0
+        self._replay_request_count = 0
         self._stream_epoch = str(uuid4())
         self._started_once = False
 
@@ -277,6 +317,14 @@ class AccountEventHub:
     @property
     def subscriber_count(self) -> int:
         return len(self._subscribers)
+
+    @property
+    def metrics(self) -> AccountEventHubMetrics:
+        return AccountEventHubMetrics(
+            published_event_count=self._published_event_count,
+            subscriber_queue_overflow_count=self._subscriber_queue_overflow_count,
+            replay_request_count=self._replay_request_count,
+        )
 
     async def start(self) -> None:
         if self._server is not None:
@@ -349,6 +397,7 @@ class AccountEventHub:
                 # Keep the order/status notification for consumers, but do not
                 # count a REST-replayed fill twice in live latency telemetry.
                 event = replace(event, has_fill=False)
+        self._published_event_count += 1
         scope = (event.environment, event.account_label)
         current_snapshot = self._next_snapshot(scope, event)
         sequence = self._sequences.get(scope, 0) + 1
@@ -460,6 +509,12 @@ class AccountEventHub:
             requested_epoch is not None
             and requested_epoch != self._stream_epoch
         )
+        if (
+            last_sequence is not None
+            and not require_full_snapshot
+            and (stream_reset or last_sequence != latest_sequence)
+        ):
+            self._replay_request_count += 1
         if require_full_snapshot or last_sequence is None or stream_reset:
             bootstrap = self._bootstrap_message(scope)
             return (
@@ -506,6 +561,13 @@ class AccountEventHub:
 
     def _enqueue_latest(self, subscriber: _Subscriber, message: str) -> None:
         if subscriber.queue.full():
+            self._subscriber_queue_overflow_count += 1
+            log.warning(
+                "account_event_hub_subscriber_queue_overflow",
+                environment=subscriber.environment,
+                account_label=subscriber.account_label,
+                overflow_count=self._subscriber_queue_overflow_count,
+            )
             while True:
                 try:
                     subscriber.queue.get_nowait()
@@ -698,6 +760,17 @@ class WebSocketAccountEventSource:
         self._last_sequence: int | None = None
         self._account_snapshot: AccountSnapshot | None = None
         self._require_full_snapshot = True
+        self._recovery_count = 0
+        self._queue_overflow_count = 0
+        self._last_recovery_reason: str | None = None
+
+    @property
+    def metrics(self) -> AccountEventHubClientMetrics:
+        return AccountEventHubClientMetrics(
+            recovery_count=self._recovery_count,
+            queue_overflow_count=self._queue_overflow_count,
+            last_recovery_reason=self._last_recovery_reason,
+        )
 
     def stop(self) -> None:
         self._stopping = True
@@ -826,6 +899,8 @@ class WebSocketAccountEventSource:
         self._account_snapshot = None
         self._last_sequence = None
         self._require_full_snapshot = True
+        self._recovery_count += 1
+        self._last_recovery_reason = reason
         if self._on_recovery is not None:
             try:
                 self._on_recovery(reason)
@@ -927,6 +1002,7 @@ class WebSocketAccountEventSource:
                 account_label=self._account_label,
                 event_id=event.event_id,
             )
+            self._queue_overflow_count += 1
             receive_queue.put_nowait(
                 _AccountEventQueueOverflow(latest_sequence=event.sequence)
             )
@@ -1078,6 +1154,13 @@ def encode_account_event(event: AccountEvent, *, sequence: int) -> str:
             "reason": event.reason,
             "has_fill": event.has_fill,
             "trade_id": event.trade_id,
+            "exchange_event_at": (
+                None
+                if event.exchange_event_at is None
+                else event.exchange_event_at.isoformat()
+            ),
+            "exchange_update_id": event.exchange_update_id,
+            "exchange_previous_update_id": event.exchange_previous_update_id,
             "account_state": (
                 None
                 if event.account_state is None
@@ -1159,6 +1242,16 @@ def decode_account_event(
         reason=_optional_string(payload, "reason"),
         has_fill=_optional_bool(payload, "has_fill"),
         trade_id=_optional_string(payload, "trade_id"),
+        exchange_event_at=(
+            None
+            if payload.get("exchange_event_at") is None
+            else _parse_datetime(payload, "exchange_event_at")
+        ),
+        exchange_update_id=_optional_int_value(payload, "exchange_update_id"),
+        exchange_previous_update_id=_optional_int_value(
+            payload,
+            "exchange_previous_update_id",
+        ),
         sequence=sequence,
         stream_epoch=stream_epoch,
         account_state=account_state,
@@ -1775,7 +1868,9 @@ __all__ = [
     "AccountEvent",
     "AccountEventHub",
     "AccountEventHubConfig",
+    "AccountEventHubClientMetrics",
     "AccountEventHubError",
+    "AccountEventHubMetrics",
     "AccountEventHubProtocolError",
     "AccountEventHubSequenceGap",
     "WebSocketAccountEventSource",

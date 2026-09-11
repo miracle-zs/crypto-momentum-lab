@@ -5,6 +5,7 @@ from decimal import Decimal
 import pytest
 
 from crypto_momentum_lab.domain.execution import (
+    ExchangeOrderEvent,
     ExchangeOrderState,
     FuturesPositionSide,
     OrderExecutionPlan,
@@ -13,6 +14,9 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
     OrderExecutionKey,
     _KeyCommandScheduler,
+)
+from crypto_momentum_lab.execution_account.orders.state_machine import (
+    OrderPreSubmissionError,
 )
 
 NOW = datetime(2026, 8, 22, tzinfo=UTC)
@@ -25,7 +29,12 @@ class BlockingBackend:
         self.submit_started = asyncio.Event()
         self.calls: list[str] = []
 
-    async def execute_approved_intent(self, plan: OrderExecutionPlan):
+    async def execute_approved_intent(
+        self,
+        plan: OrderExecutionPlan,
+        *,
+        prepared_submission=None,
+    ):
         lane = "exit" if plan.reduce_only else "entry"
         self.calls.append(f"submit:{plan.symbol}:{lane}")
         self.submit_started.set()
@@ -40,6 +49,25 @@ class BlockingBackend:
     async def cancel_order(self, plan: OrderExecutionPlan):
         self.calls.append(f"cancel:{plan.symbol}")
         return _result(plan, ExchangeOrderState.CANCELED)
+
+
+class BlockingSubmitBackend(BlockingBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release_submit = asyncio.Event()
+
+    async def execute_approved_intent(
+        self,
+        plan: OrderExecutionPlan,
+        *,
+        prepared_submission=None,
+    ):
+        result = await super().execute_approved_intent(
+            plan,
+            prepared_submission=prepared_submission,
+        )
+        await self.release_submit.wait()
+        return result
 
 
 async def test_slow_reconcile_does_not_block_other_symbol_submit() -> None:
@@ -135,6 +163,95 @@ async def test_scheduler_close_releases_queued_submitters() -> None:
     assert calls == ["first"]
 
 
+async def test_coordinator_close_waits_for_inflight_submit_after_caller_cancel(
+) -> None:
+    backend = BlockingSubmitBackend()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+    )
+    submit_task = asyncio.create_task(
+        coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+    )
+    await backend.submit_started.wait()
+
+    submit_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await submit_task
+
+    close_task = asyncio.create_task(coordinator.aclose())
+    await asyncio.sleep(0)
+    assert close_task.done() is False
+    backend.release_submit.set()
+    await close_task
+    assert backend.calls == ["submit:BTCUSDT:entry"]
+
+
+async def test_entry_gate_drains_inflight_submit_and_rejects_new_entries() -> None:
+    backend = BlockingSubmitBackend()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+    )
+    submit_task = asyncio.create_task(
+        coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+    )
+    await backend.submit_started.wait()
+
+    coordinator.block_entry_submissions()
+    drain_task = asyncio.create_task(
+        coordinator.wait_for_entry_submissions_idle()
+    )
+    await asyncio.sleep(0)
+    assert drain_task.done() is False
+
+    backend.release_submit.set()
+    await drain_task
+    await submit_task
+
+    with pytest.raises(
+        OrderPreSubmissionError,
+        match="entry submissions are blocked",
+    ):
+        await coordinator.submit(_plan("ETHUSDT", reduce_only=False))
+
+    await coordinator.aclose()
+
+
+async def test_prepare_and_execute_serializes_reconcile_after_prepare() -> None:
+    backend = BlockingBackend()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+    )
+    plan = _plan("BTCUSDT", reduce_only=False)
+    prepare_started = asyncio.Event()
+    release_prepare = asyncio.Event()
+
+    async def prepare_submission():
+        prepare_started.set()
+        await release_prepare.wait()
+        return _prepared(plan)
+
+    submit_task = asyncio.create_task(
+        coordinator.prepare_and_execute(
+            plan,
+            prepare_submission=prepare_submission,
+        )
+    )
+    await prepare_started.wait()
+    reconcile_task = asyncio.create_task(coordinator.reconcile_order(plan))
+    await asyncio.sleep(0)
+    assert backend.calls == []
+
+    release_prepare.set()
+    await backend.submit_started.wait()
+    backend.release_query.set()
+    await asyncio.gather(submit_task, reconcile_task)
+    assert backend.calls == ["submit:BTCUSDT:entry", "reconcile:BTCUSDT"]
+    await coordinator.aclose()
+
+
 async def test_coordinator_rejects_commands_after_close() -> None:
     coordinator = OrderExecutionCoordinator(
         backend=BlockingBackend(),
@@ -176,3 +293,19 @@ def _result(
         state=state,
         exchange_order_id=f"exchange-{plan.symbol}",
     )
+
+
+def _prepared(plan: OrderExecutionPlan):
+    from crypto_momentum_lab.execution_account.orders.state_machine import (
+        PreparedOrderSubmission,
+    )
+
+    event = ExchangeOrderEvent(
+        event_id=f"event-{plan.client_order_id}",
+        client_order_id=plan.client_order_id,
+        state=ExchangeOrderState.SUBMITTING,
+        occurred_at=NOW,
+        exchange_order_id=None,
+        details={},
+    )
+    return PreparedOrderSubmission(plan=plan, submitting_event=event)

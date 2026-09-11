@@ -27,6 +27,10 @@ class RiskContext:
     risk_config: RiskConfigSnapshot
     strategy_state: StrategyLiveState
     enforce_market_state_age: bool = True
+    required_lease_owner: str | None = None
+    required_lease_id: str | None = None
+    required_account_label: str | None = None
+    required_strategy_name: str | None = None
 
 
 class RiskGateway:
@@ -50,6 +54,48 @@ class RiskGateway:
             return _evaluation(intent, context, RiskDecision.REJECTED, "lease_inactive")
         if context.active_lease.expires_at <= context.now:
             return _evaluation(intent, context, RiskDecision.REJECTED, "lease_expired")
+        if (
+            context.required_lease_owner is not None
+            and context.active_lease.owner != context.required_lease_owner
+        ):
+            return _evaluation(
+                intent,
+                context,
+                RiskDecision.REJECTED,
+                "lease_owner_mismatch",
+            )
+        if (
+            context.required_lease_id is not None
+            and context.active_lease.lease_id != context.required_lease_id
+        ):
+            return _evaluation(
+                intent,
+                context,
+                RiskDecision.REJECTED,
+                "lease_id_mismatch",
+            )
+        if (
+            context.required_account_label is not None
+            and context.active_lease.account_label
+            != context.required_account_label
+        ):
+            return _evaluation(
+                intent,
+                context,
+                RiskDecision.REJECTED,
+                "lease_account_mismatch",
+            )
+        if (
+            context.required_strategy_name is not None
+            and context.active_lease.strategy_name
+            != context.required_strategy_name
+        ):
+            return _evaluation(
+                intent,
+                context,
+                RiskDecision.REJECTED,
+                "lease_strategy_mismatch",
+            )
         if context.enforce_market_state_age and _market_age_seconds(context) > (
             context.risk_config.max_market_state_age_seconds
         ):

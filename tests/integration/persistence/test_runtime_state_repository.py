@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from crypto_momentum_lab.domain.market.models import AggTradeGap
 from crypto_momentum_lab.persistence.postgres.models import (
     RuntimeMarketState15sRow,
+    RuntimeMarketStateGapRow,
 )
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
@@ -31,6 +32,7 @@ async def runtime_state_repository(
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
         async with session.begin():
+            await session.execute(delete(RuntimeMarketStateGapRow))
             await session.execute(delete(RuntimeMarketState15sRow))
     yield PostgresRuntimeMarketStateRepository(factory)
     await engine.dispose()
@@ -102,6 +104,39 @@ async def test_mark_incomplete_invalidates_existing_runtime_state(
             missing_count=2,
             reason="history_incomplete",
         )
+    )
+
+    rows = await runtime_state_repository.load_after(
+        environment="research",
+        cursor=RuntimeStateCursor(),
+        limit=10,
+    )
+
+    assert rows[0].data_complete is False
+    assert rows[0].missing_agg_trade_count == 2
+
+
+async def test_gap_before_state_insert_is_replayed_after_restart(
+    runtime_state_repository: PostgresRuntimeMarketStateRepository,
+) -> None:
+    state = fixture_state("BTCUSDT", 1)
+    gap = AggTradeGap(
+        environment="research",
+        symbol="BTCUSDT",
+        previous_id=10,
+        current_id=13,
+        previous_event_at=state.bucket_start + timedelta(seconds=1),
+        current_event_at=state.bucket_start + timedelta(seconds=2),
+        missing_count=2,
+        reason="history_incomplete",
+    )
+
+    await runtime_state_repository.mark_incomplete(gap)
+    await runtime_state_repository.mark_incomplete(gap)
+    await runtime_state_repository.save_closed_states(
+        (state,),
+        source_watermark_at=datetime(2026, 7, 3, 0, 1, tzinfo=UTC),
+        sequence_range=RuntimeStateSequenceRange(1, 1),
     )
 
     rows = await runtime_state_repository.load_after(

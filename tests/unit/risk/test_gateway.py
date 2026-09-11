@@ -26,6 +26,22 @@ def test_gateway_rejects_missing_active_lease() -> None:
     assert evaluation.reason == "missing_active_lease"
 
 
+def test_gateway_rejects_lease_fencing_mismatch() -> None:
+    evaluation = RiskGateway().evaluate(
+        _intent(),
+        replace(
+            _context(),
+            required_lease_owner="another-worker",
+            required_lease_id="lease-2",
+            required_account_label="primary",
+            required_strategy_name="compression_breakout",
+        ),
+    )
+
+    assert evaluation.decision is RiskDecision.REJECTED
+    assert evaluation.reason == "lease_owner_mismatch"
+
+
 def test_gateway_rejects_stale_market_state() -> None:
     context = _context(
         now=datetime(2026, 7, 4, 0, 2, tzinfo=UTC),

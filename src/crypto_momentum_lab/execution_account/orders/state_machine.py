@@ -132,6 +132,10 @@ OrderPreSubmissionCallback = Callable[
     [OrderExecutionPlan, datetime],
     Awaitable[None],
 ]
+OrderExchangeSubmitGuard = Callable[
+    [OrderExecutionPlan, datetime],
+    Awaitable[None],
+]
 ExchangeCallResult = TypeVar("ExchangeCallResult")
 
 
@@ -181,6 +185,7 @@ class OrderExecutionStateMachine:
         clock: Callable[[], datetime] | None = None,
         on_event: OrderEventCallback | None = None,
         on_before_submit: OrderPreSubmissionCallback | None = None,
+        on_before_exchange_submit: OrderExchangeSubmitGuard | None = None,
         on_exchange_request: ExchangeBoundaryCallback | None = None,
         on_exchange_response: ExchangeBoundaryCallback | None = None,
         serialize_commands: bool = True,
@@ -201,6 +206,7 @@ class OrderExecutionStateMachine:
         self._clock = clock or (lambda: datetime.now(tz=UTC))
         self._on_event = on_event
         self._on_before_submit = on_before_submit
+        self._on_before_exchange_submit = on_before_exchange_submit
         self._on_exchange_request = on_exchange_request
         self._on_exchange_response = on_exchange_response
         self._reconciliation_retry_delays = tuple(reconciliation_retry_delays)
@@ -669,6 +675,8 @@ class OrderExecutionStateMachine:
         operation: str,
         call: Callable[[], Awaitable[ExchangeCallResult]],
     ) -> ExchangeCallResult:
+        if operation == "submit" and self._on_before_exchange_submit is not None:
+            await self._on_before_exchange_submit(plan, self._now())
         if (
             operation == "submit"
             and not plan.reduce_only

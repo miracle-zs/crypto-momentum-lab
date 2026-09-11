@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -231,6 +232,7 @@ class UserDataAccountSyncConfig:
     failure_backoff_max_seconds: float = 300.0
     event_queue_size: int = 256
     persistence_queue_size: int = 256
+    deferred_event_buffer_size: int = 512
 
     def __post_init__(self) -> None:
         if self.rest_reconciliation_interval_seconds <= 0:
@@ -255,6 +257,8 @@ class UserDataAccountSyncConfig:
             raise ValueError("event_queue_size must be positive")
         if self.persistence_queue_size <= 0:
             raise ValueError("persistence_queue_size must be positive")
+        if self.deferred_event_buffer_size <= 0:
+            raise ValueError("deferred_event_buffer_size must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +306,8 @@ class UserDataAccountSyncDaemon:
         self._pending_missing_fill_keys: dict[FillKey, datetime] = {}
         self._missing_fill_reconnect_requested_at: dict[FillKey, datetime] = {}
         self._event_queue: asyncio.Queue[BinanceUserDataEvent] | None = None
+        self._deferred_events: deque[BinanceUserDataEvent] = deque()
+        self._reconciliation_active = False
         self._persistence_queue: asyncio.Queue[
             _PendingUserDataPersistence | None
         ] | None = None
@@ -310,6 +316,7 @@ class UserDataAccountSyncDaemon:
         self._pipeline_recovery_event = asyncio.Event()
         self._pipeline_recovery_reason: str | None = None
         self._pipeline_recovery_origin_event: BinanceUserDataEvent | None = None
+        self._pipeline_recovery_generation = 0
         self._observed_stream_queue_overflow_count = 0
         self._reconciliation_persistence_tasks: set[asyncio.Task[None]] = set()
 
@@ -509,7 +516,12 @@ class UserDataAccountSyncDaemon:
         if event_queue is None:
             await self._process_event(event)
             return
-        if not self._accept_events or self._state is None:
+        if self._reconciliation_active or self._pipeline_recovery_event.is_set():
+            self._defer_event(event)
+            return
+        if self._state is None:
+            return
+        if not self._accept_events:
             return
         try:
             event_queue.put_nowait(event)
@@ -519,11 +531,27 @@ class UserDataAccountSyncDaemon:
                 origin_event=event,
             )
 
-    async def _process_event(self, event: BinanceUserDataEvent) -> None:
+    async def _process_event(
+        self,
+        event: BinanceUserDataEvent,
+        *,
+        replay: bool = False,
+    ) -> None:
         needs_reconciliation = False
         try:
             async with self._state_lock:
-                if not self._accept_events or self._state is None:
+                if (
+                    not replay
+                    and (
+                        self._reconciliation_active
+                        or self._pipeline_recovery_event.is_set()
+                    )
+                ):
+                    self._defer_event(event)
+                    return
+                if self._state is None:
+                    return
+                if not self._accept_events and not replay:
                     return
                 update = self._state.apply(event)
                 if update.needs_reconciliation:
@@ -594,7 +622,7 @@ class UserDataAccountSyncDaemon:
         while True:
             event = await queue.get()
             try:
-                await self._process_event(event)
+                await self._process_event(event, replay=True)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -693,6 +721,7 @@ class UserDataAccountSyncDaemon:
 
     async def _recover_pipeline(self) -> ExecutionAccountSyncResult:
         self._accept_events = False
+        recovery_generation = self._pipeline_recovery_generation
         reason = self._pipeline_recovery_reason or "unspecified"
         request_reconnect = getattr(self._stream, "request_reconnect", None)
         if callable(request_reconnect):
@@ -726,10 +755,19 @@ class UserDataAccountSyncDaemon:
         if _is_ready_result(result):
             origin_event = self._pipeline_recovery_origin_event
             async with self._state_lock:
-                self._pipeline_recovery_reason = None
-                self._pipeline_recovery_origin_event = None
-                self._pipeline_recovery_event.clear()
-                self._accept_events = True
+                recovery_still_current = (
+                    recovery_generation == self._pipeline_recovery_generation
+                )
+                if recovery_still_current:
+                    self._pipeline_recovery_reason = None
+                    self._pipeline_recovery_origin_event = None
+                    self._pipeline_recovery_event.clear()
+            if recovery_still_current:
+                await self._replay_deferred_events()
+                async with self._state_lock:
+                    if not self._pipeline_recovery_event.is_set():
+                        self._reconciliation_active = False
+                        self._accept_events = True
             if origin_event is not None and self._on_persisted is not None:
                 self._notify_persisted(origin_event, result)
         return result
@@ -752,6 +790,35 @@ class UserDataAccountSyncDaemon:
 
     async def _wait_for_pipeline_recovery(self) -> None:
         await self._pipeline_recovery_event.wait()
+
+    def _defer_event(self, event: BinanceUserDataEvent) -> None:
+        """Keep events received during a snapshot/recovery window for replay."""
+        if len(self._deferred_events) >= self._config.deferred_event_buffer_size:
+            self._request_pipeline_recovery(
+                "deferred_event_buffer_overflow",
+                origin_event=event,
+            )
+            return
+        self._deferred_events.append(event)
+
+    async def _replay_deferred_events(self) -> None:
+        if not self._deferred_events:
+            return
+        deferred = sorted(
+            self._deferred_events,
+            key=lambda item: (
+                item.exchange_event_at or item.event_at,
+                item.event_at,
+                item.received_at,
+                item.event_id,
+            ),
+        )
+        self._deferred_events.clear()
+        for event in deferred:
+            if self._pipeline_recovery_event.is_set():
+                self._defer_event(event)
+                continue
+            await self._process_event(event, replay=True)
 
     def _notify_event_applied(
         self,
@@ -835,6 +902,7 @@ class UserDataAccountSyncDaemon:
         origin_event: BinanceUserDataEvent | None = None,
     ) -> None:
         self._accept_events = False
+        self._pipeline_recovery_generation += 1
         if self._pipeline_recovery_reason is None:
             self._pipeline_recovery_reason = reason
         if (
@@ -874,6 +942,26 @@ class UserDataAccountSyncDaemon:
         include_fills: bool,
         wait_for_pipeline: bool = True,
     ) -> ExecutionAccountSyncResult:
+        try:
+            return await self._reconcile_impl(
+                include_fills=include_fills,
+                wait_for_pipeline=wait_for_pipeline,
+            )
+        except Exception:
+            if not self._pipeline_recovery_event.is_set():
+                self._reconciliation_active = False
+                self._accept_events = False
+                if self._event_queue is not None:
+                    self._request_pipeline_recovery("reconciliation_failed")
+            raise
+
+    async def _reconcile_impl(
+        self,
+        *,
+        include_fills: bool,
+        wait_for_pipeline: bool = True,
+    ) -> ExecutionAccountSyncResult:
+        self._reconciliation_active = True
         if wait_for_pipeline and self._event_queue is not None:
             async with self._state_lock:
                 self._accept_events = False
@@ -939,9 +1027,12 @@ class UserDataAccountSyncDaemon:
                     )
                 else:
                     self._state.replace_snapshot(snapshot)
-                self._accept_events = not self._pipeline_recovery_event.is_set()
-            else:
                 self._accept_events = False
+            else:
+                self._reconciliation_active = False
+                self._accept_events = False
+                if self._event_queue is not None:
+                    self._request_pipeline_recovery("reconciliation_not_ready")
         if _is_ready_result(result):
             self._notify_heartbeat()
             # Publish immediately after the in-memory state has been replaced.
@@ -951,6 +1042,12 @@ class UserDataAccountSyncDaemon:
             self._notify_reconciled_fills(result)
             if use_realtime_sync:
                 self._schedule_reconciliation_persistence(result)
+            if not self._pipeline_recovery_event.is_set():
+                await self._replay_deferred_events()
+                async with self._state_lock:
+                    if not self._pipeline_recovery_event.is_set():
+                        self._reconciliation_active = False
+                        self._accept_events = True
         await self._inspect_reconciliation(result)
         return result
 
@@ -966,6 +1063,7 @@ class UserDataAccountSyncDaemon:
         pipeline_active = self._event_queue is not None
         if pipeline_active:
             async with self._state_lock:
+                self._reconciliation_active = True
                 self._accept_events = False
             if self._event_queue is not None:
                 if not await self._wait_for_queue_drain(
@@ -986,11 +1084,12 @@ class UserDataAccountSyncDaemon:
         async with self._state_lock:
             async with self._rest_sync_lock:
                 await self._service.snapshot_once(observed_at=self._now())
-            if pipeline_active:
-                self._accept_events = (
-                    self._state is not None
-                    and not self._pipeline_recovery_event.is_set()
-                )
+        if pipeline_active and not self._pipeline_recovery_event.is_set():
+            await self._replay_deferred_events()
+            async with self._state_lock:
+                if not self._pipeline_recovery_event.is_set():
+                    self._reconciliation_active = False
+                    self._accept_events = self._state is not None
 
     async def _inspect_reconciliation(
         self,

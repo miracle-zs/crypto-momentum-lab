@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import cast
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from crypto_momentum_lab.domain.market.models import AggTradeGap, MarketState15s
 from crypto_momentum_lab.persistence.postgres.models import (
     RuntimeMarketState15sRow,
+    RuntimeMarketStateGapRow,
 )
 
 _MAX_RUNTIME_STATE_INSERT_ROWS = 500
@@ -109,6 +110,24 @@ def runtime_state_row(
     }
 
 
+def runtime_state_gap_row(gap: AggTradeGap) -> dict[str, object]:
+    first_bucket = _bucket_start_15s(gap.previous_event_at)
+    last_bucket = _bucket_start_15s(gap.current_event_at)
+    return {
+        "environment": gap.environment,
+        "symbol": gap.symbol,
+        "previous_id": gap.previous_id,
+        "current_id": gap.current_id,
+        "previous_event_at": gap.previous_event_at,
+        "current_event_at": gap.current_event_at,
+        "first_bucket_start": min(first_bucket, last_bucket),
+        "last_bucket_start": max(first_bucket, last_bucket),
+        "missing_count": gap.missing_count,
+        "reason": gap.reason,
+        "created_at": datetime.now(UTC),
+    }
+
+
 def market_state_from_row(row: RuntimeMarketState15sRow) -> MarketState15s:
     return MarketState15s(
         schema_version=row.schema_version,
@@ -164,17 +183,19 @@ class PostgresRuntimeMarketStateRepository:
         _validate_sequence_range(sequence_range)
         if not states:
             return
-        values = [
-            runtime_state_row(
-                state,
-                source_watermark_at=source_watermark_at,
-                input_sequence_min=sequence_range.minimum,
-                input_sequence_max=sequence_range.maximum,
-            )
-            for state in states
-        ]
         async with self._session_factory() as session:
             async with session.begin():
+                gap_rows = await _load_overlapping_gaps(session, states)
+                gap_counts = _gap_counts_by_state_key(gap_rows, states)
+                values = [
+                    runtime_state_row(
+                        _apply_gap_completeness(state, gap_counts),
+                        source_watermark_at=source_watermark_at,
+                        input_sequence_min=sequence_range.minimum,
+                        input_sequence_max=sequence_range.maximum,
+                    )
+                    for state in states
+                ]
                 await _insert_many_idempotent(session, values)
                 for environment in sorted(
                     {state.environment for state in states}
@@ -194,6 +215,14 @@ class PostgresRuntimeMarketStateRepository:
         last_bucket = max(previous_bucket, current_bucket)
         async with self._session_factory() as session:
             async with session.begin():
+                inserted = await session.scalar(
+                    insert(RuntimeMarketStateGapRow)
+                    .values(runtime_state_gap_row(gap))
+                    .on_conflict_do_nothing()
+                    .returning(RuntimeMarketStateGapRow.current_id)
+                )
+                if inserted is None:
+                    return
                 await session.execute(
                     update(RuntimeMarketState15sRow)
                     .where(
@@ -422,6 +451,62 @@ def _runtime_state_key(values: dict[str, object]) -> _RuntimeStateKey:
         cast(str, values["environment"]),
         cast(str, values["symbol"]),
         cast(datetime, values["bucket_start"]),
+    )
+
+
+async def _load_overlapping_gaps(
+    session: AsyncSession,
+    states: tuple[MarketState15s, ...],
+) -> tuple[RuntimeMarketStateGapRow, ...]:
+    environments = {state.environment for state in states}
+    symbols = {state.symbol for state in states}
+    lower_bound = min(state.bucket_start for state in states)
+    upper_bound = max(state.bucket_start for state in states)
+    rows = await session.scalars(
+        select(RuntimeMarketStateGapRow).where(
+            RuntimeMarketStateGapRow.environment.in_(environments),
+            RuntimeMarketStateGapRow.symbol.in_(symbols),
+            RuntimeMarketStateGapRow.first_bucket_start <= upper_bound,
+            RuntimeMarketStateGapRow.last_bucket_start >= lower_bound,
+        )
+    )
+    return tuple(rows.all())
+
+
+def _gap_counts_by_state_key(
+    gap_rows: tuple[RuntimeMarketStateGapRow, ...],
+    states: tuple[MarketState15s, ...],
+) -> dict[_RuntimeStateKey, int]:
+    counts: dict[_RuntimeStateKey, int] = {}
+    for state in states:
+        key = (state.environment, state.symbol, state.bucket_start)
+        counts[key] = sum(
+            row.missing_count
+            for row in gap_rows
+            if (
+                row.environment == state.environment
+                and row.symbol == state.symbol
+                and row.first_bucket_start <= state.bucket_start
+                <= row.last_bucket_start
+            )
+        )
+    return counts
+
+
+def _apply_gap_completeness(
+    state: MarketState15s,
+    gap_counts: Mapping[_RuntimeStateKey, int],
+) -> MarketState15s:
+    missing_count = gap_counts.get(
+        (state.environment, state.symbol, state.bucket_start),
+        0,
+    )
+    if missing_count <= 0:
+        return state
+    return replace(
+        state,
+        data_complete=False,
+        missing_agg_trade_count=max(state.missing_agg_trade_count, missing_count),
     )
 
 

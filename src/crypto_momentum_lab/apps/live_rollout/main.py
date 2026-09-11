@@ -29,6 +29,7 @@ from crypto_momentum_lab.config import (
     resolve_database_url,
     resolve_role_credentials,
 )
+from crypto_momentum_lab.domain.account import AccountOpenOrderSnapshot
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderEvent,
     ExchangeOrderState,
@@ -1462,6 +1463,54 @@ async def _run_live_plan(
         await engine.dispose()
 
 
+def _external_open_order_cancellation_plan(
+    order: AccountOpenOrderSnapshot,
+    *,
+    run_id: str,
+) -> OrderExecutionPlan:
+    remaining_quantity = order.original_quantity - order.executed_quantity
+    if remaining_quantity <= 0:
+        raise ValueError(
+            "exchange-visible open order has no remaining quantity: "
+            f"{order.client_order_id}"
+        )
+    raw_position_side = order.raw_payload.get("positionSide")
+    if raw_position_side is None:
+        position_side = FuturesPositionSide.BOTH
+    else:
+        try:
+            position_side = FuturesPositionSide(str(raw_position_side).upper())
+        except ValueError as error:
+            raise ValueError(
+                "exchange-visible open order has unsupported position side: "
+                f"{order.client_order_id}"
+            ) from error
+    raw_time_in_force = order.raw_payload.get("timeInForce")
+    time_in_force = None
+    if order.order_type.upper() == "LIMIT" and isinstance(
+        raw_time_in_force,
+        str,
+    ):
+        normalized_time_in_force = raw_time_in_force.upper()
+        if normalized_time_in_force in {"GTC", "IOC", "FOK", "GTX", "GTD", "RPI"}:
+            time_in_force = normalized_time_in_force
+    return OrderExecutionPlan(
+        intent_id=f"orphan-cancel:{order.client_order_id}",
+        run_id=run_id,
+        client_order_id=order.client_order_id,
+        symbol=order.symbol,
+        side=order.side.upper(),
+        order_type=order.order_type.upper(),
+        quantity=remaining_quantity,
+        price=order.price if order.price > 0 else None,
+        reduce_only=False,
+        created_at=order.observed_at,
+        position_side=position_side,
+        quantized=True,
+        time_in_force=time_in_force,
+    )
+
+
 def _validate_missing_order_resolution(
     *,
     state: str,
@@ -1992,6 +2041,38 @@ async def _run_live_daemon(
                 if daemon is not None:
                     daemon.observe_entry_order_event(plan, event)
 
+        async def validate_live_submission(
+            plan: OrderExecutionPlan,
+            checked_at: datetime,
+        ) -> None:
+            """Revalidate control-plane state immediately before an entry POST."""
+            if plan.reduce_only:
+                return
+            if daemon is None or not daemon.entry_enabled:
+                raise OrderPreSubmissionError("live entry lane is disabled")
+            current_lease = await heartbeat_risk_repository.load_active_lease(
+                "live",
+                account_label,
+                checked_at,
+            )
+            if current_lease is None:
+                raise OrderPreSubmissionError("active lease disappeared")
+            if current_lease.owner != lease_owner:
+                raise OrderPreSubmissionError("active lease owner changed")
+            if current_lease.strategy_name != strategy_name:
+                raise OrderPreSubmissionError("active lease strategy changed")
+            if (
+                active_lease is not None
+                and current_lease.lease_id != active_lease.lease_id
+            ):
+                raise OrderPreSubmissionError("active lease fencing token changed")
+            active_halts = await heartbeat_risk_repository.load_active_halts(
+                "live",
+                account_label,
+            )
+            if active_halts:
+                raise OrderPreSubmissionError("active risk halt")
+
         state_machine = OrderExecutionStateMachine(
             exchange=client,
             repository=order_repository,
@@ -2000,6 +2081,7 @@ async def _run_live_daemon(
             clock=lambda: datetime.now(tz=UTC),
             on_event=on_live_order_event,
             on_before_submit=register_expected_entry,
+            on_before_exchange_submit=validate_live_submission,
             on_exchange_request=telemetry.exchange_request_started,
             on_exchange_response=telemetry.exchange_response_received,
             serialize_commands=False,
@@ -2041,17 +2123,23 @@ async def _run_live_daemon(
             for order in open_orders:
                 if order.reduce_only or order.client_order_id in known_ids:
                     continue
-                snapshot = await client.cancel_order_by_client_id(
-                    order.symbol,
-                    order.client_order_id,
+                orphan_plan = _external_open_order_cancellation_plan(
+                    order,
+                    run_id=session_id,
                 )
+                await order_repository.adopt_external_order_for_cancellation(
+                    orphan_plan,
+                    exchange_order_id=order.order_id,
+                    observed_at=order.observed_at,
+                )
+                result = await execution_coordinator.cancel_order(orphan_plan)
                 if (
-                    snapshot.state is ExchangeOrderState.REJECTED
-                    or not snapshot.state.terminal
+                    result.state is ExchangeOrderState.REJECTED
+                    or not result.state.terminal
                 ):
                     raise RuntimeError(
                         "exchange opening order cancellation was not confirmed: "
-                        f"{order.client_order_id}:{snapshot.state.value}"
+                        f"{order.client_order_id}:{result.state.value}"
                     )
                 cancelled_count += 1
             return cancelled_count
@@ -2461,14 +2549,31 @@ async def _run_live_daemon(
                     session_id,
                 ),
             )
+
+        lease_heartbeat_degraded = False
+
         def on_lease_renewed(lease: TradingLease) -> None:
+            nonlocal lease_heartbeat_degraded
+            lease_heartbeat_degraded = False
             context_provider.update_lease(lease)
+            heartbeat_context_provider.update_lease(lease)
+            refresh_entry_enabled()
             mark_live_database_ok()
             log.info(
                 "live_lease_renewed",
                 session_id=session_id,
                 lease_id=lease.lease_id,
                 lease_expires_at=lease.expires_at.isoformat(),
+            )
+
+        def on_lease_error(error: Exception) -> None:
+            nonlocal lease_heartbeat_degraded
+            lease_heartbeat_degraded = True
+            refresh_entry_enabled()
+            log.warning(
+                "live_lease_renewal_failed",
+                session_id=session_id,
+                error_type=type(error).__name__,
             )
 
         lease_heartbeat = LiveLeaseHeartbeat(
@@ -2481,11 +2586,7 @@ async def _run_live_daemon(
                 poll_interval_seconds=_LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS,
             ),
             on_renewed=on_lease_renewed,
-            on_error=lambda error: log.warning(
-                "live_lease_renewal_failed",
-                session_id=session_id,
-                error_type=type(error).__name__,
-            ),
+            on_error=on_lease_error,
             recover=recover_live_lease,
         )
         entry_universe_context_provider: (
@@ -2636,7 +2737,12 @@ async def _run_live_daemon(
         exit_failure_by_symbol: dict[str, str] = {}
 
         def refresh_entry_enabled() -> None:
-            if draining:
+            if lease_heartbeat_degraded:
+                daemon.set_entry_enabled(
+                    False,
+                    reason="lease_heartbeat_degraded",
+                )
+            elif draining:
                 daemon.set_entry_enabled(False, reason="session_draining")
             elif exit_failure_by_symbol:
                 symbol, reason = next(iter(exit_failure_by_symbol.items()))
@@ -2926,6 +3032,11 @@ async def _run_live_daemon(
                 )
             result = await market_task
         finally:
+            if execution_coordinator is not None:
+                # Stop admitting new entries before cancelling producers.  The
+                # coordinator still waits for the one in-flight exchange call
+                # during the final ``aclose`` below.
+                execution_coordinator.block_entry_submissions()
             if hub_source is not None:
                 hub_source.stop()
             if quote_source is not None:
@@ -3587,12 +3698,36 @@ class _LiveDaemonRepositoryAdapter:
         evaluation: RiskEvaluation,
         plan: OrderExecutionPlan,
         prepared_at: datetime,
+        environment: str | None = None,
+        account_label: str | None = None,
+        strategy_name: str | None = None,
+        required_lease_owner: str | None = None,
+        required_lease_id: str | None = None,
+        max_open_positions: int | None = None,
+        max_daily_loss: Decimal | None = None,
+        max_gross_exposure: Decimal | None = None,
+        current_daily_pnl: Decimal | None = None,
+        current_gross_exposure: Decimal | None = None,
+        open_position_symbols: frozenset[str] | None = None,
+        exposure_notional: Decimal | None = None,
     ) -> PreparedOrderSubmission | None:
         return await self._orders.prepare_submission(
             intent=intent,
             evaluation=evaluation,
             plan=plan,
             prepared_at=prepared_at,
+            environment=environment,
+            account_label=account_label,
+            strategy_name=strategy_name,
+            required_lease_owner=required_lease_owner,
+            required_lease_id=required_lease_id,
+            max_open_positions=max_open_positions,
+            max_daily_loss=max_daily_loss,
+            max_gross_exposure=max_gross_exposure,
+            current_daily_pnl=current_daily_pnl,
+            current_gross_exposure=current_gross_exposure,
+            open_position_symbols=open_position_symbols,
+            exposure_notional=exposure_notional,
         )
 
     async def save_checkpoint(
