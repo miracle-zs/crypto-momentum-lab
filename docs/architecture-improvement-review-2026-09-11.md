@@ -161,6 +161,10 @@ live_rollout/
 - 已将 `LiveDaemonRuntimeContext` 与 `LiveContextProvider` 契约移到
   `live_rollout/context.py`；PostgreSQL provider 仍可保留额外的 cache invalidation
   与 currentness 能力，但不再成为 daemon 的具体类型依赖。
+- 已将 context generation、provider currentness 检查、cache invalidation 和
+  managed-position/order symbol 发布收拢到 `live_rollout/context.py` 的
+  `LiveContextRuntime`；prefetch、admission、submission、exit 与 scheduled controller
+  只接收其窄方法回调，daemon 不再持有 context epoch 或发布实现。
 - 已将 entry-side 的 symbol/EMA filter 刷新、policy compare/enforce、signal recording
   和 candidate admission 转移到 `live_rollout/entry_lane.py`；daemon 仍保留 market
   loop 生命周期、共享 context invalidation，以及注入给 lane 的提交回调。

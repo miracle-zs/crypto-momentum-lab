@@ -8,11 +8,13 @@ state.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
+
+import structlog
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.execution import ExchangeOrderState
@@ -93,3 +95,87 @@ class LiveContextProvider(Protocol):
         self,
         state: MarketState15s,
     ) -> Awaitable[LiveDaemonRuntimeContext]: ...
+
+
+class LiveContextRuntime:
+    """Own context freshness fencing and managed-symbol publication."""
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        context_provider: LiveContextProvider,
+        set_pending_position_symbols: Callable[[Collection[str]], None],
+        update_managed_symbols: Callable[
+            [Collection[str], Collection[str]], None
+        ],
+        on_managed_position_symbols: (
+            Callable[[frozenset[str]], Awaitable[None]] | None
+        ) = None,
+    ) -> None:
+        if not run_id.strip():
+            raise ValueError("run_id must not be empty")
+        self._run_id = run_id
+        self._context_provider = context_provider
+        self._set_pending_position_symbols = set_pending_position_symbols
+        self._update_managed_symbols = update_managed_symbols
+        self._on_managed_position_symbols = on_managed_position_symbols
+        self._generation = 0
+        self._managed_position_symbols: frozenset[str] = frozenset()
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    @property
+    def managed_position_symbols(self) -> frozenset[str]:
+        return self._managed_position_symbols
+
+    def is_current(self, context: LiveDaemonRuntimeContext) -> bool:
+        checker = getattr(self._context_provider, "is_context_current", None)
+        if not callable(checker):
+            return True
+        try:
+            return bool(checker(context))
+        except Exception as error:
+            _log.warning(
+                "live_context_currentness_check_failed",
+                run_id=self._run_id,
+                error_type=type(error).__name__,
+            )
+            return False
+
+    def invalidate(self) -> None:
+        self._generation += 1
+        invalidate = getattr(self._context_provider, "invalidate_cache", None)
+        if callable(invalidate):
+            invalidate()
+
+    async def publish_managed_position_symbols(
+        self,
+        context: LiveDaemonRuntimeContext,
+    ) -> None:
+        if not self.is_current(context):
+            _log.info(
+                "live_managed_position_symbols_stale_context_ignored",
+                run_id=self._run_id,
+            )
+            return
+        symbols = frozenset(
+            (context.open_position_symbols or frozenset())
+            | context.unmanaged_position_symbols
+            | context.pending_position_symbols
+        )
+        self._managed_position_symbols = symbols
+        self._set_pending_position_symbols(context.pending_position_symbols)
+        managed_order_symbols = frozenset(
+            order.plan.symbol.strip().upper()
+            for order in context.unresolved_orders
+            if order.plan.symbol.strip()
+        )
+        self._update_managed_symbols(symbols, managed_order_symbols)
+        if self._on_managed_position_symbols is not None:
+            await self._on_managed_position_symbols(symbols)
+
+
+_log = structlog.get_logger()

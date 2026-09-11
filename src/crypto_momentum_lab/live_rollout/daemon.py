@@ -43,6 +43,7 @@ from crypto_momentum_lab.live_rollout.closed_candle_feed import (
 )
 from crypto_momentum_lab.live_rollout.context import (
     LiveContextProvider,
+    LiveContextRuntime,
     LiveDaemonRuntimeContext,
     LiveEntryFilterContext,
 )
@@ -116,11 +117,6 @@ log = structlog.get_logger()
 # from daemon.py; ownership now lives with the market loop module.
 LiveDaemonResult = _LiveDaemonResult
 LiveRuntimeStrategy = _LiveRuntimeStrategy
-
-_EXIT_RECOVERY_PREFIX = "live-exit-recovery-"
-_EXIT_RECOVERY_MAX_ATTEMPTS = 3
-_EXIT_RECOVERY_RETRY_DELAYS_SECONDS = (2.0, 5.0, 15.0)
-
 
 class LiveDaemonRepository(LiveSubmissionRepository, Protocol):
     async def save_checkpoint(
@@ -238,16 +234,8 @@ class LiveStrategyDaemon:
         self._signal_recorder = signal_recorder
         self._entry_order_lifecycle = entry_order_lifecycle
         self._clock = clock or (lambda: datetime.now(tz=UTC))
-        self._on_managed_position_symbols = on_managed_position_symbols
         self._cancel_unfilled_entry_orders = cancel_unfilled_entry_orders
         self._fetch_exchange_positions = fetch_exchange_positions
-        self._managed_position_symbols: frozenset[str] = frozenset()
-        self._context_generation = 0
-        self._context_prefetcher = LiveContextPrefetcher(
-            context_provider=self._context_provider,
-            context_generation=lambda: self._context_generation,
-            clock=self._clock,
-        )
         self._run_active = False
         self._exit_enabled = True
         self._pending_entries = LivePendingEntryRegistry(clock=self._clock)
@@ -257,11 +245,34 @@ class LiveStrategyDaemon:
             telemetry=self._telemetry,
             pending_entry_symbols=self._pending_entries.pending_symbols,
         )
+        self._context_runtime = LiveContextRuntime(
+            run_id=config.run_id,
+            context_provider=self._context_provider,
+            set_pending_position_symbols=(
+                self._entry_control.set_pending_position_symbols
+            ),
+            update_managed_symbols=(
+                lambda position_symbols, order_symbols: (
+                    self._runtime_cache.update_managed_symbols(
+                        position_symbols=position_symbols,
+                        order_symbols=order_symbols,
+                    )
+                )
+            ),
+            on_managed_position_symbols=on_managed_position_symbols,
+        )
+        self._context_prefetcher = LiveContextPrefetcher(
+            context_provider=self._context_provider,
+            context_generation=lambda: self._context_runtime.generation,
+            clock=self._clock,
+        )
         self._market_admission = LiveMarketStateAdmission(
             context_provider=self._context_provider,
-            context_generation=lambda: self._context_generation,
+            context_generation=lambda: self._context_runtime.generation,
             sync_pending_entry_plans=self._pending_entries.sync,
-            publish_managed_position_symbols=self._publish_managed_position_symbols,
+            publish_managed_position_symbols=(
+                self._context_runtime.publish_managed_position_symbols
+            ),
             telemetry=self._telemetry,
             clock=self._clock,
         )
@@ -280,7 +291,7 @@ class LiveStrategyDaemon:
             clock=self._clock,
             entry_enabled=lambda: self.entry_enabled,
             entry_enabled_reason=lambda: self.entry_enabled_reason,
-            context_is_current=self._context_is_current,
+            context_is_current=self._context_runtime.is_current,
             pending_entry_reservation=self._pending_entries.reservation,
             remember_pending_entry=self._pending_entries.remember,
             record_signal_candidate=self._record_signal_candidate,
@@ -298,9 +309,11 @@ class LiveStrategyDaemon:
             is_exit_enabled=lambda: self.exit_enabled,
             context_provider=self._context_provider,
             sync_pending_entry_plans=self._pending_entries.sync,
-            publish_managed_position_symbols=self._publish_managed_position_symbols,
-            invalidate_context_cache=self._invalidate_context_cache,
-            context_is_current=self._context_is_current,
+            publish_managed_position_symbols=(
+                self._context_runtime.publish_managed_position_symbols
+            ),
+            invalidate_context_cache=self._context_runtime.invalidate,
+            context_is_current=self._context_runtime.is_current,
         )
         self._exit_lane = ExitExecutionLane(
             self._exit_processor.process_state,
@@ -313,8 +326,10 @@ class LiveStrategyDaemon:
             run_active=lambda: self._run_active,
             context_provider=self._context_provider,
             sync_pending_entry_plans=self._pending_entries.sync,
-            publish_managed_position_symbols=self._publish_managed_position_symbols,
-            invalidate_context_cache=self._invalidate_context_cache,
+            publish_managed_position_symbols=(
+                self._context_runtime.publish_managed_position_symbols
+            ),
+            invalidate_context_cache=self._context_runtime.invalidate,
             exit_processor=self._exit_processor,
             exit_lane=self._exit_lane,
         )
@@ -327,8 +342,10 @@ class LiveStrategyDaemon:
             state_machine=self._state_machine,
             context_provider=self._context_provider,
             sync_pending_entry_plans=self._pending_entries.sync,
-            publish_managed_position_symbols=self._publish_managed_position_symbols,
-            invalidate_context_cache=self._invalidate_context_cache,
+            publish_managed_position_symbols=(
+                self._context_runtime.publish_managed_position_symbols
+            ),
+            invalidate_context_cache=self._context_runtime.invalidate,
             process_exit_requests=self._exit_processor.process_requests,
             set_entry_blocked=self.set_scheduled_entry_blocked,
             pending_entry_plans=self._pending_entries.snapshot,
@@ -362,7 +379,7 @@ class LiveStrategyDaemon:
             entry_enabled=lambda: self.entry_enabled,
             entry_enabled_reason=lambda: self.entry_enabled_reason,
             execute_candidate=self._submission.execute,
-            invalidate_context=self._invalidate_context_cache,
+            invalidate_context=self._context_runtime.invalidate,
             telemetry=self._telemetry,
             signal_recorder=self._signal_recorder,
         )
@@ -400,57 +417,6 @@ class LiveStrategyDaemon:
             set_run_active=self._set_run_active,
         )
 
-    async def _publish_managed_position_symbols(
-        self,
-        context: LiveDaemonRuntimeContext,
-    ) -> None:
-        if not self._context_is_current(context):
-            log.info(
-                "live_managed_position_symbols_stale_context_ignored",
-                run_id=self._config.run_id,
-            )
-            return
-        symbols = frozenset(
-            (context.open_position_symbols or frozenset())
-            | context.unmanaged_position_symbols
-            | context.pending_position_symbols
-        )
-        self._managed_position_symbols = symbols
-        self._entry_control.set_pending_position_symbols(
-            context.pending_position_symbols
-        )
-        managed_order_symbols = frozenset(
-            order.plan.symbol.strip().upper()
-            for order in context.unresolved_orders
-            if order.plan.symbol.strip()
-        )
-        self._runtime_cache.update_managed_symbols(
-            position_symbols=symbols,
-            order_symbols=managed_order_symbols,
-        )
-        if self._on_managed_position_symbols is not None:
-            await self._on_managed_position_symbols(symbols)
-
-    def _context_is_current(self, context: LiveDaemonRuntimeContext) -> bool:
-        checker = getattr(self._context_provider, "is_context_current", None)
-        if not callable(checker):
-            return True
-        try:
-            return bool(checker(context))
-        except Exception as error:
-            log.warning(
-                "live_context_currentness_check_failed",
-                run_id=self._config.run_id,
-                error_type=type(error).__name__,
-            )
-            return False
-
-    def _invalidate_context_cache(self) -> None:
-        self._context_generation += 1
-        invalidate = getattr(self._context_provider, "invalidate_cache", None)
-        if callable(invalidate):
-            invalidate()
-
     @property
     def entry_enabled(self) -> bool:
         return self._entry_control.entry_enabled
@@ -465,7 +431,7 @@ class LiveStrategyDaemon:
 
     @property
     def managed_position_symbols(self) -> frozenset[str]:
-        return self._managed_position_symbols
+        return self._context_runtime.managed_position_symbols
 
     def set_entry_enabled(self, enabled: bool, *, reason: str) -> None:
         self._entry_control.set_entry_enabled(enabled, reason=reason)
