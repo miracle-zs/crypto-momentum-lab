@@ -20,7 +20,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from crypto_momentum_lab.persistence.postgres.models import (
@@ -163,14 +163,44 @@ async def load_legacy_identity_report(
     environment: str,
 ) -> list[dict[str, object]]:
     async with session_factory() as session:
+        ambiguous_client_order_ids = tuple(
+            (
+                await session.scalars(
+                    select(ExchangeOrderEventRow.client_order_id)
+                    .join(
+                        ExchangeOrderRow,
+                        ExchangeOrderRow.client_order_id
+                        == ExchangeOrderEventRow.client_order_id,
+                    )
+                    .where(
+                        ExchangeOrderRow.run_id == run_id,
+                        ExchangeOrderEventRow.exchange_order_id.is_not(None),
+                    )
+                    .group_by(ExchangeOrderEventRow.client_order_id)
+                    .having(
+                        func.count(
+                            func.distinct(
+                                ExchangeOrderEventRow.exchange_order_id
+                            )
+                        )
+                        > 1
+                    )
+                )
+            ).all()
+        )
+        if not ambiguous_client_order_ids:
+            return []
         orders = (
             await session.scalars(
-                select(ExchangeOrderRow).where(ExchangeOrderRow.run_id == run_id)
+                select(ExchangeOrderRow).where(
+                    ExchangeOrderRow.run_id == run_id,
+                    ExchangeOrderRow.client_order_id.in_(
+                        ambiguous_client_order_ids
+                    ),
+                )
             )
         ).all()
-        if not orders:
-            return []
-        client_order_ids = tuple(order.client_order_id for order in orders)
+        client_order_ids = tuple(ambiguous_client_order_ids)
         events = (
             await session.scalars(
                 select(ExchangeOrderEventRow).where(
