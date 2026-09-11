@@ -135,6 +135,10 @@ from crypto_momentum_lab.live_rollout.lease import (
     LiveLeaseHeartbeat,
 )
 from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
+from crypto_momentum_lab.live_rollout.market_cache import (
+    LatestMarketQuoteCache,
+    LatestMarketStateCache,
+)
 from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,
     live_limits_from_approval,
@@ -3001,8 +3005,8 @@ async def _run_live_daemon(
             lease_owner=lease_owner,
             approval_id=approval.approval_id,
         )
-        latest_market_states = _LatestMarketStateCache()
-        latest_market_quotes = _LatestMarketQuoteCache()
+        latest_market_states = LatestMarketStateCache()
+        latest_market_quotes = LatestMarketQuoteCache()
         entry_universe_context_provider: (
             Callable[[str, datetime], dict[str, object] | None] | None
         ) = None
@@ -3643,58 +3647,9 @@ async def _run_live_daemon(
                 log.exception("live_health_stop_marker_failed")
 
 
-class _LatestMarketStateCache:
-    def __init__(self) -> None:
-        self._states: dict[str, MarketState15s] = {}
-
-    def observe(self, state: MarketState15s) -> None:
-        previous = self._states.get(state.symbol)
-        if previous is None or state.bucket_start >= previous.bucket_start:
-            self._states[state.symbol] = state
-
-    def for_symbols(self, symbols: tuple[str, ...]) -> tuple[MarketState15s, ...]:
-        if symbols:
-            selected = [
-                self._states[symbol]
-                for symbol in symbols
-                if symbol in self._states
-            ]
-        else:
-            selected = list(self._states.values())
-        return tuple(
-            sorted(selected, key=lambda state: (state.bucket_start, state.symbol))
-        )
-
-
-class _LatestMarketQuoteCache:
-    def __init__(self) -> None:
-        self._quotes: dict[str, RealtimeMarketQuote] = {}
-
-    def observe(self, quote: RealtimeMarketQuote) -> None:
-        previous = self._quotes.get(quote.symbol)
-        if previous is None or quote.received_at >= previous.received_at:
-            self._quotes[quote.symbol] = quote
-
-    def for_symbols(
-        self,
-        symbols: tuple[str, ...],
-    ) -> tuple[RealtimeMarketQuote, ...]:
-        if symbols:
-            selected = [
-                self._quotes[symbol]
-                for symbol in symbols
-                if symbol in self._quotes
-            ]
-        else:
-            selected = list(self._quotes.values())
-        return tuple(
-            sorted(selected, key=lambda quote: (quote.received_at, quote.symbol))
-        )
-
-
 async def _observe_market_states(
     states: AsyncIterable[MarketState15s],
-    cache: _LatestMarketStateCache,
+    cache: LatestMarketStateCache,
 ) -> AsyncIterator[MarketState15s]:
     async for state in states:
         cache.observe(state)
@@ -3856,8 +3811,8 @@ async def _run_quote_channel(
     *,
     source: WebSocketMarketQuoteSource,
     daemon: LiveStrategyDaemon,
-    latest_market_quotes: _LatestMarketQuoteCache,
-    latest_market_states: _LatestMarketStateCache,
+    latest_market_quotes: LatestMarketQuoteCache,
+    latest_market_states: LatestMarketStateCache,
     on_exit_failure: Callable[[str, str | None], None] | None = None,
 ) -> None:
     retry_at_by_symbol: dict[str, float] = {}
@@ -3916,7 +3871,7 @@ async def _run_closed_candle_channel(
     *,
     source: BinanceClosedCandle15mFeed,
     daemon: LiveStrategyDaemon,
-    latest_market_quotes: _LatestMarketQuoteCache,
+    latest_market_quotes: LatestMarketQuoteCache,
     on_exit_failure: Callable[[str, str | None], None] | None = None,
 ) -> None:
     async for event in source:
@@ -4002,8 +3957,8 @@ async def _run_closed_candle_channel(
 async def _run_grace_timeout_channel(
     *,
     daemon: LiveStrategyDaemon,
-    latest_market_states: _LatestMarketStateCache,
-    latest_market_quotes: _LatestMarketQuoteCache,
+    latest_market_states: LatestMarketStateCache,
+    latest_market_quotes: LatestMarketQuoteCache,
     interval_seconds: float = 1.0,
     on_exit_failure: Callable[[str, str | None], None] | None = None,
 ) -> None:
@@ -4078,8 +4033,8 @@ async def _run_account_event_channel(
     *,
     source: WebSocketAccountEventSource,
     daemon: LiveStrategyDaemon,
-    latest_market_states: _LatestMarketStateCache,
-    latest_market_quotes: _LatestMarketQuoteCache,
+    latest_market_states: LatestMarketStateCache,
+    latest_market_quotes: LatestMarketQuoteCache,
     order_repository: PostgresOrderRepository,
     state_machine: OrderExecutionPort,
     run_id: str,

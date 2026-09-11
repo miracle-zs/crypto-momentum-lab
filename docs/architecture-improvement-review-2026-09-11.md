@@ -219,6 +219,9 @@ live_rollout/
 - 已为 `LiveExitEventCoordinator` 增加独立契约测试，覆盖 account lane、quote symbol
   mismatch、closed-candle synthetic state 和 grace-timeout 路由；这些入口不再只能
   通过完整 daemon fixture 间接验证。
+- 已将四路事件通道共享的 per-symbol 最新 market state/quote cache 转移到
+  `live_rollout/market_cache.py`；account、quote、candle、grace channel 和 lease
+  recovery 通过同一窄 cache 接口读写，`main.py` 不再定义缓存实现。
 - 已将 RiskControlHub 的连接状态、durable state reload、fail-closed entry gate、
   one-shot action dispatch、reconcile task 和 telemetry 转移到
   `live_rollout/risk_control.py` 的 `LiveRiskControlRuntime`；`main.py` 只负责创建
