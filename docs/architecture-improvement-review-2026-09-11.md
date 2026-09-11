@@ -213,6 +213,9 @@ live_rollout/
 - 已将 operator-controlled `exit_enabled` 状态转移到
   `live_rollout/exit_control.py` 的 `LiveExitControlGate`；daemon 仍保留原公开属性和
   setter，但退出处理器、market loop 与 event coordinator 直接读取同一控制闸门。
+- 已为 `LiveExitEventCoordinator` 增加独立契约测试，覆盖 account lane、quote symbol
+  mismatch、closed-candle synthetic state 和 grace-timeout 路由；这些入口不再只能
+  通过完整 daemon fixture 间接验证。
 - 这是 P0-1 的渐进切片，属于转移实现所有权而非增加转发壳；`session.py` 当前仍是
   手工 one-shot session，不应把本次改动写成整个 P0-1 已完成。
 
