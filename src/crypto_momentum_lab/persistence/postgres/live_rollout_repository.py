@@ -2,7 +2,7 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Any, cast
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -112,6 +112,87 @@ class PostgresLiveRolloutRepository:
                 )
         return inserted is not None
 
+    async def load_command(self, command_id: str) -> RollbackCommand | None:
+        async with self._session_factory() as session:
+            row = await session.scalar(
+                select(LiveRollbackCommandRow).where(
+                    LiveRollbackCommandRow.command_id == command_id
+                )
+            )
+        return None if row is None else _rollback_command_from_row(row)
+
+    async def load_command_by_idempotency(
+        self,
+        idempotency_key: str,
+    ) -> RollbackCommand | None:
+        async with self._session_factory() as session:
+            row = await session.scalar(
+                select(LiveRollbackCommandRow).where(
+                    LiveRollbackCommandRow.idempotency_key == idempotency_key
+                )
+            )
+        return None if row is None else _rollback_command_from_row(row)
+
+    async def claim_command(
+        self,
+        command_id: str,
+        *,
+        account_label: str,
+        strategy_name: str,
+        session_id: str,
+    ) -> RollbackCommand | None:
+        """Atomically move one requested command into execution."""
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                claimed_id = await session.scalar(
+                    update(LiveRollbackCommandRow)
+                    .where(
+                        LiveRollbackCommandRow.command_id == command_id,
+                        LiveRollbackCommandRow.account_label == account_label,
+                        LiveRollbackCommandRow.strategy_name == strategy_name,
+                        LiveRollbackCommandRow.session_id == session_id,
+                        LiveRollbackCommandRow.status == "requested",
+                    )
+                    .values(status="executing")
+                    .returning(LiveRollbackCommandRow.command_id)
+                )
+                if claimed_id is None:
+                    return None
+                row = await session.scalar(
+                    select(LiveRollbackCommandRow).where(
+                        LiveRollbackCommandRow.command_id == claimed_id
+                    )
+                )
+        return None if row is None else _rollback_command_from_row(row)
+
+    async def complete_command(
+        self,
+        command_id: str,
+        *,
+        status: str,
+        completed_at: datetime,
+        failure_reason: str | None,
+    ) -> bool:
+        if status not in {"completed", "failed"}:
+            raise ValueError("command completion status must be completed or failed")
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = await session.execute(
+                    update(LiveRollbackCommandRow)
+                    .where(
+                        LiveRollbackCommandRow.command_id == command_id,
+                        LiveRollbackCommandRow.status == "executing",
+                    )
+                    .values(
+                        status=status,
+                        completed_at=completed_at,
+                        failure_reason=failure_reason,
+                    )
+                )
+        rowcount = cast(int, getattr(result, "rowcount", 0))
+        return rowcount == 1
+
     async def _insert(self, model: Any, values: dict[str, object]) -> None:
         async with self._session_factory() as session:
             async with session.begin():
@@ -135,3 +216,20 @@ def _prepare_transition_values(
             reason[: _LIVE_SESSION_REASON_MAX_LENGTH - 3] + "..."
         )
     return values
+
+
+def _rollback_command_from_row(row: LiveRollbackCommandRow) -> RollbackCommand:
+    return RollbackCommand(
+        command_id=row.command_id,
+        command_type=row.command_type,
+        requested_by=row.requested_by,
+        confirmation_text=row.confirmation_text,
+        requested_at=row.requested_at,
+        idempotency_key=row.idempotency_key,
+        account_label=row.account_label,
+        strategy_name=row.strategy_name,
+        session_id=row.session_id,
+        status=row.status,
+        completed_at=row.completed_at,
+        failure_reason=row.failure_reason,
+    )

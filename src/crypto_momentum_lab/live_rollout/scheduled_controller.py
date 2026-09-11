@@ -147,6 +147,32 @@ class ScheduledRiskWindowController:
         if previous_state is None or state.bucket_end >= previous_state.bucket_end:
             self._latest_market_states[state.symbol] = state
 
+    async def cancel_all_open_entries(self) -> str | None:
+        """Cancel every known and exchange-visible opening order.
+
+        The operation shares the scheduled controller lock so an operator
+        command cannot race the recurring risk window's cancellation pass.
+        The injected callback remains responsible for coordinator/state-machine
+        execution and the final exchange orphan scan.
+        """
+
+        async with self._scheduled_window_lock:
+            return await self._cancel_scheduled_entry_orders()
+
+    async def request_flatten(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> str | None:
+        """Request a one-shot reduce-only flatten through the exit processor."""
+
+        observed_at = self._clock() if now is None else now
+        async with self._scheduled_window_lock:
+            return await self._submit_scheduled_flatten(
+                observed_at,
+                force=True,
+            )
+
     async def process(
         self,
         *,
@@ -416,14 +442,19 @@ class ScheduledRiskWindowController:
     ) -> str | None:
         schedule = self._config.scheduled_risk_window
         exit_manager = self._exit_manager
-        if schedule is None or exit_manager is None:
+        if exit_manager is None:
+            return "scheduled_flatten_exit_manager_unavailable"
+        if schedule is None and not force:
             return "scheduled_flatten_exit_manager_unavailable"
         last_attempt = self._scheduled_flatten_last_attempt_at
+        retry_interval_seconds = (
+            0.0 if schedule is None else schedule.retry_interval_seconds
+        )
         if (
             not force
             and last_attempt is not None
             and (now - last_attempt).total_seconds()
-            < schedule.retry_interval_seconds
+            < retry_interval_seconds
         ):
             return None
         states = self._latest_scheduled_states()

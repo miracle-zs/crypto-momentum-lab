@@ -117,8 +117,14 @@ The stream carries account-level sequence continuity even when a consumer is
 scoped to one strategy/session. Consumers filter after applying the sequence,
 so another session's command cannot create a false gap. An optional shared
 `CML_RISK_CONTROL_HUB_TOKEN` authenticates operator publishes; the token is
-never included in logs or event details. The dashboard remains read-only; the
-CLI `disable-new-entries` command is the audited durable write path.
+never included in logs or event details. The dashboard remains read-only. The
+CLI `disable-new-entries`, `cancel-all-open-entries`, and `request-flatten`
+commands write an audited durable record before publishing. The latter two
+are claimed atomically by the live worker: cancellation uses the coordinator
+and exchange orphan scan, while flatten uses the existing reduce-only exit
+processor. A completed flatten request means the durable exit request was
+accepted; exchange position verification and reconciliation remain the source
+of truth for whether the account is actually flat.
 
 ## Live execution latency path
 

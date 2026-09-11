@@ -46,6 +46,21 @@ def test_risk_control_event_round_trips() -> None:
     assert decoded == event
 
 
+@pytest.mark.parametrize(
+    "action",
+    [
+        RiskControlAction.CANCEL_ALL_OPEN_ENTRIES,
+        RiskControlAction.REQUEST_FLATTEN,
+    ],
+)
+def test_one_shot_risk_control_actions_round_trip(action: RiskControlAction) -> None:
+    event = _event(action=action)
+
+    decoded = decode_risk_control_event(encode_risk_control_event(event))
+
+    assert decoded.action is action
+
+
 def test_risk_control_publish_message_requires_valid_token_shape() -> None:
     event = _event()
     payload = encode_risk_control_event(

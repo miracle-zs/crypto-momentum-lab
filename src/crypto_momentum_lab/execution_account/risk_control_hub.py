@@ -46,6 +46,8 @@ class RiskControlAction(StrEnum):
     DRAIN = "drain"
     HALT = "halt"
     REFRESH = "refresh"
+    CANCEL_ALL_OPEN_ENTRIES = "cancel_all_open_entries"
+    REQUEST_FLATTEN = "request_flatten"
 
 
 @dataclass(frozen=True, slots=True)

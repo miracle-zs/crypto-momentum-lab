@@ -1,7 +1,11 @@
 from crypto_momentum_lab.domain.live_rollout import RollbackCommand
 
 EMERGENCY_FLATTEN_CONFIRMATION = "EMERGENCY FLATTEN LIVE ACCOUNT"
+CANCEL_ALL_OPEN_ENTRIES_CONFIRMATION = "CANCEL ALL OPEN LIVE ENTRIES"
 RELEASE_LEASE_CONFIRMATION = "RELEASE LIVE TRADING LEASE"
+
+EMERGENCY_FLATTEN_COMMAND = "emergency_flatten"
+CANCEL_ALL_OPEN_ENTRIES_COMMAND = "cancel_all_open_entries"
 
 
 def require_authorized_command(

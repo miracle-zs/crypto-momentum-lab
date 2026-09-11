@@ -40,6 +40,7 @@ from crypto_momentum_lab.domain.live_rollout import (
     LiveOperatorApproval,
     LiveSessionState,
     LiveSessionTransition,
+    RollbackCommand,
 )
 from crypto_momentum_lab.domain.market.models import (
     JsonValue,
@@ -99,6 +100,12 @@ from crypto_momentum_lab.live_rollout.closed_candle_feed import (
     BinanceClosedCandle15mFeed,
     ClosedCandle15mFeedConfig,
 )
+from crypto_momentum_lab.live_rollout.commands import (
+    CANCEL_ALL_OPEN_ENTRIES_COMMAND,
+    CANCEL_ALL_OPEN_ENTRIES_CONFIRMATION,
+    EMERGENCY_FLATTEN_COMMAND,
+    EMERGENCY_FLATTEN_CONFIRMATION,
+)
 from crypto_momentum_lab.live_rollout.context import LiveEntryFilterContext
 from crypto_momentum_lab.live_rollout.daemon import (
     LiveDaemonConfig,
@@ -130,6 +137,9 @@ from crypto_momentum_lab.live_rollout.postgres_runtime import (
     poll_live_market_states,
 )
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
+from crypto_momentum_lab.live_rollout.risk_control import (
+    RiskControlCommandDispatcher,
+)
 from crypto_momentum_lab.live_rollout.runtime_manifest import (
     LiveRuntimeAccount,
     RuntimeManifestError,
@@ -1687,6 +1697,86 @@ def disable_new_entries_command(
         )
 
 
+@app.command("cancel-all-open-entries")
+def cancel_all_open_entries_command(
+    session_id: Annotated[str, typer.Option("--session-id")],
+    operator: Annotated[str, typer.Option("--operator")],
+    idempotency_key: Annotated[str, typer.Option("--idempotency-key")],
+    confirmation: Annotated[str, typer.Option("--confirmation")] = "",
+    account_label: Annotated[str, typer.Option("--account-label")] = "primary",
+    strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    risk_control_hub_url: Annotated[
+        str,
+        typer.Option("--risk-control-hub-url"),
+    ] = "",
+    risk_control_hub_token: Annotated[
+        str | None,
+        typer.Option(
+            "--risk-control-hub-token",
+            help="Optional token; CML_RISK_CONTROL_HUB_TOKEN is used when omitted.",
+        ),
+    ] = None,
+    database_url: Annotated[str | None, typer.Option("--database-url")] = None,
+) -> None:
+    """Durably request cancellation of all live opening orders."""
+
+    _issue_one_shot_risk_control_command(
+        action=RiskControlAction.CANCEL_ALL_OPEN_ENTRIES,
+        command_type=CANCEL_ALL_OPEN_ENTRIES_COMMAND,
+        confirmation_text=CANCEL_ALL_OPEN_ENTRIES_CONFIRMATION,
+        reason="operator_cancelled_all_open_entries",
+        session_id=session_id,
+        operator=operator,
+        idempotency_key=idempotency_key,
+        confirmation=confirmation,
+        account_label=account_label,
+        strategy=strategy,
+        risk_control_hub_url=risk_control_hub_url,
+        risk_control_hub_token=risk_control_hub_token,
+        database_url=database_url,
+    )
+
+
+@app.command("request-flatten")
+def request_flatten_command(
+    session_id: Annotated[str, typer.Option("--session-id")],
+    operator: Annotated[str, typer.Option("--operator")],
+    idempotency_key: Annotated[str, typer.Option("--idempotency-key")],
+    confirmation: Annotated[str, typer.Option("--confirmation")] = "",
+    account_label: Annotated[str, typer.Option("--account-label")] = "primary",
+    strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    risk_control_hub_url: Annotated[
+        str,
+        typer.Option("--risk-control-hub-url"),
+    ] = "",
+    risk_control_hub_token: Annotated[
+        str | None,
+        typer.Option(
+            "--risk-control-hub-token",
+            help="Optional token; CML_RISK_CONTROL_HUB_TOKEN is used when omitted.",
+        ),
+    ] = None,
+    database_url: Annotated[str | None, typer.Option("--database-url")] = None,
+) -> None:
+    """Durably request a reduce-only flatten through the live exit lane."""
+
+    _issue_one_shot_risk_control_command(
+        action=RiskControlAction.REQUEST_FLATTEN,
+        command_type=EMERGENCY_FLATTEN_COMMAND,
+        confirmation_text=EMERGENCY_FLATTEN_CONFIRMATION,
+        reason="operator_requested_flatten",
+        session_id=session_id,
+        operator=operator,
+        idempotency_key=idempotency_key,
+        confirmation=confirmation,
+        account_label=account_label,
+        strategy=strategy,
+        risk_control_hub_url=risk_control_hub_url,
+        risk_control_hub_token=risk_control_hub_token,
+        database_url=database_url,
+    )
+
+
 @app.command("report")
 def report_command(
     session_id: Annotated[str, typer.Option("--session-id")],
@@ -3183,6 +3273,16 @@ async def _run_live_daemon(
         market_state_available = market_state_source != "hub"
         market_state_unavailable_reason = "market_state_hub_connecting"
         exit_failure_by_symbol: dict[str, str] = {}
+        assert live_repository is not None
+        risk_control_dispatcher = RiskControlCommandDispatcher(
+            repository=live_repository,
+            account_label=account_label,
+            strategy_name=strategy_name,
+            session_id=session_id,
+            cancel_all_open_entries=daemon.cancel_all_open_entries,
+            request_flatten=daemon.request_flatten,
+            clock=lambda: datetime.now(tz=UTC),
+        )
 
         def refresh_entry_enabled() -> None:
             if risk_control_enabled and (
@@ -3328,7 +3428,7 @@ async def _run_live_daemon(
                 reason=reason,
             )
 
-        def on_risk_control_event(event: RiskControlEvent) -> None:
+        async def on_risk_control_event(event: RiskControlEvent) -> None:
             nonlocal risk_control_state_ready
             nonlocal risk_control_entry_blocked, risk_control_entry_block_reason
             risk_control_state_ready = False
@@ -3336,6 +3436,8 @@ async def _run_live_daemon(
                 RiskControlAction.DISABLE_ENTRIES,
                 RiskControlAction.DRAIN,
                 RiskControlAction.HALT,
+                RiskControlAction.CANCEL_ALL_OPEN_ENTRIES,
+                RiskControlAction.REQUEST_FLATTEN,
             }:
                 risk_control_entry_blocked = True
                 risk_control_entry_block_reason = (
@@ -3344,6 +3446,41 @@ async def _run_live_daemon(
             context_provider.invalidate_cache()
             heartbeat_context_provider.invalidate_cache()
             refresh_entry_enabled()
+            if event.action in {
+                RiskControlAction.CANCEL_ALL_OPEN_ENTRIES,
+                RiskControlAction.REQUEST_FLATTEN,
+            }:
+                try:
+                    failure = await risk_control_dispatcher.dispatch(event)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    failure = (
+                        "risk_control_action_dispatch_failed:"
+                        f"{type(error).__name__}"
+                    )
+                    log.exception(
+                        "live_risk_control_action_dispatch_failed",
+                        session_id=session_id,
+                        action=event.action.value,
+                        command_id=event.command_id,
+                        error_type=type(error).__name__,
+                    )
+                if failure is not None:
+                    risk_control_state_ready = True
+                    risk_control_entry_blocked = True
+                    risk_control_entry_block_reason = (
+                        f"risk_control_{event.action.value}_failed:{failure}"
+                    )
+                    refresh_entry_enabled()
+                    log.error(
+                        "live_risk_control_action_failed",
+                        session_id=session_id,
+                        action=event.action.value,
+                        command_id=event.command_id,
+                        reason=failure,
+                    )
+                    return
             schedule_risk_control_reconcile()
             log.warning(
                 "live_risk_control_event_received",
@@ -3985,10 +4122,10 @@ async def _resilient_risk_control_stream(
 async def _run_risk_control_channel(
     *,
     source: WebSocketRiskControlSource,
-    on_event: Callable[[RiskControlEvent], None],
+    on_event: Callable[[RiskControlEvent], Awaitable[None]],
 ) -> None:
     async for event in _resilient_risk_control_stream(source):
-        on_event(event)
+        await on_event(event)
 
 
 def _is_pending_position_sync_failure(failure: str | None) -> bool:
@@ -5389,6 +5526,193 @@ async def _publish_risk_control_event(
         token=token or os.environ.get("CML_RISK_CONTROL_HUB_TOKEN") or None,
     )
     return await publisher.publish(event)
+
+
+def _issue_one_shot_risk_control_command(
+    *,
+    action: RiskControlAction,
+    command_type: str,
+    confirmation_text: str,
+    reason: str,
+    session_id: str,
+    operator: str,
+    idempotency_key: str,
+    confirmation: str,
+    account_label: str,
+    strategy: str,
+    risk_control_hub_url: str,
+    risk_control_hub_token: str | None,
+    database_url: str | None,
+) -> None:
+    if confirmation != confirmation_text:
+        raise typer.BadParameter(
+            f"--confirmation must equal '{confirmation_text}'"
+        )
+    if not session_id.strip():
+        raise typer.BadParameter("--session-id must not be empty")
+    if not operator.strip():
+        raise typer.BadParameter("--operator must not be empty")
+    if not idempotency_key.strip():
+        raise typer.BadParameter("--idempotency-key must not be empty")
+    resolved_url = (
+        risk_control_hub_url.strip()
+        or os.environ.get("CML_RISK_CONTROL_HUB_URL", "").strip()
+    )
+    if not resolved_url:
+        raise typer.BadParameter(
+            "--risk-control-hub-url or CML_RISK_CONTROL_HUB_URL is required"
+        )
+
+    command = asyncio.run(
+        _load_or_save_risk_control_command(
+            database_url=_database_url(database_url),
+            command_type=command_type,
+            requested_by=operator,
+            confirmation_text=confirmation,
+            idempotency_key=idempotency_key,
+            account_label=account_label,
+            strategy_name=strategy,
+            session_id=session_id,
+        )
+    )
+    if command.status != "requested":
+        typer.echo(
+            json.dumps(
+                {
+                    "command_id": command.command_id,
+                    "status": command.status,
+                    "idempotency_key": command.idempotency_key,
+                },
+                sort_keys=True,
+            )
+        )
+        return
+
+    event = RiskControlEvent(
+        environment="live",
+        account_label=account_label,
+        strategy_name=strategy,
+        session_id=session_id,
+        action=action,
+        event_id=command.command_id,
+        command_id=command.command_id,
+        reason=reason,
+        issued_at=command.requested_at,
+        details={
+            "command_type": command_type,
+            "idempotency_key": command.idempotency_key,
+        },
+    )
+    try:
+        published = asyncio.run(
+            _publish_risk_control_event(
+                url=resolved_url,
+                token=risk_control_hub_token,
+                event=event,
+            )
+        )
+    except Exception as error:
+        typer.echo(
+            json.dumps(
+                {
+                    "command_id": command.command_id,
+                    "status": "requested",
+                    "publish_error": type(error).__name__,
+                    "retry_with_same_idempotency_key": True,
+                },
+                sort_keys=True,
+            )
+        )
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        json.dumps(
+            {
+                "action": action.value,
+                "command_id": command.command_id,
+                "sequence": published.sequence,
+                "status": "published",
+                "stream_epoch": published.stream_epoch,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+async def _load_or_save_risk_control_command(
+    *,
+    database_url: str,
+    command_type: str,
+    requested_by: str,
+    confirmation_text: str,
+    idempotency_key: str,
+    account_label: str,
+    strategy_name: str,
+    session_id: str,
+) -> RollbackCommand:
+    now = datetime.now(tz=UTC)
+    engine = create_execution_database_engine(database_url)
+    repository = PostgresLiveRolloutRepository(
+        async_sessionmaker(engine, expire_on_commit=False)
+    )
+    try:
+        existing = await repository.load_command_by_idempotency(idempotency_key)
+        if existing is not None:
+            _require_matching_risk_control_command(
+                existing,
+                command_type=command_type,
+                account_label=account_label,
+                strategy_name=strategy_name,
+                session_id=session_id,
+            )
+            return existing
+        command = RollbackCommand(
+            command_id=f"command-{uuid4()}",
+            command_type=command_type,
+            requested_by=requested_by,
+            confirmation_text=confirmation_text,
+            requested_at=now,
+            idempotency_key=idempotency_key,
+            account_label=account_label,
+            strategy_name=strategy_name,
+            session_id=session_id,
+            status="requested",
+            completed_at=None,
+            failure_reason=None,
+        )
+        if await repository.save_command(command):
+            return command
+        existing = await repository.load_command_by_idempotency(idempotency_key)
+        if existing is None:
+            raise RuntimeError("risk-control command insert was not observable")
+        _require_matching_risk_control_command(
+            existing,
+            command_type=command_type,
+            account_label=account_label,
+            strategy_name=strategy_name,
+            session_id=session_id,
+        )
+        return existing
+    finally:
+        await engine.dispose()
+
+
+def _require_matching_risk_control_command(
+    command: RollbackCommand,
+    *,
+    command_type: str,
+    account_label: str,
+    strategy_name: str,
+    session_id: str,
+) -> None:
+    if (
+        command.command_type != command_type
+        or command.account_label != account_label
+        or command.strategy_name != strategy_name
+        or command.session_id != session_id
+    ):
+        raise ValueError(
+            "idempotency key is already bound to a different risk-control command"
+        )
 
 
 def _execution_database_url(value: str | None) -> str:

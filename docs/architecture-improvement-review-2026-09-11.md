@@ -248,7 +248,8 @@ live_rollout/
 - `disable-new-entries` 现在先提交 PostgreSQL `DRAINING` transition，再尝试发布通知；发布失败仍保留数据库回退；
 - live worker 收到 `drain` / `halt` / `disable_entries` 即关闭本地 entry gate，并在重连、序列空洞、队列溢出或状态重载失败时保持 fail-closed；恢复 entry 前重新读取 PostgreSQL；
 - `prepare_submission` 额外检查 live session 的最新 durable state，仍不允许控制推送绕过 intent、Coordinator、reconcile 或既有 RiskHalt fence；
-- `cancel_all_open_entries` 与 `request_flatten` 尚未接入，因此仍是后续命令类型，不把“通知已接通”误写成“应急编排已完成”。
+- 新增 `cancel-all-open-entries` 和 `request-flatten` CLI：先写入已有 `live_rollback_commands`，再发布 typed event；worker 以 account/strategy/session scope 原子 claim，重复投递不会重复执行，授权短语不匹配或 command 不存在时不触碰交易所；
+- `cancel_all_open_entries` 复用 scheduled controller 的 entry-order cancellation seam（Coordinator/state machine + exchange orphan scan）；`request_flatten` 复用同一 controller 的 market reduce-only request 和 `LiveExitProcessor`，因此不绕过 durable intent、Coordinator 或 reconcile。动作失败保持 entry gate 关闭，成功后仍由 durable state reload 决定 gate 是否恢复；
 
 ---
 

@@ -732,6 +732,15 @@ class LiveStrategyDaemon:
     ) -> str | None:
         """Run the scheduled-risk controller for one observation."""
         return await self._scheduled_controller.process(now=now)
+
+    async def cancel_all_open_entries(self) -> str | None:
+        """Cancel open entry orders through the live coordinator seam."""
+        return await self._scheduled_controller.cancel_all_open_entries()
+
+    async def request_flatten(self, *, now: datetime | None = None) -> str | None:
+        """Request a reduce-only flatten through the live exit processor."""
+        return await self._scheduled_controller.request_flatten(now=now)
+
     async def _run_market_loop(
         self,
         states: AsyncIterable[MarketState15s],

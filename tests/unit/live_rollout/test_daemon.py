@@ -1848,6 +1848,70 @@ async def test_scheduled_risk_window_late_start_after_reopen_is_noop(
     )
 
 
+async def test_risk_control_cancel_all_open_entries_uses_injected_coordinator() -> None:
+    exchange = PlanAwareExchange()
+    cancellation_calls: list[tuple[OrderExecutionPlan, ...]] = []
+
+    async def cancel_entries(
+        plans: tuple[OrderExecutionPlan, ...],
+    ) -> int:
+        cancellation_calls.append(plans)
+        return 0
+
+    daemon = _daemon(
+        exchange=exchange,
+        cancel_unfilled_entry_orders=cancel_entries,
+    )
+
+    failure = await daemon.cancel_all_open_entries()
+
+    assert failure is None
+    assert cancellation_calls == [()]
+    assert exchange.calls == []
+
+
+async def test_risk_control_flatten_reuses_reduce_only_exit_processor() -> None:
+    exchange = PlanAwareExchange()
+    position = ManagedLivePosition(
+        symbol="BTCUSDT",
+        side="long",
+        position_side=FuturesPositionSide.LONG,
+        quantity=Decimal("0.001"),
+        entry_price=Decimal("30000"),
+        opened_at=NOW - timedelta(minutes=1),
+    )
+
+    async def position_context(state: object) -> LiveDaemonRuntimeContext:
+        del state
+        return replace(
+            _runtime_context(),
+            open_position_symbols=frozenset({"BTCUSDT"}),
+            managed_positions=(position,),
+        )
+
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=position_context,
+        exit_manager=LiveExitManager(
+            config=LiveExitConfig(
+                run_id="run-1",
+                strategy_name="compression_breakout",
+                strategy_version="v0",
+                strategy_config_hash="a" * 64,
+                policy=PositionExitPolicy(),
+            )
+        ),
+    )
+    daemon._scheduled_controller.observe_state(_state())
+
+    failure = await daemon.request_flatten()
+
+    assert failure is None
+    assert len(exchange.plans) == 1
+    assert exchange.plans[0].reduce_only is True
+    assert exchange.plans[0].order_type == "MARKET"
+
+
 @pytest.mark.parametrize("unmanaged_symbols", [frozenset(), frozenset({"ETHUSDT"})])
 async def test_scheduled_risk_window_flattens_verifies_and_reopens_entries(
     unmanaged_symbols,

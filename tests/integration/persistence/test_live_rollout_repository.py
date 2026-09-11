@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from crypto_momentum_lab.domain.live_rollout import (
     LIVE_APPROVAL_CONFIRMATION,
     LiveOperatorApproval,
+    RollbackCommand,
 )
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
@@ -101,3 +102,70 @@ async def test_save_and_load_permanent_unbounded_live_approval(
         now=NOW + timedelta(days=3650),
     )
     assert loaded == approval
+
+
+async def test_live_risk_control_command_claim_is_atomic_and_idempotent(
+    live_repository: PostgresLiveRolloutRepository,
+) -> None:
+    command = RollbackCommand(
+        command_id="command-risk-control-1",
+        command_type="cancel_all_open_entries",
+        requested_by="operator",
+        confirmation_text="CANCEL ALL OPEN LIVE ENTRIES",
+        requested_at=NOW,
+        idempotency_key="cancel-open-entries-1",
+        account_label="primary",
+        strategy_name="orderflow_impulse",
+        session_id="live-primary-v1",
+        status="requested",
+        completed_at=None,
+        failure_reason=None,
+    )
+
+    assert await live_repository.save_command(command) is True
+    assert await live_repository.save_command(command) is False
+    assert await live_repository.load_command(command.command_id) == command
+
+    claimed = await live_repository.claim_command(
+        command.command_id,
+        account_label=command.account_label,
+        strategy_name=command.strategy_name,
+        session_id=command.session_id,
+    )
+    assert claimed is not None
+    assert claimed.status == "executing"
+    assert (
+        await live_repository.claim_command(
+            command.command_id,
+            account_label=command.account_label,
+            strategy_name=command.strategy_name,
+            session_id=command.session_id,
+        )
+        is None
+    )
+
+    completed_at = NOW + timedelta(seconds=1)
+    assert (
+        await live_repository.complete_command(
+            command.command_id,
+            status="completed",
+            completed_at=completed_at,
+            failure_reason=None,
+        )
+        is True
+    )
+    loaded = await live_repository.load_command_by_idempotency(
+        command.idempotency_key
+    )
+    assert loaded is not None
+    assert loaded.status == "completed"
+    assert loaded.completed_at == completed_at
+    assert (
+        await live_repository.complete_command(
+            command.command_id,
+            status="completed",
+            completed_at=completed_at,
+            failure_reason=None,
+        )
+        is False
+    )

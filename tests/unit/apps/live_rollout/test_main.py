@@ -186,10 +186,43 @@ def test_live_cli_exposes_required_commands() -> None:
         "submit-plan",
         "status",
         "disable-new-entries",
+        "cancel-all-open-entries",
+        "request-flatten",
         "report",
         "strategy-config-hash",
     ):
         assert command in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("command", "confirmation"),
+    [
+        (
+            "cancel-all-open-entries",
+            "CANCEL ALL OPEN LIVE ENTRIES",
+        ),
+        ("request-flatten", "EMERGENCY FLATTEN LIVE ACCOUNT"),
+    ],
+)
+def test_one_shot_risk_control_commands_require_explicit_confirmation(
+    command: str,
+    confirmation: str,
+) -> None:
+    result = runner.invoke(
+        app,
+        [
+            command,
+            "--session-id",
+            "live-primary-v1",
+            "--operator",
+            "operator",
+            "--idempotency-key",
+            "command-1",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert confirmation in result.output
 
 
 def test_renew_lease_requires_explicit_confirmation() -> None:
