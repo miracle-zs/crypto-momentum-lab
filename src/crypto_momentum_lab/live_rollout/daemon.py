@@ -61,6 +61,7 @@ from crypto_momentum_lab.live_rollout.entry_lane import (
     EntryLaneConfig,
     _live_signal_account_context,
 )
+from crypto_momentum_lab.live_rollout.exit_control import LiveExitControlGate
 from crypto_momentum_lab.live_rollout.exit_event_coordinator import (
     LiveExitEventCoordinator,
 )
@@ -237,7 +238,7 @@ class LiveStrategyDaemon:
         self._cancel_unfilled_entry_orders = cancel_unfilled_entry_orders
         self._fetch_exchange_positions = fetch_exchange_positions
         self._run_active = False
-        self._exit_enabled = True
+        self._exit_control = LiveExitControlGate(run_id=config.run_id)
         self._pending_entries = LivePendingEntryRegistry(clock=self._clock)
         self._runtime_cache = LiveRuntimeCacheMaintenance(
             run_id=config.run_id,
@@ -306,7 +307,7 @@ class LiveStrategyDaemon:
             submission=self._submission,
             telemetry=self._telemetry,
             clock=self._clock,
-            is_exit_enabled=lambda: self.exit_enabled,
+            is_exit_enabled=lambda: self._exit_control.enabled,
             context_provider=self._context_provider,
             sync_pending_entry_plans=self._pending_entries.sync,
             publish_managed_position_symbols=(
@@ -322,7 +323,7 @@ class LiveStrategyDaemon:
         self._exit_events = LiveExitEventCoordinator(
             run_id=config.run_id,
             exit_manager=self._exit_manager,
-            exit_enabled=lambda: self.exit_enabled,
+            exit_enabled=lambda: self._exit_control.enabled,
             run_active=lambda: self._run_active,
             context_provider=self._context_provider,
             sync_pending_entry_plans=self._pending_entries.sync,
@@ -395,7 +396,7 @@ class LiveStrategyDaemon:
             telemetry=self._telemetry,
             exit_lane=self._exit_lane,
             exit_manager=self._exit_manager,
-            exit_enabled=lambda: self.exit_enabled,
+            exit_enabled=lambda: self._exit_control.enabled,
             reconcile_orders=self._reconcile_orders,
             reconcile_once_per_bucket=config.reconcile_once_per_bucket,
             market_admission=self._market_admission,
@@ -427,7 +428,7 @@ class LiveStrategyDaemon:
 
     @property
     def exit_enabled(self) -> bool:
-        return self._exit_enabled
+        return self._exit_control.enabled
 
     @property
     def managed_position_symbols(self) -> frozenset[str]:
@@ -459,17 +460,7 @@ class LiveStrategyDaemon:
         )
 
     def set_exit_enabled(self, enabled: bool, *, reason: str) -> None:
-        if not isinstance(enabled, bool):
-            raise TypeError("enabled must be a bool")
-        if self._exit_enabled == enabled:
-            return
-        self._exit_enabled = enabled
-        log.warning(
-            "live_exit_lane_state_changed",
-            enabled=enabled,
-            reason=reason,
-            run_id=self._config.run_id,
-        )
+        self._exit_control.set_enabled(enabled, reason=reason)
 
     def observe_entry_order_event(
         self,

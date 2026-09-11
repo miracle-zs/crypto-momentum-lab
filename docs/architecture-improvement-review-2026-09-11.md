@@ -132,6 +132,7 @@ live_rollout/
   ├── runtime_cache.py    # managed symbol 保护与冷缓存维护
   ├── market_admission.py # context reload、gate admission 与 telemetry
   ├── entry_control.py    # entry gate 组合与 coordinator 重开围栏
+  ├── exit_control.py     # reduce-only exit enable/disable 控制闸门
   ├── pending_entries.py  # pending entry reservation 与 durable sync
   ├── entry_lane.py       # 入场决策与 claim
   ├── exit_lane.py        # quote + candle + grace 的队列与最新值合并
@@ -209,6 +210,9 @@ live_rollout/
   entry 同步、managed-position 发布和 lane/processor 路由转移到
   `live_rollout/exit_event_coordinator.py`；daemon 仅保留兼容性的事件入口与组合 wiring，
   四路仍共用原有 `LiveExitProcessor` decision lock 与 episode claim。
+- 已将 operator-controlled `exit_enabled` 状态转移到
+  `live_rollout/exit_control.py` 的 `LiveExitControlGate`；daemon 仍保留原公开属性和
+  setter，但退出处理器、market loop 与 event coordinator 直接读取同一控制闸门。
 - 这是 P0-1 的渐进切片，属于转移实现所有权而非增加转发壳；`session.py` 当前仍是
   手工 one-shot session，不应把本次改动写成整个 P0-1 已完成。
 
