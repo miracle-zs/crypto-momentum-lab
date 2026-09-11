@@ -7,17 +7,13 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal, cast
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
-    Numeric,
     Select,
     String,
-    and_,
     case,
     column,
     func,
-    or_,
     select,
     text,
     true,
@@ -29,6 +25,9 @@ from sqlalchemy.sql.selectable import Values
 
 from crypto_momentum_lab.domain.execution import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.operator_dashboard import (
+    live_account_metrics_queries as _live_account_metrics_queries,
+)
 from crypto_momentum_lab.operator_dashboard import (
     overview_queries as _overview_queries,
 )
@@ -44,8 +43,6 @@ from crypto_momentum_lab.operator_dashboard.collector_status import (
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
     DecisionSLOResponse,
-    LiveAccountMetricPointResponse,
-    LiveAccountMetricsAccountResponse,
     LiveAccountMetricsResponse,
     LiveAccountsResponse,
     LiveAccountSummaryResponse,
@@ -92,24 +89,24 @@ from crypto_momentum_lab.persistence.postgres.models import (
 _EQUITY_WINDOW = timedelta(hours=24)
 _EQUITY_BUCKET_SECONDS = 6 * 60
 _EQUITY_MAX_POINTS = 240
-_LIVE_ACCOUNT_METRIC_MAX_POINTS = _EQUITY_MAX_POINTS + 1
 _LIVE_SIGNAL_MAX_ROWS = 30
 _PAPER_HISTORY_RECENT_LIMIT = 500
 _COMMON_EQUITY_BUCKET_SECONDS = 15 * 60
 FIXED_COMMON_EQUITY_START_AT = datetime(2026, 8, 21, 2, 45, tzinfo=UTC)
-_LIVE_ACCOUNT_METRIC_TIME_ZONE = ZoneInfo("Asia/Shanghai")
-_LIVE_ACCOUNT_METRIC_ANCHOR_HOUR = 8
-_ACCOUNT_EQUITY_RANGES: dict[str, tuple[timedelta, int]] = {
-    "24h": (timedelta(hours=24), 6 * 60),
-    "7d": (timedelta(days=7), 60 * 60),
-    "30d": (timedelta(days=30), 3 * 60 * 60),
-    "1y": (timedelta(days=365), 2 * 24 * 60 * 60),
-}
 DecisionSLOQueries = _telemetry_queries.DecisionSLOQueries
 _decision_slo_response = _telemetry_queries._decision_slo_response
 RiskExecutionQueries = _risk_execution_queries.RiskExecutionQueries
 _split_exchange_orders = _risk_execution_queries.split_exchange_orders
 _exchange_order = _risk_execution_queries.exchange_order
+LiveAccountMetricsQueries = _live_account_metrics_queries.LiveAccountMetricsQueries
+_AccountEquityPoint = _live_account_metrics_queries.AccountEquityPoint
+_account_equity_range = _live_account_metrics_queries.account_equity_range
+_account_equity_statement = _live_account_metrics_queries.account_equity_statement
+_account_margin_statement = _live_account_metrics_queries.account_margin_statement
+_live_account_metrics_window_start = (
+    _live_account_metrics_queries.live_account_metrics_window_start
+)
+_live_account_metric_points = _live_account_metrics_queries.live_account_metric_points
 _latest_live_account_process_statement = (
     _overview_queries.latest_live_account_process_statement
 )
@@ -130,15 +127,6 @@ class LiveCashFlowAdjustment:
     effective_at: datetime
     amount: Decimal
     cash_flow_type: str = "deposit"
-
-
-@dataclass(frozen=True, slots=True)
-class _AccountEquityPoint:
-    """Narrow account-equity projection used by the dashboard curve."""
-
-    observed_at: datetime
-    wallet_balance: Decimal
-    unrealized_pnl: Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,159 +314,6 @@ def _paper_common_equity_statement(
             run_values.join(bucket_series, true()).join(latest_equity, true())
         )
         .order_by(run_values.c.run_id, bucket_start)
-    )
-
-
-def _account_equity_statement(
-    *,
-    environment: str,
-    account_label: str,
-    asset: str,
-    window_start: datetime,
-    window_end: datetime,
-    interval_seconds: int,
-    max_points: int = _EQUITY_MAX_POINTS,
-) -> Select[tuple[datetime, Decimal, Decimal]]:
-    """Fetch one narrow, latest balance row per UTC equity bucket.
-
-    The previous dashboard query selected the full balance row (including the
-    JSON payload), sorted every row in the requested window, and then applied
-    ``DISTINCT ON``. A bounded bucket series with a lateral index lookup keeps
-    the work proportional to the number of points rendered by the dashboard.
-    """
-    if interval_seconds <= 0:
-        raise ValueError("interval_seconds must be positive")
-    if max_points <= 0:
-        raise ValueError("max_points must be positive")
-    if window_start > window_end:
-        raise ValueError("window_start must not be later than window_end")
-
-    bucket_interval = text(f"interval '{interval_seconds} seconds'")
-    end_bucket = _bucket_start(window_end, interval_seconds)
-    earliest_bucket = _bucket_start(window_start, interval_seconds)
-    latest_window_start = end_bucket - timedelta(
-        seconds=interval_seconds * (max_points - 1)
-    )
-    series_start = max(earliest_bucket, latest_window_start)
-    bucket_series = func.generate_series(
-        series_start,
-        end_bucket,
-        bucket_interval,
-    ).table_valued("bucket").render_derived(name="equity_buckets")
-    snapshot = aliased(AccountBalanceSnapshotRow)
-    bucket_start = bucket_series.c.bucket
-    latest_equity = (
-        select(
-            snapshot.observed_at.label("observed_at"),
-            snapshot.wallet_balance.label("wallet_balance"),
-            snapshot.unrealized_pnl.label("unrealized_pnl"),
-        )
-        .where(
-            snapshot.environment == environment,
-            snapshot.account_label == account_label,
-            snapshot.asset == asset,
-            snapshot.observed_at >= window_start,
-            snapshot.observed_at <= window_end,
-            snapshot.observed_at >= bucket_start,
-            snapshot.observed_at < bucket_start + bucket_interval,
-        )
-        .order_by(snapshot.observed_at.desc())
-        .limit(1)
-        .lateral("latest_equity")
-    )
-    return (
-        select(
-            latest_equity.c.observed_at,
-            latest_equity.c.wallet_balance,
-            latest_equity.c.unrealized_pnl,
-        )
-        .select_from(bucket_series.join(latest_equity, true()))
-        .order_by(bucket_start)
-    )
-
-
-def _account_margin_statement(
-    *,
-    environment: str,
-    account_label: str,
-    window_start: datetime,
-    window_end: datetime,
-    interval_seconds: int,
-    max_points: int = _EQUITY_MAX_POINTS,
-) -> Select[tuple[datetime, Decimal]]:
-    """Fetch one latest aggregate initial-margin observation per bucket.
-
-    Use Binance's account-level REST response as the source of truth. The
-    position-risk and WebSocket position payloads are per-symbol projections;
-    their notional values are not margin and may be stale while an account
-    event is being merged. ``totalInitialMargin`` already includes the
-    exchange's account-level position and open-order initial-margin result.
-    WebSocket observations are excluded by the reconciliation source join.
-    """
-    if interval_seconds <= 0:
-        raise ValueError("interval_seconds must be positive")
-    if max_points <= 0:
-        raise ValueError("max_points must be positive")
-    if window_start > window_end:
-        raise ValueError("window_start must not be later than window_end")
-
-    bucket_interval = text(f"interval '{interval_seconds} seconds'")
-    end_bucket = _bucket_start(window_end, interval_seconds)
-    earliest_bucket = _bucket_start(window_start, interval_seconds)
-    latest_window_start = end_bucket - timedelta(
-        seconds=interval_seconds * (max_points - 1)
-    )
-    series_start = max(earliest_bucket, latest_window_start)
-    bucket_series = func.generate_series(
-        series_start,
-        end_bucket,
-        bucket_interval,
-    ).table_valued("bucket").render_derived(name="margin_buckets")
-    config = aliased(AccountConfigSnapshotRow)
-    reconciliation = aliased(AccountReconciliationRunRow)
-    bucket_start = bucket_series.c.bucket
-    raw_total_initial_margin = func.nullif(
-        config.raw_payload["totalInitialMargin"].astext,
-        "",
-    ).cast(Numeric(38, 18))
-    rest_source = reconciliation.details["source"].astext
-    latest_margin = (
-        select(
-            config.observed_at.label("observed_at"),
-            raw_total_initial_margin.label("margin_used"),
-        )
-        .select_from(config)
-        .join(
-            reconciliation,
-            and_(
-                reconciliation.environment == config.environment,
-                reconciliation.account_label == config.account_label,
-                reconciliation.observed_at == config.observed_at,
-                reconciliation.status == "ready",
-            ),
-        )
-        .where(
-            config.environment == environment,
-            config.account_label == account_label,
-            config.observed_at >= window_start,
-            config.observed_at <= window_end,
-            config.observed_at >= bucket_start,
-            config.observed_at < bucket_start + bucket_interval,
-            raw_total_initial_margin.is_not(None),
-            raw_total_initial_margin >= 0,
-            or_(
-                rest_source == "rest_reconciliation",
-                rest_source.is_(None),
-            ),
-        )
-        .order_by(config.observed_at.desc())
-        .limit(1)
-        .lateral("latest_margin")
-    )
-    return (
-        select(latest_margin.c.observed_at, latest_margin.c.margin_used)
-        .select_from(bucket_series.join(latest_margin, true()))
-        .order_by(bucket_start)
     )
 
 
@@ -727,33 +562,6 @@ def parse_common_equity_start_at(value: str | None = None) -> datetime:
     return FIXED_COMMON_EQUITY_START_AT
 
 
-def _account_equity_range(value: str) -> tuple[timedelta, int]:
-    try:
-        return _ACCOUNT_EQUITY_RANGES[value]
-    except KeyError as error:
-        raise ValueError(f"unsupported account equity range: {value}") from error
-
-
-def _live_account_metrics_window_start(
-    window_end: datetime,
-    window: timedelta,
-) -> datetime:
-    """Return the first daily 08:00 (UTC+8) anchor inside the requested window."""
-    if window <= timedelta(0):
-        raise ValueError("window must be positive")
-    requested_start = _as_utc(window_end) - window
-    local_start = requested_start.astimezone(_LIVE_ACCOUNT_METRIC_TIME_ZONE)
-    anchor = local_start.replace(
-        hour=_LIVE_ACCOUNT_METRIC_ANCHOR_HOUR,
-        minute=0,
-        second=0,
-        microsecond=0,
-    )
-    if anchor < local_start:
-        anchor += timedelta(days=1)
-    return anchor.astimezone(UTC)
-
-
 @dataclass(slots=True)
 class _AccountFillAggregate:
     symbol: str
@@ -897,6 +705,10 @@ class DashboardQueries:
             research_collector_root=self._research_collector_root,
         )
         self._risk_execution_queries = RiskExecutionQueries(session_factory)
+        self._live_account_metrics_queries = LiveAccountMetricsQueries(
+            session_factory,
+            clock=self._clock,
+        )
 
     async def health(self) -> dict[str, str]:
         return await self._overview_queries.health()
@@ -917,99 +729,8 @@ class DashboardQueries:
         self,
         equity_range: str = "24h",
     ) -> LiveAccountMetricsResponse:
-        """Return six comparable metrics starting at daily 08:00 UTC+8."""
-        equity_window, equity_bucket_seconds = _account_equity_range(equity_range)
-        equity_window_end = self._clock()
-        equity_window_start = _live_account_metrics_window_start(
-            equity_window_end,
-            equity_window,
-        )
-        async with self._session_factory() as session:
-            processes = (
-                await session.scalars(_latest_live_account_process_statement())
-            ).all()
-            strategy_states = (
-                await session.scalars(
-                    select(StrategyLiveStateRow).where(
-                        StrategyLiveStateRow.environment == "live"
-                    )
-                )
-            ).all()
-            leases = (
-                await session.scalars(
-                    select(TradingLeaseRow)
-                    .where(
-                        TradingLeaseRow.environment == "live",
-                        TradingLeaseRow.state == "active",
-                        TradingLeaseRow.expires_at > equity_window_end,
-                    )
-                    .order_by(TradingLeaseRow.expires_at.desc())
-                )
-            ).all()
-            accounts = self._live_account_summaries(
-                processes,
-                strategy_states,
-                leases,
-            )
-            metric_accounts: list[LiveAccountMetricsAccountResponse] = []
-            for account in accounts:
-                equity_rows = [
-                    _AccountEquityPoint(
-                        observed_at=row.observed_at,
-                        wallet_balance=row.wallet_balance,
-                        unrealized_pnl=row.unrealized_pnl,
-                    )
-                    for row in (
-                        await session.execute(
-                            _account_equity_statement(
-                                environment=account.environment,
-                                account_label=account.account_label,
-                                asset="USDT",
-                                window_start=equity_window_start,
-                                window_end=equity_window_end,
-                                interval_seconds=equity_bucket_seconds,
-                                max_points=_LIVE_ACCOUNT_METRIC_MAX_POINTS,
-                            )
-                        )
-                    ).all()
-                ]
-                margin_rows = [
-                    (row.observed_at, row.margin_used)
-                    for row in (
-                        await session.execute(
-                            _account_margin_statement(
-                                environment=account.environment,
-                                account_label=account.account_label,
-                                window_start=equity_window_start,
-                                window_end=equity_window_end,
-                                interval_seconds=equity_bucket_seconds,
-                                max_points=_LIVE_ACCOUNT_METRIC_MAX_POINTS,
-                            )
-                        )
-                    ).all()
-                ]
-                metric_accounts.append(
-                    LiveAccountMetricsAccountResponse(
-                        account_label=account.account_label,
-                        environment=account.environment,
-                        status=account.status,
-                        metrics_curve=_live_account_metric_points(
-                            equity_rows,
-                            margin_rows,
-                            interval_seconds=equity_bucket_seconds,
-                        ),
-                    )
-                )
-        return LiveAccountMetricsResponse(
-            status=_live_account_fleet_status(accounts),
-            equity_range=cast(
-                Literal["24h", "7d", "30d", "1y"],
-                equity_range,
-            ),
-            equity_window_start=equity_window_start,
-            equity_window_end=equity_window_end,
-            equity_sample_interval_seconds=equity_bucket_seconds,
-            accounts=metric_accounts,
+        return await self._live_account_metrics_queries.live_account_metrics(
+            equity_range
         )
 
     async def overview(self) -> SystemOverviewResponse:
@@ -2615,63 +2336,6 @@ def _live_account_equity_point(
         "realized_pnl": None,
         "unrealized_pnl": str(row.unrealized_pnl),
     }
-
-
-def _live_account_metric_points(
-    equity_rows: Sequence[_AccountEquityPoint],
-    margin_rows: Sequence[tuple[datetime, Decimal]],
-    *,
-    interval_seconds: int,
-) -> list[LiveAccountMetricPointResponse]:
-    """Derive comparable equity, margin, and drawdown metrics per bucket."""
-    if interval_seconds <= 0:
-        raise ValueError("interval_seconds must be positive")
-    margin_by_bucket = {
-        _bucket_start(observed_at, interval_seconds): margin_used
-        for observed_at, margin_used in margin_rows
-    }
-    baseline: Decimal | None = None
-    peak: Decimal | None = None
-    latest_margin = Decimal("0")
-    points: list[LiveAccountMetricPointResponse] = []
-    for row in sorted(equity_rows, key=lambda item: item.observed_at):
-        equity = row.wallet_balance + row.unrealized_pnl
-        bucket = _bucket_start(row.observed_at, interval_seconds)
-        if bucket in margin_by_bucket:
-            latest_margin = max(Decimal("0"), margin_by_bucket[bucket])
-        if baseline is None:
-            baseline = equity
-        peak = equity if peak is None else max(peak, equity)
-        equity_change_ratio = (
-            None if baseline == 0 else (equity - baseline) / baseline
-        )
-        margin_occupancy_ratio = (
-            None if equity <= 0 else latest_margin / equity
-        )
-        drawdown = equity - peak
-        drawdown_ratio = None if peak <= 0 else drawdown / peak
-        points.append(
-            LiveAccountMetricPointResponse(
-                observed_at=row.observed_at,
-                equity=str(equity),
-                equity_change_ratio=(
-                    None
-                    if equity_change_ratio is None
-                    else str(equity_change_ratio)
-                ),
-                margin_used=str(latest_margin),
-                margin_occupancy_ratio=(
-                    None
-                    if margin_occupancy_ratio is None
-                    else str(margin_occupancy_ratio)
-                ),
-                drawdown=str(drawdown),
-                drawdown_ratio=(
-                    None if drawdown_ratio is None else str(drawdown_ratio)
-                ),
-            )
-        )
-    return points
 
 
 def _paper_exit_details(run: StrategyRunRow) -> tuple[str, str]:
