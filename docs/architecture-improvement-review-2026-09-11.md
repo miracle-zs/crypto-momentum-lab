@@ -228,6 +228,9 @@ live_rollout/
 - 已将 live account event 的即时订单对账、启动时 unresolved-order recovery 和周期性
   对账兜底统一到 `live_rollout/order_reconciliation.py`；account snapshot 仍在订单
   状态先持久化/对账后发布，周期任务失败时保持可重试而不终止 market loop。
+- 已将 quote、closed-candle、grace 三路 reduce-only exit channel 的退避、瞬态故障
+  重试和 pending-position promotion 收拢到 `live_rollout/exit_channels.py`；main 只
+  负责注入 daemon/cache 与启动独立任务，account channel 的兼容入口保持不变。
 - 已将 RiskControlHub 的连接状态、durable state reload、fail-closed entry gate、
   one-shot action dispatch、reconcile task 和 telemetry 转移到
   `live_rollout/risk_control.py` 的 `LiveRiskControlRuntime`；`main.py` 只负责创建
