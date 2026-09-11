@@ -5,7 +5,7 @@ from collections.abc import (
     Mapping,
 )
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol
 
@@ -60,9 +60,10 @@ from crypto_momentum_lab.live_rollout.entry_lane import (
     EntryLaneConfig,
     _live_signal_account_context,
 )
-from crypto_momentum_lab.live_rollout.exit_lane import (
-    ExitExecutionLane,
+from crypto_momentum_lab.live_rollout.exit_event_coordinator import (
+    LiveExitEventCoordinator,
 )
+from crypto_momentum_lab.live_rollout.exit_lane import ExitExecutionLane
 from crypto_momentum_lab.live_rollout.exit_processor import (
     ExitProcessorConfig,
     LiveExitProcessor,
@@ -108,7 +109,6 @@ from crypto_momentum_lab.live_rollout.submission import (
 )
 from crypto_momentum_lab.live_rollout.telemetry import LiveTelemetrySink
 from crypto_momentum_lab.risk.gateway import RiskGateway
-from crypto_momentum_lab.strategy_runner.position_exit import ClosedCandle15m
 
 log = structlog.get_logger()
 
@@ -305,6 +305,18 @@ class LiveStrategyDaemon:
         self._exit_lane = ExitExecutionLane(
             self._exit_processor.process_state,
             self._exit_processor.process_quote,
+        )
+        self._exit_events = LiveExitEventCoordinator(
+            run_id=config.run_id,
+            exit_manager=self._exit_manager,
+            exit_enabled=lambda: self.exit_enabled,
+            run_active=lambda: self._run_active,
+            context_provider=self._context_provider,
+            sync_pending_entry_plans=self._pending_entries.sync,
+            publish_managed_position_symbols=self._publish_managed_position_symbols,
+            invalidate_context_cache=self._invalidate_context_cache,
+            exit_processor=self._exit_processor,
+            exit_lane=self._exit_lane,
         )
         self._scheduled_controller = ScheduledRiskWindowController(
             config=ScheduledRiskWindowControllerConfig(
@@ -517,97 +529,14 @@ class LiveStrategyDaemon:
         *,
         quote: RealtimeMarketQuote | None = None,
     ) -> str | None:
-        """Run the exit lane from the latest account event.
-
-        The entry lane remains driven by market buckets.  This method is a
-        separate seam for account/order events: it refreshes the account view
-        and evaluates only reduce-only requests against the newest market
-        state already held in memory.  It never calls the strategy entry
-        function and therefore cannot create a new position.
-        """
-        if self._exit_manager is None or not self._exit_enabled:
-            return None
-        self._invalidate_context_cache()
-        context = await self._context_provider(state)
-        self._pending_entries.sync(context)
-        await self._publish_managed_position_symbols(context)
-        if state.symbol in context.pending_position_symbols:
-            symbols = ",".join(sorted(context.pending_position_symbols))
-            return f"pending_live_positions:{symbols}"
-        if state.symbol in context.unmanaged_position_symbols:
-            symbols = ",".join(sorted(context.unmanaged_position_symbols))
-            return f"unmanaged_live_positions:{symbols}"
-        if self._run_active:
-            await self._exit_lane.start()
-            if quote is None:
-                outcome = await self._exit_lane.submit_account(state, context)
-            else:
-                # Account events already have their own channel.  Execute the
-                # quote-triggered check directly here so an account update
-                # cannot be replaced by a newer ticker in the coalescing
-                # quote queue.
-                outcome = await self._exit_processor.process_quote(
-                    quote,
-                    state,
-                    context,
-                )
-        else:
-            outcome = (
-                await self._exit_processor.process_state(state, context)
-                if quote is None
-                else await self._exit_processor.process_quote(
-                    quote,
-                    state,
-                    context,
-                )
-            )
-        self._invalidate_context_cache()
-        if outcome.failure is not None:
-            log.error(
-                "live_account_event_exit_failed",
-                symbol=state.symbol,
-                reason=outcome.failure,
-            )
-        return outcome.failure
+        return await self._exit_events.process_account_event(state, quote=quote)
 
     async def process_market_quote(
         self,
         quote: RealtimeMarketQuote,
         state: MarketState15s,
     ) -> str | None:
-        """Submit a latest-value quote to the reduce-only exit lane."""
-        if self._exit_manager is None or not self._exit_enabled:
-            return None
-        if state.symbol != quote.symbol:
-            return None
-        # The provider caches the account/risk view for the current state
-        # bucket.  No invalidation happens on ticker arrival; account events
-        # are the explicit cache-refresh seam.
-        context = await self._context_provider(state)
-        self._pending_entries.sync(context)
-        await self._publish_managed_position_symbols(context)
-        if state.symbol in context.pending_position_symbols:
-            symbols = ",".join(sorted(context.pending_position_symbols))
-            return f"pending_live_positions:{symbols}"
-        if state.symbol in context.unmanaged_position_symbols:
-            symbols = ",".join(sorted(context.unmanaged_position_symbols))
-            return f"unmanaged_live_positions:{symbols}"
-        if self._run_active:
-            await self._exit_lane.start()
-            await self._exit_lane.submit_quote(quote, state, context)
-            return None
-        outcome = await self._exit_processor.process_quote(
-            quote,
-            state,
-            context,
-        )
-        if outcome.failure is not None:
-            log.error(
-                "live_quote_exit_failed",
-                symbol=quote.symbol,
-                reason=outcome.failure,
-            )
-        return outcome.failure
+        return await self._exit_events.process_market_quote(quote, state)
 
     async def process_closed_candle(
         self,
@@ -615,40 +544,10 @@ class LiveStrategyDaemon:
         *,
         latest_quote: RealtimeMarketQuote | None = None,
     ) -> str | None:
-        """Process one final 15m candle on the independent exit path."""
-
-        if self._exit_manager is None or not self._exit_enabled:
-            return None
-        state = _market_state_for_closed_candle(
-            event.candle,
-            received_at=event.received_at,
-            quote=latest_quote,
-        )
-        # All symbols closing at the same boundary share one synthetic state
-        # bucket.  Reuse the provider's snapshot across that burst; account
-        # events and order execution remain the explicit invalidation seams.
-        context = await self._context_provider(state)
-        self._pending_entries.sync(context)
-        await self._publish_managed_position_symbols(context)
-        if state.symbol in context.pending_position_symbols:
-            symbols = ",".join(sorted(context.pending_position_symbols))
-            return f"pending_live_positions:{symbols}"
-        if state.symbol in context.unmanaged_position_symbols:
-            symbols = ",".join(sorted(context.unmanaged_position_symbols))
-            return f"unmanaged_live_positions:{symbols}"
-        outcome = await self._exit_processor.process_closed_candle(
+        return await self._exit_events.process_closed_candle(
             event,
-            state,
-            context,
-            latest_quote,
+            latest_quote=latest_quote,
         )
-        if outcome.failure is not None:
-            log.error(
-                "live_closed_candle_exit_failed",
-                symbol=event.candle.symbol,
-                reason=outcome.failure,
-            )
-        return outcome.failure
 
     async def process_grace_timeout(
         self,
@@ -657,32 +556,11 @@ class LiveStrategyDaemon:
         now: datetime,
         latest_quote: RealtimeMarketQuote | None = None,
     ) -> str | None:
-        """Run the wall-clock fallback for an expired candle grace order."""
-
-        if self._exit_manager is None or not self._exit_enabled:
-            return None
-        context = await self._context_provider(state)
-        self._pending_entries.sync(context)
-        await self._publish_managed_position_symbols(context)
-        if state.symbol in context.pending_position_symbols:
-            symbols = ",".join(sorted(context.pending_position_symbols))
-            return f"pending_live_positions:{symbols}"
-        if state.symbol in context.unmanaged_position_symbols:
-            symbols = ",".join(sorted(context.unmanaged_position_symbols))
-            return f"unmanaged_live_positions:{symbols}"
-        outcome = await self._exit_processor.process_grace_timeout(
+        return await self._exit_events.process_grace_timeout(
             state,
-            now,
-            context,
-            latest_quote,
+            now=now,
+            latest_quote=latest_quote,
         )
-        if outcome.failure is not None:
-            log.error(
-                "live_grace_timeout_exit_failed",
-                symbol=state.symbol,
-                reason=outcome.failure,
-            )
-        return outcome.failure
 
     async def run(
         self,
@@ -747,49 +625,6 @@ class LiveStrategyDaemon:
                 candidate_id=candidate.candidate_id,
                 error_type=type(error).__name__,
             )
-
-def _market_state_for_closed_candle(
-    candle: ClosedCandle15m,
-    *,
-    received_at: datetime,
-    quote: RealtimeMarketQuote | None,
-) -> MarketState15s:
-    bid_price = quote.bid_price if quote is not None else None
-    ask_price = quote.ask_price if quote is not None else None
-    if bid_price is not None and ask_price is not None:
-        spread = ask_price - bid_price
-        midpoint = (bid_price + ask_price) / Decimal("2")
-    else:
-        spread = None
-        midpoint = candle.close_price
-    return MarketState15s(
-        schema_version=1,
-        exchange="binance-usdm",
-        environment="live",
-        symbol=candle.symbol,
-        bucket_start=candle.candle_end - timedelta(seconds=15),
-        bucket_end=candle.candle_end,
-        open_price=candle.open_price,
-        high_price=None,
-        low_price=None,
-        close_price=candle.close_price,
-        trade_count=0,
-        trade_notional=Decimal("0"),
-        aggressive_buy_notional=Decimal("0"),
-        aggressive_sell_notional=Decimal("0"),
-        last_bid_price=bid_price,
-        last_ask_price=ask_price,
-        spread=spread,
-        midpoint=midpoint,
-        liquidation_count=0,
-        liquidation_notional=Decimal("0"),
-        mark_price=midpoint,
-        closed_kline_count=1,
-        source_event_count=1,
-        first_received_at=received_at,
-        last_received_at=received_at,
-    )
-
 
 def _is_transient_live_gate(reasons: tuple[str, ...]) -> bool:
     """Compatibility export for callers that used the old daemon helper."""

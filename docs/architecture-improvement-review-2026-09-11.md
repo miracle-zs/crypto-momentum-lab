@@ -136,6 +136,7 @@ live_rollout/
   ├── entry_lane.py       # 入场决策与 claim
   ├── exit_lane.py        # quote + candle + grace 的队列与最新值合并
   ├── exit_processor.py   # exit decision、recovery 与 request fallback
+  ├── exit_event_coordinator.py # account/quote/candle/grace context 与路由
   ├── scheduled_controller.py # 定时风控窗口与平仓核验状态机
   ├── submission.py       # entry/exit 共用的提交安全流水线
   ├── lease.py            # 已有，保持
@@ -200,6 +201,10 @@ live_rollout/
 - 已将 checkpoint、exit lane、scheduled risk-window task 的启动/停止及 lane outcome
   合并转移到 `live_rollout/daemon_lifecycle.py`；`LiveStrategyDaemon.run()` 现在只是
   对外兼容入口，`daemon.py` 不再持有这些生命周期状态。
+- 已将 account、quote、closed-candle、grace 四类退出事件的 context 准备、pending
+  entry 同步、managed-position 发布和 lane/processor 路由转移到
+  `live_rollout/exit_event_coordinator.py`；daemon 仅保留兼容性的事件入口与组合 wiring，
+  四路仍共用原有 `LiveExitProcessor` decision lock 与 episode claim。
 - 这是 P0-1 的渐进切片，属于转移实现所有权而非增加转发壳；`session.py` 当前仍是
   手工 one-shot session，不应把本次改动写成整个 P0-1 已完成。
 
