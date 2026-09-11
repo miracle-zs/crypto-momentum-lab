@@ -78,7 +78,6 @@ from crypto_momentum_lab.execution_account.hub import (
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
-    OrderExecutionPort,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
@@ -135,6 +134,9 @@ from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
 from crypto_momentum_lab.live_rollout.market_cache import (
     LatestMarketQuoteCache,
     LatestMarketStateCache,
+)
+from crypto_momentum_lab.live_rollout.order_reconciliation import (
+    LiveOrderReconciliation,
 )
 from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,
@@ -262,7 +264,6 @@ _LIVE_STARTUP_RETRY_MAX_SECONDS = 300
 _LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS = 300
 _LIVE_LEASE_RENEW_BEFORE_SECONDS = 120
 _LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS = 15.0
-_LIVE_RECONCILE_INTERVAL_SECONDS = 60.0
 _LIVE_ENTRY_FILTER_PREFETCH_CONCURRENCY = 4
 _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT = 100
 _LIVE_ENTRY_PRICE_ABOVE_EMA5 = False
@@ -2659,11 +2660,13 @@ async def _run_live_daemon(
                 cancelled_count += 1
             return cancelled_count
 
-        await _reconcile_run_orders(
+        assert execution_coordinator is not None
+        order_reconciliation = LiveOrderReconciliation(
             order_repository=order_repository,
             state_machine=execution_coordinator,
             run_id=session_id,
         )
+        await order_reconciliation.reconcile_all()
         draining = await _session_is_draining(execution_factory, session_id)
         if not draining:
             await _record_transition(
@@ -3387,9 +3390,7 @@ async def _run_live_daemon(
                 daemon=daemon,
                 latest_market_states=latest_market_states,
                 latest_market_quotes=latest_market_quotes,
-                order_repository=order_repository,
-                state_machine=execution_coordinator,
-                run_id=session_id,
+                order_reconciliation=order_reconciliation,
                 telemetry=telemetry,
                 on_exit_failure=on_exit_failure,
                 on_account_snapshot=control_plane_runtime.on_account_snapshot,
@@ -3413,11 +3414,7 @@ async def _run_live_daemon(
             )
         lease_task = asyncio.create_task(lease_heartbeat.run())
         reconcile_task = asyncio.create_task(
-            _periodic_reconcile_run_orders(
-                order_repository=order_repository,
-                state_machine=execution_coordinator,
-                run_id=session_id,
-            )
+            order_reconciliation.run_periodically()
         )
         local_health_task: asyncio.Task[None] | None = None
 
@@ -3916,9 +3913,7 @@ async def _run_account_event_channel(
     daemon: LiveStrategyDaemon,
     latest_market_states: LatestMarketStateCache,
     latest_market_quotes: LatestMarketQuoteCache,
-    order_repository: PostgresOrderRepository,
-    state_machine: OrderExecutionPort,
-    run_id: str,
+    order_reconciliation: LiveOrderReconciliation,
     telemetry: LiveTelemetrySink | None = None,
     on_exit_failure: Callable[[str, str | None], None] | None = None,
     on_account_snapshot: Callable[[AccountEvent], None] | None = None,
@@ -3931,12 +3926,7 @@ async def _run_account_event_channel(
                     occurred_at=event.received_at,
                 )
             if event.event_type == "ORDER_TRADE_UPDATE" and event.client_order_id:
-                await _reconcile_account_event_order(
-                    event=event,
-                    order_repository=order_repository,
-                    state_machine=state_machine,
-                    run_id=run_id,
-                )
+                await order_reconciliation.reconcile_account_event(event)
             # ORDER_TRADE_UPDATE can carry both the account projection and
             # the order identity.  Reconcile the order first so the live
             # context cannot observe a newly opened position before its
@@ -3959,7 +3949,7 @@ async def _run_account_event_channel(
                     ):
                         log.warning(
                             "live_account_event_position_sync_retry",
-                            run_id=run_id,
+                            run_id=order_reconciliation.run_id,
                             symbol=state.symbol,
                             attempt=attempt,
                             delay_seconds=delay,
@@ -3973,7 +3963,7 @@ async def _run_account_event_channel(
                         if not _is_pending_position_sync_failure(failure):
                             log.info(
                                 "live_account_event_position_sync_recovered",
-                                run_id=run_id,
+                                run_id=order_reconciliation.run_id,
                                 symbol=state.symbol,
                                 attempt=attempt,
                             )
@@ -4004,24 +3994,12 @@ async def _run_account_event_channel(
             # reconciliation and the next market state provide retry paths.
             log.warning(
                 "live_account_event_processing_degraded",
-                run_id=run_id,
+                run_id=order_reconciliation.run_id,
                 event_type=event.event_type,
                 error_type=type(error).__name__,
             )
 
 
-async def _reconcile_account_event_order(
-    *,
-    event: AccountEvent,
-    order_repository: PostgresOrderRepository,
-    state_machine: OrderExecutionPort,
-    run_id: str,
-) -> None:
-    unresolved = await order_repository.load_unresolved_orders(run_id)
-    for order in unresolved:
-        if order.plan.client_order_id == event.client_order_id:
-            await state_machine.reconcile_order(order.plan)
-            return
 
 
 def _is_transient_live_runtime_error(error: Exception) -> bool:
@@ -4103,51 +4081,6 @@ class _LiveDaemonRepositoryAdapter:
             self._on_database_success()
 
 
-async def _reconcile_run_orders(
-    *,
-    order_repository: PostgresOrderRepository,
-    state_machine: OrderExecutionPort,
-    run_id: str,
-) -> None:
-    for order in await order_repository.load_unresolved_orders(run_id):
-        await state_machine.reconcile_order(order.plan)
-
-
-async def _periodic_reconcile_run_orders(
-    *,
-    order_repository: PostgresOrderRepository,
-    state_machine: OrderExecutionPort,
-    run_id: str,
-    interval_seconds: float = _LIVE_RECONCILE_INTERVAL_SECONDS,
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-) -> None:
-    """Reconcile ordinary unresolved orders off the market-state hot path.
-
-    Account WebSocket events still trigger an immediate reconcile for the
-    affected client order.  This loop is the eventual-consistency safety net
-    for orders without a recent account event; a transient REST/DB failure is
-    logged and retried on the next interval rather than stopping market
-    processing.
-    """
-
-    if interval_seconds <= 0:
-        raise ValueError("interval_seconds must be positive")
-    while True:
-        await sleep(interval_seconds)
-        try:
-            await _reconcile_run_orders(
-                order_repository=order_repository,
-                state_machine=state_machine,
-                run_id=run_id,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception(
-                "live_periodic_order_reconcile_failed",
-                run_id=run_id,
-                interval_seconds=interval_seconds,
-            )
 
 
 async def _has_matching_shadow_session(

@@ -13,6 +13,9 @@ from crypto_momentum_lab.apps.live_rollout import main
 from crypto_momentum_lab.domain.risk import TradingLease, TradingLeaseState
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
 from crypto_momentum_lab.execution_account.hub import AccountEventHubError
+from crypto_momentum_lab.live_rollout.order_reconciliation import (
+    LiveOrderReconciliation,
+)
 from crypto_momentum_lab.live_rollout.stream_recovery import (
     resilient_market_state_stream,
 )
@@ -1144,29 +1147,30 @@ async def test_compact_checkpoint_recovery_warms_without_evaluating_signals() ->
 
 
 @pytest.mark.asyncio
-async def test_periodic_reconcile_runs_outside_market_state_loop(monkeypatch) -> None:
+async def test_periodic_reconcile_runs_outside_market_state_loop() -> None:
     calls = 0
     delays: list[float] = []
 
-    async def fake_reconcile(**_: object) -> None:
-        nonlocal calls
-        calls += 1
+    class Repository:
+        async def load_unresolved_orders(self, run_id: str):
+            nonlocal calls
+            calls += 1
+            return ()
 
     async def controlled_sleep(delay: float) -> None:
         delays.append(delay)
         if len(delays) == 2:
             raise asyncio.CancelledError
 
-    monkeypatch.setattr(main, "_reconcile_run_orders", fake_reconcile)
+    reconciliation = LiveOrderReconciliation(
+        order_repository=Repository(),  # type: ignore[arg-type]
+        state_machine=object(),  # type: ignore[arg-type]
+        run_id="live-manual",
+        interval_seconds=60,
+    )
 
     with pytest.raises(asyncio.CancelledError):
-        await main._periodic_reconcile_run_orders(
-            order_repository=object(),  # type: ignore[arg-type]
-            state_machine=object(),  # type: ignore[arg-type]
-            run_id="live-manual",
-            interval_seconds=60,
-            sleep=controlled_sleep,
-        )
+        await reconciliation.run_periodically(sleep=controlled_sleep)
 
     assert calls == 1
     assert delays == [60, 60]
@@ -1302,9 +1306,7 @@ async def test_resilient_account_event_stream_retries_after_hub_failure() -> Non
 
 
 @pytest.mark.asyncio
-async def test_account_event_reconciles_order_before_publishing_snapshot(
-    monkeypatch,
-) -> None:
+async def test_account_event_reconciles_order_before_publishing_snapshot() -> None:
     event = SimpleNamespace(
         event_type="ORDER_TRADE_UPDATE",
         client_order_id="entry-1",
@@ -1313,10 +1315,11 @@ async def test_account_event_reconciles_order_before_publishing_snapshot(
     )
     ordering: list[str] = []
 
-    async def reconcile(**_kwargs) -> None:
-        ordering.append("reconcile")
+    class Reconciliation:
+        run_id = "run-1"
 
-    monkeypatch.setattr(main, "_reconcile_account_event_order", reconcile)
+        async def reconcile_account_event(self, _event) -> None:
+            ordering.append("reconcile")
 
     def publish_snapshot(_event) -> None:
         ordering.append("snapshot")
@@ -1334,9 +1337,7 @@ async def test_account_event_reconciles_order_before_publishing_snapshot(
         daemon=None,
         latest_market_states=latest_market_states,
         latest_market_quotes=None,
-        order_repository=None,
-        state_machine=None,
-        run_id="run-1",
+        order_reconciliation=Reconciliation(),
         on_account_snapshot=publish_snapshot,
     )
 
