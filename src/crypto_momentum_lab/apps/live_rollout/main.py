@@ -8,11 +8,13 @@ from collections.abc import (
     Awaitable,
     Callable,
     Collection,
+    Mapping,
 )
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from time import perf_counter
 from typing import Annotated
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
@@ -78,6 +80,7 @@ from crypto_momentum_lab.execution_account.hub import (
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
+    OrderExecutionPort,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
@@ -120,6 +123,11 @@ from crypto_momentum_lab.live_rollout.entry_cache import (
     universe_context_for,
 )
 from crypto_momentum_lab.live_rollout.entry_orders import LiveLimitOrderLifecycle
+from crypto_momentum_lab.live_rollout.exit_channels import (
+    LiveExitChannelRuntime,
+    is_pending_position_sync_failure as _is_pending_position_sync_failure,
+    promote_pending_position_failure as _promote_pending_position_failure,
+)
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitConfig,
     LiveExitManager,
@@ -164,11 +172,17 @@ from crypto_momentum_lab.live_rollout.session import (
 from crypto_momentum_lab.live_rollout.signal_recorder import (
     LiveStrategySignalRecorder,
 )
+from crypto_momentum_lab.live_rollout.startup_market_buffer import (
+    StartupMarketStateBuffer,
+)
 from crypto_momentum_lab.live_rollout.stream_recovery import (
     resilient_account_event_stream as _resilient_account_event_stream,
 )
 from crypto_momentum_lab.live_rollout.stream_recovery import (
     resilient_market_quote_stream as _resilient_market_quote_stream,
+)
+from crypto_momentum_lab.live_rollout.stream_recovery import (
+    resilient_market_state_stream as _resilient_market_state_stream,
 )
 from crypto_momentum_lab.live_rollout.stream_recovery import (
     resilient_risk_control_stream as _resilient_risk_control_stream,
@@ -258,7 +272,8 @@ _LIVE_ENTRY_POLICY_MODES = frozenset({"legacy", "compare_only", "enforce"})
 _LIVE_UNENFORCED_STATE_AGE_SECONDS = 1_000_000_000.0
 _LIVE_MIN_WARMUP_SECONDS = 60
 _LIVE_WARMUP_STATE_LIMIT = 100_000
-_LIVE_WARMUP_BATCH_SIZE = 100
+_LIVE_WARMUP_BATCH_SIZE = 5_000
+_LIVE_STARTUP_BUFFER_LIMIT = 100_000
 _LIVE_STARTUP_RETRY_INITIAL_SECONDS = 15
 _LIVE_STARTUP_RETRY_MAX_SECONDS = 300
 _LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS = 300
@@ -2441,6 +2456,9 @@ async def _run_live_daemon(
     volume_cache: Binance24hQuoteVolumeCache | None = None
     signal_recorder: LiveStrategySignalRecorder | None = None
     daemon: LiveStrategyDaemon | None = None
+    hub_source: WebSocketMarketStateSource | None = None
+    startup_market_buffer: StartupMarketStateBuffer | None = None
+    startup_market_state_task: asyncio.Task[None] | None = None
     risk_control_source: WebSocketRiskControlSource | None = None
     risk_control_task: asyncio.Task[None] | None = None
     risk_control_runtime: LiveRiskControlRuntime | None = None
@@ -2777,6 +2795,42 @@ async def _run_live_daemon(
         if checkpoint is not None:
             strategy.restore_checkpoint(checkpoint)
         state_repository = PostgresRuntimeMarketStateRepository(market_factory)
+        startup_cutover = _live_market_state_cutover(
+            datetime.now(tz=UTC)
+        )
+        if market_state_source == "hub":
+            startup_market_buffer = StartupMarketStateBuffer(
+                max_states=_LIVE_STARTUP_BUFFER_LIMIT
+            )
+
+            def on_startup_market_connection_change(
+                available: bool,
+                reason: str | None,
+            ) -> None:
+                assert startup_market_buffer is not None
+                startup_market_buffer.observe_connection_change(
+                    available,
+                    reason,
+                )
+                if control_plane_runtime is not None:
+                    control_plane_runtime.on_market_connection_change(
+                        available,
+                        reason,
+                    )
+
+            hub_source = WebSocketMarketStateSource(
+                url=market_state_hub_url,
+                environment=market_environment,
+                consumer_id=f"live-strategy:{session_id}",
+                on_connection_change=on_startup_market_connection_change,
+            )
+            startup_market_state_task = asyncio.create_task(
+                _collect_startup_market_states(
+                    source=hub_source,
+                    buffer=startup_market_buffer,
+                ),
+                name=f"live-startup-market-buffer:{session_id}",
+            )
         market_cursor: RuntimeStateCursor | None = None
         if checkpoint is not None:
             if _checkpoint_needs_market_recovery(checkpoint):
@@ -2785,14 +2839,16 @@ async def _run_live_daemon(
                     checkpoint=checkpoint,
                     repository=state_repository,
                     environment=market_environment,
+                    cutover_at=startup_cutover,
                 )
-            market_cursor = RuntimeStateCursor(bucket_start=now, symbol="")
+            market_cursor = _cursor_after_market_bucket(startup_cutover)
         elif market_state_source == "postgres":
             market_cursor = await _warm_live_strategy_then_start_fresh(
                 strategy=strategy,
                 repository=state_repository,
                 environment=market_environment,
                 now=now,
+                cutover_at=startup_cutover,
             )
         else:
             await _warm_live_strategy(
@@ -2800,8 +2856,8 @@ async def _run_live_daemon(
                 repository=state_repository,
                 environment=market_environment,
                 now=now,
+                cutover_at=startup_cutover,
             )
-
         notional_cap, max_positions, max_loss, max_gross = live_limits_from_approval(
             approval=approval,
             risk_config=risk_config,
@@ -3193,6 +3249,10 @@ async def _run_live_daemon(
                     control_plane_runtime.lease_heartbeat_degraded
                 ),
                 session_draining=draining,
+                strategy_warmup_ready=control_plane_runtime.strategy_warmup_ready,
+                strategy_warmup_reason=(
+                    control_plane_runtime.strategy_warmup_reason
+                ),
                 market_state_available=control_plane_runtime.market_state_available,
                 market_state_unavailable_reason=(
                     control_plane_runtime.market_state_unavailable_reason
@@ -3222,7 +3282,12 @@ async def _run_live_daemon(
             heartbeat_context_provider=heartbeat_context_provider,
             latest_market_states=latest_market_states,
             reacquire_lease=reacquire_live_lease,
-            market_state_available=market_state_source != "hub",
+            market_state_available=(
+                True
+                if startup_market_buffer is None
+                else startup_market_buffer.connection_available
+            ),
+            strategy_warmup_ready=True,
             notify_market_state_gap=(
                 lambda reason: daemon.notify_market_state_gap(reason=reason)
             ),
@@ -3304,19 +3369,14 @@ async def _run_live_daemon(
             )
         mark_live_ready()
         startup_phase = False
-        hub_source: WebSocketMarketStateSource | None = None
         quote_source: WebSocketMarketQuoteSource | None = None
         state_stream: AsyncIterable[MarketState15s]
         if market_state_source == "hub":
-            hub_source = WebSocketMarketStateSource(
-                url=market_state_hub_url,
-                environment=market_environment,
-                consumer_id=f"live-strategy:{session_id}",
-                on_connection_change=(
-                    control_plane_runtime.on_market_connection_change
-                ),
+            assert hub_source is not None
+            assert startup_market_buffer is not None
+            state_stream = startup_market_buffer.stream(
+                skip_through=_strategy_last_processed_at_by_symbol(strategy)
             )
-            state_stream = _resilient_market_state_stream(hub_source)
         else:
             state_stream = poll_live_market_states(
                 repository=state_repository,
@@ -3331,6 +3391,14 @@ async def _run_live_daemon(
             account_label=account_label,
             consumer_id=f"live-exit:{session_id}",
             on_recovery=control_plane_runtime.on_account_snapshot_recovery,
+        )
+        exit_channel_runtime = LiveExitChannelRuntime(
+            daemon=daemon,
+            latest_market_quotes=latest_market_quotes,
+            latest_market_states=latest_market_states,
+            is_transient_error=_is_transient_live_runtime_error,
+            on_exit_failure=on_exit_failure,
+            pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
         )
         if risk_control_enabled:
             assert risk_control_hub_url is not None
@@ -3349,21 +3417,13 @@ async def _run_live_daemon(
         if closed_candle_feed is not None:
             await closed_candle_feed.start()
             closed_candle_task = asyncio.create_task(
-                _run_closed_candle_channel(
+                exit_channel_runtime.run_closed_candle_channel(
                     source=closed_candle_feed,
-                    daemon=daemon,
-                    latest_market_quotes=latest_market_quotes,
-                    on_exit_failure=on_exit_failure,
                 ),
                 name=f"live-closed-candle:{session_id}",
             )
             grace_timeout_task = asyncio.create_task(
-                _run_grace_timeout_channel(
-                    daemon=daemon,
-                    latest_market_states=latest_market_states,
-                    latest_market_quotes=latest_market_quotes,
-                    on_exit_failure=on_exit_failure,
-                ),
+                exit_channel_runtime.run_grace_timeout_channel(),
                 name=f"live-grace-timeout:{session_id}",
             )
         if market_state_source == "hub":
@@ -3373,12 +3433,8 @@ async def _run_live_daemon(
                 consumer_id=f"live-exit-quotes:{session_id}",
             )
             quote_task = asyncio.create_task(
-                _run_quote_channel(
+                exit_channel_runtime.run_quote_channel(
                     source=quote_source,
-                    daemon=daemon,
-                    latest_market_quotes=latest_market_quotes,
-                    latest_market_states=latest_market_states,
-                    on_exit_failure=on_exit_failure,
                 )
             )
         market_task = asyncio.create_task(
@@ -3524,6 +3580,11 @@ async def _run_live_daemon(
                 risk_control_source.stop()
             if not market_task.done():
                 market_task.cancel()
+            if (
+                startup_market_state_task is not None
+                and not startup_market_state_task.done()
+            ):
+                startup_market_state_task.cancel()
             if not account_task.done():
                 account_task.cancel()
             if risk_control_task is not None and not risk_control_task.done():
@@ -3554,6 +3615,11 @@ async def _run_live_daemon(
                 await entry_symbol_cache.stop()
             await asyncio.gather(
                 market_task,
+                *(
+                    (startup_market_state_task,)
+                    if startup_market_state_task is not None
+                    else ()
+                ),
                 account_task,
                 *((risk_control_task,) if risk_control_task is not None else ()),
                 *((quote_task,) if quote_task is not None else ()),
@@ -3615,6 +3681,18 @@ async def _run_live_daemon(
             )
         raise
     finally:
+        if hub_source is not None:
+            hub_source.stop()
+        if (
+            startup_market_state_task is not None
+            and not startup_market_state_task.done()
+        ):
+            startup_market_state_task.cancel()
+        if startup_market_state_task is not None:
+            await asyncio.gather(
+                startup_market_state_task,
+                return_exceptions=True,
+            )
         if entry_order_lifecycle is not None:
             await entry_order_lifecycle.stop()
         if execution_coordinator is not None:
@@ -3657,6 +3735,23 @@ async def _observe_market_states(
         yield state
 
 
+async def _collect_startup_market_states(
+    *,
+    source: WebSocketMarketStateSource,
+    buffer: StartupMarketStateBuffer,
+) -> None:
+    """Consume Hub data during DB warmup and hand the same stream forward."""
+
+    try:
+        async for state in _resilient_market_state_stream(source):
+            await buffer.append(state)
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        buffer.close(error)
+        raise
+    else:
+        buffer.close()
 
 
 async def _run_risk_control_channel(
@@ -3913,11 +4008,30 @@ async def _run_account_event_channel(
     daemon: LiveStrategyDaemon,
     latest_market_states: LatestMarketStateCache,
     latest_market_quotes: LatestMarketQuoteCache,
-    order_reconciliation: LiveOrderReconciliation,
+    order_reconciliation: LiveOrderReconciliation | None = None,
+    order_repository: PostgresOrderRepository | None = None,
+    state_machine: OrderExecutionPort | None = None,
+    run_id: str | None = None,
     telemetry: LiveTelemetrySink | None = None,
     on_exit_failure: Callable[[str, str | None], None] | None = None,
     on_account_snapshot: Callable[[AccountEvent], None] | None = None,
 ) -> None:
+    if (
+        order_reconciliation is None
+        and order_repository is not None
+        and state_machine is not None
+        and run_id is not None
+    ):
+        order_reconciliation = LiveOrderReconciliation(
+            order_repository=order_repository,
+            state_machine=state_machine,
+            run_id=run_id,
+        )
+    reconciliation_run_id = (
+        order_reconciliation.run_id
+        if order_reconciliation is not None
+        else (run_id or "unknown")
+    )
     async for event in _resilient_account_event_stream(source):
         try:
             if telemetry is not None and event.has_fill:
@@ -3926,7 +4040,19 @@ async def _run_account_event_channel(
                     occurred_at=event.received_at,
                 )
             if event.event_type == "ORDER_TRADE_UPDATE" and event.client_order_id:
-                await order_reconciliation.reconcile_account_event(event)
+                if order_reconciliation is None:
+                    log.warning(
+                        "live_account_event_order_reconciliation_unavailable",
+                        run_id=reconciliation_run_id,
+                        client_order_id=event.client_order_id,
+                    )
+                else:
+                    await order_reconciliation.reconcile_account_event(event)
+            event_run_id = (
+                order_reconciliation.run_id
+                if order_reconciliation is not None
+                else run_id
+            )
             # ORDER_TRADE_UPDATE can carry both the account projection and
             # the order identity.  Reconcile the order first so the live
             # context cannot observe a newly opened position before its
@@ -3949,7 +4075,7 @@ async def _run_account_event_channel(
                     ):
                         log.warning(
                             "live_account_event_position_sync_retry",
-                            run_id=order_reconciliation.run_id,
+                            run_id=event_run_id,
                             symbol=state.symbol,
                             attempt=attempt,
                             delay_seconds=delay,
@@ -3963,7 +4089,7 @@ async def _run_account_event_channel(
                         if not _is_pending_position_sync_failure(failure):
                             log.info(
                                 "live_account_event_position_sync_recovered",
-                                run_id=order_reconciliation.run_id,
+                                run_id=event_run_id,
                                 symbol=state.symbol,
                                 attempt=attempt,
                             )
@@ -3994,12 +4120,10 @@ async def _run_account_event_channel(
             # reconciliation and the next market state provide retry paths.
             log.warning(
                 "live_account_event_processing_degraded",
-                run_id=order_reconciliation.run_id,
+                run_id=event_run_id,
                 event_type=event.event_type,
                 error_type=type(error).__name__,
             )
-
-
 
 
 def _is_transient_live_runtime_error(error: Exception) -> bool:
@@ -4081,8 +4205,6 @@ class _LiveDaemonRepositoryAdapter:
             self._on_database_success()
 
 
-
-
 async def _has_matching_shadow_session(
     factory: async_sessionmaker[AsyncSession],
     *,
@@ -4152,39 +4274,182 @@ async def _session_is_draining(
     return latest_state == LiveSessionState.DRAINING.value
 
 
+def _live_market_state_cutover(now: datetime) -> datetime:
+    """Choose the last fully closed 15-second bucket for startup recovery."""
+
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    epoch_seconds = int(now.timestamp()) // 15 * 15
+    return datetime.fromtimestamp(epoch_seconds, tz=UTC) - timedelta(seconds=15)
+
+
+def _cursor_after_market_bucket(bucket_start: datetime) -> RuntimeStateCursor:
+    if bucket_start.tzinfo is None or bucket_start.utcoffset() is None:
+        raise ValueError("bucket_start must be timezone-aware")
+    return RuntimeStateCursor(
+        bucket_start=bucket_start + timedelta(microseconds=1),
+        symbol="",
+    )
+
+
+async def _load_live_warmup_symbols(
+    *,
+    repository: PostgresRuntimeMarketStateRepository,
+    environment: str,
+    observed_at: datetime,
+) -> frozenset[str]:
+    loader = getattr(repository, "load_symbols_at", None)
+    if not callable(loader):
+        return frozenset()
+    symbols = await loader(
+        environment=environment,
+        observed_at=observed_at,
+    )
+    return frozenset(symbol for symbol in symbols if symbol.strip())
+
+
+def _strategy_last_processed_at_by_symbol(
+    strategy: LiveRuntimeStrategy,
+) -> Mapping[str, datetime]:
+    checkpoint = strategy.checkpoint(include_market_state_buffers=False)
+    return checkpoint.last_processed_at_by_symbol
+
+
+def _validate_live_warmup_coverage(
+    *,
+    strategy: LiveRuntimeStrategy,
+    states: Collection[MarketState15s],
+    expected_symbols: Collection[str],
+    cutover_at: datetime,
+) -> None:
+    """Reject startup unless every target symbol has a contiguous buffer."""
+
+    required_data = getattr(strategy, "required_data", None)
+    if not callable(required_data):
+        log.warning(
+            "live_strategy_warmup_validation_skipped",
+            reason="strategy_has_no_required_data_contract",
+        )
+        return
+    requirement = required_data()
+    warmup_buckets = int(requirement.warmup_buckets)
+    interval = timedelta(
+        seconds=int(getattr(requirement, "base_state_interval_seconds", 15))
+    )
+    required_fields = tuple(getattr(requirement, "required_fields", ()))
+    states_by_symbol: dict[str, list[MarketState15s]] = {}
+    for state in states:
+        states_by_symbol.setdefault(state.symbol, []).append(state)
+
+    missing: list[str] = []
+    gaps: list[str] = []
+    for symbol in sorted(set(expected_symbols)):
+        valid_states = [
+            state
+            for state in states_by_symbol.get(symbol, ())
+            if all(getattr(state, field, None) is not None for field in required_fields)
+        ]
+        valid_states.sort(
+            key=lambda state: getattr(state, "bucket_start", cutover_at)
+        )
+        if len(valid_states) < warmup_buckets:
+            missing.append(
+                f"{symbol}:have={len(valid_states)},need={warmup_buckets}"
+            )
+            continue
+        window = valid_states[-warmup_buckets:]
+        if all(hasattr(state, "bucket_start") for state in window):
+            if any(
+                current.bucket_start - previous.bucket_start != interval
+                for previous, current in zip(window, window[1:], strict=False)
+            ) or window[-1].bucket_start != cutover_at:
+                gaps.append(symbol)
+
+    if missing or gaps:
+        details: list[str] = []
+        if missing:
+            details.append("insufficient=" + ",".join(missing[:8]))
+        if gaps:
+            details.append("gaps=" + ",".join(gaps[:8]))
+        raise RuntimeError(
+            "live strategy warmup incomplete at "
+            f"{cutover_at.isoformat()}: "
+            + "; ".join(details)
+        )
+
+
 async def _warm_live_strategy(
     *,
     strategy: LiveRuntimeStrategy,
     repository: PostgresRuntimeMarketStateRepository,
     environment: str,
     now: datetime,
+    cutover_at: datetime | None = None,
 ) -> RuntimeStateCursor:
+    warm_market_state = getattr(strategy, "warm_market_state", None)
+    if not callable(warm_market_state):
+        raise RuntimeError("strategy does not support warm-only startup recovery")
     warmup_seconds = _live_warmup_seconds(strategy)
+    warmup_end = cutover_at or _live_market_state_cutover(now)
     cursor = RuntimeStateCursor(
-        bucket_start=now - timedelta(seconds=warmup_seconds),
+        bucket_start=warmup_end - timedelta(seconds=warmup_seconds),
         symbol="",
     )
+    expected_symbols = await _load_live_warmup_symbols(
+        repository=repository,
+        environment=environment,
+        observed_at=warmup_end,
+    )
+    warmed_states: list[MarketState15s] = []
     warmed_state_count = 0
+    started_at = perf_counter()
     while warmed_state_count < _LIVE_WARMUP_STATE_LIMIT:
+        batch_limit = min(
+            _LIVE_WARMUP_BATCH_SIZE,
+            _LIVE_WARMUP_STATE_LIMIT - warmed_state_count,
+        )
         batch = await repository.load_after(
             environment=environment,
             cursor=cursor,
-            limit=min(
-                _LIVE_WARMUP_BATCH_SIZE,
-                _LIVE_WARMUP_STATE_LIMIT - warmed_state_count,
-            ),
+            limit=batch_limit,
+            upper_bound=warmup_end,
         )
         if not batch:
             break
+        accepted_in_batch = 0
         for state in batch:
-            strategy.on_market_state(state)
+            if state.bucket_start > warmup_end:
+                continue
+            warm_market_state(state)
+            warmed_states.append(state)
             cursor = RuntimeStateCursor(
                 bucket_start=state.bucket_start,
                 symbol=state.symbol,
             )
             warmed_state_count += 1
-        if len(batch) < _LIVE_WARMUP_BATCH_SIZE:
+            accepted_in_batch += 1
+        if accepted_in_batch == 0:
             break
+        if len(batch) < batch_limit:
+            break
+    if not expected_symbols:
+        expected_symbols = frozenset(state.symbol for state in warmed_states)
+    _validate_live_warmup_coverage(
+        strategy=strategy,
+        states=warmed_states,
+        expected_symbols=expected_symbols,
+        cutover_at=warmup_end,
+    )
+    log.info(
+        "live_strategy_warmup_completed",
+        environment=environment,
+        state_count=warmed_state_count,
+        expected_symbol_count=len(expected_symbols),
+        warmed_symbol_count=len({state.symbol for state in warmed_states}),
+        cutover_at=warmup_end.isoformat(),
+        elapsed_ms=round((perf_counter() - started_at) * 1000, 3),
+        mode="warm_only",
+    )
     return cursor
 
 
@@ -4194,20 +4459,46 @@ async def _restore_live_strategy_from_checkpoint(
     checkpoint: StrategyCheckpoint,
     repository: PostgresRuntimeMarketStateRepository,
     environment: str,
-) -> None:
+    cutover_at: datetime | None = None,
+) -> Mapping[str, datetime]:
     warm_market_state = getattr(strategy, "warm_market_state", None)
     if not callable(warm_market_state):
         raise RuntimeError(
             "strategy does not support compact checkpoint recovery"
         )
+    recovery_cutover = cutover_at or _live_market_state_cutover(
+        datetime.now(tz=UTC)
+    )
+    expected_symbols = set(checkpoint.last_processed_at_by_symbol)
+    expected_symbols.update(
+        await _load_live_warmup_symbols(
+            repository=repository,
+            environment=environment,
+            observed_at=recovery_cutover,
+        )
+    )
+    recovery_bounds = {
+        symbol: checkpoint.last_processed_at_by_symbol.get(
+            symbol,
+            recovery_cutover,
+        )
+        for symbol in expected_symbols
+    }
     states = await repository.load_recovery_window(
         environment=environment,
-        last_processed_at_by_symbol=checkpoint.last_processed_at_by_symbol,
+        last_processed_at_by_symbol=recovery_bounds,
         lookback_seconds=_live_warmup_seconds(strategy),
         limit=_LIVE_WARMUP_STATE_LIMIT,
+        upper_bound=recovery_cutover,
     )
     for state in states:
         warm_market_state(state)
+    _validate_live_warmup_coverage(
+        strategy=strategy,
+        states=states,
+        expected_symbols=expected_symbols,
+        cutover_at=recovery_cutover,
+    )
     compact_checkpoint = strategy.checkpoint(
         include_market_state_buffers=False
     )
@@ -4216,8 +4507,11 @@ async def _restore_live_strategy_from_checkpoint(
         environment=environment,
         state_count=len(states),
         symbol_count=len(compact_checkpoint.warmup_buckets_by_symbol),
-        expected_symbol_count=len(checkpoint.last_processed_at_by_symbol),
+        expected_symbol_count=len(expected_symbols),
+        cutover_at=recovery_cutover.isoformat(),
+        mode="warm_only_to_current_cutover",
     )
+    return compact_checkpoint.last_processed_at_by_symbol
 
 
 def _checkpoint_needs_market_recovery(checkpoint: StrategyCheckpoint) -> bool:
@@ -4231,9 +4525,15 @@ def _live_warmup_seconds(strategy: LiveRuntimeStrategy) -> int:
     """Return the minimum history window sufficient for strategy buffers."""
     required_data = getattr(strategy, "required_data", None)
     warmup_buckets = 0
+    interval_seconds = 15
     if callable(required_data):
-        warmup_buckets = int(getattr(required_data(), "warmup_buckets", 0))
-    buffer_seconds = (warmup_buckets + 16) * 15
+        requirement = required_data()
+        warmup_buckets = int(getattr(requirement, "warmup_buckets", 0))
+        interval_seconds = max(
+            1,
+            int(getattr(requirement, "base_state_interval_seconds", 15)),
+        )
+    buffer_seconds = (warmup_buckets + 16) * interval_seconds
     return max(_LIVE_MIN_WARMUP_SECONDS, buffer_seconds)
 
 
@@ -4243,15 +4543,18 @@ async def _warm_live_strategy_then_start_fresh(
     repository: PostgresRuntimeMarketStateRepository,
     environment: str,
     now: datetime,
+    cutover_at: datetime | None = None,
 ) -> RuntimeStateCursor:
     """Warm historical state, then continue from the current live boundary."""
+    warmup_end = cutover_at or _live_market_state_cutover(now)
     await _warm_live_strategy(
         strategy=strategy,
         repository=repository,
         environment=environment,
         now=now,
+        cutover_at=warmup_end,
     )
-    return RuntimeStateCursor(bucket_start=datetime.now(tz=UTC), symbol="")
+    return _cursor_after_market_bucket(warmup_end)
 
 
 async def _record_transition(

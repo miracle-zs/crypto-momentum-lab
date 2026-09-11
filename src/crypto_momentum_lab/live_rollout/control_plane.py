@@ -97,9 +97,12 @@ class LiveControlPlaneRuntime:
         mark_database_ok: Callable[[], None],
         telemetry: LiveTelemetrySink | None = None,
         clock: Clock | None = None,
+        strategy_warmup_ready: bool = True,
     ) -> None:
         if not session_id.strip():
             raise ValueError("session_id must not be empty")
+        if not isinstance(strategy_warmup_ready, bool):
+            raise TypeError("strategy_warmup_ready must be a bool")
         self._session_id = session_id
         self._context_provider = context_provider
         self._heartbeat_context_provider = heartbeat_context_provider
@@ -118,6 +121,12 @@ class LiveControlPlaneRuntime:
             if market_state_available
             else "market_state_hub_connecting"
         )
+        self._strategy_warmup_ready = strategy_warmup_ready
+        self._strategy_warmup_reason = (
+            "strategy_warmup_ready"
+            if strategy_warmup_ready
+            else "strategy_warmup_incomplete"
+        )
 
     @property
     def account_snapshot_available(self) -> bool:
@@ -134,6 +143,30 @@ class LiveControlPlaneRuntime:
     @property
     def market_state_unavailable_reason(self) -> str:
         return self._market_state_unavailable_reason
+
+    @property
+    def strategy_warmup_ready(self) -> bool:
+        return self._strategy_warmup_ready
+
+    @property
+    def strategy_warmup_reason(self) -> str:
+        return self._strategy_warmup_reason
+
+    def set_strategy_warmup_ready(self, ready: bool, *, reason: str) -> None:
+        """Publish strategy-buffer readiness as an independent entry gate."""
+
+        if not isinstance(ready, bool):
+            raise TypeError("ready must be a bool")
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
+        if (
+            self._strategy_warmup_ready == ready
+            and self._strategy_warmup_reason == reason
+        ):
+            return
+        self._strategy_warmup_ready = ready
+        self._strategy_warmup_reason = reason
+        self._refresh_entry_gate()
 
     def on_market_connection_change(
         self,

@@ -128,6 +128,23 @@ def test_entry_control_owns_external_prerequisite_priority() -> None:
     assert gate.entry_enabled is True
 
 
+def test_entry_control_stays_closed_until_strategy_warmup_is_ready() -> None:
+    gate = LiveEntryControlGate(run_id="run-1", state_machine=_StateMachine())
+
+    gate.refresh_entry_prerequisites(
+        lease_heartbeat_degraded=False,
+        session_draining=False,
+        market_state_available=True,
+        market_state_unavailable_reason="market_state_hub_ready",
+        account_snapshot_available=True,
+        strategy_warmup_ready=False,
+        strategy_warmup_reason="strategy_warmup_incomplete:gaps=BTCUSDT",
+    )
+
+    assert gate.entry_enabled is False
+    assert gate.entry_enabled_reason == "strategy_warmup_incomplete:gaps=BTCUSDT"
+
+
 def test_entry_control_validates_external_prerequisites() -> None:
     gate = LiveEntryControlGate(run_id="run-1", state_machine=_StateMachine())
 

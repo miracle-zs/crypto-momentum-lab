@@ -254,6 +254,7 @@ class PostgresRuntimeMarketStateRepository:
         environment: str,
         cursor: RuntimeStateCursor,
         limit: int,
+        upper_bound: datetime | None = None,
     ) -> tuple[MarketState15s, ...]:
         if limit <= 0:
             raise ValueError("limit must be positive")
@@ -261,6 +262,8 @@ class PostgresRuntimeMarketStateRepository:
             raise ValueError("environment must not be empty")
         if cursor.bucket_start is not None:
             _require_aware(cursor.bucket_start, "cursor.bucket_start")
+        if upper_bound is not None:
+            _require_aware(upper_bound, "upper_bound")
 
         statement = (
             select(RuntimeMarketState15sRow)
@@ -285,9 +288,44 @@ class PostgresRuntimeMarketStateRepository:
                 )
             )
 
+        if upper_bound is not None:
+            statement = statement.where(
+                RuntimeMarketState15sRow.bucket_start <= upper_bound
+            )
+
         async with self._session_factory() as session:
             rows = (await session.execute(statement)).scalars()
             return tuple(market_state_from_row(row) for row in rows)
+
+    async def load_symbols_at(
+        self,
+        *,
+        environment: str,
+        observed_at: datetime,
+    ) -> frozenset[str]:
+        """Return symbols present in the latest closed bucket at a boundary."""
+
+        if not environment.strip():
+            raise ValueError("environment must not be empty")
+        _require_aware(observed_at, "observed_at")
+        async with self._session_factory() as session:
+            latest_bucket = await session.scalar(
+                select(func.max(RuntimeMarketState15sRow.bucket_start)).where(
+                    RuntimeMarketState15sRow.environment == environment,
+                    RuntimeMarketState15sRow.bucket_start <= observed_at,
+                )
+            )
+            if latest_bucket is None:
+                return frozenset()
+            symbols = await session.scalars(
+                select(RuntimeMarketState15sRow.symbol)
+                .where(
+                    RuntimeMarketState15sRow.environment == environment,
+                    RuntimeMarketState15sRow.bucket_start == latest_bucket,
+                )
+                .distinct()
+            )
+            return frozenset(symbols.all())
 
     async def load_latest_bucket(self, *, environment: str) -> datetime | None:
         if not environment.strip():
@@ -307,6 +345,7 @@ class PostgresRuntimeMarketStateRepository:
         last_processed_at_by_symbol: Mapping[str, datetime],
         lookback_seconds: int,
         limit: int,
+        upper_bound: datetime | None = None,
     ) -> tuple[MarketState15s, ...]:
         """Load only the derivable history needed to rebuild a checkpoint.
 
@@ -324,17 +363,29 @@ class PostgresRuntimeMarketStateRepository:
             raise ValueError("limit must be positive")
         if not last_processed_at_by_symbol:
             return ()
+        if upper_bound is not None:
+            _require_aware(upper_bound, "upper_bound")
 
         bounds = []
-        for symbol, upper_bound in last_processed_at_by_symbol.items():
+        for symbol, checkpoint_upper_bound in (
+            last_processed_at_by_symbol.items()
+        ):
             if not symbol.strip():
                 raise ValueError("checkpoint symbols must not be empty")
-            _require_aware(upper_bound, "last_processed_at_by_symbol value")
+            _require_aware(
+                checkpoint_upper_bound,
+                "last_processed_at_by_symbol value",
+            )
+            recovery_upper_bound = (
+                upper_bound
+                if upper_bound is not None
+                else checkpoint_upper_bound
+            )
             bounds.append(
                 (
                     symbol,
-                    upper_bound - timedelta(seconds=lookback_seconds),
-                    upper_bound,
+                    recovery_upper_bound - timedelta(seconds=lookback_seconds),
+                    recovery_upper_bound,
                 )
             )
 
@@ -350,6 +401,40 @@ class PostgresRuntimeMarketStateRepository:
             ),
         )
         async with self._session_factory() as session:
+            if upper_bound is not None:
+                symbols = tuple(symbol for symbol, _, _ in bounds)
+                lower_bound = upper_bound - timedelta(
+                    seconds=lookback_seconds
+                )
+                statement = (
+                    select(RuntimeMarketState15sRow)
+                    .where(
+                        RuntimeMarketState15sRow.environment == environment,
+                        RuntimeMarketState15sRow.symbol.in_(symbols),
+                        RuntimeMarketState15sRow.bucket_start > lower_bound,
+                        RuntimeMarketState15sRow.bucket_start <= upper_bound,
+                    )
+                    .order_by(
+                        RuntimeMarketState15sRow.symbol,
+                        RuntimeMarketState15sRow.bucket_start,
+                    )
+                )
+                rows = (await session.execute(statement)).scalars()
+                recovered_by_symbol: dict[str, list[MarketState15s]] = {}
+                for row in rows:
+                    states = recovered_by_symbol.setdefault(row.symbol, [])
+                    if len(states) < per_symbol_limit:
+                        states.append(market_state_from_row(row))
+                common_recovered = [
+                    state
+                    for states in recovered_by_symbol.values()
+                    for state in states
+                ]
+                common_recovered.sort(
+                    key=lambda state: (state.bucket_start, state.symbol)
+                )
+                return tuple(common_recovered[:limit])
+
             recovered: list[MarketState15s] = []
             for symbol, lower_bound, upper_bound in bounds:
                 statement = (

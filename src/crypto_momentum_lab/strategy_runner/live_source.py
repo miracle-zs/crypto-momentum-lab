@@ -29,6 +29,7 @@ class RuntimeStateLoader(Protocol):
         *,
         cursor: RuntimeStateCursor,
         limit: int,
+        upper_bound: datetime | None = None,
     ) -> tuple[MarketState15s, ...]: ...
 
     def load_recovery_window(
@@ -37,6 +38,7 @@ class RuntimeStateLoader(Protocol):
         last_processed_at_by_symbol: Mapping[str, datetime],
         lookback_seconds: int,
         limit: int,
+        upper_bound: datetime | None = None,
     ) -> tuple[MarketState15s, ...]: ...
 
     def load_active_symbols(self) -> frozenset[str]: ...
@@ -98,11 +100,17 @@ class PostgresPaperMarketStateSource:
         last_processed_at_by_symbol: Mapping[str, datetime],
         lookback_seconds: int,
         limit: int,
+        upper_bound: datetime | None = None,
     ) -> tuple[MarketState15s, ...]:
+        kwargs: dict[str, object] = {
+            "last_processed_at_by_symbol": last_processed_at_by_symbol,
+            "lookback_seconds": lookback_seconds,
+            "limit": limit,
+        }
+        if upper_bound is not None:
+            kwargs["upper_bound"] = upper_bound
         return self.loader.load_recovery_window(
-            last_processed_at_by_symbol=last_processed_at_by_symbol,
-            lookback_seconds=lookback_seconds,
-            limit=limit,
+            **kwargs  # type: ignore[arg-type]
         )
 
     def load_active_symbols_at(self, observed_at: datetime) -> frozenset[str]:
@@ -366,13 +374,17 @@ class AsyncPostgresRuntimeStateLoader:
         *,
         cursor: RuntimeStateCursor,
         limit: int,
+        upper_bound: datetime | None = None,
     ) -> tuple[MarketState15s, ...]:
+        kwargs: dict[str, object] = {
+            "environment": self.environment,
+            "cursor": cursor,
+            "limit": limit,
+        }
+        if upper_bound is not None:
+            kwargs["upper_bound"] = upper_bound
         return self._event_loop.run_until_complete(
-            self.repository.load_after(
-                environment=self.environment,
-                cursor=cursor,
-                limit=limit,
-            )
+            self.repository.load_after(**kwargs)  # type: ignore[arg-type]
         )
 
     def load_recovery_window(
@@ -381,13 +393,19 @@ class AsyncPostgresRuntimeStateLoader:
         last_processed_at_by_symbol: Mapping[str, datetime],
         lookback_seconds: int,
         limit: int,
+        upper_bound: datetime | None = None,
     ) -> tuple[MarketState15s, ...]:
+        kwargs: dict[str, object] = {
+            "environment": self.environment,
+            "last_processed_at_by_symbol": last_processed_at_by_symbol,
+            "lookback_seconds": lookback_seconds,
+            "limit": limit,
+        }
+        if upper_bound is not None:
+            kwargs["upper_bound"] = upper_bound
         return self._event_loop.run_until_complete(
             self.repository.load_recovery_window(
-                environment=self.environment,
-                last_processed_at_by_symbol=last_processed_at_by_symbol,
-                lookback_seconds=lookback_seconds,
-                limit=limit,
+                **kwargs  # type: ignore[arg-type]
             )
         )
 

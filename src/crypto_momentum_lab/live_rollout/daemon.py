@@ -455,10 +455,14 @@ class LiveStrategyDaemon:
         market_state_available: bool,
         market_state_unavailable_reason: str,
         account_snapshot_available: bool,
+        strategy_warmup_ready: bool = True,
+        strategy_warmup_reason: str = "strategy_warmup_ready",
     ) -> None:
         self._entry_control.refresh_entry_prerequisites(
             lease_heartbeat_degraded=lease_heartbeat_degraded,
             session_draining=session_draining,
+            strategy_warmup_ready=strategy_warmup_ready,
+            strategy_warmup_reason=strategy_warmup_reason,
             market_state_available=market_state_available,
             market_state_unavailable_reason=market_state_unavailable_reason,
             account_snapshot_available=account_snapshot_available,

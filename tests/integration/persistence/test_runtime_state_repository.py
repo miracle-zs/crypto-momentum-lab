@@ -176,3 +176,37 @@ async def test_load_recovery_window_is_bounded_and_globally_ordered(
         ("BTCUSDT", second.bucket_start),
         ("BTCUSDT", third.bucket_start),
     )
+
+
+async def test_load_recovery_window_can_replay_to_a_common_cutover(
+    runtime_state_repository: PostgresRuntimeMarketStateRepository,
+) -> None:
+    first = fixture_state("ETHUSDT", 0)
+    second = fixture_state("BTCUSDT", 1)
+    third = fixture_state("BTCUSDT", 2)
+    await runtime_state_repository.save_closed_states(
+        (third, first, second),
+        source_watermark_at=datetime(2026, 7, 3, 0, 1, tzinfo=UTC),
+        sequence_range=RuntimeStateSequenceRange(1, 3),
+    )
+
+    rows = await runtime_state_repository.load_recovery_window(
+        environment="research",
+        last_processed_at_by_symbol={
+            "BTCUSDT": first.bucket_start,
+            "ETHUSDT": first.bucket_start,
+        },
+        lookback_seconds=45,
+        limit=10,
+        upper_bound=third.bucket_start,
+    )
+
+    assert tuple((row.symbol, row.bucket_start) for row in rows) == (
+        ("ETHUSDT", first.bucket_start),
+        ("BTCUSDT", second.bucket_start),
+        ("BTCUSDT", third.bucket_start),
+    )
+    assert await runtime_state_repository.load_symbols_at(
+        environment="research",
+        observed_at=third.bucket_start,
+    ) == frozenset({"BTCUSDT"})

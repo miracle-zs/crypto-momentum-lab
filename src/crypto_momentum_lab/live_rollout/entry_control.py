@@ -105,17 +105,22 @@ class LiveEntryControlGate:
         market_state_available: bool,
         market_state_unavailable_reason: str,
         account_snapshot_available: bool,
+        strategy_warmup_ready: bool = True,
+        strategy_warmup_reason: str = "strategy_warmup_ready",
     ) -> None:
         """Apply external live prerequisites in their fail-closed priority."""
 
         for value, field_name in (
             (lease_heartbeat_degraded, "lease_heartbeat_degraded"),
             (session_draining, "session_draining"),
+            (strategy_warmup_ready, "strategy_warmup_ready"),
             (market_state_available, "market_state_available"),
             (account_snapshot_available, "account_snapshot_available"),
         ):
             if not isinstance(value, bool):
                 raise TypeError(f"{field_name} must be a bool")
+        if not strategy_warmup_reason.strip():
+            raise ValueError("strategy_warmup_reason must not be empty")
         if not market_state_unavailable_reason.strip():
             raise ValueError("market_state_unavailable_reason must not be empty")
 
@@ -132,6 +137,8 @@ class LiveEntryControlGate:
                 False,
                 reason=f"exit_failure:{symbol}:{failure}",
             )
+        elif not strategy_warmup_ready:
+            self.set_entry_enabled(False, reason=strategy_warmup_reason)
         elif not market_state_available:
             self.set_entry_enabled(
                 False,

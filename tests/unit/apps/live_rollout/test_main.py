@@ -1207,22 +1207,28 @@ async def test_live_warmup_applies_all_states_and_continues_from_boundary() -> N
     now = datetime(2026, 8, 4, 0, 0, tzinfo=UTC)
     stale = SimpleNamespace(
         symbol="BTCUSDT",
-        bucket_start=now - timedelta(seconds=46),
-        bucket_end=now - timedelta(seconds=31),
+        bucket_start=now - timedelta(seconds=30),
+        bucket_end=now - timedelta(seconds=15),
     )
     fresh = SimpleNamespace(
         symbol="BTCUSDT",
-        bucket_start=now - timedelta(seconds=45),
-        bucket_end=now - timedelta(seconds=30),
+        bucket_start=now - timedelta(seconds=15),
+        bucket_end=now,
     )
 
     class Strategy:
         def __init__(self) -> None:
             self.seen = []
 
-        def on_market_state(self, state):
+        def required_data(self):
+            return SimpleNamespace(
+                warmup_buckets=1,
+                base_state_interval_seconds=15,
+                required_fields=(),
+            )
+
+        def warm_market_state(self, state):
             self.seen.append(state)
-            return SimpleNamespace(candidates=())
 
     class Repository:
         async def load_after(self, **kwargs):
@@ -1240,6 +1246,34 @@ async def test_live_warmup_applies_all_states_and_continues_from_boundary() -> N
     assert strategy.seen == [stale, fresh]
     assert cursor.bucket_start == fresh.bucket_start
     assert cursor.symbol == "BTCUSDT"
+
+
+def test_live_warmup_rejects_a_symbol_with_a_window_gap() -> None:
+    start = datetime(2026, 8, 4, 0, 0, tzinfo=UTC)
+    states = tuple(
+        SimpleNamespace(
+            symbol="BTCUSDT",
+            bucket_start=start + timedelta(seconds=offset),
+            close_price=Decimal("1"),
+        )
+        for offset in (0, 15, 45)
+    )
+
+    class Strategy:
+        def required_data(self):
+            return SimpleNamespace(
+                warmup_buckets=3,
+                base_state_interval_seconds=15,
+                required_fields=("close_price",),
+            )
+
+    with pytest.raises(RuntimeError, match="gaps=BTCUSDT"):
+        main._validate_live_warmup_coverage(
+            strategy=Strategy(),
+            states=states,
+            expected_symbols=("BTCUSDT",),
+            cutover_at=states[-1].bucket_start,
+        )
 
 
 async def test_resilient_market_state_stream_retries_after_hub_failure() -> None:
