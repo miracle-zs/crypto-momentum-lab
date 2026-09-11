@@ -451,7 +451,7 @@ accounts:
 - paper account read model 已独立到 `operator_dashboard/paper_account_queries.py`，集中负责 paper run selection、account summary、history、strategy-run detail 及 position/event projection；原有 `strategy_run(..., _session=...)` facade 签名保持不变。
 - live account detail 已独立到 `operator_dashboard/account_queries.py`，集中负责 process、reconciliation、bounded equity、positions、orders、fills、signals 和 intent metadata 的组装；`DashboardQueries.account(...)` 仍保持原有入口。
 - `DashboardQueries` 保留原有外部接口与 API 路由，只作为兼容 facade 组合各查询模块；因此本次不会改变 Dashboard API 的调用方式或响应契约。
-- 仍留在 facade 的主要是 reports 及少量跨域兼容查询；下一刀评估 reports 是否与现有 session/reporting 域形成足够深的 read model seam，避免为一小段查询继续拆出浅 wrapper。
+- reports 有意保留在 facade：它目前只是两张 session/transition 表各取 10 行的简单摘要，没有独立的策略、采样或一致性边界；继续拆分只会制造浅 wrapper。P2-3 的深 read-model seam 已完成，后续若 reports 复杂度增长再单独建域。
 
 ---
 
