@@ -57,16 +57,19 @@ def _runtime(
     provider: FakeContextProvider,
     heartbeat_provider: FakeContextProvider,
     states: tuple[object, ...] = (),
+    market_state_available: bool = True,
 ) -> tuple[
     LiveControlPlaneRuntime,
     list[bool],
     list[bool],
     list[object],
     FakeTelemetry,
+    list[str],
 ]:
     refreshes: list[bool] = []
     database_markers: list[bool] = []
     reacquire_calls: list[object] = []
+    market_gap_calls: list[str] = []
     telemetry = FakeTelemetry()
 
     async def reacquire(gate_context: object) -> TradingLease | None:
@@ -83,12 +86,21 @@ def _runtime(
         heartbeat_context_provider=heartbeat_provider,
         latest_market_states=States(),
         reacquire_lease=reacquire,
+        market_state_available=market_state_available,
+        notify_market_state_gap=market_gap_calls.append,
         refresh_entry_gate=lambda: refreshes.append(True),
         mark_database_ok=lambda: database_markers.append(True),
         telemetry=telemetry,
         clock=lambda: NOW,
     )
-    return runtime, refreshes, database_markers, reacquire_calls, telemetry
+    return (
+        runtime,
+        refreshes,
+        database_markers,
+        reacquire_calls,
+        telemetry,
+        market_gap_calls,
+    )
 
 
 def _account_event(*, snapshot: object | None, sequence: int = 7) -> AccountEvent:
@@ -133,7 +145,7 @@ def _lease() -> TradingLease:
 def test_account_snapshot_recovery_fails_closed_until_full_snapshot() -> None:
     provider = FakeContextProvider()
     heartbeat_provider = FakeContextProvider()
-    runtime, refreshes, _, _, telemetry = _runtime(
+    runtime, refreshes, _, _, telemetry, _ = _runtime(
         provider=provider,
         heartbeat_provider=heartbeat_provider,
     )
@@ -170,7 +182,7 @@ async def test_lease_callbacks_publish_state_and_recover_from_latest_market_stat
         recovery_context=SimpleNamespace(gate_context=gate_context)
     )
     latest_states = (object(), object())
-    runtime, refreshes, database_markers, reacquire_calls, _ = _runtime(
+    runtime, refreshes, database_markers, reacquire_calls, _, _ = _runtime(
         provider=provider,
         heartbeat_provider=heartbeat_provider,
         states=latest_states,
@@ -191,4 +203,36 @@ async def test_lease_callbacks_publish_state_and_recover_from_latest_market_stat
     assert heartbeat_provider.loaded_states == [latest_states[-1]]
     assert heartbeat_provider.cache_invalidations == 1
     assert reacquire_calls == [gate_context]
+    assert len(refreshes) == 2
+
+
+def test_market_connection_changes_fail_closed_and_report_sequence_gaps() -> None:
+    provider = FakeContextProvider()
+    heartbeat_provider = FakeContextProvider()
+    runtime, refreshes, _, _, telemetry, gap_calls = _runtime(
+        provider=provider,
+        heartbeat_provider=heartbeat_provider,
+        market_state_available=False,
+    )
+
+    assert runtime.market_state_available is False
+    assert runtime.market_state_unavailable_reason == (
+        "market_state_hub_connecting"
+    )
+
+    runtime.on_market_connection_change(
+        False,
+        "market_state_consumer_lagged",
+    )
+    assert runtime.market_state_available is False
+    assert runtime.market_state_unavailable_reason == (
+        "market_state_consumer_lagged"
+    )
+    assert gap_calls == ["market_state_consumer_lagged"]
+    assert telemetry.events[-1]["lag"] is True
+
+    runtime.on_market_connection_change(True, None)
+    assert runtime.market_state_available is True
+    assert runtime.market_state_unavailable_reason == "market_state_hub_ready"
+    assert telemetry.events[-1]["recovery"] is True
     assert len(refreshes) == 2

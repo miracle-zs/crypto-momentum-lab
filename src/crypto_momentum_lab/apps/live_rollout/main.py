@@ -109,7 +109,6 @@ from crypto_momentum_lab.live_rollout.commands import (
 from crypto_momentum_lab.live_rollout.context import LiveEntryFilterContext
 from crypto_momentum_lab.live_rollout.control_plane import (
     LiveControlPlaneRuntime,
-    is_consumer_lag_reason,
 )
 from crypto_momentum_lab.live_rollout.daemon import (
     LiveDaemonConfig,
@@ -3146,8 +3145,6 @@ async def _run_live_daemon(
         entry_filter_cache_ready = not (
             entry_filter_cache_required or entry_symbol_cache_required
         )
-        market_state_available = market_state_source != "hub"
-        market_state_unavailable_reason = "market_state_hub_connecting"
         exit_failure_by_symbol: dict[str, str] = {}
         assert live_repository is not None
         risk_control_dispatcher = RiskControlCommandDispatcher(
@@ -3196,10 +3193,10 @@ async def _run_live_daemon(
                     False,
                     reason=f"exit_failure:{symbol}:{reason}",
                 )
-            elif not market_state_available:
+            elif not control_plane_runtime.market_state_available:
                 daemon.set_entry_enabled(
                     False,
-                    reason=market_state_unavailable_reason,
+                    reason=control_plane_runtime.market_state_unavailable_reason,
                 )
             elif not control_plane_runtime.account_snapshot_available:
                 daemon.set_entry_enabled(
@@ -3237,6 +3234,10 @@ async def _run_live_daemon(
             heartbeat_context_provider=heartbeat_context_provider,
             latest_market_states=latest_market_states,
             reacquire_lease=reacquire_live_lease,
+            market_state_available=market_state_source != "hub",
+            notify_market_state_gap=(
+                lambda reason: daemon.notify_market_state_gap(reason=reason)
+            ),
             refresh_entry_gate=refresh_entry_enabled,
             mark_database_ok=mark_live_database_ok,
             telemetry=telemetry,
@@ -3319,44 +3320,13 @@ async def _run_live_daemon(
         quote_source: WebSocketMarketQuoteSource | None = None
         state_stream: AsyncIterable[MarketState15s]
         if market_state_source == "hub":
-
-            def on_market_connection_change(
-                available: bool,
-                reason: str | None,
-            ) -> None:
-                nonlocal market_state_available, market_state_unavailable_reason
-                was_available = market_state_available
-                market_state_available = available
-                if telemetry is not None:
-                    telemetry.consumer_health(
-                        consumer="market_state_hub",
-                        available=available,
-                        occurred_at=datetime.now(tz=UTC),
-                        reason=reason,
-                        recovery=available and not was_available,
-                        lag=is_consumer_lag_reason(reason),
-                    )
-                if available:
-                    market_state_unavailable_reason = "market_state_hub_ready"
-                else:
-                    market_state_unavailable_reason = (
-                        reason or "market_state_hub_unavailable"
-                    )
-                    if reason is not None and (
-                        reason.startswith("market_state_consumer_lagged")
-                        or (
-                            reason.startswith("MarketStateHubSequenceGap")
-                            and "consumer queue overflowed" not in reason
-                        )
-                    ):
-                        daemon.notify_market_state_gap(reason=reason)
-                refresh_entry_enabled()
-
             hub_source = WebSocketMarketStateSource(
                 url=market_state_hub_url,
                 environment=market_environment,
                 consumer_id=f"live-strategy:{session_id}",
-                on_connection_change=on_market_connection_change,
+                on_connection_change=(
+                    control_plane_runtime.on_market_connection_change
+                ),
             )
             state_stream = _resilient_market_state_stream(hub_source)
         else:

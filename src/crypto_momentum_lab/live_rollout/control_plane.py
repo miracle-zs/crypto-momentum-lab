@@ -91,6 +91,8 @@ class LiveControlPlaneRuntime:
         heartbeat_context_provider: LiveControlPlaneContextProvider,
         latest_market_states: LatestMarketStateSource,
         reacquire_lease: LeaseReacquirer,
+        market_state_available: bool,
+        notify_market_state_gap: Callable[[str], None],
         refresh_entry_gate: Callable[[], None],
         mark_database_ok: Callable[[], None],
         telemetry: LiveTelemetrySink | None = None,
@@ -103,12 +105,19 @@ class LiveControlPlaneRuntime:
         self._heartbeat_context_provider = heartbeat_context_provider
         self._latest_market_states = latest_market_states
         self._reacquire_lease = reacquire_lease
+        self._notify_market_state_gap = notify_market_state_gap
         self._refresh_entry_gate = refresh_entry_gate
         self._mark_database_ok = mark_database_ok
         self._telemetry = telemetry
         self._clock = clock or (lambda: datetime.now(tz=UTC))
         self._account_snapshot_available = True
         self._lease_heartbeat_degraded = False
+        self._market_state_available = market_state_available
+        self._market_state_unavailable_reason = (
+            "market_state_hub_ready"
+            if market_state_available
+            else "market_state_hub_connecting"
+        )
 
     @property
     def account_snapshot_available(self) -> bool:
@@ -117,6 +126,48 @@ class LiveControlPlaneRuntime:
     @property
     def lease_heartbeat_degraded(self) -> bool:
         return self._lease_heartbeat_degraded
+
+    @property
+    def market_state_available(self) -> bool:
+        return self._market_state_available
+
+    @property
+    def market_state_unavailable_reason(self) -> str:
+        return self._market_state_unavailable_reason
+
+    def on_market_connection_change(
+        self,
+        available: bool,
+        reason: str | None,
+    ) -> None:
+        """Publish market-source liveness and reset strategy state on gaps."""
+
+        was_available = self._market_state_available
+        self._market_state_available = available
+        if self._telemetry is not None:
+            self._telemetry.consumer_health(
+                consumer="market_state_hub",
+                available=available,
+                occurred_at=self._clock(),
+                reason=reason,
+                recovery=available and not was_available,
+                lag=is_consumer_lag_reason(reason),
+            )
+        if available:
+            self._market_state_unavailable_reason = "market_state_hub_ready"
+        else:
+            self._market_state_unavailable_reason = (
+                reason or "market_state_hub_unavailable"
+            )
+            if reason is not None and (
+                reason.startswith("market_state_consumer_lagged")
+                or (
+                    reason.startswith("MarketStateHubSequenceGap")
+                    and "consumer queue overflowed" not in reason
+                )
+            ):
+                self._notify_market_state_gap(reason)
+        self._refresh_entry_gate()
 
     def on_account_snapshot(self, event: AccountEvent) -> None:
         """Publish a complete account projection and reopen entry admission."""

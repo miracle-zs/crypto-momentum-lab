@@ -220,10 +220,10 @@ live_rollout/
   one-shot action dispatch、reconcile task 和 telemetry 转移到
   `live_rollout/risk_control.py` 的 `LiveRiskControlRuntime`；`main.py` 只负责创建
   source、注入 callback 和收尾任务，PostgreSQL 仍是控制面权威。
-- 已将账户快照恢复、租约心跳降级/恢复、双 context provider 发布和租约自动恢复
-  转移到 `live_rollout/control_plane.py` 的 `LiveControlPlaneRuntime`；`main.py`
-  只负责组装数据库恢复策略、heartbeat 和 entry gate 回调，控制面状态不再由
-  composition root 的嵌套闭包持有。
+- 已将账户快照恢复、租约心跳降级/恢复、市场 Hub 可用性、双 context provider
+  发布和租约自动恢复转移到 `live_rollout/control_plane.py` 的
+  `LiveControlPlaneRuntime`；`main.py` 只负责组装数据库恢复策略、heartbeat、
+  gap 通知和 entry gate 回调，控制面状态不再由 composition root 的嵌套闭包持有。
 - 这是 P0-1 的渐进切片，属于转移实现所有权而非增加转发壳；`session.py` 当前仍是
   手工 one-shot session，不应把本次改动写成整个 P0-1 已完成。
 
