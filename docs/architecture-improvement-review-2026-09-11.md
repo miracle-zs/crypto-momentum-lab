@@ -222,6 +222,9 @@ live_rollout/
 - 已将四路事件通道共享的 per-symbol 最新 market state/quote cache 转移到
   `live_rollout/market_cache.py`；account、quote、candle、grace channel 和 lease
   recovery 通过同一窄 cache 接口读写，`main.py` 不再定义缓存实现。
+- 已将 market state、quote、account event 和 risk-control Hub 的重连/退避策略统一
+  到 `live_rollout/stream_recovery.py`；应用层只保留各 channel 的业务处理，不再复制
+  四份 transport retry loop。
 - 已将 RiskControlHub 的连接状态、durable state reload、fail-closed entry gate、
   one-shot action dispatch、reconcile task 和 telemetry 转移到
   `live_rollout/risk_control.py` 的 `LiveRiskControlRuntime`；`main.py` 只负责创建

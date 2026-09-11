@@ -45,7 +45,6 @@ from crypto_momentum_lab.domain.live_rollout import (
 from crypto_momentum_lab.domain.market.models import (
     JsonValue,
     MarketState15s,
-    RealtimeMarketQuote,
 )
 from crypto_momentum_lab.domain.risk import (
     RiskConfigSnapshot,
@@ -74,7 +73,6 @@ from crypto_momentum_lab.execution_account.expectations import (
 )
 from crypto_momentum_lab.execution_account.hub import (
     AccountEvent,
-    AccountEventHubError,
     WebSocketAccountEventSource,
     WebSocketAccountPositionExpectationPublisher,
 )
@@ -91,7 +89,6 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 from crypto_momentum_lab.execution_account.risk_control_hub import (
     RiskControlAction,
     RiskControlEvent,
-    RiskControlHubError,
     WebSocketRiskControlPublisher,
     WebSocketRiskControlSource,
 )
@@ -165,6 +162,15 @@ from crypto_momentum_lab.live_rollout.session import (
 from crypto_momentum_lab.live_rollout.signal_recorder import (
     LiveStrategySignalRecorder,
 )
+from crypto_momentum_lab.live_rollout.stream_recovery import (
+    resilient_account_event_stream as _resilient_account_event_stream,
+)
+from crypto_momentum_lab.live_rollout.stream_recovery import (
+    resilient_market_quote_stream as _resilient_market_quote_stream,
+)
+from crypto_momentum_lab.live_rollout.stream_recovery import (
+    resilient_risk_control_stream as _resilient_risk_control_stream,
+)
 from crypto_momentum_lab.live_rollout.telemetry import (
     PERSISTED_OPERATIONAL_TELEMETRY_EVENTS,
     PERSISTED_ORDER_TELEMETRY_EVENTS,
@@ -174,11 +180,9 @@ from crypto_momentum_lab.live_rollout.telemetry import (
 from crypto_momentum_lab.live_rollout.volume import Binance24hQuoteVolumeCache
 from crypto_momentum_lab.market_data.binance.rest import BinanceUsdMRestClient
 from crypto_momentum_lab.market_data.hub import (
-    MarketStateHubError,
     WebSocketMarketStateSource,
 )
 from crypto_momentum_lab.market_data.quote_hub import (
-    MarketQuoteHubError,
     WebSocketMarketQuoteSource,
 )
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
@@ -3656,129 +3660,6 @@ async def _observe_market_states(
         yield state
 
 
-async def _resilient_market_state_stream(
-    states: AsyncIterable[MarketState15s],
-    *,
-    retry_delay_seconds: float = 1.0,
-) -> AsyncIterator[MarketState15s]:
-    """Keep the live process alive while the market transport reconnects.
-
-    The source owns connection-level retries and reports availability changes.
-    This outer loop handles the longer outage threshold without terminating the
-    live daemon, so the account-event exit lane can continue independently.
-    """
-    if retry_delay_seconds < 0:
-        raise ValueError("retry_delay_seconds must not be negative")
-    while True:
-        try:
-            async for state in states:
-                yield state
-        except asyncio.CancelledError:
-            raise
-        except MarketStateHubError as error:
-            log.warning(
-                "live_market_state_stream_retry",
-                error_type=type(error).__name__,
-                error=str(error),
-                retry_delay_seconds=retry_delay_seconds,
-            )
-            if retry_delay_seconds > 0:
-                await asyncio.sleep(retry_delay_seconds)
-        else:
-            return
-
-
-async def _resilient_market_quote_stream(
-    quotes: AsyncIterable[RealtimeMarketQuote],
-    *,
-    retry_delay_seconds: float = 1.0,
-) -> AsyncIterator[RealtimeMarketQuote]:
-    """Keep the quote exit lane alive while the quote hub reconnects."""
-    if retry_delay_seconds < 0:
-        raise ValueError("retry_delay_seconds must not be negative")
-    while True:
-        try:
-            async for quote in quotes:
-                yield quote
-        except asyncio.CancelledError:
-            raise
-        except MarketQuoteHubError as error:
-            log.warning(
-                "live_market_quote_stream_retry",
-                error_type=type(error).__name__,
-                error=str(error),
-                retry_delay_seconds=retry_delay_seconds,
-            )
-            if retry_delay_seconds > 0:
-                await asyncio.sleep(retry_delay_seconds)
-        else:
-            return
-
-
-async def _resilient_account_event_stream(
-    source: WebSocketAccountEventSource,
-    *,
-    retry_delay_seconds: float = 1.0,
-) -> AsyncIterator[AccountEvent]:
-    """Keep the live process alive while the account hub reconnects.
-
-    Account-event delivery is an acceleration path for order reconciliation;
-    PostgreSQL recovery and the periodic reconcile loop remain the safety net.
-    A temporary account-service restart therefore must not tear down the live
-    strategy process and its independent candle/quote exit lanes.
-    """
-    if retry_delay_seconds < 0:
-        raise ValueError("retry_delay_seconds must not be negative")
-    while True:
-        try:
-            async for event in source:
-                yield event
-        except asyncio.CancelledError:
-            raise
-        except AccountEventHubError as error:
-            log.warning(
-                "live_account_event_stream_retry",
-                error_type=type(error).__name__,
-                error=str(error),
-                retry_delay_seconds=retry_delay_seconds,
-            )
-            if retry_delay_seconds > 0:
-                await asyncio.sleep(retry_delay_seconds)
-        else:
-            return
-
-
-async def _resilient_risk_control_stream(
-    source: WebSocketRiskControlSource,
-    *,
-    retry_delay_seconds: float = 1.0,
-) -> AsyncIterator[RiskControlEvent]:
-    """Keep the live process alive while control notifications reconnect.
-
-    The source reports every unavailable/recovery transition synchronously to
-    the live entry gate.  This loop only provides transport retry; durable
-    state is reloaded by that gate before entries can reopen.
-    """
-
-    if retry_delay_seconds < 0:
-        raise ValueError("retry_delay_seconds must not be negative")
-    while True:
-        try:
-            async for event in source:
-                yield event
-        except asyncio.CancelledError:
-            raise
-        except RiskControlHubError as error:
-            log.warning(
-                "live_risk_control_stream_retry",
-                error_type=type(error).__name__,
-                error=str(error),
-                retry_delay_seconds=retry_delay_seconds,
-            )
-            if retry_delay_seconds > 0:
-                await asyncio.sleep(retry_delay_seconds)
-        else:
-            return
 
 
 async def _run_risk_control_channel(

@@ -12,6 +12,10 @@ from typer.testing import CliRunner
 from crypto_momentum_lab.apps.live_rollout import main
 from crypto_momentum_lab.domain.risk import TradingLease, TradingLeaseState
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
+from crypto_momentum_lab.execution_account.hub import AccountEventHubError
+from crypto_momentum_lab.live_rollout.stream_recovery import (
+    resilient_market_state_stream,
+)
 from crypto_momentum_lab.market_data.hub import MarketStateHubError
 
 app = main.app
@@ -1255,7 +1259,7 @@ async def test_resilient_market_state_stream_retries_after_hub_failure() -> None
     source = Source()
     observed = []
 
-    async for item in main._resilient_market_state_stream(
+    async for item in resilient_market_state_stream(
         source,
         retry_delay_seconds=0,
     ):
@@ -1279,7 +1283,7 @@ async def test_resilient_account_event_stream_retries_after_hub_failure() -> Non
 
             async def stream():
                 if attempt == 1:
-                    raise main.AccountEventHubError("account-event hub unavailable")
+                    raise AccountEventHubError("account-event hub unavailable")
                 yield event
 
             return stream()
