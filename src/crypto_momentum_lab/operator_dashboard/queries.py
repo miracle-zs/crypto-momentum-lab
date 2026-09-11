@@ -33,6 +33,9 @@ from crypto_momentum_lab.operator_dashboard import (
     overview_queries as _overview_queries,
 )
 from crypto_momentum_lab.operator_dashboard import (
+    risk_execution_queries as _risk_execution_queries,
+)
+from crypto_momentum_lab.operator_dashboard import (
     telemetry_queries as _telemetry_queries,
 )
 from crypto_momentum_lab.operator_dashboard.collector_status import (
@@ -78,8 +81,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     PaperEquitySnapshotRow,
     PaperFillRow,
     PaperPositionRow,
-    RiskEvaluationRow,
-    RiskHaltRow,
     ShadowSessionRow,
     StrategyLiveStateRow,
     StrategyRunRow,
@@ -104,15 +105,11 @@ _ACCOUNT_EQUITY_RANGES: dict[str, tuple[timedelta, int]] = {
     "30d": (timedelta(days=30), 3 * 60 * 60),
     "1y": (timedelta(days=365), 2 * 24 * 60 * 60),
 }
-_CONFIRMED_OPEN_ORDER_STATES = frozenset(
-    {
-        ExchangeOrderState.ACKNOWLEDGED.value,
-        ExchangeOrderState.PARTIALLY_FILLED.value,
-    }
-)
-
 DecisionSLOQueries = _telemetry_queries.DecisionSLOQueries
 _decision_slo_response = _telemetry_queries._decision_slo_response
+RiskExecutionQueries = _risk_execution_queries.RiskExecutionQueries
+_split_exchange_orders = _risk_execution_queries.split_exchange_orders
+_exchange_order = _risk_execution_queries.exchange_order
 _latest_live_account_process_statement = (
     _overview_queries.latest_live_account_process_statement
 )
@@ -757,26 +754,6 @@ def _live_account_metrics_window_start(
     return anchor.astimezone(UTC)
 
 
-def _split_exchange_orders(
-    rows: Sequence[ExchangeOrderRow],
-) -> tuple[list[ExchangeOrderRow], list[ExchangeOrderRow]]:
-    """Separate confirmed resting orders from genuinely uncertain orders."""
-    terminal_states = {
-        state.value for state in ExchangeOrderState if state.terminal
-    }
-    pending: list[ExchangeOrderRow] = []
-    ambiguous: list[ExchangeOrderRow] = []
-    for row in rows:
-        if row.state in terminal_states:
-            continue
-        if row.state in _CONFIRMED_OPEN_ORDER_STATES:
-            pending.append(row)
-        else:
-            # Unknown/non-terminal states must remain fail-closed.
-            ambiguous.append(row)
-    return pending, ambiguous
-
-
 @dataclass(slots=True)
 class _AccountFillAggregate:
     symbol: str
@@ -919,6 +896,7 @@ class DashboardQueries:
             stale_after_seconds=self._stale_after_seconds,
             research_collector_root=self._research_collector_root,
         )
+        self._risk_execution_queries = RiskExecutionQueries(session_factory)
 
     async def health(self) -> dict[str, str]:
         return await self._overview_queries.health()
@@ -2211,50 +2189,7 @@ class DashboardQueries:
         )
 
     async def risk_execution(self) -> RiskExecutionResponse:
-        async with self._session_factory() as session:
-            halts = (
-                await session.scalars(
-                    select(RiskHaltRow)
-                    .where(RiskHaltRow.active.is_(True))
-                    .order_by(RiskHaltRow.created_at.desc())
-                )
-            ).all()
-            decisions = (
-                await session.scalars(
-                    select(RiskEvaluationRow)
-                    .order_by(RiskEvaluationRow.evaluated_at.desc())
-                    .limit(30)
-                )
-            ).all()
-            orders = (
-                await session.scalars(
-                    select(ExchangeOrderRow)
-                    .order_by(ExchangeOrderRow.updated_at.desc())
-                    .limit(30)
-                )
-            ).all()
-        pending, ambiguous = _split_exchange_orders(orders)
-        return RiskExecutionResponse(
-            status=OperationalStatus.HALTED
-            if halts or ambiguous
-            else OperationalStatus.READY,
-            active_halts=[
-                {"reason": row.reason, "created_at": row.created_at.isoformat()}
-                for row in halts
-            ],
-            latest_risk_decisions=[
-                {
-                    "candidate_id": row.candidate_id,
-                    "decision": row.decision,
-                    "reason": row.reason,
-                    "evaluated_at": row.evaluated_at.isoformat(),
-                }
-                for row in decisions
-            ],
-            exchange_orders=[_exchange_order(row) for row in orders],
-            pending_orders=[_exchange_order(row) for row in pending],
-            ambiguous_orders=[_exchange_order(row) for row in ambiguous],
-        )
+        return await self._risk_execution_queries.risk_execution()
 
     async def reports(self) -> RunReportSummaryResponse:
         async with self._session_factory() as session:
@@ -2809,18 +2744,6 @@ def _order_intent_reason(details: object) -> str | None:
         return None
     reason = details.get("reason")
     return reason if isinstance(reason, str) and reason else None
-
-
-def _exchange_order(row: ExchangeOrderRow) -> dict[str, JsonValue]:
-    return {
-        "client_order_id": row.client_order_id,
-        "exchange_order_id": row.exchange_order_id,
-        "symbol": row.symbol,
-        "side": row.side,
-        "state": row.state,
-        "quantity": str(row.quantity),
-        "updated_at": row.updated_at.isoformat(),
-    }
 
 
 def _live_strategy_signal(row: LiveStrategySignalRow) -> dict[str, JsonValue]:
