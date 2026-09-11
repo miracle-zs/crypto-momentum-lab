@@ -127,6 +127,7 @@ live_rollout/
   ├── session.py          # 逐步承接生命周期；当前实现尚不是完整 orchestrator
   ├── context.py          # ContextProvider: epoch, cache invalidation, currentness
   ├── context_prefetch.py # 有序 context 预取与 generation 失效处理
+  ├── market_loop.py      # 有序状态消费、gap/reconcile 与 lane dispatch
   ├── checkpoint_coordinator.py # market progress 与 checkpoint 生命周期
   ├── runtime_cache.py    # managed symbol 保护与冷缓存维护
   ├── market_admission.py # context reload、gate admission 与 telemetry
@@ -193,6 +194,9 @@ live_rollout/
   unresolved-order sync 和 exposure reservation 转移到 `live_rollout/pending_entries.py`；
   submission、scheduled controller 和 runtime cache 通过窄 adapter 使用它，daemon
   不再持有 pending-entry 字典或其同步细节。
+- 已将有序 market-state loop、gap reset、reconcile retry、admission/lane dispatch
+  转移到 `live_rollout/market_loop.py`；daemon 只保留生命周期启动/停止、exit/account
+  事件入口和 composition wiring，旧的 `_is_transient_live_gate` helper 仅保留兼容导出。
 - 这是 P0-1 的渐进切片，属于转移实现所有权而非增加转发壳；`session.py` 当前仍是
   手工 one-shot session，不应把本次改动写成整个 P0-1 已完成。
 
