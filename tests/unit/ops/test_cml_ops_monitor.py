@@ -377,9 +377,29 @@ def test_serverchan_config_and_payload(monkeypatch, tmp_path) -> None:
     assert _serverchan_endpoint(config.serverchan_sendkey).endswith(
         "/SCT-test-key.send"
     )
-    assert form["title"] == "CML告警: container_unhealthy"
-    assert "Live strategy is unhealthy" in form["desp"]
+    assert form["title"] == "CML | 严重 | primary | 服务健康检查失败"
+    assert "[严重] primary：服务健康检查失败" in form["desp"]
+    assert "2026-09-01 20:00:00（北京时间）" in form["desp"]
+    assert "对应服务可能无法正常处理行情、订单或账户任务。" in form["desp"]
     assert "live-strategy" in form["desp"]
+
+
+def test_serverchan_recovery_form_includes_duration_and_local_time() -> None:
+    form = _serverchan_form(
+        {
+            "event": "ops_alert_resolved",
+            "alert_name": "live_heartbeat_stale:account-2",
+            "observed_at": "2026-09-01T12:03:05+00:00",
+            "duration_seconds": 185.0,
+            "details": {"account_label": "account-2"},
+        }
+    )
+
+    assert form["title"] == "CML | 恢复 | account-2 | 实时策略心跳过期"
+    assert "[恢复] account-2：实时策略心跳过期" in form["desp"]
+    assert "2026-09-01 20:03:05（北京时间）" in form["desp"]
+    assert "持续时间**：3 分钟 5 秒" in form["desp"]
+    assert "live_heartbeat_stale:account-2" in form["desp"]
 
 
 def test_serverchan_form_is_url_encoded_for_post() -> None:
@@ -398,6 +418,39 @@ def test_serverchan_form_is_url_encoded_for_post() -> None:
 
     assert decoded["title"] == [form["title"]]
     assert decoded["desp"] == [form["desp"]]
+
+
+def test_resolution_payload_preserves_alert_context_and_duration(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    delivered: list[dict[str, object]] = []
+
+    def capture(_webhook, _sendkey, payload) -> None:
+        delivered.append(dict(payload))
+
+    monkeypatch.setattr(
+        "deploy.ops.cml_ops_monitor._deliver_notification",
+        capture,
+    )
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+    )
+
+    monitor._emit(
+        Alert(
+            "container_unhealthy",
+            "critical",
+            "service health failed",
+            {"service": "live-strategy-account-2"},
+        ),
+        now=100.0,
+    )
+    monitor._emit_resolutions(set(), now=160.0)
+
+    assert delivered[1]["event"] == "ops_alert_resolved"
+    assert delivered[1]["duration_seconds"] == 60.0
+    assert delivered[1]["details"] == {"service": "live-strategy-account-2"}
 
 
 def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(

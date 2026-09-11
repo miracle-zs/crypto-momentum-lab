@@ -27,6 +27,23 @@ monitor supports both the `SCT...` Turbo key and the `sctp...` Server酱³ key;
 the key is never written to Git or logs. A configured Server酱 key takes
 precedence over `CML_ALERT_WEBHOOK_URL`.
 
+Server酱消息使用北京时间，并分成“告警”和“恢复”两类。告警正文先给出
+账户/服务、影响和已执行的处置，再附上内部事件编号和 JSON 技术详情；恢复消息
+会给出恢复时间和本次异常持续时长。例如：
+
+```text
+CML | 严重 | account-2 | 实时策略心跳过期
+
+[严重] account-2：实时策略心跳过期
+- 发生时间：2026-09-11 18:15:00（北京时间）
+- 影响：该账户的行情处理和开平仓任务可能已经停止。
+- 处置：已触发定向重启（第 1 次），等待健康检查恢复。
+- 事件编号：live_heartbeat_stale:account-2
+```
+
+告警同时保留在 journald 中。Server酱负责通知，不代表每一条普通交易日志或
+策略信号都会单独推送；整机断电/断网仍需要 trading host 之外的第二个监控源。
+
 Live heartbeat recovery is bounded per account and per stale incident: it
 waits 15 minutes between restart attempts and stops after three attempts. A
 successful health check clears the stale/recovery alerts and resets that

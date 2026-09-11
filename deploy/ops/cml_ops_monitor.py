@@ -20,7 +20,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -41,6 +41,72 @@ _DEFAULT_ALERT_COOLDOWN_SECONDS = 900.0
 _DEFAULT_COMMAND_TIMEOUT_SECONDS = 15.0
 _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS = 900.0
 _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS = 3
+_BEIJING_TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
+_SEVERITY_LABELS = {
+    "critical": "严重",
+    "warning": "警告",
+    "info": "提示",
+}
+_ALERT_LABELS = {
+    "container_missing": "服务容器缺失",
+    "container_unhealthy": "服务健康检查失败",
+    "container_oom_killed": "服务被内存限制杀死",
+    "container_memory_high": "服务内存占用过高",
+    "rss_growth": "服务内存持续增长",
+    "telemetry_persist_failure": "运行时遥测写入失败",
+    "live_legacy_order_identity_conflict": "订单身份发生冲突",
+    "market_task_not_alive": "行情连接任务停止",
+    "live_session_not_ready": "实时会话未就绪",
+    "live_checkpoint_stale": "实时状态 checkpoint 已过期",
+    "database_check_failed": "数据库健康检查失败",
+    "database_query_stats_unavailable": "数据库查询统计不可用",
+    "database_io_timing_disabled": "数据库 I/O 耗时监控未开启",
+    "database_parallel_maintenance_enabled": "数据库并行维护超过护栏",
+    "live_heartbeat_stale": "实时策略心跳过期",
+    "live_heartbeat_auto_restarted": "实时策略已触发自动重启",
+    "live_heartbeat_restart_failed": "实时策略自动重启失败",
+    "live_heartbeat_restart_suppressed": "实时策略自动重启已达上限",
+    "ops_monitor_failed": "运维监控自身异常",
+}
+_ALERT_IMPACTS = {
+    "container_missing": "对应服务未运行，相关功能不可用。",
+    "container_unhealthy": "对应服务可能无法正常处理行情、订单或账户任务。",
+    "container_oom_killed": "对应服务已被系统终止，相关任务已中断。",
+    "container_memory_high": "服务可能出现性能下降，继续增长可能触发 OOM。",
+    "rss_growth": "服务内存持续增长，后续可能出现性能下降或 OOM。",
+    "telemetry_persist_failure": "运行时诊断数据可能不完整，不代表交易一定已停止。",
+    "live_legacy_order_identity_conflict": "订单与交易所订单的归属可能无法安全关联。",
+    "market_task_not_alive": "策略可能无法持续接收行情，开平仓判断可能受影响。",
+    "live_session_not_ready": "该实时账户未处于可安全运行状态。",
+    "live_checkpoint_stale": "策略状态可能没有及时持久化，重启恢复风险增加。",
+    "database_check_failed": "暂时无法确认实时会话、租约和 checkpoint 是否健康。",
+    "database_query_stats_unavailable": "不影响交易本身，但会降低数据库问题的定位能力。",
+    "database_io_timing_disabled": "无法准确判断数据库 I/O 延迟对交易服务的影响。",
+    "database_parallel_maintenance_enabled": "维护任务可能与交易查询争用数据库资源。",
+    "live_heartbeat_stale": "该账户的行情处理和开平仓任务可能已经停止。",
+    "live_heartbeat_auto_restarted": "该账户可能经历了短暂中断，正在等待健康检查恢复。",
+    "live_heartbeat_restart_failed": "该账户仍可能无法处理行情和订单，需要人工介入。",
+    "live_heartbeat_restart_suppressed": "该账户仍处于异常状态，监控已停止继续自动重启。",
+    "ops_monitor_failed": "监控自身可能无法继续发现新的异常。",
+}
+_ALERT_ACTIONS = {
+    "container_missing": "未自动修复，请检查 Compose 服务和容器状态。",
+    "container_unhealthy": "已记录健康检查失败；若同时存在心跳告警，将由心跳恢复流程定向重启。",
+    "container_oom_killed": "未在此告警中自动处理，请检查内存占用、容器限制和最近日志。",
+    "container_memory_high": "当前未自动重启，请继续观察内存趋势并检查泄漏或缓存增长。",
+    "rss_growth": "当前未自动重启，请检查内存趋势和进程堆积情况。",
+    "telemetry_persist_failure": "已保留告警并继续运行，建议检查 PostgreSQL 延迟和连接池。",
+    "live_legacy_order_identity_conflict": "请暂停相关排障范围内的自动处理并核对订单归属。",
+    "market_task_not_alive": "请检查行情连接、网络和策略进程；本告警不代表已自动恢复。",
+    "live_session_not_ready": "请检查实时会话、租约和 checkpoint；未确认安全前不要扩大交易范围。",
+    "live_checkpoint_stale": "请检查 PostgreSQL、策略进程和 checkpoint 写入延迟。",
+    "database_check_failed": "请检查 PostgreSQL 容器、连接和监控查询权限。",
+    "database_query_stats_unavailable": "请在低风险窗口启用 pg_stat_statements。",
+    "database_io_timing_disabled": "请核对 PostgreSQL 的 I/O timing 配置。",
+    "database_parallel_maintenance_enabled": "请核对维护参数，避免与实时交易查询争用资源。",
+    "live_heartbeat_stale": "已发现心跳过期；若自动恢复未启用，需要人工检查策略进程。",
+    "ops_monitor_failed": "请检查 cml-ops-monitor.service 和 journald 日志。",
+}
 _COMPOSE_SERVICE_HEADER = re.compile(
     r"^  (?P<service>[A-Za-z0-9][A-Za-z0-9_-]*):\s*$"
 )
@@ -1035,6 +1101,13 @@ SELECT 'parallel_maintenance' || E'\\t' || current_setting(
         ):
             return
         active[alert.name] = now
+        contexts = self._state.setdefault("active_alert_context", {})
+        if isinstance(contexts, dict):
+            contexts[alert.name] = {
+                "severity": alert.severity,
+                "summary": alert.summary,
+                "details": dict(alert.details),
+            }
         payload = {
             "event": "ops_alert",
             "observed_at": datetime.fromtimestamp(now, UTC).isoformat(),
@@ -1052,13 +1125,26 @@ SELECT 'parallel_maintenance' || E'\\t' || current_setting(
 
     def _emit_resolutions(self, active_keys: set[str], *, now: float) -> None:
         active = self._state.setdefault("active_alerts", {})
+        contexts = self._state.setdefault("active_alert_context", {})
         for name in tuple(active):
             if name in active_keys:
                 continue
+            previous = active.get(name)
+            duration_seconds = (
+                round(now - previous, 3)
+                if isinstance(previous, (int, float))
+                else None
+            )
+            context = contexts.get(name) if isinstance(contexts, dict) else None
+            context = context if isinstance(context, Mapping) else {}
             payload = {
                 "event": "ops_alert_resolved",
                 "observed_at": datetime.fromtimestamp(now, UTC).isoformat(),
                 "alert_name": name,
+                "severity": context.get("severity", "critical"),
+                "summary": context.get("summary", ""),
+                "details": context.get("details", {}),
+                "duration_seconds": duration_seconds,
             }
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
             _deliver_notification(
@@ -1067,6 +1153,8 @@ SELECT 'parallel_maintenance' || E'\\t' || current_setting(
                 payload,
             )
             active.pop(name, None)
+            if isinstance(contexts, dict):
+                contexts.pop(name, None)
 
 
 def _parse_log_record(line: str) -> dict[str, object]:
@@ -1270,31 +1358,137 @@ def _serverchan_endpoint(sendkey: str) -> str:
     return f"https://sctapi.ftqq.com/{urllib.parse.quote(key, safe='')}.send"
 
 
+def _split_alert_name(alert_name: str) -> tuple[str, str | None]:
+    base_name, separator, scope = alert_name.partition(":")
+    return base_name, scope if separator and scope else None
+
+
+def _service_scope(service: object) -> str | None:
+    if not isinstance(service, str) or not service:
+        return None
+    if service == "live-strategy":
+        return "primary"
+    for prefix in ("live-strategy-", "execution-account-live-"):
+        if service.startswith(prefix):
+            return service.removeprefix(prefix)
+    return service
+
+
+def _alert_scope(alert_name: str, details: Mapping[str, object]) -> str | None:
+    account_label = details.get("account_label")
+    if account_label:
+        return str(account_label)
+    service_scope = _service_scope(details.get("service"))
+    if service_scope:
+        return service_scope
+    _base_name, suffix = _split_alert_name(alert_name)
+    return suffix
+
+
+def _friendly_alert_label(alert_name: str, summary: str = "") -> str:
+    base_name, _scope = _split_alert_name(alert_name)
+    return _ALERT_LABELS.get(base_name, summary or base_name)
+
+
+def _severity_label(severity: object) -> str:
+    normalized = str(severity or "critical").lower()
+    return _SEVERITY_LABELS.get(normalized, normalized.upper())
+
+
+def _format_alert_time(value: object) -> str:
+    raw_value = str(value or "")
+    try:
+        parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        return raw_value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(_BEIJING_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _format_duration(seconds: object) -> str:
+    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool):
+        return "未知"
+    total_seconds = max(0, int(round(seconds)))
+    minutes, remainder = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours} 小时 {minutes} 分钟"
+    if minutes:
+        return f"{minutes} 分钟 {remainder} 秒"
+    return f"{remainder} 秒"
+
+
+def _alert_impact(alert_name: str, details: Mapping[str, object]) -> str:
+    base_name, _scope = _split_alert_name(alert_name)
+    impact = _ALERT_IMPACTS.get(base_name)
+    if impact is not None:
+        return impact
+    service = _alert_scope(alert_name, details) or "相关服务"
+    return f"{service} 可能存在异常，需要进一步确认。"
+
+
+def _alert_action(alert_name: str, details: Mapping[str, object]) -> str:
+    base_name, _scope = _split_alert_name(alert_name)
+    if base_name == "live_heartbeat_stale":
+        attempt = details.get("attempt")
+        if attempt:
+            return f"已触发定向重启（第 {attempt} 次），等待健康检查恢复。"
+        restart_attempts = details.get("restart_attempts")
+        if restart_attempts:
+            return "已触发过自动重启，目前正在等待冷却或健康检查恢复。"
+    if base_name == "live_heartbeat_auto_restarted":
+        return "已执行定向重启，目前等待健康检查恢复。"
+    if base_name == "live_heartbeat_restart_failed":
+        return "自动重启失败，需要人工检查容器、日志和数据库。"
+    if base_name == "live_heartbeat_restart_suppressed":
+        return "已达到自动重启上限，不再继续重启，需要人工处理。"
+    return _ALERT_ACTIONS.get(
+        base_name,
+        "已记录告警，建议结合技术详情检查相关服务。",
+    )
+
+
 def _serverchan_form(payload: Mapping[str, object]) -> dict[str, str]:
     event = str(payload.get("event", "ops_alert"))
     alert_name = str(payload.get("alert_name", "ops_monitor"))
+    summary = str(payload.get("summary", ""))
+    raw_details = payload.get("details", {})
+    details = raw_details if isinstance(raw_details, Mapping) else {}
+    scope = _alert_scope(alert_name, details)
+    label = _friendly_alert_label(alert_name, summary)
     if event == "ops_alert":
-        severity = str(payload.get("severity", "critical")).upper()
-        title = f"CML告警: {alert_name}"
-        summary = str(payload.get("summary", "Operational alert"))
-        details = payload.get("details", {})
+        severity = _severity_label(payload.get("severity", "critical"))
+        title_parts = ["CML", severity]
+        if scope:
+            title_parts.append(scope)
+        title_parts.append(label)
+        title = " | ".join(title_parts)
         body = [
-            f"## {summary}",
-            f"- **级别**：`{severity}`",
-            f"- **告警**：`{alert_name}`",
-            f"- **时间**：`{payload.get('observed_at', '')}",
+            f"## [{severity}] {scope + '：' if scope else ''}{label}",
+            f"- **发生时间**：{_format_alert_time(payload.get('observed_at'))}（北京时间）",
+            f"- **影响**：{_alert_impact(alert_name, details)}",
+            f"- **处置**：{_alert_action(alert_name, details)}",
+            f"- **事件编号**：`{alert_name}`",
         ]
         if details:
             body.append(
-                "- **详情**：\n```json\n"
+                "- **技术详情**：\n```json\n"
                 + json.dumps(details, ensure_ascii=False, sort_keys=True)
                 + "\n```"
             )
     else:
-        title = f"CML恢复: {alert_name}"
+        title_parts = ["CML", "恢复"]
+        if scope:
+            title_parts.append(scope)
+        title_parts.append(label)
+        title = " | ".join(title_parts)
         body = [
-            f"## 监控恢复：{alert_name}",
-            f"- **时间**：{payload.get('observed_at', '')}",
+            f"## [恢复] {scope + '：' if scope else ''}{label}",
+            f"- **恢复时间**：{_format_alert_time(payload.get('observed_at'))}（北京时间）",
+            f"- **持续时间**：{_format_duration(payload.get('duration_seconds'))}",
+            "- **当前状态**：监控已恢复，后续将继续观察。",
+            f"- **原告警编号**：`{alert_name}`",
         ]
     return {
         "title": " ".join(title.split())[:32],
