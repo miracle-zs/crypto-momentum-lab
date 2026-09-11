@@ -1162,6 +1162,17 @@ def _classify_live_positions_detailed(
             )
             for order in position_orders
         )
+    position_orders, binding_unresolved_identity_ids = (
+        _repair_legacy_exit_batch_bindings(
+            position_orders,
+            identity_events=identity_events,
+            account_fill_quantities=fill_quantities,
+            fill_times=fill_times,
+        )
+    )
+    blocked_identity_ids = (
+        unresolved_identity_ids | binding_unresolved_identity_ids
+    )
     managed: list[ManagedLivePosition] = []
     pending: set[str] = set()
     unmanaged: set[str] = set()
@@ -1179,7 +1190,7 @@ def _classify_live_positions_detailed(
             and order.position_side is position_side
         ]
         if any(
-            order.client_order_id in unresolved_identity_ids
+            order.client_order_id in blocked_identity_ids
             for order in matching_orders
         ):
             log.critical(
@@ -1190,7 +1201,7 @@ def _classify_live_positions_detailed(
                     {
                         order.client_order_id
                         for order in matching_orders
-                        if order.client_order_id in unresolved_identity_ids
+                        if order.client_order_id in blocked_identity_ids
                     }
                 ),
                 reason="legacy_order_identity_not_reconstructible",
@@ -1476,6 +1487,88 @@ def _normalise_position_orders(
         seen_keys.add(key)
         normalised.append(order)
     return tuple(normalised)
+
+
+def _repair_legacy_exit_batch_bindings(
+    orders: Sequence[_PositionOrder],
+    *,
+    identity_events: Mapping[
+        str,
+        Sequence[ExchangeOrderEventRow],
+    ],
+    account_fill_quantities: Mapping[str, Decimal],
+    fill_times: Mapping[str, datetime],
+) -> tuple[tuple[_PositionOrder, ...], frozenset[str]]:
+    """Replace stale legacy exit bindings with the nearest prior entry.
+
+    A reused client ID can carry an old ``batch_id`` in
+    ``order_intent_executions``.  Once the exchange attempts are split, the
+    attempt timestamp gives us a stronger identity boundary than that stale
+    metadata: a reduce-only SELL belongs to the latest filled LONG entry
+    before that attempt (and vice versa).  If that boundary cannot be proven,
+    fail closed for the affected client ID instead of retaining a wrong lot.
+    """
+
+    reconstructible_ids = frozenset(
+        client_order_id
+        for client_order_id, events in identity_events.items()
+        if _legacy_order_identity_is_ambiguous(events)
+        and _legacy_order_identity_is_reconstructible(
+            events,
+            account_fill_quantities,
+        )
+    )
+    if not reconstructible_ids:
+        return tuple(orders), frozenset()
+    entry_orders = tuple(
+        order
+        for order in orders
+        if not order.reduce_only
+        and _is_entry_fill_observed(order, fill_times)
+    )
+    repaired: list[_PositionOrder] = []
+    unresolved: set[str] = set()
+    for order in orders:
+        client_order_id = order.client_order_id
+        if (
+            not order.reduce_only
+            or client_order_id not in reconstructible_ids
+        ):
+            repaired.append(order)
+            continue
+        exit_side = (
+            StrategySide.LONG
+            if order.side == "SELL"
+            else StrategySide.SHORT
+        )
+        candidates = [
+            entry
+            for entry in entry_orders
+            if entry.symbol == order.symbol
+            and entry.position_side is order.position_side
+            and _opening_order_matches_side(entry.side, exit_side)
+            and _order_entry_time(entry, fill_times) <= order.created_at
+        ]
+        if not candidates:
+            unresolved.add(client_order_id)
+            repaired.append(order)
+            continue
+        target = max(
+            candidates,
+            key=lambda entry: (
+                _order_entry_time(entry, fill_times),
+                entry.updated_at,
+                entry.created_at,
+            ),
+        )
+        repaired.append(
+            replace(
+                order,
+                exit_batch_id=_batch_id_for_entry(target),
+                legacy_exit_attribution=False,
+            )
+        )
+    return tuple(repaired), frozenset(unresolved)
 
 
 def _legacy_order_identity_is_ambiguous(

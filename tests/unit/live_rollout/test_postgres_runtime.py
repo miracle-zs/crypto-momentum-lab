@@ -824,6 +824,8 @@ def test_reused_client_id_exit_attempts_are_kept_as_separate_batches() -> None:
 
 
 def test_reused_client_id_is_split_from_event_ledger_before_batch_attribution() -> None:
+    prior_at = NOW - timedelta(days=1)
+    prior_exit_at = prior_at + timedelta(minutes=10)
     old_at = NOW
     first_exit_at = old_at + timedelta(minutes=10)
     second_exit_at = old_at + timedelta(minutes=11)
@@ -861,6 +863,27 @@ def test_reused_client_id_is_split_from_event_ledger_before_batch_attribution() 
             _order(
                 reduce_only=False,
                 side="BUY",
+                quantity=Decimal("1371"),
+                executed_quantity=Decimal("1371"),
+                created_at=prior_at,
+                updated_at=prior_at,
+                exchange_order_id="stale-entry-exchange",
+                client_order_id="stale-entry",
+            ),
+            _order(
+                reduce_only=True,
+                side="SELL",
+                quantity=Decimal("1371"),
+                executed_quantity=Decimal("0"),
+                state=ExchangeOrderState.CANCELED.value,
+                created_at=prior_exit_at,
+                updated_at=prior_exit_at,
+                exchange_order_id="stale-exit-exchange",
+                client_order_id="stale-exit",
+            ),
+            _order(
+                reduce_only=False,
+                side="BUY",
                 quantity=Decimal("1786"),
                 executed_quantity=Decimal("1786"),
                 created_at=old_at,
@@ -881,8 +904,9 @@ def test_reused_client_id_is_split_from_event_ledger_before_batch_attribution() 
             ),
         ],
         exit_batch_ids={
-            "reused-exit": "BTCUSDT:LONG:old-entry",
+            "reused-exit": "BTCUSDT:LONG:stale-entry",
         },
+        legacy_exit_order_ids=frozenset({"stale-exit"}),
         order_identity_events=identity_events,
         account_fill_quantities={
             "reused-exit-a": Decimal("1371"),
