@@ -321,13 +321,17 @@ def test_downsample_equity_snapshots_caps_result_to_latest_240_buckets() -> None
     assert sampled[-1].snapshot_id == "241"
 
 
-def test_dashboard_uses_latest_checkpoint_without_append_only_events() -> None:
-    source = Path(
+def test_dashboard_facade_keeps_telemetry_query_in_its_domain_module() -> None:
+    facade_source = Path(
         "src/crypto_momentum_lab/operator_dashboard/queries.py"
     ).read_text(encoding="utf-8")
+    telemetry_source = Path(
+        "src/crypto_momentum_lab/operator_dashboard/telemetry_queries.py"
+    ).read_text(encoding="utf-8")
 
-    assert "StrategyRuntimeCheckpointRow" in source
-    assert "StrategyRuntimeEventRow" in source
+    assert "StrategyRuntimeCheckpointRow" in facade_source
+    assert "StrategyRuntimeEventRow" not in facade_source
+    assert "StrategyRuntimeEventRow" in telemetry_source
 
 
 def test_decision_slo_response_aggregates_latency_health_and_reasons() -> None:

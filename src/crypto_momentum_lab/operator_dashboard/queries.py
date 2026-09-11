@@ -1,6 +1,4 @@
-import asyncio
 import json
-import math
 import os
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -8,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Literal, TypedDict, cast
+from typing import Literal, cast
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
@@ -31,14 +29,17 @@ from sqlalchemy.sql.selectable import Values
 
 from crypto_momentum_lab.domain.execution import ExchangeOrderState
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.operator_dashboard import (
+    overview_queries as _overview_queries,
+)
+from crypto_momentum_lab.operator_dashboard import (
+    telemetry_queries as _telemetry_queries,
+)
 from crypto_momentum_lab.operator_dashboard.collector_status import (
     DEFAULT_RESEARCH_COLLECTOR_ROOT,
-    read_research_collector_status,
 )
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
-    DecisionSLOConsumerResponse,
-    DecisionSLOLatencyResponse,
     DecisionSLOResponse,
     LiveAccountMetricPointResponse,
     LiveAccountMetricsAccountResponse,
@@ -53,7 +54,6 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     ResearchCollectorResponse,
     RiskExecutionResponse,
     RunReportSummaryResponse,
-    ServiceStatusResponse,
     StrategyRunResponse,
     SystemOverviewResponse,
     UniverseStatusResponse,
@@ -73,7 +73,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ExecutionAccountProcessStateRow,
     LiveSessionTransitionRow,
     LiveStrategySignalRow,
-    MonitoringMembershipRow,
     OrderIntentCandidateRow,
     OrderIntentExecutionRow,
     PaperEquitySnapshotRow,
@@ -81,16 +80,12 @@ from crypto_momentum_lab.persistence.postgres.models import (
     PaperPositionRow,
     RiskEvaluationRow,
     RiskHaltRow,
-    RuntimeMarketState15sRow,
     ShadowSessionRow,
     StrategyLiveStateRow,
     StrategyRunRow,
     StrategyRuntimeCheckpointRow,
-    StrategyRuntimeEventRow,
     StrategySignalRow,
     TradingLeaseRow,
-    UniverseEntryRow,
-    UniverseSnapshotRow,
 )
 
 _EQUITY_WINDOW = timedelta(hours=24)
@@ -115,242 +110,21 @@ _CONFIRMED_OPEN_ORDER_STATES = frozenset(
         ExchangeOrderState.PARTIALLY_FILLED.value,
     }
 )
-_DECISION_SLO_WINDOWS = {
-    "1h": timedelta(hours=1),
-    "6h": timedelta(hours=6),
-    "24h": timedelta(hours=24),
-    "7d": timedelta(days=7),
-}
-_DECISION_SLO_MAX_EVENTS = 50_000
-_DECISION_SLO_LATENCY_KEY = "decision_slo_latency_ms"
-_CONSUMER_HEALTH_EVENT = "consumer_health"
-_TERMINAL_REASON_EVENTS = frozenset(
-    {"terminal_reason", "trace_terminated"}
+
+DecisionSLOQueries = _telemetry_queries.DecisionSLOQueries
+_decision_slo_response = _telemetry_queries._decision_slo_response
+_latest_live_account_process_statement = (
+    _overview_queries.latest_live_account_process_statement
 )
-_DECISION_SLO_EVENT_TYPES = (
-    "candidate_accepted",
-    "risk_approved",
-    "intent_saved",
-    "submitting",
-    "exchange_request_started",
-    "exchange_response_received",
-    "exchange_filled",
-    "account_fill",
-    _CONSUMER_HEALTH_EVENT,
-    "terminal_reason",
-    "trace_terminated",
-)
-
-
-class _DecisionSLOConsumerStats(TypedDict):
-    observed_event_count: int
-    recovery_count: int
-    unavailable_event_count: int
-    lag_event_count: int
-    last_available: bool | None
-    last_recovery_reason: str | None
-    last_observed_at: datetime | None
-
-
-def _latest_live_account_process_statement() -> Select[Any]:
-    """Load one current process state per live account.
-
-    The dashboard treats account labels as separate operational units.  A
-    grouped latest-row lookup keeps the fleet endpoint bounded even when the
-    append-only process-state table has accumulated a long history.
-    """
-    latest = (
-        select(
-            ExecutionAccountProcessStateRow.account_label,
-            func.max(ExecutionAccountProcessStateRow.occurred_at).label(
-                "latest_occurred_at"
-            ),
-        )
-        .where(ExecutionAccountProcessStateRow.environment == "live")
-        .group_by(ExecutionAccountProcessStateRow.account_label)
-        .subquery("latest_live_account_process")
-    )
-    return (
-        select(ExecutionAccountProcessStateRow)
-        .join(
-            latest,
-            and_(
-                ExecutionAccountProcessStateRow.account_label
-                == latest.c.account_label,
-                ExecutionAccountProcessStateRow.occurred_at
-                == latest.c.latest_occurred_at,
-                ExecutionAccountProcessStateRow.environment == "live",
-            ),
-        )
-        .order_by(ExecutionAccountProcessStateRow.account_label)
-    )
-
-
-def _account_label_sort_key(account_label: str) -> tuple[int, int | str]:
-    """Keep the canonical fleet order while allowing custom labels."""
-    if account_label == "primary":
-        return (0, 0)
-    suffix = account_label.removeprefix("account-")
-    return (1, int(suffix)) if suffix.isdigit() else (2, account_label)
-
-
-def _live_account_status(state: str | None) -> OperationalStatus:
-    if state is None:
-        return OperationalStatus.UNKNOWN
-    return (
-        OperationalStatus.READY
-        if state == "ready_readonly"
-        else OperationalStatus.HALTED
-    )
-
-
-def _live_account_fleet_status(
-    accounts: Sequence[LiveAccountSummaryResponse],
-) -> OperationalStatus:
-    if not accounts:
-        return OperationalStatus.NO_DATA
-    return (
-        OperationalStatus.READY
-        if all(account.status is OperationalStatus.READY for account in accounts)
-        else OperationalStatus.HALTED
-    )
-
-
-def _decision_slo_response(
-    rows: Sequence[Any],
-    *,
-    window: str,
-    window_start: datetime,
-    window_end: datetime,
-    truncated: bool,
-) -> DecisionSLOResponse:
-    latency_samples: dict[str, list[float]] = {}
-    terminal_reasons: dict[str, dict[str, dict[str, int]]] = {}
-    consumer_stats: dict[str, _DecisionSLOConsumerStats] = {}
-    for row in rows:
-        details = row.details if isinstance(row.details, Mapping) else {}
-        recorded_transitions: set[str] = set()
-        decision_slo_latencies = details.get(_DECISION_SLO_LATENCY_KEY)
-        if isinstance(decision_slo_latencies, Mapping):
-            for transition, raw_latency in decision_slo_latencies.items():
-                transition_name = _slo_text(transition)
-                latency = _non_negative_float(raw_latency)
-                if transition_name is None or latency is None:
-                    continue
-                latency_samples.setdefault(transition_name, []).append(latency)
-                recorded_transitions.add(transition_name)
-        previous_phase = details.get("previous_phase")
-        latency = _non_negative_float(details.get("latency_ms_from_previous"))
-        if previous_phase is not None and latency is not None:
-            transition = f"{previous_phase}->{row.event_type}"
-            if transition not in recorded_transitions:
-                latency_samples.setdefault(transition, []).append(latency)
-
-        if row.event_type in _TERMINAL_REASON_EVENTS:
-            reason = _slo_text(details.get("reason"))
-            if reason is not None:
-                lane = _slo_text(details.get("lane")) or "unknown"
-                source = _slo_text(details.get("trigger_source")) or "unknown"
-                lane_summary = terminal_reasons.setdefault(lane, {})
-                source_summary = lane_summary.setdefault(source, {})
-                source_summary[reason] = source_summary.get(reason, 0) + 1
-
-        if row.event_type != _CONSUMER_HEALTH_EVENT:
-            continue
-        consumer = _slo_text(details.get("consumer")) or "unknown"
-        stats = consumer_stats.setdefault(
-            consumer,
-            {
-                "observed_event_count": 0,
-                "recovery_count": 0,
-                "unavailable_event_count": 0,
-                "lag_event_count": 0,
-                "last_available": None,
-                "last_recovery_reason": None,
-                "last_observed_at": None,
-            },
-        )
-        stats["observed_event_count"] = int(stats["observed_event_count"]) + 1
-        if details.get("lag") is True:
-            stats["lag_event_count"] = int(stats["lag_event_count"]) + 1
-        if details.get("recovery") is True:
-            stats["recovery_count"] = int(stats["recovery_count"]) + 1
-            recovery_reason = _slo_text(details.get("reason"))
-            if recovery_reason is not None:
-                stats["last_recovery_reason"] = recovery_reason
-        if details.get("available") is False:
-            stats["unavailable_event_count"] = (
-                int(stats["unavailable_event_count"]) + 1
-            )
-        observed_at = row.occurred_at
-        last_observed_at = stats["last_observed_at"]
-        if last_observed_at is None or observed_at > last_observed_at:
-            stats["last_observed_at"] = observed_at
-            available = details.get("available")
-            stats["last_available"] = (
-                available if isinstance(available, bool) else None
-            )
-
-    return DecisionSLOResponse(
-        status=(
-            OperationalStatus.READY
-            if rows
-            else OperationalStatus.NO_DATA
-        ),
-        window=cast(Literal["1h", "6h", "24h", "7d"], window),
-        window_start=window_start,
-        window_end=window_end,
-        persisted_event_count=len(rows),
-        truncated=truncated,
-        phase_latency={
-            transition: DecisionSLOLatencyResponse(
-                sample_count=len(values),
-                p50_ms=_percentile(values, 0.50),
-                p95_ms=_percentile(values, 0.95),
-                max_ms=max(values),
-            )
-            for transition, values in sorted(latency_samples.items())
-        },
-        terminal_reasons=terminal_reasons,
-        consumers=[
-            DecisionSLOConsumerResponse(
-                consumer=consumer,
-                observed_event_count=int(stats["observed_event_count"]),
-                recovery_count=int(stats["recovery_count"]),
-                unavailable_event_count=int(stats["unavailable_event_count"]),
-                lag_event_count=int(stats["lag_event_count"]),
-                last_available=stats["last_available"],
-                last_recovery_reason=stats["last_recovery_reason"],
-                last_observed_at=stats["last_observed_at"],
-            )
-            for consumer, stats in sorted(consumer_stats.items())
-        ],
-    )
-
-
-def _non_negative_float(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    result = float(value)
-    return result if math.isfinite(result) and result >= 0 else None
-
-
-def _slo_text(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip()
-    return normalized or None
-
-
-def _percentile(values: list[float], percentile: float) -> float:
-    ordered = sorted(values)
-    position = (len(ordered) - 1) * percentile
-    lower_index = int(position)
-    upper_index = min(lower_index + 1, len(ordered) - 1)
-    weight = position - lower_index
-    return ordered[lower_index] + (
-        ordered[upper_index] - ordered[lower_index]
-    ) * weight
+_account_label_sort_key = _overview_queries.account_label_sort_key
+_live_account_status = _overview_queries.live_account_status
+_live_account_fleet_status = _overview_queries.live_account_fleet_status
+_live_account_summaries = _overview_queries.live_account_summaries
+_service = _overview_queries.service
+_live_observation = _overview_queries.live_observation
+_age = _overview_queries.age
+_universe_entry = _overview_queries.universe_entry
+_universe_membership = _overview_queries.universe_membership
 
 
 @dataclass(frozen=True, slots=True)
@@ -1104,6 +878,10 @@ async def _session_scope(
 
 
 class DashboardQueries:
+    _live_account_summaries = staticmethod(
+        _overview_queries.live_account_summaries
+    )
+
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -1131,161 +909,31 @@ class DashboardQueries:
             else _as_utc(common_equity_start_at)
         )
         self._research_collector_root = research_collector_root
+        self._telemetry_queries = DecisionSLOQueries(
+            session_factory,
+            clock=self._clock,
+        )
+        self._overview_queries = _overview_queries.OverviewQueries(
+            session_factory,
+            clock=self._clock,
+            stale_after_seconds=self._stale_after_seconds,
+            research_collector_root=self._research_collector_root,
+        )
 
     async def health(self) -> dict[str, str]:
-        async with self._session_factory() as session:
-            await session.execute(text("SELECT 1"))
-        return {"app_status": "UP", "database_status": "UP"}
+        return await self._overview_queries.health()
 
     async def decision_slo(
         self,
         window: str = "24h",
     ) -> DecisionSLOResponse:
-        """Aggregate bounded historical decision and consumer telemetry."""
-
-        duration = _DECISION_SLO_WINDOWS.get(window)
-        if duration is None:
-            raise ValueError(
-                "window must be one of: "
-                + ", ".join(sorted(_DECISION_SLO_WINDOWS))
-            )
-        window_end = _as_utc(self._clock())
-        window_start = window_end - duration
-        async with self._session_factory() as session:
-            rows = list(
-                (
-                    await session.scalars(
-                        select(StrategyRuntimeEventRow)
-                        .where(
-                            StrategyRuntimeEventRow.occurred_at >= window_start,
-                            StrategyRuntimeEventRow.occurred_at <= window_end,
-                            StrategyRuntimeEventRow.event_type.in_(
-                                _DECISION_SLO_EVENT_TYPES
-                            ),
-                        )
-                        .order_by(StrategyRuntimeEventRow.occurred_at.desc())
-                        .limit(_DECISION_SLO_MAX_EVENTS + 1)
-                    )
-                ).all()
-            )
-        truncated = len(rows) > _DECISION_SLO_MAX_EVENTS
-        if truncated:
-            rows = rows[:_DECISION_SLO_MAX_EVENTS]
-        return _decision_slo_response(
-            rows,
-            window=window,
-            window_start=window_start,
-            window_end=window_end,
-            truncated=truncated,
-        )
+        return await self._telemetry_queries.decision_slo(window)
 
     async def research_collector(self) -> ResearchCollectorResponse:
-        return await asyncio.to_thread(
-            read_research_collector_status,
-            self._research_collector_root,
-            now=self._clock(),
-        )
-
-    @staticmethod
-    def _live_account_summaries(
-        processes: Sequence[ExecutionAccountProcessStateRow],
-        strategy_states: Sequence[StrategyLiveStateRow],
-        leases: Sequence[TradingLeaseRow],
-    ) -> list[LiveAccountSummaryResponse]:
-        """Join current process, strategy, and lease state by account label."""
-        process_by_account = {row.account_label: row for row in processes}
-        strategy_by_account: dict[str, StrategyLiveStateRow] = {}
-        for row in sorted(
-            strategy_states,
-            key=lambda item: item.changed_at,
-            reverse=True,
-        ):
-            strategy_by_account.setdefault(row.account_label, row)
-        lease_by_account = {row.account_label: row for row in leases}
-        account_labels = sorted(
-            set(process_by_account)
-            | set(strategy_by_account)
-            | set(lease_by_account),
-            key=_account_label_sort_key,
-        )
-        summaries: list[LiveAccountSummaryResponse] = []
-        for account_label in account_labels:
-            strategy = strategy_by_account.get(account_label)
-            lease = lease_by_account.get(account_label)
-            summaries.append(
-                LiveAccountSummaryResponse(
-                    account_label=account_label,
-                    environment=(
-                        process_by_account[account_label].environment
-                        if account_label in process_by_account
-                        else "live"
-                    ),
-                    status=_live_account_status(
-                        None
-                        if account_label not in process_by_account
-                        else process_by_account[account_label].state
-                    ),
-                    readiness=(
-                        process_by_account[account_label].state
-                        if account_label in process_by_account
-                        else "missing"
-                    ),
-                    observed_at=(
-                        process_by_account[account_label].occurred_at
-                        if account_label in process_by_account
-                        else None
-                    ),
-                    strategy_name=(
-                        strategy.strategy_name
-                        if strategy is not None
-                        else lease.strategy_name
-                        if lease is not None
-                        else None
-                    ),
-                    strategy_state=(
-                        strategy.state
-                        if strategy is not None
-                        else None
-                    ),
-                    lease_expires_at=(
-                        lease.expires_at
-                        if lease is not None
-                        else None
-                    ),
-                )
-            )
-        return summaries
+        return await self._overview_queries.research_collector()
 
     async def live_accounts(self) -> LiveAccountsResponse:
-        """Return a small, bounded operational snapshot for every live account."""
-        now = self._clock()
-        async with self._session_factory() as session:
-            processes = (
-                await session.scalars(_latest_live_account_process_statement())
-            ).all()
-            strategy_states = (
-                await session.scalars(
-                    select(StrategyLiveStateRow).where(
-                        StrategyLiveStateRow.environment == "live"
-                    )
-                )
-            ).all()
-            leases = (
-                await session.scalars(
-                    select(TradingLeaseRow)
-                    .where(
-                        TradingLeaseRow.environment == "live",
-                        TradingLeaseRow.state == "active",
-                        TradingLeaseRow.expires_at > now,
-                    )
-                    .order_by(TradingLeaseRow.expires_at.desc())
-                )
-            ).all()
-        accounts = self._live_account_summaries(processes, strategy_states, leases)
-        return LiveAccountsResponse(
-            status=_live_account_fleet_status(accounts),
-            accounts=accounts,
-        )
+        return await self._overview_queries.live_accounts()
 
     async def live_account_metrics(
         self,
@@ -1387,206 +1035,10 @@ class DashboardQueries:
         )
 
     async def overview(self) -> SystemOverviewResponse:
-        now = self._clock()
-        async with self._session_factory() as session:
-            market_at = await session.scalar(
-                select(RuntimeMarketState15sRow.bucket_end)
-                .order_by(RuntimeMarketState15sRow.bucket_start.desc())
-                .limit(1)
-            )
-            account_rows = (
-                await session.scalars(_latest_live_account_process_statement())
-            ).all()
-            account = max(
-                account_rows,
-                key=lambda row: row.occurred_at,
-                default=None,
-            )
-            strategy_at = await session.scalar(_latest_checkpoint_at_statement())
-            halt_count = await session.scalar(
-                select(func.count(RiskHaltRow.halt_id)).where(
-                    RiskHaltRow.active.is_(True)
-                )
-            )
-            strategy_states = (
-                await session.scalars(
-                    select(StrategyLiveStateRow).where(
-                        StrategyLiveStateRow.environment == "live"
-                    )
-                )
-            ).all()
-            leases = (
-                await session.scalars(
-                    select(TradingLeaseRow)
-                    .where(
-                        TradingLeaseRow.environment == "live",
-                        TradingLeaseRow.state == "active",
-                        TradingLeaseRow.expires_at > now,
-                    )
-                    .order_by(TradingLeaseRow.expires_at.desc())
-                )
-            ).all()
-            lease = leases[0] if leases else None
-            live = await session.scalar(
-                select(LiveSessionTransitionRow)
-                .order_by(LiveSessionTransitionRow.occurred_at.desc())
-                .limit(1)
-            )
-            live_heartbeat_at = None
-            live_started_at = None
-            if live is not None:
-                # A runtime checkpoint is meaningful for the current session
-                # only after the daemon has entered live_enabled. During
-                # preflight retries, an older checkpoint would make a healthy
-                # retry loop look dead in the dashboard.
-                live_heartbeat_at = await session.scalar(
-                    select(StrategyRuntimeCheckpointRow.saved_at).where(
-                        StrategyRuntimeCheckpointRow.run_id == live.session_id
-                    )
-                )
-                live_started_at = await session.scalar(
-                    select(LiveSessionTransitionRow.occurred_at)
-                    .where(
-                        LiveSessionTransitionRow.session_id == live.session_id,
-                        LiveSessionTransitionRow.state == "live_enabled",
-                    )
-                    .order_by(LiveSessionTransitionRow.occurred_at.desc())
-                    .limit(1)
-                )
-        account_at = None if account is None else account.occurred_at
-        account_statuses = self._live_account_summaries(
-            account_rows,
-            strategy_states=strategy_states,
-            leases=leases,
-        )
-        services = [
-            _service("market-data", now, market_at, self._stale_after_seconds),
-            _service("execution-account", now, account_at, self._stale_after_seconds),
-            _service("strategy-runner", now, strategy_at, self._stale_after_seconds),
-            ServiceStatusResponse(
-                name="database",
-                status=OperationalStatus.READY,
-                observed_at=now,
-                age_seconds=0,
-            ),
-        ]
-        if live is not None:
-            live_status = (
-                OperationalStatus.LIVE
-                if live.state == "live_enabled"
-                else OperationalStatus.HALTED
-                if live.state == "halted"
-                else OperationalStatus.SHADOW
-            )
-            live_observed_at, heartbeat_source = _live_observation(
-                state=live.state,
-                runtime_checkpoint_at=live_heartbeat_at,
-                transition_at=live.occurred_at,
-            )
-            live_details: dict[str, JsonValue] = {
-                "state": live.state,
-                "session_id": live.session_id,
-                "heartbeat_source": heartbeat_source,
-            }
-            if live_started_at is not None:
-                live_details["started_at"] = live_started_at.isoformat()
-            services.append(
-                ServiceStatusResponse(
-                    name="live-rollout",
-                    status=live_status,
-                    observed_at=live_observed_at,
-                    age_seconds=_age(now, live_observed_at),
-                    details=live_details,
-                )
-            )
-        return SystemOverviewResponse(
-            generated_at=now,
-            database_status=OperationalStatus.READY,
-            services=services,
-            active_halt_count=int(halt_count or 0),
-            active_lease=None
-            if lease is None
-            else {
-                "account_label": lease.account_label,
-                "strategy_name": lease.strategy_name,
-                "owner": lease.owner,
-                "expires_at": lease.expires_at.isoformat(),
-            },
-            active_leases=[
-                {
-                    "account_label": item.account_label,
-                    "strategy_name": item.strategy_name,
-                    "owner": item.owner,
-                    "expires_at": item.expires_at.isoformat(),
-                }
-                for item in leases
-            ],
-            account_statuses=account_statuses,
-        )
+        return await self._overview_queries.overview()
 
     async def universe(self) -> UniverseStatusResponse:
-        async with self._session_factory() as session:
-            snapshot = await session.scalar(
-                select(UniverseSnapshotRow)
-                .where(UniverseSnapshotRow.activated.is_(True))
-                .order_by(UniverseSnapshotRow.observed_at.desc())
-                .limit(1)
-            )
-            if snapshot is None:
-                return UniverseStatusResponse(
-                    status=OperationalStatus.NO_DATA,
-                    observed_at=None,
-                    gainers=[],
-                    losers=[],
-                    monitored_symbols=[],
-                )
-            entries = (
-                await session.scalars(
-                    select(UniverseEntryRow).where(
-                        UniverseEntryRow.snapshot_id == snapshot.snapshot_id
-                    )
-                )
-            ).all()
-            memberships = (
-                await session.scalars(
-                    select(MonitoringMembershipRow).where(
-                        MonitoringMembershipRow.snapshot_id == snapshot.snapshot_id
-                    )
-                )
-            ).all()
-            entries_by_symbol = {entry.symbol: entry for entry in entries}
-        gainers = sorted(
-            (entry for entry in entries if entry.gainer_rank is not None),
-            key=lambda item: item.gainer_rank or 999,
-        )[:20]
-        losers = sorted(
-            (entry for entry in entries if entry.loser_rank is not None),
-            key=lambda item: item.loser_rank or 999,
-        )[:20]
-        return UniverseStatusResponse(
-            status=freshness_status(
-                now=self._clock(),
-                observed_at=snapshot.observed_at,
-                stale_after_seconds=3600,
-            ),
-            observed_at=snapshot.observed_at,
-            gainers=[_universe_entry(row, "gainer") for row in gainers],
-            losers=[_universe_entry(row, "loser") for row in losers],
-            monitored_symbols=[
-                _universe_membership(row, entries_by_symbol.get(row.symbol))
-                for row in sorted(
-                    memberships,
-                    key=lambda row: (
-                        {"target": 0, "retained": 1, "forced": 2}.get(
-                            row.status,
-                            99,
-                        ),
-                        {"gainer": 0, "loser": 1}.get(row.side or "", 2),
-                        row.symbol,
-                    ),
-                )
-            ],
-        )
+        return await self._overview_queries.universe()
 
     async def paper_accounts(self) -> PaperAccountsResponse:
         async with self._session_factory() as session:
@@ -3352,90 +2804,11 @@ def _paper_account_summary(
     )
 
 
-def _service(
-    name: str,
-    now: datetime,
-    observed_at: datetime | None,
-    stale_after_seconds: float,
-) -> ServiceStatusResponse:
-    return ServiceStatusResponse(
-        name=name,
-        status=freshness_status(
-            now=now,
-            observed_at=observed_at,
-            stale_after_seconds=stale_after_seconds,
-        ),
-        observed_at=observed_at,
-        age_seconds=None if observed_at is None else _age(now, observed_at),
-    )
-
-
-def _live_observation(
-    *,
-    state: str,
-    runtime_checkpoint_at: datetime | None,
-    transition_at: datetime,
-) -> tuple[datetime, str]:
-    """Choose a heartbeat that belongs to the live session's current state."""
-    if state == "live_enabled" and runtime_checkpoint_at is not None:
-        return runtime_checkpoint_at, "runtime_checkpoint"
-    return transition_at, "state_transition"
-
-
-def _age(now: datetime, observed_at: datetime) -> float:
-    return max(0.0, (now - observed_at).total_seconds())
-
-
 def _order_intent_reason(details: object) -> str | None:
     if not isinstance(details, dict):
         return None
     reason = details.get("reason")
     return reason if isinstance(reason, str) and reason else None
-
-
-def _universe_entry(row: UniverseEntryRow, side: str) -> dict[str, JsonValue]:
-    rank = row.gainer_rank if side == "gainer" else row.loser_rank
-    return {
-        "symbol": row.symbol,
-        "rank": rank,
-        "utc_day_return": None
-        if row.utc_day_return is None
-        else str(row.utc_day_return),
-        "current_price": None if row.current_price is None else str(row.current_price),
-    }
-
-
-def _universe_membership(
-    row: MonitoringMembershipRow,
-    entry: UniverseEntryRow | None,
-) -> dict[str, JsonValue]:
-    rank = None
-    utc_day_return = None
-    current_price = None
-    if entry is not None:
-        rank = (
-            entry.gainer_rank
-            if row.side == "gainer"
-            else entry.loser_rank
-            if row.side == "loser"
-            else None
-        )
-        utc_day_return = (
-            None
-            if entry.utc_day_return is None
-            else str(entry.utc_day_return)
-        )
-        current_price = (
-            None if entry.current_price is None else str(entry.current_price)
-        )
-    return {
-        "symbol": row.symbol,
-        "status": row.status,
-        "side": row.side,
-        "rank": rank,
-        "utc_day_return": utc_day_return,
-        "current_price": current_price,
-    }
 
 
 def _exchange_order(row: ExchangeOrderRow) -> dict[str, JsonValue]:

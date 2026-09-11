@@ -440,6 +440,13 @@ accounts:
 
 `operator_dashboard/queries.py`（~3.4k 行）按 API 域拆分（overview / risk / execution / equity）。优先级低于 live 巨石与控制面。
 
+**本次落地状态（2026-09-11）**
+
+- 已先抽出历史运行 telemetry 查询域：新增 `operator_dashboard/telemetry_queries.py`，由 `DecisionSLOQueries` 独立负责决策 SLO 的时间窗口校验、事件查询上限和聚合；模块接口只有 `decision_slo(window)`。
+- 又抽出 operational overview 域：新增 `operator_dashboard/overview_queries.py`，集中负责 health、collector、live accounts、system overview 和 universe 查询，并对外提供窄的 live-account summary seam。
+- `DashboardQueries` 保留原有外部接口与 API 路由，只作为兼容 facade 组合两个查询模块；因此本次不会改变 Dashboard API 的调用方式或响应契约。
+- risk / execution / equity 三个主 API 域尚未宣称完成，后续继续按有实际深度的 seam 逐个抽取，避免用纯转发 wrapper 制造“拆分完成”的假象。
+
 ---
 
 ## 5. 明确不建议
