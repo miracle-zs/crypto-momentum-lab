@@ -255,6 +255,9 @@ live_rollout/
 - 已将 live worker 外部任务的 fail-fast 监控、entry submission fencing、source 停止、
   runtime/cache 关闭和最终 task join 收拢到 `live_rollout/runtime_supervisor.py`；
   `main.py` 只组装 task/resource 回调，关闭顺序与关键任务故障语义由独立契约测试覆盖。
+- 已将 live startup 的瞬态故障分类、Binance `retry-after` 退避、已启用 session 的
+  lease 自动恢复与 fail-closed 条件收拢到 `live_rollout/startup_resilience.py`；
+  恢复策略不再与 CLI/资源装配代码混在一起。
 - 已将 scheduled controller 的已知开仓单撤销、exchange orphan scan、durable adoption
   和统一的 state-machine cancellation confirmation 收拢到
   `live_rollout/entry_order_cancellation.py`；已知单与交易所孤儿单仍走同一 Coordinator，

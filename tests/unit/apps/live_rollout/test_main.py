@@ -21,6 +21,11 @@ from crypto_momentum_lab.live_rollout.startup_recovery import (
     validate_live_warmup_coverage,
     warm_live_strategy,
 )
+from crypto_momentum_lab.live_rollout.startup_resilience import (
+    is_retryable_live_startup_error,
+    live_startup_retry_delay,
+    should_auto_reacquire_live_lease,
+)
 from crypto_momentum_lab.live_rollout.stream_recovery import (
     resilient_account_event_stream,
     resilient_market_state_stream,
@@ -1091,17 +1096,17 @@ def test_live_run_does_not_expose_removed_safety_limits() -> None:
 
 
 def test_live_startup_retry_delay_uses_exchange_retry_after() -> None:
-    assert main._live_startup_retry_delay(1, retry_after_seconds=17) == 17
-    assert main._live_startup_retry_delay(2, retry_after_seconds=None) == 30
-    assert main._live_startup_retry_delay(10, retry_after_seconds=None) == 300
+    assert live_startup_retry_delay(1, retry_after_seconds=17) == 17
+    assert live_startup_retry_delay(2, retry_after_seconds=None) == 30
+    assert live_startup_retry_delay(10, retry_after_seconds=None) == 300
 
 
 def test_only_transient_live_startup_errors_are_retryable() -> None:
-    assert main._is_retryable_live_startup_error(
+    assert is_retryable_live_startup_error(
         RuntimeError("live gate blocked: missing_active_lease")
     )
-    assert main._is_retryable_live_startup_error(TimeoutError("recovery timed out"))
-    assert not main._is_retryable_live_startup_error(
+    assert is_retryable_live_startup_error(TimeoutError("recovery timed out"))
+    assert not is_retryable_live_startup_error(
         RuntimeError("position mode mismatch: expected hedge, got one-way")
     )
 
@@ -1183,25 +1188,25 @@ async def test_periodic_reconcile_runs_outside_market_state_loop() -> None:
 
 
 def test_live_lease_auto_reacquire_requires_prior_live_session() -> None:
-    assert main._should_auto_reacquire_live_lease(
+    assert should_auto_reacquire_live_lease(
         lease_present=False,
         session_was_live_enabled=True,
         draining=False,
         gate_reasons=("missing_active_lease",),
     )
-    assert not main._should_auto_reacquire_live_lease(
+    assert not should_auto_reacquire_live_lease(
         lease_present=False,
         session_was_live_enabled=False,
         draining=False,
         gate_reasons=("missing_active_lease",),
     )
-    assert not main._should_auto_reacquire_live_lease(
+    assert not should_auto_reacquire_live_lease(
         lease_present=False,
         session_was_live_enabled=True,
         draining=True,
         gate_reasons=("missing_active_lease",),
     )
-    assert not main._should_auto_reacquire_live_lease(
+    assert not should_auto_reacquire_live_lease(
         lease_present=False,
         session_was_live_enabled=True,
         draining=False,

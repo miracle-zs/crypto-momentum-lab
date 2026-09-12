@@ -59,7 +59,6 @@ from crypto_momentum_lab.domain.strategy.entry_policy_compare import (
     universe_snapshot_for_symbols,
 )
 from crypto_momentum_lab.execution_account.binance import (
-    BinanceRateLimitError,
     BinanceUsdMTradeClient,
 )
 from crypto_momentum_lab.execution_account.hub import (
@@ -202,6 +201,18 @@ from crypto_momentum_lab.live_rollout.startup_recovery import (
 from crypto_momentum_lab.live_rollout.startup_recovery import (
     warm_live_strategy_then_start_fresh as _warm_live_strategy_then_start_fresh,
 )
+from crypto_momentum_lab.live_rollout.startup_resilience import (
+    LiveStartupRetryableError as _LiveStartupRetryableError,
+)
+from crypto_momentum_lab.live_rollout.startup_resilience import (
+    is_retryable_live_startup_error as _is_retryable_live_startup_error,
+)
+from crypto_momentum_lab.live_rollout.startup_resilience import (
+    maybe_auto_reacquire_live_lease as _maybe_auto_reacquire_live_lease,
+)
+from crypto_momentum_lab.live_rollout.startup_resilience import (
+    run_with_live_startup_backoff as _run_with_live_startup_backoff,
+)
 from crypto_momentum_lab.live_rollout.stream_recovery import (
     resilient_market_state_stream as _resilient_market_state_stream,
 )
@@ -295,8 +306,6 @@ _LIVE_ENTRY_POLICY_MODES = frozenset({"legacy", "compare_only", "enforce"})
 # migration.
 _LIVE_UNENFORCED_STATE_AGE_SECONDS = 1_000_000_000.0
 _LIVE_STARTUP_BUFFER_LIMIT = 100_000
-_LIVE_STARTUP_RETRY_INITIAL_SECONDS = 15
-_LIVE_STARTUP_RETRY_MAX_SECONDS = 300
 _LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS = 300
 _LIVE_LEASE_RENEW_BEFORE_SECONDS = 120
 _LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS = 15.0
@@ -339,12 +348,6 @@ class _PreflightRuntimeStrategyConfig:
     @property
     def entry_policy_enforce(self) -> bool:
         return self.entry_policy_mode == "enforce"
-
-
-class _LiveStartupRetryableError(RuntimeError):
-    def __init__(self, cause: Exception) -> None:
-        super().__init__(str(cause))
-        self.retry_after_seconds = getattr(cause, "retry_after_seconds", None)
 
 
 @app.callback()
@@ -1970,138 +1973,6 @@ def _validate_missing_order_resolution(
     )
 
 
-async def _run_with_live_startup_backoff(
-    run_once: Callable[[], Awaitable[LiveDaemonResult]],
-) -> LiveDaemonResult:
-    consecutive_failures = 0
-    while True:
-        try:
-            return await run_once()
-        except _LiveStartupRetryableError as error:
-            consecutive_failures += 1
-            delay = _live_startup_retry_delay(
-                consecutive_failures,
-                retry_after_seconds=error.retry_after_seconds,
-            )
-            log.warning(
-                "live_startup_retry_scheduled",
-                attempt=consecutive_failures,
-                delay_seconds=delay,
-                error_type=type(error.__cause__ or error).__name__,
-                error=str(error),
-            )
-            await asyncio.sleep(delay)
-
-
-def _is_retryable_live_startup_error(error: Exception) -> bool:
-    return isinstance(error, BinanceRateLimitError) or (
-        isinstance(error, RuntimeError)
-        and str(error).startswith("live gate blocked:")
-    ) or _is_transient_live_runtime_error(error)
-
-
-def _should_auto_reacquire_live_lease(
-    *,
-    lease_present: bool,
-    session_was_live_enabled: bool,
-    draining: bool,
-    gate_reasons: tuple[str, ...],
-) -> bool:
-    """Allow recovery only for an already-enabled, non-draining session."""
-    return (
-        not lease_present
-        and session_was_live_enabled
-        and not draining
-        and gate_reasons == ("missing_active_lease",)
-    )
-
-
-async def _session_was_live_enabled(
-    factory: async_sessionmaker[AsyncSession],
-    session_id: str,
-) -> bool:
-    async with factory() as database_session:
-        latest_state = await database_session.scalar(
-            select(LiveSessionTransitionRow.state)
-            .where(
-                LiveSessionTransitionRow.session_id == session_id,
-                LiveSessionTransitionRow.state.not_in(
-                    (
-                        LiveSessionState.PREFLIGHT.value,
-                        LiveSessionState.SHADOW_PREFLIGHT.value,
-                    )
-                ),
-            )
-            .order_by(LiveSessionTransitionRow.occurred_at.desc())
-            .limit(1)
-        )
-    return latest_state == LiveSessionState.LIVE_ENABLED.value
-
-
-async def _maybe_auto_reacquire_live_lease(
-    *,
-    factory: async_sessionmaker[AsyncSession],
-    risk_repository: PostgresRiskRepository,
-    gate_context: LiveGateContext,
-    session_id: str,
-    draining: bool,
-) -> TradingLease | None:
-    """Recover a lease lost during a worker/feed restart without bypassing gates."""
-    gate = evaluate_live_gate(gate_context)
-    if gate.approved or gate_context.active_lease is not None:
-        return gate_context.active_lease
-    if not await _session_was_live_enabled(factory, session_id):
-        return None
-    if not _should_auto_reacquire_live_lease(
-        lease_present=False,
-        session_was_live_enabled=True,
-        draining=draining,
-        gate_reasons=gate.reasons,
-    ):
-        return None
-    now = gate_context.now
-    lease = TradingLease(
-        lease_id=f"lease-{uuid4()}",
-        environment="live",
-        account_label=gate_context.account_label,
-        strategy_name=gate_context.strategy_name,
-        owner=gate_context.required_lease_owner,
-        code_generation=gate_context.git_commit_hash,
-        state=TradingLeaseState.ACTIVE,
-        acquired_at=now,
-        expires_at=now + timedelta(seconds=_LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS),
-    )
-    await risk_repository.acquire_lease(lease)
-    log.info(
-        "live_lease_auto_reacquired",
-        account_label=lease.account_label,
-        session_id=session_id,
-        lease_id=lease.lease_id,
-        lease_expires_at=lease.expires_at.isoformat(),
-    )
-    return lease
-
-
-def _live_startup_retry_delay(
-    attempt: int,
-    *,
-    retry_after_seconds: object,
-) -> float:
-    if attempt <= 0:
-        raise ValueError("attempt must be positive")
-    exponent = min(attempt - 1, 30)
-    delay = min(
-        _LIVE_STARTUP_RETRY_INITIAL_SECONDS * (2**exponent),
-        _LIVE_STARTUP_RETRY_MAX_SECONDS,
-    )
-    if isinstance(retry_after_seconds, int | float) and not isinstance(
-        retry_after_seconds, bool
-    ):
-        if retry_after_seconds >= 0:
-            delay = max(delay, float(retry_after_seconds))
-    return float(min(delay, _LIVE_STARTUP_RETRY_MAX_SECONDS))
-
-
 async def _run_live_daemon(
     *,
     execution_database_url: str,
@@ -2399,6 +2270,7 @@ async def _run_live_daemon(
             gate_context=gate_context,
             session_id=session_id,
             draining=draining,
+            lease_ttl_seconds=_LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS,
         )
         gate_context = replace(gate_context, active_lease=active_lease)
         gate = evaluate_live_gate(gate_context)
@@ -2940,6 +2812,7 @@ async def _run_live_daemon(
                     heartbeat_factory,
                     session_id,
                 ),
+                lease_ttl_seconds=_LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS,
             )
 
         control_plane_runtime = LiveControlPlaneRuntime(
