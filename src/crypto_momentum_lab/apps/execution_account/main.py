@@ -59,6 +59,7 @@ app = typer.Typer(no_args_is_help=True)
 log = structlog.get_logger()
 
 _DEFAULT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS = 6 * 60 * 60
+_DEFAULT_HISTORICAL_FILL_RECONCILIATION_BATCH_SIZE = 10
 
 
 @app.callback()
@@ -246,6 +247,18 @@ def sync_command(
             ),
         ),
     ] = _DEFAULT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS,
+    historical_fill_reconciliation_batch_size: Annotated[
+        int,
+        typer.Option(
+            "--historical-fill-reconciliation-batch-size",
+            min=1,
+            max=100,
+            help=(
+                "Maximum number of closed historical symbols checked per "
+                "reconciliation. Active symbols are always included."
+            ),
+        ),
+    ] = _DEFAULT_HISTORICAL_FILL_RECONCILIATION_BATCH_SIZE,
     snapshot_retention_days: Annotated[
         int,
         typer.Option(
@@ -347,6 +360,9 @@ def sync_command(
             ),
             historical_fill_reconciliation_interval_seconds=(
                 historical_fill_reconciliation_interval_seconds
+            ),
+            historical_fill_reconciliation_batch_size=(
+                historical_fill_reconciliation_batch_size
             ),
             request_interval_seconds=request_interval_seconds,
             shared_request_pacer_path=shared_request_pacer_path,
@@ -451,6 +467,7 @@ async def sync_continuously(
     account_event_hub_port: int,
     rest_reconciliation_interval_seconds: float,
     historical_fill_reconciliation_interval_seconds: float,
+    historical_fill_reconciliation_batch_size: int,
     snapshot_retention_days: int,
     equity_retention_days: int,
     snapshot_retention_interval_seconds: float,
@@ -537,6 +554,9 @@ async def sync_continuously(
                     recent_fill_cursors=historical_fill_cursors,
                     historical_fill_reconciliation_interval_seconds=(
                         historical_fill_reconciliation_interval_seconds
+                    ),
+                    historical_fill_reconciliation_batch_size=(
+                        historical_fill_reconciliation_batch_size
                     ),
                 ),
             )

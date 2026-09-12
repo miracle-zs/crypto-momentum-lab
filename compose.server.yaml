@@ -47,6 +47,8 @@ x-execution-account-command: &execution-account-command
   - "300"
   - --historical-fill-reconciliation-interval-seconds
   - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS:-21600}
+  - --historical-fill-reconciliation-batch-size
+  - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_BATCH_SIZE:-10}
   - --request-interval-seconds
   - ${CML_ACCOUNT_REQUEST_INTERVAL_SECONDS:-0.5}
   - --shared-request-pacer-path

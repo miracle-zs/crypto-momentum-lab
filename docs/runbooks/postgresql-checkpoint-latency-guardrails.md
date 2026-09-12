@@ -37,6 +37,28 @@ CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_ROWS_PER_TABLE=5000
 CML_ACCOUNT_SNAPSHOT_RETENTION_MAX_RUNTIME_SECONDS=45
 ```
 
+## Bound historical fill reconciliation
+
+The execution-account process must not sweep every previously traded symbol in
+one reconciliation. Current positions, open orders, and other active symbols
+are always checked; closed historical symbols are checked in an oldest-first
+batch and their durable cursors advance across subsequent cycles. The default
+batch is 10 symbols per account. This keeps the per-symbol Binance
+`userTrades` requests below the local healthcheck window while preserving a
+periodic historical repair path for WebSocket gaps.
+
+The production override is:
+
+```text
+CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_BATCH_SIZE=10
+```
+
+Do not increase this value without measuring the combined request-pacer budget
+across all live accounts and confirming that the account heartbeat remains
+fresh. A WebSocket sequence gap or unresolved order still triggers the normal
+fail-closed recovery path; this batch only limits the routine closed-symbol
+backlog.
+
 After the first logical cleanup, inspect table sizes and run `VACUUM
 (ANALYZE)` during a quiet period. Use `VACUUM FULL` or `pg_repack` only with
 an explicit maintenance window because it rewrites the table and takes a

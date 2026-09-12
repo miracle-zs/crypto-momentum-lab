@@ -370,6 +370,85 @@ async def test_sync_restores_cursors_and_defers_fresh_historical_symbols() -> No
     assert repository.fill_cursor_calls == [result.fill_cursor_updates]
 
 
+async def test_sync_batches_due_historical_fill_reconciliation() -> None:
+    observed_at = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+    old_checked_at = observed_at - timedelta(hours=2)
+    cursors = {
+        symbol: AccountFillReconciliationCursor(
+            environment="live",
+            account_label="primary",
+            symbol=symbol,
+            from_id=index,
+            start_time_ms=None,
+            last_checked_at=old_checked_at,
+        )
+        for index, symbol in enumerate(
+            ("BTCUSDT", "ETHUSDT", "SOLUSDT"),
+            start=1,
+        )
+    }
+    client = CursorClient(responses=[(), ()])
+    service = ExecutionAccountSyncService(
+        client=client,
+        repository=FakeRepository(),
+        config=ExecutionAccountSyncConfig(
+            environment="live",
+            account_label="primary",
+            expected_multi_assets_mode=False,
+            expected_hedge_mode=False,
+            observed_at=observed_at,
+            recent_fill_cursors=cursors,
+            historical_fill_reconciliation_interval_seconds=3600,
+            historical_fill_reconciliation_batch_size=2,
+        ),
+    )
+
+    await service.sync_once(observed_at=observed_at)
+    await service.sync_once(observed_at=observed_at + timedelta(minutes=1))
+
+    assert client.calls[0][0] == ("BTCUSDT", "ETHUSDT")
+    assert client.calls[1][0] == ("SOLUSDT",)
+
+
+async def test_sync_always_includes_active_symbols_with_historical_batching() -> None:
+    observed_at = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+    old_checked_at = observed_at - timedelta(hours=2)
+    cursors = {
+        symbol: AccountFillReconciliationCursor(
+            environment="live",
+            account_label="primary",
+            symbol=symbol,
+            from_id=index,
+            start_time_ms=None,
+            last_checked_at=old_checked_at,
+        )
+        for index, symbol in enumerate(("BTCUSDT", "SOLUSDT"), start=1)
+    }
+    client = NewPositionClient(
+        responses=[(), ()],
+        positions=[(), (_position(),)],
+    )
+    service = ExecutionAccountSyncService(
+        client=client,
+        repository=FakeRepository(),
+        config=ExecutionAccountSyncConfig(
+            environment="live",
+            account_label="primary",
+            expected_multi_assets_mode=False,
+            expected_hedge_mode=False,
+            observed_at=observed_at,
+            recent_fill_cursors=cursors,
+            historical_fill_reconciliation_interval_seconds=3600,
+            historical_fill_reconciliation_batch_size=1,
+        ),
+    )
+
+    await service.sync_once(observed_at=observed_at)
+    await service.sync_once(observed_at=observed_at + timedelta(minutes=1))
+
+    assert client.calls[1][0] == ("ETHUSDT", "SOLUSDT")
+
+
 async def test_sync_once_halts_on_hedge_mode_mismatch() -> None:
     repository = FakeRepository()
     service = ExecutionAccountSyncService(

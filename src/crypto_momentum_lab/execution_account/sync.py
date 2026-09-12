@@ -1,7 +1,7 @@
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
@@ -28,6 +28,7 @@ type BalanceValue = tuple[Decimal, Decimal, Decimal]
 _FILL_KEY_CACHE_SIZE = 8192
 _FILL_FETCH_OVERLAP_MS = 60_000
 _NEW_POSITION_FILL_LOOKBACK = timedelta(minutes=30)
+_DEFAULT_HISTORICAL_FILL_RECONCILIATION_BATCH_SIZE = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +121,12 @@ class ExecutionAccountSyncConfig:
         default_factory=dict
     )
     historical_fill_reconciliation_interval_seconds: float = 6 * 60 * 60
+    # A historical sweep is deliberately incremental.  Active symbols are
+    # always included; this only bounds the closed-symbol backlog so a
+    # reconciliation cannot starve account heartbeats for minutes.
+    historical_fill_reconciliation_batch_size: int = (
+        _DEFAULT_HISTORICAL_FILL_RECONCILIATION_BATCH_SIZE
+    )
 
     def __post_init__(self) -> None:
         if not self.environment.strip():
@@ -133,6 +140,10 @@ class ExecutionAccountSyncConfig:
         if self.historical_fill_reconciliation_interval_seconds <= 0:
             raise ValueError(
                 "historical_fill_reconciliation_interval_seconds must be positive"
+            )
+        if self.historical_fill_reconciliation_batch_size <= 0:
+            raise ValueError(
+                "historical_fill_reconciliation_batch_size must be positive"
             )
         for symbol, cursor in self.recent_fill_cursors.items():
             normalized_symbol = symbol.strip().upper()
@@ -905,11 +916,22 @@ class ExecutionAccountSyncService:
             symbol
             for symbol in self._tracked_fill_symbols
             if (
-                self._fill_cursor_checked_at.get(symbol) is None
-                or self._fill_cursor_checked_at[symbol] <= historical_cutoff
+                symbol not in active_fill_symbols
+                and (
+                    self._fill_cursor_checked_at.get(symbol) is None
+                    or self._fill_cursor_checked_at[symbol] <= historical_cutoff
+                )
             )
         }
-        return tuple(sorted(active_fill_symbols | due_historical_symbols))
+        historical_symbols = sorted(
+            due_historical_symbols,
+            key=lambda symbol: (
+                self._fill_cursor_checked_at.get(symbol)
+                or datetime.min.replace(tzinfo=UTC),
+                symbol,
+            ),
+        )[: self._config.historical_fill_reconciliation_batch_size]
+        return tuple(sorted(active_fill_symbols | set(historical_symbols)))
 
     def _balances_to_persist(
         self,
