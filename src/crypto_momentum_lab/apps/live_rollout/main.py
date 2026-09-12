@@ -163,6 +163,10 @@ from crypto_momentum_lab.live_rollout.runtime_manifest import (
     RuntimeManifestError,
     load_live_runtime_manifest,
 )
+from crypto_momentum_lab.live_rollout.runtime_supervisor import (
+    LiveRuntimeSupervisor,
+    LiveRuntimeTasks,
+)
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
 )
@@ -3158,85 +3162,8 @@ async def _run_live_daemon(
                 health_monitor.run(),
                 name=f"live-local-health:{session_id}",
             )
-        try:
-            monitored_tasks: set[asyncio.Task[object]] = {
-                market_task,
-                account_task,
-                *(() if quote_task is None else (quote_task,)),
-                *(
-                    ()
-                    if closed_candle_task is None
-                    else (closed_candle_task,)
-                ),
-                *(
-                    ()
-                    if grace_timeout_task is None
-                    else (grace_timeout_task,)
-                ),
-                lease_task,
-                reconcile_task,
-            }
-            if risk_control_task is not None:
-                monitored_tasks.add(risk_control_task)
-            if entry_filter_cache_task is not None:
-                monitored_tasks.add(entry_filter_cache_task)
-            if entry_symbol_cache_task is not None:
-                monitored_tasks.add(entry_symbol_cache_task)
-            await asyncio.wait(
-                monitored_tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if account_task.done():
-                await account_task
-                raise RuntimeError("account event channel stopped unexpectedly")
-            if risk_control_task is not None and risk_control_task.done():
-                await risk_control_task
-                raise RuntimeError("risk-control channel stopped unexpectedly")
-            if quote_task is not None and quote_task.done():
-                await quote_task
-                raise RuntimeError("market quote channel stopped unexpectedly")
-            if (
-                closed_candle_task is not None
-                and closed_candle_task.done()
-            ):
-                await closed_candle_task
-                raise RuntimeError(
-                    "closed candle exit channel stopped unexpectedly"
-                )
-            if grace_timeout_task is not None and grace_timeout_task.done():
-                await grace_timeout_task
-                raise RuntimeError(
-                    "grace timeout exit channel stopped unexpectedly"
-                )
-            if lease_task.done():
-                await lease_task
-                raise RuntimeError("live lease heartbeat stopped unexpectedly")
-            if reconcile_task.done():
-                await reconcile_task
-                raise RuntimeError("live order reconcile task stopped unexpectedly")
-            if (
-                entry_filter_cache_task is not None
-                and entry_filter_cache_task.done()
-            ):
-                await entry_filter_cache_task
-                raise RuntimeError(
-                    "live entry filter cache task stopped unexpectedly"
-                )
-            if (
-                entry_symbol_cache_task is not None
-                and entry_symbol_cache_task.done()
-            ):
-                await entry_symbol_cache_task
-                raise RuntimeError(
-                    "live entry symbol cache task stopped unexpectedly"
-                )
-            result = await market_task
-        finally:
-            if execution_coordinator is not None:
-                # Stop admitting new entries before cancelling producers.  The
-                # coordinator still waits for the one in-flight exchange call
-                # during the final ``aclose`` below.
-                execution_coordinator.block_entry_submissions()
+
+        def stop_runtime_sources() -> None:
             if hub_source is not None:
                 hub_source.stop()
             if quote_source is not None:
@@ -3244,80 +3171,45 @@ async def _run_live_daemon(
             account_source.stop()
             if risk_control_source is not None:
                 risk_control_source.stop()
-            if not market_task.done():
-                market_task.cancel()
-            if (
-                startup_market_state_task is not None
-                and not startup_market_state_task.done()
-            ):
-                startup_market_state_task.cancel()
-            if not account_task.done():
-                account_task.cancel()
-            if risk_control_task is not None and not risk_control_task.done():
-                risk_control_task.cancel()
+
+        async def close_risk_control() -> None:
             if risk_control_runtime is not None:
                 await risk_control_runtime.close()
-            if quote_task is not None and not quote_task.done():
-                quote_task.cancel()
-            if (
-                closed_candle_task is not None
-                and not closed_candle_task.done()
-            ):
-                closed_candle_task.cancel()
-            if (
-                grace_timeout_task is not None
-                and not grace_timeout_task.done()
-            ):
-                grace_timeout_task.cancel()
-            if not lease_task.done():
-                lease_task.cancel()
-            if not reconcile_task.done():
-                reconcile_task.cancel()
-            if local_health_task is not None and not local_health_task.done():
-                local_health_task.cancel()
+
+        async def stop_entry_caches() -> None:
             if entry_filter_cache is not None:
                 await entry_filter_cache.stop()
             if entry_symbol_cache is not None:
                 await entry_symbol_cache.stop()
-            await asyncio.gather(
-                market_task,
-                *(
-                    (startup_market_state_task,)
-                    if startup_market_state_task is not None
-                    else ()
-                ),
-                account_task,
-                *((risk_control_task,) if risk_control_task is not None else ()),
-                *((quote_task,) if quote_task is not None else ()),
-                *(
-                    (closed_candle_task,)
-                    if closed_candle_task is not None
-                    else ()
-                ),
-                *(
-                    (grace_timeout_task,)
-                    if grace_timeout_task is not None
-                    else ()
-                ),
-                lease_task,
-                reconcile_task,
-                *(
-                    (local_health_task,)
-                    if local_health_task is not None
-                    else ()
-                ),
-                *(
-                    (entry_filter_cache_task,)
-                    if entry_filter_cache_task is not None
-                    else ()
-                ),
-                *(
-                    (entry_symbol_cache_task,)
-                    if entry_symbol_cache_task is not None
-                    else ()
-                ),
-                return_exceptions=True,
-            )
+
+        runtime_supervisor = LiveRuntimeSupervisor(
+            tasks=LiveRuntimeTasks(
+                market=market_task,
+                account=account_task,
+                lease=lease_task,
+                reconcile=reconcile_task,
+                startup_market=startup_market_state_task,
+                quote=quote_task,
+                closed_candle=closed_candle_task,
+                grace_timeout=grace_timeout_task,
+                risk_control=risk_control_task,
+                entry_filter_cache=entry_filter_cache_task,
+                entry_symbol_cache=entry_symbol_cache_task,
+                local_health=local_health_task,
+            ),
+            block_entry_submissions=(
+                lambda: execution_coordinator.block_entry_submissions()
+                if execution_coordinator is not None
+                else None
+            ),
+            stop_sources=stop_runtime_sources,
+            close_risk_control=close_risk_control,
+            stop_entry_caches=stop_entry_caches,
+        )
+        try:
+            result = await runtime_supervisor.run()
+        finally:
+            await runtime_supervisor.stop()
         await _record_transition(
             live_repository,
             session_id=session_id,

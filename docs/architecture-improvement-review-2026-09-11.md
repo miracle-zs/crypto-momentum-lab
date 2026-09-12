@@ -252,6 +252,9 @@ live_rollout/
   校验、checkpoint recovery 和 warm-only startup 转移到
   `live_rollout/startup_recovery.py`；main 只负责选择 checkpoint/PostgreSQL/Hub
   路径并组装 repository/strategy，恢复不变量集中在独立模块。
+- 已将 live worker 外部任务的 fail-fast 监控、entry submission fencing、source 停止、
+  runtime/cache 关闭和最终 task join 收拢到 `live_rollout/runtime_supervisor.py`；
+  `main.py` 只组装 task/resource 回调，关闭顺序与关键任务故障语义由独立契约测试覆盖。
 - 已将 scheduled controller 的已知开仓单撤销、exchange orphan scan、durable adoption
   和统一的 state-machine cancellation confirmation 收拢到
   `live_rollout/entry_order_cancellation.py`；已知单与交易所孤儿单仍走同一 Coordinator，
