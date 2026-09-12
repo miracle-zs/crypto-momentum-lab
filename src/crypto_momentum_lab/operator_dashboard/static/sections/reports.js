@@ -28,7 +28,7 @@ export function renderReports(data) {
         <div class="ledger-event-main"><div><b>${esc(event.label)}</b><span>${esc(event.title)}</span></div><small class="num">${esc(event.id || "—")}</small></div>
         <div class="ledger-event-meta"><span>${esc(dayTime(event.at))}</span>${pill(event.state)}</div>
       </li>`).join("")}</ol>`
-    : `<div class="empty ledger-empty"><span>尚无运行事件</span><small>影子会话或实盘状态迁移到达后会出现在这里</small></div>`;
+    : `<div class="empty ledger-empty"><span>尚无运行事件</span><small>暂无影子会话或状态迁移记录</small></div>`;
   const shadowTable = dataTable([
     { label: "运行 ID", key: "run_id", cls: "num cut" },
     { label: "策略", key: "strategy_name", cls: "sym" },
@@ -41,7 +41,7 @@ export function renderReports(data) {
     { label: "时间", value: (row) => dayTime(row.occurred_at), align: "right", cls: "muted" },
   ], data.live_sessions, { emptyText: "尚无实盘状态迁移" });
   const body = `<div class="ledger-overview">
-      ${blockTitle("最近运行事件", "UNIFIED EVENT TIMELINE", `<strong class="num">${timelineEvents.length}</strong>`)}
+      ${blockTitle("运行事件时间线", "TIMELINE", `<strong class="num">${timelineEvents.length}</strong>`)}
       ${timeline}
     </div>
     <div class="block-split ledger-tables">

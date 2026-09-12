@@ -221,7 +221,7 @@ function paperDetailPlaceholder(account, index, message = "账户详情按需加
   return `<div class="paper-account-detail" id="${paperAccountPanelId()}" data-run-id="${esc(account?.run_id || "")}" role="tabpanel" aria-labelledby="${paperAccountTabId(index)}">
     <div class="lazy-detail">
       <strong>${esc(message)}</strong>
-      <small>首屏只查询账户摘要；曲线、持仓、交易和信号将在选中后加载。</small>
+      <small>点击上方卡片加载持仓明细与信号流水</small>
       <button class="history-button" type="button" data-load-paper-detail>加载账户详情</button>
     </div>
   </div>`;

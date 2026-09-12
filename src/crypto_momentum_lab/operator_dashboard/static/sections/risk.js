@@ -7,7 +7,7 @@ export function renderRisk(data) {
   const pendingOrders = data.pending_orders || [];
   const halts = data.active_halts?.length
     ? data.active_halts.map((halt) => `<div class="alert-box"><strong>HALT</strong><div>${esc(halt.reason)}<small>${esc(dayTime(halt.created_at))} ${DISPLAY_TIME_ZONE_LABEL}</small></div></div>`).join("")
-    : `<div class="ok-box"><i></i>风控闸门畅通 · 0 活跃停机</div>`;
+    : `<div class="ok-box"><i></i>风控畅通 · 0 活跃停机</div>`;
   const orderColumns = [
     { label: "币种", key: "symbol", cls: "sym" },
     { label: "客户端订单号", key: "client_order_id", cls: "num cut" },
@@ -33,13 +33,14 @@ export function renderRisk(data) {
   ], data.latest_risk_decisions, { emptyText: "暂无风控决策流水", tall: true });
   const ambiguousSummary = ambiguousOrders.length
     ? ""
-    : `<div class="risk-empty-note"><span>不确定订单</span><strong class="num">0</strong><small>无不确定订单 · 可继续核对待完成订单</small></div>`;
+    : `<div class="risk-empty-note"><span>不确定订单</span><strong class="num">0</strong><small>无不确定订单</small></div>`;
   const ambiguousBlock = ambiguousOrders.length
     ? `<div class="block risk-ambiguous">${blockTitle("不确定订单", "AMBIGUOUS / UNRESOLVED", `<strong class="num">${ambiguousOrders.length}</strong>`)}${ambiguousTable}</div>`
     : "";
   const body = `<div class="risk-priority-grid">
       <div class="block risk-halts">${blockTitle("活跃停机", "ACTIVE HALTS")}${halts}</div>
-      <div class="risk-decision-callout">${blockTitle("先看这里", "OPERATOR ORDER")}
+      <div class="risk-decision-callout">
+        <span class="callout-tag">处置顺序</span>
         <strong>阻断 → 未决 → 待完成</strong>
         <p>先完成交易所对账，再决定恢复执行或人工处理。</p>
       </div>
@@ -49,6 +50,6 @@ export function renderRisk(data) {
       ${ambiguousBlock}
       <div class="block risk-pending">${blockTitle("待完成订单", "RESTING / PARTIALLY FILLED", `<strong class="num">${pendingOrders.length}</strong>`)}${pendingTable}</div>
     </div>
-    <div class="block risk-decisions">${blockTitle("风控决策", "RISK DECISIONS · LATEST 30")}${decisionsTable}</div>`;
+    <div class="block risk-decisions">${blockTitle("风控决策流水", "LATEST 30")}${decisionsTable}</div>`;
   return [data.status, body];
 }

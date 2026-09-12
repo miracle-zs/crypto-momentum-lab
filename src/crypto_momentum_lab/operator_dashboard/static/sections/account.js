@@ -113,9 +113,9 @@ export function renderLiveAccountMetrics(data) {
     : "等待时间窗口";
   const anchorLabel = `${String(COMPARISON_ANCHOR_HOUR).padStart(2, "0")}:00 ${DISPLAY_TIME_ZONE_LABEL}`;
   return `<div class="block live-account-metrics-block" data-live-account-metrics-selected="${selectedRange.key}">
-    ${blockTitle("四账户资金与风险时序", `LIVE ACCOUNT METRICS · DAILY ${anchorLabel} · ${selectedRange.shortLabel} · ${equitySampleLabel(interval)} BUCKETS`, liveMetricsRangeControls(selectedRange.key))}
+    ${blockTitle("四账户资金与风险时序", `DAILY ${anchorLabel} · ${selectedRange.shortLabel} · ${equitySampleLabel(interval)} BUCKETS`, liveMetricsRangeControls(selectedRange.key))}
     <div class="live-metrics-context"><span>${esc(windowText)}</span><span>${accounts.length} 个账户 · ${interval >= 86400 ? `${Math.round(interval / 86400)} 天` : `${Math.round(interval / 60)} 分钟`}采样</span></div>
-    <p class="live-metrics-note">每个时间窗口从每日 ${esc(anchorLabel)} 起算；权益金额与比例均以各账户窗口首个可用权益点为基准（起点分别为 0 USDT 与 0%）；保证金占用为交易所初始保证金，回撤金额与比例均相对窗口内历史峰值计算。</p>
+    <div class="live-metrics-note">每日 ${esc(anchorLabel)} 起算 · 首点归零 (0 USDT / 0%) · 交易所初始保证金 · 相对窗口峰值回撤</div>
     <div class="live-metrics-grid">${charts}</div>
   </div>`;
 }
@@ -295,12 +295,12 @@ export function renderAccount(data) {
       ? { className: "status-FRESH", label: "数据新鲜", detail: `${relToNow(data.observed_at)} · 最近一次同步` }
       : { className: "status-STALE", label: "数据过期", detail: `${relToNow(data.observed_at)} · 请检查同步服务` };
   const accountHeroDescription = syncStatus === "ready" && freshnessSeconds != null && freshnessSeconds <= 120
-    ? "只读同步链路正常 · 实盘订单由 live-strategy 执行管控。"
+    ? "只读同步正常 · 实盘订单由 live-strategy 执行管控"
     : syncStatus === "ready" && freshnessSeconds != null
-      ? "只读同步数据已过期 · 实盘订单由 live-strategy 执行管控，请检查同步服务。"
+      ? "只读同步数据延迟 · 实盘订单由 live-strategy 执行管控，请检查同步服务"
       : syncStatus === "halted"
-        ? "只读同步已停止 · 实盘订单由 live-strategy 执行管控，请检查同步服务。"
-        : "只读同步状态待确认 · 实盘订单由 live-strategy 执行管控。";
+        ? "只读同步已停止 · 实盘订单由 live-strategy 执行管控，请检查同步服务"
+        : "只读同步状态待确认 · 实盘订单由 live-strategy 执行管控";
   const executionState = {
     className: "status-SHADOW",
     label: "live-strategy",
@@ -352,7 +352,7 @@ export function renderAccount(data) {
     : "";
   const equityValue = `<span class="account-equity-value"><small>${esc(selectedEquityRange.shortLabel)} 期末权益</small><strong class="num ${pnlClass(accountEquityDelta)}">${esc(money(latestAccountEquity))}</strong></span>`;
   const equityChartBlock = `<div class="block account-equity-block" data-equity-range="${selectedEquityRange.key}">
-    ${blockTitle("实盘账户权益", `LIVE USDT ACCOUNT EQUITY · ROLLING ${selectedEquityRange.shortLabel} · ${accountSample} BUCKETS`, `${equityRangeControls(selectedEquityRange.key)}${equityValue}`)}
+    ${blockTitle("实盘账户权益", `ROLLING ${selectedEquityRange.shortLabel} · ${accountSample} BUCKETS`, `${equityRangeControls(selectedEquityRange.key)}${equityValue}`)}
     <div class="chart-context"><span>${esc(`${selectedEquityRange.key === "1y" ? fullDateTime(data.equity_window_start) : dayTime(data.equity_window_start)} → ${selectedEquityRange.key === "1y" ? fullDateTime(data.equity_window_end) : dayTime(data.equity_window_end)} ${DISPLAY_TIME_ZONE_LABEL}`)}</span><b class="num">${accountEquity.length} 个采样点</b></div>
     ${equityCoverage}
     ${equityChart(accountEquity, "live-account-equity", data.equity_window_start, data.equity_window_end)}
@@ -368,7 +368,7 @@ export function renderAccount(data) {
     <div><span>对账快照 资产 / 持仓</span><b>${esc(`${reconciliation.balance_count ?? "—"} / ${reconciliation.position_count ?? "—"}`)}</b></div>
     <div><span>对账快照 挂单 / 成交</span><b>${esc(`${reconciliation.open_order_count ?? "—"} / ${reconciliation.fill_count ?? "—"}`)}</b></div>
   </div>
-  <p class="account-facts-note"><b>怎么读：</b><code>只读同步</code>不会下单；实盘订单由 <code>live-strategy</code> 与风控闸门共同决定。对账比较余额、持仓、挂单和成交快照；<code>对账一致 / 0 项</code>表示本次快照未发现差异。</p>`;
+  <div class="account-facts-note"><b>怎么读</b>：<code>只读同步</code>不会下单；实盘订单由 <code>live-strategy</code> 与风控闸门共同决定。<code>对账一致 / 0 项</code>表示本次快照未发现差异。</div>`;
   const usdtBalances = (data.balances || []).filter((row) => String(row.asset || "").toUpperCase() === "USDT");
   const balancesTable = dataTable([
     { label: "资产", key: "asset", cls: "sym" },
@@ -563,11 +563,11 @@ function liveAccountSummary(accounts, overallStatus) {
   return `<div class="live-account-fleet-summary">
     <div class="live-account-fleet-title">
       <div>
-        <span class="section-kicker">O3 · ACCOUNT FLEET / LIVE</span>
+        <span class="section-kicker">LIVE FLEET</span>
         <h3>${esc(accounts.length === 4 ? "实盘账户矩阵 · 四账户实盘总览" : `${accounts.length} 个实盘账户总览`)}</h3>
-        <p>四个账户共享同一 market-data，运行状态先集中判断；余额、持仓、挂单和权益在选中账户详情中核对。</p>
+        <p>共享同一 market-data 接入 · 独立执行与对账快照</p>
       </div>
-      <div class="live-account-fleet-status"><small>账户群状态</small>${pill(overallStatus)}<span>${readyCount} 正常 · ${haltedCount} 停止 · ${reviewCount} 待确认</span></div>
+      <div class="live-account-fleet-status"><small>集群状态</small>${pill(overallStatus)}<span>${readyCount} 正常 · ${haltedCount} 停止 · ${reviewCount} 待确认</span></div>
     </div>
     <div class="tile-grid live-account-fleet-kpis">${tiles.join("")}</div>
   </div>`;
@@ -602,7 +602,7 @@ export function renderLiveAccounts(data) {
   const cards = `<div class="live-account-grid" role="tablist" aria-label="实盘账户选择">${accounts.map((account, index) => liveAccountCard(account, index, selectedLiveAccount)).join("")}</div>`;
   const detail = `<div id="live-account-detail" class="live-account-detail" data-live-account-detail role="tabpanel" aria-labelledby="live-account-tab-${accounts.indexOf(selectedAccount)}" data-account-label="${esc(selectedAccount.account_label || "")}">
     <div class="live-account-detail-head">
-      <div><span class="section-kicker">SELECTED ACCOUNT</span><h3>${esc(selectedAccount.account_label || "交易所账户")}</h3><p>选择账户卡片切换详情；详情请求按账户和权益区间单独缓存。</p></div>
+      <div><span class="section-kicker">SELECTED ACCOUNT</span><h3>${esc(selectedAccount.account_label || "交易所账户")}</h3><small class="muted">切换卡片查看快照与权益曲线</small></div>
       <div class="live-account-detail-status">${pill(selectedAccount.status)}<span>${esc(dayTime(selectedAccount.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</span></div>
     </div>
     ${selectedDetail}

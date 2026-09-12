@@ -367,26 +367,26 @@ const WORKSPACES = Object.freeze({
   ops: {
     label: "运行控制",
     kicker: "OPERATIONS",
-    purpose: "安全 · 账户 · 命令",
+    purpose: "监控与账户控制",
     defaultView: "overview",
   },
   data: {
     label: "策略与数据",
     kicker: "ANALYTICS",
-    purpose: "策略 · 市场 · 采集",
+    purpose: "策略回放与数据流",
     defaultView: "strategy",
   },
 });
 
 const VIEW_PURPOSES = Object.freeze({
-  overview: "现在是否可信",
-  risk: "风险与未决订单",
-  account: "真实账户与暴露",
-  reports: "运行事件与迁移",
-  actions: "受控命令",
-  strategy: "策略版本与权益",
-  universe: "市场排名与监控池",
-  collector: "数据链路健康",
+  overview: "系统状态与心跳监控",
+  risk: "风控闸门与待核订单",
+  account: "资金权益与持仓对账",
+  reports: "运行会话与状态迁移",
+  actions: "受控命令操作",
+  strategy: "策略对比与收益走势",
+  universe: "UTC 动量排名与监控池",
+  collector: "数据采集与窗口归档",
 });
 
 const navLinks = new Map(

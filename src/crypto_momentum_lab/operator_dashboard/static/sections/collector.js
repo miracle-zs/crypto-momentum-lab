@@ -66,7 +66,7 @@ function freeSpaceMeter(data) {
 function alertPanel(data) {
   const alerts = Array.isArray(data.alerts) ? data.alerts : [];
   if (!alerts.length) {
-    return `<div class="ok-box collector-ok"><i></i><span>checkpoint 新鲜，窗口连续，当前没有容量或超时积压告警。</span></div>`;
+    return `<div class="ok-box collector-ok"><i></i><span>checkpoint 正常 · 窗口连续 · 没有容量或超时积压告警</span></div>`;
   }
   return `<div class="alert-box collector-alert">
     <strong>REVIEW</strong>
@@ -123,9 +123,9 @@ export function renderCollector(data) {
     : "—";
   const hero = `<div class="collector-hero ${statusClass(status)}">
     <div class="collector-hero-copy">
-      <span class="collector-kicker">RESEARCH CAPTURE · CANONICAL 15S STATE</span>
+      <span class="collector-kicker">RESEARCH CAPTURE · 15S STATE</span>
       <h3>Top${escNumber(data?.top_count)} 数据采集</h3>
-      <p>只读观察 research-data：15 秒状态持续写入，15 分钟窗口原子封存。</p>
+      <p>15 秒状态持续归档 · 15 分钟原子封存</p>
     </div>
     <div class="collector-state-rail">
       <span class="collector-state-dot"></span>

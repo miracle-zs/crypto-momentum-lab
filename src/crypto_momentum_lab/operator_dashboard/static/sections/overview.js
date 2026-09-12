@@ -16,9 +16,9 @@ export function renderOverview(data) {
   const accountStatuses = data.account_statuses || [];
   const haltCount = data.active_halt_count || 0;
   const tiles = `<div class="tile-grid">
-    ${tile("数据库", data.database_status || "UNKNOWN", "PostgreSQL 只读连接", statusSlug(data.database_status) === "READY" ? "pos" : "warn")}
-    ${tile("活跃停机", haltCount, haltCount ? "入场信号已被阻断" : "无全局停机", haltCount ? "neg" : "")}
-    ${tile("交易租约", lease?.strategy_name || "无租约", lease ? `持有者 ${lease.owner || "未知"}` : "当前无进程持有交易权", "txt")}
+    ${tile("数据库", data.database_status || "UNKNOWN", "PostgreSQL 只读", statusSlug(data.database_status) === "READY" ? "pos" : "warn")}
+    ${tile("活跃停机", haltCount, haltCount ? "入场信号已阻断" : "正常无停机", haltCount ? "neg" : "")}
+    ${tile("交易租约", lease?.strategy_name || "无租约", lease ? `${lease.owner || "未知"}` : "无进程持有交易权", "txt")}
     ${tile("租约到期", lease?.expires_at ? relToNow(lease.expires_at) : "—", lease?.expires_at ? `${dayTime(lease.expires_at)} ${DISPLAY_TIME_ZONE_LABEL}` : "")}
   </div>`;
   const serviceRows = services.map((service) => {
@@ -38,12 +38,12 @@ export function renderOverview(data) {
     <small>同步 ${esc(relToNow(account.observed_at))}</small>
   </a>`).join("");
   const accountBlock = accountStatuses.length
-    ? `${blockTitle("四账户实盘状态", "LIVE ACCOUNT STATUS · SHARED MARKET-DATA", `<span class="num muted">${accountStatuses.length} 个账户</span>`)}<div class="overview-account-status-grid">${accountRows}</div>`
+    ? `${blockTitle("四账户实盘状态", "LIVE FLEET", `<span class="num muted">${accountStatuses.length} 个账户</span>`)}<div class="overview-account-status-grid">${accountRows}</div>`
     : "";
   const body = `${tiles}
     ${accountBlock}
-    ${blockTitle("服务心跳", "SERVICE HEARTBEATS", `<span class="num muted">${services.length} 个进程</span>`)}
-    <div class="service-list">${serviceRows || emptyBox("尚未观察到任何服务心跳")}</div>`;
+    ${blockTitle("服务心跳", "SERVICES", `<span class="num muted">${services.length} 个进程</span>`)}
+    <div class="service-list">${serviceRows || emptyBox("暂无活跃心跳")}</div>`;
   return [haltCount ? "HALTED" : data.database_status, body];
 }
 
