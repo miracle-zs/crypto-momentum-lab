@@ -276,11 +276,6 @@ async def warm_live_strategy(
         expected_symbols=expected_symbols,
         cutover_at=warmup_end,
     )
-    if expected_symbols and not complete_symbols:
-        raise RuntimeError(
-            "live strategy warmup incomplete: no symbol has a complete window "
-            f"at {warmup_end.isoformat()}"
-        )
     deferred_symbols = expected_symbols - complete_symbols
     if deferred_symbols:
         log.warning(
@@ -364,11 +359,6 @@ async def restore_live_strategy_from_checkpoint(
         expected_symbols=expected_symbols,
         cutover_at=recovery_cutover,
     )
-    if expected_symbols and not complete_symbols:
-        raise RuntimeError(
-            "live strategy warmup incomplete: no symbol has a complete window "
-            f"at {recovery_cutover.isoformat()}"
-        )
     deferred_symbols = expected_symbols - complete_symbols
     if deferred_symbols:
         log.warning(

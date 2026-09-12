@@ -1402,20 +1402,20 @@ async def test_live_checkpoint_recovery_scales_limit_to_symbol_universe() -> Non
             seen.update(kwargs)
             return ()
 
-    with pytest.raises(RuntimeError, match="no symbol has a complete window"):
-        await restore_live_strategy_from_checkpoint(
-            strategy=Strategy(),
-            checkpoint=StrategyCheckpoint(
-                last_processed_at_by_symbol={"S00000USDT": now},
-                warmup_buckets_by_symbol={"S00000USDT": 140},
-                cooldown_buckets_remaining_by_symbol={"S00000USDT": 0},
-                payload={"signal_sequence": 4},
-            ),
-            repository=Repository(),
-            environment="research",
-        )
+    result = await restore_live_strategy_from_checkpoint(
+        strategy=Strategy(),
+        checkpoint=StrategyCheckpoint(
+            last_processed_at_by_symbol={"S00000USDT": now},
+            warmup_buckets_by_symbol={"S00000USDT": 140},
+            cooldown_buckets_remaining_by_symbol={"S00000USDT": 0},
+            payload={"signal_sequence": 4},
+        ),
+        repository=Repository(),
+        environment="research",
+    )
 
     assert seen["limit"] == 718 * 158
+    assert result == {"S00000USDT": now}
 
 
 def test_live_warmup_rejects_a_symbol_with_a_window_gap() -> None:
