@@ -66,7 +66,7 @@ def test_live_readiness_validator_embedded_python_is_valid() -> None:
 def test_deployment_script_loads_extra_live_overlay_only_when_needed() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     compose_start = script.index("has_running_compose_service()")
-    compose_end = script.index("dashboard_image=", compose_start)
+    compose_end = script.index("deploy_phase=compose", compose_start)
     compose_block = script[compose_start:compose_end]
 
     assert "-f compose.server.yaml" in compose_block
@@ -277,8 +277,8 @@ def test_live_recovery_always_revalidates_preflight() -> None:
         not in script
     )
     assert '"$recovery_run" != 1 && "$refresh_approvals" != 1' in active_pairs
-    assert script.index("deploy_phase=live-preflight") < script.index(
-        "# Nginx exposes the dashboard"
+    assert script.index("consumer_candidates=()") < script.index(
+        "deploy_phase=live-preflight"
     )
 
 
@@ -290,11 +290,34 @@ def test_live_generation_fence_order_is_migration_preflight_restart() -> None:
     dashboard_phase = script.index("deploy_phase=dashboard-market-data")
     live_restart = script.index("deploy_phase=live-restart")
 
-    assert migration_phase < preflight_phase < dashboard_phase
+    consumers_phase = script.index("consumer_candidates=()")
+
+    assert migration_phase < dashboard_phase < consumers_phase < preflight_phase
     assert preflight_phase < live_restart
-    assert "run --rm --no-deps migrate" in script[migration_phase:preflight_phase]
-    assert "run_parallel_pairs renew" in script[preflight_phase:dashboard_phase]
-    assert "run_parallel_pairs preflight" in script[preflight_phase:dashboard_phase]
+    preflight_block = script[preflight_phase:live_restart]
+    assert "run --rm --no-deps migrate" in script[migration_phase:dashboard_phase]
+    assert "run_parallel_pairs preflight" in preflight_block
+    assert "run_parallel_pairs renew" in preflight_block
+    assert preflight_block.index("run_parallel_pairs preflight") < preflight_block.index(
+        "run_parallel_pairs renew"
+    )
+
+
+def test_live_preflight_has_no_side_effects_before_validation() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    preflight_phase = script.index("deploy_phase=live-preflight")
+    consumers_phase = script.index("consumer_candidates=()")
+    preflight_start = script.index("preflight_started_at=")
+    lease_start = script.index("lease_started_at=")
+    env_commit_write = script.index(
+        'set_env_value CML_CODE_COMMIT "$runtime_commit"'
+    )
+    verify_elapsed = script.index("phase=verify elapsed_seconds=")
+
+    assert consumers_phase < preflight_phase
+    assert preflight_start < lease_start
+    assert verify_elapsed < env_commit_write
 
 
 def test_health_wait_detects_restart_loops() -> None:

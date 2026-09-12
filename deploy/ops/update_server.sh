@@ -306,6 +306,7 @@ fi
 runtime_commit="${deploy_state_runtime:-${env_runtime_commit:-${deploy_state_target:-$previous_commit}}}"
 runtime_image_commit="${deploy_state_image:-$runtime_commit}"
 previous_runtime_commit="$runtime_commit"
+previous_env_runtime_commit="$env_runtime_commit"
 deployment_base_commit="$previous_commit"
 # Keep the original diff across retries (including a newer target arriving
 # during an incomplete rollout), rather than treating every service as changed.
@@ -455,15 +456,20 @@ set_env_value() {
   fi
 }
 
-set_env_value CML_CODE_COMMIT "$runtime_commit"
 current_dashboard_image="$(sed -n 's/^CML_DASHBOARD_IMAGE=//p' .env.server | tail -n 1)"
 if [[ -z "$current_dashboard_image" \
-  || "$current_dashboard_image" == "crypto-momentum-lab-app:${previous_runtime_commit}" ]]; then
-  set_env_value CML_DASHBOARD_IMAGE "crypto-momentum-lab-app:${runtime_commit}"
+  || "$current_dashboard_image" == "crypto-momentum-lab-app:${previous_env_runtime_commit:-$previous_runtime_commit}" ]]; then
+  dashboard_image="crypto-momentum-lab-app:${runtime_commit}"
 else
+  dashboard_image="$current_dashboard_image"
   echo "dashboard_image_preserved=1"
 fi
-chmod 600 .env.server
+# Compose reads these process-level overrides for this attempt. Persisting them
+# to .env.server is intentionally deferred until every health and target check
+# succeeds, so a failed preflight cannot change the runtime seen by old Live
+# containers on the next restart.
+export CML_CODE_COMMIT="$runtime_commit"
+export CML_DASHBOARD_IMAGE="$dashboard_image"
 
 # Resolve the full graph before stopping anything. This also catches missing
 # account credentials and malformed environment overrides early. The base
@@ -506,10 +512,6 @@ if [[ "$live_overlay_required" == 1 ]]; then
     --profile live
   )
 fi
-dashboard_image="$(sed -n 's/^CML_DASHBOARD_IMAGE=//p' .env.server | tail -n 1)"
-if [[ -z "$dashboard_image" ]]; then
-  dashboard_image="crypto-momentum-lab-app:${runtime_commit}"
-fi
 deploy_phase=compose
 
 phase_rank() {
@@ -519,15 +521,15 @@ phase_rank() {
     build) echo 2 ;;
     migrate) echo 3 ;;
     volume-init) echo 4 ;;
-    live-preflight) echo 5 ;;
     # dashboard is a legacy phase name from before the dashboard/market-data
     # start wave. It must still retry the research stop before the wave.
     dashboard|research-stop) echo 6 ;;
     dashboard-market-data|market-data) echo 7 ;;
     consumers) echo 8 ;;
-    live-restart) echo 9 ;;
-    verify) echo 10 ;;
-    complete) echo 11 ;;
+    live-preflight) echo 9 ;;
+    live-restart) echo 10 ;;
+    verify) echo 11 ;;
+    complete) echo 12 ;;
     *) echo 0 ;;
   esac
 }
@@ -1179,40 +1181,6 @@ else
   echo "phase=volume-init skipped runtime_unchanged=$runtime_changed"
 fi
 
-# Run the Live preflight before restarting any application service. Approval
-# and lease state are external, so a persisted deployment phase never proves
-# that this invocation is still authorized to restart Live services.
-if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
-  deploy_phase=live-preflight
-  write_deploy_state running "$deploy_phase"
-  # Validate approvals with the freshly built image before restarting any
-  # application service. A bad approval now fails before the dashboard,
-  # consumers, or Live services are changed.
-  if [[ "$refresh_approvals" == 1 ]]; then
-    approval_refresh_started_at="$(date +%s)"
-    if ! run_parallel_pairs refresh "${active_pairs[@]}"; then
-      echo "approval refresh failed; Live services were not restarted" >&2
-      exit 1
-    fi
-    echo "phase=approval-refresh elapsed_seconds=$(( $(date +%s) - approval_refresh_started_at ))"
-  fi
-
-  lease_started_at="$(date +%s)"
-  if ! run_parallel_pairs renew "${active_pairs[@]}"; then
-    echo "lease renewal failed; Live services were not restarted" >&2
-    exit 1
-  fi
-  echo "phase=lease-renew elapsed_seconds=$(( $(date +%s) - lease_started_at ))"
-
-  preflight_started_at="$(date +%s)"
-  if ! run_parallel_pairs preflight "${active_pairs[@]}"; then
-    echo "preflight failed; Live services were not restarted" >&2
-    exit 1
-  fi
-  echo "phase=preflight elapsed_seconds=$(( $(date +%s) - preflight_started_at ))"
-  live_preflight_complete=1
-fi
-
 # Preserve the durable research cursor before the Hub's stream epoch changes.
 # Otherwise an old collector can observe the new Hub first, reset its cursor,
 # and make the new collector look like a fresh subscriber with no gap to heal.
@@ -1339,6 +1307,42 @@ if [[ "$market_changed" == 1 ]]; then
 fi
 verification_services+=("${consumer_candidates[@]}")
 
+# Run the Live preflight after the non-Live services have converged and before
+# touching any Live container. Approval and lease state are external, so a
+# persisted deployment phase never proves that this invocation is still
+# authorized to restart Live services. Keeping this gate here also lets a
+# rejected Live rollout leave the non-Live update complete instead of forcing
+# a second recovery deployment.
+if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
+  deploy_phase=live-preflight
+  write_deploy_state running "$deploy_phase"
+  if [[ "$refresh_approvals" == 1 ]]; then
+    approval_refresh_started_at="$(date +%s)"
+    if ! run_parallel_pairs refresh "${active_pairs[@]}"; then
+      echo "approval refresh failed; Live services were not restarted" >&2
+      exit 1
+    fi
+    echo "phase=approval-refresh elapsed_seconds=$(( $(date +%s) - approval_refresh_started_at ))"
+  fi
+
+  # Preflight is read-only. Run it before lease renewal so an approval or
+  # migration mismatch cannot leave a new lease attached to old containers.
+  preflight_started_at="$(date +%s)"
+  if ! run_parallel_pairs preflight "${active_pairs[@]}"; then
+    echo "preflight failed; Live services were not restarted" >&2
+    exit 1
+  fi
+  echo "phase=preflight elapsed_seconds=$(( $(date +%s) - preflight_started_at ))"
+
+  lease_started_at="$(date +%s)"
+  if ! run_parallel_pairs renew "${active_pairs[@]}"; then
+    echo "lease renewal failed; Live services were not restarted" >&2
+    exit 1
+  fi
+  echo "phase=lease-renew elapsed_seconds=$(( $(date +%s) - lease_started_at ))"
+  live_preflight_complete=1
+fi
+
 if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   deploy_phase=live-restart
   write_deploy_state running "$deploy_phase"
@@ -1417,6 +1421,13 @@ for service in "${verification_services[@]}"; do
 done
 echo "phase=verify elapsed_seconds=$(( $(date +%s) - verification_started_at )) services=${#verification_services[@]}"
 
+# Commit the runtime identity only after all service health and image checks
+# pass. Until this point Compose has used process-level overrides, leaving the
+# previous .env.server values available to the currently running containers if
+# a deployment is rejected or interrupted.
+set_env_value CML_CODE_COMMIT "$runtime_commit"
+set_env_value CML_DASHBOARD_IMAGE "$dashboard_image"
+chmod 600 .env.server
 write_deploy_state success complete
 echo "phase=total elapsed_seconds=$(( $(date +%s) - deploy_started_at ))"
 

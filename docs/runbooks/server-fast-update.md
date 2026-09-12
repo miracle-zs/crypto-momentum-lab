@@ -75,19 +75,21 @@ The script:
    a rollback, then verifies that `HEAD` equals the requested commit;
 3. classifies the changed paths and skips the build/restart when a commit only
    changes docs, tests, or operator tooling;
-4. updates the runtime-only `CML_CODE_COMMIT` and dashboard image in
-   `.env.server`;
-5. validates the merged Compose graph;
-6. builds the image once using the dependency cache;
-7. runs the Live approval, lease, and strict preflight before restarting any
-   application service when the Live path changed;
-8. recreates Dashboard and `market-data` in one Compose start wave when needed,
-   while keeping their separate health budgets;
-9. verifies the Dashboard endpoint, waits for `market-data` to be healthy, then
-   updates only the affected research and Paper consumers;
-10. verifies the image and health state of every service it updated;
+4. resolves the target runtime commit and dashboard image as process-level
+   Compose overrides; `.env.server` is not changed yet;
+5. validates the merged Compose graph and builds the image once using the
+   dependency cache;
+6. runs migrations and the volume-ownership check before restarting services;
+7. recreates Dashboard and `market-data` in one Compose start wave when needed,
+   while keeping their separate health budgets, then updates only the affected
+   research and Paper consumers;
+8. runs the Live approval/preflight gate after the non-Live services converge,
+   with strict preflight completing before any Live lease is renewed;
+9. restarts Live execution services and strategies only after that gate passes;
+10. verifies the image and health state of every service it updated, then
+   persists the runtime commit and dashboard image to `.env.server`;
 11. prints separate remote and client-side timings, the checkout/runtime/image
-    commits, and the container health summary.
+   commits, and the container health summary.
 
 The script uses bounded Compose operations and an explicit health wait. A
 healthy service with the expected image is left in place; a service that must
@@ -147,15 +149,20 @@ Set `CML_LIVE_CONCURRENCY=1` before the command for a serialized rollout, or
 leave the default `2` to use two bounded restart waves.
 
 The Live path builds the target image, optionally refreshes active approvals,
-renews active leases, then runs strict `preflight` for every currently running
-strategy before restarting the dashboard, any consumer, or any Live container.
-On a recovery run it rechecks even pairs that already use the target image.
-Lease renewal and read-only preflight run in bounded parallel batches using
+then runs read-only strict `preflight` for every currently running strategy
+before renewing any lease. The preflight runs after Dashboard, `market-data`,
+research, and Paper have converged, but before any Live container restarts. On
+a recovery run it rechecks even pairs that already use the target image. This
+keeps a rejected Live approval from changing leases or forcing a second
+non-Live recovery deployment. Lease renewal and read-only preflight run in
+bounded parallel batches using
 `CML_LIVE_CONCURRENCY`. The checks cover the approval, runtime strategy hash,
 risk snapshot, target commit, migration revision, account readiness, and lease
-presence. If any check fails, the command exits before restarting services. It then updates the active execution
-services in a bounded parallel wave and the strategies in a second bounded
-wave. The default concurrency is two; set `CML_LIVE_CONCURRENCY=1` for a more
+presence. If any check fails, the command exits before restarting Live
+services, leaving `.env.server` at the previous committed runtime identity. It
+then updates the active execution services in a bounded parallel wave and the
+strategies in a second bounded wave. The default concurrency is two; set
+`CML_LIVE_CONCURRENCY=1` for a more
 conservative rollout or `=4` when the host has headroom:
 
 1. execution services (up to two at a time);
