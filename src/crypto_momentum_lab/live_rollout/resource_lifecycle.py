@@ -45,10 +45,10 @@ class LiveResourceLifecycle:
         telemetry: LiveRuntimeTelemetry | None,
         volume_cache: Binance24hQuoteVolumeCache | None,
         volume_rest_client: BinanceUsdMRestClient | None,
-        execution_engine: AsyncEngine,
-        market_engine: AsyncEngine,
-        observability_engine: AsyncEngine,
-        checkpoint_engine: AsyncEngine,
+        execution_engine: AsyncEngine | None,
+        market_engine: AsyncEngine | None,
+        observability_engine: AsyncEngine | None,
+        checkpoint_engine: AsyncEngine | None,
         heartbeat_engine: AsyncEngine | None,
         health: LocalHealthWriter | None,
     ) -> None:
@@ -95,10 +95,14 @@ class LiveResourceLifecycle:
             await self._volume_cache.stop()
         if self._volume_rest_client is not None:
             await self._volume_rest_client.aclose()
-        await self._execution_engine.dispose()
-        await self._market_engine.dispose()
-        await self._observability_engine.dispose()
-        await self._checkpoint_engine.dispose()
+        if self._execution_engine is not None:
+            await self._execution_engine.dispose()
+        if self._market_engine is not None:
+            await self._market_engine.dispose()
+        if self._observability_engine is not None:
+            await self._observability_engine.dispose()
+        if self._checkpoint_engine is not None:
+            await self._checkpoint_engine.dispose()
         if self._heartbeat_engine is not None:
             await self._heartbeat_engine.dispose()
         if self._health is not None:

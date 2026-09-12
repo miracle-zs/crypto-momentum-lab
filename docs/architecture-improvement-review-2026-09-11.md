@@ -177,6 +177,10 @@ live_rollout/
 - 已将 `session.py` 对执行层的依赖收窄为单方法 `LivePlanExecutor`；session
   现在只负责 preflight/shadow-preflight、gate 状态转移和调用已批准 plan，
   coordinator 作为 composition root 注入的 adapter。
+- 已将 one-shot `submit-plan` 的 live gate、approved-intent notional fence、Binance
+  position-mode 校验、entry expectation、submission fence 和资源收尾转移到
+  `live_rollout/plan_runner.py`；`session.py` 仍只负责 one-shot 状态转移，daemon 与
+  手工路径继续复用相同的 durable submission 屏障。
 - 已将定时风控窗口的状态机转移到 `live_rollout/scheduled_controller.py`；该模块
   独立持有入场封锁、开仓挂单撤销、reduce-only flatten、重试和交易所持仓核验，
   scheduled flatten 仍通过共享的 `LiveExitProcessor`，daemon 只保留状态观察、
