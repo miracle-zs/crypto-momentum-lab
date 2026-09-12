@@ -245,6 +245,9 @@ live_rollout/
 - 已将 `resolve-missing-order` 的交易所只读三重核验、并发重读、证据持久化和
   `ABSENT_RECONCILED` 终态写入收拢到 `live_rollout/missing_order_resolution.py`；CLI
   只负责参数/凭证边界，人工处理仍不调用 Binance 写接口。
+- 已将 live order event 的 telemetry best-effort、GTD lifecycle 观察和 daemon
+  pending-entry release 的后处理顺序收拢到 `live_rollout/order_event_runtime.py`；
+  telemetry 故障仍不会跳过本地订单生命周期与 exposure bookkeeping。
 - 已将 scheduled controller 的已知开仓单撤销、exchange orphan scan、durable adoption
   和统一的 state-machine cancellation confirmation 收拢到
   `live_rollout/entry_order_cancellation.py`；已知单与交易所孤儿单仍走同一 Coordinator，

@@ -32,7 +32,6 @@ from crypto_momentum_lab.config import (
     resolve_role_credentials,
 )
 from crypto_momentum_lab.domain.execution import (
-    ExchangeOrderEvent,
     FuturesPositionSide,
     OrderExecutionPlan,
 )
@@ -145,6 +144,9 @@ from crypto_momentum_lab.live_rollout.missing_order_resolution import (
 )
 from crypto_momentum_lab.live_rollout.missing_order_resolution import (
     validate_missing_order_resolution as _validate_missing_order_resolution_impl,
+)
+from crypto_momentum_lab.live_rollout.order_event_runtime import (
+    LiveOrderEventRuntime,
 )
 from crypto_momentum_lab.live_rollout.order_reconciliation import (
     LiveOrderReconciliation,
@@ -2281,24 +2283,7 @@ async def _run_live_daemon(
             account_event_hub_url=account_event_hub_url,
             account_label=account_label,
         )
-        async def on_live_order_event(
-            plan: OrderExecutionPlan,
-            event: ExchangeOrderEvent,
-        ) -> None:
-            try:
-                await telemetry.order_event(plan, event)
-            except Exception as error:
-                log.warning(
-                    "live_order_telemetry_failed",
-                    symbol=plan.symbol,
-                    client_order_id=plan.client_order_id,
-                    error_type=type(error).__name__,
-                )
-            finally:
-                if entry_order_lifecycle is not None:
-                    entry_order_lifecycle.observe(plan, event)
-                if daemon is not None:
-                    daemon.observe_entry_order_event(plan, event)
+        order_event_runtime = LiveOrderEventRuntime(telemetry=telemetry)
 
         submission_fence = LiveSubmissionFence(
             risk_state=heartbeat_risk_repository,
@@ -2319,7 +2304,7 @@ async def _run_live_daemon(
             submit_policy=SubmitPolicy.LIVE_SUBMIT,
             live_submit_enabled=True,
             clock=lambda: datetime.now(tz=UTC),
-            on_event=on_live_order_event,
+            on_event=order_event_runtime.handle,
             on_before_submit=register_expected_entry,
             on_before_exchange_submit=submission_fence.validate,
             on_exchange_request=telemetry.exchange_request_started,
@@ -2364,6 +2349,7 @@ async def _run_live_daemon(
         entry_order_lifecycle = LiveLimitOrderLifecycle(
             cancel_order=execution_coordinator.cancel_order,
         )
+        order_event_runtime.set_entry_order_lifecycle(entry_order_lifecycle)
         await entry_order_lifecycle.restore(unresolved)
         active_lease = await risk_repository.load_active_lease(
             "live", account_label, now
@@ -2870,6 +2856,7 @@ async def _run_live_daemon(
                 else closed_candle_feed.set_symbols
             ),
         )
+        order_event_runtime.set_daemon(daemon)
         assert live_repository is not None
         risk_control_dispatcher = RiskControlCommandDispatcher(
             repository=live_repository,
