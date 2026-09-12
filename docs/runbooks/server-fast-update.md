@@ -200,6 +200,45 @@ Use `live-strategy` and the primary environment variables for `primary`.
 Confirm the risk hash and limits from the latest risk snapshot before creating
 an approval; do not guess them from defaults.
 
+## Generation-fence release rehearsal
+
+The `20260911_0035` migration makes the deployed code generation part of the
+live lease. The deployment script must therefore keep this order:
+
+1. apply migrations while the old worker may still be running;
+2. let the migration expire active leases that cannot be attributed safely;
+3. renew a lease and run strict `preflight` with the target commit;
+4. restart the execution-account pair and then the strategy pair;
+5. verify the new worker has the target generation and that the old worker has
+   no active lease before considering the rollout complete.
+
+Run this rehearsal on a disposable database or a deliberately drained,
+small-capital account before the first production rollout that includes the
+generation fence. Record the old worker image/commit, lease ID, target commit,
+and migration head. During the migration-to-restart window, confirm with a
+read-only query that the old active lease is expired:
+
+```sql
+SELECT account_label, lease_id, owner, state, code_generation
+FROM trading_leases
+WHERE environment = 'live'
+ORDER BY expires_at DESC;
+```
+
+The old image must fail closed at its durable `prepare_submission` boundary;
+it must not reach an exchange write after its lease has been expired or its
+generation no longer matches. The target image must then acquire a fresh lease
+and pass strict `preflight` before any Live container is restarted. If either
+worker can submit during this window, stop the rehearsal and do not continue
+the rollout.
+
+After the new pair is healthy, exercise the existing stop path once: send
+`SIGTERM` during a controlled restart, verify the entry gate closes, confirm
+open entries are reconciled/cancelled, and check that a restarted worker
+recovers only with the target generation. Pair this with the five local fault
+injection gates in `docs/runbooks/fault-injection-gates.md`; the release is not
+accepted based on container health alone.
+
 ## Verification and rollback
 
 After the script completes, verify the exact image and health state:

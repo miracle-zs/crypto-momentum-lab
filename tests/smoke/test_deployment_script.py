@@ -268,6 +268,21 @@ def test_live_recovery_always_revalidates_preflight() -> None:
     )
 
 
+def test_live_generation_fence_order_is_migration_preflight_restart() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    migration_phase = script.index("deploy_phase=migrate")
+    preflight_phase = script.index("deploy_phase=live-preflight")
+    dashboard_phase = script.index("deploy_phase=dashboard-market-data")
+    live_restart = script.index("deploy_phase=live-restart")
+
+    assert migration_phase < preflight_phase < dashboard_phase
+    assert preflight_phase < live_restart
+    assert "run --rm --no-deps migrate" in script[migration_phase:preflight_phase]
+    assert "run_parallel_pairs renew" in script[preflight_phase:dashboard_phase]
+    assert "run_parallel_pairs preflight" in script[preflight_phase:dashboard_phase]
+
+
 def test_health_wait_detects_restart_loops() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     health_start = script.index("service_restart_info()")

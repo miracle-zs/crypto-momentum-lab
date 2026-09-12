@@ -389,6 +389,11 @@ live_rollout/
 `prepare_submission` 均校验当前 worker generation。旧 worker 无法重新获取
 缺少 generation 的 lease，也无法通过提交前 fencing。
 
+部署侧已补充 generation-fence release rehearsal：`server-fast-update.md`
+明确迁移、旧 lease 失效、目标 generation 的 renew/preflight、分批重启和
+SIGTERM/撤单恢复的验收顺序；部署脚本的 smoke test 也锁定了该顺序。真正的
+生产主机演练仍需在可控账户/窗口执行，不能由仓库静态测试替代。
+
 ---
 
 ### P1-2 运行时拓扑 Manifest
