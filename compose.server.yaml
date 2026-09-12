@@ -40,7 +40,7 @@ x-execution-account-command: &execution-account-command
   - live
   - --hedge-mode
   - --interval-seconds
-  - "15"
+  - ${CML_ACCOUNT_SNAPSHOT_INTERVAL_SECONDS:-15}
   - --fill-interval-seconds
   - "300"
   - --rest-reconciliation-interval-seconds
@@ -53,6 +53,8 @@ x-execution-account-command: &execution-account-command
   - ${CML_ACCOUNT_REQUEST_INTERVAL_SECONDS:-0.5}
   - --shared-request-pacer-path
   - /run/cml/binance-rest-pacer/private-read.lock
+  - --shared-command-request-pacer-path
+  - /run/cml/binance-rest-pacer/private-command.lock
   - --snapshot-retention-days
   - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
   - --equity-retention-days
@@ -539,6 +541,9 @@ services:
       CML_LIVE_CANDLE_GRACE_PROFIT_PCT: ${CML_LIVE_CANDLE_GRACE_PROFIT_PCT:-0.0088}
       CML_MARKET_STATE_HUB_URL: ${CML_MARKET_STATE_HUB_URL:-ws://market-data:8766}
       CML_MARKET_QUOTE_HUB_URL: ${CML_MARKET_QUOTE_HUB_URL:-ws://market-data:8768}
+      CML_MARKET_QUOTE_VOLUME_HUB_URL: ${CML_MARKET_QUOTE_VOLUME_HUB_URL:-ws://market-data:8768}
+      CML_BINANCE_SHARED_REQUEST_PACER_PATH: ${CML_BINANCE_SHARED_REQUEST_PACER_PATH:-/run/cml/binance-rest-pacer/private-read.lock}
+      CML_BINANCE_SHARED_COMMAND_REQUEST_PACER_PATH: ${CML_BINANCE_SHARED_COMMAND_REQUEST_PACER_PATH:-/run/cml/binance-rest-pacer/private-command.lock}
       CML_ACCOUNT_EVENT_HUB_URL: ${CML_ACCOUNT_EVENT_HUB_URL:-ws://execution-account-live:8767}
       CML_RISK_CONTROL_HUB_URL: ${CML_RISK_CONTROL_HUB_URL:-ws://execution-account-live:8769}
       CML_RISK_CONTROL_HUB_TOKEN: ${CML_RISK_CONTROL_HUB_TOKEN:-}
@@ -559,6 +564,8 @@ services:
       - ${CML_MARKET_STATE_HUB_URL:-ws://market-data:8766}
       - --market-quote-hub-url
       - ${CML_MARKET_QUOTE_HUB_URL:-ws://market-data:8768}
+      - --market-quote-volume-hub-url
+      - ${CML_MARKET_QUOTE_VOLUME_HUB_URL:-ws://market-data:8768}
       - --account-event-hub-url
       - ${CML_ACCOUNT_EVENT_HUB_URL:-ws://execution-account-live:8767}
       - --risk-control-hub-url
@@ -615,6 +622,8 @@ services:
         condition: service_started
       execution-account-live:
         condition: service_healthy
+    volumes:
+      - binance-rest-pacer:/run/cml/binance-rest-pacer
     healthcheck:
       # The live process refreshes liveness locally and refreshes the database
       # marker after lease/checkpoint writes.

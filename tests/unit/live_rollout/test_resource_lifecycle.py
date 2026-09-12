@@ -68,3 +68,32 @@ async def test_live_resource_lifecycle_preserves_shutdown_order() -> None:
         "heartbeat-engine",
         "health",
     ]
+
+
+async def test_live_resource_lifecycle_closes_shared_candle_source_once() -> None:
+    events: list[str] = []
+    source = FakeResource("candle-source", events)
+
+    lifecycle = LiveResourceLifecycle(
+        entry_runtime=None,
+        entry_order_lifecycle=None,
+        execution_coordinator=None,
+        client=None,
+        closed_candle_feed=None,
+        candle_source=source,  # type: ignore[arg-type]
+        ema_candle_source=source,  # type: ignore[arg-type]
+        signal_recorder=None,
+        telemetry=None,
+        volume_cache=None,
+        volume_rest_client=None,
+        execution_engine=None,
+        market_engine=None,
+        observability_engine=None,
+        checkpoint_engine=None,
+        heartbeat_engine=None,
+        health=None,
+    )
+
+    await lifecycle.close()
+
+    assert events == ["candle-source"]

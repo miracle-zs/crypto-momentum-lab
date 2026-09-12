@@ -10,9 +10,7 @@ not an execution capability.
 import asyncio
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Protocol
 
 import structlog
@@ -20,12 +18,15 @@ import structlog
 from crypto_momentum_lab.market_data.binance.rest import (
     Binance24hTicker,
 )
+from crypto_momentum_lab.market_data.quote_hub import (
+    WebSocketMarketQuoteVolumeSource,
+)
+from crypto_momentum_lab.market_data.quote_volume import QuoteVolume24hSnapshot
 
 log = structlog.get_logger()
 
 _DEFAULT_REFRESH_INTERVAL_SECONDS = 60.0
 _DEFAULT_HISTORY_SIZE = 2_880
-_BINANCE_24H_TICKER_SOURCE = "binance_fapi_ticker_24hr"
 
 
 class Binance24hTickerClient(Protocol):
@@ -41,28 +42,54 @@ class QuoteVolume24hProvider(Protocol):
     ) -> "QuoteVolume24hSnapshot | None": ...
 
 
-@dataclass(frozen=True, slots=True)
-class QuoteVolume24hSnapshot:
-    symbol: str
-    quote_volume: Decimal
-    source_at: datetime
-    fetched_at: datetime
-    quote_asset: str = "USDT"
-    source: str = _BINANCE_24H_TICKER_SOURCE
+class _QuoteVolumeHistory:
+    def __init__(self, history_size: int) -> None:
+        if history_size <= 0:
+            raise ValueError("history_size must be positive")
+        self._history_size = history_size
+        self._snapshots: dict[str, deque[QuoteVolume24hSnapshot]] = {}
+        self.last_refresh_at: datetime | None = None
 
-    def __post_init__(self) -> None:
-        if not self.symbol.strip():
+    def observe(self, snapshot: QuoteVolume24hSnapshot) -> bool:
+        # The live strategy trades USDT-margined perpetuals.  The global
+        # endpoint also returns COIN-M/USDC-style symbols, for which a value
+        # labelled as USDT would be misleading.
+        if not snapshot.symbol.upper().endswith("USDT"):
+            return False
+        normalized = QuoteVolume24hSnapshot(
+            symbol=snapshot.symbol.upper(),
+            quote_volume=snapshot.quote_volume,
+            source_at=snapshot.source_at,
+            fetched_at=snapshot.fetched_at,
+            quote_asset=snapshot.quote_asset,
+            source=snapshot.source,
+            exchange=snapshot.exchange,
+            environment=snapshot.environment,
+        )
+        history = self._snapshots.setdefault(
+            normalized.symbol,
+            deque(maxlen=self._history_size),
+        )
+        history.append(normalized)
+        self.last_refresh_at = normalized.fetched_at
+        return True
+
+    def snapshot(
+        self,
+        symbol: str,
+        *,
+        as_of: datetime,
+    ) -> QuoteVolume24hSnapshot | None:
+        if not symbol.strip():
             raise ValueError("symbol must not be empty")
-        if self.quote_volume < 0:
-            raise ValueError("quote_volume must be non-negative")
-        if not self.quote_asset.strip():
-            raise ValueError("quote_asset must not be empty")
-        if not self.source.strip():
-            raise ValueError("source must not be empty")
-        for field_name in ("source_at", "fetched_at"):
-            value = getattr(self, field_name)
-            if value.tzinfo is None or value.utcoffset() is None:
-                raise ValueError(f"{field_name} must be timezone-aware")
+        _require_aware(as_of, "as_of")
+        history = self._snapshots.get(symbol.upper())
+        if not history:
+            return None
+        for snapshot in reversed(history):
+            if snapshot.fetched_at <= as_of:
+                return snapshot
+        return None
 
 
 class Binance24hQuoteVolumeCache:
@@ -82,12 +109,10 @@ class Binance24hQuoteVolumeCache:
             raise ValueError("history_size must be positive")
         self._client = client
         self._refresh_interval_seconds = refresh_interval_seconds
-        self._history_size = history_size
         self._clock = clock or (lambda: datetime.now(tz=UTC))
-        self._snapshots: dict[str, deque[QuoteVolume24hSnapshot]] = {}
+        self._history = _QuoteVolumeHistory(history_size)
         self._refresh_task: asyncio.Task[None] | None = None
         self._refresh_failure_count = 0
-        self._last_refresh_at: datetime | None = None
 
     @property
     def refresh_failure_count(self) -> int:
@@ -95,7 +120,7 @@ class Binance24hQuoteVolumeCache:
 
     @property
     def last_refresh_at(self) -> datetime | None:
-        return self._last_refresh_at
+        return self._history.last_refresh_at
 
     async def start(self) -> None:
         if self._refresh_task is not None:
@@ -121,24 +146,13 @@ class Binance24hQuoteVolumeCache:
         tickers = await self._client.fetch_24h_tickers()
         refreshed_count = 0
         for ticker in tickers.values():
-            # The live strategy trades USDT-margined perpetuals.  The global
-            # endpoint also returns COIN-M/USDC-style symbols, for which a
-            # value labelled as USDT would be misleading.
-            if not ticker.symbol.upper().endswith("USDT"):
-                continue
             snapshot = QuoteVolume24hSnapshot(
                 symbol=ticker.symbol.upper(),
                 quote_volume=ticker.quote_volume,
                 source_at=ticker.close_time,
                 fetched_at=fetched_at,
             )
-            history = self._snapshots.setdefault(
-                snapshot.symbol,
-                deque(maxlen=self._history_size),
-            )
-            history.append(snapshot)
-            refreshed_count += 1
-        self._last_refresh_at = fetched_at
+            refreshed_count += int(self._history.observe(snapshot))
         return refreshed_count
 
     def snapshot(
@@ -153,16 +167,7 @@ class Binance24hQuoteVolumeCache:
         prevents a later REST response from leaking into an earlier signal.
         """
 
-        if not symbol.strip():
-            raise ValueError("symbol must not be empty")
-        _require_aware(as_of, "as_of")
-        history = self._snapshots.get(symbol.upper())
-        if not history:
-            return None
-        for snapshot in reversed(history):
-            if snapshot.fetched_at <= as_of:
-                return snapshot
-        return None
+        return self._history.snapshot(symbol, as_of=as_of)
 
     async def _run_refresh_loop(self) -> None:
         while True:
@@ -181,9 +186,73 @@ class Binance24hQuoteVolumeCache:
                 log.debug(
                     "live_24h_quote_volume_refreshed",
                     symbol_count=refreshed_count,
-                    fetched_at=self._last_refresh_at,
+                    fetched_at=self.last_refresh_at,
                 )
             await asyncio.sleep(self._refresh_interval_seconds)
+
+
+class WebSocketQuoteVolumeProvider:
+    """Consume the market-data hub's shared volume snapshots."""
+
+    def __init__(
+        self,
+        source: WebSocketMarketQuoteVolumeSource,
+        *,
+        history_size: int = _DEFAULT_HISTORY_SIZE,
+    ) -> None:
+        self._source = source
+        self._history = _QuoteVolumeHistory(history_size)
+        self._task: asyncio.Task[None] | None = None
+        self._failure_count = 0
+
+    @property
+    def refresh_failure_count(self) -> int:
+        return self._failure_count
+
+    @property
+    def last_refresh_at(self) -> datetime | None:
+        return self._history.last_refresh_at
+
+    async def start(self) -> None:
+        if self._task is not None:
+            return
+        self._task = asyncio.create_task(
+            self._run(),
+            name="live-24h-quote-volume-hub",
+        )
+
+    async def stop(self) -> None:
+        self._source.stop()
+        task = self._task
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self._task = None
+
+    def snapshot(
+        self,
+        symbol: str,
+        *,
+        as_of: datetime,
+    ) -> QuoteVolume24hSnapshot | None:
+        return self._history.snapshot(symbol, as_of=as_of)
+
+    async def _run(self) -> None:
+        while True:
+            try:
+                async for snapshot in self._source:
+                    self._history.observe(snapshot)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._failure_count += 1
+                log.warning(
+                    "live_24h_quote_volume_hub_failed",
+                    error_type=type(error).__name__,
+                    failure_count=self._failure_count,
+                )
+                await asyncio.sleep(1.0)
 
 
 def _require_aware(value: datetime, field_name: str) -> None:
@@ -195,4 +264,5 @@ __all__ = [
     "Binance24hQuoteVolumeCache",
     "QuoteVolume24hProvider",
     "QuoteVolume24hSnapshot",
+    "WebSocketQuoteVolumeProvider",
 ]

@@ -62,9 +62,7 @@ def test_decode_closed_candle_requires_official_final_flag() -> None:
 
     assert event is not None
     assert event.candle.symbol == "BTCUSDT"
-    assert event.candle.candle_end - event.candle.candle_start == timedelta(
-        minutes=15
-    )
+    assert event.candle.candle_end - event.candle.candle_start == timedelta(minutes=15)
     assert event.candle.open_price == Decimal("100")
     assert event.candle.close_price == Decimal("101.5")
     assert event.recovered is False
@@ -126,6 +124,36 @@ async def test_feed_recovery_publishes_only_missing_candles() -> None:
     assert backfill.calls[0][0] == "BTCUSDT"
     event = await feed._events.get()
     assert event.recovered is True
+
+
+@pytest.mark.asyncio
+async def test_feed_coalesces_reconnect_recovery_within_cooldown() -> None:
+    now = RECEIVED_AT
+    recovery_calls: list[frozenset[str]] = []
+    feed = BinanceClosedCandle15mFeed(
+        config=ClosedCandle15mFeedConfig(
+            websocket_url="wss://example.test/market/ws",
+            connection_recovery_cooldown_seconds=30,
+        ),
+        clock=lambda: now,
+    )
+    feed._symbols = frozenset({"BTCUSDT"})
+    feed._schedule_recovery = recovery_calls.append  # type: ignore[method-assign]
+
+    class LifecycleEvent:
+        opened = True
+        reason = None
+
+    await feed._observe_lifecycle(LifecycleEvent())
+    await feed._observe_lifecycle(LifecycleEvent())
+    assert recovery_calls == [frozenset({"BTCUSDT"})]
+
+    now += timedelta(seconds=31)
+    await feed._observe_lifecycle(LifecycleEvent())
+    assert recovery_calls == [
+        frozenset({"BTCUSDT"}),
+        frozenset({"BTCUSDT"}),
+    ]
 
 
 @pytest.mark.asyncio

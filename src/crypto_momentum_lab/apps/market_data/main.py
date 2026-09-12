@@ -62,6 +62,9 @@ from crypto_momentum_lab.market_data.quote_hub import (
     MarketQuoteHub,
     MarketQuoteHubConfig,
 )
+from crypto_momentum_lab.market_data.quote_volume import (
+    Binance24hQuoteVolumePublisher,
+)
 from crypto_momentum_lab.market_data.runtime_states import (
     ClosedMarketStatePublisher,
     ClosedMarketStatePublisherConfig,
@@ -101,6 +104,7 @@ from crypto_momentum_lab.persistence.raw_files.retention import (
     delete_archive_files,
     retention_cutoff_date,
 )
+from crypto_momentum_lab.universe.daily_open_prefetch import DailyOpenPrefetcher
 from crypto_momentum_lab.universe.refresh import UniverseRefreshService
 from crypto_momentum_lab.universe.scheduler import run_scheduler_loop
 
@@ -173,23 +177,15 @@ def _market_database_url(default_url: str) -> str:
 
 
 def parse_paper_exit_run_ids(value: str | None = None) -> frozenset[str]:
-    raw_value = (
-        os.environ.get(_PAPER_EXIT_RUN_IDS_ENV, "")
-        if value is None
-        else value
-    )
+    raw_value = os.environ.get(_PAPER_EXIT_RUN_IDS_ENV, "") if value is None else value
     return frozenset(
-        run_id
-        for item in raw_value.split(",")
-        if (run_id := item.strip())
+        run_id for item in raw_value.split(",") if (run_id := item.strip())
     )
 
 
 def parse_live_position_account_label(value: str | None = None) -> str | None:
     raw_value = (
-        os.environ.get(_LIVE_POSITION_ACCOUNT_LABEL_ENV, "")
-        if value is None
-        else value
+        os.environ.get(_LIVE_POSITION_ACCOUNT_LABEL_ENV, "") if value is None else value
     )
     normalized = raw_value.strip()
     return normalized or None
@@ -238,13 +234,9 @@ async def _load_protected_symbols(
     while the latest ready account reconciliation runs discover labels for
     stopped or newly added live accounts automatically.
     """
-    paper_symbols = await paper_repository.load_open_position_symbols(
-        protected_run_ids
-    )
-    discovered_labels = (
-        await account_repository.load_active_position_account_labels(
-            environment="live"
-        )
+    paper_symbols = await paper_repository.load_open_position_symbols(protected_run_ids)
+    discovered_labels = await account_repository.load_active_position_account_labels(
+        environment="live"
     )
     live_position_account_labels = (
         configured_live_position_account_labels | discovered_labels
@@ -326,9 +318,7 @@ async def refresh_once(
 
 
 def format_snapshot(snapshot: UniverseSnapshot) -> str:
-    eligible = (
-        len(snapshot.ranking.candidates) - len(snapshot.ranking.exclusions)
-    )
+    eligible = len(snapshot.ranking.candidates) - len(snapshot.ranking.exclusions)
     return " ".join(
         [
             f"snapshot_id={snapshot.snapshot_id}",
@@ -348,10 +338,7 @@ def log_snapshot(snapshot: UniverseSnapshot) -> None:
         snapshot_id=str(snapshot.snapshot_id),
         observed_at=snapshot.observed_at.isoformat(),
         activated=snapshot.activated,
-        eligible=(
-            len(snapshot.ranking.candidates)
-            - len(snapshot.ranking.exclusions)
-        ),
+        eligible=(len(snapshot.ranking.candidates) - len(snapshot.ranking.exclusions)),
         target=len(snapshot.ranking.target_symbols),
         monitoring=len(snapshot.memberships),
         excluded=len(snapshot.ranking.exclusions),
@@ -402,9 +389,7 @@ async def monitor_market_data_freshness(
             continue
         age = (now - observed_at).total_seconds()
         if age > stale_after_seconds:
-            raise MarketDataStaleError(
-                f"market data stale by {age:.1f} seconds"
-            )
+            raise MarketDataStaleError(f"market data stale by {age:.1f} seconds")
 
 
 class CaptureSubscriptionApplier(Protocol):
@@ -525,9 +510,7 @@ async def prune_expired_raw_archives(
         manifest_paths,
         cutoff_date=cutoff_date,
     )
-    deleted_manifests = await repository.delete_manifests(
-        result.removable_paths
-    )
+    deleted_manifests = await repository.delete_manifests(result.removable_paths)
     log.info(
         "raw_archive_retention_pruned",
         cutoff_date=cutoff_date.isoformat(),
@@ -571,9 +554,7 @@ async def prune_operational_database_once(
     *,
     contract_metadata_retention_hours: float = _CONTRACT_METADATA_RETENTION_HOURS,
     runtime_state_retention_hours: float = _RUNTIME_STATE_RETENTION_HOURS,
-    contract_metadata_batch_size: int = (
-        _CONTRACT_METADATA_RETENTION_BATCH_SIZE
-    ),
+    contract_metadata_batch_size: int = (_CONTRACT_METADATA_RETENTION_BATCH_SIZE),
     runtime_state_batch_size: int = _RUNTIME_STATE_RETENTION_BATCH_SIZE,
     now: datetime | None = None,
 ) -> None:
@@ -586,9 +567,7 @@ async def prune_operational_database_once(
     if runtime_state_batch_size <= 0:
         raise ValueError("runtime_state_batch_size must be positive")
     observed_at = datetime.now(UTC) if now is None else now
-    contract_cutoff = observed_at - timedelta(
-        hours=contract_metadata_retention_hours
-    )
+    contract_cutoff = observed_at - timedelta(hours=contract_metadata_retention_hours)
     runtime_cutoff = observed_at - timedelta(hours=runtime_state_retention_hours)
     deleted_contracts = await repository.prune_contract_metadata(
         before=contract_cutoff,
@@ -614,9 +593,7 @@ async def run_operational_database_retention_loop(
     interval_seconds: float = _DATABASE_RETENTION_INTERVAL_SECONDS,
     contract_metadata_retention_hours: float = _CONTRACT_METADATA_RETENTION_HOURS,
     runtime_state_retention_hours: float = _RUNTIME_STATE_RETENTION_HOURS,
-    contract_metadata_batch_size: int = (
-        _CONTRACT_METADATA_RETENTION_BATCH_SIZE
-    ),
+    contract_metadata_batch_size: int = (_CONTRACT_METADATA_RETENTION_BATCH_SIZE),
     runtime_state_batch_size: int = _RUNTIME_STATE_RETENTION_BATCH_SIZE,
     sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
@@ -662,11 +639,11 @@ class MarketDataRuntime:
     universe_refresh_interval_minutes: int
     enabled_streams: tuple[CaptureStream, ...]
     initial_symbols: frozenset[str]
+    quote_volume_publisher: Binance24hQuoteVolumePublisher | None = None
+    daily_open_prefetcher: DailyOpenPrefetcher | None = None
     maintenance_capture_repository: PostgresCaptureRepository | None = None
     operational_retention: PostgresOperationalRetentionRepository | None = None
-    database_retention_interval_seconds: float = (
-        _DATABASE_RETENTION_INTERVAL_SECONDS
-    )
+    database_retention_interval_seconds: float = _DATABASE_RETENTION_INTERVAL_SECONDS
     contract_metadata_retention_hours: float = _CONTRACT_METADATA_RETENTION_HOURS
     runtime_state_retention_hours: float = _RUNTIME_STATE_RETENTION_HOURS
 
@@ -702,17 +679,11 @@ async def build_market_data_runtime(
     )
     universe_repository = PostgresUniverseRepository(market_sessions)
     capture_repository = PostgresCaptureRepository(observability_sessions)
-    maintenance_capture_repository = PostgresCaptureRepository(
-        maintenance_sessions
-    )
-    operational_retention = PostgresOperationalRetentionRepository(
-        maintenance_sessions
-    )
+    maintenance_capture_repository = PostgresCaptureRepository(maintenance_sessions)
+    operational_retention = PostgresOperationalRetentionRepository(maintenance_sessions)
     paper_repository = PostgresPaperDaemonRepository(maintenance_sessions)
     account_repository = PostgresAccountRepository(maintenance_sessions)
-    runtime_state_repository = PostgresRuntimeMarketStateRepository(
-        market_sessions
-    )
+    runtime_state_repository = PostgresRuntimeMarketStateRepository(market_sessions)
     state_hub = MarketStateHub(
         MarketStateHubConfig(
             host=os.environ.get(
@@ -746,9 +717,7 @@ async def build_market_data_runtime(
         on_durable_state_persisted=on_durable_state_persisted,
     )
     protected_run_ids = parse_paper_exit_run_ids()
-    configured_live_position_account_labels = (
-        parse_live_position_account_labels()
-    )
+    configured_live_position_account_labels = parse_live_position_account_labels()
 
     async def load_protected_symbols() -> frozenset[str]:
         return await _load_protected_symbols(
@@ -761,9 +730,7 @@ async def build_market_data_runtime(
         )
 
     initial_memberships = await universe_repository.load_active_memberships()
-    initial_symbols = (
-        frozenset(initial_memberships) | await load_protected_symbols()
-    )
+    initial_symbols = frozenset(initial_memberships) | await load_protected_symbols()
     enabled_streams = tuple(
         CaptureStream(item) for item in runtime.capture.enabled_streams
     )
@@ -779,9 +746,7 @@ async def build_market_data_runtime(
     archive_streams = (
         None
         if archive_config.streams is None
-        else frozenset(
-            CaptureStream(item) for item in archive_config.streams
-        )
+        else frozenset(CaptureStream(item) for item in archive_config.streams)
     )
     queue = BoundedEnvelopeQueue(
         max_events=runtime.capture.queue_max_events,
@@ -797,9 +762,7 @@ async def build_market_data_runtime(
         coalescing_interval_seconds=(
             runtime.capture.book_ticker_coalescing_interval_seconds
         ),
-        backpressure_timeout_seconds=(
-            runtime.capture.backpressure_timeout_seconds
-        ),
+        backpressure_timeout_seconds=(runtime.capture.backpressure_timeout_seconds),
     )
 
     async def save_manifest(manifest: ArchiveManifest) -> None:
@@ -821,9 +784,7 @@ async def build_market_data_runtime(
         # here would append the same entry and then let replay delete it.
         await maintenance_capture_repository.save_manifest(manifest)
 
-    replayed_manifest_count = await manifest_journal.replay(
-        save_replayed_manifest
-    )
+    replayed_manifest_count = await manifest_journal.replay(save_replayed_manifest)
     if replayed_manifest_count:
         log.info(
             "pending_manifest_journal_replayed",
@@ -850,18 +811,23 @@ async def build_market_data_runtime(
         rotation_uncompressed_bytes=archive_config.rotation_uncompressed_bytes,
         max_open_writers=archive_config.max_open_writers,
         group_commit_max_events=archive_config.group_commit_max_events,
-        group_commit_max_milliseconds=(
-            archive_config.group_commit_max_milliseconds
-        ),
+        group_commit_max_milliseconds=(archive_config.group_commit_max_milliseconds),
     )
     rest_client = BinanceUsdMRestClient(str(runtime.binance_base_url))
     agg_trade_recovery = AggTradeGapRecoverer(rest_client)
+    daily_open_prefetcher = DailyOpenPrefetcher(
+        rest_client,
+        universe_repository,
+    )
+    quote_volume_publisher = Binance24hQuoteVolumePublisher(
+        rest_client,
+        publish=quote_hub.publish_volume,
+        environment=runtime.environment,
+    )
 
     async def handle_agg_trade_gap(gap: AggTradeGap) -> None:
         await runtime_state_publisher.mark_incomplete(gap)
-        await capture_repository.save_quality_event(
-            agg_trade_gap_quality_event(gap)
-        )
+        await capture_repository.save_quality_event(agg_trade_gap_quality_event(gap))
 
     coordinator = CaptureCoordinator(
         queue=queue,
@@ -891,29 +857,19 @@ async def build_market_data_runtime(
             group_id=group.group_id,
             route=group.route,
             environment=runtime.environment,
-            desired_names=tuple(
-                item.binance_name for item in group.subscriptions
-            ),
+            desired_names=tuple(item.binance_name for item in group.subscriptions),
             generation=1,
             on_envelope=on_capture_envelope,
             on_lifecycle=coordinator.observe_lifecycle,
             reconnect_delays=(0.0, 1.0, 5.0),
-            connection_lifetime_seconds=(
-                runtime.capture.connection_lifetime_seconds
-            ),
+            connection_lifetime_seconds=(runtime.capture.connection_lifetime_seconds),
             open_timeout_seconds=runtime.capture.open_timeout_seconds,
             ping_interval_seconds=runtime.capture.ping_interval_seconds,
             ping_timeout_seconds=runtime.capture.ping_timeout_seconds,
             silence_timeout_seconds=runtime.capture.silence_timeout_seconds,
-            control_ack_timeout_seconds=(
-                runtime.capture.control_ack_timeout_seconds
-            ),
-            control_messages_per_second=(
-                runtime.capture.control_messages_per_second
-            ),
-            ingress_queue_max_events=(
-                runtime.capture.ingress_queue_max_events
-            ),
+            control_ack_timeout_seconds=(runtime.capture.control_ack_timeout_seconds),
+            control_messages_per_second=(runtime.capture.control_messages_per_second),
+            ingress_queue_max_events=(runtime.capture.ingress_queue_max_events),
             symbol_filter=coordinator.accepts_symbol,
             on_realtime_envelope=runtime_state_publisher.observe_realtime_quote,
         )
@@ -923,9 +879,7 @@ async def build_market_data_runtime(
         max_subscriptions_per_connection=(
             runtime.capture.max_subscriptions_per_connection
         ),
-        control_messages_per_second=(
-            runtime.capture.control_messages_per_second
-        ),
+        control_messages_per_second=(runtime.capture.control_messages_per_second),
         max_subscriptions_per_connection_by_stream=(
             {
                 CaptureStream.BOOK_TICKER: (
@@ -933,14 +887,11 @@ async def build_market_data_runtime(
                 )
             }
             if (
-                runtime.capture.book_ticker_max_subscriptions_per_connection
-                is not None
+                runtime.capture.book_ticker_max_subscriptions_per_connection is not None
             )
             else None
         ),
-        use_all_book_ticker_stream=(
-            runtime.capture.book_ticker_use_all_stream
-        ),
+        use_all_book_ticker_stream=(runtime.capture.book_ticker_use_all_stream),
     )
     capture = MarketDataCaptureService(
         queue=queue,
@@ -951,9 +902,7 @@ async def build_market_data_runtime(
             halt_free_bytes=archive_config.halt_free_bytes,
             recovery_free_bytes=archive_config.recovery_free_bytes,
         ),
-        disk_free_bytes_provider=lambda: shutil.disk_usage(
-            archive_config.root
-        ).free,
+        disk_free_bytes_provider=lambda: shutil.disk_usage(archive_config.root).free,
         coordinator=coordinator,
     )
     observer = CaptureUniverseObserver(
@@ -968,6 +917,7 @@ async def build_market_data_runtime(
         config=runtime.universe,
         config_hash=capture_version,
         observer=observer,
+        daily_open_prefetcher=daily_open_prefetcher,
     )
     try:
         yield MarketDataRuntime(
@@ -985,6 +935,8 @@ async def build_market_data_runtime(
             agg_trade_recovery=agg_trade_recovery,
             state_hub=state_hub,
             quote_hub=quote_hub,
+            quote_volume_publisher=quote_volume_publisher,
+            daily_open_prefetcher=daily_open_prefetcher,
             universe_activation_minute=runtime.universe.activation_minute,
             universe_refresh_interval_minutes=(
                 runtime.universe.refresh_interval_minutes
@@ -1008,9 +960,7 @@ def refresh_universe(
 ) -> None:
     try:
         observed_at = parse_observed_at(at)
-        snapshot = asyncio.run(
-            refresh_once(resolve_config_path(config), observed_at)
-        )
+        snapshot = asyncio.run(refresh_once(resolve_config_path(config), observed_at))
     except Exception as error:
         typer.echo(f"refresh failed: {error}", err=True)
         raise typer.Exit(code=1) from error
@@ -1054,6 +1004,8 @@ async def run_market_data(
         auxiliary_tasks: tuple[asyncio.Task[None], ...] = ()
         stop_task: asyncio.Task[bool] | None = None
         quote_hub = getattr(runtime, "quote_hub", None)
+        quote_volume_publisher = getattr(runtime, "quote_volume_publisher", None)
+        daily_open_prefetcher = getattr(runtime, "daily_open_prefetcher", None)
         try:
             await runtime.state_hub.start()
             if quote_hub is not None:
@@ -1068,6 +1020,9 @@ async def run_market_data(
                 second=0,
                 microsecond=0,
             )
+            if daily_open_prefetcher is not None:
+                await daily_open_prefetcher.bootstrap_current_day(startup_observed_at)
+                await daily_open_prefetcher.start()
             startup_snapshot = await runtime.universe.refresh(
                 observed_at=startup_observed_at
             )
@@ -1075,14 +1030,14 @@ async def run_market_data(
                 "universe_startup_refresh",
                 observed_at=startup_snapshot.observed_at.isoformat(),
             )
+            if quote_volume_publisher is not None:
+                await quote_volume_publisher.start()
             capture_task = asyncio.create_task(runtime.capture.run())
             auxiliary_tasks = (
                 asyncio.create_task(
                     run_scheduler_loop(
                         LoggingRefreshService(runtime.universe),
-                        activation_minute=(
-                            runtime.universe_activation_minute
-                        ),
+                        activation_minute=(runtime.universe_activation_minute),
                         refresh_interval_minutes=(
                             runtime.universe_refresh_interval_minutes
                         ),
@@ -1098,21 +1053,15 @@ async def run_market_data(
                 asyncio.create_task(
                     monitor_market_data_health(
                         capture_metrics=runtime.capture.metrics_snapshot,
-                        connection_metrics=(
-                            runtime.connection_pool.metrics_snapshot
-                        ),
+                        connection_metrics=(runtime.connection_pool.metrics_snapshot),
                         runtime_state_metrics=(
                             runtime.runtime_state_publisher.lateness_metrics_snapshot
                         ),
-                        recovery_metrics=lambda: (
-                            runtime.agg_trade_recovery.metrics
-                        ),
+                        recovery_metrics=lambda: runtime.agg_trade_recovery.metrics,
                     )
                 ),
                 asyncio.create_task(
-                    reconcile_paper_exit_subscriptions(
-                        runtime.subscription_observer
-                    )
+                    reconcile_paper_exit_subscriptions(runtime.subscription_observer)
                 ),
                 asyncio.create_task(
                     run_raw_archive_retention_loop(
@@ -1188,6 +1137,10 @@ async def run_market_data(
             if capture_task is not None:
                 await asyncio.gather(capture_task, return_exceptions=True)
             await runtime.runtime_state_publisher.stop()
+            if daily_open_prefetcher is not None:
+                await daily_open_prefetcher.stop()
+            if quote_volume_publisher is not None:
+                await quote_volume_publisher.stop()
             if quote_hub is not None:
                 await quote_hub.stop()
             await runtime.state_hub.stop()
@@ -1234,9 +1187,7 @@ async def run_market_data_with_signal_handlers(config_path: Path) -> None:
 
 async def run_market_data_for(config_path: Path, *, seconds: float) -> None:
     stop_requested = asyncio.Event()
-    timer_task = asyncio.create_task(
-        _request_stop_after(seconds, stop_requested)
-    )
+    timer_task = asyncio.create_task(_request_stop_after(seconds, stop_requested))
     try:
         await run_market_data(
             config_path,
@@ -1303,9 +1254,7 @@ def partition_runtime_states_command(
     if lookahead_hours <= 0:
         raise typer.BadParameter("--lookahead-hours must be positive")
     if phase == "cutover" and not confirm_writer_paused:
-        raise typer.BadParameter(
-            "--confirm-writer-paused is required for cutover"
-        )
+        raise typer.BadParameter("--confirm-writer-paused is required for cutover")
 
     async def run() -> None:
         engine = create_partitioning_database_engine(database_url)
@@ -1329,9 +1278,7 @@ def partition_runtime_states_command(
                     )
                 )
             else:
-                cutover_report = await cutover_runtime_state_partition(
-                    session_factory
-                )
+                cutover_report = await cutover_runtime_state_partition(session_factory)
                 typer.echo(
                     " ".join(
                         (

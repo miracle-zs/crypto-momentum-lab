@@ -56,9 +56,7 @@ class ContinuousAccountSyncConfig:
         if self.interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
         if self.fill_interval_seconds < self.interval_seconds:
-            raise ValueError(
-                "fill_interval_seconds must not be below interval_seconds"
-            )
+            raise ValueError("fill_interval_seconds must not be below interval_seconds")
         if self.failure_backoff_initial_seconds <= 0:
             raise ValueError("failure_backoff_initial_seconds must be positive")
         if self.failure_backoff_max_seconds < self.failure_backoff_initial_seconds:
@@ -308,9 +306,9 @@ class UserDataAccountSyncDaemon:
         self._event_queue: asyncio.Queue[BinanceUserDataEvent] | None = None
         self._deferred_events: deque[BinanceUserDataEvent] = deque()
         self._reconciliation_active = False
-        self._persistence_queue: asyncio.Queue[
-            _PendingUserDataPersistence | None
-        ] | None = None
+        self._persistence_queue: (
+            asyncio.Queue[_PendingUserDataPersistence | None] | None
+        ) = None
         self._event_worker_task: asyncio.Task[None] | None = None
         self._persistence_worker_task: asyncio.Task[None] | None = None
         self._pipeline_recovery_event = asyncio.Event()
@@ -371,9 +369,7 @@ class UserDataAccountSyncDaemon:
                     )
                 if reconciliation_task is None or reconciliation_task.done():
                     reconciliation_task = asyncio.ensure_future(
-                        self._sleep(
-                            self._config.rest_reconciliation_interval_seconds
-                        )
+                        self._sleep(self._config.rest_reconciliation_interval_seconds)
                     )
                 if snapshot_task is None or snapshot_task.done():
                     snapshot_task = asyncio.ensure_future(
@@ -540,12 +536,9 @@ class UserDataAccountSyncDaemon:
         needs_reconciliation = False
         try:
             async with self._state_lock:
-                if (
-                    not replay
-                    and (
-                        self._reconciliation_active
-                        or self._pipeline_recovery_event.is_set()
-                    )
+                if not replay and (
+                    self._reconciliation_active
+                    or self._pipeline_recovery_event.is_set()
                 ):
                     self._defer_event(event)
                     return
@@ -665,9 +658,7 @@ class UserDataAccountSyncDaemon:
 
     def _start_pipeline(self) -> None:
         if self._event_queue is None:
-            self._event_queue = asyncio.Queue(
-                maxsize=self._config.event_queue_size
-            )
+            self._event_queue = asyncio.Queue(maxsize=self._config.event_queue_size)
         if self._persistence_queue is None:
             self._persistence_queue = asyncio.Queue(
                 maxsize=self._config.persistence_queue_size
@@ -738,16 +729,11 @@ class UserDataAccountSyncDaemon:
             "event recovery",
         ):
             raise TimeoutError("account event queue did not drain for recovery")
-        if (
-            self._persistence_queue is not None
-            and not await self._wait_for_queue_drain(
-                self._persistence_queue,
-                "persistence recovery",
-            )
+        if self._persistence_queue is not None and not await self._wait_for_queue_drain(
+            self._persistence_queue,
+            "persistence recovery",
         ):
-            raise TimeoutError(
-                "account persistence queue did not drain for recovery"
-            )
+            raise TimeoutError("account persistence queue did not drain for recovery")
         result = await self._reconcile(
             include_fills=True,
             wait_for_pipeline=False,
@@ -905,19 +891,14 @@ class UserDataAccountSyncDaemon:
         self._pipeline_recovery_generation += 1
         if self._pipeline_recovery_reason is None:
             self._pipeline_recovery_reason = reason
-        if (
-            origin_event is not None
-            and self._pipeline_recovery_origin_event is None
-        ):
+        if origin_event is not None and self._pipeline_recovery_origin_event is None:
             self._pipeline_recovery_origin_event = origin_event
         self._pipeline_recovery_event.set()
         log.error(
             "binance_user_data_pipeline_recovery_requested",
             reason=reason,
             queue_size=(
-                None
-                if self._event_queue is None
-                else self._event_queue.qsize()
+                None if self._event_queue is None else self._event_queue.qsize()
             ),
             persistence_queue_size=(
                 None
@@ -973,15 +954,14 @@ class UserDataAccountSyncDaemon:
                 raise TimeoutError(
                     "account event queue did not drain before reconciliation"
                 )
-            if self._persistence_queue is not None and not await (
-                self._wait_for_queue_drain(
+            if (
+                self._persistence_queue is not None
+                and not await self._wait_for_queue_drain(
                     self._persistence_queue,
                     "persistence reconciliation",
                 )
             ):
-                self._request_pipeline_recovery(
-                    "persistence_queue_drain_timeout"
-                )
+                self._request_pipeline_recovery("persistence_queue_drain_timeout")
                 raise TimeoutError(
                     "account persistence queue did not drain before reconciliation"
                 )
@@ -1001,8 +981,7 @@ class UserDataAccountSyncDaemon:
                     else None
                 )
                 use_realtime_sync = (
-                    self._state is not None
-                    and realtime_sync_callable is not None
+                    self._state is not None and realtime_sync_callable is not None
                 )
                 if realtime_sync_callable is not None and use_realtime_sync:
                     result = await realtime_sync_callable(
@@ -1021,9 +1000,7 @@ class UserDataAccountSyncDaemon:
                 if self._state is None:
                     self._state = AccountUserDataState(
                         snapshot,
-                        expected_position_registry=(
-                            self._expected_position_registry
-                        ),
+                        expected_position_registry=(self._expected_position_registry),
                     )
                 else:
                     self._state.replace_snapshot(snapshot)
@@ -1077,9 +1054,7 @@ class UserDataAccountSyncDaemon:
                     self._persistence_queue,
                     "persistence snapshot",
                 ):
-                    self._request_pipeline_recovery(
-                        "persistence_queue_drain_timeout"
-                    )
+                    self._request_pipeline_recovery("persistence_queue_drain_timeout")
                     return
         async with self._state_lock:
             async with self._rest_sync_lock:
@@ -1122,19 +1097,14 @@ class UserDataAccountSyncDaemon:
 
             reconnect_requested = False
             pending_after.update(
-                {
-                    fill_key: pending_before[fill_key]
-                    for fill_key in still_missing
-                }
+                {fill_key: pending_before[fill_key] for fill_key in still_missing}
             )
             reconnect_candidates = {
                 fill_key
                 for fill_key in still_missing
                 if (
-                    fill_key
-                    not in self._missing_fill_reconnect_requested_at
-                    or now
-                    - self._missing_fill_reconnect_requested_at[fill_key]
+                    fill_key not in self._missing_fill_reconnect_requested_at
+                    or now - self._missing_fill_reconnect_requested_at[fill_key]
                     >= timedelta(seconds=_MISSING_FILL_RECONNECT_RETRY_SECONDS)
                 )
             }
@@ -1153,10 +1123,7 @@ class UserDataAccountSyncDaemon:
                             await reconnect_result
                         reconnect_requested = True
                         self._missing_fill_reconnect_requested_at.update(
-                            {
-                                fill_key: now
-                                for fill_key in reconnect_candidates
-                            }
+                            {fill_key: now for fill_key in reconnect_candidates}
                         )
                     except Exception as error:
                         self._report_error(error)
@@ -1328,10 +1295,7 @@ def _metric_fill_keys(metrics: object) -> set[FillKey] | None:
 
 
 def _is_ready_result(result: ExecutionAccountSyncResult) -> bool:
-    return (
-        result.status.value == "ready_readonly"
-        and result.snapshot is not None
-    )
+    return result.status.value == "ready_readonly" and result.snapshot is not None
 
 
 def _ready_snapshot(result: ExecutionAccountSyncResult) -> AccountSnapshot:

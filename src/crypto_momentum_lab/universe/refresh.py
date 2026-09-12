@@ -20,6 +20,7 @@ from crypto_momentum_lab.domain.universe.ports import (
     UniverseSnapshotObserver,
 )
 from crypto_momentum_lab.domain.universe.ranking import rank_utc_day_returns
+from crypto_momentum_lab.universe.daily_open_prefetch import DailyOpenPrefetchSink
 
 
 class UniverseRefreshService:
@@ -32,6 +33,7 @@ class UniverseRefreshService:
         config_hash: str,
         obligations: MonitoringObligationProvider | None = None,
         observer: UniverseSnapshotObserver | None = None,
+        daily_open_prefetcher: DailyOpenPrefetchSink | None = None,
     ) -> None:
         self._market_data = market_data
         self._repository = repository
@@ -39,6 +41,7 @@ class UniverseRefreshService:
         self._config_hash = config_hash
         self._obligations = obligations or NoMonitoringObligations()
         self._observer = observer or NoUniverseSnapshotObserver()
+        self._daily_open_prefetcher = daily_open_prefetcher
 
     async def refresh(self, *, observed_at: datetime) -> UniverseSnapshot:
         if observed_at.tzinfo is None:
@@ -59,15 +62,19 @@ class UniverseRefreshService:
             utc_day,
             symbols,
         )
-        missing_symbols = symbols - stored_opens.keys()
-        fetched_opens = await self._market_data.fetch_daily_opens(
-            frozenset(missing_symbols),
-            utc_day,
-        )
-        await self._repository.save_daily_opens(
-            fetched_opens,
-            captured_at=observed_at,
-        )
+        if self._daily_open_prefetcher is None:
+            missing_symbols = symbols - stored_opens.keys()
+            fetched_opens = await self._market_data.fetch_daily_opens(
+                frozenset(missing_symbols),
+                utc_day,
+            )
+            await self._repository.save_daily_opens(
+                fetched_opens,
+                captured_at=observed_at,
+            )
+        else:
+            await self._daily_open_prefetcher.request(symbols, utc_day)
+            fetched_opens = ()
         opens: dict[str, Decimal] = {
             **stored_opens,
             **{item.symbol: item.open_price for item in fetched_opens},
@@ -78,9 +85,7 @@ class UniverseRefreshService:
             MarketCandidate(
                 symbol=symbol,
                 open_price=opens.get(symbol),
-                current_price=(
-                    None if symbol not in prices else prices[symbol].price
-                ),
+                current_price=(None if symbol not in prices else prices[symbol].price),
                 price_time=(
                     None if symbol not in prices else prices[symbol].observed_at
                 ),
@@ -104,9 +109,7 @@ class UniverseRefreshService:
                     forced_symbols=forced,
                     observed_at=observed_at,
                     retention_rank=self._config.retention_rank,
-                    retention_duration=timedelta(
-                        hours=self._config.retention_hours
-                    ),
+                    retention_duration=timedelta(hours=self._config.retention_hours),
                     extended_gainer_count=self._config.extended_gainer_count,
                 ).values()
             )
@@ -121,9 +124,7 @@ class UniverseRefreshService:
             config_hash=self._config_hash,
             activated=activated,
             ranking=ranking,
-            memberships=tuple(
-                sorted(memberships, key=lambda item: item.symbol)
-            ),
+            memberships=tuple(sorted(memberships, key=lambda item: item.symbol)),
         )
         await self._repository.save_snapshot(snapshot)
         if snapshot.activated:

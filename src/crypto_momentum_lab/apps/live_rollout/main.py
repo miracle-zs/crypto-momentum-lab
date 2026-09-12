@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Annotated, TypeVar
+from typing import Annotated
 from uuid import uuid4
 
 import structlog
@@ -165,6 +165,10 @@ from crypto_momentum_lab.live_rollout.runtime_supervisor import (
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
 )
+from crypto_momentum_lab.live_rollout.session import (
+    LiveSessionConfig,
+    LiveSessionLifecycle,
+)
 from crypto_momentum_lab.live_rollout.signal_recorder import (
     LiveStrategySignalRecorder,
 )
@@ -204,10 +208,6 @@ from crypto_momentum_lab.live_rollout.startup_resilience import (
 from crypto_momentum_lab.live_rollout.startup_resilience import (
     run_with_live_startup_backoff as _run_with_live_startup_backoff,
 )
-from crypto_momentum_lab.live_rollout.session import (
-    LiveSessionConfig,
-    LiveSessionLifecycle,
-)
 from crypto_momentum_lab.live_rollout.stream_recovery import (
     resilient_market_state_stream as _resilient_market_state_stream,
 )
@@ -223,13 +223,13 @@ from crypto_momentum_lab.live_rollout.telemetry import (
     LiveRuntimeTelemetry,
     LiveTelemetrySink,
 )
-from crypto_momentum_lab.live_rollout.volume import Binance24hQuoteVolumeCache
-from crypto_momentum_lab.market_data.binance.rest import BinanceUsdMRestClient
+from crypto_momentum_lab.live_rollout.volume import WebSocketQuoteVolumeProvider
 from crypto_momentum_lab.market_data.hub import (
     WebSocketMarketStateSource,
 )
 from crypto_momentum_lab.market_data.quote_hub import (
     WebSocketMarketQuoteSource,
+    WebSocketMarketQuoteVolumeSource,
 )
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
@@ -248,6 +248,9 @@ from crypto_momentum_lab.persistence.postgres.order_repository import (
 from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     PostgresPaperDaemonRepository,
 )
+from crypto_momentum_lab.persistence.postgres.repository import (
+    PostgresUniverseRepository,
+)
 from crypto_momentum_lab.persistence.postgres.risk_repository import (
     PostgresRiskRepository,
 )
@@ -260,9 +263,6 @@ from crypto_momentum_lab.persistence.postgres.runtime_context import (
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
     RuntimeStateCursor,
-)
-from crypto_momentum_lab.persistence.postgres.repository import (
-    PostgresUniverseRepository,
 )
 from crypto_momentum_lab.persistence.postgres.runtime_telemetry_repository import (
     PostgresRuntimeTelemetryRepository,
@@ -311,6 +311,8 @@ _LIVE_ENTRY_ORDER_TYPE = EntryType.LIMIT
 _LIVE_ENTRY_LIMIT_TTL_SECONDS = 900
 _LIVE_ORDERFLOW_PROFILE = LiveOrderFlowImpulseProfile()
 _LIVE_MARKET_WEBSOCKET_URL = "wss://fstream.binance.com/market/ws"
+_BINANCE_SHARED_REQUEST_PACER_PATH_ENV = "CML_BINANCE_SHARED_REQUEST_PACER_PATH"
+_BINANCE_SHARED_COMMAND_PACER_PATH_ENV = "CML_BINANCE_SHARED_COMMAND_REQUEST_PACER_PATH"
 _DEFAULT_PERSIST_EXCHANGE_OPERATIONS = frozenset({"submit", "cancel"})
 _GIT_COMMIT_HASH_LENGTH = 40
 _CONFIG_HASH_LENGTH = 64
@@ -328,7 +330,6 @@ _PENDING_POSITION_RETRY_DELAYS_SECONDS = (
 _ORDER_IDENTITY_CONFLICT_MESSAGE = (
     "client order ID is already bound to a different order"
 )
-_ManifestValue = TypeVar("_ManifestValue")
 
 
 @dataclass(frozen=True, slots=True)
@@ -563,10 +564,13 @@ def prepare_command(
             strategy=strategy,
         )
     )
-    configured_git_commit = git_commit_hash.strip() or os.environ.get(
-        "CML_CODE_COMMIT",
-        "",
-    ).strip()
+    configured_git_commit = (
+        git_commit_hash.strip()
+        or os.environ.get(
+            "CML_CODE_COMMIT",
+            "",
+        ).strip()
+    )
     if manifest_account is not None:
         manifest_git_commit = _validate_hex_hash(
             manifest_account.image_commit,
@@ -577,9 +581,7 @@ def prepare_command(
             configured_git_commit
             and configured_git_commit.lower() != manifest_git_commit
         ):
-            raise typer.BadParameter(
-                "git commit does not match the runtime manifest"
-            )
+            raise typer.BadParameter("git commit does not match the runtime manifest")
         configured_git_commit = manifest_git_commit
     git_commit_hash = _validate_hex_hash(
         configured_git_commit,
@@ -587,10 +589,13 @@ def prepare_command(
         _GIT_COMMIT_HASH_LENGTH,
     )
     if manifest_account is not None:
-        configured_migration_revision = migration_revision.strip() or os.environ.get(
-            "CML_LIVE_MIGRATION_REVISION",
-            "",
-        ).strip()
+        configured_migration_revision = (
+            migration_revision.strip()
+            or os.environ.get(
+                "CML_LIVE_MIGRATION_REVISION",
+                "",
+            ).strip()
+        )
         if (
             configured_migration_revision
             and configured_migration_revision != manifest_account.migration_revision
@@ -809,9 +814,7 @@ def approve_runtime_command(
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
     strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
     git_commit_hash: Annotated[str, typer.Option("--git-commit-hash")] = "",
-    migration_revision: Annotated[
-        str, typer.Option("--migration-revision")
-    ] = "",
+    migration_revision: Annotated[str, typer.Option("--migration-revision")] = "",
     notional_cap: Annotated[str, typer.Option("--notional-cap")] = "unlimited",
     max_open_positions: Annotated[
         str, typer.Option("--max-open-positions")
@@ -904,9 +907,7 @@ def refresh_approval_runtime_command(
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
     strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
     git_commit_hash: Annotated[str, typer.Option("--git-commit-hash")] = "",
-    migration_revision: Annotated[
-        str, typer.Option("--migration-revision")
-    ] = "",
+    migration_revision: Annotated[str, typer.Option("--migration-revision")] = "",
 ) -> None:
     """Refresh an active approval while preserving its operator limits."""
 
@@ -1019,9 +1020,7 @@ def _runtime_manifest_strategy_config_hash(
     computed = _live_strategy_config_hash(
         account.strategy,
         profile=inputs.profile,
-        entry_positive_gainer_top_count=(
-            inputs.entry_positive_gainer_top_count
-        ),
+        entry_positive_gainer_top_count=(inputs.entry_positive_gainer_top_count),
         require_price_above_ema5=inputs.require_price_above_ema5,
         require_price_above_ema10=inputs.require_price_above_ema10,
         entry_policy_enforce=inputs.entry_policy_enforce,
@@ -1042,17 +1041,15 @@ def _runtime_manifest_strategy_config_hash(
     return computed
 
 
-def _resolve_manifest_option(
-    value: _ManifestValue | None,
-    expected: _ManifestValue,
+def _resolve_manifest_option[T](
+    value: T | None,
+    expected: T,
     option_name: str,
-) -> _ManifestValue:
+) -> T:
     """Use manifest values while rejecting an explicitly conflicting option."""
 
     if value is not None and value != expected:
-        raise typer.BadParameter(
-            f"{option_name} does not match the runtime manifest"
-        )
+        raise typer.BadParameter(f"{option_name} does not match the runtime manifest")
     return expected
 
 
@@ -1068,9 +1065,7 @@ def _resolve_manifest_decimal_option(
     except InvalidOperation as error:
         raise typer.BadParameter(f"{option_name} must be a decimal") from error
     if configured != expected:
-        raise typer.BadParameter(
-            f"{option_name} does not match the runtime manifest"
-        )
+        raise typer.BadParameter(f"{option_name} does not match the runtime manifest")
     return str(expected)
 
 
@@ -1088,9 +1083,7 @@ def _resolve_manifest_operations(
         else frozenset(item for item in expected.split(",") if item)
     )
     if configured != expected_operations:
-        raise typer.BadParameter(
-            f"{option_name} does not match the runtime manifest"
-        )
+        raise typer.BadParameter(f"{option_name} does not match the runtime manifest")
     return expected
 
 
@@ -1147,9 +1140,7 @@ def preflight_command(
     if expected_migration_revision is not None:
         expected_migration_revision = expected_migration_revision.strip()
         if not expected_migration_revision:
-            raise typer.BadParameter(
-                "--expected-migration-revision must not be empty"
-            )
+            raise typer.BadParameter("--expected-migration-revision must not be empty")
     payload = asyncio.run(
         _preflight_summary(
             _database_url(database_url),
@@ -1350,6 +1341,10 @@ def run_command(
         str,
         typer.Option("--market-quote-hub-url"),
     ] = "ws://market-data:8768",
+    market_quote_volume_hub_url: Annotated[
+        str,
+        typer.Option("--market-quote-volume-hub-url"),
+    ] = "ws://market-data:8768",
     market_websocket_url: Annotated[
         str,
         typer.Option(
@@ -1457,9 +1452,7 @@ def run_command(
         bool,
         typer.Option(
             "--allow-legacy-credential-fallback/--no-allow-legacy-credential-fallback",
-            help=(
-                "Temporarily fall back to BINANCE_API_KEY/SECRET during migration."
-            ),
+            help=("Temporarily fall back to BINANCE_API_KEY/SECRET during migration."),
         ),
     ] = False,
     entry_leverage: Annotated[
@@ -1546,9 +1539,7 @@ def run_command(
             else entry_price_above_ema10
         )
         entry_order_type = (
-            _LIVE_ENTRY_ORDER_TYPE
-            if entry_order_type is None
-            else entry_order_type
+            _LIVE_ENTRY_ORDER_TYPE if entry_order_type is None else entry_order_type
         )
         entry_limit_ttl_seconds = (
             _LIVE_ENTRY_LIMIT_TTL_SECONDS
@@ -1563,9 +1554,7 @@ def run_command(
         )
         entry_leverage = 1 if entry_leverage is None else entry_leverage
         margin_type = "CROSSED" if margin_type is None else margin_type
-        exit_mode = (
-            PositionExitMode.CANDLE_15M if exit_mode is None else exit_mode
-        )
+        exit_mode = PositionExitMode.CANDLE_15M if exit_mode is None else exit_mode
         take_profit_pct = "0.02" if take_profit_pct is None else take_profit_pct
         stop_loss_pct = "0.01" if stop_loss_pct is None else stop_loss_pct
         candle_grace_bars = 1 if candle_grace_bars is None else candle_grace_bars
@@ -1591,20 +1580,14 @@ def run_command(
             min_notional_5m_vs_30m=min_notional_5m_vs_30m,
             cooldown_buckets=cooldown_buckets,
         )
-        entry_positive_gainer_top_count = (
-            _resolve_live_entry_positive_gainer_top_count(
-                entry_positive_gainer_top_count
-            )
+        entry_positive_gainer_top_count = _resolve_live_entry_positive_gainer_top_count(
+            entry_positive_gainer_top_count
         )
     else:
         if session_id is not None and session_id != manifest_account.session_id:
-            raise typer.BadParameter(
-                "session id does not match the runtime manifest"
-            )
+            raise typer.BadParameter("session id does not match the runtime manifest")
         if lease_owner is not None and lease_owner != manifest_account.lease_owner:
-            raise typer.BadParameter(
-                "lease owner does not match the runtime manifest"
-            )
+            raise typer.BadParameter("lease owner does not match the runtime manifest")
         session_id = manifest_account.session_id
         lease_owner = manifest_account.lease_owner
         strategy_inputs = manifest_account.strategy_inputs
@@ -1614,9 +1597,7 @@ def run_command(
         )
         entry_price_above_ema5 = strategy_inputs.require_price_above_ema5
         entry_price_above_ema10 = strategy_inputs.require_price_above_ema10
-        entry_policy_compare_only = (
-            strategy_inputs.entry_policy_mode == "compare_only"
-        )
+        entry_policy_compare_only = strategy_inputs.entry_policy_mode == "compare_only"
         entry_policy_enforce = strategy_inputs.entry_policy_enforce
         entry_order_type = strategy_inputs.entry_order_type
         entry_limit_ttl_seconds = strategy_inputs.entry_limit_ttl_seconds
@@ -1680,10 +1661,13 @@ def run_command(
             "--persist-exchange-operations",
         )
 
-        configured_git_commit = git_commit_hash.strip() or os.environ.get(
-            "CML_CODE_COMMIT",
-            "",
-        ).strip()
+        configured_git_commit = (
+            git_commit_hash.strip()
+            or os.environ.get(
+                "CML_CODE_COMMIT",
+                "",
+            ).strip()
+        )
         manifest_git_commit = _validate_hex_hash(
             manifest_account.image_commit,
             "runtime manifest image_commit",
@@ -1693,15 +1677,16 @@ def run_command(
             configured_git_commit
             and configured_git_commit.lower() != manifest_git_commit
         ):
-            raise typer.BadParameter(
-                "git commit does not match the runtime manifest"
-            )
+            raise typer.BadParameter("git commit does not match the runtime manifest")
         git_commit_hash = manifest_git_commit
 
-        configured_migration_revision = migration_revision.strip() or os.environ.get(
-            "CML_LIVE_MIGRATION_REVISION",
-            "",
-        ).strip()
+        configured_migration_revision = (
+            migration_revision.strip()
+            or os.environ.get(
+                "CML_LIVE_MIGRATION_REVISION",
+                "",
+            ).strip()
+        )
         if (
             configured_migration_revision
             and configured_migration_revision != manifest_account.migration_revision
@@ -1750,6 +1735,7 @@ def run_command(
             market_state_source=market_state_source,
             market_state_hub_url=market_state_hub_url,
             market_quote_hub_url=market_quote_hub_url,
+            market_quote_volume_hub_url=market_quote_volume_hub_url,
             market_websocket_url=market_websocket_url,
             account_event_hub_url=account_event_hub_url,
             risk_control_hub_url=risk_control_hub_url,
@@ -1774,9 +1760,7 @@ def run_command(
             entry_order_type=entry_order_type,
             entry_limit_ttl_seconds=entry_limit_ttl_seconds,
             candle_grace_bars=candle_grace_bars,
-            candle_grace_decision_profit_pct=Decimal(
-                candle_grace_decision_profit_pct
-            ),
+            candle_grace_decision_profit_pct=Decimal(candle_grace_decision_profit_pct),
             candle_grace_profit_pct=Decimal(candle_grace_profit_pct),
             base_url=base_url,
             api_key=credentials.api_key,
@@ -2054,6 +2038,7 @@ async def _run_live_daemon(
     acknowledge_missing_shadow_preflight: bool = False,
     market_websocket_url: str = _LIVE_MARKET_WEBSOCKET_URL,
     risk_control_hub_url: str | None = None,
+    market_quote_volume_hub_url: str = "ws://market-data:8768",
 ) -> LiveDaemonResult:
     risk_control_enabled = bool(
         risk_control_hub_url is not None and risk_control_hub_url.strip()
@@ -2064,6 +2049,8 @@ async def _run_live_daemon(
         raise ValueError("market_state_hub_url must not be empty in hub mode")
     if market_state_source == "hub" and not market_quote_hub_url.strip():
         raise ValueError("market_quote_hub_url must not be empty in hub mode")
+    if market_state_source == "hub" and not market_quote_volume_hub_url.strip():
+        raise ValueError("market_quote_volume_hub_url must not be empty in hub mode")
     if not account_event_hub_url.strip():
         raise ValueError("account_event_hub_url must not be empty")
     health = LocalHealthWriter.from_environment()
@@ -2093,9 +2080,7 @@ async def _run_live_daemon(
     observability_engine = create_observability_database_engine(
         observability_database_url
     )
-    checkpoint_engine = create_checkpoint_database_engine(
-        observability_database_url
-    )
+    checkpoint_engine = create_checkpoint_database_engine(observability_database_url)
     heartbeat_engine: AsyncEngine | None = None
     client: BinanceUsdMTradeClient | None = None
     execution_coordinator: OrderExecutionCoordinator | None = None
@@ -2108,8 +2093,8 @@ async def _run_live_daemon(
     entry_order_lifecycle: LiveLimitOrderLifecycle | None = None
     live_repository: PostgresLiveRolloutRepository | None = None
     telemetry: LiveRuntimeTelemetry | None = None
-    volume_rest_client: BinanceUsdMRestClient | None = None
-    volume_cache: Binance24hQuoteVolumeCache | None = None
+    volume_cache: WebSocketQuoteVolumeProvider | None = None
+    volume_source: WebSocketMarketQuoteVolumeSource | None = None
     signal_recorder: LiveStrategySignalRecorder | None = None
     daemon: LiveStrategyDaemon | None = None
     hub_source: WebSocketMarketStateSource | None = None
@@ -2158,9 +2143,7 @@ async def _run_live_daemon(
         heartbeat_risk_repository = PostgresRiskRepository(heartbeat_factory)
         order_repository = PostgresOrderRepository(execution_factory)
         checkpoint_repository = PostgresPaperDaemonRepository(checkpoint_factory)
-        telemetry_repository = PostgresRuntimeTelemetryRepository(
-            observability_factory
-        )
+        telemetry_repository = PostgresRuntimeTelemetryRepository(observability_factory)
         telemetry = LiveRuntimeTelemetry(
             run_id=session_id,
             persist=telemetry_repository.save_runtime_events,
@@ -2171,8 +2154,12 @@ async def _run_live_daemon(
             persist_exchange_operations=persist_exchange_operations,
         )
         await telemetry.start()
-        volume_rest_client = BinanceUsdMRestClient(base_url)
-        volume_cache = Binance24hQuoteVolumeCache(volume_rest_client)
+        volume_source = WebSocketMarketQuoteVolumeSource(
+            url=market_quote_volume_hub_url,
+            environment=market_environment,
+            consumer_id=f"live-volume:{session_id}",
+        )
+        volume_cache = WebSocketQuoteVolumeProvider(volume_source)
         await volume_cache.start()
         signal_repository = PostgresLiveSignalRepository(observability_factory)
         signal_recorder = LiveStrategySignalRecorder(
@@ -2206,6 +2193,17 @@ async def _run_live_daemon(
             account_label=account_label,
             live_submit_enabled=True,
             base_url=base_url,
+            shared_request_pacer_path=(
+                os.environ.get(_BINANCE_SHARED_REQUEST_PACER_PATH_ENV, "").strip()
+                or None
+            ),
+            shared_command_request_pacer_path=(
+                os.environ.get(
+                    _BINANCE_SHARED_COMMAND_PACER_PATH_ENV,
+                    "",
+                ).strip()
+                or None
+            ),
             entry_leverage=entry_leverage,
             margin_type=margin_type,
         )
@@ -2230,9 +2228,7 @@ async def _run_live_daemon(
             lease_owner=lease_owner,
             code_generation=git_commit_hash,
             active_lease=lambda: active_lease,
-            entry_enabled=lambda: (
-                daemon is not None and daemon.entry_enabled
-            ),
+            entry_enabled=lambda: daemon is not None and daemon.entry_enabled,
         )
 
         state_machine = OrderExecutionStateMachine(
@@ -2336,7 +2332,7 @@ async def _run_live_daemon(
         if computed_hash != strategy_config_hash:
             raise RuntimeError(
                 "strategy config hash does not match the live runtime configuration"
-        )
+            )
         if not draining:
             assert session_lifecycle is not None
             await session_lifecycle.transition(LiveSessionState.SHADOW_PREFLIGHT)
@@ -2380,9 +2376,7 @@ async def _run_live_daemon(
         if checkpoint is not None:
             strategy.restore_checkpoint(checkpoint)
         state_repository = PostgresRuntimeMarketStateRepository(market_factory)
-        startup_cutover = _live_market_state_cutover(
-            datetime.now(tz=UTC)
-        )
+        startup_cutover = _live_market_state_cutover(datetime.now(tz=UTC))
         startup_warmup_symbols: frozenset[str] | None = None
         if entry_positive_gainer_top_count is not None:
             universe_repository = PostgresUniverseRepository(market_factory)
@@ -2465,10 +2459,7 @@ async def _run_live_daemon(
                 warmup_symbols=startup_warmup_symbols,
                 on_warmup_status=live_readiness.update_warmup,
             )
-        if (
-            checkpoint is not None
-            and not _checkpoint_needs_market_recovery(checkpoint)
-        ):
+        if checkpoint is not None and not _checkpoint_needs_market_recovery(checkpoint):
             live_readiness.update_warmup_progress(
                 strategy,
                 expected_symbols=startup_warmup_symbols,
@@ -2489,8 +2480,9 @@ async def _run_live_daemon(
                 backfill_source=candle_source,
             )
         if require_price_above_ema5 or require_price_above_ema10:
-            ema_candle_source = BinanceRestClosedCandle15mSource(base_url)
-            ema_provider = ClosedCandleEmaProvider(ema_candle_source)
+            if candle_source is None:
+                candle_source = BinanceRestClosedCandle15mSource(base_url)
+            ema_provider = ClosedCandleEmaProvider(candle_source)
 
         assert client is not None
         entry_runtime = LiveEntryRuntime(
@@ -2571,12 +2563,8 @@ async def _run_live_daemon(
                 require_price_above_ema5=require_price_above_ema5,
                 require_price_above_ema10=require_price_above_ema10,
                 entry_filter_context_loader=entry_filter_context_loader,
-                entry_universe_context_provider=(
-                    entry_universe_context_provider
-                ),
-                entry_universe_snapshot_provider=(
-                    entry_universe_snapshot_provider
-                ),
+                entry_universe_context_provider=(entry_universe_context_provider),
+                entry_universe_snapshot_provider=(entry_universe_snapshot_provider),
                 entry_policy_compare_only=entry_policy_compare_only,
                 entry_policy_enforce=entry_policy_enforce,
                 entry_order_type=entry_order_type,
@@ -2596,9 +2584,7 @@ async def _run_live_daemon(
                         mode=exit_mode,
                     ),
                     candle_grace_bars=candle_grace_bars,
-                    candle_grace_decision_profit_pct=(
-                        candle_grace_decision_profit_pct
-                    ),
+                    candle_grace_decision_profit_pct=(candle_grace_decision_profit_pct),
                     candle_grace_profit_pct=candle_grace_profit_pct,
                 ),
                 candle_loader=None,
@@ -2607,9 +2593,7 @@ async def _run_live_daemon(
             cancel_unfilled_entry_orders=entry_order_canceller.cancel,
             fetch_exchange_positions=client.fetch_positions,
             on_managed_position_symbols=(
-                None
-                if closed_candle_feed is None
-                else closed_candle_feed.set_symbols
+                None if closed_candle_feed is None else closed_candle_feed.set_symbols
             ),
         )
         order_event_runtime.set_daemon(daemon)
@@ -2654,9 +2638,7 @@ async def _run_live_daemon(
                 ),
                 session_draining=draining,
                 strategy_warmup_ready=control_plane_runtime.strategy_warmup_ready,
-                strategy_warmup_reason=(
-                    control_plane_runtime.strategy_warmup_reason
-                ),
+                strategy_warmup_reason=(control_plane_runtime.strategy_warmup_reason),
                 market_state_available=control_plane_runtime.market_state_available,
                 market_state_unavailable_reason=(
                     control_plane_runtime.market_state_unavailable_reason
@@ -2863,9 +2845,7 @@ async def _run_live_daemon(
             entry_symbol_cache_task,
         ) = entry_runtime.start()
         lease_task = asyncio.create_task(lease_heartbeat.run())
-        reconcile_task = asyncio.create_task(
-            order_reconciliation.run_periodically()
-        )
+        reconcile_task = asyncio.create_task(order_reconciliation.run_periodically())
         local_health_task: asyncio.Task[None] | None = None
 
         if health is not None:
@@ -2876,10 +2856,7 @@ async def _run_live_daemon(
                     market_task.done()
                     or account_task.done()
                     or lease_task.done()
-                    or (
-                        risk_control_task is not None
-                        and risk_control_task.done()
-                    )
+                    or (risk_control_task is not None and risk_control_task.done())
                 ),
             )
             local_health_task = asyncio.create_task(
@@ -2920,9 +2897,11 @@ async def _run_live_daemon(
                 local_health=local_health_task,
             ),
             block_entry_submissions=(
-                lambda: execution_coordinator.block_entry_submissions()
-                if execution_coordinator is not None
-                else None
+                lambda: (
+                    execution_coordinator.block_entry_submissions()
+                    if execution_coordinator is not None
+                    else None
+                )
             ),
             stop_sources=stop_runtime_sources,
             close_risk_control=close_risk_control,
@@ -2973,7 +2952,7 @@ async def _run_live_daemon(
             signal_recorder=signal_recorder,
             telemetry=telemetry,
             volume_cache=volume_cache,
-            volume_rest_client=volume_rest_client,
+            volume_rest_client=None,
             execution_engine=execution_engine,
             market_engine=market_engine,
             observability_engine=observability_engine,
@@ -2994,8 +2973,10 @@ async def _observe_market_states(
     async for state in states:
         cache.observe(state)
         if on_observed is not None and strategy is not None:
-            count = 0 if entry_universe_count is None else entry_universe_count(
-                state.bucket_start
+            count = (
+                0
+                if entry_universe_count is None
+                else entry_universe_count(state.bucket_start)
             )
             on_observed(
                 state,
@@ -3105,8 +3086,7 @@ def _is_transient_live_runtime_error(error: Exception) -> bool:
 
 def _is_order_identity_conflict(error: Exception) -> bool:
     return (
-        isinstance(error, ValueError)
-        and str(error) == _ORDER_IDENTITY_CONFLICT_MESSAGE
+        isinstance(error, ValueError) and str(error) == _ORDER_IDENTITY_CONFLICT_MESSAGE
     )
 
 
@@ -3515,9 +3495,7 @@ async def _renew_live_lease(
                 f"active live lease is missing for account {account_label}"
             )
         if lease.owner != lease_owner:
-            raise RuntimeError(
-                f"live lease owner mismatch for account {account_label}"
-            )
+            raise RuntimeError(f"live lease owner mismatch for account {account_label}")
         if lease.strategy_name != strategy_name:
             raise RuntimeError(
                 f"live lease strategy mismatch for account {account_label}"
@@ -3768,8 +3746,7 @@ async def _preflight_summary(
             entry_limit_ttl_seconds=runtime_config.entry_limit_ttl_seconds,
         )
         configured_strategy_config_hash = (
-            os.environ.get("CML_LIVE_STRATEGY_CONFIG_HASH", "").strip().lower()
-            or None
+            os.environ.get("CML_LIVE_STRATEGY_CONFIG_HASH", "").strip().lower() or None
         )
         if configured_strategy_config_hash == "unset":
             configured_strategy_config_hash = None
@@ -3784,9 +3761,7 @@ async def _preflight_summary(
             None if approval is None else approval.git_commit_hash
         )
         approval_migration_revision = (
-            None
-            if approval is None
-            else approval.database_migration_revision
+            None if approval is None else approval.database_migration_revision
         )
         checks: dict[str, bool] = {
             "approval_present": approval is not None,
@@ -4001,9 +3976,7 @@ def _issue_one_shot_risk_control_command(
     database_url: str | None,
 ) -> None:
     if confirmation != confirmation_text:
-        raise typer.BadParameter(
-            f"--confirmation must equal '{confirmation_text}'"
-        )
+        raise typer.BadParameter(f"--confirmation must equal '{confirmation_text}'")
     if not session_id.strip():
         raise typer.BadParameter("--session-id must not be empty")
     if not operator.strip():

@@ -83,6 +83,7 @@ class ClosedCandle15mFeedConfig:
     control_ack_timeout_seconds: float = 10.0
     ingress_queue_max_events: int = 4096
     final_event_queue_size: int = 256
+    connection_recovery_cooldown_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         for value, field_name in (
@@ -102,6 +103,10 @@ class ClosedCandle15mFeedConfig:
             (self.ping_interval_seconds, "ping_interval_seconds"),
             (self.ping_timeout_seconds, "ping_timeout_seconds"),
             (self.control_ack_timeout_seconds, "control_ack_timeout_seconds"),
+            (
+                self.connection_recovery_cooldown_seconds,
+                "connection_recovery_cooldown_seconds",
+            ),
         ):
             if numeric_value <= 0:
                 raise ValueError(f"{field_name} must be positive")
@@ -189,6 +194,7 @@ class BinanceClosedCandle15mFeed:
         self._seen_keys: set[tuple[str, datetime]] = set()
         self._seen_order: deque[tuple[str, datetime]] = deque()
         self._last_seen_start: dict[str, datetime] = {}
+        self._last_connection_recovery_at: datetime | None = None
         self._recovery_tasks: set[asyncio.Task[None]] = set()
         self._started = False
 
@@ -292,11 +298,7 @@ class BinanceClosedCandle15mFeed:
         latest_start = _candle_start_15m(through) - _CANDLE_INTERVAL
         async with self._recovery_lock:
             previous = self._last_seen_start.get(normalized_symbol)
-            start = (
-                latest_start
-                if previous is None
-                else previous + _CANDLE_INTERVAL
-            )
+            start = latest_start if previous is None else previous + _CANDLE_INTERVAL
             if start > latest_start:
                 return 0
             candles = await asyncio.to_thread(
@@ -369,14 +371,24 @@ class BinanceClosedCandle15mFeed:
             reason=getattr(event, "reason", None),
         )
         if getattr(event, "opened", False):
+            now = self._clock()
+            last_recovery_at = self._last_connection_recovery_at
+            if last_recovery_at is not None and now - last_recovery_at < timedelta(
+                seconds=self._config.connection_recovery_cooldown_seconds
+            ):
+                log.debug(
+                    "live_closed_candle_recovery_coalesced",
+                    consumer_id=self._config.consumer_id,
+                    cooldown_seconds=(
+                        self._config.connection_recovery_cooldown_seconds
+                    ),
+                )
+                return
+            self._last_connection_recovery_at = now
             self._schedule_recovery(self._symbols)
 
     def _schedule_recovery(self, symbols: frozenset[str]) -> None:
-        if (
-            self._backfill_source is None
-            or not symbols
-            or self._stopping
-        ):
+        if self._backfill_source is None or not symbols or self._stopping:
             return
         task = asyncio.create_task(
             self._recover_symbols(symbols),
@@ -416,9 +428,7 @@ class BinanceClosedCandle15mFeed:
 
     @staticmethod
     def _stream_names(symbols: frozenset[str]) -> tuple[str, ...]:
-        return tuple(
-            sorted(f"{symbol.lower()}@kline_15m" for symbol in symbols)
-        )
+        return tuple(sorted(f"{symbol.lower()}@kline_15m" for symbol in symbols))
 
 
 def _required_int(payload: Mapping[str, object], name: str) -> int:
@@ -435,9 +445,7 @@ def _required_decimal(payload: Mapping[str, object], name: str) -> Decimal:
     try:
         return Decimal(str(value))
     except InvalidOperation as error:
-        raise ClosedCandleFeedError(
-            f"kline field {name} is not a decimal"
-        ) from error
+        raise ClosedCandleFeedError(f"kline field {name} is not a decimal") from error
 
 
 def _from_milliseconds(value: int) -> datetime:

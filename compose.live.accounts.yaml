@@ -19,6 +19,8 @@ x-live-account-app: &live-account-app
     CML_LOCAL_HEALTH_DIR: /run/cml/health
     CML_CODE_COMMIT: ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
     CML_RISK_CONTROL_HUB_TOKEN: ${CML_RISK_CONTROL_HUB_TOKEN:-}
+    CML_BINANCE_SHARED_REQUEST_PACER_PATH: /run/cml/binance-rest-pacer/private-read.lock
+    CML_BINANCE_SHARED_COMMAND_REQUEST_PACER_PATH: /run/cml/binance-rest-pacer/private-command.lock
   restart: unless-stopped
   stop_grace_period: 60s
   logging: *default-logging
@@ -35,7 +37,7 @@ x-execution-account-command: &execution-account-command
   - live
   - --hedge-mode
   - --interval-seconds
-  - "15"
+  - ${CML_ACCOUNT_SNAPSHOT_INTERVAL_SECONDS:-15}
   - --fill-interval-seconds
   - "300"
   - --rest-reconciliation-interval-seconds
@@ -48,6 +50,8 @@ x-execution-account-command: &execution-account-command
   - ${CML_ACCOUNT_REQUEST_INTERVAL_SECONDS:-0.5}
   - --shared-request-pacer-path
   - /run/cml/binance-rest-pacer/private-read.lock
+  - --shared-command-request-pacer-path
+  - /run/cml/binance-rest-pacer/private-command.lock
   - --snapshot-retention-days
   - ${CML_ACCOUNT_SNAPSHOT_RETENTION_DAYS:-7}
   - --equity-retention-days
@@ -188,6 +192,7 @@ services:
       CML_LIVE_CANDLE_GRACE_PROFIT_PCT: ${CML_LIVE_CANDLE_GRACE_PROFIT_PCT_ACCOUNT_2:-0.0088}
       CML_MARKET_STATE_HUB_URL: ws://market-data:8766
       CML_MARKET_QUOTE_HUB_URL: ws://market-data:8768
+      CML_MARKET_QUOTE_VOLUME_HUB_URL: ws://market-data:8768
       CML_ACCOUNT_EVENT_HUB_URL: ws://execution-account-live-account-2:8767
       CML_RISK_CONTROL_HUB_URL: ws://execution-account-live-account-2:8769
     entrypoint: ["cml-live-rollout"]
@@ -206,6 +211,8 @@ services:
       - --market-state-hub-url
       - ws://market-data:8766
       - --market-quote-hub-url
+      - ws://market-data:8768
+      - --market-quote-volume-hub-url
       - ws://market-data:8768
       - --account-event-hub-url
       - ws://execution-account-live-account-2:8767
@@ -259,6 +266,8 @@ services:
         condition: service_started
       execution-account-live-account-2:
         condition: service_healthy
+    volumes:
+      - binance-rest-pacer:/run/cml/binance-rest-pacer
     healthcheck:
       test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "300"]
       interval: 60s
@@ -312,6 +321,7 @@ services:
       CML_LIVE_CANDLE_GRACE_PROFIT_PCT: ${CML_LIVE_CANDLE_GRACE_PROFIT_PCT_ACCOUNT_3:-0.0088}
       CML_MARKET_STATE_HUB_URL: ws://market-data:8766
       CML_MARKET_QUOTE_HUB_URL: ws://market-data:8768
+      CML_MARKET_QUOTE_VOLUME_HUB_URL: ws://market-data:8768
       CML_ACCOUNT_EVENT_HUB_URL: ws://execution-account-live-account-3:8767
       CML_RISK_CONTROL_HUB_URL: ws://execution-account-live-account-3:8769
     entrypoint: ["cml-live-rollout"]
@@ -330,6 +340,8 @@ services:
       - --market-state-hub-url
       - ws://market-data:8766
       - --market-quote-hub-url
+      - ws://market-data:8768
+      - --market-quote-volume-hub-url
       - ws://market-data:8768
       - --account-event-hub-url
       - ws://execution-account-live-account-3:8767
@@ -383,6 +395,8 @@ services:
         condition: service_started
       execution-account-live-account-3:
         condition: service_healthy
+    volumes:
+      - binance-rest-pacer:/run/cml/binance-rest-pacer
     healthcheck:
       test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "300"]
       interval: 60s
@@ -436,6 +450,7 @@ services:
       CML_LIVE_CANDLE_GRACE_PROFIT_PCT: ${CML_LIVE_CANDLE_GRACE_PROFIT_PCT_ACCOUNT_4:-0.0088}
       CML_MARKET_STATE_HUB_URL: ws://market-data:8766
       CML_MARKET_QUOTE_HUB_URL: ws://market-data:8768
+      CML_MARKET_QUOTE_VOLUME_HUB_URL: ws://market-data:8768
       CML_ACCOUNT_EVENT_HUB_URL: ws://execution-account-live-account-4:8767
       CML_RISK_CONTROL_HUB_URL: ws://execution-account-live-account-4:8769
     entrypoint: ["cml-live-rollout"]
@@ -454,6 +469,8 @@ services:
       - --market-state-hub-url
       - ws://market-data:8766
       - --market-quote-hub-url
+      - ws://market-data:8768
+      - --market-quote-volume-hub-url
       - ws://market-data:8768
       - --account-event-hub-url
       - ws://execution-account-live-account-4:8767
@@ -507,6 +524,8 @@ services:
         condition: service_started
       execution-account-live-account-4:
         condition: service_healthy
+    volumes:
+      - binance-rest-pacer:/run/cml/binance-rest-pacer
     healthcheck:
       test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "300"]
       interval: 60s

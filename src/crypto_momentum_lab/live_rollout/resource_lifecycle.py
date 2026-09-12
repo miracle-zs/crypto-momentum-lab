@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Protocol
+
 import structlog
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -19,13 +21,16 @@ from crypto_momentum_lab.live_rollout.signal_recorder import (
     LiveStrategySignalRecorder,
 )
 from crypto_momentum_lab.live_rollout.telemetry import LiveRuntimeTelemetry
-from crypto_momentum_lab.live_rollout.volume import Binance24hQuoteVolumeCache
 from crypto_momentum_lab.market_data.binance.rest import BinanceUsdMRestClient
 from crypto_momentum_lab.strategy_runner.candle_source import (
     BinanceRestClosedCandle15mSource,
 )
 
 log = structlog.get_logger()
+
+
+class _StoppableVolumeCache(Protocol):
+    async def stop(self) -> None: ...
 
 
 class LiveResourceLifecycle:
@@ -43,7 +48,7 @@ class LiveResourceLifecycle:
         ema_candle_source: BinanceRestClosedCandle15mSource | None,
         signal_recorder: LiveStrategySignalRecorder | None,
         telemetry: LiveRuntimeTelemetry | None,
-        volume_cache: Binance24hQuoteVolumeCache | None,
+        volume_cache: _StoppableVolumeCache | None,
         volume_rest_client: BinanceUsdMRestClient | None,
         execution_engine: AsyncEngine | None,
         market_engine: AsyncEngine | None,
@@ -83,10 +88,12 @@ class LiveResourceLifecycle:
             await self._client.aclose()
         if self._closed_candle_feed is not None:
             await self._closed_candle_feed.stop()
-        if self._candle_source is not None:
-            self._candle_source.close()
-        if self._ema_candle_source is not None:
-            self._ema_candle_source.close()
+        closed_candle_sources: set[int] = set()
+        for source in (self._candle_source, self._ema_candle_source):
+            if source is None or id(source) in closed_candle_sources:
+                continue
+            source.close()
+            closed_candle_sources.add(id(source))
         if self._signal_recorder is not None:
             await self._signal_recorder.stop()
         if self._telemetry is not None:

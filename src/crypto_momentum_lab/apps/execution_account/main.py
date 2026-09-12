@@ -91,9 +91,7 @@ def sync_once_command(
         bool,
         typer.Option(
             "--allow-legacy-credential-fallback/--no-allow-legacy-credential-fallback",
-            help=(
-                "Temporarily fall back to BINANCE_API_KEY/SECRET during migration."
-            ),
+            help=("Temporarily fall back to BINANCE_API_KEY/SECRET during migration."),
         ),
     ] = False,
     expected_multi_assets_mode: Annotated[
@@ -126,6 +124,13 @@ def sync_once_command(
             help="Shared lock file used to coordinate account REST requests.",
         ),
     ] = None,
+    shared_command_request_pacer_path: Annotated[
+        str | None,
+        typer.Option(
+            "--shared-command-request-pacer-path",
+            help=("Shared lock file used to coordinate private command requests."),
+        ),
+    ] = None,
 ) -> None:
     resolved_database_url = _execution_database_url(database_url)
     credentials = _resolve_cli_credentials(
@@ -155,6 +160,7 @@ def sync_once_command(
             fill_symbols=_parse_symbols(fill_symbols),
             request_interval_seconds=request_interval_seconds,
             shared_request_pacer_path=shared_request_pacer_path,
+            shared_command_request_pacer_path=shared_command_request_pacer_path,
         )
     )
     typer.echo(
@@ -188,9 +194,7 @@ def sync_command(
         bool,
         typer.Option(
             "--allow-legacy-credential-fallback/--no-allow-legacy-credential-fallback",
-            help=(
-                "Temporarily fall back to BINANCE_API_KEY/SECRET during migration."
-            ),
+            help=("Temporarily fall back to BINANCE_API_KEY/SECRET during migration."),
         ),
     ] = False,
     expected_multi_assets_mode: Annotated[
@@ -208,7 +212,7 @@ def sync_command(
     interval_seconds: Annotated[
         float,
         typer.Option("--interval-seconds", min=1),
-    ] = 5.0,
+    ] = 15.0,
     fill_interval_seconds: Annotated[
         float,
         typer.Option("--fill-interval-seconds", min=1),
@@ -242,9 +246,7 @@ def sync_command(
         typer.Option(
             "--historical-fill-reconciliation-interval-seconds",
             min=300,
-            help=(
-                "How often closed historical symbols are checked for new fills."
-            ),
+            help=("How often closed historical symbols are checked for new fills."),
         ),
     ] = _DEFAULT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS,
     historical_fill_reconciliation_batch_size: Annotated[
@@ -321,6 +323,13 @@ def sync_command(
             help="Shared lock file used to coordinate account REST requests.",
         ),
     ] = None,
+    shared_command_request_pacer_path: Annotated[
+        str | None,
+        typer.Option(
+            "--shared-command-request-pacer-path",
+            help=("Shared lock file used to coordinate private command requests."),
+        ),
+    ] = None,
 ) -> None:
     resolved_database_url = _execution_database_url(database_url)
     credentials = _resolve_cli_credentials(
@@ -355,9 +364,7 @@ def sync_command(
             account_event_hub_port=account_event_hub_port,
             risk_control_hub_host=risk_control_hub_host,
             risk_control_hub_port=risk_control_hub_port,
-            rest_reconciliation_interval_seconds=(
-                rest_reconciliation_interval_seconds
-            ),
+            rest_reconciliation_interval_seconds=(rest_reconciliation_interval_seconds),
             historical_fill_reconciliation_interval_seconds=(
                 historical_fill_reconciliation_interval_seconds
             ),
@@ -366,11 +373,10 @@ def sync_command(
             ),
             request_interval_seconds=request_interval_seconds,
             shared_request_pacer_path=shared_request_pacer_path,
+            shared_command_request_pacer_path=shared_command_request_pacer_path,
             snapshot_retention_days=snapshot_retention_days,
             equity_retention_days=equity_retention_days,
-            snapshot_retention_interval_seconds=(
-                snapshot_retention_interval_seconds
-            ),
+            snapshot_retention_interval_seconds=(snapshot_retention_interval_seconds),
             snapshot_retention_batch_size=snapshot_retention_batch_size,
             snapshot_retention_max_rows_per_table=(
                 snapshot_retention_max_rows_per_table
@@ -401,6 +407,7 @@ async def sync_once(
     fill_symbols: tuple[str, ...] = (),
     request_interval_seconds: float = 0.2,
     shared_request_pacer_path: str | None = None,
+    shared_command_request_pacer_path: str | None = None,
 ) -> ExecutionAccountSyncResult:
     engine = create_account_database_engine(database_url)
     try:
@@ -410,11 +417,9 @@ async def sync_once(
             environment=environment,
             account_label=account_label,
         )
-        historical_fill_cursors = (
-            await repository.load_fill_reconciliation_cursors(
-                environment=environment,
-                account_label=account_label,
-            )
+        historical_fill_cursors = await repository.load_fill_reconciliation_cursors(
+            environment=environment,
+            account_label=account_label,
         )
         client = BinanceUsdMPrivateReadClient(
             api_key=api_key,
@@ -424,7 +429,7 @@ async def sync_once(
             base_url=base_url,
             request_interval_seconds=request_interval_seconds,
             shared_request_pacer_path=shared_request_pacer_path,
-            shared_command_request_pacer_path=shared_request_pacer_path,
+            shared_command_request_pacer_path=shared_command_request_pacer_path,
         )
         try:
             service = ExecutionAccountSyncService(
@@ -476,14 +481,13 @@ async def sync_continuously(
     snapshot_retention_max_runtime_seconds: float,
     request_interval_seconds: float = 0.2,
     shared_request_pacer_path: str | None = None,
+    shared_command_request_pacer_path: str | None = None,
     risk_control_hub_host: str = "0.0.0.0",
     risk_control_hub_port: int = 8769,
 ) -> None:
     health = LocalHealthWriter.from_environment()
     health_callback = (
-        None
-        if health is None
-        else lambda: health.heartbeat(database_ok=True)
+        None if health is None else lambda: health.heartbeat(database_ok=True)
     )
     engine = create_account_database_engine(database_url)
     retention_engine = create_maintenance_database_engine(database_url)
@@ -514,19 +518,15 @@ async def sync_continuously(
             environment=environment,
             account_label=account_label,
         )
-        historical_fill_cursors = (
-            await repository.load_fill_reconciliation_cursors(
-                environment=environment,
-                account_label=account_label,
-            )
+        historical_fill_cursors = await repository.load_fill_reconciliation_cursors(
+            environment=environment,
+            account_label=account_label,
         )
         retention_factory = async_sessionmaker(
             retention_engine,
             expire_on_commit=False,
         )
-        retention_repository = PostgresOperationalRetentionRepository(
-            retention_factory
-        )
+        retention_repository = PostgresOperationalRetentionRepository(retention_factory)
         client = BinanceUsdMPrivateReadClient(
             api_key=api_key,
             api_secret=api_secret,
@@ -535,7 +535,7 @@ async def sync_continuously(
             base_url=base_url,
             request_interval_seconds=request_interval_seconds,
             shared_request_pacer_path=shared_request_pacer_path,
-            shared_command_request_pacer_path=shared_request_pacer_path,
+            shared_command_request_pacer_path=shared_command_request_pacer_path,
         )
         retention_task: asyncio.Task[None] | None = None
         try:
@@ -637,8 +637,7 @@ async def sync_continuously(
                         max_runtime_seconds=snapshot_retention_max_runtime_seconds,
                     ),
                     on_error=lambda error: typer.echo(
-                        "Account snapshot retention failed: "
-                        f"{type(error).__name__}",
+                        f"Account snapshot retention failed: {type(error).__name__}",
                         err=True,
                     ),
                     on_pruned=lambda deleted: typer.echo(
@@ -672,11 +671,7 @@ async def sync_continuously(
 def _parse_symbols(value: str) -> tuple[str, ...]:
     return tuple(
         sorted(
-            {
-                symbol.strip().upper()
-                for symbol in value.split(",")
-                if symbol.strip()
-            }
+            {symbol.strip().upper() for symbol in value.split(",") if symbol.strip()}
         )
     )
 
@@ -732,9 +727,8 @@ def _account_event_from_user_data(
             symbol = _event_text(order.get("s"))
             client_order_id = _event_text(order.get("c"))
             order_status = _event_text(order.get("X"))
-            has_fill = (
-                _event_text(order.get("x")) == "TRADE"
-                and _is_nonzero_quantity(order.get("l"))
+            has_fill = _event_text(order.get("x")) == "TRADE" and _is_nonzero_quantity(
+                order.get("l")
             )
             if has_fill:
                 trade_id = _event_text(order.get("t"))
@@ -826,8 +820,7 @@ def _account_event_from_reconciled_fill(
         account_label=account_label,
         event_type="ACCOUNT_FILL_RECONCILED",
         event_id=(
-            f"reconciled-fill:{result.reconciliation_id}:"
-            f"{fill.symbol}:{fill.trade_id}"
+            f"reconciled-fill:{result.reconciliation_id}:{fill.symbol}:{fill.trade_id}"
         ),
         event_at=fill.trade_at,
         received_at=received_at,

@@ -164,8 +164,7 @@ class _AsyncRequestPacer:
                     now = asyncio.get_running_loop().time()
                     delay = max(0.0, self._next_allowed_at - now)
                     self._next_allowed_at = (
-                        max(now, self._next_allowed_at)
-                        + self._min_interval_seconds
+                        max(now, self._next_allowed_at) + self._min_interval_seconds
                     )
                 if delay > 0:
                     await asyncio.sleep(delay)
@@ -225,9 +224,7 @@ class _FileRequestPacer:
                 reserved_at = max(now, next_allowed_at)
                 handle.seek(0)
                 handle.truncate()
-                handle.write(
-                    f"{reserved_at + self._min_interval_seconds:.9f}\n"
-                )
+                handle.write(f"{reserved_at + self._min_interval_seconds:.9f}\n")
                 handle.flush()
                 return max(0.0, reserved_at - now)
             finally:
@@ -269,9 +266,7 @@ class BinanceUsdMPrivateReadClient:
         if command_request_interval_seconds is not None and (
             command_request_interval_seconds < 0
         ):
-            raise ValueError(
-                "command_request_interval_seconds must not be negative"
-            )
+            raise ValueError("command_request_interval_seconds must not be negative")
         if request_timeout_seconds <= 0:
             raise ValueError("request_timeout_seconds must be positive")
         if connect_timeout_seconds <= 0:
@@ -349,9 +344,7 @@ class BinanceUsdMPrivateReadClient:
     async def fetch_account_config(self) -> AccountConfigSnapshot:
         payload = await self._signed_get("/fapi/v3/account")
         data = _require_mapping(payload)
-        position_mode_payload = await self._signed_get(
-            "/fapi/v1/positionSide/dual"
-        )
+        position_mode_payload = await self._signed_get("/fapi/v1/positionSide/dual")
         position_mode = _require_mapping(position_mode_payload)
         hedge_mode = bool(position_mode.get("dualSidePosition", False))
         raw_payload = _json_mapping(data)
@@ -645,9 +638,7 @@ class BinanceUsdMPrivateReadClient:
         self,
         params: dict[str, str | int | float | bool | None],
     ) -> dict[str, str | int | float | bool | None]:
-        payload = {
-            key: value for key, value in params.items() if value is not None
-        }
+        payload = {key: value for key, value in params.items() if value is not None}
         payload.update(
             {
                 "timestamp": int(self._now().timestamp() * 1000),
@@ -684,6 +675,8 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
         recv_window_ms: int = 10000,
         request_interval_seconds: float = 0.2,
         command_request_interval_seconds: float | None = None,
+        shared_request_pacer_path: str | Path | None = None,
+        shared_command_request_pacer_path: str | Path | None = None,
         request_timeout_seconds: float = _DEFAULT_REQUEST_TIMEOUT_SECONDS,
         connect_timeout_seconds: float = _DEFAULT_CONNECT_TIMEOUT_SECONDS,
         pool_timeout_seconds: float = _DEFAULT_POOL_TIMEOUT_SECONDS,
@@ -706,6 +699,8 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             recv_window_ms=recv_window_ms,
             request_interval_seconds=request_interval_seconds,
             command_request_interval_seconds=command_request_interval_seconds,
+            shared_request_pacer_path=shared_request_pacer_path,
+            shared_command_request_pacer_path=shared_command_request_pacer_path,
             request_timeout_seconds=request_timeout_seconds,
             connect_timeout_seconds=connect_timeout_seconds,
             pool_timeout_seconds=pool_timeout_seconds,
@@ -819,9 +814,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     raise OrderPreSubmissionError(
                         "GTD order must expire more than 600 seconds from now"
                     )
-                params["goodTillDate"] = int(
-                    plan.expires_at.timestamp() * 1000
-                )
+                params["goodTillDate"] = int(plan.expires_at.timestamp() * 1000)
         try:
             payload = await self._signed_post(
                 "/fapi/v1/order",
@@ -876,10 +869,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
 
         try:
             position_quantity = sum(
-                (
-                    _exit_position_quantity(position, plan)
-                    for position in positions
-                ),
+                (_exit_position_quantity(position, plan) for position in positions),
                 start=Decimal("0"),
             )
             active_client_order_ids = {
@@ -908,9 +898,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             return None
         normalized_symbol = _normalize_symbols((symbol,))[0]
         async with self._margin_type_lock:
-            configured = self._configured_margin_type_by_symbol.get(
-                normalized_symbol
-            )
+            configured = self._configured_margin_type_by_symbol.get(normalized_symbol)
             if configured is not None:
                 return configured
             try:
@@ -944,17 +932,13 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                 return desired_margin_type
             except httpx.TimeoutException as exc:
                 raise ExchangeOrderRejectedError(
-                    "Binance entry margin type was not confirmed; "
-                    "order was not sent"
+                    "Binance entry margin type was not confirmed; order was not sent"
                 ) from exc
             except httpx.HTTPStatusError as exc:
-                raise ExchangeOrderRejectedError(
-                    _exchange_error_message(exc)
-                ) from exc
+                raise ExchangeOrderRejectedError(_exchange_error_message(exc)) from exc
             except (httpx.HTTPError, ValueError, TypeError) as exc:
                 raise ExchangeOrderRejectedError(
-                    "Binance entry margin type was not confirmed; "
-                    "order was not sent"
+                    "Binance entry margin type was not confirmed; order was not sent"
                 ) from exc
 
     async def _ensure_entry_leverage(self, symbol: str) -> int | None:
@@ -974,9 +958,10 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                     priority=_COMMAND_ENTRY_PRIORITY,
                 )
                 response = _require_mapping(payload)
-                if str(response.get("symbol", "")) != symbol or int(
-                    str(response.get("leverage", 0))
-                ) != leverage:
+                if (
+                    str(response.get("symbol", "")) != symbol
+                    or int(str(response.get("leverage", 0))) != leverage
+                ):
                     raise ValueError("unexpected leverage response")
             except httpx.HTTPStatusError as exc:
                 if not _is_invalid_leverage_rejection(exc):
@@ -1116,8 +1101,7 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
                         ),
                     ) from query_error
                 if any(
-                    order.symbol == symbol
-                    and order.client_order_id == client_order_id
+                    order.symbol == symbol and order.client_order_id == client_order_id
                     for order in open_orders
                 ):
                     raise ExchangeCancellationUnknownError(
