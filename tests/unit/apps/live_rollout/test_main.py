@@ -279,7 +279,7 @@ def test_renew_live_lease_checks_owner_and_extends_expiration(monkeypatch) -> No
         acquired_at=now - timedelta(minutes=5),
         expires_at=now + timedelta(minutes=5),
     )
-    renewed_calls: list[tuple[str, str, datetime]] = []
+    renewed_calls: list[tuple[str, str, datetime, str | None]] = []
 
     class FakeEngine:
         async def dispose(self) -> None:
@@ -295,15 +295,22 @@ def test_renew_live_lease_checks_owner_and_extends_expiration(monkeypatch) -> No
             assert current.tzinfo is not None
             return lease
 
-        async def renew_lease(self, *, lease_id, owner, expires_at):
-            renewed_calls.append((lease_id, owner, expires_at))
+        async def renew_lease(
+            self,
+            *,
+            lease_id,
+            owner,
+            expires_at,
+            code_generation=None,
+        ):
+            renewed_calls.append((lease_id, owner, expires_at, code_generation))
             return TradingLease(
                 lease_id=lease.lease_id,
                 environment=lease.environment,
                 account_label=lease.account_label,
                 strategy_name=lease.strategy_name,
                 owner=lease.owner,
-                code_generation=lease.code_generation,
+                code_generation=code_generation or lease.code_generation,
                 state=lease.state,
                 acquired_at=lease.acquired_at,
                 expires_at=expires_at,
@@ -344,6 +351,7 @@ def test_renew_live_lease_checks_owner_and_extends_expiration(monkeypatch) -> No
             strategy_name="orderflow_impulse",
             lease_owner="live-worker-account-2",
             lease_ttl_seconds=3600,
+            code_generation="new-generation",
         )
     )
 
@@ -351,6 +359,7 @@ def test_renew_live_lease_checks_owner_and_extends_expiration(monkeypatch) -> No
     assert payload["lease_id"] == "lease-1"
     assert renewed_calls[0][0:2] == ("lease-1", "live-worker-account-2")
     assert renewed_calls[0][2] > lease.expires_at
+    assert renewed_calls[0][3] == "new-generation"
 
 
 def test_live_run_exposes_operation_aware_telemetry_option() -> None:

@@ -676,12 +676,26 @@ def renew_lease_command(
         int,
         typer.Option("--lease-ttl-seconds", min=300),
     ] = 3600,
+    git_commit_hash: Annotated[
+        str,
+        typer.Option("--git-commit-hash"),
+    ] = "",
     confirmation: Annotated[str, typer.Option("--confirmation")] = "",
 ) -> None:
     if confirmation != _RENEW_LEASE_CONFIRMATION:
         raise typer.BadParameter(
             f"--confirmation must equal '{_RENEW_LEASE_CONFIRMATION}'"
         )
+    normalized_git_commit_hash = git_commit_hash.strip()
+    code_generation = (
+        None
+        if not normalized_git_commit_hash
+        else _validate_hex_hash(
+            normalized_git_commit_hash,
+            "--git-commit-hash",
+            _GIT_COMMIT_HASH_LENGTH,
+        )
+    )
     payload = asyncio.run(
         _renew_live_lease(
             database_url=_database_url(database_url),
@@ -689,6 +703,7 @@ def renew_lease_command(
             strategy_name=strategy,
             lease_owner=lease_owner,
             lease_ttl_seconds=lease_ttl_seconds,
+            code_generation=code_generation,
         )
     )
     typer.echo(json.dumps(payload, sort_keys=True))
@@ -3276,6 +3291,7 @@ async def _renew_live_lease(
     strategy_name: str,
     lease_owner: str,
     lease_ttl_seconds: int,
+    code_generation: str | None = None,
 ) -> dict[str, str]:
     if lease_ttl_seconds < 300:
         raise ValueError("lease_ttl_seconds must be at least 300")
@@ -3298,11 +3314,19 @@ async def _renew_live_lease(
             raise RuntimeError(
                 f"live lease strategy mismatch for account {account_label}"
             )
-        renewed = await repository.renew_lease(
-            lease_id=lease.lease_id,
-            owner=lease_owner,
-            expires_at=now + timedelta(seconds=lease_ttl_seconds),
-        )
+        if code_generation is not None:
+            renewed = await repository.renew_lease(
+                lease_id=lease.lease_id,
+                owner=lease_owner,
+                expires_at=now + timedelta(seconds=lease_ttl_seconds),
+                code_generation=code_generation,
+            )
+        else:
+            renewed = await repository.renew_lease(
+                lease_id=lease.lease_id,
+                owner=lease_owner,
+                expires_at=now + timedelta(seconds=lease_ttl_seconds),
+            )
     finally:
         await engine.dispose()
     return {

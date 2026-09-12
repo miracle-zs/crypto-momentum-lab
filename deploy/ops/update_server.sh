@@ -920,6 +920,7 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
         --account-label "$account" \
         --strategy orderflow_impulse \
         --lease-owner "$lease_owner" \
+        --git-commit-hash "$runtime_commit" \
         --lease-ttl-seconds 3600 \
         --confirmation "RENEW LIVE RISK LEASE" </dev/null >/dev/null
   }

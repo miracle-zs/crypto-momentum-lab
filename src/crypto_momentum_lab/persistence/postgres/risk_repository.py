@@ -143,6 +143,7 @@ class PostgresRiskRepository:
         lease_id: str,
         owner: str,
         expires_at: datetime,
+        code_generation: str | None = None,
     ) -> TradingLease:
         async with self._session_factory() as session:
             async with session.begin():
@@ -155,6 +156,10 @@ class PostgresRiskRepository:
                 if expires_at <= owned_row.expires_at:
                     raise ValueError("renewed expiration must extend the lease")
                 owned_row.expires_at = expires_at
+                if code_generation is not None:
+                    if not code_generation.strip():
+                        raise ValueError("code_generation must not be empty")
+                    owned_row.code_generation = code_generation
                 return _lease_from_row(owned_row)
 
     async def release_lease(self, lease_id: str, owner: str) -> None:
