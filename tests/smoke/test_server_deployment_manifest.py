@@ -407,7 +407,7 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
     )
     assert (
         account_two_environment["CML_LIVE_MIGRATION_REVISION_ACCOUNT_2"]
-        == "${CML_LIVE_MIGRATION_REVISION_ACCOUNT_2:-20260831_0029}"
+        == "${CML_LIVE_MIGRATION_REVISION_ACCOUNT_2:-20260911_0036}"
     )
 
     for account_number in (3, 4):

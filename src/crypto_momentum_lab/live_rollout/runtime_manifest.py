@@ -14,7 +14,11 @@ import yaml
 
 from crypto_momentum_lab.domain.strategy import EntryType
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
+from crypto_momentum_lab.live_rollout.runtime_config import (
+    _live_strategy_config_hash,
+)
 from crypto_momentum_lab.strategy_runner.position_exit import PositionExitMode
+from crypto_momentum_lab.strategy_runner.registry import StrategyRegistryError
 
 
 class RuntimeManifestError(ValueError):
@@ -191,6 +195,7 @@ def _parse_manifest(document: Any, *, path: Path) -> LiveRuntimeManifest:
             raise RuntimeManifestError(f"duplicate runtime account label: {label}")
         labels.add(label)
         services = _services(account.get("services"), prefix)
+        strategy = _text(account.get("strategy"), f"{prefix}.strategy")
         strategy_inputs = _strategy_inputs(
             account.get("strategy_config"),
             prefix,
@@ -199,10 +204,19 @@ def _parse_manifest(document: Any, *, path: Path) -> LiveRuntimeManifest:
             account.get("execution_config"),
             prefix,
         )
+        strategy_config_hash = _text(
+            account.get("strategy_config_hash", "unset"),
+            f"{prefix}.strategy_config_hash",
+        ).lower()
+        if strategy_config_hash == "unset":
+            strategy_config_hash = _computed_strategy_config_hash(
+                strategy,
+                strategy_inputs,
+            )
         accounts.append(
             LiveRuntimeAccount(
                 label=label,
-                strategy=_text(account.get("strategy"), f"{prefix}.strategy"),
+                strategy=strategy,
                 session_id=_text(
                     account.get("session_id"),
                     f"{prefix}.session_id",
@@ -219,10 +233,7 @@ def _parse_manifest(document: Any, *, path: Path) -> LiveRuntimeManifest:
                     account.get("migration_revision", default_migration_revision),
                     f"{prefix}.migration_revision",
                 ),
-                strategy_config_hash=_text(
-                    account.get("strategy_config_hash", "unset"),
-                    f"{prefix}.strategy_config_hash",
-                ).lower(),
+                strategy_config_hash=strategy_config_hash,
                 profile_ref=_text(
                     account.get("profile_ref"),
                     f"{prefix}.profile_ref",
@@ -264,6 +275,29 @@ def _services(value: Any, prefix: str) -> tuple[str, ...]:
     if len(set(services)) != len(services):
         raise RuntimeManifestError(f"{prefix}.services must not contain duplicates")
     return services
+
+
+def _computed_strategy_config_hash(
+    strategy: str,
+    inputs: LiveRuntimeStrategyInputs,
+) -> str:
+    try:
+        return _live_strategy_config_hash(
+            strategy,
+            profile=inputs.profile,
+            entry_positive_gainer_top_count=(
+                inputs.entry_positive_gainer_top_count
+            ),
+            require_price_above_ema5=inputs.require_price_above_ema5,
+            require_price_above_ema10=inputs.require_price_above_ema10,
+            entry_policy_enforce=inputs.entry_policy_enforce,
+            entry_order_type=inputs.entry_order_type,
+            entry_limit_ttl_seconds=inputs.entry_limit_ttl_seconds,
+        )
+    except StrategyRegistryError:
+        # Keep manifest parsing useful for generic topology validation. The
+        # runtime command will reject an unsupported strategy at startup.
+        return "unset"
 
 
 def _strategy_inputs(value: Any, prefix: str) -> LiveRuntimeStrategyInputs:

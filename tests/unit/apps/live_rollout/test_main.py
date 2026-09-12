@@ -13,6 +13,7 @@ from crypto_momentum_lab.apps.live_rollout import main
 from crypto_momentum_lab.domain.risk import TradingLease, TradingLeaseState
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
 from crypto_momentum_lab.execution_account.hub import AccountEventHubError
+from crypto_momentum_lab.live_rollout import runtime_config, runtime_orchestrator
 from crypto_momentum_lab.live_rollout.order_reconciliation import (
     LiveOrderReconciliation,
 )
@@ -121,7 +122,10 @@ accounts:
     )
     captured: dict[str, object] = {}
 
-    async def fake_run_live_daemon(**kwargs: object):
+    async def fake_run_live_daemon(
+        *, config: runtime_config.LiveRuntimeConfig, **kwargs: object
+    ):
+        captured["config"] = config
         captured.update(kwargs)
         return main.LiveDaemonResult(
             processed_state_count=0,
@@ -183,33 +187,37 @@ accounts:
     expected_hash = main._runtime_manifest_strategy_config_hash(account)
 
     assert result.exit_code == 0
-    assert captured["session_id"] == "live-account-2-v1"
-    assert captured["lease_owner"] == "live-worker-account-2"
-    assert captured["git_commit_hash"] == "a" * 40
-    assert captured["migration_revision"] == "20260911_0040"
-    assert captured["strategy_config_hash"] == expected_hash
-    profile = captured["profile"]
+    config = captured["config"]
+    assert isinstance(config, runtime_config.LiveRuntimeConfig)
+    assert config.identity.session_id == "live-account-2-v1"
+    assert config.identity.lease_owner == "live-worker-account-2"
+    assert config.identity.git_commit_hash == "a" * 40
+    assert config.identity.migration_revision == "20260911_0040"
+    assert config.identity.strategy_config_hash == expected_hash
+    profile = config.strategy.profile
     assert isinstance(profile, main.LiveOrderFlowImpulseProfile)
     assert profile.impulse_window_buckets == 2
     assert profile.min_notional_5m_vs_30m == Decimal("1.75")
-    assert captured["entry_positive_gainer_top_count"] == 17
-    assert captured["require_price_above_ema5"] is True
-    assert captured["require_price_above_ema10"] is False
-    assert captured["entry_policy_compare_only"] is True
-    assert captured["entry_policy_enforce"] is False
-    assert captured["entry_order_type"] is main.EntryType.LIMIT
-    assert captured["entry_limit_ttl_seconds"] == 1200
-    assert captured["hedge_mode"] is True
-    assert captured["entry_long_only"] is True
-    assert captured["entry_leverage"] == 7
-    assert captured["margin_type"] == "ISOLATED"
-    assert captured["exit_mode"] is main.PositionExitMode.FIXED
-    assert captured["take_profit_pct"] == Decimal("0.03")
-    assert captured["stop_loss_pct"] == Decimal("0.015")
-    assert captured["candle_grace_bars"] == 0
-    assert captured["candle_grace_decision_profit_pct"] == Decimal("0.001")
-    assert captured["candle_grace_profit_pct"] == Decimal("0")
-    assert captured["persist_exchange_operations"] == frozenset({"submit", "cancel"})
+    assert config.strategy.entry_positive_gainer_top_count == 17
+    assert config.strategy.require_price_above_ema5 is True
+    assert config.strategy.require_price_above_ema10 is False
+    assert config.strategy.entry_policy_compare_only is True
+    assert config.strategy.entry_policy_enforce is False
+    assert config.strategy.entry_order_type is main.EntryType.LIMIT
+    assert config.strategy.entry_limit_ttl_seconds == 1200
+    assert config.execution.hedge_mode is True
+    assert config.execution.entry_long_only is True
+    assert config.execution.entry_leverage == 7
+    assert config.execution.margin_type == "ISOLATED"
+    assert config.execution.exit_mode is main.PositionExitMode.FIXED
+    assert config.execution.take_profit_pct == Decimal("0.03")
+    assert config.execution.stop_loss_pct == Decimal("0.015")
+    assert config.execution.candle_grace_bars == 0
+    assert config.execution.candle_grace_decision_profit_pct == Decimal("0.001")
+    assert config.execution.candle_grace_profit_pct == Decimal("0")
+    assert config.lifecycle.persist_exchange_operations == frozenset(
+        {"submit", "cancel"}
+    )
 
     conflict = runner.invoke(
         app,
@@ -475,7 +483,10 @@ def test_live_run_passes_exchange_operation_allowlist_to_daemon(
 ) -> None:
     captured: dict[str, object] = {}
 
-    async def fake_run_live_daemon(**kwargs: object):
+    async def fake_run_live_daemon(
+        *, config: runtime_config.LiveRuntimeConfig, **kwargs: object
+    ):
+        captured["config"] = config
         captured.update(kwargs)
         return main.LiveDaemonResult(
             processed_state_count=0,
@@ -516,15 +527,20 @@ def test_live_run_passes_exchange_operation_allowlist_to_daemon(
     result = runner.invoke(app, arguments)
 
     assert result.exit_code == 0
-    assert captured["persist_exchange_operations"] == expected
-    assert captured["entry_policy_compare_only"] is True
-    assert captured["entry_positive_gainer_top_count"] == 25
+    config = captured["config"]
+    assert isinstance(config, runtime_config.LiveRuntimeConfig)
+    assert config.lifecycle.persist_exchange_operations == expected
+    assert config.strategy.entry_policy_compare_only is True
+    assert config.strategy.entry_positive_gainer_top_count == 25
 
 
 def test_live_run_passes_entry_policy_enforce_to_daemon(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    async def fake_run_live_daemon(**kwargs: object):
+    async def fake_run_live_daemon(
+        *, config: runtime_config.LiveRuntimeConfig, **kwargs: object
+    ):
+        captured["config"] = config
         captured.update(kwargs)
         return main.LiveDaemonResult(
             processed_state_count=0,
@@ -558,13 +574,18 @@ def test_live_run_passes_entry_policy_enforce_to_daemon(monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
-    assert captured["entry_policy_enforce"] is True
+    config = captured["config"]
+    assert isinstance(config, runtime_config.LiveRuntimeConfig)
+    assert config.strategy.entry_policy_enforce is True
 
 
 def test_live_run_passes_account_scoped_profile_to_daemon(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    async def fake_run_live_daemon(**kwargs: object):
+    async def fake_run_live_daemon(
+        *, config: runtime_config.LiveRuntimeConfig, **kwargs: object
+    ):
+        captured["config"] = config
         captured.update(kwargs)
         return main.LiveDaemonResult(
             processed_state_count=0,
@@ -611,7 +632,9 @@ def test_live_run_passes_account_scoped_profile_to_daemon(monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
-    profile = captured["profile"]
+    config = captured["config"]
+    assert isinstance(config, runtime_config.LiveRuntimeConfig)
+    profile = config.strategy.profile
     assert isinstance(profile, main.LiveOrderFlowImpulseProfile)
     assert profile.impulse_window_buckets == 4
     assert profile.min_notional_5m_vs_30m == Decimal("1.50")
@@ -620,7 +643,10 @@ def test_live_run_passes_account_scoped_profile_to_daemon(monkeypatch) -> None:
 def test_live_run_passes_shadow_preflight_acknowledgment_to_daemon(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    async def fake_run_live_daemon(**kwargs: object):
+    async def fake_run_live_daemon(
+        *, config: runtime_config.LiveRuntimeConfig, **kwargs: object
+    ):
+        captured["config"] = config
         captured.update(kwargs)
         return main.LiveDaemonResult(
             processed_state_count=0,
@@ -654,7 +680,9 @@ def test_live_run_passes_shadow_preflight_acknowledgment_to_daemon(monkeypatch) 
     )
 
     assert result.exit_code == 0
-    assert captured["acknowledge_missing_shadow_preflight"] is True
+    config = captured["config"]
+    assert isinstance(config, runtime_config.LiveRuntimeConfig)
+    assert config.lifecycle.acknowledge_missing_shadow_preflight is True
 
 
 def test_live_cli_legacy_credentials_require_explicit_fallback(monkeypatch) -> None:
@@ -1092,10 +1120,10 @@ def test_strategy_config_hash_includes_live_entry_filters() -> None:
 def test_live_defaults_disable_ema_and_use_primary_orderflow_imbalance() -> None:
     assert main._LIVE_ENTRY_PRICE_ABOVE_EMA5 is False
     assert main._LIVE_ENTRY_PRICE_ABOVE_EMA10 is False
-    assert main._live_strategy_config()[
+    assert runtime_config._live_strategy_config()[
         "order_flow_impulse_min_aggressive_imbalance"
     ] == Decimal("0.30")
-    assert main._live_strategy_config()[
+    assert runtime_config._live_strategy_config()[
         "order_flow_impulse_min_notional_5m_vs_30m"
     ] == Decimal("1.50")
 
@@ -1595,7 +1623,7 @@ async def test_account_event_reconciles_order_before_publishing_snapshot() -> No
             return stream()
 
     latest_market_states = SimpleNamespace(for_symbols=lambda _symbols: ())
-    await main._run_account_event_channel(
+    await runtime_orchestrator._run_account_event_channel(
         source=Source(),
         daemon=None,
         latest_market_states=latest_market_states,
@@ -1645,7 +1673,7 @@ async def test_account_event_retries_pending_position_sync(
             return stream()
 
     daemon = Daemon()
-    await main._run_account_event_channel(
+    await runtime_orchestrator._run_account_event_channel(
         source=Source(),
         daemon=daemon,
         latest_market_states=SimpleNamespace(
@@ -1698,7 +1726,7 @@ async def test_account_event_does_not_retry_confirmed_unmanaged_position(
 
             return stream()
 
-    await main._run_account_event_channel(
+    await runtime_orchestrator._run_account_event_channel(
         source=Source(),
         daemon=Daemon(),
         latest_market_states=SimpleNamespace(
@@ -1739,7 +1767,7 @@ async def test_grace_timeout_channel_degrades_on_order_identity_conflict(
             )
 
     with pytest.raises(asyncio.CancelledError):
-        await main._run_grace_timeout_channel(
+        await runtime_orchestrator._run_grace_timeout_channel(
             daemon=Daemon(),
             latest_market_states=SimpleNamespace(
                 for_symbols=lambda _symbols: (state,),
@@ -1780,7 +1808,7 @@ async def test_shadow_preflight_accepts_an_old_matching_session() -> None:
     session = FakeSession()
     factory = FakeFactory(session)
 
-    assert await main._has_matching_shadow_session(
+    assert await runtime_orchestrator._has_matching_shadow_session(
         factory,
         strategy_name="orderflow_impulse",
         strategy_config_hash="a" * 64,
@@ -1812,9 +1840,9 @@ async def test_missing_shadow_preflight_only_logs_a_warning(
         def warning(self, event, **kwargs):
             warnings.append((event, kwargs))
 
-    monkeypatch.setattr(main, "log", FakeLogger())
+    monkeypatch.setattr(runtime_orchestrator, "log", FakeLogger())
 
-    await main._warn_if_shadow_preflight_missing(
+    await runtime_orchestrator._warn_if_shadow_preflight_missing(
         FakeFactory(),
         strategy_name="orderflow_impulse",
         strategy_config_hash="a" * 64,
@@ -1862,9 +1890,9 @@ async def test_acknowledged_missing_shadow_preflight_logs_info(
         def warning(self, event, **kwargs):
             events.append(("warning", event, kwargs))
 
-    monkeypatch.setattr(main, "log", FakeLogger())
+    monkeypatch.setattr(runtime_orchestrator, "log", FakeLogger())
 
-    await main._warn_if_shadow_preflight_missing(
+    await runtime_orchestrator._warn_if_shadow_preflight_missing(
         FakeFactory(),
         strategy_name="orderflow_impulse",
         strategy_config_hash="a" * 64,

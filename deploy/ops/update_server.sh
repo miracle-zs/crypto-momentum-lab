@@ -885,10 +885,10 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   migration_revision_for_account() {
     local account="$1"
     case "$account" in
-      primary) env_value CML_LIVE_MIGRATION_REVISION 20260822_0018 ;;
-      account-2) env_value CML_LIVE_MIGRATION_REVISION_ACCOUNT_2 20260831_0029 ;;
-      account-3) env_value CML_LIVE_MIGRATION_REVISION_ACCOUNT_3 20260831_0029 ;;
-      account-4) env_value CML_LIVE_MIGRATION_REVISION_ACCOUNT_4 20260831_0029 ;;
+      primary) env_value CML_LIVE_MIGRATION_REVISION 20260911_0036 ;;
+      account-2) env_value CML_LIVE_MIGRATION_REVISION_ACCOUNT_2 20260911_0036 ;;
+      account-3) env_value CML_LIVE_MIGRATION_REVISION_ACCOUNT_3 20260911_0036 ;;
+      account-4) env_value CML_LIVE_MIGRATION_REVISION_ACCOUNT_4 20260911_0036 ;;
       *) echo "unknown account: $account" >&2; return 64 ;;
     esac
   }
