@@ -650,6 +650,7 @@ class OpsMonitor:
                     snapshot.service,
                     snapshot.memory_bytes,
                     now,
+                    container_id=snapshot.container_id,
                     metric_source=snapshot.memory_source,
                 )
             )
@@ -703,6 +704,7 @@ class OpsMonitor:
                     "market-data-process-memory",
                     combined_signals.latest_rss_bytes,
                     now,
+                    container_id=market_id,
                     metric_source="process_rss_log",
                 )
             )
@@ -839,7 +841,7 @@ class OpsMonitor:
         ):
             restart_attempts = 0
 
-        details = {
+        details: dict[str, object] = {
             "account_label": account_label,
             "service": snapshot.service,
             "health": snapshot.health,
@@ -1340,12 +1342,34 @@ SELECT 'parallel_maintenance' || E'\\t' || current_setting(
         current_bytes: int | None,
         now: float,
         *,
+        container_id: str | None = None,
         metric_source: str,
     ) -> tuple[Alert, ...]:
         samples_by_service = self._state.setdefault("memory_samples", {})
         if not isinstance(samples_by_service, dict):
             samples_by_service = {}
             self._state["memory_samples"] = samples_by_service
+
+        growth_breaches = self._state.setdefault("memory_growth_breaches", {})
+        if not isinstance(growth_breaches, dict):
+            growth_breaches = {}
+            self._state["memory_growth_breaches"] = growth_breaches
+
+        if container_id is not None:
+            sample_container_ids = self._state.setdefault(
+                "memory_sample_container_ids",
+                {},
+            )
+            if not isinstance(sample_container_ids, dict):
+                sample_container_ids = {}
+                self._state["memory_sample_container_ids"] = (
+                    sample_container_ids
+                )
+            if sample_container_ids.get(service) != container_id:
+                samples_by_service[service] = []
+                growth_breaches[service] = 0
+            sample_container_ids[service] = container_id
+
         samples = samples_by_service.setdefault(service, [])
         if not isinstance(samples, list):
             samples = []
@@ -1364,14 +1388,10 @@ SELECT 'parallel_maintenance' || E'\\t' || current_setting(
                 retained.append(sample)
 
         baseline = retained[0] if retained else None
-        baseline_bytes = baseline[1] if baseline is not None else None
+        baseline_bytes = int(baseline[1]) if baseline is not None else None
         baseline_age_seconds = (
             now - baseline[0] if baseline is not None else None
         )
-        growth_breaches = self._state.setdefault("memory_growth_breaches", {})
-        if not isinstance(growth_breaches, dict):
-            growth_breaches = {}
-            self._state["memory_growth_breaches"] = growth_breaches
         previous_breaches = growth_breaches.get(service, 0)
         if not isinstance(previous_breaches, int) or isinstance(
             previous_breaches, bool

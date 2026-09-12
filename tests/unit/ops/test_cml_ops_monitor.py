@@ -260,6 +260,48 @@ def test_memory_growth_uses_oldest_window_sample_and_resets_on_drop(
     assert monitor._state["memory_growth_breaches"]["postgres"] == 0
 
 
+def test_memory_growth_starts_a_new_baseline_after_container_recreation(
+    tmp_path,
+) -> None:
+    monitor = OpsMonitor(
+        MonitorConfig(
+            state_path=tmp_path / "state.json",
+            rss_growth_bytes=64,
+        ),
+    )
+
+    for now, value in ((0.0, 100), (60.0, 170), (120.0, 171)):
+        assert (
+            monitor._memory_growth_alerts(
+                "market-data",
+                value,
+                now,
+                container_id="old-container",
+                metric_source="cgroup_memory_current",
+            )
+            == ()
+        )
+
+    # A recreated container must not inherit the old container's baseline.
+    assert (
+        monitor._memory_growth_alerts(
+            "market-data",
+            1_000,
+            180.0,
+            container_id="new-container",
+            metric_source="cgroup_memory_current",
+        )
+        == ()
+    )
+
+    assert monitor._state["memory_samples"]["market-data"] == [[180.0, 1_000]]
+    assert monitor._state["memory_growth_breaches"]["market-data"] == 0
+    assert (
+        monitor._state["memory_sample_container_ids"]["market-data"]
+        == "new-container"
+    )
+
+
 def test_memory_pressure_alerts_only_after_cgroup_counter_advances(
     tmp_path,
 ) -> None:

@@ -19,7 +19,10 @@ The monitor alerts on:
 - `market_data_connection_task_not_alive` records;
 - container memory growth of at least 64 MiB over the retained 30-minute
   trend window for three consecutive checks; the sample prefers cgroup
-  `memory.current` and falls back to Docker's working-set value;
+  `memory.current` and falls back to Docker's working-set value. Trend
+  samples are scoped to the current container ID, so a Compose recreation
+  starts a fresh baseline instead of inheriting the previous container's
+  warm-up spike;
 - cgroup memory-pressure counter advances, including current swap and peak
   values in the alert details;
 - missing `pg_stat_statements`, disabled I/O timing, or re-enabled parallel
@@ -98,10 +101,11 @@ systemctl status cml-ops-monitor.service --no-pager
 
 The monitor keeps a small state file at
 `/var/lib/crypto-momentum-lab/ops-monitor.json` for alert de-duplication,
-container-memory trend samples, cgroup pressure counters, and per-account
-restart budgets. It changes Docker state
-only by restarting the affected live strategy when the bounded recovery path
-above is enabled; it never changes PostgreSQL state.
+container-memory trend samples (including their container IDs), cgroup
+pressure counters, and per-account restart budgets. Container high-memory and
+pressure checks remain independent of the trend-baseline reset. It changes
+Docker state only by restarting the affected live strategy when the bounded
+recovery path above is enabled; it never changes PostgreSQL state.
 
 This monitor runs on the trading server itself. It can notify when the
 `live-strategy[-account]` container is missing, unhealthy, OOM-killed, or no
