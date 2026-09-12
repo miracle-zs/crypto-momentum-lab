@@ -267,6 +267,15 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert services["live-strategy"]["environment"][
         "BINANCE_TRADE_API_KEY"
     ] == "${BINANCE_TRADE_API_KEY:-}"
+    assert services["live-strategy"]["environment"]["CML_LIVE_ENTRY_LEVERAGE"] == (
+        "${CML_LIVE_ENTRY_LEVERAGE:-5}"
+    )
+    assert services["live-strategy"]["environment"]["CML_LIVE_EXIT_MODE"] == (
+        "${CML_LIVE_EXIT_MODE:-candle_15m}"
+    )
+    assert services["live-strategy"]["environment"][
+        "CML_LIVE_PERSIST_EXCHANGE_OPERATIONS"
+    ] == "${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-submit,cancel}"
     assert "BINANCE_API_KEY" not in services["execution-account-live"][
         "environment"
     ]
@@ -340,6 +349,21 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
             "CML_LIVE_COOLDOWN_BUCKETS",
         ):
             assert profile_env in strategy["environment"]
+        for execution_env, default in (
+            ("ENTRY_LEVERAGE", "5"),
+            ("MARGIN_TYPE", "CROSSED"),
+            ("EXIT_MODE", "candle_15m"),
+            ("TAKE_PROFIT_PCT", "0.02"),
+            ("STOP_LOSS_PCT", "0.01"),
+            ("CANDLE_GRACE_BARS", "8"),
+            ("CANDLE_GRACE_DECISION_PROFIT_PCT", "0.001"),
+            ("CANDLE_GRACE_PROFIT_PCT", "0.0088"),
+            ("PERSIST_EXCHANGE_OPERATIONS", "submit,cancel"),
+        ):
+            assert strategy["environment"][f"CML_LIVE_{execution_env}"] == (
+                "${CML_LIVE_"
+                f"{execution_env}_ACCOUNT_{account_number}:-{default}}}"
+            )
         assert "BINANCE_API_KEY" not in execution["environment"]
         assert "BINANCE_API_SECRET" not in execution["environment"]
         assert "BINANCE_API_KEY" not in strategy["environment"]

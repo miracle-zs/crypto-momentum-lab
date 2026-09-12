@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, TypeVar
 from uuid import uuid4
 
 import structlog
@@ -324,6 +324,7 @@ _PENDING_POSITION_RETRY_DELAYS_SECONDS = (
 _ORDER_IDENTITY_CONFLICT_MESSAGE = (
     "client order ID is already bound to a different order"
 )
+_ManifestValue = TypeVar("_ManifestValue")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1037,6 +1038,58 @@ def _runtime_manifest_strategy_config_hash(
     return computed
 
 
+def _resolve_manifest_option(
+    value: _ManifestValue | None,
+    expected: _ManifestValue,
+    option_name: str,
+) -> _ManifestValue:
+    """Use manifest values while rejecting an explicitly conflicting option."""
+
+    if value is not None and value != expected:
+        raise typer.BadParameter(
+            f"{option_name} does not match the runtime manifest"
+        )
+    return expected
+
+
+def _resolve_manifest_decimal_option(
+    value: str | None,
+    expected: Decimal,
+    option_name: str,
+) -> str:
+    if value is None:
+        return str(expected)
+    try:
+        configured = Decimal(value)
+    except InvalidOperation as error:
+        raise typer.BadParameter(f"{option_name} must be a decimal") from error
+    if configured != expected:
+        raise typer.BadParameter(
+            f"{option_name} does not match the runtime manifest"
+        )
+    return str(expected)
+
+
+def _resolve_manifest_operations(
+    value: str | None,
+    expected: str,
+    option_name: str,
+) -> str:
+    if value is None:
+        return expected
+    configured = _parse_exchange_operations(value)
+    expected_operations = (
+        None
+        if expected == "all"
+        else frozenset(item for item in expected.split(",") if item)
+    )
+    if configured != expected_operations:
+        raise typer.BadParameter(
+            f"{option_name} does not match the runtime manifest"
+        )
+    return expected
+
+
 @app.command("preflight")
 def preflight_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
@@ -1330,57 +1383,57 @@ def run_command(
         int, typer.Option("--checkpoint-every-states", min=1)
     ] = 100,
     hedge_mode: Annotated[
-        bool,
+        bool | None,
         typer.Option("--hedge-mode/--one-way-mode"),
-    ] = True,
+    ] = None,
     exit_mode: Annotated[
-        PositionExitMode,
+        PositionExitMode | None,
         typer.Option("--exit-mode"),
-    ] = PositionExitMode.CANDLE_15M,
+    ] = None,
     take_profit_pct: Annotated[
-        str,
+        str | None,
         typer.Option("--take-profit-pct"),
-    ] = "0.02",
+    ] = None,
     stop_loss_pct: Annotated[
-        str,
+        str | None,
         typer.Option("--stop-loss-pct"),
-    ] = "0.01",
+    ] = None,
     entry_long_only: Annotated[
-        bool,
+        bool | None,
         typer.Option("--entry-long-only/--entry-all-sides"),
-    ] = True,
+    ] = None,
     entry_positive_gainer_top_count: Annotated[
         int | None,
         typer.Option("--entry-positive-gainer-top-count", min=1),
     ] = None,
     entry_price_above_ema5: Annotated[
-        bool,
+        bool | None,
         typer.Option("--entry-price-above-ema5/--no-entry-price-above-ema5"),
-    ] = _LIVE_ENTRY_PRICE_ABOVE_EMA5,
+    ] = None,
     entry_price_above_ema10: Annotated[
-        bool,
+        bool | None,
         typer.Option("--entry-price-above-ema10/--no-entry-price-above-ema10"),
-    ] = _LIVE_ENTRY_PRICE_ABOVE_EMA10,
+    ] = None,
     entry_order_type: Annotated[
-        EntryType,
+        EntryType | None,
         typer.Option("--entry-order-type"),
-    ] = _LIVE_ENTRY_ORDER_TYPE,
+    ] = None,
     entry_limit_ttl_seconds: Annotated[
-        int,
+        int | None,
         typer.Option("--entry-limit-ttl-seconds", min=601),
-    ] = _LIVE_ENTRY_LIMIT_TTL_SECONDS,
+    ] = None,
     candle_grace_bars: Annotated[
-        int,
+        int | None,
         typer.Option("--candle-grace-bars", min=0),
-    ] = 1,
+    ] = None,
     candle_grace_decision_profit_pct: Annotated[
-        str,
+        str | None,
         typer.Option("--candle-grace-decision-profit-pct"),
-    ] = "0.001",
+    ] = None,
     candle_grace_profit_pct: Annotated[
-        str,
+        str | None,
         typer.Option("--candle-grace-profit-pct"),
-    ] = "0.0088",
+    ] = None,
     base_url: Annotated[str, typer.Option("--base-url")] = "https://fapi.binance.com",
     api_key_env: Annotated[
         str | None,
@@ -1406,17 +1459,17 @@ def run_command(
         ),
     ] = False,
     entry_leverage: Annotated[
-        int, typer.Option("--entry-leverage", min=1, max=125)
-    ] = 1,
+        int | None, typer.Option("--entry-leverage", min=1, max=125)
+    ] = None,
     margin_type: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--margin-type",
             help="Entry margin mode: CROSSED or ISOLATED.",
         ),
-    ] = "CROSSED",
+    ] = None,
     entry_policy_compare_only: Annotated[
-        bool,
+        bool | None,
         typer.Option(
             "--entry-policy-compare-only/--no-entry-policy-compare-only",
             help=(
@@ -1424,14 +1477,14 @@ def run_command(
                 "order decisions."
             ),
         ),
-    ] = False,
+    ] = None,
     entry_policy_enforce: Annotated[
-        bool,
+        bool | None,
         typer.Option(
             "--entry-policy-enforce/--no-entry-policy-enforce",
             help="Use the shared Policy for real entry eligibility decisions.",
         ),
-    ] = False,
+    ] = None,
     acknowledge_missing_shadow_preflight: Annotated[
         bool,
         typer.Option(
@@ -1443,7 +1496,7 @@ def run_command(
         ),
     ] = False,
     persist_exchange_operations: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--persist-exchange-operations",
             help=(
@@ -1452,7 +1505,7 @@ def run_command(
                 "diagnostic capture."
             ),
         ),
-    ] = "submit,cancel",
+    ] = None,
     confirmation: Annotated[
         bool, typer.Option("--i-understand-this-places-real-orders")
     ] = False,
@@ -1476,6 +1529,55 @@ def run_command(
     if manifest_account is None:
         session_id = session_id or "live-manual"
         lease_owner = lease_owner or "live-worker"
+        hedge_mode = True if hedge_mode is None else hedge_mode
+        entry_long_only = True if entry_long_only is None else entry_long_only
+        entry_price_above_ema5 = (
+            _LIVE_ENTRY_PRICE_ABOVE_EMA5
+            if entry_price_above_ema5 is None
+            else entry_price_above_ema5
+        )
+        entry_price_above_ema10 = (
+            _LIVE_ENTRY_PRICE_ABOVE_EMA10
+            if entry_price_above_ema10 is None
+            else entry_price_above_ema10
+        )
+        entry_order_type = (
+            _LIVE_ENTRY_ORDER_TYPE
+            if entry_order_type is None
+            else entry_order_type
+        )
+        entry_limit_ttl_seconds = (
+            _LIVE_ENTRY_LIMIT_TTL_SECONDS
+            if entry_limit_ttl_seconds is None
+            else entry_limit_ttl_seconds
+        )
+        entry_policy_compare_only = (
+            False if entry_policy_compare_only is None else entry_policy_compare_only
+        )
+        entry_policy_enforce = (
+            False if entry_policy_enforce is None else entry_policy_enforce
+        )
+        entry_leverage = 1 if entry_leverage is None else entry_leverage
+        margin_type = "CROSSED" if margin_type is None else margin_type
+        exit_mode = (
+            PositionExitMode.CANDLE_15M if exit_mode is None else exit_mode
+        )
+        take_profit_pct = "0.02" if take_profit_pct is None else take_profit_pct
+        stop_loss_pct = "0.01" if stop_loss_pct is None else stop_loss_pct
+        candle_grace_bars = 1 if candle_grace_bars is None else candle_grace_bars
+        candle_grace_decision_profit_pct = (
+            "0.001"
+            if candle_grace_decision_profit_pct is None
+            else candle_grace_decision_profit_pct
+        )
+        candle_grace_profit_pct = (
+            "0.0088" if candle_grace_profit_pct is None else candle_grace_profit_pct
+        )
+        persist_exchange_operations = (
+            "submit,cancel"
+            if persist_exchange_operations is None
+            else persist_exchange_operations
+        )
         profile = _resolve_live_profile_options(
             impulse_window_buckets=impulse_window_buckets,
             confirmation_buckets=confirmation_buckets,
@@ -1514,6 +1616,65 @@ def run_command(
         entry_policy_enforce = strategy_inputs.entry_policy_enforce
         entry_order_type = strategy_inputs.entry_order_type
         entry_limit_ttl_seconds = strategy_inputs.entry_limit_ttl_seconds
+        execution_inputs = manifest_account.execution_inputs
+        hedge_mode = _resolve_manifest_option(
+            hedge_mode,
+            execution_inputs.hedge_mode,
+            "--hedge-mode",
+        )
+        entry_long_only = _resolve_manifest_option(
+            entry_long_only,
+            execution_inputs.entry_long_only,
+            "--entry-long-only",
+        )
+        entry_leverage = _resolve_manifest_option(
+            entry_leverage,
+            execution_inputs.entry_leverage,
+            "--entry-leverage",
+        )
+        configured_margin_type = (
+            None if margin_type is None else margin_type.strip().upper()
+        )
+        margin_type = _resolve_manifest_option(
+            configured_margin_type,
+            execution_inputs.margin_type,
+            "--margin-type",
+        )
+        exit_mode = _resolve_manifest_option(
+            exit_mode,
+            execution_inputs.exit_mode,
+            "--exit-mode",
+        )
+        take_profit_pct = _resolve_manifest_decimal_option(
+            take_profit_pct,
+            execution_inputs.take_profit_pct,
+            "--take-profit-pct",
+        )
+        stop_loss_pct = _resolve_manifest_decimal_option(
+            stop_loss_pct,
+            execution_inputs.stop_loss_pct,
+            "--stop-loss-pct",
+        )
+        candle_grace_bars = _resolve_manifest_option(
+            candle_grace_bars,
+            execution_inputs.candle_grace_bars,
+            "--candle-grace-bars",
+        )
+        candle_grace_decision_profit_pct = _resolve_manifest_decimal_option(
+            candle_grace_decision_profit_pct,
+            execution_inputs.candle_grace_decision_profit_pct,
+            "--candle-grace-decision-profit-pct",
+        )
+        candle_grace_profit_pct = _resolve_manifest_decimal_option(
+            candle_grace_profit_pct,
+            execution_inputs.candle_grace_profit_pct,
+            "--candle-grace-profit-pct",
+        )
+        persist_exchange_operations = _resolve_manifest_operations(
+            persist_exchange_operations,
+            execution_inputs.persist_exchange_operations,
+            "--persist-exchange-operations",
+        )
 
         configured_git_commit = git_commit_hash.strip() or os.environ.get(
             "CML_CODE_COMMIT",

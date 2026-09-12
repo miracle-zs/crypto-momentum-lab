@@ -445,8 +445,12 @@ accounts:
   并以 manifest 覆盖 session、lease、commit、migration 和策略 hash；若 Compose 或
   操作者显式传入冲突值则 fail closed。`compose.server.yaml` 与三个多账户 Live
   service 都已传入该参数，Docker 镜像也会携带 `deploy/live-runtime.yaml`。
-- 这仍是第二阶段的 strategy-input seam：退出参数、杠杆、风险限额和交易凭证等
-  运行细节继续由 Compose/环境变量提供，因此 manifest 尚未被伪装成完整的单一配置源。
+- 本次又将杠杆、保证金模式、退出模式/阈值、candle grace 和可持久化交易操作列表
+  纳入 manifest 的 typed `execution_config`；`run --runtime-manifest` 对显式 CLI
+  冲突直接 fail closed，Compose 已把每个账户的引用值注入容器，避免 manifest 解析
+  时拿不到账户级配置。
+- 这仍不是完整的单一配置源：风险限额通过 `limits_ref` 由数据库持有，交易凭证和
+  transport 仍由 Compose/环境变量提供；这两类信息不应复制进版本库 manifest。
 
 ---
 

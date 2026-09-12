@@ -27,6 +27,18 @@ accounts:
       entry_policy_mode: "${CML_LIVE_ENTRY_POLICY_MODE:-enforce}"
       entry_order_type: limit
       entry_limit_ttl_seconds: 900
+    execution_config:
+      hedge_mode: true
+      entry_long_only: true
+      entry_leverage: "${CML_LIVE_ENTRY_LEVERAGE:-5}"
+      margin_type: "${CML_LIVE_MARGIN_TYPE:-CROSSED}"
+      exit_mode: "${CML_LIVE_EXIT_MODE:-candle_15m}"
+      take_profit_pct: "${CML_LIVE_TAKE_PROFIT_PCT:-0.02}"
+      stop_loss_pct: "${CML_LIVE_STOP_LOSS_PCT:-0.01}"
+      candle_grace_bars: "${CML_LIVE_CANDLE_GRACE_BARS:-8}"
+      candle_grace_decision_profit_pct: "${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT:-0.001}"
+      candle_grace_profit_pct: "${CML_LIVE_CANDLE_GRACE_PROFIT_PCT:-0.0088}"
+      persist_exchange_operations: "${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-submit,cancel}"
     profile_ref: compose.server.yaml#services.live-strategy
     limits_ref: postgres:risk_config/primary
     services:
@@ -52,6 +64,18 @@ accounts:
       entry_policy_mode: "${CML_LIVE_ENTRY_POLICY_MODE_ACCOUNT_2:-enforce}"
       entry_order_type: limit
       entry_limit_ttl_seconds: 900
+    execution_config:
+      hedge_mode: true
+      entry_long_only: true
+      entry_leverage: "${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_2:-5}"
+      margin_type: "${CML_LIVE_MARGIN_TYPE_ACCOUNT_2:-CROSSED}"
+      exit_mode: "${CML_LIVE_EXIT_MODE_ACCOUNT_2:-candle_15m}"
+      take_profit_pct: "${CML_LIVE_TAKE_PROFIT_PCT_ACCOUNT_2:-0.02}"
+      stop_loss_pct: "${CML_LIVE_STOP_LOSS_PCT_ACCOUNT_2:-0.01}"
+      candle_grace_bars: "${CML_LIVE_CANDLE_GRACE_BARS_ACCOUNT_2:-8}"
+      candle_grace_decision_profit_pct: "${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT_ACCOUNT_2:-0.001}"
+      candle_grace_profit_pct: "${CML_LIVE_CANDLE_GRACE_PROFIT_PCT_ACCOUNT_2:-0.0088}"
+      persist_exchange_operations: "${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS_ACCOUNT_2:-submit,cancel}"
     migration_revision: "${CML_LIVE_MIGRATION_REVISION_ACCOUNT_2:-20260831_0029}"
     profile_ref: compose.live.accounts.yaml#services.live-strategy-account-2
     limits_ref: postgres:risk_config/account-2
@@ -78,6 +102,18 @@ accounts:
       entry_policy_mode: "${CML_LIVE_ENTRY_POLICY_MODE_ACCOUNT_3:-enforce}"
       entry_order_type: limit
       entry_limit_ttl_seconds: 900
+    execution_config:
+      hedge_mode: true
+      entry_long_only: true
+      entry_leverage: "${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_3:-5}"
+      margin_type: "${CML_LIVE_MARGIN_TYPE_ACCOUNT_3:-CROSSED}"
+      exit_mode: "${CML_LIVE_EXIT_MODE_ACCOUNT_3:-candle_15m}"
+      take_profit_pct: "${CML_LIVE_TAKE_PROFIT_PCT_ACCOUNT_3:-0.02}"
+      stop_loss_pct: "${CML_LIVE_STOP_LOSS_PCT_ACCOUNT_3:-0.01}"
+      candle_grace_bars: "${CML_LIVE_CANDLE_GRACE_BARS_ACCOUNT_3:-8}"
+      candle_grace_decision_profit_pct: "${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT_ACCOUNT_3:-0.001}"
+      candle_grace_profit_pct: "${CML_LIVE_CANDLE_GRACE_PROFIT_PCT_ACCOUNT_3:-0.0088}"
+      persist_exchange_operations: "${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS_ACCOUNT_3:-submit,cancel}"
     migration_revision: "${CML_LIVE_MIGRATION_REVISION_ACCOUNT_3:-20260831_0029}"
     profile_ref: compose.live.accounts.yaml#services.live-strategy-account-3
     limits_ref: postgres:risk_config/account-3
@@ -104,6 +140,18 @@ accounts:
       entry_policy_mode: "${CML_LIVE_ENTRY_POLICY_MODE_ACCOUNT_4:-enforce}"
       entry_order_type: limit
       entry_limit_ttl_seconds: 900
+    execution_config:
+      hedge_mode: true
+      entry_long_only: true
+      entry_leverage: "${CML_LIVE_ENTRY_LEVERAGE_ACCOUNT_4:-5}"
+      margin_type: "${CML_LIVE_MARGIN_TYPE_ACCOUNT_4:-CROSSED}"
+      exit_mode: "${CML_LIVE_EXIT_MODE_ACCOUNT_4:-candle_15m}"
+      take_profit_pct: "${CML_LIVE_TAKE_PROFIT_PCT_ACCOUNT_4:-0.02}"
+      stop_loss_pct: "${CML_LIVE_STOP_LOSS_PCT_ACCOUNT_4:-0.01}"
+      candle_grace_bars: "${CML_LIVE_CANDLE_GRACE_BARS_ACCOUNT_4:-8}"
+      candle_grace_decision_profit_pct: "${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT_ACCOUNT_4:-0.001}"
+      candle_grace_profit_pct: "${CML_LIVE_CANDLE_GRACE_PROFIT_PCT_ACCOUNT_4:-0.0088}"
+      persist_exchange_operations: "${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS_ACCOUNT_4:-submit,cancel}"
     migration_revision: "${CML_LIVE_MIGRATION_REVISION_ACCOUNT_4:-20260831_0029}"
     profile_ref: compose.live.accounts.yaml#services.live-strategy-account-4
     limits_ref: postgres:risk_config/account-4

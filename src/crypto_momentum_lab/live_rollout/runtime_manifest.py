@@ -14,6 +14,7 @@ import yaml
 
 from crypto_momentum_lab.domain.strategy import EntryType
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
+from crypto_momentum_lab.strategy_runner.position_exit import PositionExitMode
 
 
 class RuntimeManifestError(ValueError):
@@ -35,6 +36,7 @@ class LiveRuntimeAccount:
     limits_ref: str
     services: tuple[str, ...]
     strategy_inputs: LiveRuntimeStrategyInputs
+    execution_inputs: LiveRuntimeExecutionInputs
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +54,23 @@ class LiveRuntimeStrategyInputs:
     @property
     def entry_policy_enforce(self) -> bool:
         return self.entry_policy_mode == "enforce"
+
+
+@dataclass(frozen=True, slots=True)
+class LiveRuntimeExecutionInputs:
+    """Account-scoped order and exit settings owned by the manifest."""
+
+    hedge_mode: bool
+    entry_long_only: bool
+    entry_leverage: int
+    margin_type: str
+    exit_mode: PositionExitMode
+    take_profit_pct: Decimal
+    stop_loss_pct: Decimal
+    candle_grace_bars: int
+    candle_grace_decision_profit_pct: Decimal
+    candle_grace_profit_pct: Decimal
+    persist_exchange_operations: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +92,20 @@ class LiveRuntimeManifest:
 
 _ENV_REFERENCE = re.compile(
     r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:(?P<operator>:-|:\?)(?P<argument>[^}]*))?\}"
+)
+
+_DEFAULT_EXECUTION_INPUTS = LiveRuntimeExecutionInputs(
+    hedge_mode=True,
+    entry_long_only=True,
+    entry_leverage=1,
+    margin_type="CROSSED",
+    exit_mode=PositionExitMode.CANDLE_15M,
+    take_profit_pct=Decimal("0.02"),
+    stop_loss_pct=Decimal("0.01"),
+    candle_grace_bars=1,
+    candle_grace_decision_profit_pct=Decimal("0.001"),
+    candle_grace_profit_pct=Decimal("0.0088"),
+    persist_exchange_operations="submit,cancel",
 )
 
 
@@ -162,6 +195,10 @@ def _parse_manifest(document: Any, *, path: Path) -> LiveRuntimeManifest:
             account.get("strategy_config"),
             prefix,
         )
+        execution_inputs = _execution_inputs(
+            account.get("execution_config"),
+            prefix,
+        )
         accounts.append(
             LiveRuntimeAccount(
                 label=label,
@@ -196,6 +233,7 @@ def _parse_manifest(document: Any, *, path: Path) -> LiveRuntimeManifest:
                 ),
                 services=services,
                 strategy_inputs=strategy_inputs,
+                execution_inputs=execution_inputs,
             )
         )
     return LiveRuntimeManifest(
@@ -310,6 +348,102 @@ def _strategy_inputs(value: Any, prefix: str) -> LiveRuntimeStrategyInputs:
         raise RuntimeManifestError(f"{field} is invalid: {error}") from error
 
 
+def _execution_inputs(
+    value: Any,
+    prefix: str,
+) -> LiveRuntimeExecutionInputs:
+    if value is None:
+        return _DEFAULT_EXECUTION_INPUTS
+    field = f"{prefix}.execution_config"
+    config = _mapping(value, field, Path("runtime-manifest"))
+    try:
+        hedge_mode = _boolean(
+            config.get("hedge_mode"),
+            f"{field}.hedge_mode",
+        )
+        entry_long_only = _boolean(
+            config.get("entry_long_only"),
+            f"{field}.entry_long_only",
+        )
+        entry_leverage = _integer(
+            config.get("entry_leverage"),
+            f"{field}.entry_leverage",
+        )
+        if not 1 <= entry_leverage <= 125:
+            raise RuntimeManifestError(
+                f"{field}.entry_leverage must be between 1 and 125"
+            )
+        margin_type = _text(
+            config.get("margin_type"),
+            f"{field}.margin_type",
+        ).upper()
+        if margin_type not in {"CROSSED", "ISOLATED"}:
+            raise RuntimeManifestError(
+                f"{field}.margin_type must be CROSSED or ISOLATED"
+            )
+        exit_mode = PositionExitMode(
+            _text(config.get("exit_mode"), f"{field}.exit_mode").lower()
+        )
+        take_profit_pct = _positive_decimal(
+            config.get("take_profit_pct"),
+            f"{field}.take_profit_pct",
+        )
+        stop_loss_pct = _positive_decimal(
+            config.get("stop_loss_pct"),
+            f"{field}.stop_loss_pct",
+        )
+        candle_grace_bars = _integer(
+            config.get("candle_grace_bars"),
+            f"{field}.candle_grace_bars",
+        )
+        if candle_grace_bars < 0:
+            raise RuntimeManifestError(
+                f"{field}.candle_grace_bars must not be negative"
+            )
+        candle_grace_decision_profit_pct = _decimal(
+            config.get("candle_grace_decision_profit_pct"),
+            f"{field}.candle_grace_decision_profit_pct",
+        )
+        candle_grace_profit_pct = _decimal(
+            config.get("candle_grace_profit_pct"),
+            f"{field}.candle_grace_profit_pct",
+        )
+        if candle_grace_bars > 0 and candle_grace_decision_profit_pct <= 0:
+            raise RuntimeManifestError(
+                f"{field}.candle_grace_decision_profit_pct must be positive "
+                "when grace is enabled"
+            )
+        for candidate, name in (
+            (candle_grace_decision_profit_pct, "candle_grace_decision_profit_pct"),
+            (candle_grace_profit_pct, "candle_grace_profit_pct"),
+        ):
+            if not candidate.is_finite() or not 0 <= candidate < 1:
+                raise RuntimeManifestError(
+                    f"{field}.{name} must be finite and in [0, 1)"
+                )
+        persist_exchange_operations = _operations(
+            config.get("persist_exchange_operations"),
+            f"{field}.persist_exchange_operations",
+        )
+        return LiveRuntimeExecutionInputs(
+            hedge_mode=hedge_mode,
+            entry_long_only=entry_long_only,
+            entry_leverage=entry_leverage,
+            margin_type=margin_type,
+            exit_mode=exit_mode,
+            take_profit_pct=take_profit_pct,
+            stop_loss_pct=stop_loss_pct,
+            candle_grace_bars=candle_grace_bars,
+            candle_grace_decision_profit_pct=candle_grace_decision_profit_pct,
+            candle_grace_profit_pct=candle_grace_profit_pct,
+            persist_exchange_operations=persist_exchange_operations,
+        )
+    except (InvalidOperation, ValueError) as error:
+        if isinstance(error, RuntimeManifestError):
+            raise
+        raise RuntimeManifestError(f"{field} is invalid: {error}") from error
+
+
 def _integer(value: Any, field: str) -> int:
     if isinstance(value, bool):
         raise RuntimeManifestError(f"{field} must be an integer")
@@ -326,6 +460,33 @@ def _decimal(value: Any, field: str) -> Decimal:
         raise RuntimeManifestError(f"{field} must be a decimal") from error
 
 
+def _positive_decimal(value: Any, field: str) -> Decimal:
+    parsed = _decimal(value, field)
+    if not parsed.is_finite() or parsed <= 0:
+        raise RuntimeManifestError(f"{field} must be finite and positive")
+    return parsed
+
+
+def _operations(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise RuntimeManifestError(f"{field} must be a comma-separated string")
+    normalized = value.strip()
+    if not normalized:
+        raise RuntimeManifestError(f"{field} must not be empty")
+    if normalized.lower() == "all":
+        return "all"
+    operations = tuple(item.strip() for item in normalized.split(","))
+    if any(not item for item in operations):
+        raise RuntimeManifestError(
+            f"{field} must contain only non-empty operation names"
+        )
+    if any(item.lower() == "all" for item in operations):
+        raise RuntimeManifestError(f"{field} accepts 'all' only by itself")
+    if len(set(operations)) != len(operations):
+        raise RuntimeManifestError(f"{field} must not contain duplicates")
+    return ",".join(sorted(operations))
+
+
 def _boolean(value: Any, field: str) -> bool:
     if isinstance(value, bool):
         return value
@@ -340,6 +501,7 @@ def _boolean(value: Any, field: str) -> bool:
 
 __all__ = [
     "LiveRuntimeAccount",
+    "LiveRuntimeExecutionInputs",
     "LiveRuntimeManifest",
     "LiveRuntimeStrategyInputs",
     "RuntimeManifestError",

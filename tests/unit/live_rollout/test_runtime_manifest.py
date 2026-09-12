@@ -27,6 +27,15 @@ def test_checked_in_live_runtime_manifest_resolves_account_identity() -> None:
     assert account_3.session_id == "live-account-3-v1"
     assert account_3.lease_owner == "live-worker-account-3"
     assert account_3.migration_revision == "20260831_0029"
+    assert primary.execution_inputs.hedge_mode is True
+    assert primary.execution_inputs.entry_long_only is True
+    assert primary.execution_inputs.entry_leverage == 5
+    assert primary.execution_inputs.margin_type == "CROSSED"
+    assert primary.execution_inputs.exit_mode.value == "candle_15m"
+    assert primary.execution_inputs.candle_grace_bars == 8
+    assert primary.execution_inputs.persist_exchange_operations == (
+        "cancel,submit"
+    )
 
 
 def test_runtime_manifest_expands_override_and_rejects_missing_required_value(

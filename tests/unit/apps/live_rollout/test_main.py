@@ -104,6 +104,18 @@ accounts:
       entry_policy_mode: compare_only
       entry_order_type: limit
       entry_limit_ttl_seconds: 1200
+    execution_config:
+      hedge_mode: true
+      entry_long_only: true
+      entry_leverage: 7
+      margin_type: ISOLATED
+      exit_mode: fixed
+      take_profit_pct: 0.03
+      stop_loss_pct: 0.015
+      candle_grace_bars: 0
+      candle_grace_decision_profit_pct: 0.001
+      candle_grace_profit_pct: 0
+      persist_exchange_operations: submit,cancel
 """,
         encoding="utf-8",
     )
@@ -157,6 +169,8 @@ accounts:
             "a" * 40,
             "--migration-revision",
             "20260911_0040",
+            "--entry-leverage",
+            "7",
             "--i-understand-this-places-real-orders",
         ],
     )
@@ -185,6 +199,39 @@ accounts:
     assert captured["entry_policy_enforce"] is False
     assert captured["entry_order_type"] is main.EntryType.LIMIT
     assert captured["entry_limit_ttl_seconds"] == 1200
+    assert captured["hedge_mode"] is True
+    assert captured["entry_long_only"] is True
+    assert captured["entry_leverage"] == 7
+    assert captured["margin_type"] == "ISOLATED"
+    assert captured["exit_mode"] is main.PositionExitMode.FIXED
+    assert captured["take_profit_pct"] == Decimal("0.03")
+    assert captured["stop_loss_pct"] == Decimal("0.015")
+    assert captured["candle_grace_bars"] == 0
+    assert captured["candle_grace_decision_profit_pct"] == Decimal("0.001")
+    assert captured["candle_grace_profit_pct"] == Decimal("0")
+    assert captured["persist_exchange_operations"] == frozenset({"submit", "cancel"})
+
+    conflict = runner.invoke(
+        app,
+        [
+            "run",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--account-label",
+            "account-2",
+            "--runtime-manifest",
+            str(manifest_path),
+            "--git-commit-hash",
+            "a" * 40,
+            "--migration-revision",
+            "20260911_0040",
+            "--entry-leverage",
+            "8",
+            "--i-understand-this-places-real-orders",
+        ],
+    )
+    assert conflict.exit_code != 0
+    assert "entry-leverage does not match" in conflict.output
 
 
 def test_cli_requires_confirmation_flag_for_live_run() -> None:
@@ -1154,7 +1201,12 @@ async def test_compact_checkpoint_recovery_warms_without_evaluating_signals() ->
     class Repository:
         async def load_recovery_window(self, **kwargs):
             seen.update(kwargs)
-            return (SimpleNamespace(symbol="BTCUSDT"),)
+            return (
+                SimpleNamespace(
+                    symbol="BTCUSDT",
+                    bucket_start=kwargs["upper_bound"],
+                ),
+            )
 
     checkpoint = StrategyCheckpoint(
         last_processed_at_by_symbol={"BTCUSDT": now},
