@@ -248,6 +248,12 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert services["live-strategy"]["environment"][
         "CML_LIVE_IMPULSE_WINDOW_BUCKETS"
     ] == "${CML_LIVE_IMPULSE_WINDOW_BUCKETS:-4}"
+    assert services["live-strategy"]["environment"]["CML_LIVE_SESSION_ID"] == (
+        "${CML_LIVE_SESSION_ID:-live-primary-v1}"
+    )
+    assert services["live-strategy"]["environment"]["CML_LIVE_LEASE_OWNER"] == (
+        "${CML_LIVE_LEASE_OWNER:-live-worker}"
+    )
     assert services["execution-account-live"]["environment"][
         "BINANCE_READ_API_KEY"
     ] == "${BINANCE_READ_API_KEY:-}"
@@ -370,6 +376,14 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
     assert (
         account_two_environment["CML_LIVE_MIN_NOTIONAL_5M_VS_30M"]
         == "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_2:-1.50}"
+    )
+    assert (
+        account_two_environment["CML_LIVE_SESSION_ID_ACCOUNT_2"]
+        == "${CML_LIVE_SESSION_ID_ACCOUNT_2:-live-account-2-v1}"
+    )
+    assert (
+        account_two_environment["CML_LIVE_MIGRATION_REVISION_ACCOUNT_2"]
+        == "${CML_LIVE_MIGRATION_REVISION_ACCOUNT_2:-20260831_0029}"
     )
 
     for account_number in (3, 4):
