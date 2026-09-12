@@ -137,6 +137,8 @@ unhealthy, the script starts it and verifies both its Compose healthcheck and
 `CML_DASHBOARD_REQUIRED=0` only on a host where the Nginx dashboard route is
 intentionally disabled. On a host whose proxy uses another local URL, set
 `CML_DASHBOARD_PROXY_URL` for that invocation.
+The deployment-side health poll runs once per second; Docker's own healthcheck
+intervals remain the source of truth for when a service becomes healthy.
 
 ## Live update
 
@@ -162,7 +164,11 @@ deploy/ops/update_server.sh 43.167.191.253 <commit-sha> \
 ```
 
 Set `CML_LIVE_CONCURRENCY=1` before the command for a serialized rollout, or
-leave the default `2` to use two bounded restart waves.
+leave the default `2` to use two bounded restart waves. The approval,
+preflight, and lease control-plane operations use a separate
+`CML_LIVE_CONTROL_CONCURRENCY` setting (default `4`), so increasing control
+parallelism does not increase the number of Live containers restarted or the
+number of market-data connections.
 
 The Live path builds the target image, applies any required migration, and runs
 a lightweight read-only approval-binding check for every currently running
@@ -180,8 +186,8 @@ account set and runs the final read-only strict `preflight` before renewing any
 lease. On a recovery run it rechecks even pairs that already use the target
 image. This keeps a rejected Live approval from changing leases or forcing a
 second non-Live recovery deployment. Lease renewal and read-only preflight run
-in bounded parallel batches using
-`CML_LIVE_CONCURRENCY`. The checks cover the approval, runtime strategy hash,
+in bounded parallel batches using `CML_LIVE_CONTROL_CONCURRENCY`. The checks
+cover the approval, runtime strategy hash,
 risk snapshot, target commit, migration revision, account readiness, and lease
 presence. If any check fails, the command exits before restarting Live
 services, leaving `.env.server` at the previous committed runtime identity. It

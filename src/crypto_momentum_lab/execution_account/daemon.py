@@ -318,15 +318,25 @@ class UserDataAccountSyncDaemon:
         self._observed_stream_queue_overflow_count = 0
         self._reconciliation_persistence_tasks: set[asyncio.Task[None]] = set()
 
-    async def run(self) -> None:
+    async def run(self, *, stop_requested: asyncio.Event | None = None) -> None:
         stream_task: asyncio.Task[None] | None = None
         heartbeat_task: asyncio.Future[None] | None = None
         reconciliation_task: asyncio.Future[None] | None = None
         snapshot_task: asyncio.Future[None] | None = None
         recovery_task: asyncio.Task[None] | None = None
+        stop_task = (
+            asyncio.create_task(
+                _wait_for_stop(stop_requested),
+                name="execution-account-stop-waiter",
+            )
+            if stop_requested is not None
+            else None
+        )
         consecutive_failures = 0
         try:
             while True:
+                if stop_requested is not None and stop_requested.is_set():
+                    return
                 if self._state is None:
                     try:
                         # Bring balances/positions online first.  The first
@@ -391,10 +401,14 @@ class UserDataAccountSyncDaemon:
                     wait_tasks.add(self._event_worker_task)
                 if self._persistence_worker_task is not None:
                     wait_tasks.add(self._persistence_worker_task)
+                if stop_task is not None:
+                    wait_tasks.add(stop_task)
                 done, _ = await asyncio.wait(
                     wait_tasks,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                if stop_task is not None and stop_task in done:
+                    return
                 if recovery_task in done:
                     recovery_task = None
                     if heartbeat_task is not None:
@@ -491,6 +505,8 @@ class UserDataAccountSyncDaemon:
         finally:
             self._accept_events = False
             await self._stream.stop()
+            if stop_task is not None:
+                await _cancel_task(stop_task)
             if heartbeat_task is not None:
                 await _cancel_task(heartbeat_task)
             if reconciliation_task is not None:
@@ -1313,6 +1329,10 @@ async def _cancel_task(task: asyncio.Future[None]) -> None:
         await task
     except asyncio.CancelledError:
         pass
+
+
+async def _wait_for_stop(stop_requested: asyncio.Event) -> None:
+    await stop_requested.wait()
 
 
 def _event_applied_result(

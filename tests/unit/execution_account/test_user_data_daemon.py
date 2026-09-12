@@ -99,6 +99,28 @@ async def test_run_does_not_block_startup_on_historical_fill_reconciliation() ->
             await task
 
 
+async def test_run_stops_when_stop_is_requested() -> None:
+    service = FakeService(_snapshot())
+    stream = BlockingStream()
+    stop_requested = asyncio.Event()
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=stream,
+        config=UserDataAccountSyncConfig(),
+    )
+    task = asyncio.create_task(daemon.run(stop_requested=stop_requested))
+    try:
+        await asyncio.wait_for(service.sync_started.wait(), timeout=1)
+        stop_requested.set()
+        await asyncio.wait_for(task, timeout=1)
+        assert stream.stop_count == 1
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
 class RealtimeFakeService(FakeService):
     def __init__(self, snapshot: AccountSnapshot) -> None:
         super().__init__(snapshot)

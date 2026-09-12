@@ -10,6 +10,7 @@ Environment:
   CML_SERVER_USER  SSH user (default: root)
   CML_REMOTE_DIR   checkout on the server (default: /opt/crypto-momentum-lab)
   CML_LIVE_CONCURRENCY  maximum parallel Live services (default: 2)
+  CML_LIVE_CONTROL_CONCURRENCY  maximum parallel Live approval/preflight/lease operations (default: 4)
   CML_DEPLOY_WAIT_TIMEOUT_SECONDS  general health wait timeout (default: 300)
   CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS  market-data health timeout (default: 900)
   CML_CONSUMER_WAIT_TIMEOUT_SECONDS  Paper/research health timeout (default: 300)
@@ -94,6 +95,7 @@ fi
 server_user="${CML_SERVER_USER:-root}"
 remote_dir="${CML_REMOTE_DIR:-/opt/crypto-momentum-lab}"
 live_concurrency="${CML_LIVE_CONCURRENCY:-2}"
+live_control_concurrency="${CML_LIVE_CONTROL_CONCURRENCY:-4}"
 deploy_wait_timeout="${CML_DEPLOY_WAIT_TIMEOUT_SECONDS:-300}"
 market_data_wait_timeout="${CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS:-900}"
 consumer_wait_timeout="${CML_CONSUMER_WAIT_TIMEOUT_SECONDS:-300}"
@@ -144,6 +146,7 @@ fi
 client_started_at="$(date +%s)"
 if "${ssh_command[@]}" "${ssh_opts[@]}" "${server_user}@${server_host}" bash -s -- \
   "$remote_dir" "$target_ref" "$live_update" "$live_concurrency" \
+  "$live_control_concurrency" \
   "$deploy_wait_timeout" "$market_data_wait_timeout" \
   "$consumer_wait_timeout" "$live_wait_timeout" \
   "$live_stop_timeout" \
@@ -156,16 +159,17 @@ remote_dir="$1"
 target_ref="$2"
 live_update="$3"
 live_concurrency="$4"
-deploy_wait_timeout="$5"
-market_data_wait_timeout="$6"
-consumer_wait_timeout="$7"
-live_wait_timeout="$8"
-live_stop_timeout="$9"
-deploy_operation_timeout="${10}"
-deploy_build_timeout="${11}"
-refresh_approvals="${12}"
-dashboard_required="${13}"
-dashboard_proxy_url="${14}"
+live_control_concurrency="$5"
+deploy_wait_timeout="$6"
+market_data_wait_timeout="$7"
+consumer_wait_timeout="$8"
+live_wait_timeout="$9"
+live_stop_timeout="${10}"
+deploy_operation_timeout="${11}"
+deploy_build_timeout="${12}"
+refresh_approvals="${13}"
+dashboard_required="${14}"
+dashboard_proxy_url="${15}"
 for timeout_name in \
   CML_DEPLOY_WAIT_TIMEOUT_SECONDS \
   CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS \
@@ -208,13 +212,23 @@ cd "$remote_dir"
 deploy_started_at="$(date +%s)"
 
 run_with_timeout() {
+  local quiet=0
+  if [[ "$1" == "--quiet" ]]; then
+    quiet=1
+    shift
+  fi
   local label="$1"
   local timeout_seconds="$2"
   shift 2
-  local started_at status
+  local started_at status output_target
+  output_target=/dev/stdout
+  if (( quiet == 1 )); then
+    output_target=/dev/null
+  fi
   started_at="$(date +%s)"
   echo "operation=start name=$label timeout_seconds=$timeout_seconds"
-  if timeout --foreground --kill-after=30s "$timeout_seconds" "$@" </dev/null; then
+  if timeout --foreground --kill-after=30s "$timeout_seconds" "$@" \
+    </dev/null >"$output_target"; then
     status=0
   else
     status=$?
@@ -806,7 +820,10 @@ wait_for_services_healthy() {
       print_service_logs "$failure_service"
       return 1
     fi
-    sleep 5
+    # Docker performs the health probe on its own interval. Poll more often
+    # here so the deployment does not add another multi-second gap after a
+    # container becomes healthy.
+    sleep 1
   done
 }
 
@@ -954,6 +971,10 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     echo "Invalid CML_LIVE_CONCURRENCY: $live_concurrency" >&2
     exit 64
   fi
+  if ! [[ "$live_control_concurrency" =~ ^[1-4]$ ]]; then
+    echo "Invalid CML_LIVE_CONTROL_CONCURRENCY: $live_control_concurrency" >&2
+    exit 64
+  fi
 
   env_value() {
     local key="$1"
@@ -1017,14 +1038,14 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     IFS=: read -r account execution_service strategy_service <<<"$pair"
     lease_owner="$(lease_owner_for_account "$account")"
     echo "renew lease $account"
-    run_with_timeout "renew-lease:$account" "$deploy_operation_timeout" \
+    run_with_timeout --quiet "renew-lease:$account" "$deploy_operation_timeout" \
       "${compose[@]}" run --rm --no-deps -T "$strategy_service" renew-lease \
         --account-label "$account" \
         --strategy orderflow_impulse \
         --lease-owner "$lease_owner" \
         --git-commit-hash "$runtime_commit" \
         --lease-ttl-seconds 3600 \
-        --confirmation "RENEW LIVE RISK LEASE" </dev/null >/dev/null
+        --confirmation "RENEW LIVE RISK LEASE" </dev/null
   }
 
   preflight_pair() {
@@ -1251,7 +1272,7 @@ print(
         *) echo "unknown parallel action: $action" >&2; return 64 ;;
       esac
       pids+=("$!")
-      if (( ${#pids[@]} >= live_concurrency )); then
+      if (( ${#pids[@]} >= live_control_concurrency )); then
         if ! wait_for_batch "${pids[@]}"; then
           return 1
         fi

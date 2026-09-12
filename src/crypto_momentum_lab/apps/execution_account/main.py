@@ -1,5 +1,7 @@
 import asyncio
 import os
+import signal
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Annotated
@@ -60,6 +62,45 @@ log = structlog.get_logger()
 
 _DEFAULT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS = 6 * 60 * 60
 _DEFAULT_HISTORICAL_FILL_RECONCILIATION_BATCH_SIZE = 10
+
+
+async def _run_execution_account_with_signal_handlers(
+    run_once: Callable[[asyncio.Event], Awaitable[None]],
+) -> None:
+    """Convert process stop signals into the sync daemon's normal exit lane."""
+
+    stop_requested = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    registered_signals: list[signal.Signals] = []
+
+    def request_stop(received_signal: signal.Signals) -> None:
+        if not stop_requested.is_set():
+            log.warning(
+                "execution_account_shutdown_signal_received",
+                signal=received_signal.name,
+            )
+        stop_requested.set()
+
+    for received_signal in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(
+                received_signal,
+                request_stop,
+                received_signal,
+            )
+        except (NotImplementedError, RuntimeError, ValueError):
+            log.warning(
+                "execution_account_shutdown_signal_handler_unavailable",
+                signal=received_signal.name,
+            )
+        else:
+            registered_signals.append(received_signal)
+
+    try:
+        await run_once(stop_requested)
+    finally:
+        for received_signal in registered_signals:
+            loop.remove_signal_handler(received_signal)
 
 
 @app.callback()
@@ -346,8 +387,8 @@ def sync_command(
         account_label=resolved_account_label,
         **credentials.metadata(),
     )
-    asyncio.run(
-        sync_continuously(
+    async def run_once(stop_requested: asyncio.Event) -> None:
+        await sync_continuously(
             database_url=resolved_database_url,
             environment=environment,
             account_label=resolved_account_label,
@@ -384,8 +425,10 @@ def sync_command(
             snapshot_retention_max_runtime_seconds=(
                 snapshot_retention_max_runtime_seconds
             ),
+            stop_requested=stop_requested,
         )
-    )
+
+    asyncio.run(_run_execution_account_with_signal_handlers(run_once))
 
 
 def _resolve_account_label(account_label: str | None) -> str:
@@ -484,6 +527,7 @@ async def sync_continuously(
     shared_command_request_pacer_path: str | None = None,
     risk_control_hub_host: str = "0.0.0.0",
     risk_control_hub_port: int = 8769,
+    stop_requested: asyncio.Event | None = None,
 ) -> None:
     health = LocalHealthWriter.from_environment()
     health_callback = (
@@ -650,7 +694,7 @@ async def sync_continuously(
                     ),
                 )
             )
-            await daemon.run()
+            await daemon.run(stop_requested=stop_requested)
         finally:
             if retention_task is not None:
                 retention_task.cancel()

@@ -62,6 +62,39 @@ def test_deployment_script_reports_service_level_timings() -> None:
     assert 'log_service_timing "verify"' in script
 
 
+def test_live_control_plane_concurrency_is_separate_from_restart_concurrency() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    assert "CML_LIVE_CONTROL_CONCURRENCY" in script
+    assert 'live_control_concurrency="${CML_LIVE_CONTROL_CONCURRENCY:-4}"' in script
+    assert 'run_parallel_pairs()' in script
+    assert 'live_control_concurrency' in script[script.index("run_parallel_pairs()") :]
+    assert (
+        'live_up_and_wait_parallel "$live_wait_timeout" "$live_concurrency"'
+        in script
+    )
+
+
+def test_live_lease_timing_is_not_hidden_by_command_output_redirection() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    renew_start = script.index("renew_lease_for_pair()")
+    renew_end = script.index("preflight_pair()", renew_start)
+    renew_block = script[renew_start:renew_end]
+
+    assert 'run_with_timeout --quiet "renew-lease:$account"' in renew_block
+    assert '</dev/null >/dev/null' not in renew_block
+
+
+def test_health_wait_does_not_add_a_five_second_polling_gap() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    health_start = script.index("wait_for_services_healthy()")
+    health_end = script.index("up_and_wait()", health_start)
+    health_block = script[health_start:health_end]
+
+    assert "sleep 1" in health_block
+    assert "sleep 5" not in health_block
+
+
 def test_live_readiness_validator_embedded_python_is_valid() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     marker = "docker exec \"$container_id\" python -S -c '"
