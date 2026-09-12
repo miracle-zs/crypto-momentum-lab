@@ -17,7 +17,11 @@ The monitor alerts on:
   account-specific critical alert and, by default, restarts only that
   `live-strategy[-account]` service;
 - `market_data_connection_task_not_alive` records;
-- RSS/cgroup memory growth of at least 64 MiB in a 30-minute window;
+- container memory growth of at least 64 MiB over the retained 30-minute
+  trend window for three consecutive checks; the sample prefers cgroup
+  `memory.current` and falls back to Docker's working-set value;
+- cgroup memory-pressure counter advances, including current swap and peak
+  values in the alert details;
 - missing `pg_stat_statements`, disabled I/O timing, or re-enabled parallel
   maintenance.
 
@@ -93,8 +97,9 @@ systemctl status cml-ops-monitor.service --no-pager
 ```
 
 The monitor keeps a small state file at
-`/var/lib/crypto-momentum-lab/ops-monitor.json` for alert de-duplication and
-RSS trend samples and per-account restart budgets. It changes Docker state
+`/var/lib/crypto-momentum-lab/ops-monitor.json` for alert de-duplication,
+container-memory trend samples, cgroup pressure counters, and per-account
+restart budgets. It changes Docker state
 only by restarting the affected live strategy when the bounded recovery path
 above is enabled; it never changes PostgreSQL state.
 

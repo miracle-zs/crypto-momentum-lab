@@ -37,6 +37,7 @@ _DEFAULT_RSS_WARNING_FRACTION = 0.75
 _DEFAULT_RSS_CRITICAL_FRACTION = 0.90
 _DEFAULT_RSS_GROWTH_BYTES = 64 * 1024 * 1024
 _DEFAULT_RSS_GROWTH_WINDOW_SECONDS = 1_800.0
+_DEFAULT_MEMORY_GROWTH_REQUIRED_SAMPLES = 3
 _DEFAULT_ALERT_COOLDOWN_SECONDS = 900.0
 _DEFAULT_COMMAND_TIMEOUT_SECONDS = 15.0
 _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS = 900.0
@@ -52,6 +53,10 @@ _ALERT_LABELS = {
     "container_unhealthy": "服务健康检查失败",
     "container_oom_killed": "服务被内存限制杀死",
     "container_memory_high": "服务内存占用过高",
+    "container_memory_growth": "服务内存趋势异常",
+    "container_memory_pressure": "服务触碰内存上限",
+    # Keep the legacy label so an alert written by an older monitor can still
+    # be rendered correctly while its recovery record is being drained.
     "rss_growth": "服务内存持续增长",
     "telemetry_persist_failure": "运行时遥测写入失败",
     "live_legacy_order_identity_conflict": "订单身份发生冲突",
@@ -73,6 +78,12 @@ _ALERT_IMPACTS = {
     "container_unhealthy": "对应服务可能无法正常处理行情、订单或账户任务。",
     "container_oom_killed": "对应服务已被系统终止，相关任务已中断。",
     "container_memory_high": "服务可能出现性能下降，继续增长可能触发 OOM。",
+    "container_memory_growth": (
+        "服务内存相对趋势基线持续上升，需要确认缓存、查询和进程数量。"
+    ),
+    "container_memory_pressure": (
+        "容器已触碰 cgroup 内存上限，可能发生回收或换页。"
+    ),
     "rss_growth": "服务内存持续增长，后续可能出现性能下降或 OOM。",
     "telemetry_persist_failure": "运行时诊断数据可能不完整，不代表交易一定已停止。",
     "live_legacy_order_identity_conflict": "订单与交易所订单的归属可能无法安全关联。",
@@ -102,6 +113,12 @@ _ALERT_ACTIONS = {
         "未在此告警中自动处理，请检查内存占用、容器限制和最近日志。"
     ),
     "container_memory_high": "当前未自动重启，请继续观察内存趋势并检查泄漏或缓存增长。",
+    "container_memory_growth": (
+        "当前未自动重启，已改为等待连续趋势证据并保留内存压力详情。"
+    ),
+    "container_memory_pressure": (
+        "当前未自动重启，请检查 cgroup 事件、swap、临时查询和连接池。"
+    ),
     "rss_growth": "当前未自动重启，请检查内存趋势和进程堆积情况。",
     "telemetry_persist_failure": (
         "已保留告警并继续运行，建议检查 PostgreSQL 延迟和连接池。"
@@ -157,6 +174,26 @@ class ContainerSnapshot:
     restart_count: int
     memory_bytes: int | None
     memory_limit_bytes: int | None
+    memory_source: str = "docker_stats_working_set"
+    memory_working_set_bytes: int | None = None
+    memory_current_bytes: int | None = None
+    memory_peak_bytes: int | None = None
+    memory_swap_current_bytes: int | None = None
+    memory_events_max: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ContainerMemoryStats:
+    """Container memory values from Docker and the cgroup v2 controller."""
+
+    observed_bytes: int | None
+    memory_limit_bytes: int | None
+    source: str
+    working_set_bytes: int | None = None
+    current_bytes: int | None = None
+    peak_bytes: int | None = None
+    swap_current_bytes: int | None = None
+    events_max: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +345,17 @@ def evaluate_container(
     """Return alerts for Docker lifecycle and memory state."""
 
     alerts: list[Alert] = []
+    memory_details = {
+        "service": snapshot.service,
+        "memory_bytes": snapshot.memory_bytes,
+        "memory_limit_bytes": snapshot.memory_limit_bytes,
+        "memory_source": snapshot.memory_source,
+        "memory_working_set_bytes": snapshot.memory_working_set_bytes,
+        "memory_current_bytes": snapshot.memory_current_bytes,
+        "memory_peak_bytes": snapshot.memory_peak_bytes,
+        "memory_swap_current_bytes": snapshot.memory_swap_current_bytes,
+        "memory_events_max": snapshot.memory_events_max,
+    }
     if snapshot.oom_killed:
         alerts.append(
             Alert(
@@ -342,9 +390,7 @@ def evaluate_container(
                     "critical",
                     f"Container {snapshot.service} memory is near its cgroup limit",
                     {
-                        "service": snapshot.service,
-                        "memory_bytes": snapshot.memory_bytes,
-                        "memory_limit_bytes": snapshot.memory_limit_bytes,
+                        **memory_details,
                         "fraction": round(fraction, 4),
                     },
                 )
@@ -359,14 +405,61 @@ def evaluate_container(
                         "warning threshold"
                     ),
                     {
-                        "service": snapshot.service,
-                        "memory_bytes": snapshot.memory_bytes,
-                        "memory_limit_bytes": snapshot.memory_limit_bytes,
+                        **memory_details,
                         "fraction": round(fraction, 4),
                     },
                 )
             )
     return tuple(alerts)
+
+
+def evaluate_container_memory_growth(
+    *,
+    service: str,
+    current_bytes: int | None,
+    baseline_bytes: int | None,
+    baseline_age_seconds: float | None,
+    consecutive_samples: int,
+    required_samples: int,
+    growth_bytes: int,
+    growth_window_seconds: float,
+    metric_source: str,
+) -> tuple[Alert, ...]:
+    """Alert after a sustained container-memory increase over a trend baseline."""
+
+    if (
+        current_bytes is None
+        or baseline_bytes is None
+        or baseline_age_seconds is None
+        or baseline_age_seconds < 0
+        or consecutive_samples < required_samples
+        or required_samples <= 0
+        or growth_bytes <= 0
+        or current_bytes - baseline_bytes < growth_bytes
+    ):
+        return ()
+    return (
+        Alert(
+            "container_memory_growth",
+            "warning",
+            (
+                f"Container {service} memory grew beyond the configured "
+                "trend window"
+            ),
+            {
+                "service": service,
+                "baseline_bytes": baseline_bytes,
+                "current_bytes": current_bytes,
+                "growth_bytes": current_bytes - baseline_bytes,
+                "threshold_bytes": growth_bytes,
+                "growth_window_seconds": growth_window_seconds,
+                "baseline_age_seconds": round(baseline_age_seconds, 3),
+                "consecutive_samples": consecutive_samples,
+                "required_samples": required_samples,
+                "metric_source": metric_source,
+            },
+        ),
+    )
 
 
 def evaluate_rss_growth(
@@ -376,7 +469,13 @@ def evaluate_rss_growth(
     previous_bytes: int | None,
     growth_bytes: int,
 ) -> tuple[Alert, ...]:
-    """Alert when a process RSS sample grows beyond the configured delta."""
+    """Backward-compatible one-sample helper for older callers.
+
+    The production monitor uses :func:`evaluate_container_memory_growth`,
+    which has a time-window baseline and consecutive-sample guard.  Keeping
+    this helper avoids breaking small external diagnostics that imported the
+    old function name.
+    """
 
     if (
         current_bytes is None
@@ -389,13 +488,14 @@ def evaluate_rss_growth(
         Alert(
             "rss_growth",
             "warning",
-            f"Container {service} RSS grew beyond the configured window",
+            f"Container {service} memory grew beyond the previous sample",
             {
                 "service": service,
                 "previous_bytes": previous_bytes,
                 "current_bytes": current_bytes,
                 "growth_bytes": current_bytes - previous_bytes,
                 "threshold_bytes": growth_bytes,
+                "metric_source": "legacy_compatibility_helper",
             },
         ),
     )
@@ -444,6 +544,7 @@ class MonitorConfig:
     rss_critical_fraction: float = _DEFAULT_RSS_CRITICAL_FRACTION
     rss_growth_bytes: int = _DEFAULT_RSS_GROWTH_BYTES
     rss_growth_window_seconds: float = _DEFAULT_RSS_GROWTH_WINDOW_SECONDS
+    memory_growth_required_samples: int = _DEFAULT_MEMORY_GROWTH_REQUIRED_SAMPLES
     alert_cooldown_seconds: float = _DEFAULT_ALERT_COOLDOWN_SECONDS
     command_timeout_seconds: float = _DEFAULT_COMMAND_TIMEOUT_SECONDS
     state_path: Path = Path("/var/lib/crypto-momentum-lab/ops-monitor.json")
@@ -472,6 +573,8 @@ class OpsMonitor:
             raise ValueError("log_window_seconds must be positive")
         if not 0 < config.rss_warning_fraction < config.rss_critical_fraction <= 1:
             raise ValueError("RSS thresholds are invalid")
+        if config.memory_growth_required_samples <= 0:
+            raise ValueError("memory_growth_required_samples must be positive")
         if bool(config.external_heartbeat_url) != bool(
             config.external_heartbeat_token
         ):
@@ -540,7 +643,15 @@ class OpsMonitor:
                 )
             )
             alerts.extend(
-                self._rss_alerts(snapshot.service, snapshot.memory_bytes, now)
+                self._memory_pressure_alerts(snapshot)
+            )
+            alerts.extend(
+                self._memory_growth_alerts(
+                    snapshot.service,
+                    snapshot.memory_bytes,
+                    now,
+                    metric_source=snapshot.memory_source,
+                )
             )
             account_label = live_strategy_accounts.get(snapshot.service)
             if account_label is not None:
@@ -588,10 +699,11 @@ class OpsMonitor:
         alerts.extend(evaluate_log_signals(combined_signals))
         if combined_signals.latest_rss_bytes is not None:
             alerts.extend(
-                self._rss_alerts(
-                    "market-data-rss",
+                self._memory_growth_alerts(
+                    "market-data-process-memory",
                     combined_signals.latest_rss_bytes,
                     now,
+                    metric_source="process_rss_log",
                 )
             )
 
@@ -929,7 +1041,7 @@ class OpsMonitor:
             )[0]
             state = payload.get("State", {})
             health = state.get("Health") or {}
-            memory_bytes, memory_limit_bytes = self._memory_stats(container_id)
+            memory = self._memory_stats(container_id)
             snapshots.append(
                 ContainerSnapshot(
                     service=service,
@@ -937,13 +1049,19 @@ class OpsMonitor:
                     health=health.get("Status"),
                     oom_killed=bool(state.get("OOMKilled", False)),
                     restart_count=int(payload.get("RestartCount", 0)),
-                    memory_bytes=memory_bytes,
-                    memory_limit_bytes=memory_limit_bytes,
+                    memory_bytes=memory.observed_bytes,
+                    memory_limit_bytes=memory.memory_limit_bytes,
+                    memory_source=memory.source,
+                    memory_working_set_bytes=memory.working_set_bytes,
+                    memory_current_bytes=memory.current_bytes,
+                    memory_peak_bytes=memory.peak_bytes,
+                    memory_swap_current_bytes=memory.swap_current_bytes,
+                    memory_events_max=memory.events_max,
                 )
             )
         return tuple(snapshots)
 
-    def _memory_stats(self, container_id: str) -> tuple[int | None, int | None]:
+    def _memory_stats(self, container_id: str) -> ContainerMemoryStats:
         payload = json.loads(
             self._runner.run(
                 ["docker", "inspect", container_id],
@@ -964,10 +1082,78 @@ class OpsMonitor:
                 timeout_seconds=self._config.command_timeout_seconds,
             ).strip()
             memory_text = stats.split("/", 1)[0].strip()
-            memory_bytes = _parse_size(memory_text)
+            working_set_bytes = _parse_size(memory_text)
         except Exception:
-            memory_bytes = None
-        return memory_bytes, memory_limit or None
+            working_set_bytes = None
+
+        cgroup = self._cgroup_memory_stats(container_id)
+        current_bytes = cgroup.get("memory.current")
+        memory_bytes = (
+            current_bytes if current_bytes is not None else working_set_bytes
+        )
+        source = (
+            "cgroup_memory_current"
+            if current_bytes is not None
+            else "docker_stats_working_set"
+        )
+        return ContainerMemoryStats(
+            observed_bytes=memory_bytes,
+            memory_limit_bytes=memory_limit or cgroup.get("memory.max"),
+            source=source,
+            working_set_bytes=working_set_bytes,
+            current_bytes=current_bytes,
+            peak_bytes=cgroup.get("memory.peak"),
+            swap_current_bytes=cgroup.get("memory.swap.current"),
+            events_max=cgroup.get("memory.events.max"),
+        )
+
+    def _cgroup_memory_stats(self, container_id: str) -> dict[str, int]:
+        """Read cgroup v2 memory counters without touching the database."""
+
+        try:
+            output = self._runner.run(
+                [
+                    "docker",
+                    "exec",
+                    container_id,
+                    "sh",
+                    "-c",
+                    (
+                        "for name in memory.current memory.peak "
+                        "memory.max memory.swap.current; do "
+                        "if [ -r \"/sys/fs/cgroup/$name\" ]; then "
+                        "printf '%s=%s\\n' \"$name\" "
+                        "\"$(cat \"/sys/fs/cgroup/$name\")\"; fi; "
+                        "done; "
+                        "if [ -r /sys/fs/cgroup/memory.events ]; then "
+                        "while read -r key value _; do "
+                        "if [ \"$key\" = max ]; then "
+                        "printf 'memory.events.max=%s\\n' \"$value\"; "
+                        "fi; done < /sys/fs/cgroup/memory.events; fi"
+                    ),
+                ],
+                timeout_seconds=self._config.command_timeout_seconds,
+            )
+        except Exception:
+            return {}
+        values: dict[str, int] = {}
+        for line in output.splitlines():
+            key, separator, raw_value = line.partition("=")
+            if not separator:
+                continue
+            try:
+                value = int(raw_value.strip())
+            except ValueError:
+                continue
+            if key in {
+                "memory.current",
+                "memory.peak",
+                "memory.max",
+                "memory.swap.current",
+                "memory.events.max",
+            } and value >= 0:
+                values[key] = value
+        return values
 
     def _log_signals(
         self,
@@ -1110,18 +1296,61 @@ SELECT 'parallel_maintenance' || E'\\t' || current_setting(
             ),
         )
 
-    def _rss_alerts(
+    def _memory_pressure_alerts(
+        self,
+        snapshot: ContainerSnapshot,
+    ) -> tuple[Alert, ...]:
+        """Alert when the cgroup max counter advances since the last check."""
+
+        current = snapshot.memory_events_max
+        if current is None:
+            return ()
+        counters = self._state.setdefault("memory_events_max", {})
+        if not isinstance(counters, dict):
+            counters = {}
+            self._state["memory_events_max"] = counters
+        previous = counters.get(snapshot.service)
+        counters[snapshot.service] = current
+        if not isinstance(previous, int) or current <= previous:
+            return ()
+        return (
+            Alert(
+                "container_memory_pressure",
+                "warning",
+                f"Container {snapshot.service} reached its cgroup memory limit",
+                {
+                    "service": snapshot.service,
+                    "memory_bytes": snapshot.memory_bytes,
+                    "memory_limit_bytes": snapshot.memory_limit_bytes,
+                    "memory_source": snapshot.memory_source,
+                    "memory_current_bytes": snapshot.memory_current_bytes,
+                    "memory_peak_bytes": snapshot.memory_peak_bytes,
+                    "memory_swap_current_bytes": (
+                        snapshot.memory_swap_current_bytes
+                    ),
+                    "memory_events_max": current,
+                    "memory_events_max_delta": current - previous,
+                },
+            ),
+        )
+
+    def _memory_growth_alerts(
         self,
         service: str,
         current_bytes: int | None,
         now: float,
+        *,
+        metric_source: str,
     ) -> tuple[Alert, ...]:
-        samples = self._state.setdefault("rss_samples", {}).setdefault(service, [])
+        samples_by_service = self._state.setdefault("memory_samples", {})
+        if not isinstance(samples_by_service, dict):
+            samples_by_service = {}
+            self._state["memory_samples"] = samples_by_service
+        samples = samples_by_service.setdefault(service, [])
         if not isinstance(samples, list):
             samples = []
-            self._state.setdefault("rss_samples", {})[service] = samples
+            samples_by_service[service] = samples
         cutoff = now - self._config.rss_growth_window_seconds
-        previous_bytes: int | None = None
         retained: list[list[float | int]] = []
         for sample in samples:
             if (
@@ -1130,17 +1359,52 @@ SELECT 'parallel_maintenance' || E'\\t' || current_setting(
                 and isinstance(sample[0], int | float)
                 and isinstance(sample[1], int)
                 and sample[0] >= cutoff
+                and sample[0] <= now
             ):
                 retained.append(sample)
-                previous_bytes = sample[1]
+
+        baseline = retained[0] if retained else None
+        baseline_bytes = baseline[1] if baseline is not None else None
+        baseline_age_seconds = (
+            now - baseline[0] if baseline is not None else None
+        )
+        growth_breaches = self._state.setdefault("memory_growth_breaches", {})
+        if not isinstance(growth_breaches, dict):
+            growth_breaches = {}
+            self._state["memory_growth_breaches"] = growth_breaches
+        previous_breaches = growth_breaches.get(service, 0)
+        if not isinstance(previous_breaches, int) or isinstance(
+            previous_breaches, bool
+        ):
+            previous_breaches = 0
+        breached = (
+            current_bytes is not None
+            and baseline_bytes is not None
+            and current_bytes - baseline_bytes >= self._config.rss_growth_bytes
+        )
+        consecutive_samples = previous_breaches + 1 if breached else 0
+        growth_breaches[service] = consecutive_samples
         if current_bytes is not None:
             retained.append([now, current_bytes])
-        self._state.setdefault("rss_samples", {})[service] = retained[-120:]
-        return evaluate_rss_growth(
+        sample_limit = max(
+            120,
+            int(
+                self._config.rss_growth_window_seconds
+                / self._config.interval_seconds
+            )
+            + 2,
+        )
+        samples_by_service[service] = retained[-sample_limit:]
+        return evaluate_container_memory_growth(
             service=service,
             current_bytes=current_bytes,
-            previous_bytes=previous_bytes,
+            baseline_bytes=baseline_bytes,
+            baseline_age_seconds=baseline_age_seconds,
+            consecutive_samples=consecutive_samples,
+            required_samples=self._config.memory_growth_required_samples,
             growth_bytes=self._config.rss_growth_bytes,
+            growth_window_seconds=self._config.rss_growth_window_seconds,
+            metric_source=metric_source,
         )
 
     def _compose_prefix(self) -> list[str]:
@@ -1847,6 +2111,11 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
         rss_critical_fraction=args.rss_critical_fraction,
         rss_growth_bytes=args.rss_growth_bytes,
         rss_growth_window_seconds=args.rss_growth_window_seconds,
+        memory_growth_required_samples=getattr(
+            args,
+            "memory_growth_required_samples",
+            _DEFAULT_MEMORY_GROWTH_REQUIRED_SAMPLES,
+        ),
         alert_cooldown_seconds=args.alert_cooldown_seconds,
         command_timeout_seconds=args.command_timeout_seconds,
         auto_restart_stale_live_services=_parse_env_bool(
@@ -1947,6 +2216,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--rss-growth-window-seconds",
         type=float,
         default=_DEFAULT_RSS_GROWTH_WINDOW_SECONDS,
+    )
+    parser.add_argument(
+        "--memory-growth-required-samples",
+        type=int,
+        default=int(
+            os.environ.get(
+                "CML_MEMORY_GROWTH_REQUIRED_SAMPLES",
+                _DEFAULT_MEMORY_GROWTH_REQUIRED_SAMPLES,
+            )
+        ),
     )
     parser.add_argument(
         "--alert-cooldown-seconds",

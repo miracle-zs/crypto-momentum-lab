@@ -18,6 +18,7 @@ from deploy.ops.cml_ops_monitor import (
     build_config,
     build_deadman_heartbeat_payload,
     evaluate_container,
+    evaluate_container_memory_growth,
     evaluate_database_state,
     evaluate_log_signals,
 )
@@ -159,6 +160,189 @@ def test_container_alerts_on_oom_and_rss_limit() -> None:
         "container_memory_high",
     }
     assert all(alert.severity == "critical" for alert in alerts)
+
+
+def test_container_memory_growth_requires_consecutive_samples() -> None:
+    common = {
+        "service": "postgres",
+        "current_bytes": 180,
+        "baseline_bytes": 100,
+        "baseline_age_seconds": 120.0,
+        "required_samples": 3,
+        "growth_bytes": 64,
+        "growth_window_seconds": 1_800.0,
+        "metric_source": "cgroup_memory_current",
+    }
+
+    assert evaluate_container_memory_growth(
+        **common,
+        consecutive_samples=2,
+    ) == ()
+
+    alerts = evaluate_container_memory_growth(
+        **common,
+        consecutive_samples=3,
+    )
+
+    assert [alert.name for alert in alerts] == ["container_memory_growth"]
+    assert alerts[0].details == {
+        "service": "postgres",
+        "baseline_bytes": 100,
+        "current_bytes": 180,
+        "growth_bytes": 80,
+        "threshold_bytes": 64,
+        "growth_window_seconds": 1_800.0,
+        "baseline_age_seconds": 120.0,
+        "consecutive_samples": 3,
+        "required_samples": 3,
+        "metric_source": "cgroup_memory_current",
+    }
+
+
+def test_memory_growth_uses_oldest_window_sample_and_resets_on_drop(
+    tmp_path,
+) -> None:
+    monitor = OpsMonitor(
+        MonitorConfig(
+            state_path=tmp_path / "state.json",
+            rss_growth_bytes=64,
+        ),
+    )
+
+    assert (
+        monitor._memory_growth_alerts(
+            "postgres",
+            100,
+            0.0,
+            metric_source="cgroup_memory_current",
+        )
+        == ()
+    )
+    assert (
+        monitor._memory_growth_alerts(
+            "postgres",
+            170,
+            60.0,
+            metric_source="cgroup_memory_current",
+        )
+        == ()
+    )
+    assert (
+        monitor._memory_growth_alerts(
+            "postgres",
+            171,
+            120.0,
+            metric_source="cgroup_memory_current",
+        )
+        == ()
+    )
+
+    alerts = monitor._memory_growth_alerts(
+        "postgres",
+        172,
+        180.0,
+        metric_source="cgroup_memory_current",
+    )
+
+    assert [alert.name for alert in alerts] == ["container_memory_growth"]
+    assert alerts[0].details["baseline_bytes"] == 100
+    assert alerts[0].details["growth_bytes"] == 72
+
+    assert (
+        monitor._memory_growth_alerts(
+            "postgres",
+            105,
+            240.0,
+            metric_source="cgroup_memory_current",
+        )
+        == ()
+    )
+    assert monitor._state["memory_growth_breaches"]["postgres"] == 0
+
+
+def test_memory_pressure_alerts_only_after_cgroup_counter_advances(
+    tmp_path,
+) -> None:
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+    )
+    snapshot = ContainerSnapshot(
+        service="postgres",
+        container_id="abc",
+        health="healthy",
+        oom_killed=False,
+        restart_count=0,
+        memory_bytes=700,
+        memory_limit_bytes=1_000,
+        memory_source="cgroup_memory_current",
+        memory_current_bytes=700,
+        memory_events_max=10,
+    )
+
+    assert monitor._memory_pressure_alerts(snapshot) == ()
+
+    alerts = monitor._memory_pressure_alerts(
+        ContainerSnapshot(
+            service="postgres",
+            container_id="abc",
+            health="healthy",
+            oom_killed=False,
+            restart_count=0,
+            memory_bytes=800,
+            memory_limit_bytes=1_000,
+            memory_source="cgroup_memory_current",
+            memory_current_bytes=800,
+            memory_swap_current_bytes=128,
+            memory_events_max=12,
+        )
+    )
+
+    assert [alert.name for alert in alerts] == ["container_memory_pressure"]
+    assert alerts[0].details["memory_events_max_delta"] == 2
+    assert alerts[0].details["memory_swap_current_bytes"] == 128
+
+
+def test_memory_stats_prefers_cgroup_current_and_keeps_working_set(
+    tmp_path,
+) -> None:
+    class Runner:
+        def run(self, args, *, timeout_seconds):
+            del timeout_seconds
+            if args[:2] == ["docker", "inspect"]:
+                return json.dumps(
+                    [
+                        {
+                            "HostConfig": {"Memory": 1_000},
+                        }
+                    ]
+                )
+            if args[:2] == ["docker", "stats"]:
+                return "10MiB / 1GiB\n"
+            if args[:2] == ["docker", "exec"]:
+                return (
+                    "memory.current=700\n"
+                    "memory.peak=900\n"
+                    "memory.max=1000\n"
+                    "memory.swap.current=128\n"
+                    "memory.events.max=12\n"
+                )
+            raise AssertionError(f"unexpected command: {args}")
+
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+        runner=Runner(),
+    )
+
+    stats = monitor._memory_stats("postgres")
+
+    assert stats.observed_bytes == 700
+    assert stats.memory_limit_bytes == 1_000
+    assert stats.source == "cgroup_memory_current"
+    assert stats.working_set_bytes == 10 * 1_048_576
+    assert stats.current_bytes == 700
+    assert stats.peak_bytes == 900
+    assert stats.swap_current_bytes == 128
+    assert stats.events_max == 12
 
 
 def test_database_state_parses_postgres_boolean_text(tmp_path) -> None:
