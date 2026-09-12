@@ -1325,6 +1325,55 @@ async def test_live_warmup_defers_symbols_without_a_complete_window() -> None:
     assert cursor.symbol == states[-1].symbol
 
 
+@pytest.mark.asyncio
+async def test_live_checkpoint_recovery_scales_limit_to_symbol_universe() -> None:
+    now = datetime(2026, 8, 4, 0, 0, tzinfo=UTC)
+    symbols = {f"S{index:05d}USDT" for index in range(718)}
+    seen: dict[str, object] = {}
+
+    class Strategy:
+        def required_data(self):
+            return SimpleNamespace(
+                warmup_buckets=140,
+                base_state_interval_seconds=15,
+                required_fields=(),
+            )
+
+        def warm_market_state(self, state):
+            return None
+
+        def checkpoint(self, *, include_market_state_buffers=True):
+            return StrategyCheckpoint(
+                last_processed_at_by_symbol={"S00000USDT": now},
+                warmup_buckets_by_symbol={"S00000USDT": 140},
+                cooldown_buckets_remaining_by_symbol={"S00000USDT": 0},
+                payload={},
+            )
+
+    class Repository:
+        async def load_symbols_at(self, **kwargs):
+            return frozenset(symbols)
+
+        async def load_recovery_window(self, **kwargs):
+            seen.update(kwargs)
+            return ()
+
+    with pytest.raises(RuntimeError, match="no symbol has a complete window"):
+        await restore_live_strategy_from_checkpoint(
+            strategy=Strategy(),
+            checkpoint=StrategyCheckpoint(
+                last_processed_at_by_symbol={"S00000USDT": now},
+                warmup_buckets_by_symbol={"S00000USDT": 140},
+                cooldown_buckets_remaining_by_symbol={"S00000USDT": 0},
+                payload={"signal_sequence": 4},
+            ),
+            repository=Repository(),
+            environment="research",
+        )
+
+    assert seen["limit"] == 718 * 158
+
+
 def test_live_warmup_rejects_a_symbol_with_a_window_gap() -> None:
     start = datetime(2026, 8, 4, 0, 0, tzinfo=UTC)
     states = tuple(

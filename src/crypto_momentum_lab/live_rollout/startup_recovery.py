@@ -175,6 +175,32 @@ def _symbols_with_complete_warmup(
     return frozenset(complete)
 
 
+def _recovery_state_limit(
+    *,
+    strategy: LiveRuntimeStrategy,
+    symbol_count: int,
+    lookback_seconds: int,
+) -> int:
+    """Keep enough rows for every symbol's complete recovery window.
+
+    The repository applies ``limit`` after combining the per-symbol ranges.
+    A fixed global limit can therefore truncate the newest rows for every
+    symbol when the exchange universe grows, leaving no symbol with a complete
+    window even though the database contains all required history.
+    """
+
+    required_data = getattr(strategy, "required_data", None)
+    interval_seconds = 15
+    if callable(required_data):
+        requirement = required_data()
+        interval_seconds = max(
+            1,
+            int(getattr(requirement, "base_state_interval_seconds", 15)),
+        )
+    states_per_symbol = max(1, lookback_seconds // interval_seconds + 2)
+    return max(WARMUP_STATE_LIMIT, symbol_count * states_per_symbol)
+
+
 async def warm_live_strategy(
     *,
     strategy: LiveRuntimeStrategy,
@@ -197,13 +223,18 @@ async def warm_live_strategy(
         environment=environment,
         observed_at=warmup_end,
     )
+    recovery_state_limit = _recovery_state_limit(
+        strategy=strategy,
+        symbol_count=len(expected_symbols),
+        lookback_seconds=warmup_seconds,
+    )
     warmed_states: list[MarketState15s] = []
     warmed_state_count = 0
     started_at = perf_counter()
-    while warmed_state_count < WARMUP_STATE_LIMIT:
+    while warmed_state_count < recovery_state_limit:
         batch_limit = min(
             WARMUP_BATCH_SIZE,
-            WARMUP_STATE_LIMIT - warmed_state_count,
+            recovery_state_limit - warmed_state_count,
         )
         batch = await repository.load_after(
             environment=environment,
@@ -304,7 +335,11 @@ async def restore_live_strategy_from_checkpoint(
         environment=environment,
         last_processed_at_by_symbol=recovery_bounds,
         lookback_seconds=live_warmup_seconds(strategy),
-        limit=WARMUP_STATE_LIMIT,
+        limit=_recovery_state_limit(
+            strategy=strategy,
+            symbol_count=len(expected_symbols),
+            lookback_seconds=live_warmup_seconds(strategy),
+        ),
         upper_bound=recovery_cutover,
     )
     for state in states:
