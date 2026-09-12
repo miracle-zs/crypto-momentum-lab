@@ -1124,20 +1124,37 @@ def _classify_live_positions_detailed(
         for client_order_id, events in identity_events.items()
         if _legacy_order_identity_is_ambiguous(events)
     )
-    unresolved_identity_ids = frozenset(
+    reconstructible_identity_ids = frozenset(
         client_order_id
         for client_order_id in ambiguous_identity_ids
-        if not _legacy_order_identity_is_reconstructible(
+        if _legacy_order_identity_is_reconstructible(
             identity_events[client_order_id],
             fill_quantities,
         )
+    )
+    zero_fill_terminal_identity_ids = frozenset(
+        client_order_id
+        for client_order_id in ambiguous_identity_ids
+        if _legacy_order_identity_is_zero_fill_terminal(
+            identity_events[client_order_id],
+            fill_quantities,
+        )
+    )
+    unresolved_identity_ids = frozenset(
+        client_order_id
+        for client_order_id in ambiguous_identity_ids
+        if client_order_id
+        not in reconstructible_identity_ids | zero_fill_terminal_identity_ids
     )
     if ambiguous_identity_ids:
         log.warning(
             "live_legacy_order_identity_conflict",
             ambiguous_client_order_ids=sorted(ambiguous_identity_ids),
             reconstructed_client_order_ids=sorted(
-                ambiguous_identity_ids - unresolved_identity_ids
+                reconstructible_identity_ids
+            ),
+            zero_fill_terminal_client_order_ids=sorted(
+                zero_fill_terminal_identity_ids
             ),
             unresolved_client_order_ids=sorted(unresolved_identity_ids),
         )
@@ -1614,6 +1631,59 @@ def _legacy_order_identity_is_reconstructible(
     return bool(by_exchange_order_id) and all(
         quantity > 0 for quantity in by_exchange_order_id.values()
     )
+
+
+def _legacy_order_identity_is_zero_fill_terminal(
+    events: Sequence[ExchangeOrderEventRow],
+    account_fill_quantities: Mapping[str, Decimal],
+) -> bool:
+    """Recognize a harmless legacy collision with no possible fill.
+
+    Older runs could reuse one client ID for multiple protective-order
+    attempts.  If every attempt is explicitly terminal without execution and
+    the account-fill ledger agrees, the collision cannot explain a live
+    position and must not block a separately evidenced current entry.  Any
+    active, filled, malformed, or incomplete evidence remains fail-closed.
+    """
+    events_by_exchange_order_id: dict[str, list[ExchangeOrderEventRow]] = {}
+    for event in events:
+        if event.exchange_order_id:
+            events_by_exchange_order_id.setdefault(
+                event.exchange_order_id,
+                [],
+            ).append(event)
+    if not events_by_exchange_order_id:
+        return False
+    zero_fill_terminal_states = frozenset(
+        {
+            ExchangeOrderState.CANCELED,
+            ExchangeOrderState.ABSENT_RECONCILED,
+            ExchangeOrderState.REJECTED,
+            ExchangeOrderState.EXPIRED,
+            ExchangeOrderState.SUPPRESSED,
+        }
+    )
+    for exchange_order_id, order_events in events_by_exchange_order_id.items():
+        latest_event = max(
+            order_events,
+            key=lambda event: event.occurred_at,
+        )
+        try:
+            latest_state = ExchangeOrderState(latest_event.state)
+        except (TypeError, ValueError):
+            return False
+        if latest_state not in zero_fill_terminal_states:
+            return False
+        if any(
+            _event_executed_quantity(event) > 0
+            for event in order_events
+        ):
+            return False
+        if _decimal_or_zero(
+            account_fill_quantities.get(exchange_order_id)
+        ) > 0:
+            return False
+    return True
 
 
 def _expand_legacy_order_row(

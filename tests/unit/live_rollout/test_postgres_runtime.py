@@ -922,6 +922,113 @@ def test_reused_client_id_is_split_from_event_ledger_before_batch_attribution() 
     ] == [("BTCUSDT:LONG:current-entry", Decimal("4595"), current_at)]
 
 
+def test_zero_fill_legacy_identity_collision_does_not_block_current_position() -> None:
+    current_entry_at = NOW + timedelta(days=30)
+    legacy_client_id = "legacy-zero-fill-exit"
+
+    managed, unmanaged = _classify_live_positions(
+        [
+            _position(
+                symbol="MINAUSDT",
+                position_amt=Decimal("926"),
+            )
+        ],
+        [
+            _order(
+                symbol="MINAUSDT",
+                reduce_only=True,
+                side="SELL",
+                quantity=Decimal("1813"),
+                executed_quantity=Decimal("0"),
+                state=ExchangeOrderState.CANCELED.value,
+                created_at=NOW + timedelta(minutes=10),
+                updated_at=NOW + timedelta(minutes=20),
+                exchange_order_id="legacy-exit-b",
+                client_order_id=legacy_client_id,
+            ),
+            _order(
+                symbol="MINAUSDT",
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("926"),
+                executed_quantity=Decimal("926"),
+                created_at=current_entry_at,
+                updated_at=current_entry_at,
+                exchange_order_id="current-entry",
+                client_order_id="current-entry-client",
+            ),
+        ],
+        order_identity_events={
+            legacy_client_id: (
+                SimpleNamespace(
+                    exchange_order_id="legacy-exit-a",
+                    state=ExchangeOrderState.CANCELED.value,
+                    occurred_at=NOW + timedelta(minutes=19),
+                    details={"executed_quantity": "0"},
+                ),
+                SimpleNamespace(
+                    exchange_order_id="legacy-exit-b",
+                    state=ExchangeOrderState.CANCELED.value,
+                    occurred_at=NOW + timedelta(minutes=20),
+                    details={"executed_quantity": "0"},
+                ),
+            )
+        },
+    )
+
+    assert unmanaged == frozenset()
+    assert len(managed) == 1
+    assert managed[0].quantity == Decimal("926")
+    assert managed[0].opened_at == current_entry_at
+
+
+def test_active_zero_fill_legacy_identity_collision_remains_blocked() -> None:
+    legacy_client_id = "legacy-active-zero-fill-exit"
+    managed, unmanaged = _classify_live_positions(
+        [_position(symbol="MINAUSDT", position_amt=Decimal("926"))],
+        [
+            _order(
+                symbol="MINAUSDT",
+                reduce_only=True,
+                side="SELL",
+                quantity=Decimal("1813"),
+                executed_quantity=Decimal("0"),
+                state=ExchangeOrderState.ACKNOWLEDGED.value,
+                exchange_order_id="legacy-exit-b",
+                client_order_id=legacy_client_id,
+            ),
+            _order(
+                symbol="MINAUSDT",
+                reduce_only=False,
+                side="BUY",
+                quantity=Decimal("926"),
+                executed_quantity=Decimal("926"),
+                exchange_order_id="current-entry",
+                client_order_id="current-entry-client",
+            ),
+        ],
+        order_identity_events={
+            legacy_client_id: (
+                SimpleNamespace(
+                    exchange_order_id="legacy-exit-a",
+                    state=ExchangeOrderState.CANCELED.value,
+                    occurred_at=NOW + timedelta(minutes=19),
+                    details={"executed_quantity": "0"},
+                ),
+                SimpleNamespace(
+                    exchange_order_id="legacy-exit-b",
+                    state=ExchangeOrderState.ACKNOWLEDGED.value,
+                    occurred_at=NOW + timedelta(minutes=20),
+                    details={"executed_quantity": "0"},
+                ),
+            )
+        },
+    )
+
+    assert managed == ()
+    assert unmanaged == frozenset({"MINAUSDT"})
+
+
 def test_legacy_exit_history_does_not_keep_an_old_batch_active() -> None:
     old_at = NOW
     current_at = NOW + timedelta(days=20)
@@ -1563,11 +1670,12 @@ def _runtime_context() -> LiveDaemonRuntimeContext:
 
 def _position(
     *,
+    symbol: str = "BTCUSDT",
     position_amt: Decimal = Decimal("0.5"),
     observed_at: datetime = NOW,
 ):
     return SimpleNamespace(
-        symbol="BTCUSDT",
+        symbol=symbol,
         position_side="LONG",
         position_amt=position_amt,
         entry_price=Decimal("100"),
@@ -1577,6 +1685,7 @@ def _position(
 
 def _order(
     *,
+    symbol: str = "BTCUSDT",
     reduce_only: bool,
     side: str,
     updated_at: datetime = NOW,
@@ -1595,7 +1704,7 @@ def _order(
     return SimpleNamespace(
         state=state,
         reduce_only=reduce_only,
-        symbol="BTCUSDT",
+        symbol=symbol,
         position_side="LONG",
         side=side,
         created_at=updated_at if created_at is None else created_at,
