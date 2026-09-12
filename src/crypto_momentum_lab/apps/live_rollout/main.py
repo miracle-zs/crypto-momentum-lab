@@ -256,6 +256,9 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
     RuntimeStateCursor,
 )
+from crypto_momentum_lab.persistence.postgres.repository import (
+    PostgresUniverseRepository,
+)
 from crypto_momentum_lab.persistence.postgres.runtime_telemetry_repository import (
     PostgresRuntimeTelemetryRepository,
 )
@@ -2198,6 +2201,21 @@ async def _run_live_daemon(
         startup_cutover = _live_market_state_cutover(
             datetime.now(tz=UTC)
         )
+        startup_warmup_symbols: frozenset[str] | None = None
+        if entry_positive_gainer_top_count is not None:
+            universe_repository = PostgresUniverseRepository(market_factory)
+            startup_warmup_symbols = (
+                await universe_repository.load_positive_gainer_symbols_at(
+                    startup_cutover,
+                    top_count=entry_positive_gainer_top_count,
+                )
+            )
+            log.info(
+                "live_startup_warmup_symbols_selected",
+                symbol_count=len(startup_warmup_symbols),
+                top_count=entry_positive_gainer_top_count,
+                cutover_at=startup_cutover.isoformat(),
+            )
         if market_state_source == "hub":
             startup_market_buffer = StartupMarketStateBuffer(
                 max_states=_LIVE_STARTUP_BUFFER_LIMIT
@@ -2240,6 +2258,7 @@ async def _run_live_daemon(
                     repository=state_repository,
                     environment=market_environment,
                     cutover_at=startup_cutover,
+                    warmup_symbols=startup_warmup_symbols,
                 )
             market_cursor = _cursor_after_market_bucket(startup_cutover)
         elif market_state_source == "postgres":
@@ -2249,6 +2268,7 @@ async def _run_live_daemon(
                 environment=market_environment,
                 now=now,
                 cutover_at=startup_cutover,
+                warmup_symbols=startup_warmup_symbols,
             )
         else:
             await _warm_live_strategy(
@@ -2257,6 +2277,7 @@ async def _run_live_daemon(
                 environment=market_environment,
                 now=now,
                 cutover_at=startup_cutover,
+                warmup_symbols=startup_warmup_symbols,
             )
         notional_cap, max_positions, max_loss, max_gross = live_limits_from_approval(
             approval=approval,

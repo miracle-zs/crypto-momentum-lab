@@ -44,7 +44,10 @@ async def load_live_warmup_symbols(
     repository: PostgresRuntimeMarketStateRepository,
     environment: str,
     observed_at: datetime,
+    symbols: Collection[str] | None = None,
 ) -> frozenset[str]:
+    if symbols is not None:
+        return frozenset(symbol.strip() for symbol in symbols if symbol.strip())
     loader = getattr(repository, "load_symbols_at", None)
     if not callable(loader):
         return frozenset()
@@ -208,6 +211,7 @@ async def warm_live_strategy(
     environment: str,
     now: datetime,
     cutover_at: datetime | None = None,
+    warmup_symbols: Collection[str] | None = None,
 ) -> RuntimeStateCursor:
     warm_market_state = getattr(strategy, "warm_market_state", None)
     if not callable(warm_market_state):
@@ -222,6 +226,7 @@ async def warm_live_strategy(
         repository=repository,
         environment=environment,
         observed_at=warmup_end,
+        symbols=warmup_symbols,
     )
     recovery_state_limit = _recovery_state_limit(
         strategy=strategy,
@@ -236,12 +241,15 @@ async def warm_live_strategy(
             WARMUP_BATCH_SIZE,
             recovery_state_limit - warmed_state_count,
         )
-        batch = await repository.load_after(
-            environment=environment,
-            cursor=cursor,
-            limit=batch_limit,
-            upper_bound=warmup_end,
-        )
+        load_kwargs: dict[str, object] = {
+            "environment": environment,
+            "cursor": cursor,
+            "limit": batch_limit,
+            "upper_bound": warmup_end,
+        }
+        if warmup_symbols is not None:
+            load_kwargs["symbols"] = expected_symbols
+        batch = await repository.load_after(**load_kwargs)  # type: ignore[arg-type]
         if not batch:
             break
         accepted_in_batch = 0
@@ -260,7 +268,7 @@ async def warm_live_strategy(
             break
         if len(batch) < batch_limit:
             break
-    if not expected_symbols:
+    if not expected_symbols and warmup_symbols is None:
         expected_symbols = frozenset(state.symbol for state in warmed_states)
     complete_symbols = _symbols_with_complete_warmup(
         strategy=strategy,
@@ -307,6 +315,7 @@ async def restore_live_strategy_from_checkpoint(
     repository: PostgresRuntimeMarketStateRepository,
     environment: str,
     cutover_at: datetime | None = None,
+    warmup_symbols: Collection[str] | None = None,
 ) -> Mapping[str, datetime]:
     warm_market_state = getattr(strategy, "warm_market_state", None)
     if not callable(warm_market_state):
@@ -316,14 +325,19 @@ async def restore_live_strategy_from_checkpoint(
     recovery_cutover = cutover_at or live_market_state_cutover(
         datetime.now(tz=UTC)
     )
-    expected_symbols = set(checkpoint.last_processed_at_by_symbol)
-    expected_symbols.update(
-        await load_live_warmup_symbols(
-            repository=repository,
-            environment=environment,
-            observed_at=recovery_cutover,
+    if warmup_symbols is None:
+        expected_symbols = set(checkpoint.last_processed_at_by_symbol)
+        expected_symbols.update(
+            await load_live_warmup_symbols(
+                repository=repository,
+                environment=environment,
+                observed_at=recovery_cutover,
+            )
         )
-    )
+    else:
+        expected_symbols = set(
+            symbol.strip() for symbol in warmup_symbols if symbol.strip()
+        )
     recovery_bounds = {
         symbol: checkpoint.last_processed_at_by_symbol.get(
             symbol,

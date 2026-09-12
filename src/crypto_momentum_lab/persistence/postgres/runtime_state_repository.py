@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -255,6 +255,7 @@ class PostgresRuntimeMarketStateRepository:
         cursor: RuntimeStateCursor,
         limit: int,
         upper_bound: datetime | None = None,
+        symbols: Collection[str] | None = None,
     ) -> tuple[MarketState15s, ...]:
         if limit <= 0:
             raise ValueError("limit must be positive")
@@ -264,6 +265,13 @@ class PostgresRuntimeMarketStateRepository:
             _require_aware(cursor.bucket_start, "cursor.bucket_start")
         if upper_bound is not None:
             _require_aware(upper_bound, "upper_bound")
+        normalized_symbols: tuple[str, ...] | None = None
+        if symbols is not None:
+            normalized_symbols = tuple(
+                sorted(symbol.strip() for symbol in symbols if symbol.strip())
+            )
+            if not normalized_symbols:
+                return ()
 
         statement = (
             select(RuntimeMarketState15sRow)
@@ -291,6 +299,10 @@ class PostgresRuntimeMarketStateRepository:
         if upper_bound is not None:
             statement = statement.where(
                 RuntimeMarketState15sRow.bucket_start <= upper_bound
+            )
+        if normalized_symbols is not None:
+            statement = statement.where(
+                RuntimeMarketState15sRow.symbol.in_(normalized_symbols)
             )
 
         async with self._session_factory() as session:
