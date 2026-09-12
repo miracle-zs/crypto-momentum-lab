@@ -52,11 +52,7 @@ from crypto_momentum_lab.domain.strategy import (
     RunMode,
     StrategyCheckpoint,
     StrategyRunIdentity,
-    UniverseRankingSnapshot,
     deterministic_config_hash,
-)
-from crypto_momentum_lab.domain.strategy.entry_policy_compare import (
-    universe_snapshot_for_symbols,
 )
 from crypto_momentum_lab.execution_account.binance import (
     BinanceUsdMTradeClient,
@@ -94,7 +90,6 @@ from crypto_momentum_lab.live_rollout.commands import (
     EMERGENCY_FLATTEN_COMMAND,
     EMERGENCY_FLATTEN_CONFIRMATION,
 )
-from crypto_momentum_lab.live_rollout.context import LiveEntryFilterContext
 from crypto_momentum_lab.live_rollout.control_plane import (
     LiveControlPlaneRuntime,
 )
@@ -103,13 +98,6 @@ from crypto_momentum_lab.live_rollout.daemon import (
     LiveDaemonResult,
     LiveStrategyDaemon,
 )
-from crypto_momentum_lab.live_rollout.entry_cache import (
-    EntryFilterCacheConfig,
-    LiveEntryFilterCache,
-    LiveEntrySymbolCache,
-    LiveEntryUniverseData,
-    universe_context_for,
-)
 from crypto_momentum_lab.live_rollout.entry_expectations import (
     LiveEntryExpectationRegistrar,
 )
@@ -117,6 +105,7 @@ from crypto_momentum_lab.live_rollout.entry_order_cancellation import (
     LiveEntryOrderCanceller,
 )
 from crypto_momentum_lab.live_rollout.entry_orders import LiveLimitOrderLifecycle
+from crypto_momentum_lab.live_rollout.entry_runtime import LiveEntryRuntime
 from crypto_momentum_lab.live_rollout.exit_channels import (
     LiveExitChannelRuntime,
 )
@@ -253,9 +242,6 @@ from crypto_momentum_lab.persistence.postgres.order_repository import (
 from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     PostgresPaperDaemonRepository,
 )
-from crypto_momentum_lab.persistence.postgres.repository import (
-    PostgresUniverseRepository,
-)
 from crypto_momentum_lab.persistence.postgres.risk_repository import (
     PostgresRiskRepository,
 )
@@ -309,7 +295,6 @@ _LIVE_STARTUP_BUFFER_LIMIT = 100_000
 _LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS = 300
 _LIVE_LEASE_RENEW_BEFORE_SECONDS = 120
 _LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS = 15.0
-_LIVE_ENTRY_FILTER_PREFETCH_CONCURRENCY = 4
 _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT = 100
 _LIVE_ENTRY_PRICE_ABOVE_EMA5 = False
 _LIVE_ENTRY_PRICE_ABOVE_EMA10 = False
@@ -2066,9 +2051,8 @@ async def _run_live_daemon(
     candle_source: BinanceRestClosedCandle15mSource | None = None
     closed_candle_feed: BinanceClosedCandle15mFeed | None = None
     ema_candle_source: BinanceRestClosedCandle15mSource | None = None
-    entry_filter_cache: LiveEntryFilterCache | None = None
+    entry_runtime: LiveEntryRuntime | None = None
     entry_filter_cache_task: asyncio.Task[None] | None = None
-    entry_symbol_cache: LiveEntrySymbolCache | None = None
     entry_symbol_cache_task: asyncio.Task[None] | None = None
     entry_order_lifecycle: LiveLimitOrderLifecycle | None = None
     live_repository: PostgresLiveRolloutRepository | None = None
@@ -2414,173 +2398,21 @@ async def _run_live_daemon(
             ema_candle_source = BinanceRestClosedCandle15mSource(base_url)
             ema_provider = ClosedCandleEmaProvider(ema_candle_source)
 
-        entry_symbol_loader: Callable[[datetime], Awaitable[frozenset[str]]] | None = (
-            None
+        assert client is not None
+        entry_runtime = LiveEntryRuntime(
+            market_session_factory=market_factory,
+            client=client,
+            ema_provider=ema_provider,
+            positive_gainer_top_count=entry_positive_gainer_top_count,
+            entry_leverage=entry_leverage,
+            margin_type=margin_type,
         )
-        entry_universe_loader: Callable[
-            [datetime],
-            Awaitable[LiveEntryUniverseData | None],
-        ] | None = None
-        if entry_positive_gainer_top_count is not None:
-            universe_repository = PostgresUniverseRepository(market_factory)
-            positive_gainer_top_count = entry_positive_gainer_top_count
+        await entry_runtime.warm_exchange(now)
+        entry_filter_cache_required = entry_runtime.entry_filter_cache_required
+        entry_symbol_cache_required = entry_runtime.entry_symbol_cache_required
+        daemon_entry_symbol_loader = entry_runtime.entry_symbol_loader
 
-            async def load_entry_universe_data(
-                observed_at: datetime,
-            ) -> LiveEntryUniverseData:
-                snapshot = await universe_repository.load_snapshot_at(
-                    observed_at
-                )
-                if snapshot is None:
-                    return LiveEntryUniverseData(
-                        symbols=frozenset(),
-                        snapshot=None,
-                    )
-                symbols = frozenset(
-                    entry.symbol
-                    for entry in snapshot.ranking.gainers[
-                        :positive_gainer_top_count
-                    ]
-                    if entry.utc_day_return > 0
-                )
-                return LiveEntryUniverseData(
-                    symbols=symbols,
-                    snapshot=snapshot,
-                )
-
-            entry_universe_loader = load_entry_universe_data
-
-            async def load_entry_symbols_from_database(
-                observed_at: datetime,
-            ) -> frozenset[str]:
-                data = await load_entry_universe_data(observed_at)
-                return data.symbols
-
-            entry_symbol_loader = load_entry_symbols_from_database
-        initial_entry_symbols: frozenset[str] = frozenset()
-        if entry_symbol_loader is not None:
-            assert client is not None
-            try:
-                initial_entry_symbols = await entry_symbol_loader(now)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                log.warning(
-                    "live_entry_symbol_warmup_failed",
-                    error_type=type(error).__name__,
-                )
-        if margin_type is not None:
-            assert client is not None
-            try:
-                await client.warm_entry_margin_type(initial_entry_symbols)
-                log.info(
-                    "live_entry_margin_type_warmed",
-                    requested_symbol_count=len(initial_entry_symbols),
-                    cached_symbol_count=client.configured_margin_type_count,
-                    margin_type=margin_type,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                # A failed warmup keeps the per-symbol confirmation fallback
-                # in place. It remains fail-closed before any affected entry
-                # is submitted.
-                log.warning(
-                    "live_entry_margin_type_warmup_failed",
-                    error_type=type(error).__name__,
-                )
-        if entry_symbol_loader is not None and entry_leverage is not None:
-            assert client is not None
-            try:
-                await client.warm_entry_leverage(initial_entry_symbols)
-                log.info(
-                    "live_entry_leverage_warmed",
-                    symbol_count=len(initial_entry_symbols),
-                    leverage=entry_leverage,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                # A failed warmup keeps the existing per-symbol
-                # confirmation fallback in place.
-                log.warning(
-                    "live_entry_leverage_warmup_failed",
-                    error_type=type(error).__name__,
-                )
-        entry_filter_cache_required = (
-            ema_provider is not None and entry_symbol_loader is not None
-        )
-        entry_symbol_cache_required = (
-            entry_symbol_loader is not None and not entry_filter_cache_required
-        )
-        daemon_entry_symbol_loader = entry_symbol_loader
-        if entry_filter_cache_required:
-
-            async def load_entry_symbols_from_cache(
-                observed_at: datetime,
-            ) -> frozenset[str]:
-                if entry_filter_cache is None:
-                    return frozenset()
-                return entry_filter_cache.symbols_for(observed_at)
-
-            daemon_entry_symbol_loader = load_entry_symbols_from_cache
-        elif entry_symbol_cache_required:
-
-            async def load_entry_symbols_from_symbol_cache(
-                observed_at: datetime,
-            ) -> frozenset[str]:
-                if entry_symbol_cache is None:
-                    return frozenset()
-                return entry_symbol_cache.symbols_for(observed_at)
-
-            daemon_entry_symbol_loader = load_entry_symbols_from_symbol_cache
-
-        entry_filter_context_loader: (
-            Callable[
-                [MarketState15s],
-                Awaitable[LiveEntryFilterContext | None],
-            ]
-            | None
-        ) = None
-        if ema_provider is not None:
-
-            async def load_entry_filter_context(
-                state: MarketState15s,
-            ) -> LiveEntryFilterContext | None:
-                entry_price = (
-                    state.last_ask_price
-                    or state.midpoint
-                    or state.close_price
-                    or state.mark_price
-                )
-                if entry_price is None:
-                    return None
-                if entry_filter_cache is not None:
-                    snapshot = entry_filter_cache.snapshot_for(
-                        symbol=state.symbol,
-                        observed_at=state.bucket_start,
-                    )
-                else:
-                    # Explicit no-pool configurations retain the old
-                    # behaviour. The production Top100 path always uses the
-                    # background cache above.
-                    snapshot = await asyncio.to_thread(
-                        ema_provider.load,
-                        symbol=state.symbol,
-                        observed_at=state.bucket_start,
-                    )
-                if snapshot is None:
-                    return None
-                return LiveEntryFilterContext(
-                    entry_price=entry_price,
-                    ema5=snapshot.ema5,
-                    ema10=snapshot.ema10,
-                    ema_observed_at=snapshot.observed_at,
-                    ema_snapshot_id=snapshot.snapshot_id,
-                    ema_config_hash=snapshot.config_hash,
-                )
-
-            entry_filter_context_loader = load_entry_filter_context
+        entry_filter_context_loader = entry_runtime.entry_filter_context_loader
         context_provider = PostgresLiveContextProvider(
             execution_session_factory=execution_factory,
             market_session_factory=market_factory,
@@ -2607,76 +2439,10 @@ async def _run_live_daemon(
         )
         latest_market_states = LatestMarketStateCache()
         latest_market_quotes = LatestMarketQuoteCache()
-        entry_universe_context_provider: (
-            Callable[[str, datetime], dict[str, object] | None] | None
-        ) = None
-        entry_universe_snapshot_provider: (
-            Callable[[datetime], UniverseRankingSnapshot | None] | None
-        ) = None
-        if entry_positive_gainer_top_count is not None:
-
-            def load_entry_universe_context(
-                symbol: str,
-                observed_at: datetime,
-            ) -> dict[str, object] | None:
-                universe_data: LiveEntryUniverseData | None = None
-                if entry_filter_cache is not None:
-                    universe_data = entry_filter_cache.universe_data_for(
-                        observed_at
-                    )
-                elif entry_symbol_cache is not None:
-                    universe_data = entry_symbol_cache.universe_data_for(
-                        observed_at
-                    )
-                return universe_context_for(
-                    universe_data,
-                    symbol=symbol,
-                    entry_pool_name=(
-                        "positive_gainer_top"
-                        f"{entry_positive_gainer_top_count}"
-                    ),
-                    entry_pool_top_count=entry_positive_gainer_top_count,
-                )
-
-            entry_universe_context_provider = load_entry_universe_context
-
-            def load_entry_universe_policy_snapshot(
-                observed_at: datetime,
-            ) -> UniverseRankingSnapshot | None:
-                universe_data: LiveEntryUniverseData | None = None
-                if entry_filter_cache is not None:
-                    universe_data = entry_filter_cache.universe_data_for(
-                        observed_at
-                    )
-                elif entry_symbol_cache is not None:
-                    universe_data = entry_symbol_cache.universe_data_for(
-                        observed_at
-                    )
-                if universe_data is None:
-                    return None
-                source_snapshot = universe_data.snapshot
-                return universe_snapshot_for_symbols(
-                    universe_data.symbols,
-                    observed_at=(
-                        observed_at
-                        if source_snapshot is None
-                        else source_snapshot.observed_at
-                    ),
-                    snapshot_id=(
-                        None
-                        if source_snapshot is None
-                        else str(source_snapshot.snapshot_id)
-                    ),
-                    config_hash=(
-                        None
-                        if source_snapshot is None
-                        else source_snapshot.config_hash
-                    ),
-                )
-
-            entry_universe_snapshot_provider = (
-                load_entry_universe_policy_snapshot
-            )
+        entry_universe_context_provider = entry_runtime.entry_universe_context_provider
+        entry_universe_snapshot_provider = (
+            entry_runtime.entry_universe_snapshot_provider
+        )
         daemon = LiveStrategyDaemon(
             strategy=strategy,
             risk_gateway=RiskGateway(),
@@ -2871,31 +2637,7 @@ async def _run_live_daemon(
         daemon.set_entry_filter_cache_ready(
             not (entry_filter_cache_required or entry_symbol_cache_required)
         )
-
-        if entry_filter_cache_required:
-            assert ema_provider is not None
-            assert entry_universe_loader is not None
-            entry_filter_cache = LiveEntryFilterCache(
-                ema_provider=ema_provider,
-                universe_loader=entry_universe_loader,
-                config=EntryFilterCacheConfig(
-                    refresh_interval_seconds=15.0,
-                    prefetch_concurrency=_LIVE_ENTRY_FILTER_PREFETCH_CONCURRENCY,
-                ),
-            )
-            entry_filter_cache.set_ready_callback(
-                on_entry_filter_cache_ready
-            )
-        elif entry_symbol_cache_required:
-            assert entry_universe_loader is not None
-            entry_symbol_cache = LiveEntrySymbolCache(
-                universe_loader=entry_universe_loader,
-                config=EntryFilterCacheConfig(
-                    refresh_interval_seconds=15.0,
-                    prefetch_concurrency=1,
-                ),
-            )
-            entry_symbol_cache.set_ready_callback(on_entry_filter_cache_ready)
+        entry_runtime.set_ready_callback(on_entry_filter_cache_ready)
         refresh_entry_enabled()
         if not draining:
             await _record_transition(
@@ -3003,14 +2745,10 @@ async def _run_live_daemon(
                 ),
                 name=f"live-risk-control:{session_id}",
             )
-        if entry_filter_cache is not None:
-            entry_filter_cache_task = asyncio.create_task(
-                entry_filter_cache.run()
-            )
-        if entry_symbol_cache is not None:
-            entry_symbol_cache_task = asyncio.create_task(
-                entry_symbol_cache.run()
-            )
+        (
+            entry_filter_cache_task,
+            entry_symbol_cache_task,
+        ) = entry_runtime.start()
         lease_task = asyncio.create_task(lease_heartbeat.run())
         reconcile_task = asyncio.create_task(
             order_reconciliation.run_periodically()
@@ -3050,10 +2788,8 @@ async def _run_live_daemon(
                 await risk_control_runtime.close()
 
         async def stop_entry_caches() -> None:
-            if entry_filter_cache is not None:
-                await entry_filter_cache.stop()
-            if entry_symbol_cache is not None:
-                await entry_symbol_cache.stop()
+            assert entry_runtime is not None
+            await entry_runtime.stop()
 
         runtime_supervisor = LiveRuntimeSupervisor(
             tasks=LiveRuntimeTasks(
