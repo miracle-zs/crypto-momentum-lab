@@ -14,6 +14,7 @@ Environment:
   CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS  market-data health timeout (default: 900)
   CML_CONSUMER_WAIT_TIMEOUT_SECONDS  Paper/research health timeout (default: 300)
   CML_LIVE_WAIT_TIMEOUT_SECONDS  Live health timeout (default: 300)
+  CML_LIVE_STOP_TIMEOUT_SECONDS  maximum Live graceful-stop timeout (default: 90)
   CML_DEPLOY_OPERATION_TIMEOUT_SECONDS  individual Docker operation timeout (default: 300)
   CML_DEPLOY_BUILD_TIMEOUT_SECONDS  image build timeout (default: 900)
   CML_DASHBOARD_REQUIRED  require the dashboard endpoint (default: 1)
@@ -21,8 +22,9 @@ Environment:
   CML_SSH_PASSWORD  optional password for sshpass; prefer an SSH key
 
 The live profile is never touched unless --live is supplied. Live updates run
-preflight for every currently running account before restarting any live
-container, then verify each running strategy's structured readiness snapshot.
+a lightweight approval-binding check for every currently running account before
+restarting any non-Live service, then run the full preflight immediately before
+restarting each Live container and verify its structured readiness snapshot.
 The additional-account overlay is loaded only when an account-2/3/4
 service is already running; stopped accounts are not started implicitly.
 --refresh-approvals is an explicit opt-in that refreshes active approvals from
@@ -96,6 +98,7 @@ deploy_wait_timeout="${CML_DEPLOY_WAIT_TIMEOUT_SECONDS:-300}"
 market_data_wait_timeout="${CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS:-900}"
 consumer_wait_timeout="${CML_CONSUMER_WAIT_TIMEOUT_SECONDS:-300}"
 live_wait_timeout="${CML_LIVE_WAIT_TIMEOUT_SECONDS:-300}"
+live_stop_timeout="${CML_LIVE_STOP_TIMEOUT_SECONDS:-90}"
 deploy_operation_timeout="${CML_DEPLOY_OPERATION_TIMEOUT_SECONDS:-300}"
 deploy_build_timeout="${CML_DEPLOY_BUILD_TIMEOUT_SECONDS:-900}"
 dashboard_required="${CML_DASHBOARD_REQUIRED:-1}"
@@ -116,6 +119,7 @@ for timeout_value in \
   "$market_data_wait_timeout" \
   "$consumer_wait_timeout" \
   "$live_wait_timeout" \
+  "$live_stop_timeout" \
   "$deploy_operation_timeout" \
   "$deploy_build_timeout"; do
   if ! [[ "$timeout_value" =~ ^[1-9][0-9]*$ ]]; then
@@ -142,6 +146,7 @@ if "${ssh_command[@]}" "${ssh_opts[@]}" "${server_user}@${server_host}" bash -s 
   "$remote_dir" "$target_ref" "$live_update" "$live_concurrency" \
   "$deploy_wait_timeout" "$market_data_wait_timeout" \
   "$consumer_wait_timeout" "$live_wait_timeout" \
+  "$live_stop_timeout" \
   "$deploy_operation_timeout" "$deploy_build_timeout" \
   "$refresh_approvals" "$dashboard_required" "$dashboard_proxy_url" \
   <<'REMOTE_SCRIPT'
@@ -155,16 +160,18 @@ deploy_wait_timeout="$5"
 market_data_wait_timeout="$6"
 consumer_wait_timeout="$7"
 live_wait_timeout="$8"
-deploy_operation_timeout="$9"
-deploy_build_timeout="${10}"
-refresh_approvals="${11}"
-dashboard_required="${12}"
-dashboard_proxy_url="${13}"
+live_stop_timeout="$9"
+deploy_operation_timeout="${10}"
+deploy_build_timeout="${11}"
+refresh_approvals="${12}"
+dashboard_required="${13}"
+dashboard_proxy_url="${14}"
 for timeout_name in \
   CML_DEPLOY_WAIT_TIMEOUT_SECONDS \
   CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS \
   CML_CONSUMER_WAIT_TIMEOUT_SECONDS \
   CML_LIVE_WAIT_TIMEOUT_SECONDS \
+  CML_LIVE_STOP_TIMEOUT_SECONDS \
   CML_DEPLOY_OPERATION_TIMEOUT_SECONDS \
   CML_DEPLOY_BUILD_TIMEOUT_SECONDS; do
   case "$timeout_name" in
@@ -172,6 +179,7 @@ for timeout_name in \
     CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS) timeout_value="$market_data_wait_timeout" ;;
     CML_CONSUMER_WAIT_TIMEOUT_SECONDS) timeout_value="$consumer_wait_timeout" ;;
     CML_LIVE_WAIT_TIMEOUT_SECONDS) timeout_value="$live_wait_timeout" ;;
+    CML_LIVE_STOP_TIMEOUT_SECONDS) timeout_value="$live_stop_timeout" ;;
     CML_DEPLOY_OPERATION_TIMEOUT_SECONDS) timeout_value="$deploy_operation_timeout" ;;
     CML_DEPLOY_BUILD_TIMEOUT_SECONDS) timeout_value="$deploy_build_timeout" ;;
   esac
@@ -213,6 +221,25 @@ run_with_timeout() {
   fi
   echo "operation=end name=$label status=$status elapsed_seconds=$(( $(date +%s) - started_at ))"
   return "$status"
+}
+
+log_service_timing() {
+  local operation="$1"
+  local service="$2"
+  local started_at="$3"
+  local status="$4"
+  echo "service-timing phase=${deploy_phase:-unknown} operation=$operation service=$service status=$status elapsed_seconds=$(( $(date +%s) - started_at ))"
+}
+
+log_service_timings() {
+  local operation="$1"
+  local started_at="$2"
+  local status="$3"
+  shift 3
+  local service
+  for service in "$@"; do
+    log_service_timing "$operation" "$service" "$started_at" "$status"
+  done
 }
 
 git_dir="$(git rev-parse --git-dir)"
@@ -321,6 +348,7 @@ write_deploy_state running checkout
 # services. Unknown runtime paths are treated conservatively as affecting all
 # application consumers.
 runtime_changed=0
+schema_changed=0
 market_changed=0
 research_changed=0
 paper_changed=0
@@ -339,6 +367,9 @@ while IFS= read -r changed_path; do
       paper_changed=1
       dashboard_changed=1
       live_changed=1
+      case "$changed_path" in
+        alembic.ini|alembic/*) schema_changed=1 ;;
+      esac
       ;;
     src/crypto_momentum_lab/live_rollout/*|\
     src/crypto_momentum_lab/apps/live_rollout/*|\
@@ -414,6 +445,7 @@ if [[ "$target_commit" == "$previous_commit" \
     research_changed=1
     paper_changed=1
     dashboard_changed=1
+    schema_changed=1
     if [[ "$live_update" == 1 ]]; then
       live_changed=1
     fi
@@ -521,6 +553,7 @@ phase_rank() {
     build) echo 2 ;;
     migrate) echo 3 ;;
     volume-init) echo 4 ;;
+    live-approval-precheck) echo 5 ;;
     # dashboard is a legacy phase name from before the dashboard/market-data
     # start wave. It must still retry the research stop before the wave.
     dashboard|research-stop) echo 6 ;;
@@ -700,6 +733,16 @@ service_is_converged() {
     && "$image" == "$expected_image" ]]
 }
 
+log_service_health_timings() {
+  local started_at="$1"
+  shift
+  local service status
+  for service in "$@"; do
+    status="$(service_status "$service")"
+    log_service_timing "health-wait" "$service" "$started_at" "$status"
+  done
+}
+
 wait_for_services_healthy() {
   local timeout_seconds="$1"
   shift
@@ -708,6 +751,8 @@ wait_for_services_healthy() {
     return 64
   fi
   local deadline=$(( $(date +%s) + timeout_seconds ))
+  local health_started_at
+  health_started_at="$(date +%s)"
   local service status state health restart_info restart_count restarting baseline
   local all_ready pending_service
   if (( $# == 0 )); then
@@ -722,6 +767,7 @@ wait_for_services_healthy() {
       health="${status#*|}"
       if [[ "$state" != running || "$health" == unhealthy ]]; then
         failure_service="$service"
+        log_service_health_timings "$health_started_at" "$@"
         echo "service failed during health wait: service=$service status=$status" >&2
         print_service_logs "$service"
         return 1
@@ -734,6 +780,7 @@ wait_for_services_healthy() {
         || { [[ "$restart_count" =~ ^[0-9]+$ ]] \
           && (( restart_count > baseline )); }; then
         failure_service="$service"
+        log_service_health_timings "$health_started_at" "$@"
         echo "service restart loop detected: service=$service" \
           "restart_count=$restart_count baseline=$baseline" \
           "restarting=$restarting" >&2
@@ -749,10 +796,12 @@ wait_for_services_healthy() {
       fi
     done
     if (( all_ready == 1 )); then
+      log_service_health_timings "$health_started_at" "$@"
       return 0
     fi
     if (( $(date +%s) >= deadline )); then
       failure_service="${pending_service:-unknown}"
+      log_service_health_timings "$health_started_at" "$@"
       echo "service health wait timed out: service=$failure_service timeout_seconds=$timeout_seconds" >&2
       print_service_logs "$failure_service"
       return 1
@@ -767,11 +816,26 @@ up_and_wait() {
   if (( $# == 0 )); then
     return 0
   fi
+  local restart_started_at operation_status
+  restart_started_at="$(date +%s)"
   failure_service="$1"
   record_restart_baseline "$@"
-  run_with_timeout "compose-up:$*" "$deploy_operation_timeout" \
-    "${compose[@]}" up -d --force-recreate --no-deps "$@"
-  wait_for_services_healthy "$health_timeout" "$@"
+  if run_with_timeout "compose-up:$*" "$deploy_operation_timeout" \
+    "${compose[@]}" up -d --force-recreate --no-deps "$@"; then
+    :
+  else
+    operation_status=$?
+    log_service_timings "restart" "$restart_started_at" failed "$@"
+    return "$operation_status"
+  fi
+  if wait_for_services_healthy "$health_timeout" "$@"; then
+    :
+  else
+    operation_status=$?
+    log_service_timings "restart" "$restart_started_at" failed "$@"
+    return "$operation_status"
+  fi
+  log_service_timings "restart" "$restart_started_at" success "$@"
 }
 
 up_and_wait_parallel() {
@@ -781,11 +845,26 @@ up_and_wait_parallel() {
   if (( $# == 0 )); then
     return 0
   fi
+  local restart_started_at operation_status
+  restart_started_at="$(date +%s)"
   failure_service="$1"
   record_restart_baseline "$@"
-  run_with_timeout "compose-up:$*" "$deploy_operation_timeout" \
-    "${compose[@]}" --parallel "$parallel" up -d --force-recreate --no-deps "$@"
-  wait_for_services_healthy "$health_timeout" "$@"
+  if run_with_timeout "compose-up:$*" "$deploy_operation_timeout" \
+    "${compose[@]}" --parallel "$parallel" up -d --force-recreate --no-deps "$@"; then
+    :
+  else
+    operation_status=$?
+    log_service_timings "restart" "$restart_started_at" failed "$@"
+    return "$operation_status"
+  fi
+  if wait_for_services_healthy "$health_timeout" "$@"; then
+    :
+  else
+    operation_status=$?
+    log_service_timings "restart" "$restart_started_at" failed "$@"
+    return "$operation_status"
+  fi
+  log_service_timings "restart" "$restart_started_at" success "$@"
 }
 
 wait_for_dashboard_market_health() {
@@ -846,6 +925,19 @@ verify_service_target() {
   if [[ "$state" != "running|healthy" || "$image" != "$expected_image" ]]; then
     echo "verification failed: service=$service state=$state image=$image expected_image=$expected_image" >&2
     return 1
+  fi
+}
+
+verify_service_target_timed() {
+  local service="$1"
+  local verification_started_at verification_status
+  verification_started_at="$(date +%s)"
+  if verify_service_target "$service"; then
+    log_service_timing "verify" "$service" "$verification_started_at" success
+  else
+    verification_status=$?
+    log_service_timing "verify" "$service" "$verification_started_at" failed
+    return "$verification_status"
   fi
 }
 
@@ -942,6 +1034,21 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     echo "preflight $account"
     run_with_timeout "preflight:$account" "$deploy_operation_timeout" \
       "${compose[@]}" run --rm --no-deps -T "$strategy_service" preflight \
+        --account-label "$account" \
+        --strategy orderflow_impulse \
+        --strict \
+        --expected-git-commit "$runtime_commit" \
+        --expected-migration-revision "$(migration_revision_for_account "$account")" \
+        </dev/null
+  }
+
+  approval_precheck_for_pair() {
+    local pair="$1"
+    local account execution_service strategy_service
+    IFS=: read -r account execution_service strategy_service <<<"$pair"
+    echo "approval precheck $account"
+    run_with_timeout "approval-precheck:$account" "$deploy_operation_timeout" \
+      "${compose[@]}" run --rm --no-deps -T "$strategy_service" approval-precheck \
         --account-label "$account" \
         --strategy orderflow_impulse \
         --strict \
@@ -1050,6 +1157,86 @@ print(
 ' "$runtime_commit" "$account" "$(migration_revision_for_account "$account")"
   }
 
+  live_old_services=()
+  live_old_container_ids=()
+
+  capture_live_container_ids() {
+    live_old_services=("$@")
+    live_old_container_ids=()
+    local service container_id
+    for service in "${live_old_services[@]}"; do
+      container_id="$("${compose[@]}" ps -q "$service" 2>/dev/null || true)"
+      live_old_container_ids+=("$container_id")
+    done
+  }
+
+  wait_for_live_containers_stopped() {
+    local timeout_seconds="$1"
+    if ! [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
+      echo "Invalid Live stop timeout: $timeout_seconds" >&2
+      return 64
+    fi
+    local deadline=$(( $(date +%s) + timeout_seconds ))
+    local all_stopped pending_service index service container_id state
+    while :; do
+      all_stopped=1
+      pending_service=""
+      for index in "${!live_old_services[@]}"; do
+        service="${live_old_services[$index]}"
+        container_id="${live_old_container_ids[$index]}"
+        [[ -z "$container_id" ]] && continue
+        state="$(docker inspect -f '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
+        case "$state" in
+          running|restarting|paused)
+            all_stopped=0
+            if [[ -z "$pending_service" ]]; then
+              pending_service="$service"
+            fi
+            ;;
+        esac
+      done
+      if (( all_stopped == 1 )); then
+        return 0
+      fi
+      if (( $(date +%s) >= deadline )); then
+        failure_service="${pending_service:-unknown}"
+        echo "Live container stop timed out: service=$failure_service timeout_seconds=$timeout_seconds" >&2
+        print_service_logs "$failure_service"
+        return 1
+      fi
+      sleep 1
+    done
+  }
+
+  stop_live_services() {
+    if (( $# == 0 )); then
+      return 0
+    fi
+    local stop_started_at operation_status
+    capture_live_container_ids "$@"
+    stop_started_at="$(date +%s)"
+    if run_with_timeout "compose-stop:$*" "$deploy_operation_timeout" \
+      "${compose[@]}" stop --timeout "$live_stop_timeout" "$@"; then
+      :
+    else
+      operation_status=$?
+      log_service_timings "graceful-stop" "$stop_started_at" failed "$@"
+      return "$operation_status"
+    fi
+    if wait_for_live_containers_stopped "$live_stop_timeout"; then
+      :
+    else
+      operation_status=$?
+      log_service_timings "graceful-stop" "$stop_started_at" failed "$@"
+      return "$operation_status"
+    fi
+    # Give Docker one scheduling turn after every old container is confirmed
+    # stopped. This is a guard after completion, not a fixed 90-second wait.
+    sleep 1
+    log_service_timings "graceful-stop" "$stop_started_at" stopped "$@"
+    echo "phase=live-stop elapsed_seconds=$(( $(date +%s) - stop_started_at )) services=$*"
+  }
+
   run_parallel_pairs() {
     local action="$1"
     shift
@@ -1060,6 +1247,7 @@ print(
         refresh) refresh_approval_for_pair "$pair" & ;;
         renew) renew_lease_for_pair "$pair" & ;;
         preflight) preflight_pair "$pair" & ;;
+        approval-precheck) approval_precheck_for_pair "$pair" & ;;
         *) echo "unknown parallel action: $action" >&2; return 64 ;;
       esac
       pids+=("$!")
@@ -1075,19 +1263,60 @@ print(
     fi
   }
 
-  active_pairs=()
-  for pair in "${live_pairs[@]}"; do
-    IFS=: read -r account execution_service strategy_service <<<"$pair"
-    if is_live_service_active "$strategy_service"; then
-      if [[ "$recovery_run" != 1 && "$refresh_approvals" != 1 ]] \
-        && service_is_converged "$execution_service" \
-        && service_is_converged "$strategy_service"; then
-        echo "phase=live account=$account skipped converged=1"
-      else
-        active_pairs+=("$pair")
-      fi
+  live_up_and_wait_parallel() {
+    local health_timeout="$1"
+    local parallel="$2"
+    shift 2
+    if (( $# == 0 )); then
+      return 0
     fi
-  done
+    local restart_started_at operation_status
+    restart_started_at="$(date +%s)"
+    failure_service="$1"
+    record_restart_baseline "$@"
+    if stop_live_services "$@"; then
+      :
+    else
+      operation_status=$?
+      log_service_timings "restart" "$restart_started_at" failed "$@"
+      return "$operation_status"
+    fi
+    if run_with_timeout "compose-up:$*" "$deploy_operation_timeout" \
+      "${compose[@]}" --parallel "$parallel" up -d --force-recreate --no-deps "$@"; then
+      :
+    else
+      operation_status=$?
+      log_service_timings "restart" "$restart_started_at" failed "$@"
+      return "$operation_status"
+    fi
+    if wait_for_services_healthy "$health_timeout" "$@"; then
+      :
+    else
+      operation_status=$?
+      log_service_timings "restart" "$restart_started_at" failed "$@"
+      return "$operation_status"
+    fi
+    log_service_timings "restart" "$restart_started_at" success "$@"
+  }
+
+  collect_active_live_pairs() {
+    active_pairs=()
+    local pair account execution_service strategy_service
+    for pair in "${live_pairs[@]}"; do
+      IFS=: read -r account execution_service strategy_service <<<"$pair"
+      if is_live_service_active "$strategy_service"; then
+        if [[ "$recovery_run" != 1 && "$refresh_approvals" != 1 ]] \
+          && service_is_converged "$execution_service" \
+          && service_is_converged "$strategy_service"; then
+          echo "phase=live account=$account skipped converged=1"
+        else
+          active_pairs+=("$pair")
+        fi
+      fi
+    done
+  }
+
+  collect_active_live_pairs
   # market-data discovers every account whose latest ready PostgreSQL
   # reconciliation still has positions. The optional
   # CML_LIVE_POSITION_ACCOUNT_LABEL and CML_LIVE_POSITION_ACCOUNT_LABELS
@@ -1131,12 +1360,16 @@ if should_run_phase migrate && [[ "$runtime_changed" == 1 ]]; then
     "${compose[@]}" up -d postgres
   failure_service=postgres
   wait_for_services_healthy "$deploy_wait_timeout" postgres
-  failure_service=migrate
-  run_with_timeout "migration" "$deploy_operation_timeout" \
-    "${compose[@]}" run --rm --no-deps migrate </dev/null
-  echo "phase=migrate elapsed_seconds=$(( $(date +%s) - migration_started_at ))"
+  if [[ "$schema_changed" == 1 ]]; then
+    failure_service=migrate
+    run_with_timeout "migration" "$deploy_operation_timeout" \
+      "${compose[@]}" run --rm --no-deps migrate </dev/null
+    echo "phase=migrate elapsed_seconds=$(( $(date +%s) - migration_started_at ))"
+  else
+    echo "phase=migrate skipped schema_changed=$schema_changed"
+  fi
 else
-  echo "phase=migrate skipped runtime_unchanged=$runtime_changed"
+  echo "phase=migrate skipped runtime_unchanged=$runtime_changed schema_changed=$schema_changed"
 fi
 
 # Initialize the named data volumes before any service is restarted with
@@ -1179,6 +1412,33 @@ if should_run_phase volume-init && [[ "$runtime_changed" == 1 ]]; then
   fi
 else
   echo "phase=volume-init skipped runtime_unchanged=$runtime_changed"
+fi
+
+# Check the Live approval binding before restarting any non-Live service. This
+# read-only check only validates that an active approval exists for the target
+# commit and migration; the full preflight remains the final race-sensitive
+# gate immediately before each Live restart.
+# An explicit approval refresh intentionally stays in the final Live gate so
+# the old running worker is never left under a newly refreshed approval while
+# Dashboard, market-data, or consumers are still converging.
+if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
+  deploy_phase=live-approval-precheck
+  if should_run_phase live-approval-precheck; then
+    write_deploy_state running "$deploy_phase"
+    if [[ "$refresh_approvals" == 1 ]]; then
+      echo "phase=live-approval-precheck skipped refresh_approvals=1"
+    else
+      collect_active_live_pairs
+      approval_precheck_started_at="$(date +%s)"
+      if ! run_parallel_pairs approval-precheck "${active_pairs[@]}"; then
+        echo "approval precheck failed; non-Live services were not restarted" >&2
+        exit 1
+      fi
+      echo "phase=live-approval-precheck elapsed_seconds=$(( $(date +%s) - approval_precheck_started_at ))"
+    fi
+  else
+    echo "phase=live-approval-precheck skipped resume_from_phase=$resume_from_phase"
+  fi
 fi
 
 # Preserve the durable research cursor before the Hub's stream epoch changes.
@@ -1229,9 +1489,15 @@ if should_run_phase dashboard-market-data; then
     run_with_timeout "compose-up:dashboard+market-data" "$deploy_operation_timeout" \
       "${compose[@]}" --parallel 2 up -d --force-recreate --no-deps \
       "${dashboard_market_candidates[@]}"
-    if ! wait_for_dashboard_market_health \
+    if wait_for_dashboard_market_health \
       "$dashboard_market_health_dashboard" "$dashboard_market_health_market"; then
-      exit 1
+      log_service_timings "restart" "$dashboard_market_started_at" success \
+        "${dashboard_market_candidates[@]}"
+    else
+      dashboard_market_health_status=$?
+      log_service_timings "restart" "$dashboard_market_started_at" failed \
+        "${dashboard_market_candidates[@]}"
+      exit "$dashboard_market_health_status"
     fi
     echo "phase=dashboard-market-data elapsed_seconds=$(( $(date +%s) - dashboard_market_started_at ))"
   else
@@ -1314,6 +1580,9 @@ verification_services+=("${consumer_candidates[@]}")
 # rejected Live rollout leave the non-Live update complete instead of forcing
 # a second recovery deployment.
 if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
+  # Recompute the active set after non-Live convergence. A strategy that
+  # drained during the earlier phases must not be restarted accidentally.
+  collect_active_live_pairs
   deploy_phase=live-preflight
   write_deploy_state running "$deploy_phase"
   if [[ "$refresh_approvals" == 1 ]]; then
@@ -1371,7 +1640,7 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   if (( ${#execution_services[@]} > 0 )); then
     execution_started_at="$(date +%s)"
     echo "update execution wave (${#execution_services[@]} services)"
-    up_and_wait_parallel "$live_wait_timeout" "$live_concurrency" "${execution_services[@]}"
+    live_up_and_wait_parallel "$live_wait_timeout" "$live_concurrency" "${execution_services[@]}"
     echo "phase=execution elapsed_seconds=$(( $(date +%s) - execution_started_at ))"
   else
     echo "phase=execution skipped no_active_services=1"
@@ -1393,7 +1662,7 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   if (( ${#strategy_services[@]} > 0 )); then
     strategy_started_at="$(date +%s)"
     echo "update strategy wave (${#strategy_services[@]} services)"
-    up_and_wait_parallel "$live_wait_timeout" "$live_concurrency" "${strategy_services[@]}"
+    live_up_and_wait_parallel "$live_wait_timeout" "$live_concurrency" "${strategy_services[@]}"
     echo "phase=strategy elapsed_seconds=$(( $(date +%s) - strategy_started_at ))"
   else
     echo "phase=strategy skipped no_active_services=1"
@@ -1417,7 +1686,7 @@ verification_started_at="$(date +%s)"
 deploy_phase=verify
 write_deploy_state running "$deploy_phase"
 for service in "${verification_services[@]}"; do
-  verify_service_target "$service"
+  verify_service_target_timed "$service"
 done
 echo "phase=verify elapsed_seconds=$(( $(date +%s) - verification_started_at )) services=${#verification_services[@]}"
 

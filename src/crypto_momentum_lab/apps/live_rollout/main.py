@@ -1003,6 +1003,43 @@ def preflight_command(
         raise typer.Exit(code=1)
 
 
+@app.command("approval-precheck")
+def approval_precheck_command(
+    database_url: Annotated[str | None, typer.Option("--database-url")] = None,
+    account_label: Annotated[str, typer.Option("--account-label")] = "primary",
+    strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
+    expected_git_commit: Annotated[
+        str, typer.Option("--expected-git-commit")
+    ] = "",
+    expected_migration_revision: Annotated[
+        str, typer.Option("--expected-migration-revision")
+    ] = "",
+    strict: Annotated[bool, typer.Option("--strict")] = False,
+) -> None:
+    """Validate the active approval's target commit and migration binding."""
+
+    expected_git_commit = _validate_hex_hash(
+        expected_git_commit,
+        "--expected-git-commit",
+        _GIT_COMMIT_HASH_LENGTH,
+    )
+    expected_migration_revision = expected_migration_revision.strip()
+    if not expected_migration_revision:
+        raise typer.BadParameter("--expected-migration-revision must not be empty")
+    payload = asyncio.run(
+        _approval_binding_summary(
+            _database_url(database_url),
+            account_label,
+            strategy,
+            expected_git_commit=expected_git_commit,
+            expected_migration_revision=expected_migration_revision,
+        )
+    )
+    typer.echo(json.dumps(payload, sort_keys=True))
+    if strict and payload["approval_precheck_ok"] is not True:
+        raise typer.Exit(code=1)
+
+
 @app.command("resolve-missing-order")
 def resolve_missing_order_command(
     client_order_id: Annotated[str, typer.Option("--client-order-id")],
@@ -1751,6 +1788,55 @@ async def _load_active_approval(
         )
     finally:
         await engine.dispose()
+
+
+async def _approval_binding_summary(
+    database_url: str,
+    account_label: str,
+    strategy_name: str,
+    *,
+    expected_git_commit: str,
+    expected_migration_revision: str,
+) -> dict[str, object]:
+    """Check only the approval identity needed before non-Live convergence."""
+
+    approval = await _load_active_approval(
+        database_url=database_url,
+        account_label=account_label,
+        strategy_name=strategy_name,
+        now=datetime.now(tz=UTC),
+    )
+    normalized_git_commit = expected_git_commit.strip().lower()
+    normalized_migration_revision = expected_migration_revision.strip()
+    approved_git_commit_hash = (
+        None if approval is None else approval.git_commit_hash
+    )
+    approved_migration_revision = (
+        None if approval is None else approval.database_migration_revision
+    )
+    checks = {
+        "approval_present": approval is not None,
+        "approval_git_commit_matches_expected": (
+            approval is not None
+            and approval.git_commit_hash.strip().lower() == normalized_git_commit
+        ),
+        "approval_migration_matches_expected": (
+            approval is not None
+            and approval.database_migration_revision == normalized_migration_revision
+        ),
+    }
+    errors = [name for name, passed in checks.items() if not passed]
+    return {
+        "account_label": account_label,
+        "strategy": strategy_name,
+        "approved_git_commit_hash": approved_git_commit_hash,
+        "approved_migration_revision": approved_migration_revision,
+        "expected_git_commit": normalized_git_commit,
+        "expected_migration_revision": normalized_migration_revision,
+        "approval_precheck_checks": checks,
+        "approval_precheck_errors": errors,
+        "approval_precheck_ok": not errors,
+    }
 
 
 async def _prepare_live_risk_gates(

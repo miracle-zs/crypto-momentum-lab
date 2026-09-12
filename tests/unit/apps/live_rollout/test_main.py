@@ -914,6 +914,73 @@ def test_strict_preflight_returns_failure_exit_code(monkeypatch) -> None:
     assert "approval_present" in result.stdout
 
 
+def test_approval_binding_summary_checks_only_target_identity(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_load(*args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            git_commit_hash="a" * 40,
+            database_migration_revision="20260911_0040",
+        )
+
+    monkeypatch.setattr(main, "_load_active_approval", fake_load)
+
+    payload = asyncio.run(
+        main._approval_binding_summary(
+            "postgresql+asyncpg://unused",
+            "primary",
+            "orderflow_impulse",
+            expected_git_commit="a" * 40,
+            expected_migration_revision="20260911_0040",
+        )
+    )
+
+    assert captured["account_label"] == "primary"
+    assert captured["strategy_name"] == "orderflow_impulse"
+    assert payload["approval_precheck_ok"] is True
+    assert payload["approval_precheck_errors"] == []
+    assert payload["approval_precheck_checks"] == {
+        "approval_present": True,
+        "approval_git_commit_matches_expected": True,
+        "approval_migration_matches_expected": True,
+    }
+
+
+def test_strict_approval_precheck_returns_failure_exit_code(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_summary(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "approval_precheck_ok": False,
+            "approval_precheck_errors": ["approval_present"],
+        }
+
+    monkeypatch.setattr(main, "_approval_binding_summary", fake_summary)
+
+    result = runner.invoke(
+        app,
+        [
+            "approval-precheck",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--account-label",
+            "account-2",
+            "--expected-git-commit",
+            "b" * 40,
+            "--expected-migration-revision",
+            "20260911_0040",
+            "--strict",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "approval_present" in result.stdout
+    assert captured["expected_git_commit"] == "b" * 40
+    assert captured["expected_migration_revision"] == "20260911_0040"
+
+
 def test_preflight_passes_runtime_manifest_expectations_to_summary(
     monkeypatch,
     tmp_path: Path,

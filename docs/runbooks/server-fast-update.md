@@ -15,10 +15,13 @@ outside the release layer, so source-only changes rebuild a small local wheel.
 Healthchecks retain their 60/90-second steady-state intervals to keep
 probe CPU low, but use a 5-second `start_interval` (15 seconds for the long
 market-data recovery window) while a container is starting. Stateless
-research, paper, and dashboard services stop after 20 seconds; market-data and
-Live services retain a 60-second grace period for state and exchange cleanup.
-Updating eight Live containers one by one used to add several minutes even
-when the code build was cached.
+research, paper, and dashboard services stop after 20 seconds; Live services
+retain a longer grace period for state and exchange cleanup. The deployment
+script treats that grace period as a maximum: it explicitly stops the old Live
+containers, polls their captured IDs until they are no longer running, waits
+one additional second, and then creates the replacements. It does not add a
+fixed wait after an early shutdown. Updating eight Live containers one by one
+used to add several minutes even when the code build was cached.
 
 The host must have the Ubuntu `docker-buildx` package installed once so Compose
 can use BuildKit/Bake and retain the dependency cache. The package install does
@@ -79,17 +82,30 @@ The script:
    Compose overrides; `.env.server` is not changed yet;
 5. validates the merged Compose graph and builds the image once using the
    dependency cache;
-6. runs migrations and the volume-ownership check before restarting services;
+6. ensures PostgreSQL is healthy and runs the one-shot migration only when the
+   target range changes `alembic.ini` or `alembic/`, then performs the
+   volume-ownership check before restarting services;
 7. recreates Dashboard and `market-data` in one Compose start wave when needed,
    while keeping their separate health budgets, then updates only the affected
    research and Paper consumers;
-8. runs the Live approval/preflight gate after the non-Live services converge,
-   with strict preflight completing before any Live lease is renewed;
-9. restarts Live execution services and strategies only after that gate passes;
-10. verifies the image and health state of every service it updated, then
+8. runs a read-only Live approval precheck after migrations and before any
+   non-Live service restart; an explicit approval refresh remains deferred to
+   the final Live gate;
+9. runs the final Live approval/preflight gate after the non-Live services
+   converge, with strict preflight completing before any Live lease is renewed;
+10. restarts Live execution services and strategies only after that gate passes;
+11. verifies the image and health state of every service it updated, then
    persists the runtime commit and dashboard image to `.env.server`;
-11. prints separate remote and client-side timings, the checkout/runtime/image
+12. prints separate remote and client-side timings, the checkout/runtime/image
    commits, and the container health summary.
+
+In addition to phase and Docker-operation timings, the output includes one
+`service-timing` record for each affected service during health waiting,
+restart, Live graceful stop, and final verification. Each record contains the
+phase, operation, service name, status, and elapsed seconds. Services in the
+same parallel wave share the wave start time, so use the phase/wave timing for
+wall-clock cost and use the service records to identify the slow or failed
+member; do not add parallel service timings together.
 
 The script uses bounded Compose operations and an explicit health wait. A
 healthy service with the expected image is left in place; a service that must
@@ -105,7 +121,7 @@ healthcheck has a 15-minute startup window. Individual Docker operations are
 bounded to 300 seconds and image builds to 900 seconds. Override them with
 `CML_DEPLOY_WAIT_TIMEOUT_SECONDS`, `CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS`,
 `CML_CONSUMER_WAIT_TIMEOUT_SECONDS`, `CML_LIVE_WAIT_TIMEOUT_SECONDS`,
-`CML_DEPLOY_OPERATION_TIMEOUT_SECONDS`, and
+`CML_LIVE_STOP_TIMEOUT_SECONDS`, `CML_DEPLOY_OPERATION_TIMEOUT_SECONDS`, and
 `CML_DEPLOY_BUILD_TIMEOUT_SECONDS` when a host needs different limits. A
 broken operation or healthcheck now fails with diagnostics instead of waiting
 indefinitely. A container in `exited`, `restarting`, `paused`, or another
@@ -148,14 +164,23 @@ deploy/ops/update_server.sh 43.167.191.253 <commit-sha> \
 Set `CML_LIVE_CONCURRENCY=1` before the command for a serialized rollout, or
 leave the default `2` to use two bounded restart waves.
 
-The Live path builds the target image, optionally refreshes active approvals,
-then runs read-only strict `preflight` for every currently running strategy
-before renewing any lease. The preflight runs after Dashboard, `market-data`,
-research, and Paper have converged, but before any Live container restarts. On
-a recovery run it rechecks even pairs that already use the target image. This
-keeps a rejected Live approval from changing leases or forcing a second
-non-Live recovery deployment. Lease renewal and read-only preflight run in
-bounded parallel batches using
+The Live path builds the target image, applies any required migration, and runs
+a lightweight read-only approval-binding check for every currently running
+strategy before restarting any non-Live service. The check only verifies an
+active approval and its target commit/migration binding, so it catches a
+target/approval mismatch without first recreating Dashboard, `market-data`,
+research, or Paper. When
+`--refresh-approvals` is supplied, this early target check is skipped because
+the explicit refresh is intentionally deferred until the final Live gate; the
+old worker is never left under a newly refreshed approval while unrelated
+services are still converging.
+
+After the non-Live services converge, the Live path recomputes the active
+account set and runs the final read-only strict `preflight` before renewing any
+lease. On a recovery run it rechecks even pairs that already use the target
+image. This keeps a rejected Live approval from changing leases or forcing a
+second non-Live recovery deployment. Lease renewal and read-only preflight run
+in bounded parallel batches using
 `CML_LIVE_CONCURRENCY`. The checks cover the approval, runtime strategy hash,
 risk snapshot, target commit, migration revision, account readiness, and lease
 presence. If any check fails, the command exits before restarting Live
@@ -169,6 +194,14 @@ conservative rollout or `=4` when the host has headroom:
 2. matching strategy services (up to two at a time);
 3. wait for every service in each wave to report healthy before starting the
    next wave.
+
+Before each Live restart wave, the script captures the old container IDs and
+executes `docker compose stop --timeout`. It polls those same IDs until Docker
+confirms they are stopped, waits one second, and only then invokes
+`up --force-recreate`. `CML_LIVE_STOP_TIMEOUT_SECONDS` (default `90`) is the
+maximum graceful-stop budget, not a fixed sleep. If a container does not stop
+within the budget, the deployment fails closed and does not start its
+replacement.
 
 Services that are not currently running are skipped, so the script does not
 enable a disabled Live account accidentally. The dashboard is handled

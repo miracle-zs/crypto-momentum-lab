@@ -37,6 +37,7 @@ def test_deployment_script_is_valid_shell_and_has_recovery_guards() -> None:
     assert "runtime_commit=" in script
     assert "image_commit=" in script
     assert "CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS" in script
+    assert "CML_LIVE_STOP_TIMEOUT_SECONDS" in script
     assert "CML_DEPLOY_OPERATION_TIMEOUT_SECONDS" in script
     assert "CML_DEPLOY_BUILD_TIMEOUT_SECONDS" in script
     assert "run_with_timeout" in script
@@ -47,6 +48,18 @@ def test_deployment_script_is_valid_shell_and_has_recovery_guards() -> None:
     assert "volume-init-check" in script
     assert "ownership=correct" in script
     assert "logs --no-color --tail=200" in script
+
+
+def test_deployment_script_reports_service_level_timings() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    assert "service-timing" in script
+    assert "log_service_health_timings" in script
+    assert 'log_service_timings "restart"' in script
+    assert 'log_service_timings "graceful-stop"' in script
+    assert "verify_service_target_timed" in script
+    assert 'log_service_timing "health-wait"' in script
+    assert 'log_service_timing "verify"' in script
 
 
 def test_live_readiness_validator_embedded_python_is_valid() -> None:
@@ -229,8 +242,8 @@ def test_retry_classification_preserves_dashboard_only_scope(tmp_path: Path) -> 
     ]
     result = subprocess.check_output(
         ["bash", "-c", 'set -eu\n' + classification +
-         '\nprintf "%s" "$runtime_changed:$dashboard_changed:'
-         '$market_changed:$paper_changed:$live_changed"'],
+         '\nprintf "%s" "$runtime_changed:$schema_changed:'
+         '$dashboard_changed:$market_changed:$paper_changed:$live_changed"'],
         cwd=tmp_path,
         env={
             **os.environ,
@@ -246,7 +259,81 @@ def test_retry_classification_preserves_dashboard_only_scope(tmp_path: Path) -> 
             "live_update": "1",
         }, text=True,
     )
-    assert result.endswith("1:1:0:0:0")
+    assert result.endswith("1:0:1:0:0:0")
+
+
+def test_migration_phase_runs_one_shot_only_for_schema_changes() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    classification_start = script.index("runtime_changed=0\n")
+    classification_end = script.index(
+        'if [[ "$runtime_changed" == 1 ]]; then',
+        classification_start,
+    )
+    classification = script[classification_start:classification_end]
+    migration_start = script.index("deploy_phase=migrate")
+    migration_end = script.index("deploy_phase=volume-init", migration_start)
+    migration = script[migration_start:migration_end]
+
+    assert "schema_changed=0" in classification
+    assert "alembic.ini|alembic/*" in classification
+    assert 'if [[ "$schema_changed" == 1 ]]; then' in migration
+    assert 'run --rm --no-deps migrate' in migration
+    assert 'phase=migrate skipped schema_changed=$schema_changed' in migration
+
+
+def test_alembic_change_sets_schema_changed(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(
+            ["git", "-C", str(tmp_path), *args], text=True
+        ).strip()
+
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    git("commit", "--allow-empty", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    migration = tmp_path / "alembic/versions/20260912_0001_add_index.py"
+    migration.parent.mkdir(parents=True)
+    migration.write_text("# migration\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-qm", "migration")
+    target = git("rev-parse", "HEAD")
+
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    classification_start = script.index("runtime_changed=0\n")
+    classification_end = script.index(
+        'if [[ "$runtime_changed" == 1 ]]; then',
+        classification_start,
+    )
+    classification = script[classification_start:classification_end]
+    result = subprocess.check_output(
+        [
+            "bash",
+            "-c",
+            "set -eu\n"
+            + classification
+            + '\nprintf "%s" "$runtime_changed:$schema_changed"',
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "deployment_base_commit": base,
+            "target_commit": target,
+            "previous_commit": target,
+            "deploy_state_checkout": target,
+            "deploy_state_target": target,
+            "deploy_state_status": "success",
+            "deploy_state_phase": "complete",
+            "deploy_state_base": base,
+            "runtime_commit": base,
+            "live_update": "0",
+        },
+        text=True,
+    )
+
+    assert result.endswith("1:1")
 
 
 def test_research_collector_stops_before_market_data_restart() -> None:
@@ -298,9 +385,49 @@ def test_live_generation_fence_order_is_migration_preflight_restart() -> None:
     assert "run --rm --no-deps migrate" in script[migration_phase:dashboard_phase]
     assert "run_parallel_pairs preflight" in preflight_block
     assert "run_parallel_pairs renew" in preflight_block
-    assert preflight_block.index("run_parallel_pairs preflight") < preflight_block.index(
-        "run_parallel_pairs renew"
+    assert preflight_block.index(
+        "run_parallel_pairs preflight"
+    ) < preflight_block.index("run_parallel_pairs renew")
+
+
+def test_live_approval_precheck_precedes_non_live_restart() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    precheck = script.index("deploy_phase=live-approval-precheck")
+    research_stop = script.index("deploy_phase=research-stop")
+    dashboard_wave = script.index("deploy_phase=dashboard-market-data")
+    consumers = script.index("consumer_candidates=()")
+    final_preflight = script.index("deploy_phase=live-preflight")
+    precheck_block = script[precheck:research_stop]
+
+    assert "should_run_phase live-approval-precheck" in precheck_block
+    assert "run_parallel_pairs approval-precheck" in precheck_block
+    assert "run_parallel_pairs preflight" not in precheck_block
+    assert "refresh_approvals=1" in precheck_block
+    assert precheck < research_stop < dashboard_wave < consumers < final_preflight
+
+
+def test_live_restart_waits_for_old_containers_before_recreate() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    helper_start = script.index("stop_live_services()")
+    helper_end = script.index("run_parallel_pairs()", helper_start)
+    helper_block = script[helper_start:helper_end]
+    restart_start = script.index("live_up_and_wait_parallel()")
+    restart_end = script.index("collect_active_live_pairs()", restart_start)
+    restart_block = script[restart_start:restart_end]
+
+    assert "capture_live_container_ids" in helper_block
+    assert "compose-stop:" in helper_block
+    assert "wait_for_live_containers_stopped" in helper_block
+    assert 'stop --timeout "$live_stop_timeout"' in helper_block
+    assert helper_block.index("wait_for_live_containers_stopped") < helper_block.index(
+        "sleep 1"
     )
+    assert restart_block.index("stop_live_services") < restart_block.index(
+        'up -d --force-recreate --no-deps'
+    )
+    assert script.count("live_up_and_wait_parallel") >= 3
 
 
 def test_live_preflight_has_no_side_effects_before_validation() -> None:
