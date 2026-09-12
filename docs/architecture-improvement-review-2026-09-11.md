@@ -242,6 +242,9 @@ live_rollout/
   scope 构造和失败时转换为 `OrderPreSubmissionError` 的安全边界收拢到
   `live_rollout/entry_expectations.py`；one-shot 与 daemon 复用同一 callable，不再由
   composition root 持有 publisher/异常语义。
+- 已将 `resolve-missing-order` 的交易所只读三重核验、并发重读、证据持久化和
+  `ABSENT_RECONCILED` 终态写入收拢到 `live_rollout/missing_order_resolution.py`；CLI
+  只负责参数/凭证边界，人工处理仍不调用 Binance 写接口。
 - 已将 scheduled controller 的已知开仓单撤销、exchange orphan scan、durable adoption
   和统一的 state-machine cancellation confirmation 收拢到
   `live_rollout/entry_order_cancellation.py`；已知单与交易所孤儿单仍走同一 Coordinator，
