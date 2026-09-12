@@ -261,6 +261,9 @@ live_rollout/
 - 已将 entry universe 的数据库加载、正收益池筛选、exchange leverage/margin 预热、
   EMA/symbol cache 选择，以及 entry filter/universe context provider 收拢到
   `live_rollout/entry_runtime.py`；`main.py` 只注入 runtime 输出和 readiness 回调。
+- 已将 entry runtime、order lifecycle、exchange client、candle/telemetry/volume
+  resource 和数据库 engine 的关闭顺序收拢到 `live_rollout/resource_lifecycle.py`；
+  外层 finally 保留 source/task fallback，资源释放顺序由独立契约测试固定。
 - 已将 scheduled controller 的已知开仓单撤销、exchange orphan scan、durable adoption
   和统一的 state-machine cancellation confirmation 收拢到
   `live_rollout/entry_order_cancellation.py`；已知单与交易所孤儿单仍走同一 Coordinator，

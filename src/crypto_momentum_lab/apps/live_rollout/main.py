@@ -142,6 +142,9 @@ from crypto_momentum_lab.live_rollout.postgres_runtime import (
     poll_live_market_states,
 )
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
+from crypto_momentum_lab.live_rollout.resource_lifecycle import (
+    LiveResourceLifecycle,
+)
 from crypto_momentum_lab.live_rollout.risk_control import (
     LiveRiskControlRuntime,
     RiskControlCommandDispatcher,
@@ -2860,37 +2863,25 @@ async def _run_live_daemon(
                 startup_market_state_task,
                 return_exceptions=True,
             )
-        if entry_order_lifecycle is not None:
-            await entry_order_lifecycle.stop()
-        if execution_coordinator is not None:
-            await execution_coordinator.aclose()
-        if client is not None:
-            await client.aclose()
-        if closed_candle_feed is not None:
-            await closed_candle_feed.stop()
-        if candle_source is not None:
-            candle_source.close()
-        if ema_candle_source is not None:
-            ema_candle_source.close()
-        if signal_recorder is not None:
-            await signal_recorder.stop()
-        if telemetry is not None:
-            await telemetry.stop()
-        if volume_cache is not None:
-            await volume_cache.stop()
-        if volume_rest_client is not None:
-            await volume_rest_client.aclose()
-        await execution_engine.dispose()
-        await market_engine.dispose()
-        await observability_engine.dispose()
-        await checkpoint_engine.dispose()
-        if heartbeat_engine is not None:
-            await heartbeat_engine.dispose()
-        if health is not None:
-            try:
-                health.stopped()
-            except Exception:
-                log.exception("live_health_stop_marker_failed")
+        await LiveResourceLifecycle(
+            entry_runtime=entry_runtime,
+            entry_order_lifecycle=entry_order_lifecycle,
+            execution_coordinator=execution_coordinator,
+            client=client,
+            closed_candle_feed=closed_candle_feed,
+            candle_source=candle_source,
+            ema_candle_source=ema_candle_source,
+            signal_recorder=signal_recorder,
+            telemetry=telemetry,
+            volume_cache=volume_cache,
+            volume_rest_client=volume_rest_client,
+            execution_engine=execution_engine,
+            market_engine=market_engine,
+            observability_engine=observability_engine,
+            checkpoint_engine=checkpoint_engine,
+            heartbeat_engine=heartbeat_engine,
+            health=health,
+        ).close()
 
 
 async def _observe_market_states(
