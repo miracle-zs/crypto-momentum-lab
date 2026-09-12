@@ -1277,6 +1277,54 @@ async def test_live_warmup_applies_all_states_and_continues_from_boundary() -> N
     assert cursor.symbol == "BTCUSDT"
 
 
+@pytest.mark.asyncio
+async def test_live_warmup_defers_symbols_without_a_complete_window() -> None:
+    now = datetime(2026, 8, 4, 0, 0, tzinfo=UTC)
+    states = tuple(
+        SimpleNamespace(
+            symbol=symbol,
+            bucket_start=now - timedelta(seconds=offset),
+            bucket_end=now - timedelta(seconds=offset - 15),
+        )
+        for symbol, offset in (
+            ("BTCUSDT", 45),
+            ("BTCUSDT", 30),
+            ("BTCUSDT", 15),
+            ("NEWUSDT", 15),
+        )
+    )
+
+    class Strategy:
+        def required_data(self):
+            return SimpleNamespace(
+                warmup_buckets=3,
+                base_state_interval_seconds=15,
+                required_fields=(),
+            )
+
+        def warm_market_state(self, state):
+            return None
+
+    class Repository:
+        async def load_symbols_at(self, **kwargs):
+            assert kwargs["environment"] == "research"
+            return frozenset({"BTCUSDT", "NEWUSDT"})
+
+        async def load_after(self, **kwargs):
+            return states
+
+    cursor = await warm_live_strategy(
+        strategy=Strategy(),
+        repository=Repository(),
+        environment="research",
+        now=now,
+        cutover_at=now,
+    )
+
+    assert cursor.bucket_start == states[-1].bucket_start
+    assert cursor.symbol == states[-1].symbol
+
+
 def test_live_warmup_rejects_a_symbol_with_a_window_gap() -> None:
     start = datetime(2026, 8, 4, 0, 0, tzinfo=UTC)
     states = tuple(

@@ -473,9 +473,9 @@ chmod 600 .env.server
 # update.
 has_running_compose_service() {
   local service="$1"
-  docker ps \
+  docker ps -a \
     --filter "label=com.docker.compose.service=$service" \
-    --format '{{.ID}}' | grep -q .
+    --format '{{.Status}}' | grep -Eq '^(Up|Restarting)'
 }
 
 live_overlay_required=0
@@ -671,6 +671,13 @@ restart_baseline_for_service() {
 is_running() {
   local service="$1"
   [[ "$(service_status "$service")" == "running|"* ]]
+}
+
+is_live_service_active() {
+  local service="$1"
+  local state
+  state="$(service_status "$service")"
+  [[ "${state%%|*}" == "running" || "${state%%|*}" == "restarting" ]]
 }
 
 is_healthy() {
@@ -968,7 +975,7 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   active_pairs=()
   for pair in "${live_pairs[@]}"; do
     IFS=: read -r account execution_service strategy_service <<<"$pair"
-    if is_running "$strategy_service"; then
+    if is_live_service_active "$strategy_service"; then
       if [[ "$recovery_run" != 1 && "$refresh_approvals" != 1 ]] \
         && service_is_converged "$execution_service" \
         && service_is_converged "$strategy_service"; then
@@ -1247,7 +1254,7 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   execution_services=()
   for pair in "${active_pairs[@]}"; do
     IFS=: read -r account execution_service strategy_service <<<"$pair"
-    if is_running "$strategy_service"; then
+    if is_live_service_active "$strategy_service"; then
       execution_candidates+=("$execution_service")
       if service_is_converged "$execution_service"; then
         echo "phase=execution service=$execution_service skipped converged=1"
@@ -1269,7 +1276,7 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   strategy_services=()
   for pair in "${active_pairs[@]}"; do
     IFS=: read -r account execution_service strategy_service <<<"$pair"
-    if is_running "$strategy_service"; then
+    if is_live_service_active "$strategy_service"; then
       strategy_candidates+=("$strategy_service")
       if service_is_converged "$strategy_service"; then
         echo "phase=strategy service=$strategy_service skipped converged=1"

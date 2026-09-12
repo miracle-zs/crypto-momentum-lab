@@ -125,6 +125,56 @@ def validate_live_warmup_coverage(
         )
 
 
+def _symbols_with_complete_warmup(
+    *,
+    strategy: LiveRuntimeStrategy,
+    states: Collection[MarketState15s],
+    expected_symbols: Collection[str],
+    cutover_at: datetime,
+) -> frozenset[str]:
+    """Return symbols that can safely participate immediately after startup.
+
+    The exchange universe can contain newly listed symbols or symbols whose
+    durable history has a gap.  Those symbols must remain entry-ineligible
+    until their own rolling window is complete; they must not prevent mature
+    symbols from starting the worker.
+    """
+
+    required_data = getattr(strategy, "required_data", None)
+    if not callable(required_data):
+        return frozenset(expected_symbols)
+    requirement = required_data()
+    warmup_buckets = int(requirement.warmup_buckets)
+    interval = timedelta(
+        seconds=int(getattr(requirement, "base_state_interval_seconds", 15))
+    )
+    required_fields = tuple(getattr(requirement, "required_fields", ()))
+    states_by_symbol: dict[str, list[MarketState15s]] = {}
+    for state in states:
+        states_by_symbol.setdefault(state.symbol, []).append(state)
+
+    complete: set[str] = set()
+    for symbol in sorted(set(expected_symbols)):
+        valid_states = [
+            state
+            for state in states_by_symbol.get(symbol, ())
+            if all(getattr(state, field, None) is not None for field in required_fields)
+        ]
+        valid_states.sort(key=lambda state: state.bucket_start)
+        if len(valid_states) < warmup_buckets:
+            continue
+        window = valid_states[-warmup_buckets:]
+        if window[-1].bucket_start != cutover_at:
+            continue
+        if any(
+            current.bucket_start - previous.bucket_start != interval
+            for previous, current in zip(window, window[1:], strict=False)
+        ):
+            continue
+        complete.add(symbol)
+    return frozenset(complete)
+
+
 async def warm_live_strategy(
     *,
     strategy: LiveRuntimeStrategy,
@@ -181,10 +231,29 @@ async def warm_live_strategy(
             break
     if not expected_symbols:
         expected_symbols = frozenset(state.symbol for state in warmed_states)
-    validate_live_warmup_coverage(
+    complete_symbols = _symbols_with_complete_warmup(
         strategy=strategy,
         states=warmed_states,
         expected_symbols=expected_symbols,
+        cutover_at=warmup_end,
+    )
+    if expected_symbols and not complete_symbols:
+        raise RuntimeError(
+            "live strategy warmup incomplete: no symbol has a complete window "
+            f"at {warmup_end.isoformat()}"
+        )
+    deferred_symbols = expected_symbols - complete_symbols
+    if deferred_symbols:
+        log.warning(
+            "live_strategy_warmup_symbols_deferred",
+            deferred_count=len(deferred_symbols),
+            deferred_examples=sorted(deferred_symbols)[:8],
+            cutover_at=warmup_end.isoformat(),
+        )
+    validate_live_warmup_coverage(
+        strategy=strategy,
+        states=warmed_states,
+        expected_symbols=complete_symbols,
         cutover_at=warmup_end,
     )
     log.info(
@@ -240,10 +309,29 @@ async def restore_live_strategy_from_checkpoint(
     )
     for state in states:
         warm_market_state(state)
-    validate_live_warmup_coverage(
+    complete_symbols = _symbols_with_complete_warmup(
         strategy=strategy,
         states=states,
         expected_symbols=expected_symbols,
+        cutover_at=recovery_cutover,
+    )
+    if expected_symbols and not complete_symbols:
+        raise RuntimeError(
+            "live strategy warmup incomplete: no symbol has a complete window "
+            f"at {recovery_cutover.isoformat()}"
+        )
+    deferred_symbols = expected_symbols - complete_symbols
+    if deferred_symbols:
+        log.warning(
+            "live_strategy_warmup_symbols_deferred",
+            deferred_count=len(deferred_symbols),
+            deferred_examples=sorted(deferred_symbols)[:8],
+            cutover_at=recovery_cutover.isoformat(),
+        )
+    validate_live_warmup_coverage(
+        strategy=strategy,
+        states=states,
+        expected_symbols=complete_symbols,
         cutover_at=recovery_cutover,
     )
     compact_checkpoint = strategy.checkpoint(
