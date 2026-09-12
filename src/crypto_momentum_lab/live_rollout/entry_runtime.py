@@ -76,6 +76,7 @@ class LiveEntryRuntime:
         )
         self._entry_filter_cache: LiveEntryFilterCache | None = None
         self._entry_symbol_cache: LiveEntrySymbolCache | None = None
+        self._last_entry_universe_symbols: frozenset[str] = frozenset()
         if self._universe_repository is not None:
             universe_loader = self._load_entry_universe_data
             if ema_provider is not None:
@@ -164,6 +165,15 @@ class LiveEntryRuntime:
         if self._entry_symbol_cache is not None:
             await self._entry_symbol_cache.stop()
 
+    def entry_universe_count(self, observed_at: datetime) -> int:
+        """Return the latest in-memory entry-pool size without I/O."""
+
+        if self._entry_filter_cache is not None:
+            return len(self._entry_filter_cache.symbols_for(observed_at))
+        if self._entry_symbol_cache is not None:
+            return len(self._entry_symbol_cache.symbols_for(observed_at))
+        return len(self._last_entry_universe_symbols)
+
     async def warm_exchange(self, observed_at: datetime) -> None:
         initial_symbols: frozenset[str] = frozenset()
         if self._universe_repository is not None:
@@ -218,6 +228,7 @@ class LiveEntryRuntime:
         assert self._positive_gainer_top_count is not None
         snapshot = await self._universe_repository.load_snapshot_at(observed_at)
         if snapshot is None:
+            self._last_entry_universe_symbols = frozenset()
             return LiveEntryUniverseData(symbols=frozenset(), snapshot=None)
         symbols = frozenset(
             entry.symbol
@@ -226,6 +237,7 @@ class LiveEntryRuntime:
             ]
             if entry.utc_day_return > 0
         )
+        self._last_entry_universe_symbols = symbols
         return LiveEntryUniverseData(symbols=symbols, snapshot=snapshot)
 
     async def _load_entry_symbols_from_database(

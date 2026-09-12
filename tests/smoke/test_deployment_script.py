@@ -49,6 +49,20 @@ def test_deployment_script_is_valid_shell_and_has_recovery_guards() -> None:
     assert "logs --no-color --tail=200" in script
 
 
+def test_live_readiness_validator_embedded_python_is_valid() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    marker = "docker exec \"$container_id\" python -S -c '"
+    start = script.index(marker) + len(marker)
+    end = script.index("' \"$runtime_commit\"", start)
+
+    compile(script[start:end], "<live-readiness-validator>", "exec")
+    assert "verify_live_readiness" in script
+    assert "live-readiness" in script
+    assert "/run/cml/health/readiness" in script
+    assert "warmup symbol counts do not reconcile" in script
+    assert "phase=live-readiness" in script
+
+
 def test_deployment_script_loads_extra_live_overlay_only_when_needed() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     compose_start = script.index("has_running_compose_service()")
@@ -85,7 +99,7 @@ def test_live_overlay_detection_only_reports_running_extra_accounts(
         "  esac\n"
         "done\n"
         "case \",${RUNNING_EXTRA_SERVICES:-},\" in\n"
-        "  *,${service},*) printf 'container-id\\n' ;;\n"
+        "  *,${service},*) printf 'Up 1 second\\n' ;;\n"
         "esac\n",
         encoding="utf-8",
     )

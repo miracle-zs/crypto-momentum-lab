@@ -145,6 +145,7 @@ from crypto_momentum_lab.live_rollout.postgres_runtime import (
     poll_live_market_states,
 )
 from crypto_momentum_lab.live_rollout.profile import LiveOrderFlowImpulseProfile
+from crypto_momentum_lab.live_rollout.readiness import LiveReadinessPublisher
 from crypto_momentum_lab.live_rollout.resource_lifecycle import (
     LiveResourceLifecycle,
 )
@@ -1901,6 +1902,7 @@ async def _run_live_daemon(
     if not account_event_hub_url.strip():
         raise ValueError("account_event_hub_url must not be empty")
     health = LocalHealthWriter.from_environment()
+    live_readiness: LiveReadinessPublisher | None = None
 
     def mark_live_database_ok() -> None:
         if health is None:
@@ -1915,6 +1917,8 @@ async def _run_live_daemon(
             return
         try:
             health.heartbeat(database_ok=True)
+            if live_readiness is not None:
+                live_readiness.publish()
         except Exception:
             log.exception("live_health_marker_failed")
 
@@ -2194,6 +2198,19 @@ async def _run_live_daemon(
                 source_paths=(f"{market_state_source}:{market_environment}",),
             ),
         )
+        required_data = getattr(strategy, "required_data", None)
+        if not callable(required_data):
+            raise RuntimeError("live strategy does not expose required data")
+        live_readiness = LiveReadinessPublisher(
+            health=health,
+            account_label=account_label,
+            session_id=session_id,
+            strategy=strategy_name,
+            code_commit=git_commit_hash,
+            migration_revision=migration_revision,
+            entry_universe_target_count=entry_positive_gainer_top_count,
+            warmup_required_buckets=int(required_data().warmup_buckets),
+        )
         checkpoint = await checkpoint_repository.load_checkpoint(session_id)
         if checkpoint is not None:
             strategy.restore_checkpoint(checkpoint)
@@ -2216,6 +2233,7 @@ async def _run_live_daemon(
                 top_count=entry_positive_gainer_top_count,
                 cutover_at=startup_cutover.isoformat(),
             )
+            live_readiness.set_expected_warmup_symbols(startup_warmup_symbols)
         if market_state_source == "hub":
             startup_market_buffer = StartupMarketStateBuffer(
                 max_states=_LIVE_STARTUP_BUFFER_LIMIT
@@ -2259,6 +2277,7 @@ async def _run_live_daemon(
                     environment=market_environment,
                     cutover_at=startup_cutover,
                     warmup_symbols=startup_warmup_symbols,
+                    on_warmup_status=live_readiness.update_warmup,
                 )
             market_cursor = _cursor_after_market_bucket(startup_cutover)
         elif market_state_source == "postgres":
@@ -2269,6 +2288,7 @@ async def _run_live_daemon(
                 now=now,
                 cutover_at=startup_cutover,
                 warmup_symbols=startup_warmup_symbols,
+                on_warmup_status=live_readiness.update_warmup,
             )
         else:
             await _warm_live_strategy(
@@ -2278,6 +2298,15 @@ async def _run_live_daemon(
                 now=now,
                 cutover_at=startup_cutover,
                 warmup_symbols=startup_warmup_symbols,
+                on_warmup_status=live_readiness.update_warmup,
+            )
+        if (
+            checkpoint is not None
+            and not _checkpoint_needs_market_recovery(checkpoint)
+        ):
+            live_readiness.update_warmup_progress(
+                strategy,
+                expected_symbols=startup_warmup_symbols,
             )
         notional_cap, max_positions, max_loss, max_gross = live_limits_from_approval(
             approval=approval,
@@ -2308,6 +2337,11 @@ async def _run_live_daemon(
             margin_type=margin_type,
         )
         await entry_runtime.warm_exchange(now)
+        live_readiness.update_entry_gate(
+            entry_universe_count=entry_runtime.entry_universe_count(now),
+            entry_enabled=False,
+            entry_enabled_reason="entry_runtime_initializing",
+        )
         entry_filter_cache_required = entry_runtime.entry_filter_cache_required
         entry_symbol_cache_required = entry_runtime.entry_symbol_cache_required
         daemon_entry_symbol_loader = entry_runtime.entry_symbol_loader
@@ -2443,6 +2477,7 @@ async def _run_live_daemon(
         def refresh_entry_enabled() -> None:
             assert risk_control_runtime is not None
             assert control_plane_runtime is not None
+            assert entry_runtime is not None
             risk_blocked, risk_reason = risk_control_runtime.entry_gate()
             daemon.set_risk_control_entry_blocked(
                 risk_blocked,
@@ -2464,6 +2499,13 @@ async def _run_live_daemon(
                 account_snapshot_available=(
                     control_plane_runtime.account_snapshot_available
                 ),
+            )
+            live_readiness.update_entry_gate(
+                entry_universe_count=entry_runtime.entry_universe_count(
+                    datetime.now(tz=UTC)
+                ),
+                entry_enabled=daemon.entry_enabled,
+                entry_enabled_reason=daemon.entry_enabled_reason,
             )
 
         async def reacquire_live_lease(
@@ -2632,8 +2674,18 @@ async def _run_live_daemon(
                     source=quote_source,
                 )
             )
+        assert entry_runtime is not None
+        assert live_readiness is not None
         market_task = asyncio.create_task(
-            daemon.run(_observe_market_states(state_stream, latest_market_states))
+            daemon.run(
+                _observe_market_states(
+                    state_stream,
+                    latest_market_states,
+                    on_observed=live_readiness.observe_market_state,
+                    strategy=strategy,
+                    entry_universe_count=entry_runtime.entry_universe_count,
+                )
+            )
         )
         account_task = asyncio.create_task(
             account_event_runtime.run(account_source),
@@ -2786,9 +2838,22 @@ async def _run_live_daemon(
 async def _observe_market_states(
     states: AsyncIterable[MarketState15s],
     cache: LatestMarketStateCache,
+    *,
+    on_observed: Callable[..., None] | None = None,
+    strategy: object | None = None,
+    entry_universe_count: Callable[[datetime], int] | None = None,
 ) -> AsyncIterator[MarketState15s]:
     async for state in states:
         cache.observe(state)
+        if on_observed is not None and strategy is not None:
+            count = 0 if entry_universe_count is None else entry_universe_count(
+                state.bucket_start
+            )
+            on_observed(
+                state,
+                strategy=strategy,
+                entry_universe_count=count,
+            )
         yield state
 
 

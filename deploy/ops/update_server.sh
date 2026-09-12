@@ -22,7 +22,8 @@ Environment:
 
 The live profile is never touched unless --live is supplied. Live updates run
 preflight for every currently running account before restarting any live
-container. The additional-account overlay is loaded only when an account-2/3/4
+container, then verify each running strategy's structured readiness snapshot.
+The additional-account overlay is loaded only when an account-2/3/4
 service is already running; stopped accounts are not started implicitly.
 --refresh-approvals is an explicit opt-in that refreshes active approvals from
 the target runtime while preserving their existing limits and operator fields;
@@ -947,6 +948,106 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
         </dev/null
   }
 
+  verify_live_readiness() {
+    local service="$1"
+    local account="$2"
+    local container_id
+    failure_service="$service"
+    container_id="$("${compose[@]}" ps -q "$service" 2>/dev/null || true)"
+    if [[ -z "$container_id" ]]; then
+      echo "live readiness verification failed: service=$service has no container" >&2
+      return 1
+    fi
+    run_with_timeout "live-readiness:$account" "$deploy_operation_timeout" \
+      docker exec "$container_id" python -S -c '
+import json
+from pathlib import Path
+import sys
+
+expected_commit, expected_account, expected_migration = sys.argv[1:4]
+path = Path("/run/cml/health/readiness")
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except Exception as error:
+    raise SystemExit(f"cannot read readiness: {type(error).__name__}") from error
+
+required = (
+    "schema_version",
+    "account_label",
+    "session_id",
+    "strategy",
+    "code_commit",
+    "migration_revision",
+    "entry_universe_target_count",
+    "entry_universe_count",
+    "warmup_required_buckets",
+    "warmup_expected_symbols",
+    "warmup_complete_symbols",
+    "warmup_deferred_symbols",
+    "latest_market_state_age_seconds",
+    "entry_enabled",
+    "entry_enabled_reason",
+)
+missing = [key for key in required if key not in payload]
+if missing:
+    raise SystemExit("readiness schema missing: " + ",".join(missing))
+schema_version = payload["schema_version"]
+account_label = payload["account_label"]
+code_commit = payload["code_commit"]
+migration_revision = payload["migration_revision"]
+if schema_version != 1:
+    raise SystemExit(f"unsupported readiness schema: {schema_version}")
+if account_label != expected_account:
+    raise SystemExit(f"readiness account mismatch: {account_label}")
+if code_commit.lower() != expected_commit.lower():
+    raise SystemExit(f"readiness commit mismatch: {code_commit}")
+if migration_revision != expected_migration:
+    raise SystemExit(f"readiness migration mismatch: {migration_revision}")
+
+def nonnegative_int(key):
+    value = payload[key]
+    if type(value) is not int or value < 0:
+        raise SystemExit(f"readiness field must be a nonnegative integer: {key}")
+    return value
+
+target = payload["entry_universe_target_count"]
+if target is not None and (type(target) is not int or target <= 0):
+    raise SystemExit("readiness entry_universe_target_count is invalid")
+entry_count = nonnegative_int("entry_universe_count")
+expected = nonnegative_int("warmup_expected_symbols")
+complete = nonnegative_int("warmup_complete_symbols")
+deferred = nonnegative_int("warmup_deferred_symbols")
+required_buckets = nonnegative_int("warmup_required_buckets")
+if required_buckets == 0:
+    raise SystemExit("readiness warmup_required_buckets is zero")
+if complete + deferred != expected:
+    raise SystemExit("readiness warmup symbol counts do not reconcile")
+if target is not None and entry_count > target:
+    raise SystemExit("readiness entry universe exceeds configured top count")
+entry_enabled = payload["entry_enabled"]
+entry_reason = payload["entry_enabled_reason"]
+if type(entry_enabled) is not bool:
+    raise SystemExit("readiness entry_enabled is invalid")
+if not isinstance(entry_reason, str):
+    raise SystemExit("readiness entry_enabled_reason is invalid")
+age = payload["latest_market_state_age_seconds"]
+if age is not None and (type(age) not in (int, float) or age < 0):
+    raise SystemExit("readiness latest_market_state_age_seconds is invalid")
+target_label = "unbounded" if target is None else str(target)
+
+print(
+    "live_readiness"
+    f" account={account_label}"
+    f" entry_universe={entry_count}/{target_label}"
+    f" warmup={complete}/{expected}"
+    f" deferred={deferred}"
+    f" entry_enabled={str(entry_enabled).lower()}"
+    f" reason={entry_reason}"
+    f" latest_market_state_age_seconds={age}"
+)
+' "$runtime_commit" "$account" "$(migration_revision_for_account "$account")"
+  }
+
   run_parallel_pairs() {
     local action="$1"
     shift
@@ -1293,6 +1394,14 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   else
     echo "phase=strategy skipped no_active_services=1"
   fi
+  live_readiness_started_at="$(date +%s)"
+  for pair in "${live_pairs[@]}"; do
+    IFS=: read -r account execution_service strategy_service <<<"$pair"
+    if is_live_service_active "$strategy_service"; then
+      verify_live_readiness "$strategy_service" "$account"
+    fi
+  done
+  echo "phase=live-readiness elapsed_seconds=$(( $(date +%s) - live_readiness_started_at ))"
   verification_services+=(
     "${execution_candidates[@]}"
     "${strategy_candidates[@]}"

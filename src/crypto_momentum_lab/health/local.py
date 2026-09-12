@@ -8,13 +8,16 @@ writes. The shell healthcheck only reads their contents and modification times.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 
 _HEALTH_DIR_ENV = "CML_LOCAL_HEALTH_DIR"
 _STATUS_FILE = "status"
 _DATABASE_FILE = "database"
+_READINESS_FILE = "readiness"
 
 
 class LocalHealthWriter:
@@ -31,6 +34,7 @@ class LocalHealthWriter:
         self._directory = directory
         self._status_path = directory / _STATUS_FILE
         self._database_path = directory / _DATABASE_FILE
+        self._readiness_path = directory / _READINESS_FILE
         directory.mkdir(parents=True, exist_ok=True)
         self.reset()
 
@@ -57,10 +61,15 @@ class LocalHealthWriter:
     def database_path(self) -> Path:
         return self._database_path
 
+    @property
+    def readiness_path(self) -> Path:
+        return self._readiness_path
+
     def reset(self) -> None:
         """Remove stale readiness from a previous process and enter starting."""
 
         self._database_path.unlink(missing_ok=True)
+        self._readiness_path.unlink(missing_ok=True)
         self._write_atomic(self._status_path, "starting\n")
 
     def heartbeat(self, *, database_ok: bool = False) -> None:
@@ -78,6 +87,18 @@ class LocalHealthWriter:
         """Record that an existing database operation completed successfully."""
 
         self._write_atomic(self._database_path, "ok\n")
+
+    def write_readiness(self, payload: Mapping[str, object]) -> None:
+        """Atomically publish a JSON business-readiness snapshot."""
+
+        content = json.dumps(
+            dict(payload),
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self._write_atomic(self._readiness_path, f"{content}\n")
 
     def degraded(self) -> None:
         """Stop advertising readiness while allowing the process to recover."""

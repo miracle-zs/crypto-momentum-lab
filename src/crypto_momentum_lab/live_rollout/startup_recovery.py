@@ -1,6 +1,6 @@
 """Warmup and checkpoint recovery for live strategy startup."""
 
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 
@@ -9,6 +9,7 @@ import structlog
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
 from crypto_momentum_lab.live_rollout.daemon import LiveRuntimeStrategy
+from crypto_momentum_lab.live_rollout.readiness import LiveWarmupStatus
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
     RuntimeStateCursor,
@@ -19,6 +20,8 @@ log = structlog.get_logger()
 MIN_WARMUP_SECONDS = 60
 WARMUP_STATE_LIMIT = 100_000
 WARMUP_BATCH_SIZE = 5_000
+
+WarmupStatusCallback = Callable[[LiveWarmupStatus], None]
 
 
 def live_market_state_cutover(now: datetime) -> datetime:
@@ -212,6 +215,7 @@ async def warm_live_strategy(
     now: datetime,
     cutover_at: datetime | None = None,
     warmup_symbols: Collection[str] | None = None,
+    on_warmup_status: WarmupStatusCallback | None = None,
 ) -> RuntimeStateCursor:
     warm_market_state = getattr(strategy, "warm_market_state", None)
     if not callable(warm_market_state):
@@ -277,6 +281,13 @@ async def warm_live_strategy(
         cutover_at=warmup_end,
     )
     deferred_symbols = expected_symbols - complete_symbols
+    _notify_warmup_status(
+        on_warmup_status,
+        required_buckets=_required_warmup_buckets(strategy),
+        expected_symbols=expected_symbols,
+        complete_symbols=complete_symbols,
+        cutover_at=warmup_end,
+    )
     if deferred_symbols:
         log.warning(
             "live_strategy_warmup_symbols_deferred",
@@ -311,6 +322,7 @@ async def restore_live_strategy_from_checkpoint(
     environment: str,
     cutover_at: datetime | None = None,
     warmup_symbols: Collection[str] | None = None,
+    on_warmup_status: WarmupStatusCallback | None = None,
 ) -> Mapping[str, datetime]:
     warm_market_state = getattr(strategy, "warm_market_state", None)
     if not callable(warm_market_state):
@@ -360,6 +372,13 @@ async def restore_live_strategy_from_checkpoint(
         cutover_at=recovery_cutover,
     )
     deferred_symbols = expected_symbols - complete_symbols
+    _notify_warmup_status(
+        on_warmup_status,
+        required_buckets=_required_warmup_buckets(strategy),
+        expected_symbols=expected_symbols,
+        complete_symbols=complete_symbols,
+        cutover_at=recovery_cutover,
+    )
     if deferred_symbols:
         log.warning(
             "live_strategy_warmup_symbols_deferred",
@@ -418,6 +437,8 @@ async def warm_live_strategy_then_start_fresh(
     environment: str,
     now: datetime,
     cutover_at: datetime | None = None,
+    warmup_symbols: Collection[str] | None = None,
+    on_warmup_status: WarmupStatusCallback | None = None,
 ) -> RuntimeStateCursor:
     """Warm historical state, then continue from the current live boundary."""
     warmup_end = cutover_at or live_market_state_cutover(now)
@@ -427,8 +448,43 @@ async def warm_live_strategy_then_start_fresh(
         environment=environment,
         now=now,
         cutover_at=warmup_end,
+        warmup_symbols=warmup_symbols,
+        on_warmup_status=on_warmup_status,
     )
     return cursor_after_market_bucket(warmup_end)
+
+
+def _notify_warmup_status(
+    callback: WarmupStatusCallback | None,
+    *,
+    required_buckets: int,
+    expected_symbols: Collection[str],
+    complete_symbols: Collection[str],
+    cutover_at: datetime,
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(
+            LiveWarmupStatus(
+                required_buckets=required_buckets,
+                expected_symbols=frozenset(expected_symbols),
+                complete_symbols=frozenset(complete_symbols),
+                cutover_at=cutover_at,
+            )
+        )
+    except Exception as error:
+        log.warning(
+            "live_warmup_status_publish_failed",
+            error_type=type(error).__name__,
+        )
+
+
+def _required_warmup_buckets(strategy: LiveRuntimeStrategy) -> int:
+    required_data = getattr(strategy, "required_data", None)
+    if not callable(required_data):
+        return 1
+    return max(1, int(required_data().warmup_buckets))
 
 
 __all__ = [
@@ -440,6 +496,7 @@ __all__ = [
     "restore_live_strategy_from_checkpoint",
     "strategy_last_processed_at_by_symbol",
     "validate_live_warmup_coverage",
+    "WarmupStatusCallback",
     "warm_live_strategy",
     "warm_live_strategy_then_start_fresh",
 ]

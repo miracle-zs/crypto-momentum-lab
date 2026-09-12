@@ -1313,16 +1313,23 @@ async def test_live_warmup_defers_symbols_without_a_complete_window() -> None:
         async def load_after(self, **kwargs):
             return states
 
+    statuses = []
     cursor = await warm_live_strategy(
         strategy=Strategy(),
         repository=Repository(),
         environment="research",
         now=now,
         cutover_at=now - timedelta(seconds=15),
+        on_warmup_status=statuses.append,
     )
 
     assert cursor.bucket_start == states[-1].bucket_start
     assert cursor.symbol == states[-1].symbol
+    assert len(statuses) == 1
+    assert statuses[0].required_buckets == 3
+    assert statuses[0].expected_symbols == {"BTCUSDT", "NEWUSDT"}
+    assert statuses[0].complete_symbols == {"BTCUSDT"}
+    assert statuses[0].deferred_symbols == {"NEWUSDT"}
 
 
 @pytest.mark.asyncio
