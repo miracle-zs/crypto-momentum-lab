@@ -131,7 +131,16 @@ accounts:
     monkeypatch.setattr(
         main,
         "_resolve_live_cli_credentials",
-        lambda **_: SimpleNamespace(api_key="test-key", api_secret="test-secret"),
+        lambda **_: SimpleNamespace(
+            api_key="test-key",
+            api_secret="test-secret",
+            metadata=lambda: {
+                "credential_role": "trade",
+                "api_key_env": "BINANCE_TRADE_API_KEY",
+                "api_secret_env": "BINANCE_TRADE_API_SECRET",
+                "api_key_fingerprint": "test-fingerprint",
+            },
+        ),
     )
 
     result = runner.invoke(

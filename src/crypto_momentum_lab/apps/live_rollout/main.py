@@ -1544,6 +1544,13 @@ def run_command(
         api_secret_env=api_secret_env,
         allow_legacy_fallback=allow_legacy_credential_fallback,
     )
+    log.info(
+        "binance_credentials_resolved",
+        command="live-run",
+        environment="live",
+        account_label=account_label,
+        **credentials.metadata(),
+    )
 
     async def run_once() -> LiveDaemonResult:
         return await _run_live_daemon(

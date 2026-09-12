@@ -49,7 +49,8 @@ either role.  The read key must not have order-trading permission.
    reconciliation, and order submission before removing the compatibility
    fallback.
 5. Record the key role and a non-secret key fingerprint in startup metadata;
-   never log the key or secret itself.
+   never log the key or secret itself. The long-running `sync` and `run`
+   commands now emit this structured metadata at startup.
 
 ## Rollback
 

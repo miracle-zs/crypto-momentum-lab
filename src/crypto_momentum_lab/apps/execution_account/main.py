@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Annotated
 
+import structlog
 import typer
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -55,6 +56,7 @@ from crypto_momentum_lab.persistence.postgres import (
 )
 
 app = typer.Typer(no_args_is_help=True)
+log = structlog.get_logger()
 
 _DEFAULT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS = 6 * 60 * 60
 
@@ -131,11 +133,19 @@ def sync_once_command(
         api_secret_env=api_secret_env,
         allow_legacy_fallback=allow_legacy_credential_fallback,
     )
+    resolved_account_label = _resolve_account_label(account_label)
+    log.info(
+        "binance_credentials_resolved",
+        command="sync-once",
+        environment=environment,
+        account_label=resolved_account_label,
+        **credentials.metadata(),
+    )
     result = asyncio.run(
         sync_once(
             database_url=resolved_database_url,
             environment=environment,
-            account_label=_resolve_account_label(account_label),
+            account_label=resolved_account_label,
             base_url=base_url,
             api_key=credentials.api_key,
             api_secret=credentials.api_secret,
@@ -306,11 +316,19 @@ def sync_command(
         api_secret_env=api_secret_env,
         allow_legacy_fallback=allow_legacy_credential_fallback,
     )
+    resolved_account_label = _resolve_account_label(account_label)
+    log.info(
+        "binance_credentials_resolved",
+        command="sync",
+        environment=environment,
+        account_label=resolved_account_label,
+        **credentials.metadata(),
+    )
     asyncio.run(
         sync_continuously(
             database_url=resolved_database_url,
             environment=environment,
-            account_label=_resolve_account_label(account_label),
+            account_label=resolved_account_label,
             base_url=base_url,
             api_key=credentials.api_key,
             api_secret=credentials.api_secret,

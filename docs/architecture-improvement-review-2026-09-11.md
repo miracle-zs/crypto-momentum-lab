@@ -29,6 +29,11 @@
 | 热路径 | Market/Account Hub 移除了正常行情/账户增量的数据库传输；PostgreSQL 仍承担控制面、执行上下文和 durable authority，不只是 recovery adapter |
 | 确定性 | 策略 core 共享；config hash / code commit 纳入 preflight |
 
+凭证边界的仓库侧还补上了启动可审计性：`execution-account sync` 使用 read
+role，`live-strategy run` 使用 trade role，两个入口只记录 credential role、环境变量名
+和非秘密 fingerprint，不记录 key/secret。Binance 控制台中 read key 的实际权限仍需
+由运维按 ADR 验收，不能由应用日志替代。
+
 竞态审查（2026-09-11）表明：3 月 P1 与本轮 #1–#7 的**代码保护已基本落地**。当前阶段的主要矛盾不再是「缺某一条 if」，而是：
 
 1. **演进成本**：`live_rollout` 决策巨石继续膨胀，每修一个并发洞都在加厚同一个类；

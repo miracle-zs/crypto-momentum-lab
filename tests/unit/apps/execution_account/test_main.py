@@ -65,3 +65,23 @@ def test_execution_account_can_use_legacy_credentials_only_with_explicit_flag(
     )
     assert resolved.api_key == "legacy-key"
     assert resolved.api_key_env == "BINANCE_API_KEY"
+
+
+def test_execution_account_credential_metadata_is_secret_free() -> None:
+    from crypto_momentum_lab.config import resolve_role_credentials
+
+    credentials = resolve_role_credentials(
+        BinanceCredentialRole.READ,
+        environ={
+            "BINANCE_READ_API_KEY": "read-key-value",
+            "BINANCE_READ_API_SECRET": "read-secret-value",
+        },
+    )
+
+    metadata = credentials.metadata()
+
+    assert metadata["credential_role"] == "read"
+    assert metadata["api_key_env"] == "BINANCE_READ_API_KEY"
+    assert metadata["api_secret_env"] == "BINANCE_READ_API_SECRET"
+    assert "read-key-value" not in str(metadata)
+    assert "read-secret-value" not in str(metadata)
