@@ -9,6 +9,7 @@ from crypto_momentum_lab.execution_account.hub import AccountEvent
 from crypto_momentum_lab.live_rollout.daemon import LiveStrategyDaemon
 from crypto_momentum_lab.live_rollout.exit_channels import (
     DEFAULT_PENDING_POSITION_RETRY_DELAYS_SECONDS,
+    ORDER_IDENTITY_CONFLICT_REASON,
     is_pending_position_sync_failure,
     promote_pending_position_failure,
 )
@@ -27,6 +28,10 @@ from crypto_momentum_lab.live_rollout.telemetry import LiveTelemetrySink
 log = structlog.get_logger()
 
 
+def _never_order_identity_conflict(_error: Exception) -> bool:
+    return False
+
+
 class LiveAccountEventRuntime:
     """Reconcile and fan out account events without losing exit safety."""
 
@@ -40,6 +45,7 @@ class LiveAccountEventRuntime:
         run_id: str | None = None,
         telemetry: LiveTelemetrySink | None = None,
         is_transient_error: Callable[[Exception], bool],
+        is_order_identity_conflict: Callable[[Exception], bool] | None = None,
         on_exit_failure: Callable[[str, str | None], None] | None = None,
         on_account_snapshot: Callable[[AccountEvent], None] | None = None,
         pending_position_retry_delays: tuple[float, ...] = (
@@ -57,6 +63,9 @@ class LiveAccountEventRuntime:
         self._run_id = run_id
         self._telemetry = telemetry
         self._is_transient_error = is_transient_error
+        self._is_order_identity_conflict = (
+            is_order_identity_conflict or _never_order_identity_conflict
+        )
         self._on_exit_failure = on_exit_failure
         self._on_account_snapshot = on_account_snapshot
         self._pending_position_retry_delays = pending_position_retry_delays
@@ -145,6 +154,19 @@ class LiveAccountEventRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            if self._is_order_identity_conflict(error):
+                failure = ORDER_IDENTITY_CONFLICT_REASON
+                if self._on_exit_failure is not None:
+                    for symbol in event.symbols:
+                        self._on_exit_failure(symbol, failure)
+                log.warning(
+                    "live_account_event_processing_degraded",
+                    run_id=reconciliation_run_id,
+                    event_type=event.event_type,
+                    error_type=type(error).__name__,
+                    reason=failure,
+                )
+                return
             if not self._is_transient_error(error):
                 raise
             # The account stream itself is still healthy. Do not kill the

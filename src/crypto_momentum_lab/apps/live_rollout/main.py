@@ -317,6 +317,9 @@ _PENDING_POSITION_RETRY_DELAYS_SECONDS = (
     16.0,
     32.0,
 )
+_ORDER_IDENTITY_CONFLICT_MESSAGE = (
+    "client order ID is already bound to a different order"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2539,6 +2542,7 @@ async def _run_live_daemon(
             latest_market_quotes=latest_market_quotes,
             latest_market_states=latest_market_states,
             is_transient_error=_is_transient_live_runtime_error,
+            is_order_identity_conflict=_is_order_identity_conflict,
             on_exit_failure=on_exit_failure,
             pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
         )
@@ -2550,6 +2554,7 @@ async def _run_live_daemon(
             run_id=session_id,
             telemetry=telemetry,
             is_transient_error=_is_transient_live_runtime_error,
+            is_order_identity_conflict=_is_order_identity_conflict,
             on_exit_failure=on_exit_failure,
             on_account_snapshot=control_plane_runtime.on_account_snapshot,
             pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
@@ -2812,6 +2817,7 @@ async def _run_account_event_channel(
         run_id=run_id,
         telemetry=telemetry,
         is_transient_error=_is_transient_live_runtime_error,
+        is_order_identity_conflict=_is_order_identity_conflict,
         on_exit_failure=on_exit_failure,
         on_account_snapshot=on_account_snapshot,
         pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
@@ -2819,10 +2825,39 @@ async def _run_account_event_channel(
     await runtime.run(source)
 
 
+async def _run_grace_timeout_channel(
+    *,
+    daemon: LiveStrategyDaemon,
+    latest_market_states: LatestMarketStateCache,
+    latest_market_quotes: LatestMarketQuoteCache,
+    interval_seconds: float = 1.0,
+    on_exit_failure: Callable[[str, str | None], None] | None = None,
+) -> None:
+    """Keep the historical test/CLI seam backed by the extracted runtime."""
+
+    runtime = LiveExitChannelRuntime(
+        daemon=daemon,
+        latest_market_quotes=latest_market_quotes,
+        latest_market_states=latest_market_states,
+        is_transient_error=_is_transient_live_runtime_error,
+        is_order_identity_conflict=_is_order_identity_conflict,
+        on_exit_failure=on_exit_failure,
+        pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
+    )
+    await runtime.run_grace_timeout_channel(interval_seconds=interval_seconds)
+
+
 def _is_transient_live_runtime_error(error: Exception) -> bool:
     return isinstance(
         error,
         (SQLAlchemyError, TimeoutError, ConnectionError, OSError),
+    )
+
+
+def _is_order_identity_conflict(error: Exception) -> bool:
+    return (
+        isinstance(error, ValueError)
+        and str(error) == _ORDER_IDENTITY_CONFLICT_MESSAGE
     )
 
 

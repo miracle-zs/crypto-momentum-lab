@@ -128,6 +128,17 @@ def test_log_signals_alert_on_persist_failure_and_dead_task() -> None:
     assert all(isinstance(alert, Alert) for alert in alerts)
 
 
+def test_log_signals_alert_on_legacy_order_identity_conflict() -> None:
+    alerts = evaluate_log_signals(
+        LogSignals(legacy_order_identity_conflicts=1)
+    )
+
+    assert [alert.name for alert in alerts] == [
+        "live_legacy_order_identity_conflict"
+    ]
+    assert alerts[0].severity == "critical"
+
+
 def test_container_alerts_on_oom_and_rss_limit() -> None:
     alerts = evaluate_container(
         ContainerSnapshot(
@@ -428,9 +439,29 @@ def test_serverchan_config_and_payload(monkeypatch, tmp_path) -> None:
     assert _serverchan_endpoint(config.serverchan_sendkey).endswith(
         "/SCT-test-key.send"
     )
-    assert form["title"] == "CML告警: container_unhealthy"
-    assert "Live strategy is unhealthy" in form["desp"]
+    assert form["title"] == "CML | 严重 | primary | 服务健康检查失败"
+    assert "[严重] primary：服务健康检查失败" in form["desp"]
+    assert "2026-09-01 20:00:00（北京时间）" in form["desp"]
+    assert "对应服务可能无法正常处理行情、订单或账户任务。" in form["desp"]
     assert "live-strategy" in form["desp"]
+
+
+def test_serverchan_recovery_form_includes_duration_and_local_time() -> None:
+    form = _serverchan_form(
+        {
+            "event": "ops_alert_resolved",
+            "alert_name": "live_heartbeat_stale:account-2",
+            "observed_at": "2026-09-01T12:03:05+00:00",
+            "duration_seconds": 185.0,
+            "details": {"account_label": "account-2"},
+        }
+    )
+
+    assert form["title"] == "CML | 恢复 | account-2 | 实时策略心跳过期"
+    assert "[恢复] account-2：实时策略心跳过期" in form["desp"]
+    assert "2026-09-01 20:03:05（北京时间）" in form["desp"]
+    assert "持续时间**：3 分钟 5 秒" in form["desp"]
+    assert "live_heartbeat_stale:account-2" in form["desp"]
 
 
 def test_serverchan_form_is_url_encoded_for_post() -> None:
@@ -449,3 +480,142 @@ def test_serverchan_form_is_url_encoded_for_post() -> None:
 
     assert decoded["title"] == [form["title"]]
     assert decoded["desp"] == [form["desp"]]
+
+
+def test_resolution_payload_preserves_alert_context_and_duration(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    delivered: list[dict[str, object]] = []
+
+    def capture(_webhook, _sendkey, payload) -> None:
+        delivered.append(dict(payload))
+
+    monkeypatch.setattr(
+        "deploy.ops.cml_ops_monitor._deliver_notification",
+        capture,
+    )
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+    )
+
+    monitor._emit(
+        Alert(
+            "container_unhealthy",
+            "critical",
+            "service health failed",
+            {"service": "live-strategy-account-2"},
+        ),
+        now=100.0,
+    )
+    monitor._emit_resolutions(set(), now=160.0)
+
+    assert delivered[1]["event"] == "ops_alert_resolved"
+    assert delivered[1]["duration_seconds"] == 60.0
+    assert delivered[1]["details"] == {"service": "live-strategy-account-2"}
+
+
+def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
+    tmp_path,
+) -> None:
+    class Runner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def run(self, args, *, timeout_seconds):
+            del timeout_seconds
+            command = list(args)
+            self.calls.append(command)
+            if command[:3] == ["docker", "ps", "--filter"]:
+                service = command[3].rsplit("=", 1)[1]
+                if service == "live-strategy-account-2":
+                    return "account-2-container\n"
+                if service == "postgres":
+                    return "postgres-container\n"
+                return ""
+            if command[:2] == ["docker", "inspect"]:
+                return json.dumps(
+                    [
+                        {
+                            "State": {
+                                "Health": {"Status": "unhealthy"},
+                                "OOMKilled": False,
+                            },
+                            "RestartCount": 0,
+                            "HostConfig": {"Memory": 512 * 1024 * 1024},
+                        }
+                    ]
+                )
+            if command[:2] == ["docker", "stats"]:
+                return "10MiB / 512MiB\n"
+            if command[:2] == ["docker", "logs"]:
+                return ""
+            if command[:2] == ["docker", "exec"]:
+                return (
+                    "checkpoint_age\t12\n"
+                    "live_ready\ttrue\n"
+                    "pg_stat_statements\ttrue\n"
+                    "track_io_timing\ton\n"
+                    "track_wal_io_timing\ton\n"
+                    "parallel_maintenance\t0\n"
+                )
+            if command[:2] == ["docker", "compose"]:
+                return "restarted\n"
+            raise AssertionError(f"unexpected command: {command}")
+
+    now = [1000.0]
+    runner = Runner()
+    monitor = OpsMonitor(
+        MonitorConfig(
+            project_directory=tmp_path,
+            compose_file=tmp_path / "compose.yaml",
+            compose_files=(tmp_path / "compose.yaml",),
+            compose_profiles=("live",),
+            compose_env_file=None,
+            services=("live-strategy-account-2",),
+            live_accounts=(
+                ("account-2", "live-account-2-v1", "live-worker-account-2"),
+            ),
+            state_path=tmp_path / "state.json",
+            auto_restart_stale_live_services=True,
+            live_restart_cooldown_seconds=900.0,
+            live_restart_max_attempts=2,
+        ),
+        runner=runner,
+        clock=lambda: now[0],
+    )
+
+    first_alerts = monitor.run_once()
+    restart_commands = [
+        call
+        for call in runner.calls
+        if call[:2] == ["docker", "compose"]
+    ]
+    assert len(restart_commands) == 1
+    assert restart_commands[0][-2:] == ["restart", "live-strategy-account-2"]
+    assert any(
+        alert.name == "live_heartbeat_stale:account-2"
+        for alert in first_alerts
+    )
+
+    now[0] += 10
+    monitor.run_once()
+    assert len(
+        [call for call in runner.calls if call[:2] == ["docker", "compose"]]
+    ) == 1
+
+    now[0] += 900
+    monitor.run_once()
+    assert len(
+        [call for call in runner.calls if call[:2] == ["docker", "compose"]]
+    ) == 2
+
+    now[0] += 900
+    final_alerts = monitor.run_once()
+    assert len(
+        [call for call in runner.calls if call[:2] == ["docker", "compose"]]
+    ) == 2
+    assert any(
+        alert.name == "live_heartbeat_restart_suppressed:account-2"
+        for alert in final_alerts
+    )

@@ -28,6 +28,11 @@ DEFAULT_PENDING_POSITION_RETRY_DELAYS_SECONDS = (
     16.0,
     32.0,
 )
+ORDER_IDENTITY_CONFLICT_REASON = "order_identity_conflict"
+
+
+def _never_order_identity_conflict(_error: Exception) -> bool:
+    return False
 
 
 def is_pending_position_sync_failure(failure: str | None) -> bool:
@@ -57,6 +62,7 @@ class LiveExitChannelRuntime:
         latest_market_quotes: LatestMarketQuoteCache,
         latest_market_states: LatestMarketStateCache,
         is_transient_error: Callable[[Exception], bool],
+        is_order_identity_conflict: Callable[[Exception], bool] | None = None,
         on_exit_failure: Callable[[str, str | None], None] | None = None,
         pending_position_retry_delays: tuple[float, ...] = (
             DEFAULT_PENDING_POSITION_RETRY_DELAYS_SECONDS
@@ -70,6 +76,9 @@ class LiveExitChannelRuntime:
         self._latest_market_quotes = latest_market_quotes
         self._latest_market_states = latest_market_states
         self._is_transient_error = is_transient_error
+        self._is_order_identity_conflict = (
+            is_order_identity_conflict or _never_order_identity_conflict
+        )
         self._on_exit_failure = on_exit_failure
         self._pending_position_retry_delays = pending_position_retry_delays
 
@@ -89,12 +98,29 @@ class LiveExitChannelRuntime:
                 try:
                     failure = await self._daemon.process_market_quote(quote, state)
                 except Exception as error:
-                    if not self._is_transient_error(error):
+                    order_identity_conflict = self._is_order_identity_conflict(
+                        error
+                    )
+                    if not (
+                        self._is_transient_error(error)
+                        or order_identity_conflict
+                    ):
                         raise
+                    failure = (
+                        ORDER_IDENTITY_CONFLICT_REASON
+                        if order_identity_conflict
+                        else type(error).__name__
+                    )
+                    if (
+                        order_identity_conflict
+                        and self._on_exit_failure is not None
+                    ):
+                        self._on_exit_failure(quote.symbol, failure)
                     log.warning(
                         "live_market_quote_processing_degraded",
                         symbol=quote.symbol,
                         error_type=type(error).__name__,
+                        reason=failure,
                     )
                     continue
                 if failure is not None:
@@ -155,6 +181,9 @@ class LiveExitChannelRuntime:
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
+                    if self._is_order_identity_conflict(error):
+                        failure = ORDER_IDENTITY_CONFLICT_REASON
+                        break
                     if not self._is_transient_error(error):
                         raise
                     if attempt == 2:
@@ -244,6 +273,29 @@ class LiveExitChannelRuntime:
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
+                    if self._is_order_identity_conflict(error):
+                        failure = ORDER_IDENTITY_CONFLICT_REASON
+                        if self._on_exit_failure is not None:
+                            self._on_exit_failure(state.symbol, failure)
+                        retry_delay = min(
+                            retry_delay_by_symbol.get(state.symbol, 1.0),
+                            60.0,
+                        )
+                        retry_delay_by_symbol[state.symbol] = min(
+                            retry_delay * 2,
+                            60.0,
+                        )
+                        retry_at_by_symbol[state.symbol] = (
+                            asyncio.get_running_loop().time() + retry_delay
+                        )
+                        log.warning(
+                            "live_grace_timeout_processing_degraded",
+                            symbol=state.symbol,
+                            error_type=type(error).__name__,
+                            reason=failure,
+                            retry_delay_seconds=retry_delay,
+                        )
+                        continue
                     if not self._is_transient_error(error):
                         raise
                     log.warning(
@@ -291,6 +343,7 @@ class LiveExitChannelRuntime:
 
 __all__ = [
     "DEFAULT_PENDING_POSITION_RETRY_DELAYS_SECONDS",
+    "ORDER_IDENTITY_CONFLICT_REASON",
     "LiveExitChannelRuntime",
     "is_pending_position_sync_failure",
     "promote_pending_position_failure",

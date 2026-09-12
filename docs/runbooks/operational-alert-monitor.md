@@ -13,6 +13,9 @@ The monitor alerts on:
 - `live_runtime_telemetry_persist_failed` batches;
 - stale live checkpoint, session transition, or lease for the configured live
   run (order-lifecycle telemetry is intentionally not used as a heartbeat);
+- stale local heartbeat on a live strategy: the monitor raises an
+  account-specific critical alert and, by default, restarts only that
+  `live-strategy[-account]` service;
 - `market_data_connection_task_not_alive` records;
 - RSS/cgroup memory growth of at least 64 MiB in a 30-minute window;
 - missing `pg_stat_statements`, disabled I/O timing, or re-enabled parallel
@@ -40,6 +43,32 @@ or write access to PostgreSQL, Docker, Binance, or the operator API. A warning
 or critical status in an otherwise delivered heartbeat should also alert; the
 heartbeat is a liveness signal, not a replacement for local diagnosis.
 
+Server酱消息使用北京时间，并分成“告警”和“恢复”两类。告警正文先给出
+账户/服务、影响和已执行的处置，再附上内部事件编号和 JSON 技术详情；恢复消息
+会给出恢复时间和本次异常持续时长。例如：
+
+```text
+CML | 严重 | account-2 | 实时策略心跳过期
+
+[严重] account-2：实时策略心跳过期
+- 发生时间：2026-09-11 18:15:00（北京时间）
+- 影响：该账户的行情处理和开平仓任务可能已经停止。
+- 处置：已触发定向重启（第 1 次），等待健康检查恢复。
+- 事件编号：live_heartbeat_stale:account-2
+```
+
+告警同时保留在 journald 中。Server酱负责通知，不代表每一条普通交易日志或
+策略信号都会单独推送；整机断电/断网仍需要 trading host 之外的第二个监控源。
+
+Live heartbeat recovery is bounded per account and per stale incident: it
+waits 15 minutes between restart attempts and stops after three attempts. A
+successful health check clears the stale/recovery alerts and resets that
+account's restart budget. Set
+`CML_AUTO_RESTART_STALE_LIVE_SERVICES=false` in
+`/etc/crypto-momentum-lab/ops-monitor.env` to keep this path alert-only; the
+cooldown and attempt limit can be changed with
+`CML_LIVE_RESTART_COOLDOWN_SECONDS` and `CML_LIVE_RESTART_MAX_ATTEMPTS`.
+
 Install or refresh it after pulling a release:
 
 ```bash
@@ -65,10 +94,12 @@ systemctl status cml-ops-monitor.service --no-pager
 
 The monitor keeps a small state file at
 `/var/lib/crypto-momentum-lab/ops-monitor.json` for alert de-duplication and
-RSS trend samples. It never changes Docker or PostgreSQL state.
+RSS trend samples and per-account restart budgets. It changes Docker state
+only by restarting the affected live strategy when the bounded recovery path
+above is enabled; it never changes PostgreSQL state.
 
 This monitor runs on the trading server itself. It can notify when the
-`live-strategy` container is missing, unhealthy, OOM-killed, or no longer
-producing a fresh live checkpoint. If the entire server loses power or network
-connectivity, the configured external heartbeat checker is responsible for
-sending the missed-heartbeat notification.
+`live-strategy[-account]` container is missing, unhealthy, OOM-killed, or no
+longer producing a fresh live checkpoint. If the entire server loses power or
+network connectivity, a second monitor outside this host is required to send
+that notification.

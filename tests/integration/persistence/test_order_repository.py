@@ -230,6 +230,82 @@ async def test_prepare_submission_journals_intent_order_and_event_together(
     assert event_states == [ExchangeOrderState.SUBMITTING.value]
 
 
+async def test_prepare_reuses_active_reduce_only_intent_after_reprice(
+    order_repository,
+) -> None:
+    repository, factory = order_repository
+    intent = replace(
+        _intent(),
+        reduce_only=True,
+        features={
+            "position_side": "LONG",
+            "opened_at": NOW.isoformat(),
+        },
+    )
+    evaluation = _evaluation(intent, "evaluation-exit-1")
+    first_plan = replace(
+        _plan(),
+        intent_id=intent.candidate_id,
+        client_order_id="cml_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("0.001"),
+        price=Decimal("100"),
+        reduce_only=True,
+        position_side=FuturesPositionSide.LONG,
+        time_in_force="GTC",
+        expires_at=NOW + timedelta(minutes=1),
+    )
+
+    assert (
+        await repository.prepare_submission(
+            intent=intent,
+            evaluation=evaluation,
+            plan=first_plan,
+            prepared_at=NOW + timedelta(seconds=1),
+        )
+        is not None
+    )
+    await repository.append_order_event(
+        ExchangeOrderEvent(
+            event_id="exit-ack",
+            client_order_id=first_plan.client_order_id,
+            state=ExchangeOrderState.ACKNOWLEDGED,
+            occurred_at=NOW + timedelta(seconds=2),
+            exchange_order_id="exchange-exit-1",
+            details={},
+        )
+    )
+
+    repriced_plan = replace(
+        first_plan,
+        order_type="MARKET",
+        price=None,
+        time_in_force=None,
+        expires_at=None,
+        created_at=NOW + timedelta(seconds=3),
+    )
+    assert (
+        await repository.prepare_submission(
+            intent=intent,
+            evaluation=evaluation,
+            plan=repriced_plan,
+            prepared_at=NOW + timedelta(seconds=3),
+        )
+        is None
+    )
+
+    async with factory() as session:
+        row = await session.get(
+            ExchangeOrderRow,
+            first_plan.client_order_id,
+        )
+    assert row is not None
+    assert row.state == ExchangeOrderState.ACKNOWLEDGED.value
+    assert row.price == Decimal("100")
+    assert row.exchange_order_id == "exchange-exit-1"
+
+
 async def test_concurrent_prepare_grants_only_one_submission(order_repository) -> None:
     repository, factory = order_repository
     evaluation = RiskEvaluation(
