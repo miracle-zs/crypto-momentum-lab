@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterable, Awaitable, Callable
 
+import structlog
+
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.live_rollout.checkpoint_coordinator import (
     LiveCheckpointCoordinator,
@@ -20,6 +22,9 @@ from crypto_momentum_lab.live_rollout.market_loop import (
 from crypto_momentum_lab.live_rollout.scheduled_controller import (
     ScheduledRiskWindowController,
 )
+
+log = structlog.get_logger()
+_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 
 class LiveDaemonLifecycle:
@@ -38,9 +43,12 @@ class LiveDaemonLifecycle:
             [AsyncIterable[MarketState15s]], Awaitable[LiveDaemonResult]
         ],
         set_run_active: Callable[[bool], None],
+        shutdown_timeout_seconds: float = _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
+        if shutdown_timeout_seconds <= 0:
+            raise ValueError("shutdown_timeout_seconds must be positive")
         self._run_id = run_id
         self._checkpoint_coordinator = checkpoint_coordinator
         self._exit_lane = exit_lane
@@ -49,6 +57,7 @@ class LiveDaemonLifecycle:
         self._scheduled_risk_window_enabled = scheduled_risk_window_enabled
         self._run_market_loop = run_market_loop
         self._set_run_active = set_run_active
+        self._shutdown_timeout_seconds = shutdown_timeout_seconds
 
     async def run(
         self,
@@ -71,13 +80,61 @@ class LiveDaemonLifecycle:
         finally:
             if scheduled_task is not None:
                 scheduled_task.cancel()
-                await asyncio.gather(
-                    scheduled_task,
-                    return_exceptions=True,
-                )
+                try:
+                    async with asyncio.timeout(self._shutdown_timeout_seconds):
+                        await asyncio.gather(
+                            scheduled_task,
+                            return_exceptions=True,
+                        )
+                except TimeoutError:
+                    log.warning(
+                        "live_scheduled_controller_shutdown_timed_out",
+                        run_id=self._run_id,
+                        timeout_seconds=self._shutdown_timeout_seconds,
+                    )
+                except asyncio.CancelledError:
+                    raise
             if self._exit_manager is not None:
-                exit_outcome = await self._exit_lane.stop()
-            await self._checkpoint_coordinator.stop()
+                try:
+                    async with asyncio.timeout(self._shutdown_timeout_seconds):
+                        exit_outcome = await self._exit_lane.stop()
+                except TimeoutError:
+                    log.warning(
+                        "live_exit_lane_shutdown_timed_out",
+                        run_id=self._run_id,
+                        timeout_seconds=self._shutdown_timeout_seconds,
+                    )
+                    exit_outcome = ExitLaneOutcome(
+                        failure="exit_lane_shutdown_timed_out",
+                        fatal_failure=True,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception(
+                        "live_exit_lane_shutdown_failed",
+                        run_id=self._run_id,
+                    )
+                    exit_outcome = ExitLaneOutcome(
+                        failure="exit_lane_shutdown_failed",
+                        fatal_failure=True,
+                    )
+            try:
+                async with asyncio.timeout(self._shutdown_timeout_seconds):
+                    await self._checkpoint_coordinator.stop()
+            except TimeoutError:
+                log.warning(
+                    "live_checkpoint_shutdown_timed_out",
+                    run_id=self._run_id,
+                    timeout_seconds=self._shutdown_timeout_seconds,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception(
+                    "live_checkpoint_shutdown_failed",
+                    run_id=self._run_id,
+                )
             self._set_run_active(False)
         if result is None:
             raise RuntimeError("live daemon stopped without a result")

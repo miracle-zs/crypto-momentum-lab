@@ -158,11 +158,24 @@ class CheckpointWriter:
         task = self._task
         if task is None:
             return
-        await self.flush()
-        self._stopping = True
-        self._wake.set()
-        await asyncio.gather(task, return_exceptions=True)
-        self._task = None
+        try:
+            await self.flush()
+            self._stopping = True
+            self._wake.set()
+            await asyncio.gather(task, return_exceptions=True)
+        except asyncio.CancelledError:
+            self._stopping = True
+            self._pending = None
+            self._wake.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            self._inflight = False
+            self._idle.set()
+            self._task = None
+            raise
+        else:
+            self._task = None
 
     async def _wait_until_idle(self) -> None:
         while self._pending is not None or self._inflight:

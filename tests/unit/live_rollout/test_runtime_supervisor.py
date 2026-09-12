@@ -29,12 +29,14 @@ async def _close_nothing() -> None:
 def _runtime_tasks(
     *,
     account: asyncio.Task[None],
+    shutdown: asyncio.Task[None] | None = None,
 ) -> LiveRuntimeTasks:
     return LiveRuntimeTasks(
         market=asyncio.create_task(_wait_for_market_result()),
         account=account,
         lease=asyncio.create_task(_wait_forever()),
         reconcile=asyncio.create_task(_wait_forever()),
+        shutdown=shutdown,
     )
 
 
@@ -82,4 +84,46 @@ async def test_supervisor_shutdown_preserves_safety_order_and_is_idempotent() ->
         "close-risk-control",
         "stop-entry-caches",
     ]
+    assert all(task.done() for task in tasks.all_tasks())
+
+
+async def test_supervisor_returns_when_shutdown_is_requested() -> None:
+    shutdown_requested = asyncio.Event()
+    shutdown_task = asyncio.create_task(shutdown_requested.wait())
+    tasks = _runtime_tasks(
+        account=asyncio.create_task(_wait_forever()),
+        shutdown=shutdown_task,
+    )
+    supervisor = LiveRuntimeSupervisor(
+        tasks=tasks,
+        block_entry_submissions=lambda: None,
+        stop_sources=lambda: None,
+        close_risk_control=_close_nothing,
+        stop_entry_caches=_close_nothing,
+    )
+
+    shutdown_requested.set()
+    result = await supervisor.run()
+
+    assert result.halt_reason == "shutdown_requested"
+    await supervisor.stop()
+
+
+async def test_supervisor_bounds_shutdown_phases_and_joins_tasks() -> None:
+    tasks = _runtime_tasks(account=asyncio.create_task(_wait_forever()))
+
+    async def hang_during_shutdown() -> None:
+        await asyncio.Event().wait()
+
+    supervisor = LiveRuntimeSupervisor(
+        tasks=tasks,
+        block_entry_submissions=lambda: None,
+        stop_sources=lambda: None,
+        close_risk_control=hang_during_shutdown,
+        stop_entry_caches=_close_nothing,
+        shutdown_timeout_seconds=0.01,
+    )
+
+    await supervisor.stop()
+
     assert all(task.done() for task in tasks.all_tasks())

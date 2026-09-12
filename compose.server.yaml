@@ -633,7 +633,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 2m
-    stop_grace_period: 60s
+    stop_grace_period: 90s
     # Observed usage is below 200 MiB; 1 GiB was over-provisioned on this host.
     mem_limit: 512m
     memswap_limit: 768m

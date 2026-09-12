@@ -37,6 +37,13 @@ class FakeExitLane:
         )
 
 
+class HangingExitLane(FakeExitLane):
+    async def stop(self) -> ExitLaneOutcome:
+        self.events.append("exit_stop_started")
+        await asyncio.Event().wait()
+        raise AssertionError("hanging exit lane should be timed out")
+
+
 class FakeScheduledController:
     approved_intent_count = 4
     submitted_order_count = 5
@@ -123,5 +130,35 @@ async def test_lifecycle_stops_lanes_when_market_loop_fails() -> None:
         "checkpoint_start",
         "exit_start",
         "exit_stop",
+        "checkpoint_stop",
+    ]
+
+
+async def test_lifecycle_bounds_exit_lane_shutdown() -> None:
+    events: list[str] = []
+
+    async def run_market_loop(states) -> LiveDaemonResult:
+        del states
+        return LiveDaemonResult(1, 0, 0, None, None)
+
+    lifecycle = LiveDaemonLifecycle(
+        run_id="run-1",
+        checkpoint_coordinator=cast(object, FakeCheckpointCoordinator(events)),
+        exit_lane=cast(object, HangingExitLane(events)),
+        exit_manager=cast(object, object()),
+        scheduled_controller=cast(object, FakeScheduledController(events)),
+        scheduled_risk_window_enabled=False,
+        run_market_loop=run_market_loop,
+        set_run_active=lambda _active: None,
+        shutdown_timeout_seconds=0.01,
+    )
+
+    result = await lifecycle.run(_empty_states())
+
+    assert result.halt_reason == "exit_lane_shutdown_timed_out"
+    assert events == [
+        "checkpoint_start",
+        "exit_start",
+        "exit_stop_started",
         "checkpoint_stop",
     ]

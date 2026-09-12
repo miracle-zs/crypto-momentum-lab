@@ -98,6 +98,7 @@ class ExitExecutionLane:
         self._market_workers: tuple[asyncio.Task[None], ...] = ()
         self._quote_workers: tuple[asyncio.Task[None], ...] = ()
         self._idle: asyncio.Event | None = None
+        self._pending_completions: set[asyncio.Future[ExitLaneOutcome]] = set()
         self._outstanding_work = 0
         self._outcome = ExitLaneOutcome()
 
@@ -122,6 +123,7 @@ class ExitExecutionLane:
         self._market_enqueued = set()
         self._quote_latest = {}
         self._quote_enqueued = set()
+        self._pending_completions = set()
         self._outstanding_work = 0
         self._outcome = ExitLaneOutcome()
         self._idle = asyncio.Event()
@@ -156,6 +158,8 @@ class ExitExecutionLane:
         completion: asyncio.Future[ExitLaneOutcome] = (
             asyncio.get_running_loop().create_future()
         )
+        self._pending_completions.add(completion)
+        completion.add_done_callback(self._pending_completions.discard)
         self._outstanding_work += 1
         self._idle.clear()
         await self._account_queue.put(_ExitLaneWork(state, context, completion))
@@ -200,6 +204,8 @@ class ExitExecutionLane:
         completion: asyncio.Future[ExitLaneOutcome] | None = None
         if wait:
             completion = asyncio.get_running_loop().create_future()
+            self._pending_completions.add(completion)
+            completion.add_done_callback(self._pending_completions.discard)
         async with self._market_state_lock:
             if quote.symbol not in self._quote_latest:
                 self._outstanding_work += 1
@@ -220,32 +226,36 @@ class ExitExecutionLane:
     async def stop(self) -> ExitLaneOutcome:
         if not self._started:
             return ExitLaneOutcome()
-        await self.drain()
         account_queue = self._account_queue
         market_queue = self._market_queue
         quote_queue = self._quote_queue
         account_worker = self._account_worker
         market_workers = self._market_workers
         quote_workers = self._quote_workers
-        if account_queue is not None:
-            account_queue.put_nowait(None)
-        if market_queue is not None:
-            for _ in market_workers:
-                market_queue.put_nowait(None)
-        if quote_queue is not None:
-            for _ in quote_workers:
-                quote_queue.put_nowait(None)
         workers: tuple[asyncio.Task[None], ...] = (
             (account_worker,) if account_worker is not None else ()
         )
         workers += market_workers
         workers += quote_workers
-        if workers:
-            await asyncio.gather(*workers)
+        try:
+            await self.drain()
+            if account_queue is not None:
+                account_queue.put_nowait(None)
+            if market_queue is not None:
+                for _ in market_workers:
+                    market_queue.put_nowait(None)
+            if quote_queue is not None:
+                for _ in quote_workers:
+                    quote_queue.put_nowait(None)
+            if workers:
+                await asyncio.gather(*workers)
+        except asyncio.CancelledError:
+            await self._cancel_workers(workers)
+            self._cancel_pending_work()
+            self._reset_after_stop()
+            raise
         outcome = self._outcome
-        self._started = False
-        self._market_workers = ()
-        self._quote_workers = ()
+        self._reset_after_stop()
         return outcome
 
     async def drain(self) -> None:
@@ -352,3 +362,55 @@ class ExitExecutionLane:
     def _mark_idle_if_ready(self) -> None:
         if self._idle is not None and self._outstanding_work == 0:
             self._idle.set()
+
+    async def _cancel_workers(
+        self,
+        workers: tuple[asyncio.Task[None], ...],
+    ) -> None:
+        for worker in workers:
+            self._cancel(worker)
+        if workers:
+            await asyncio.gather(*workers, return_exceptions=True)
+
+    def _cancel_pending_work(self) -> None:
+        account_queue = self._account_queue
+        if account_queue is not None:
+            while True:
+                try:
+                    account_work = account_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if (
+                    account_work is not None
+                    and account_work.completion is not None
+                ):
+                    account_work.completion.cancel()
+        for market_work in self._market_latest.values():
+            if market_work.completion is not None:
+                market_work.completion.cancel()
+        for quote_work in self._quote_latest.values():
+            if quote_work.completion is not None:
+                quote_work.completion.cancel()
+        for completion in tuple(self._pending_completions):
+            if not completion.done():
+                completion.cancel()
+        self._pending_completions.clear()
+        self._market_latest.clear()
+        self._market_enqueued.clear()
+        self._quote_latest.clear()
+        self._quote_enqueued.clear()
+        self._outstanding_work = 0
+        if self._idle is not None:
+            self._idle.set()
+
+    @staticmethod
+    def _cancel(task: asyncio.Task[None] | None) -> None:
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _reset_after_stop(self) -> None:
+        self._started = False
+        self._account_worker = None
+        self._market_workers = ()
+        self._quote_workers = ()
+        self._cancel_pending_work()

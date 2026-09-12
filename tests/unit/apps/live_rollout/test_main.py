@@ -131,7 +131,7 @@ accounts:
             final_state_at=None,
         )
 
-    async def fake_startup_backoff(run_once):
+    async def fake_startup_backoff(run_once, **_kwargs):
         return await run_once()
 
     monkeypatch.setattr(main, "_run_live_daemon", fake_run_live_daemon)
@@ -485,7 +485,7 @@ def test_live_run_passes_exchange_operation_allowlist_to_daemon(
             final_state_at=None,
         )
 
-    async def fake_startup_backoff(run_once):
+    async def fake_startup_backoff(run_once, **_kwargs):
         return await run_once()
 
     monkeypatch.setattr(main, "_run_live_daemon", fake_run_live_daemon)
@@ -534,7 +534,7 @@ def test_live_run_passes_entry_policy_enforce_to_daemon(monkeypatch) -> None:
             final_state_at=None,
         )
 
-    async def fake_startup_backoff(run_once):
+    async def fake_startup_backoff(run_once, **_kwargs):
         return await run_once()
 
     monkeypatch.setattr(main, "_run_live_daemon", fake_run_live_daemon)
@@ -574,7 +574,7 @@ def test_live_run_passes_account_scoped_profile_to_daemon(monkeypatch) -> None:
             final_state_at=None,
         )
 
-    async def fake_startup_backoff(run_once):
+    async def fake_startup_backoff(run_once, **_kwargs):
         return await run_once()
 
     monkeypatch.setattr(main, "_run_live_daemon", fake_run_live_daemon)
@@ -630,7 +630,7 @@ def test_live_run_passes_shadow_preflight_acknowledgment_to_daemon(monkeypatch) 
             final_state_at=None,
         )
 
-    async def fake_startup_backoff(run_once):
+    async def fake_startup_backoff(run_once, **_kwargs):
         return await run_once()
 
     monkeypatch.setattr(main, "_run_live_daemon", fake_run_live_daemon)

@@ -42,11 +42,16 @@ class LiveStartupRetryableError(RuntimeError):
 
 async def run_with_live_startup_backoff(
     run_once: Callable[[], Awaitable[LiveDaemonResult]],
+    *,
+    stop_requested: asyncio.Event | None = None,
 ) -> LiveDaemonResult:
     """Retry only failures explicitly wrapped as startup-retryable."""
 
     consecutive_failures = 0
     while True:
+        if stop_requested is not None and stop_requested.is_set():
+            log.info("live_startup_stopped_before_attempt")
+            return LiveDaemonResult(0, 0, 0, "shutdown_requested", None)
         try:
             return await run_once()
         except LiveStartupRetryableError as error:
@@ -62,16 +67,28 @@ async def run_with_live_startup_backoff(
                 error_type=type(error.__cause__ or error).__name__,
                 error=str(error),
             )
-            await asyncio.sleep(delay)
+            if stop_requested is None:
+                await asyncio.sleep(delay)
+            else:
+                try:
+                    await asyncio.wait_for(stop_requested.wait(), timeout=delay)
+                except TimeoutError:
+                    continue
+                log.info("live_startup_stopped_during_backoff")
+                return LiveDaemonResult(0, 0, 0, "shutdown_requested", None)
 
 
 def is_retryable_live_startup_error(error: Exception) -> bool:
     """Classify only transient startup failures as eligible for retry."""
 
-    return isinstance(error, BinanceRateLimitError) or (
-        isinstance(error, RuntimeError)
-        and str(error).startswith("live gate blocked:")
-    ) or isinstance(error, (SQLAlchemyError, TimeoutError, ConnectionError, OSError))
+    return (
+        isinstance(error, BinanceRateLimitError)
+        or (
+            isinstance(error, RuntimeError)
+            and str(error).startswith("live gate blocked:")
+        )
+        or isinstance(error, (SQLAlchemyError, TimeoutError, ConnectionError, OSError))
+    )
 
 
 def should_auto_reacquire_live_lease(

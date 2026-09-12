@@ -224,10 +224,19 @@ class LiveStrategySignalRecorder:
         queue = self._queue
         if writer_task is None or queue is None:
             return
-        await queue.put(None)
-        await writer_task
-        self._writer_task = None
-        self._queue = None
+        try:
+            await queue.put(None)
+            await writer_task
+        except asyncio.CancelledError:
+            if not writer_task.done():
+                writer_task.cancel()
+            await asyncio.gather(writer_task, return_exceptions=True)
+            self._writer_task = None
+            self._queue = None
+            raise
+        else:
+            self._writer_task = None
+            self._queue = None
         log.info(
             "live_strategy_signal_recorder_stopped",
             run_id=self._run_id,

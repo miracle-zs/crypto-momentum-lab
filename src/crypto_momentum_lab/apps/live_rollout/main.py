@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import signal
 from collections.abc import (
     AsyncIterable,
     AsyncIterator,
@@ -304,6 +305,7 @@ _LIVE_STARTUP_BUFFER_LIMIT = 100_000
 _LIVE_AUTO_REACQUIRE_LEASE_TTL_SECONDS = 300
 _LIVE_LEASE_RENEW_BEFORE_SECONDS = 120
 _LIVE_LEASE_HEARTBEAT_INTERVAL_SECONDS = 15.0
+_LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS = 15.0
 _LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT = 100
 _LIVE_ENTRY_PRICE_ABOVE_EMA5 = False
 _LIVE_ENTRY_PRICE_ABOVE_EMA10 = False
@@ -330,6 +332,48 @@ _PENDING_POSITION_RETRY_DELAYS_SECONDS = (
 _ORDER_IDENTITY_CONFLICT_MESSAGE = (
     "client order ID is already bound to a different order"
 )
+
+
+async def _run_live_with_signal_handlers(
+    run_once: Callable[[asyncio.Event], Awaitable[LiveDaemonResult]],
+) -> LiveDaemonResult:
+    """Convert process stop signals into the live runtime's normal exit lane."""
+
+    stop_requested = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    registered_signals: list[signal.Signals] = []
+
+    def request_stop(received_signal: signal.Signals) -> None:
+        if not stop_requested.is_set():
+            log.warning(
+                "live_shutdown_signal_received",
+                signal=received_signal.name,
+            )
+        stop_requested.set()
+
+    for received_signal in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(
+                received_signal,
+                request_stop,
+                received_signal,
+            )
+        except (NotImplementedError, RuntimeError, ValueError):
+            log.warning(
+                "live_shutdown_signal_handler_unavailable",
+                signal=received_signal.name,
+            )
+        else:
+            registered_signals.append(received_signal)
+
+    try:
+        return await _run_with_live_startup_backoff(
+            lambda: run_once(stop_requested),
+            stop_requested=stop_requested,
+        )
+    finally:
+        for received_signal in registered_signals:
+            loop.remove_signal_handler(received_signal)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1724,7 +1768,7 @@ def run_command(
         **credentials.metadata(),
     )
 
-    async def run_once() -> LiveDaemonResult:
+    async def run_once(stop_requested: asyncio.Event) -> LiveDaemonResult:
         return await _run_live_daemon(
             execution_database_url=_execution_database_url(database_url),
             market_database_url=_market_database_url(database_url),
@@ -1773,9 +1817,10 @@ def run_command(
             persist_exchange_operations=_parse_exchange_operations(
                 persist_exchange_operations
             ),
+            shutdown_requested=stop_requested,
         )
 
-    result = asyncio.run(_run_with_live_startup_backoff(run_once))
+    result = asyncio.run(_run_live_with_signal_handlers(run_once))
     typer.echo(json.dumps(asdict(result), default=str, sort_keys=True))
 
 
@@ -2039,6 +2084,7 @@ async def _run_live_daemon(
     market_websocket_url: str = _LIVE_MARKET_WEBSOCKET_URL,
     risk_control_hub_url: str | None = None,
     market_quote_volume_hub_url: str = "ws://market-data:8768",
+    shutdown_requested: asyncio.Event | None = None,
 ) -> LiveDaemonResult:
     risk_control_enabled = bool(
         risk_control_hub_url is not None and risk_control_hub_url.strip()
@@ -2105,6 +2151,7 @@ async def _run_live_daemon(
     risk_control_runtime: LiveRiskControlRuntime | None = None
     control_plane_runtime: LiveControlPlaneRuntime | None = None
     session_lifecycle: LiveSessionLifecycle | None = None
+    shutdown_task: asyncio.Task[bool] | None = None
     risk_config_hash = ""
     startup_phase = True
     try:
@@ -2881,6 +2928,11 @@ async def _run_live_daemon(
             assert entry_runtime is not None
             await entry_runtime.stop()
 
+        if shutdown_requested is not None:
+            shutdown_task = asyncio.create_task(
+                shutdown_requested.wait(),
+                name=f"live-shutdown-request:{session_id}",
+            )
         runtime_supervisor = LiveRuntimeSupervisor(
             tasks=LiveRuntimeTasks(
                 market=market_task,
@@ -2895,6 +2947,7 @@ async def _run_live_daemon(
                 entry_filter_cache=entry_filter_cache_task,
                 entry_symbol_cache=entry_symbol_cache_task,
                 local_health=local_health_task,
+                shutdown=shutdown_task,
             ),
             block_entry_submissions=(
                 lambda: (
@@ -2906,6 +2959,12 @@ async def _run_live_daemon(
             stop_sources=stop_runtime_sources,
             close_risk_control=close_risk_control,
             stop_entry_caches=stop_entry_caches,
+            wait_for_entry_submissions_idle=(
+                execution_coordinator.wait_for_entry_submissions_idle
+                if execution_coordinator is not None
+                else None
+            ),
+            shutdown_timeout_seconds=_LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS,
         )
         try:
             result = await runtime_supervisor.run()
@@ -2937,10 +2996,23 @@ async def _run_live_daemon(
         ):
             startup_market_state_task.cancel()
         if startup_market_state_task is not None:
-            await asyncio.gather(
-                startup_market_state_task,
-                return_exceptions=True,
-            )
+            try:
+                async with asyncio.timeout(_LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS):
+                    await asyncio.gather(
+                        startup_market_state_task,
+                        return_exceptions=True,
+                    )
+            except TimeoutError:
+                log.warning(
+                    "live_startup_market_buffer_shutdown_timed_out",
+                    timeout_seconds=_LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS,
+                )
+            except asyncio.CancelledError:
+                raise
+        if shutdown_task is not None and not shutdown_task.done():
+            shutdown_task.cancel()
+        if shutdown_task is not None:
+            await asyncio.gather(shutdown_task, return_exceptions=True)
         await LiveResourceLifecycle(
             entry_runtime=entry_runtime,
             entry_order_lifecycle=entry_order_lifecycle,
@@ -2959,6 +3031,7 @@ async def _run_live_daemon(
             checkpoint_engine=checkpoint_engine,
             heartbeat_engine=heartbeat_engine,
             health=health,
+            shutdown_timeout_seconds=_LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS,
         ).close()
 
 

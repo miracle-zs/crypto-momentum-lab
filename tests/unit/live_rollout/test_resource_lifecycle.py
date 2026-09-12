@@ -1,3 +1,5 @@
+import asyncio
+
 from crypto_momentum_lab.live_rollout.resource_lifecycle import (
     LiveResourceLifecycle,
 )
@@ -22,6 +24,11 @@ class FakeResource:
 
     def stopped(self) -> None:
         self._events.append(self._label)
+
+
+class HangingResource:
+    async def stop(self) -> None:
+        await asyncio.Event().wait()
 
 
 async def test_live_resource_lifecycle_preserves_shutdown_order() -> None:
@@ -97,3 +104,32 @@ async def test_live_resource_lifecycle_closes_shared_candle_source_once() -> Non
     await lifecycle.close()
 
     assert events == ["candle-source"]
+
+
+async def test_live_resource_lifecycle_bounds_hanging_cleanup() -> None:
+    events: list[str] = []
+
+    lifecycle = LiveResourceLifecycle(
+        entry_runtime=HangingResource(),  # type: ignore[arg-type]
+        entry_order_lifecycle=None,
+        execution_coordinator=None,
+        client=None,
+        closed_candle_feed=None,
+        candle_source=None,
+        ema_candle_source=None,
+        signal_recorder=None,
+        telemetry=None,
+        volume_cache=None,
+        volume_rest_client=None,
+        execution_engine=None,
+        market_engine=None,
+        observability_engine=None,
+        checkpoint_engine=None,
+        heartbeat_engine=None,
+        health=FakeResource("health", events),  # type: ignore[arg-type]
+        shutdown_timeout_seconds=0.01,
+    )
+
+    await lifecycle.close()
+
+    assert events == ["health"]

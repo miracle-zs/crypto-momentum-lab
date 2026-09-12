@@ -22,7 +22,7 @@ x-live-account-app: &live-account-app
     CML_BINANCE_SHARED_REQUEST_PACER_PATH: /run/cml/binance-rest-pacer/private-read.lock
     CML_BINANCE_SHARED_COMMAND_REQUEST_PACER_PATH: /run/cml/binance-rest-pacer/private-command.lock
   restart: unless-stopped
-  stop_grace_period: 60s
+  stop_grace_period: 90s
   logging: *default-logging
 
 x-live-account-depends: &live-account-depends
