@@ -267,6 +267,9 @@ live_rollout/
 - 已将 live startup 的瞬态故障分类、Binance `retry-after` 退避、已启用 session 的
   lease 自动恢复与 fail-closed 条件收拢到 `live_rollout/startup_resilience.py`；
   恢复策略不再与 CLI/资源装配代码混在一起。
+- 已将 one-shot 与长运行 daemon 共用的 session transition 构造、持久化字段和当前
+  状态记录收拢到 `live_rollout/session.py` 的 `LiveSessionLifecycle`；`main.py` 不再
+  自己生成第二套 transition writer，session 语义由同一个深模块接口承载。
 - 已将 entry universe 的数据库加载、正收益池筛选、exchange leverage/margin 预热、
   EMA/symbol cache 选择，以及 entry filter/universe context provider 收拢到
   `live_rollout/entry_runtime.py`；`main.py` 只注入 runtime 输出和 readiness 回调。

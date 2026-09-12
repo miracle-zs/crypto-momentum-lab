@@ -204,6 +204,10 @@ from crypto_momentum_lab.live_rollout.startup_resilience import (
 from crypto_momentum_lab.live_rollout.startup_resilience import (
     run_with_live_startup_backoff as _run_with_live_startup_backoff,
 )
+from crypto_momentum_lab.live_rollout.session import (
+    LiveSessionConfig,
+    LiveSessionLifecycle,
+)
 from crypto_momentum_lab.live_rollout.stream_recovery import (
     resilient_market_state_stream as _resilient_market_state_stream,
 )
@@ -2115,6 +2119,7 @@ async def _run_live_daemon(
     risk_control_task: asyncio.Task[None] | None = None
     risk_control_runtime: LiveRiskControlRuntime | None = None
     control_plane_runtime: LiveControlPlaneRuntime | None = None
+    session_lifecycle: LiveSessionLifecycle | None = None
     risk_config_hash = ""
     startup_phase = True
     try:
@@ -2183,6 +2188,17 @@ async def _run_live_daemon(
         await signal_recorder.start()
         risk_config = await _latest_risk_config(execution_factory, account_label)
         risk_config_hash = risk_config.config_hash
+        assert live_repository is not None
+        session_lifecycle = LiveSessionLifecycle(
+            repository=live_repository,
+            config=LiveSessionConfig(
+                session_id=session_id,
+                operator=operator,
+                strategy_config_hash=strategy_config_hash,
+                risk_config_hash=risk_config_hash,
+            ),
+            clock=lambda: datetime.now(tz=UTC),
+        )
         client = BinanceUsdMTradeClient(
             api_key=api_key,
             api_secret=api_secret,
@@ -2253,14 +2269,8 @@ async def _run_live_daemon(
         await order_reconciliation.reconcile_all()
         draining = await _session_is_draining(execution_factory, session_id)
         if not draining:
-            await _record_transition(
-                live_repository,
-                session_id=session_id,
-                operator=operator,
-                strategy_config_hash=strategy_config_hash,
-                risk_config_hash=risk_config_hash,
-                state=LiveSessionState.PREFLIGHT,
-            )
+            assert session_lifecycle is not None
+            await session_lifecycle.transition(LiveSessionState.PREFLIGHT)
         approval = await live_repository.load_active_approval(
             account_label=account_label,
             strategy_name=strategy_name,
@@ -2326,16 +2336,10 @@ async def _run_live_daemon(
         if computed_hash != strategy_config_hash:
             raise RuntimeError(
                 "strategy config hash does not match the live runtime configuration"
-            )
+        )
         if not draining:
-            await _record_transition(
-                live_repository,
-                session_id=session_id,
-                operator=operator,
-                strategy_config_hash=strategy_config_hash,
-                risk_config_hash=risk_config_hash,
-                state=LiveSessionState.SHADOW_PREFLIGHT,
-            )
+            assert session_lifecycle is not None
+            await session_lifecycle.transition(LiveSessionState.SHADOW_PREFLIGHT)
         await _warn_if_shadow_preflight_missing(
             execution_factory,
             strategy_name=strategy_name,
@@ -2743,14 +2747,8 @@ async def _run_live_daemon(
         entry_runtime.set_ready_callback(on_entry_filter_cache_ready)
         refresh_entry_enabled()
         if not draining:
-            await _record_transition(
-                live_repository,
-                session_id=session_id,
-                operator=operator,
-                strategy_config_hash=strategy_config_hash,
-                risk_config_hash=risk_config_hash,
-                state=LiveSessionState.LIVE_ENABLED,
-            )
+            assert session_lifecycle is not None
+            await session_lifecycle.transition(LiveSessionState.LIVE_ENABLED)
         mark_live_ready()
         startup_phase = False
         quote_source: WebSocketMarketQuoteSource | None = None
@@ -2934,31 +2932,20 @@ async def _run_live_daemon(
             result = await runtime_supervisor.run()
         finally:
             await runtime_supervisor.stop()
-        await _record_transition(
-            live_repository,
-            session_id=session_id,
-            operator=operator,
-            strategy_config_hash=strategy_config_hash,
-            risk_config_hash=risk_config_hash,
-            state=(
-                LiveSessionState.HALTED
-                if result.halt_reason is not None
-                else LiveSessionState.COMPLETED
-            ),
+        assert session_lifecycle is not None
+        await session_lifecycle.transition(
+            LiveSessionState.HALTED
+            if result.halt_reason is not None
+            else LiveSessionState.COMPLETED,
             reason=result.halt_reason,
         )
         return result
     except Exception as exc:
         if startup_phase and _is_retryable_live_startup_error(exc):
             raise _LiveStartupRetryableError(exc) from exc
-        if live_repository is not None and risk_config_hash:
-            await _record_transition(
-                live_repository,
-                session_id=session_id,
-                operator=operator,
-                strategy_config_hash=strategy_config_hash,
-                risk_config_hash=risk_config_hash,
-                state=LiveSessionState.HALTED,
+        if session_lifecycle is not None and risk_config_hash:
+            await session_lifecycle.transition(
+                LiveSessionState.HALTED,
                 reason=str(exc),
             )
         raise
@@ -3262,32 +3249,6 @@ async def _session_is_draining(
             .limit(1)
         )
     return latest_state == LiveSessionState.DRAINING.value
-
-
-async def _record_transition(
-    repository: PostgresLiveRolloutRepository,
-    *,
-    session_id: str,
-    operator: str,
-    strategy_config_hash: str,
-    risk_config_hash: str,
-    state: LiveSessionState,
-    reason: str | None = None,
-) -> None:
-    occurred_at = datetime.now(tz=UTC)
-    await repository.save_transition(
-        LiveSessionTransition(
-            transition_id=f"transition-{uuid4()}",
-            session_id=session_id,
-            state=state,
-            occurred_at=occurred_at,
-            operator=operator,
-            strategy_config_hash=strategy_config_hash,
-            risk_config_hash=risk_config_hash,
-            reason=reason,
-            details={},
-        )
-    )
 
 
 def _load_plan(path: Path) -> OrderExecutionPlan:

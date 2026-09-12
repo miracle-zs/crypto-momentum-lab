@@ -13,6 +13,7 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
 from crypto_momentum_lab.live_rollout.session import (
     LiveRolloutSession,
     LiveSessionConfig,
+    LiveSessionLifecycle,
 )
 from tests.unit.execution_account.orders.test_state_machine import (
     FakeExchange,
@@ -23,6 +24,31 @@ from tests.unit.execution_account.orders.test_state_machine import (
 from tests.unit.live_rollout.test_gates import _context
 
 NOW = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+
+
+async def test_session_lifecycle_persists_shared_transition_contract() -> None:
+    repository = FakeTransitionRepository()
+    lifecycle = LiveSessionLifecycle(
+        repository=repository,
+        config=LiveSessionConfig(
+            session_id="live-1",
+            operator="operator",
+            strategy_config_hash="a" * 64,
+            risk_config_hash="b" * 64,
+        ),
+        clock=lambda: NOW,
+    )
+
+    transition = await lifecycle.transition(
+        LiveSessionState.PREFLIGHT,
+        reason="startup",
+    )
+
+    assert transition.state is LiveSessionState.PREFLIGHT
+    assert transition.reason == "startup"
+    assert transition.session_id == "live-1"
+    assert lifecycle.state is LiveSessionState.PREFLIGHT
+    assert repository.items == [transition]
 
 
 async def test_session_preflight_runs_shadow_before_live() -> None:
