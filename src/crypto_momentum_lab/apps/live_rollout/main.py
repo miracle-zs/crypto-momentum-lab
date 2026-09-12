@@ -69,13 +69,9 @@ from crypto_momentum_lab.execution_account.binance import (
     BinanceRateLimitError,
     BinanceUsdMTradeClient,
 )
-from crypto_momentum_lab.execution_account.expectations import (
-    AccountPositionExpectation,
-)
 from crypto_momentum_lab.execution_account.hub import (
     AccountEvent,
     WebSocketAccountEventSource,
-    WebSocketAccountPositionExpectationPublisher,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionCoordinator,
@@ -83,7 +79,6 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionStateMachine,
-    OrderPreSubmissionError,
     PreparedOrderSubmission,
     SubmitPolicy,
 )
@@ -123,6 +118,9 @@ from crypto_momentum_lab.live_rollout.entry_cache import (
     LiveEntrySymbolCache,
     LiveEntryUniverseData,
     universe_context_for,
+)
+from crypto_momentum_lab.live_rollout.entry_expectations import (
+    LiveEntryExpectationRegistrar,
 )
 from crypto_momentum_lab.live_rollout.entry_order_cancellation import (
     LiveEntryOrderCanceller,
@@ -324,45 +322,6 @@ class _LiveStartupRetryableError(RuntimeError):
     def __init__(self, cause: Exception) -> None:
         super().__init__(str(cause))
         self.retry_after_seconds = getattr(cause, "retry_after_seconds", None)
-
-
-def _live_expected_entry_registrar(
-    *,
-    account_event_hub_url: str,
-    account_label: str,
-) -> Callable[[OrderExecutionPlan, datetime], Awaitable[None]]:
-    publisher = WebSocketAccountPositionExpectationPublisher(
-        url=account_event_hub_url,
-        environment="live",
-        account_label=account_label,
-    )
-
-    async def register_expected_entry(
-        plan: OrderExecutionPlan,
-        registered_at: datetime,
-    ) -> None:
-        try:
-            await publisher.register(
-                AccountPositionExpectation.from_plan(
-                    plan,
-                    environment="live",
-                    account_label=account_label,
-                    registered_at=registered_at,
-                )
-            )
-        except Exception as error:
-            log.error(
-                "live_account_position_expectation_registration_failed",
-                symbol=plan.symbol,
-                client_order_id=plan.client_order_id,
-                error_type=type(error).__name__,
-            )
-            raise OrderPreSubmissionError(
-                "account position expectation registration failed: "
-                f"{type(error).__name__}"
-            ) from error
-
-    return register_expected_entry
 
 
 @app.callback()
@@ -1893,7 +1852,7 @@ async def _run_live_plan(
         if account_config.hedge_mode != plan_uses_hedge_mode:
             raise RuntimeError("order plan position mode does not match Binance")
 
-        register_expected_entry = _live_expected_entry_registrar(
+        register_expected_entry = LiveEntryExpectationRegistrar(
             account_event_hub_url=account_event_hub_url,
             account_label=account_label,
         )
@@ -2479,7 +2438,7 @@ async def _run_live_daemon(
             raise RuntimeError(
                 f"position mode mismatch: expected {expected}, got {actual}"
             )
-        register_expected_entry = _live_expected_entry_registrar(
+        register_expected_entry = LiveEntryExpectationRegistrar(
             account_event_hub_url=account_event_hub_url,
             account_label=account_label,
         )

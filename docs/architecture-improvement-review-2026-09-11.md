@@ -238,6 +238,10 @@ live_rollout/
 - 已将手工 `submit-plan` 与长运行 live daemon 共用的提交前 lease、generation、
   strategy、halt 和 entry/draining 复核收拢到 `live_rollout/submission_fence.py`；它
   仍位于 durable prepare/Coordinator 之前，不改变提交屏障的顺序或 reduce-only 放行。
+- 已将 live entry 在交易所提交前向 AccountEventHub 注册 position expectation、
+  scope 构造和失败时转换为 `OrderPreSubmissionError` 的安全边界收拢到
+  `live_rollout/entry_expectations.py`；one-shot 与 daemon 复用同一 callable，不再由
+  composition root 持有 publisher/异常语义。
 - 已将 scheduled controller 的已知开仓单撤销、exchange orphan scan、durable adoption
   和统一的 state-machine cancellation confirmation 收拢到
   `live_rollout/entry_order_cancellation.py`；已知单与交易所孤儿单仍走同一 Coordinator，
