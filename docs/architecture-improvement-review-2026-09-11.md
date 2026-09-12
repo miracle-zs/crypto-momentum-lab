@@ -5,8 +5,6 @@
 - 本次核验基线：当前 `HEAD` 为 `bd273016`（`10e2048` 之后的 `fix: preserve account hub bootstrap on overflow`）；因此下文区分“审阅基线”和“核验基线”，不把后续修复倒灌到原审阅结论中。
 - 审阅范围：系统设计与架构演进，不重复逐条竞态缺陷
 - 对照前置：
-  - [ARCHITECTURE_REVIEW_ASSESSMENT.md](./ARCHITECTURE_REVIEW_ASSESSMENT.md)（2026-09-04）
-  - [REFACTOR_PLAN.md](./REFACTOR_PLAN.md)（2026-09-04 Draft）
   - [race-condition-review-2026-09-11.md](./race-condition-review-2026-09-11.md)
   - [docs/superpowers/specs/2026-06-14-project-architecture-design.md](./superpowers/specs/2026-06-14-project-architecture-design.md)
   - [docs/runbooks/market-state-hub.md](./runbooks/market-state-hub.md)
@@ -99,7 +97,7 @@ ops-monitor ──(read / alert; optional external webhook)──> host / Postgr
 
 以下设计与 2026-06 架构文档、9 月评估结论一致，**禁止**在后续重构中为“整洁”而破坏：
 
-1. **下单前持久化屏障**（REFACTOR_PLAN §2.2）：`risk approved → durable intent + SUBMITTING → REST` 不得异步化。
+1. **下单前持久化屏障**（见 [race-condition-review-2026-09-11.md](./race-condition-review-2026-09-11.md)）：`risk approved → durable intent + SUBMITTING → REST` 不得异步化。
 2. **Binance 为交易状态权威、PostgreSQL 为控制面与 durable authority**：Hub 不是第二真相源。
 3. **单主租约 + Fail-Closed**：lease / hub gap / stale / unresolved order 阻断新敞口。
 4. **Hub 语义**（序列、epoch、有界重放、缺口 fail-closed）重于传输介质；不得用“换成 Redis Pub/Sub”替换语义。
@@ -606,8 +604,7 @@ P0-1 仍是重要的结构工程，但应在上述安全与运维护栏明确后
 | 文档 | 关系 |
 |---|---|
 | 2026-06 架构设计 | 不变；本文是演进建议，不修改核心不变量 |
-| ARCHITECTURE_REVIEW_ASSESSMENT（09-04） | 本文不重开延迟根因争论；接受其对单机/Hub/租约优点的判断 |
-| REFACTOR_PLAN（09-04 Draft） | P0-1 与其中 Composition Root / 收窄编排方向一致；本文补充控制面推送与外机监控 |
+| 2026-09-04 架构评估与重构草案 | 相关结论已合并到本文；本文不再依赖已移除的历史草案文件 |
 | race-condition-review（09-11） | 以固定 commit 上的代码缺口验证为前提；本文聚焦结构与运行时架构，而非再列竞态条目 |
 
 ---
