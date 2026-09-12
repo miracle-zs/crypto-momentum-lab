@@ -248,6 +248,10 @@ live_rollout/
 - 已将 live order event 的 telemetry best-effort、GTD lifecycle 观察和 daemon
   pending-entry release 的后处理顺序收拢到 `live_rollout/order_event_runtime.py`；
   telemetry 故障仍不会跳过本地订单生命周期与 exposure bookkeeping。
+- 已将 live startup 的 market cutover/cursor、warmup symbol 发现、连续 bucket coverage
+  校验、checkpoint recovery 和 warm-only startup 转移到
+  `live_rollout/startup_recovery.py`；main 只负责选择 checkpoint/PostgreSQL/Hub
+  路径并组装 repository/strategy，恢复不变量集中在独立模块。
 - 已将 scheduled controller 的已知开仓单撤销、exchange orphan scan、durable adoption
   和统一的 state-machine cancellation confirmation 收拢到
   `live_rollout/entry_order_cancellation.py`；已知单与交易所孤儿单仍走同一 Coordinator，

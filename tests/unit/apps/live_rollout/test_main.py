@@ -16,6 +16,11 @@ from crypto_momentum_lab.execution_account.hub import AccountEventHubError
 from crypto_momentum_lab.live_rollout.order_reconciliation import (
     LiveOrderReconciliation,
 )
+from crypto_momentum_lab.live_rollout.startup_recovery import (
+    restore_live_strategy_from_checkpoint,
+    validate_live_warmup_coverage,
+    warm_live_strategy,
+)
 from crypto_momentum_lab.live_rollout.stream_recovery import (
     resilient_account_event_stream,
     resilient_market_state_stream,
@@ -1135,7 +1140,7 @@ async def test_compact_checkpoint_recovery_warms_without_evaluating_signals() ->
         payload={"signal_sequence": 4},
     )
 
-    await main._restore_live_strategy_from_checkpoint(
+    await restore_live_strategy_from_checkpoint(
         strategy=Strategy(),
         checkpoint=checkpoint,
         repository=Repository(),
@@ -1237,7 +1242,7 @@ async def test_live_warmup_applies_all_states_and_continues_from_boundary() -> N
             return (stale, fresh)
 
     strategy = Strategy()
-    cursor = await main._warm_live_strategy(
+    cursor = await warm_live_strategy(
         strategy=strategy,
         repository=Repository(),
         environment="research",
@@ -1269,7 +1274,7 @@ def test_live_warmup_rejects_a_symbol_with_a_window_gap() -> None:
             )
 
     with pytest.raises(RuntimeError, match="gaps=BTCUSDT"):
-        main._validate_live_warmup_coverage(
+        validate_live_warmup_coverage(
             strategy=Strategy(),
             states=states,
             expected_symbols=("BTCUSDT",),
