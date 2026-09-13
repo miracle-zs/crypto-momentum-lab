@@ -121,6 +121,11 @@ services:
       - maintenance_work_mem=32MB
       - -c
       - autovacuum_work_mem=32MB
+      # The 4 MiB default made reporting and retention queries spill to disk:
+      # pg_stat_statements showed ~7.9 GB of temp files, whose IO contended
+      # with the live telemetry writes inside the persist budget.
+      - -c
+      - work_mem=16MB
     logging: *default-logging
     environment:
       POSTGRES_DB: cml

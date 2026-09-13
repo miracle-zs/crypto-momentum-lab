@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -10,6 +11,7 @@ from crypto_momentum_lab.domain.execution import (
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.execution_account.hub import AccountEvent
+from crypto_momentum_lab.live_rollout import telemetry as telemetry_module
 from crypto_momentum_lab.live_rollout.telemetry import (
     CONSUMER_HEALTH,
     EXCHANGE_REQUEST_STARTED,
@@ -153,6 +155,71 @@ async def test_live_telemetry_persists_events_in_batches_without_blocking_record
     assert len(batches) == 1
     assert batches[0][0]["event_type"] == "market_state_received"
     assert batches[0][0]["details"]["lane"] == "entry"
+
+
+async def test_transient_persist_timeout_is_retried_before_dropping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        telemetry_module, "_PERSIST_BATCH_TIMEOUT_SECONDS", 0.05
+    )
+    monkeypatch.setattr(
+        telemetry_module, "_PERSIST_BATCH_RETRY_DELAY_SECONDS", 0.01
+    )
+    attempts: list[int] = []
+
+    async def persist(events) -> None:
+        attempts.append(len(events))
+        if len(attempts) == 1:
+            await asyncio.sleep(0.5)
+
+    telemetry = LiveRuntimeTelemetry(
+        run_id="run-1",
+        persist=persist,
+        persist_event_types=frozenset({MARKET_STATE_RECEIVED}),
+    )
+    await telemetry.start()
+    await telemetry.market_state_received(
+        _state(),
+        occurred_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+    await telemetry.stop()
+
+    assert len(attempts) == 2
+    assert telemetry.persist_failure_count == 0
+
+
+async def test_exhausted_persist_attempts_are_counted_as_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(telemetry_module, "_PERSIST_BATCH_ATTEMPTS", 3)
+    monkeypatch.setattr(
+        telemetry_module, "_PERSIST_BATCH_TIMEOUT_SECONDS", 0.05
+    )
+    monkeypatch.setattr(
+        telemetry_module, "_PERSIST_BATCH_RETRY_DELAY_SECONDS", 0.01
+    )
+    attempts = 0
+
+    async def persist(events) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("persist unavailable")
+
+    telemetry = LiveRuntimeTelemetry(
+        run_id="run-1",
+        persist=persist,
+        persist_event_types=frozenset({MARKET_STATE_RECEIVED}),
+    )
+    await telemetry.start()
+    await telemetry.market_state_received(
+        _state(),
+        occurred_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+    await telemetry.stop()
+
+    assert attempts == 3
+    assert telemetry.persist_failure_count == 1
 
 
 async def test_consumer_health_persists_low_cardinality_operational_event() -> None:

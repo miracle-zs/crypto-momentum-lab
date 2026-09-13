@@ -11,7 +11,7 @@ import asyncio
 import hashlib
 import json
 from collections import defaultdict, deque
-from collections.abc import Awaitable, Callable, Collection, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta
 from typing import Literal, Protocol
@@ -99,7 +99,13 @@ _EXCHANGE_BOUNDARY_EVENTS = frozenset(
     {EXCHANGE_REQUEST_STARTED, EXCHANGE_RESPONSE_RECEIVED}
 )
 _MAX_EVENT_BATCH = 128
-_PERSIST_BATCH_TIMEOUT_SECONDS = 0.25
+# A batch that misses this budget is retried a bounded number of times before
+# the events are dropped.  The previous 0.25s budget was tight enough that a
+# transient disk stall (large query temp spill, checkpoint writeback) dropped
+# whole batches, which then surfaced as phantom staleness in the ops monitor.
+_PERSIST_BATCH_TIMEOUT_SECONDS = 2.0
+_PERSIST_BATCH_ATTEMPTS = 3
+_PERSIST_BATCH_RETRY_DELAY_SECONDS = 0.25
 _MAX_PENDING_EXCHANGE_REQUESTS = 32
 _MAX_STRATEGY_OUTPUT_SAMPLES = 8192
 
@@ -1499,10 +1505,7 @@ class LiveRuntimeTelemetry:
                     break
                 batch.append(next_event)
             try:
-                await asyncio.wait_for(
-                    self._persist(tuple(event.row() for event in batch)),
-                    timeout=_PERSIST_BATCH_TIMEOUT_SECONDS,
-                )
+                await self._persist_batch(batch)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -1515,6 +1518,36 @@ class LiveRuntimeTelemetry:
                 )
             if stop_after_batch:
                 return
+
+    async def _persist_batch(self, batch: Sequence[LiveRuntimeEvent]) -> None:
+        """Persist one batch, retrying transient timeouts before giving up.
+
+        A client-side timeout cancels the statement but the server may still
+        have committed the rows, so a retry has to stay idempotent.  It does:
+        ``event_id`` is derived deterministically and the sink inserts with
+        ``ON CONFLICT (event_id) DO NOTHING``.
+        """
+
+        rows = tuple(event.row() for event in batch)
+        for attempt in range(1, _PERSIST_BATCH_ATTEMPTS + 1):
+            try:
+                await asyncio.wait_for(
+                    self._persist(rows),
+                    timeout=_PERSIST_BATCH_TIMEOUT_SECONDS,
+                )
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if attempt >= _PERSIST_BATCH_ATTEMPTS:
+                    raise
+                log.warning(
+                    "live_runtime_telemetry_persist_retry",
+                    run_id=self._run_id,
+                    attempt=attempt,
+                    event_count=len(batch),
+                )
+                await asyncio.sleep(_PERSIST_BATCH_RETRY_DELAY_SECONDS)
 
 
 def _previous_phase(phase: str, phase_at: Mapping[str, datetime]) -> str | None:
