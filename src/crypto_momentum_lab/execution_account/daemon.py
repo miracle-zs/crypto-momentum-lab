@@ -4,6 +4,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from typing import Protocol, TypeVar, cast
 
 import structlog
@@ -326,6 +327,10 @@ class UserDataAccountSyncDaemon:
         self._reconciliation_persistence_tasks: set[asyncio.Task[None]] = set()
 
     async def run(self, *, stop_requested: asyncio.Event | None = None) -> None:
+        startup_started_at = perf_counter()
+        startup_ready_logged = False
+        startup_stream_logged = False
+        log.info("execution_account_startup_started")
         stream_task: asyncio.Task[None] | None = None
         heartbeat_task: asyncio.Future[None] | None = None
         reconciliation_task: asyncio.Future[None] | None = None
@@ -356,12 +361,32 @@ class UserDataAccountSyncDaemon:
                             await self._sleep_for_failure(consecutive_failures, None)
                             continue
                         consecutive_failures = 0
+                        if not startup_ready_logged:
+                            log.info(
+                                "execution_account_startup_phase",
+                                phase="initial_reconciliation_ready",
+                                elapsed_ms=round(
+                                    (perf_counter() - startup_started_at) * 1000,
+                                    3,
+                                ),
+                            )
+                            startup_ready_logged = True
                         self._start_pipeline()
                         self._stream.set_handler(self._on_event)
                         stream_task = asyncio.create_task(
                             self._stream.run(),
                             name="binance-user-data-stream",
                         )
+                        if not startup_stream_logged:
+                            log.info(
+                                "execution_account_startup_phase",
+                                phase="user_data_stream_started",
+                                elapsed_ms=round(
+                                    (perf_counter() - startup_started_at) * 1000,
+                                    3,
+                                ),
+                            )
+                            startup_stream_logged = True
                     except Exception as error:
                         consecutive_failures += 1
                         self._report_error(error)

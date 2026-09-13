@@ -10,6 +10,7 @@ from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from time import perf_counter
 
 import structlog
 from sqlalchemy import select
@@ -363,6 +364,20 @@ async def run_live_daemon(
     shutdown_task: asyncio.Task[bool] | None = None
     risk_config_hash = ""
     startup_phase = True
+    startup_started_at = perf_counter()
+    startup_last_phase_at = startup_started_at
+
+    def log_startup_phase(phase: str) -> None:
+        nonlocal startup_last_phase_at
+        now = perf_counter()
+        log.info(
+            "live_startup_phase",
+            phase=phase,
+            phase_elapsed_ms=round((now - startup_last_phase_at) * 1000, 3),
+            total_elapsed_ms=round((now - startup_started_at) * 1000, 3),
+        )
+        startup_last_phase_at = now
+
     try:
         execution_factory = async_sessionmaker(
             execution_engine,
@@ -432,6 +447,7 @@ async def run_live_daemon(
         )
         await signal_recorder.start()
         risk_config = await _latest_risk_config(execution_factory, account_label)
+        log_startup_phase("risk_config_loaded")
         risk_config_hash = risk_config.config_hash
         assert live_repository is not None
         session_lifecycle = LiveSessionLifecycle(
@@ -466,6 +482,7 @@ async def run_live_daemon(
             margin_type=margin_type,
         )
         account_config = await client.fetch_account_config()
+        log_startup_phase("exchange_account_config_loaded")
         if account_config.hedge_mode != hedge_mode:
             expected = "hedge" if hedge_mode else "one-way"
             actual = "hedge" if account_config.hedge_mode else "one-way"
@@ -521,6 +538,7 @@ async def run_live_daemon(
             run_id=session_id,
         )
         await order_reconciliation.reconcile_all()
+        log_startup_phase("order_state_reconciled")
         draining = await _session_is_draining(execution_factory, session_id)
         if not draining:
             assert session_lifecycle is not None
@@ -723,6 +741,7 @@ async def run_live_daemon(
                 warmup_symbols=startup_warmup_symbols,
                 on_warmup_status=live_readiness.update_warmup,
             )
+        log_startup_phase("strategy_market_warmup_completed")
         if checkpoint is not None and not _checkpoint_needs_market_recovery(checkpoint):
             live_readiness.update_warmup_progress(
                 strategy,
@@ -758,6 +777,7 @@ async def run_live_daemon(
             margin_type=margin_type,
         )
         await entry_runtime.warm_exchange(now)
+        log_startup_phase("entry_exchange_warmup_completed")
         live_readiness.update_entry_gate(
             entry_universe_count=entry_runtime.entry_universe_count(now),
             entry_enabled=False,
@@ -999,6 +1019,7 @@ async def run_live_daemon(
             assert session_lifecycle is not None
             await session_lifecycle.transition(LiveSessionState.LIVE_ENABLED)
         mark_live_ready()
+        log_startup_phase("live_readiness_published")
         startup_phase = False
         quote_source: WebSocketMarketQuoteSource | None = None
         state_stream: AsyncIterable[MarketState15s]
