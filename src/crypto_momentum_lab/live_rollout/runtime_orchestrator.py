@@ -667,12 +667,25 @@ async def run_live_daemon(
             warmup_required_buckets=int(required_data().warmup_buckets),
         )
         checkpoint = await checkpoint_repository.load_checkpoint(session_id)
+        requires_market_recovery = checkpoint is not None and (
+            _checkpoint_needs_market_recovery(checkpoint)
+        )
         hub_cursor_state = _LiveHubCursorState()
         if checkpoint is not None:
             strategy.restore_checkpoint(checkpoint)
-            restored_hub_cursor = _hub_cursor_from_checkpoint(checkpoint)
+            restored_hub_cursor = _hub_cursor_for_startup(
+                checkpoint,
+                requires_market_recovery=requires_market_recovery,
+            )
             if restored_hub_cursor is not None:
                 hub_cursor_state.restore(restored_hub_cursor)
+            elif requires_market_recovery and _hub_cursor_from_checkpoint_payload(
+                checkpoint
+            ) is not None:
+                log.info(
+                    "live_hub_cursor_discarded_before_durable_rewarm",
+                    reason="checkpoint_requires_market_recovery",
+                )
         state_repository = PostgresRuntimeMarketStateRepository(market_factory)
         requested_startup_cutover = _live_market_state_cutover(
             datetime.now(tz=UTC)
@@ -746,7 +759,7 @@ async def run_live_daemon(
             )
         market_cursor: RuntimeStateCursor | None = None
         if checkpoint is not None:
-            if _checkpoint_needs_market_recovery(checkpoint):
+            if requires_market_recovery:
                 await _restore_live_strategy_from_checkpoint(
                     strategy=strategy,
                     checkpoint=checkpoint,
@@ -778,7 +791,7 @@ async def run_live_daemon(
                 on_warmup_status=live_readiness.update_warmup,
             )
         log_startup_phase("strategy_market_warmup_completed")
-        if checkpoint is not None and not _checkpoint_needs_market_recovery(checkpoint):
+        if checkpoint is not None and not requires_market_recovery:
             live_readiness.update_warmup_progress(
                 strategy,
                 expected_symbols=startup_warmup_symbols,
@@ -1478,8 +1491,8 @@ def _is_order_identity_conflict(error: Exception) -> bool:
 def _hub_cursor_from_checkpoint(
     checkpoint: StrategyCheckpoint,
 ) -> dict[str, str | int] | None:
-    raw_cursor = checkpoint.payload.get("market_state_hub_cursor")
-    if not isinstance(raw_cursor, Mapping):
+    raw_cursor = _hub_cursor_from_checkpoint_payload(checkpoint)
+    if raw_cursor is None:
         return None
     stream_id = raw_cursor.get("stream_id")
     sequence = raw_cursor.get("sequence")
@@ -1490,6 +1503,32 @@ def _hub_cursor_from_checkpoint(
         log.warning("live_hub_cursor_checkpoint_ignored", reason="invalid_sequence")
         return None
     return {"stream_id": stream_id, "sequence": sequence}
+
+
+def _hub_cursor_from_checkpoint_payload(
+    checkpoint: StrategyCheckpoint,
+) -> Mapping[str, object] | None:
+    raw_cursor = checkpoint.payload.get("market_state_hub_cursor")
+    if not isinstance(raw_cursor, Mapping):
+        return None
+    return raw_cursor
+
+
+def _hub_cursor_for_startup(
+    checkpoint: StrategyCheckpoint | None,
+    *,
+    requires_market_recovery: bool,
+) -> dict[str, str | int] | None:
+    """Only resume a Hub cursor when its epoch remains authoritative.
+
+    A restart that requires durable rewarm must start from the current Hub
+    epoch.  Reusing the old cursor would turn the expected stream reset into a
+    restart loop because the old in-memory Hub history no longer exists.
+    """
+
+    if checkpoint is None or requires_market_recovery:
+        return None
+    return _hub_cursor_from_checkpoint(checkpoint)
 
 
 class _LiveHubCursorState:

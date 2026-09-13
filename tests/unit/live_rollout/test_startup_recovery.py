@@ -3,11 +3,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
 from crypto_momentum_lab.live_rollout.market_loop import (
     LiveMarketLoop,
     LiveMarketStateContinuityError,
 )
 from crypto_momentum_lab.live_rollout.runtime_orchestrator import (
+    _hub_cursor_for_startup,
     _LiveHubCursorState,
 )
 from crypto_momentum_lab.live_rollout.startup_recovery import (
@@ -169,3 +171,29 @@ def test_hub_cursor_is_committed_only_after_the_entire_batch_is_processed() -> N
         "stream_id": "stream-a",
         "sequence": 17,
     }
+
+
+def test_hub_cursor_is_discarded_before_durable_market_rewarm() -> None:
+    checkpoint = StrategyCheckpoint(
+        last_processed_at_by_symbol={},
+        warmup_buckets_by_symbol={},
+        cooldown_buckets_remaining_by_symbol={},
+        payload={
+            "market_state_hub_cursor": {
+                "stream_id": "old-stream",
+                "sequence": 42,
+            }
+        },
+    )
+
+    assert (
+        _hub_cursor_for_startup(
+            checkpoint,
+            requires_market_recovery=True,
+        )
+        is None
+    )
+    assert _hub_cursor_for_startup(
+        checkpoint,
+        requires_market_recovery=False,
+    ) == {"stream_id": "old-stream", "sequence": 42}
