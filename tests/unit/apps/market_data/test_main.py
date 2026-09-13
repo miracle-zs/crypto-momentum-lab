@@ -543,10 +543,12 @@ async def test_capture_observer_applies_membership_symbols() -> None:
             self.calls.append((symbols, streams, generation))
 
     capture = FakeCapture()
+    changed_symbols = []
     observer = main.CaptureUniverseObserver(
         capture,
         streams=(CaptureStream.AGG_TRADE,),
         initial_generation=1,
+        on_symbols_changed=changed_symbols.append,
     )
     snapshot = fixture_snapshot()
 
@@ -559,6 +561,7 @@ async def test_capture_observer_applies_membership_symbols() -> None:
             2,
         )
     ]
+    assert changed_symbols == [frozenset({"BTCUSDT"})]
 
 
 async def test_capture_observer_keeps_open_position_symbols_subscribed() -> None:

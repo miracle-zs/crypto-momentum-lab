@@ -20,6 +20,7 @@ class FakeRuntimeStateRepository:
     def __init__(self) -> None:
         self.saved_symbols: list[tuple[str, ...]] = []
         self.saved_states = []
+        self.saved_sequence_ranges = []
         self.incomplete_gaps = []
 
     async def save_closed_states(
@@ -30,6 +31,7 @@ class FakeRuntimeStateRepository:
         sequence_range,
     ) -> None:
         self.saved_symbols.append(tuple(state.symbol for state in states))
+        self.saved_sequence_ranges.append(sequence_range)
         self.saved_states.extend(states)
 
     async def mark_incomplete(self, gap) -> None:
@@ -63,6 +65,50 @@ async def test_publisher_closes_only_buckets_behind_watermark() -> None:
 
     assert repository.saved_symbols == [("BTCUSDT", "BTCUSDT")]
     assert publisher.metrics.closed_state_count == 2
+
+
+async def test_publisher_materializes_empty_bucket_for_expected_quiet_symbol() -> None:
+    repository = FakeRuntimeStateRepository()
+    publisher = ClosedMarketStatePublisher(
+        repository=repository,
+        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+    )
+    publisher.set_expected_symbols(frozenset({"BTCUSDT"}))
+
+    await publisher.observe(fixture_trade(0, price="100", sequence=1))
+    await publisher.observe(fixture_trade(3, price="102", sequence=2))
+
+    states_by_bucket = {state.bucket_start: state for state in repository.saved_states}
+    empty_state = states_by_bucket[datetime(2026, 7, 3, 0, 0, 15, tzinfo=UTC)]
+    assert empty_state.source_event_count == 0
+    assert empty_state.trade_count == 0
+    assert empty_state.close_price == Decimal("100")
+    assert empty_state.data_complete is True
+    assert [
+        (item.minimum, item.maximum) for item in repository.saved_sequence_ranges
+    ] == [(1, 1), (None, None)]
+
+
+async def test_quiet_symbol_fills_when_global_watermark_advances() -> None:
+    repository = FakeRuntimeStateRepository()
+    publisher = ClosedMarketStatePublisher(
+        repository=repository,
+        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+    )
+    publisher.set_expected_symbols(frozenset({"BTCUSDT", "ETHUSDT"}))
+
+    await publisher.observe(fixture_trade(0, price="100", sequence=1))
+    await publisher.observe(fixture_trade(3, price="200", sequence=2, symbol="ETHUSDT"))
+
+    btc_bucket_starts = sorted(
+        state.bucket_start
+        for state in repository.saved_states
+        if state.symbol == "BTCUSDT"
+    )
+    assert btc_bucket_starts == [
+        datetime(2026, 7, 3, 0, 0, tzinfo=UTC),
+        datetime(2026, 7, 3, 0, 0, 15, tzinfo=UTC),
+    ]
 
 
 async def test_late_event_for_closed_bucket_is_rejected() -> None:

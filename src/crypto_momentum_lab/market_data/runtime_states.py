@@ -1,7 +1,7 @@
 import asyncio
 import heapq
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -160,6 +160,7 @@ class ClosedMarketStatePublisherMetrics:
     received_envelope_count: int
     normalized_event_count: int
     closed_state_count: int
+    synthetic_state_count: int
     rejected_envelope_count: int
     late_event_count: int
     latest_watermark_at: datetime | None
@@ -307,6 +308,7 @@ class ClosedMarketStatePublisher:
         self._received_envelope_count = 0
         self._normalized_event_count = 0
         self._closed_state_count = 0
+        self._synthetic_state_count = 0
         self._rejected_envelope_count = 0
         self._late_event_count = 0
         self._realtime_batch_count = 0
@@ -324,9 +326,29 @@ class ClosedMarketStatePublisher:
             CaptureStream,
             _EventLatenessCounters,
         ] = {}
+        self._expected_symbols: frozenset[str] = frozenset()
+        self._observed_symbol_keys: set[tuple[str, str]] = set()
+        self._exchange_by_symbol_key: dict[tuple[str, str], str] = {}
+        self._last_materialized_bucket_by_symbol: dict[tuple[str, str], datetime] = {}
+        self._last_state_by_symbol: dict[tuple[str, str], MarketState15s] = {}
         self._durable_queue: asyncio.Queue[_DurableCommand | None] | None = None
         self._durable_task: asyncio.Task[None] | None = None
         self._log = structlog.get_logger()
+
+    def set_expected_symbols(self, symbols: Collection[str]) -> None:
+        """Set the symbols for which the 15-second stream must be dense."""
+        expected_symbols = frozenset(
+            symbol.strip() for symbol in symbols if symbol.strip()
+        )
+        removed_symbols = self._expected_symbols - expected_symbols
+        if removed_symbols:
+            for symbol_key in tuple(self._last_materialized_bucket_by_symbol):
+                if symbol_key[1] in removed_symbols:
+                    self._last_materialized_bucket_by_symbol.pop(
+                        symbol_key,
+                        None,
+                    )
+        self._expected_symbols = expected_symbols
 
     async def start(self) -> None:
         if self._durable_task is not None:
@@ -368,6 +390,7 @@ class ClosedMarketStatePublisher:
             received_envelope_count=self._received_envelope_count,
             normalized_event_count=self._normalized_event_count,
             closed_state_count=self._closed_state_count,
+            synthetic_state_count=self._synthetic_state_count,
             rejected_envelope_count=self._rejected_envelope_count,
             late_event_count=self._late_event_count,
             latest_watermark_at=self._latest_watermark_at,
@@ -435,6 +458,7 @@ class ClosedMarketStatePublisher:
                 ),
             },
             "completeness": {
+                "synthetic_state_count": metrics.synthetic_state_count,
                 "incomplete_active_bucket_count": (
                     metrics.incomplete_active_bucket_count
                 ),
@@ -545,6 +569,12 @@ class ClosedMarketStatePublisher:
         self._latest_watermark_at = realtime_watermark
         self._latest_durable_watermark_at = durable_watermark
 
+        # A symbol can be quiet even while the global stream advances.  Once
+        # a symbol has produced its first state, materialize its eligible
+        # zero-event buckets before processing the current event so the
+        # realtime and durable consumers observe the same dense clock.
+        self._materialize_empty_buckets_through(realtime_watermark)
+
         key = _bucket_key(event)
         bucket_end = key[2] + timedelta(seconds=_BUCKET_SECONDS)
         simulated_close_drops = tuple(
@@ -582,17 +612,19 @@ class ClosedMarketStatePublisher:
                     )
             return
 
+        symbol_key = (event.environment, event.symbol)
+        self._observed_symbol_keys.add(symbol_key)
+        self._exchange_by_symbol_key.setdefault(symbol_key, event.exchange)
+        self._materialize_empty_buckets_before_event(
+            symbol_key=symbol_key,
+            current_bucket=key[2],
+        )
+
         accumulator = self._accumulators_by_bucket.get(key)
         if accumulator is None:
             accumulator = MarketState15sAccumulator.for_bucket(event)
-            self._accumulators_by_bucket[key] = accumulator
-            self._active_bucket_high_watermark = max(
-                self._active_bucket_high_watermark,
-                len(self._accumulators_by_bucket),
-            )
-            deadline = _bucket_deadline(key)
-            heapq.heappush(self._realtime_deadlines, deadline)
-            heapq.heappush(self._durable_deadlines, deadline)
+            self._activate_accumulator(key, accumulator)
+        self._remember_materialized_bucket(key)
 
         if isinstance(event, NormalizedBookTicker):
             # A closed 15-second state only needs the latest executable quote
@@ -675,22 +707,134 @@ class ClosedMarketStatePublisher:
         if not durable_snapshots:
             return
 
-        sequence_range = RuntimeStateSequenceRange(
-            minimum=min(
-                snapshot.input_sequence_min
-                for snapshot in durable_snapshots
-            ),
-            maximum=max(
-                snapshot.input_sequence_max
-                for snapshot in durable_snapshots
-            ),
+        self._synthetic_state_count += sum(
+            snapshot.input_sequence_min is None
+            and snapshot.input_sequence_max is None
+            for snapshot in durable_snapshots
         )
-        durable_batch = (states_tuple, durable_watermark, sequence_range)
-        if self._durable_queue is None:
-            await self._persist_batch(durable_batch)
-        else:
-            await self._durable_queue.put(durable_batch)
+        for durable_batch in _durable_batches(
+            durable_snapshots,
+            watermark=durable_watermark,
+        ):
+            if self._durable_queue is None:
+                await self._persist_batch(durable_batch)
+            else:
+                await self._durable_queue.put(durable_batch)
         self._closed_state_count += len(states_tuple)
+
+    def _materialize_empty_buckets_through(self, watermark: datetime) -> None:
+        if not self._expected_symbols or not self._observed_symbol_keys:
+            return
+        # A bucket is eligible only after its end is behind the watermark.
+        through_bucket = bucket_start_15s(
+            watermark - timedelta(seconds=_BUCKET_SECONDS)
+        )
+        for symbol_key in sorted(self._observed_symbol_keys):
+            self._materialize_buckets_until(
+                symbol_key=symbol_key,
+                through_bucket=through_bucket,
+            )
+
+    def _materialize_empty_buckets_before_event(
+        self,
+        *,
+        symbol_key: tuple[str, str],
+        current_bucket: datetime,
+    ) -> None:
+        if not self._is_dense_symbol(symbol_key):
+            return
+        self._materialize_buckets_until(
+            symbol_key=symbol_key,
+            through_bucket=current_bucket - timedelta(seconds=_BUCKET_SECONDS),
+        )
+
+    def _materialize_buckets_until(
+        self,
+        *,
+        symbol_key: tuple[str, str],
+        through_bucket: datetime,
+    ) -> None:
+        if not self._is_dense_symbol(symbol_key):
+            return
+        last_bucket = self._last_materialized_bucket_by_symbol.get(symbol_key)
+        exchange = self._exchange_by_symbol_key.get(symbol_key)
+        if last_bucket is None or exchange is None:
+            return
+        next_bucket = last_bucket + timedelta(seconds=_BUCKET_SECONDS)
+        while next_bucket <= through_bucket:
+            key = (symbol_key[0], symbol_key[1], next_bucket)
+            if key not in self._accumulators_by_bucket:
+                previous_state = self._previous_state_for_symbol(
+                    symbol_key,
+                    before_bucket=next_bucket,
+                )
+                self._activate_accumulator(
+                    key,
+                    MarketState15sAccumulator.empty_bucket(
+                        exchange=exchange,
+                        environment=symbol_key[0],
+                        symbol=symbol_key[1],
+                        bucket_start=next_bucket,
+                        previous_state=previous_state,
+                    ),
+                )
+            self._last_materialized_bucket_by_symbol[symbol_key] = next_bucket
+            next_bucket += timedelta(seconds=_BUCKET_SECONDS)
+
+    def _previous_state_for_symbol(
+        self,
+        symbol_key: tuple[str, str],
+        *,
+        before_bucket: datetime,
+    ) -> MarketState15s | None:
+        candidates = [
+            (key, accumulator)
+            for key, accumulator in self._accumulators_by_bucket.items()
+            if ((key[0], key[1]) == symbol_key and key[2] < before_bucket)
+        ]
+        if candidates:
+            previous_key, accumulator = max(
+                candidates,
+                key=lambda item: item[0][2],
+            )
+            return accumulator.snapshot(
+                initial_quote=(
+                    self._durable_latest_quotes.get(symbol_key)
+                    or self._realtime_latest_quotes.get(symbol_key)
+                ),
+                latest_quote=self._latest_book_ticker_by_bucket.get(previous_key),
+            ).state
+        previous_state = self._last_state_by_symbol.get(symbol_key)
+        if previous_state is not None and previous_state.bucket_start < before_bucket:
+            return previous_state
+        return None
+
+    def _is_dense_symbol(self, symbol_key: tuple[str, str]) -> bool:
+        return (
+            bool(self._expected_symbols)
+            and symbol_key in self._observed_symbol_keys
+            and symbol_key[1] in self._expected_symbols
+        )
+
+    def _activate_accumulator(
+        self,
+        key: _BucketKey,
+        accumulator: MarketState15sAccumulator,
+    ) -> None:
+        self._accumulators_by_bucket[key] = accumulator
+        self._active_bucket_high_watermark = max(
+            self._active_bucket_high_watermark,
+            len(self._accumulators_by_bucket),
+        )
+        deadline = _bucket_deadline(key)
+        heapq.heappush(self._realtime_deadlines, deadline)
+        heapq.heappush(self._durable_deadlines, deadline)
+
+    def _remember_materialized_bucket(self, key: _BucketKey) -> None:
+        symbol_key = (key[0], key[1])
+        last_bucket = self._last_materialized_bucket_by_symbol.get(symbol_key)
+        if last_bucket is None or key[2] > last_bucket:
+            self._last_materialized_bucket_by_symbol[symbol_key] = key[2]
 
     async def _build_snapshots(
         self,
@@ -712,6 +856,7 @@ class ClosedMarketStatePublisher:
             )
             snapshots.append(snapshot)
             state = snapshot.state
+            self._last_state_by_symbol[(state.environment, state.symbol)] = state
             if (
                 state.last_bid_price is not None
                 and state.last_ask_price is not None
@@ -817,6 +962,62 @@ def _bucket_deadline(key: _BucketKey) -> _BucketDeadline:
         key[1],
         key[0],
         key,
+    )
+
+
+def _durable_batches(
+    snapshots: tuple[MarketState15sSnapshot, ...],
+    *,
+    watermark: datetime,
+) -> tuple[_DurableBatch, ...]:
+    """Keep synthetic rows' source sequence columns genuinely empty."""
+    event_snapshots = tuple(
+        snapshot
+        for snapshot in snapshots
+        if snapshot.input_sequence_min is not None
+        or snapshot.input_sequence_max is not None
+    )
+    synthetic_snapshots = tuple(
+        snapshot
+        for snapshot in snapshots
+        if snapshot.input_sequence_min is None and snapshot.input_sequence_max is None
+    )
+    batches: list[_DurableBatch] = []
+    if event_snapshots:
+        batches.append(
+            (
+                tuple(snapshot.state for snapshot in event_snapshots),
+                watermark,
+                _sequence_range(event_snapshots),
+            )
+        )
+    if synthetic_snapshots:
+        batches.append(
+            (
+                tuple(snapshot.state for snapshot in synthetic_snapshots),
+                watermark,
+                RuntimeStateSequenceRange(),
+            )
+        )
+    return tuple(batches)
+
+
+def _sequence_range(
+    snapshots: tuple[MarketState15sSnapshot, ...],
+) -> RuntimeStateSequenceRange:
+    minimums = tuple(
+        snapshot.input_sequence_min
+        for snapshot in snapshots
+        if snapshot.input_sequence_min is not None
+    )
+    maximums = tuple(
+        snapshot.input_sequence_max
+        for snapshot in snapshots
+        if snapshot.input_sequence_max is not None
+    )
+    return RuntimeStateSequenceRange(
+        minimum=(None if not minimums else min(minimums)),
+        maximum=(None if not maximums else max(maximums)),
     )
 
 

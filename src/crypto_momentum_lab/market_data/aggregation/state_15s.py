@@ -61,8 +61,8 @@ def aggregate_market_states_15s(
 @dataclass(frozen=True, slots=True)
 class MarketState15sSnapshot:
     state: MarketState15s
-    input_sequence_min: int
-    input_sequence_max: int
+    input_sequence_min: int | None
+    input_sequence_max: int | None
 
 
 @dataclass(slots=True)
@@ -123,6 +123,86 @@ class MarketState15sAccumulator:
             liquidation_count=0,
             liquidation_notional=Decimal("0"),
             mark_price=None,
+            closed_kline_count=0,
+            closed_kline_1m_open_time=None,
+            closed_kline_1m_close_time=None,
+            closed_kline_1m_open_price=None,
+            closed_kline_1m_close_price=None,
+            source_event_count=0,
+            first_received_at=None,
+            last_received_at=None,
+            input_sequence_min=None,
+            input_sequence_max=None,
+        )
+
+    @classmethod
+    def empty_bucket(
+        cls,
+        *,
+        exchange: str,
+        environment: str,
+        symbol: str,
+        bucket_start: datetime,
+        previous_state: MarketState15s | None = None,
+    ) -> "MarketState15sAccumulator":
+        """Create a zero-event bucket carrying forward the last price state.
+
+        A quiet symbol still needs a closed state so consumers that operate on
+        a fixed 15-second clock do not have to infer whether a missing row is
+        an outage or simply no activity.  Empty buckets deliberately carry no
+        input sequence range because no source event contributed to them.
+        """
+        start = bucket_start_15s(bucket_start)
+        if previous_state is not None:
+            if (
+                previous_state.exchange != exchange
+                or previous_state.environment != environment
+                or previous_state.symbol != symbol
+                or previous_state.bucket_start >= start
+            ):
+                raise ValueError("previous_state does not precede empty bucket")
+            reference_price = next(
+                (
+                    value
+                    for value in (
+                        previous_state.close_price,
+                        previous_state.mark_price,
+                        previous_state.midpoint,
+                    )
+                    if value is not None
+                ),
+                None,
+            )
+            last_bid_price = previous_state.last_bid_price
+            last_ask_price = previous_state.last_ask_price
+            mark_price = previous_state.mark_price
+        else:
+            reference_price = None
+            last_bid_price = None
+            last_ask_price = None
+            mark_price = None
+        return cls(
+            schema_version=(
+                2 if previous_state is None else previous_state.schema_version
+            ),
+            exchange=exchange,
+            environment=environment,
+            symbol=symbol,
+            bucket_start=start,
+            bucket_end=start + timedelta(seconds=_BUCKET_SECONDS),
+            open_price=reference_price,
+            high_price=reference_price,
+            low_price=reference_price,
+            close_price=reference_price,
+            trade_count=0,
+            trade_notional=Decimal("0"),
+            aggressive_buy_notional=Decimal("0"),
+            aggressive_sell_notional=Decimal("0"),
+            last_bid_price=last_bid_price,
+            last_ask_price=last_ask_price,
+            liquidation_count=0,
+            liquidation_notional=Decimal("0"),
+            mark_price=mark_price,
             closed_kline_count=0,
             closed_kline_1m_open_time=None,
             closed_kline_1m_close_time=None,
@@ -226,8 +306,6 @@ class MarketState15sAccumulator:
         if last_bid_price is not None and last_ask_price is not None:
             spread = last_ask_price - last_bid_price
             midpoint = (last_bid_price + last_ask_price) / Decimal("2")
-        if sequence_min is None or sequence_max is None:
-            raise RuntimeError("cannot snapshot an empty market-state bucket")
         return MarketState15sSnapshot(
             state=MarketState15s(
                 schema_version=self.schema_version,

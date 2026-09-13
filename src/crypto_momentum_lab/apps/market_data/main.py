@@ -413,11 +413,13 @@ class CaptureUniverseObserver:
         protected_symbol_loader: (
             Callable[[], Awaitable[frozenset[str]]] | None
         ) = None,
+        on_symbols_changed: Callable[[frozenset[str]], None] | None = None,
     ) -> None:
         self._capture = capture
         self._streams = streams
         self._generation = initial_generation
         self._protected_symbol_loader = protected_symbol_loader
+        self._on_symbols_changed = on_symbols_changed
         self._lock = asyncio.Lock()
         self._universe_symbols: frozenset[str] | None = None
         self._applied_symbols: frozenset[str] | None = None
@@ -456,6 +458,8 @@ class CaptureUniverseObserver:
             generation=self._generation,
         )
         self._applied_symbols = symbols
+        if self._on_symbols_changed is not None:
+            self._on_symbols_changed(symbols)
         log.info(
             "capture_symbols_updated",
             universe=len(self._universe_symbols),
@@ -732,6 +736,7 @@ async def build_market_data_runtime(
 
     initial_memberships = await universe_repository.load_active_memberships()
     initial_symbols = frozenset(initial_memberships) | await load_protected_symbols()
+    runtime_state_publisher.set_expected_symbols(initial_symbols)
     enabled_streams = tuple(
         CaptureStream(item) for item in runtime.capture.enabled_streams
     )
@@ -911,6 +916,7 @@ async def build_market_data_runtime(
         streams=enabled_streams,
         initial_generation=1,
         protected_symbol_loader=load_protected_symbols,
+        on_symbols_changed=runtime_state_publisher.set_expected_symbols,
     )
     universe = UniverseRefreshService(
         market_data=rest_client,
