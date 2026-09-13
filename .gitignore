@@ -7,10 +7,12 @@
 .local-backups/
 .pytest_cache/
 .ruff_cache/
-/docs/HANDOFF.md
 .venv
 .venv/
 __pycache__/
 *.egg-info/
 data/
+/docs/
+/reports/
+server_exports/
 runs/
