@@ -123,3 +123,33 @@ async def test_daemon_accepts_a_fill_key_seen_by_the_stream() -> None:
     )
 
     assert stream.reconnect_reasons == []
+
+
+async def test_daemon_expires_unmatched_fill_without_waiting_or_reconnecting_again(
+) -> None:
+    stream = WatchdogStream()
+    current_time = [datetime(2026, 8, 28, 0, 0, 0, tzinfo=UTC)]
+    daemon = UserDataAccountSyncDaemon(
+        service=SnapshotService(),
+        stream=stream,
+        config=UserDataAccountSyncConfig(missing_fill_max_age_seconds=10),
+        clock=lambda: current_time[0],
+    )
+    fill_key = ("BTCUSDT", "42")
+
+    await daemon._inspect_reconciliation(
+        _result(fill_count=1, new_fill_keys=frozenset({fill_key}))
+    )
+    current_time[0] = current_time[0].replace(second=1)
+    await daemon._inspect_reconciliation(_result(fill_count=1))
+    assert stream.reconnect_reasons == [
+        "rest_reconciliation_found_unmatched_fill_keys"
+    ]
+
+    current_time[0] = current_time[0].replace(second=11)
+    await daemon._inspect_reconciliation(_result(fill_count=1))
+
+    assert daemon._pending_missing_fill_keys == {}
+    assert stream.reconnect_reasons == [
+        "rest_reconciliation_found_unmatched_fill_keys"
+    ]

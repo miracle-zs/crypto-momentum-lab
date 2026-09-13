@@ -33,6 +33,7 @@ log = structlog.get_logger(__name__)
 
 _QueueItem = TypeVar("_QueueItem")
 _MISSING_FILL_RECONNECT_RETRY_SECONDS = 60.0
+_DEFAULT_MISSING_FILL_MAX_AGE_SECONDS = 5 * 60.0
 
 
 class AccountSyncCycle(Protocol):
@@ -224,6 +225,10 @@ class UserDataAccountEventStream(Protocol):
 @dataclass(frozen=True, slots=True)
 class UserDataAccountSyncConfig:
     rest_reconciliation_interval_seconds: float = 300.0
+    # A REST-only historical fill may never be replayed by a newly connected
+    # user-data stream. Keep a bounded, non-blocking retry window so that one
+    # such fill cannot trigger reconnects forever.
+    missing_fill_max_age_seconds: float = _DEFAULT_MISSING_FILL_MAX_AGE_SECONDS
     snapshot_interval_seconds: float = 15.0
     heartbeat_interval_seconds: float = 30.0
     failure_backoff_initial_seconds: float = 10.0
@@ -235,6 +240,8 @@ class UserDataAccountSyncConfig:
     def __post_init__(self) -> None:
         if self.rest_reconciliation_interval_seconds <= 0:
             raise ValueError("rest_reconciliation_interval_seconds must be positive")
+        if self.missing_fill_max_age_seconds <= 0:
+            raise ValueError("missing_fill_max_age_seconds must be positive")
         if self.snapshot_interval_seconds <= 0:
             raise ValueError("snapshot_interval_seconds must be positive")
         if self.heartbeat_interval_seconds <= 0:
@@ -1103,13 +1110,19 @@ class UserDataAccountSyncDaemon:
             now = self._now()
             pending_after: dict[FillKey, datetime] = {}
             still_missing: set[FillKey] = set()
+            expired_missing: set[FillKey] = set()
             for fill_key in candidates:
                 if fill_key in stream_fill_keys:
                     continue
-                if fill_key in pending_before:
-                    still_missing.add(fill_key)
-                else:
+                first_seen_at = pending_before.get(fill_key)
+                if first_seen_at is None:
                     pending_after[fill_key] = now
+                    continue
+                age_seconds = (now - first_seen_at).total_seconds()
+                if age_seconds >= self._config.missing_fill_max_age_seconds:
+                    expired_missing.add(fill_key)
+                    continue
+                still_missing.add(fill_key)
 
             reconnect_requested = False
             pending_after.update(
@@ -1166,6 +1179,13 @@ class UserDataAccountSyncDaemon:
                     reconnect_deferred_count=(
                         len(still_missing) - len(reconnect_candidates)
                     ),
+                )
+            if expired_missing:
+                log.warning(
+                    "binance_user_data_stream_historical_unmatched_fill_events",
+                    unmatched_fill_count=len(expired_missing),
+                    unmatched_fill_keys=sorted(expired_missing)[:10],
+                    max_age_seconds=self._config.missing_fill_max_age_seconds,
                 )
             self._pending_missing_fill_keys = pending_after
             self._missing_fill_reconnect_requested_at = {
