@@ -51,6 +51,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert services["live-strategy"]["stop_grace_period"] == "90s"
     assert services["dashboard"]["healthcheck"]["interval"] == "30s"
     assert services["dashboard"]["healthcheck"]["start_interval"] == "5s"
+    assert services["dashboard"]["healthcheck"]["start_period"] == "30s"
     assert services["dashboard"]["healthcheck"]["retries"] == 4
     assert services["market-data"]["healthcheck"]["interval"] == "60s"
     assert services["market-data"]["healthcheck"]["retries"] == 2
@@ -288,6 +289,29 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert "BINANCE_API_SECRET" not in services["live-strategy"]["environment"]
     assert "BINANCE_API_KEY" not in str(services["market-data"])
     assert "BINANCE_API_KEY" not in str(services["paper-orderflow-pair"])
+
+
+def test_healthcheck_start_interval_requires_start_period() -> None:
+    """Docker rejects start_interval unless start_period is also set."""
+
+    offenders: list[str] = []
+    for compose_file in ("compose.server.yaml", "compose.live.accounts.yaml"):
+        manifest = yaml.safe_load(Path(compose_file).read_text(encoding="utf-8"))
+        blocks = list(manifest.get("services", {}).items())
+        blocks += [
+            (key, value)
+            for key, value in manifest.items()
+            if key.startswith("x-") and isinstance(value, dict)
+        ]
+        for name, body in blocks:
+            if not isinstance(body, dict):
+                continue
+            healthcheck = body.get("healthcheck")
+            if not isinstance(healthcheck, dict):
+                continue
+            if "start_interval" in healthcheck and "start_period" not in healthcheck:
+                offenders.append(f"{compose_file}:{name}")
+    assert offenders == []
 
 
 def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> None:

@@ -675,6 +675,7 @@ services:
       start_interval: 5s
       timeout: 5s
       retries: 4
+      start_period: 30s
     # The dashboard process regularly uses over 200 MiB with all sections
     # loaded, so keep headroom without reserving the old live-strategy budget.
     mem_limit: 320m
