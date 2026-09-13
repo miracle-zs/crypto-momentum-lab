@@ -31,7 +31,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert services["migrate"]["build"]["context"] == "."
     assert services["migrate"]["image"] == manifest["x-app"]["image"]
     assert services["market-data"]["healthcheck"]["start_period"] == "15m"
-    assert services["market-data"]["healthcheck"]["start_interval"] == "15s"
+    assert services["market-data"]["healthcheck"]["start_interval"] == "5s"
     assert services["market-data"]["healthcheck"]["test"] == [
         "CMD",
         "/usr/local/bin/cml-local-healthcheck",
@@ -48,8 +48,9 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     assert services["execution-account-live"]["healthcheck"]["start_interval"] == "5s"
     assert services["execution-account-live"]["stop_grace_period"] == "60s"
     assert services["live-strategy"]["healthcheck"]["start_interval"] == "5s"
-    assert services["live-strategy"]["stop_grace_period"] == "60s"
+    assert services["live-strategy"]["stop_grace_period"] == "90s"
     assert services["dashboard"]["healthcheck"]["interval"] == "30s"
+    assert services["dashboard"]["healthcheck"]["start_interval"] == "5s"
     assert services["dashboard"]["healthcheck"]["retries"] == 4
     assert services["market-data"]["healthcheck"]["interval"] == "60s"
     assert services["market-data"]["healthcheck"]["retries"] == 2
@@ -307,8 +308,8 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
         strategy = services[f"live-strategy-account-{account_number}"]
         assert execution["profiles"] == ["live"]
         assert strategy["profiles"] == ["live"]
-        assert execution["stop_grace_period"] == "60s"
-        assert strategy["stop_grace_period"] == "60s"
+        assert execution["stop_grace_period"] == "90s"
+        assert strategy["stop_grace_period"] == "90s"
         assert execution["healthcheck"]["start_interval"] == "5s"
         assert strategy["healthcheck"]["start_interval"] == "5s"
         assert execution["healthcheck"]["test"] == [

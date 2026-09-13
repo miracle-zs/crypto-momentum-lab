@@ -208,7 +208,7 @@ services:
       # reads that marker and never opens a second database connection.
       test: ["CMD", "/usr/local/bin/cml-local-healthcheck", "120"]
       interval: 60s
-      start_interval: 15s
+      start_interval: 5s
       timeout: 15s
       retries: 2
       start_period: 15m
@@ -672,6 +672,7 @@ services:
         - >-
           python -S -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=3)"
       interval: 30s
+      start_interval: 5s
       timeout: 5s
       retries: 4
     # The dashboard process regularly uses over 200 MiB with all sections
