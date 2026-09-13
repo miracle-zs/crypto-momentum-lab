@@ -89,6 +89,15 @@ class StrategyRuntimeState:
         max_buffer_length: int,
     ) -> None:
         if state.close_price is None:
+            previous = self.last_processed.get(state.symbol)
+            if previous is None or state.bucket_start >= previous:
+                # A durable bucket with no close price is still a real
+                # market-state watermark.  The rolling feature buffer cannot
+                # use it, but leaving the old checkpoint timestamp in place
+                # makes the first valid bucket after a data outage look like
+                # a continuity break and sends every live worker into a
+                # restart loop.
+                self.last_processed[state.symbol] = state.bucket_start
             return
         self.append_market_state(
             state,

@@ -110,6 +110,30 @@ def test_orderflow_impulse_warm_recovery_advances_last_processed_watermark() -> 
     assert checkpoint.payload["signal_sequence"] == 0
 
 
+def test_orderflow_impulse_warm_recovery_advances_over_missing_price_bucket() -> None:
+    strategy = _strategy()
+    state = replace(
+        _state(0, Decimal("100"), notional=Decimal("0")),
+        open_price=None,
+        high_price=None,
+        low_price=None,
+        close_price=None,
+        last_bid_price=None,
+        last_ask_price=None,
+        midpoint=None,
+        mark_price=None,
+    )
+
+    strategy.warm_market_state(state)
+
+    checkpoint = strategy.checkpoint(include_market_state_buffers=False)
+
+    assert checkpoint.last_processed_at_by_symbol == {
+        "BTCUSDT": state.bucket_start,
+    }
+    assert checkpoint.payload["buffer_sizes"] == {}
+
+
 def test_orderflow_impulse_resets_symbol_after_a_market_data_gap() -> None:
     strategy = _strategy()
     _last_decision(strategy, _impulse_states())
