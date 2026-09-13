@@ -1816,7 +1816,7 @@ def _paired_runtime_identity(
 
 
 def _build_paired_account(
-    repository: object,
+    repository: PostgresPaperDaemonRepository,
     spec: _PairedAccountSpec,
     *,
     strategy_name: str,

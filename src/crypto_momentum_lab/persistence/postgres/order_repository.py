@@ -2,10 +2,11 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import (
+    CursorResult,
     and_,
     case,
     delete,
@@ -847,7 +848,9 @@ class PostgresOrderRepository:
                         )
                     )
                     if (
-                        order_update.rowcount
+                        # session.execute() is typed as Result[Any]; for an
+                        # UPDATE it is a CursorResult, which carries rowcount.
+                        cast(CursorResult[Any], order_update).rowcount
                         and order_intent_id is not None
                         and current_order_state is not None
                     ):

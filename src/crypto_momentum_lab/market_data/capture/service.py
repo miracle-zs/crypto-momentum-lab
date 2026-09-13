@@ -113,6 +113,8 @@ class CaptureRunner(Protocol):
 
     async def stop(self) -> None: ...
 
+    async def submit(self, envelope: RawEnvelope) -> None: ...
+
 
 class MarketDataCaptureService:
     def __init__(

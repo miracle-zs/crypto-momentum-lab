@@ -53,6 +53,9 @@ class RuntimeStrategyProtocol(Protocol):
     def clear_market_state_buffers(self) -> None:
         pass
 
+    def reset_symbol(self, symbol: str) -> None:
+        pass
+
 
 class StrategyRegistryError(ValueError):
     pass

@@ -17,7 +17,10 @@ from typing import Protocol
 import structlog
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
-from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
+from crypto_momentum_lab.domain.strategy import (
+    StrategyCheckpoint,
+    StrategyDataRequirement,
+)
 from crypto_momentum_lab.health import LocalHealthWriter
 
 log = structlog.get_logger()
@@ -26,7 +29,7 @@ log = structlog.get_logger()
 class ReadinessStrategy(Protocol):
     """The compact strategy surface needed by readiness reporting."""
 
-    def required_data(self) -> object: ...
+    def required_data(self) -> StrategyDataRequirement: ...
 
     def checkpoint(
         self,

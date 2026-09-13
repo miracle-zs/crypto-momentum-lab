@@ -209,7 +209,10 @@ class OrderExecutionCoordinator:
                     prepared_submission=prepared_submission,
                 )
 
-            return await self._run_entry_submission(plan, submit)
+            return cast(
+                OrderExecutionResult,
+                await self._run_entry_submission(plan, submit),
+            )
 
         return cast(
             OrderExecutionResult,
@@ -247,7 +250,10 @@ class OrderExecutionCoordinator:
                     prepared_submission=prepared,
                 )
 
-            return await self._run_entry_submission(plan, prepare_and_submit)
+            return cast(
+                OrderExecutionResult | None,
+                await self._run_entry_submission(plan, prepare_and_submit),
+            )
 
         return cast(
             OrderExecutionResult | None,

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from inspect import Parameter, signature
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import NAMESPACE_URL, uuid5
 
 import structlog
@@ -2070,7 +2070,9 @@ def _strategy_decision_without_shared_cooldown(
 ) -> StrategyDecision:
     method = getattr(strategy, "on_market_state_without_cooldown", None)
     if callable(method):
-        return method(state)
+        # getattr() erases the callable's signature; the optional hook has the
+        # same contract as on_market_state.
+        return cast(StrategyDecision, method(state))
     return strategy.on_market_state(state)
 
 
@@ -2081,7 +2083,8 @@ def _strategy_cooldown_buckets(strategy: RuntimeStrategy) -> int:
     value = method()
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return 0
-    return value
+    # The guards above already proved this is a non-negative int.
+    return cast(int, value)
 
 
 def _log_candle_gap_events(

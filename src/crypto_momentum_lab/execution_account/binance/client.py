@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
+from typing import TypedDict, cast
 from urllib.parse import urlencode
 
 import httpx
@@ -54,6 +54,17 @@ from crypto_momentum_lab.live_rollout.commands import (
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 5.0
 _DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
 _DEFAULT_POOL_TIMEOUT_SECONDS = 5.0
+
+
+class _EndpointMetric(TypedDict):
+    """One per-endpoint counter row reported by ``endpoint_metrics``."""
+
+    count: int
+    error_count: int
+    total_ms: float
+    last_status: int | None
+
+
 _COMMAND_EXIT_PRIORITY = 0
 _COMMAND_ENTRY_PRIORITY = 10
 _COMMAND_BACKGROUND_PRIORITY = 20
@@ -310,18 +321,18 @@ class BinanceUsdMPrivateReadClient:
             ),
             trust_env=False,
         )
-        self._endpoint_metrics: dict[str, dict[str, object]] = {}
+        self._endpoint_metrics: dict[str, _EndpointMetric] = {}
 
     @property
-    def endpoint_metrics(self) -> dict[str, dict[str, object]]:
+    def endpoint_metrics(self) -> dict[str, _EndpointMetric]:
         """Return request counts and latency totals without credentials."""
         return {
-            path: {
-                "count": int(values["count"]),
-                "error_count": int(values["error_count"]),
-                "total_ms": round(float(values["total_ms"]), 3),
-                "last_status": values["last_status"],
-            }
+            path: _EndpointMetric(
+                count=values["count"],
+                error_count=values["error_count"],
+                total_ms=round(values["total_ms"], 3),
+                last_status=values["last_status"],
+            )
             for path, values in self._endpoint_metrics.items()
         }
 
