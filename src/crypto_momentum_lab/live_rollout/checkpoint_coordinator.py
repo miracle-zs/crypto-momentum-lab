@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime
 from inspect import Parameter, signature
@@ -42,12 +42,16 @@ class LiveCheckpointCoordinator:
         writer: CheckpointWriter,
         strategy: CheckpointableStrategy,
         checkpoint_every_states: int,
+        hub_cursor_provider: Callable[
+            [], Mapping[str, str | int] | None
+        ] | None = None,
     ) -> None:
         if checkpoint_every_states <= 0:
             raise ValueError("checkpoint_every_states must be positive")
         self._writer = writer
         self._strategy = strategy
         self._checkpoint_every_states = checkpoint_every_states
+        self._hub_cursor_provider = hub_cursor_provider
         self._last_processed_at_by_symbol: dict[str, datetime] = {}
         self._processed_state_count = 0
         self._dirty = False
@@ -58,7 +62,10 @@ class LiveCheckpointCoordinator:
         if self._started:
             return
         self._last_processed_at_by_symbol = dict(
-            _checkpoint_for_persistence(self._strategy)
+            _checkpoint_for_persistence(
+                self._strategy,
+                hub_cursor_provider=self._hub_cursor_provider,
+            )
             .last_processed_at_by_symbol
         )
         self._processed_state_count = 0
@@ -94,7 +101,10 @@ class LiveCheckpointCoordinator:
         if self._processed_state_count % self._checkpoint_every_states != 0:
             return
         self._writer.submit(
-            _checkpoint_for_persistence(self._strategy),
+            _checkpoint_for_persistence(
+                self._strategy,
+                hub_cursor_provider=self._hub_cursor_provider,
+            ),
             saved_at,
         )
         self._dirty = False
@@ -104,7 +114,10 @@ class LiveCheckpointCoordinator:
         if not self._dirty or self._last_saved_at is None:
             return True
         saved = await self._writer.save_now(
-            _checkpoint_for_persistence(self._strategy),
+            _checkpoint_for_persistence(
+                self._strategy,
+                hub_cursor_provider=self._hub_cursor_provider,
+            ),
             self._last_saved_at,
         )
         if saved:
@@ -112,9 +125,36 @@ class LiveCheckpointCoordinator:
             self._last_saved_at = None
         return saved
 
+    def record_recovered_state(
+        self,
+        state: MarketState15s,
+        *,
+        saved_at: datetime,
+    ) -> None:
+        """Advance the durable watermark for a state warmed during backfill.
+
+        A recovered bucket was not evaluated as a new signal, so it must not
+        count toward the normal checkpoint cadence.  It is nevertheless part
+        of the strategy's contiguous rolling state and must be reflected in
+        the next compact checkpoint.
+        """
+
+        if not self._started:
+            raise RuntimeError("checkpoint coordinator is not started")
+        previous = self._last_processed_at_by_symbol.get(state.symbol)
+        if previous is not None and state.bucket_start <= previous:
+            return
+        self._last_processed_at_by_symbol[state.symbol] = state.bucket_start
+        self._dirty = True
+        self._last_saved_at = saved_at
+
 
 def _checkpoint_for_persistence(
     strategy: CheckpointableStrategy,
+    *,
+    hub_cursor_provider: Callable[
+        [], Mapping[str, str | int] | None
+    ] | None = None,
 ) -> StrategyCheckpoint:
     """Build a compact checkpoint without breaking lightweight adapters."""
     started = perf_counter()
@@ -134,7 +174,7 @@ def _checkpoint_for_persistence(
             build_ms=round((perf_counter() - started) * 1000, 3),
             payload_keys=tuple(sorted(checkpoint.payload)),
         )
-        return checkpoint
+        return _with_hub_cursor(checkpoint, hub_cursor_provider)
 
     checkpoint = checkpoint_method()
     payload = {
@@ -148,7 +188,30 @@ def _checkpoint_for_persistence(
         build_ms=round((perf_counter() - started) * 1000, 3),
         payload_keys=tuple(sorted(compact.payload)),
     )
-    return compact
+    return _with_hub_cursor(compact, hub_cursor_provider)
+
+
+def _with_hub_cursor(
+    checkpoint: StrategyCheckpoint,
+    provider: Callable[[], Mapping[str, str | int] | None] | None,
+) -> StrategyCheckpoint:
+    if provider is None:
+        return checkpoint
+    cursor = provider()
+    if cursor is None:
+        return checkpoint
+    stream_id = cursor.get("stream_id")
+    sequence = cursor.get("sequence")
+    if not isinstance(stream_id, str) or not stream_id.strip():
+        raise ValueError("hub cursor stream_id must be a non-empty string")
+    if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
+        raise ValueError("hub cursor sequence must be a non-negative integer")
+    payload = dict(checkpoint.payload)
+    payload["market_state_hub_cursor"] = {
+        "stream_id": stream_id,
+        "sequence": sequence,
+    }
+    return replace(checkpoint, payload=payload)
 
 
 __all__ = ["LiveCheckpointCoordinator"]

@@ -87,3 +87,28 @@ async def test_stream_fails_before_draining_states_after_fatal_close() -> None:
         await anext(buffer.stream())
 
     assert raised.value.__cause__ is failure
+
+
+@pytest.mark.asyncio
+async def test_stream_acknowledges_history_states_skipped_by_watermark() -> None:
+    skipped = SimpleNamespace(
+        symbol="BTCUSDT",
+        bucket_start=datetime(2026, 9, 12, tzinfo=UTC),
+    )
+    observed: list[object] = []
+    buffer = StartupMarketStateBuffer(
+        max_states=2,
+        on_state_skipped=observed.append,  # type: ignore[arg-type]
+    )
+    await buffer.append(skipped)  # type: ignore[arg-type]
+    buffer.close()
+
+    yielded = [
+        state
+        async for state in buffer.stream(
+            skip_through={"BTCUSDT": skipped.bucket_start}
+        )
+    ]
+
+    assert yielded == []
+    assert observed == [skipped]

@@ -122,6 +122,70 @@ async def test_coordinator_submits_periodic_checkpoint_and_forgets_gap_symbol() 
     }
 
 
+async def test_coordinator_persists_hub_cursor_with_compact_checkpoint() -> None:
+    persisted: list[tuple[str, StrategyCheckpoint, datetime]] = []
+    strategy = _Strategy()
+    writer = CheckpointWriter(
+        run_id="run-1",
+        persist=lambda run_id, checkpoint, saved_at: _persist(
+            persisted,
+            run_id,
+            checkpoint,
+            saved_at,
+        ),
+    )
+    coordinator = LiveCheckpointCoordinator(
+        writer=writer,
+        strategy=strategy,
+        checkpoint_every_states=1,
+        hub_cursor_provider=lambda: {
+            "stream_id": "stream-a",
+            "sequence": 17,
+        },
+    )
+
+    await coordinator.start()
+    coordinator.record_processed_state(_state(), saved_at=NOW)
+    await writer.flush()
+    await coordinator.stop()
+
+    assert persisted[0][1].payload["market_state_hub_cursor"] == {
+        "stream_id": "stream-a",
+        "sequence": 17,
+    }
+
+
+async def test_coordinator_advances_watermark_for_recovered_market_state() -> None:
+    persisted: list[tuple[str, StrategyCheckpoint, datetime]] = []
+    strategy = _Strategy()
+    writer = CheckpointWriter(
+        run_id="run-1",
+        persist=lambda run_id, checkpoint, saved_at: _persist(
+            persisted,
+            run_id,
+            checkpoint,
+            saved_at,
+        ),
+    )
+    coordinator = LiveCheckpointCoordinator(
+        writer=writer,
+        strategy=strategy,
+        checkpoint_every_states=10,
+    )
+
+    await coordinator.start()
+    recovered = _state("BTCUSDT")
+    coordinator.record_recovered_state(recovered, saved_at=NOW)
+
+    assert coordinator.last_processed_at("BTCUSDT") == NOW
+    assert await coordinator.save_final() is True
+    await coordinator.stop()
+
+    assert persisted[0][1].payload == {
+        "include_market_state_buffers": False,
+    }
+
+
 async def _persist(
     persisted: list[tuple[str, StrategyCheckpoint, datetime]],
     run_id: str,

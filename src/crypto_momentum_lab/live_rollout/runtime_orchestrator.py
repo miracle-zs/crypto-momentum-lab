@@ -6,7 +6,13 @@ module owns the runtime assembly and lifecycle of one live daemon.
 
 import asyncio
 import os
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
+from collections.abc import (
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Mapping,
+)
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -84,6 +90,9 @@ from crypto_momentum_lab.live_rollout.market_cache import (
     LatestMarketQuoteCache,
     LatestMarketStateCache,
 )
+from crypto_momentum_lab.live_rollout.market_loop import (
+    LiveMarketStateContinuityError,
+)
 from crypto_momentum_lab.live_rollout.order_event_runtime import LiveOrderEventRuntime
 from crypto_momentum_lab.live_rollout.order_reconciliation import (
     LiveOrderReconciliation,
@@ -140,10 +149,16 @@ from crypto_momentum_lab.live_rollout.startup_recovery import (
     live_market_state_cutover as _live_market_state_cutover,
 )
 from crypto_momentum_lab.live_rollout.startup_recovery import (
+    load_live_market_state_gap as _load_live_market_state_gap,
+)
+from crypto_momentum_lab.live_rollout.startup_recovery import (
     restore_live_strategy_from_checkpoint as _restore_live_strategy_from_checkpoint,
 )
 from crypto_momentum_lab.live_rollout.startup_recovery import (
     strategy_last_processed_at_by_symbol as _strategy_last_processed_at_by_symbol,
+)
+from crypto_momentum_lab.live_rollout.startup_recovery import (
+    wait_for_durable_market_state_cutover as _wait_for_durable_market_state_cutover,
 )
 from crypto_momentum_lab.live_rollout.startup_recovery import (
     warm_live_strategy as _warm_live_strategy,
@@ -174,7 +189,10 @@ from crypto_momentum_lab.live_rollout.telemetry import (
     LiveTelemetrySink,
 )
 from crypto_momentum_lab.live_rollout.volume import WebSocketQuoteVolumeProvider
-from crypto_momentum_lab.market_data.hub import WebSocketMarketStateSource
+from crypto_momentum_lab.market_data.hub import (
+    MarketStateBatch,
+    WebSocketMarketStateSource,
+)
 from crypto_momentum_lab.market_data.quote_hub import (
     WebSocketMarketQuoteSource,
     WebSocketMarketQuoteVolumeSource,
@@ -649,10 +667,21 @@ async def run_live_daemon(
             warmup_required_buckets=int(required_data().warmup_buckets),
         )
         checkpoint = await checkpoint_repository.load_checkpoint(session_id)
+        hub_cursor_state = _LiveHubCursorState()
         if checkpoint is not None:
             strategy.restore_checkpoint(checkpoint)
+            restored_hub_cursor = _hub_cursor_from_checkpoint(checkpoint)
+            if restored_hub_cursor is not None:
+                hub_cursor_state.restore(restored_hub_cursor)
         state_repository = PostgresRuntimeMarketStateRepository(market_factory)
-        startup_cutover = _live_market_state_cutover(datetime.now(tz=UTC))
+        requested_startup_cutover = _live_market_state_cutover(
+            datetime.now(tz=UTC)
+        )
+        startup_cutover = await _wait_for_durable_market_state_cutover(
+            repository=state_repository,
+            environment=market_environment,
+            requested_cutover=requested_startup_cutover,
+        )
         startup_warmup_symbols: frozenset[str] | None = None
         if entry_positive_gainer_top_count is not None:
             universe_repository = PostgresUniverseRepository(market_factory)
@@ -671,7 +700,8 @@ async def run_live_daemon(
             live_readiness.set_expected_warmup_symbols(startup_warmup_symbols)
         if market_state_source == "hub":
             startup_market_buffer = StartupMarketStateBuffer(
-                max_states=_LIVE_STARTUP_BUFFER_LIMIT
+                max_states=_LIVE_STARTUP_BUFFER_LIMIT,
+                on_state_skipped=hub_cursor_state.acknowledge_state,
             )
 
             def on_startup_market_connection_change(
@@ -694,6 +724,7 @@ async def run_live_daemon(
                 environment=market_environment,
                 consumer_id=f"live-strategy:{session_id}",
                 on_connection_change=on_startup_market_connection_change,
+                on_batch=hub_cursor_state.observe_batch,
                 # A live worker may only consume a contiguous epoch.  If the
                 # bounded Hub replay cannot bridge a reconnect, let the
                 # worker fail so the durable startup rewarm path rebuilds the
@@ -701,6 +732,11 @@ async def run_live_daemon(
                 fail_on_replay_unavailable=True,
                 preserve_sequence_on_overflow=True,
             )
+            if hub_cursor_state.has_cursor:
+                hub_source.set_resume_cursor(
+                    stream_id=hub_cursor_state.stream_id,
+                    sequence=hub_cursor_state.sequence,
+                )
             startup_market_state_task = asyncio.create_task(
                 _collect_startup_market_states(
                     source=hub_source,
@@ -788,6 +824,24 @@ async def run_live_daemon(
         daemon_entry_symbol_loader = entry_runtime.entry_symbol_loader
 
         entry_filter_context_loader = entry_runtime.entry_filter_context_loader
+
+        async def recover_market_state_gap(
+            error: LiveMarketStateContinuityError,
+        ) -> tuple[MarketState15s, ...]:
+            requirement = required_data()
+            interval_seconds = max(
+                1,
+                int(getattr(requirement, "base_state_interval_seconds", 15)),
+            )
+            return await _load_live_market_state_gap(
+                repository=state_repository,
+                environment=market_environment,
+                symbol=error.symbol,
+                previous_at=error.previous_at,
+                current_at=error.current_at,
+                interval_seconds=interval_seconds,
+            )
+
         context_provider = PostgresLiveContextProvider(
             execution_session_factory=execution_factory,
             market_session_factory=market_factory,
@@ -879,6 +933,11 @@ async def run_live_daemon(
             on_managed_position_symbols=(
                 None if closed_candle_feed is None else closed_candle_feed.set_symbols
             ),
+            recover_market_state_gap=recover_market_state_gap,
+            hub_cursor_provider=(
+                hub_cursor_state.snapshot
+            ),
+            commit_market_state_cursor=hub_cursor_state.acknowledge_state,
         )
         order_event_runtime.set_daemon(daemon)
         assert live_repository is not None
@@ -1414,6 +1473,91 @@ def _is_order_identity_conflict(error: Exception) -> bool:
     return (
         isinstance(error, ValueError) and str(error) == _ORDER_IDENTITY_CONFLICT_MESSAGE
     )
+
+
+def _hub_cursor_from_checkpoint(
+    checkpoint: StrategyCheckpoint,
+) -> dict[str, str | int] | None:
+    raw_cursor = checkpoint.payload.get("market_state_hub_cursor")
+    if not isinstance(raw_cursor, Mapping):
+        return None
+    stream_id = raw_cursor.get("stream_id")
+    sequence = raw_cursor.get("sequence")
+    if not isinstance(stream_id, str) or not stream_id.strip():
+        log.warning("live_hub_cursor_checkpoint_ignored", reason="invalid_stream_id")
+        return None
+    if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
+        log.warning("live_hub_cursor_checkpoint_ignored", reason="invalid_sequence")
+        return None
+    return {"stream_id": stream_id, "sequence": sequence}
+
+
+class _LiveHubCursorState:
+    """Commit a Hub cursor only after every state in its batch is processed."""
+
+    def __init__(self) -> None:
+        self.stream_id: str | None = None
+        self.sequence: int | None = None
+        self._batch_by_state: dict[
+            tuple[str, datetime], tuple[str, int]
+        ] = {}
+        self._remaining_by_batch: dict[tuple[str, int], int] = {}
+
+    @property
+    def has_cursor(self) -> bool:
+        return self.stream_id is not None and self.sequence is not None
+
+    def restore(self, cursor: Mapping[str, str | int]) -> None:
+        stream_id = cursor.get("stream_id")
+        sequence = cursor.get("sequence")
+        if not isinstance(stream_id, str) or not stream_id.strip():
+            raise ValueError("hub cursor stream_id must be a non-empty string")
+        if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
+            raise ValueError("hub cursor sequence must be a non-negative integer")
+        self.stream_id = stream_id
+        self.sequence = sequence
+
+    def observe_batch(self, batch: MarketStateBatch) -> None:
+        if batch.stream_id is None:
+            return
+        batch_key = (batch.stream_id, batch.sequence)
+        self._remaining_by_batch[batch_key] = len(batch.states)
+        for state in batch.states:
+            self._batch_by_state[(state.symbol, state.bucket_start)] = batch_key
+
+    def acknowledge_state(self, state: MarketState15s) -> None:
+        batch_key = self._batch_by_state.pop(
+            (state.symbol, state.bucket_start),
+            None,
+        )
+        if batch_key is None:
+            return
+        remaining = self._remaining_by_batch.get(batch_key)
+        if remaining is None:
+            return
+        if remaining > 1:
+            self._remaining_by_batch[batch_key] = remaining - 1
+            return
+        self._remaining_by_batch.pop(batch_key, None)
+        stream_id, sequence = batch_key
+        if (
+            self.stream_id is None
+            or self.sequence is None
+            or stream_id != self.stream_id
+            or sequence > self.sequence
+        ):
+            self.stream_id = stream_id
+            self.sequence = sequence
+
+    def snapshot(self) -> dict[str, str | int] | None:
+        if not self.has_cursor:
+            return None
+        assert self.stream_id is not None
+        assert self.sequence is not None
+        return {
+            "stream_id": self.stream_id,
+            "sequence": self.sequence,
+        }
 
 
 class _LiveDaemonRepositoryAdapter:

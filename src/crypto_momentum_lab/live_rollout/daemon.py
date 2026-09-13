@@ -80,6 +80,7 @@ from crypto_momentum_lab.live_rollout.market_loop import (
 )
 from crypto_momentum_lab.live_rollout.market_loop import (
     LiveMarketLoop,
+    MarketStateGapRecovery,
 )
 from crypto_momentum_lab.live_rollout.market_loop import (
     LiveRuntimeStrategy as _LiveRuntimeStrategy,
@@ -208,6 +209,12 @@ class LiveStrategyDaemon:
         fetch_exchange_positions: (
             Callable[[], Awaitable[tuple[AccountPositionSnapshot, ...]]] | None
         ) = None,
+        recover_market_state_gap: MarketStateGapRecovery | None = None,
+        hub_cursor_provider: Callable[
+            [], Mapping[str, str | int] | None
+        ] | None = None,
+        commit_market_state_cursor: Callable[[MarketState15s], None]
+        | None = None,
     ) -> None:
         self._strategy = strategy
         self._risk_gateway = risk_gateway
@@ -230,6 +237,7 @@ class LiveStrategyDaemon:
             ),
             strategy=self._strategy,
             checkpoint_every_states=config.checkpoint_every_states,
+            hub_cursor_provider=hub_cursor_provider,
         )
         self._telemetry = telemetry
         self._signal_recorder = signal_recorder
@@ -404,6 +412,9 @@ class LiveStrategyDaemon:
             entry_lane=self._entry_lane,
             state_machine=self._state_machine,
             clock=self._clock,
+            recover_market_state_gap=recover_market_state_gap,
+            hub_cursor_provider=hub_cursor_provider,
+            commit_market_state_cursor=commit_market_state_cursor,
         )
         self._lifecycle = LiveDaemonLifecycle(
             run_id=config.run_id,

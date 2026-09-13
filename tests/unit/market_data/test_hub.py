@@ -279,6 +279,72 @@ async def test_durable_market_state_source_requires_batch_stream_epoch(
         await iterator.aclose()
 
 
+async def test_market_state_source_reports_consumed_batch_cursor(monkeypatch) -> None:
+    state = fixture_state("BTCUSDT", 0)
+    messages = [
+        json.dumps(
+            {
+                "type": "market_state_hub_ready",
+                "schema_version": 1,
+                "environment": "research",
+                "stream_id": "stream-a",
+                "replay_available": True,
+                "latest_sequence": 0,
+            }
+        ),
+        encode_market_state_batch(
+            (state,),
+            sequence=1,
+            published_at=state.bucket_end,
+            stream_id="stream-a",
+        ),
+    ]
+
+    class FakeConnection:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, _message):
+            return None
+
+        async def recv(self):
+            return messages.pop(0)
+
+    monkeypatch.setattr(
+        hub_module,
+        "connect",
+        lambda *_args, **_kwargs: FakeConnection(),
+    )
+    observed: list[tuple[str, int]] = []
+    batches: list[object] = []
+    source = WebSocketMarketStateSource(
+        url="ws://unused",
+        environment="research",
+        consumer_id="test-live",
+        config=MarketStateHubConfig(reconnect_delays=(0,)),
+        on_batch=batches.append,  # type: ignore[arg-type]
+        on_cursor_change=lambda stream_id, sequence: observed.append(
+            (stream_id, sequence)
+        ),
+        fail_on_replay_unavailable=True,
+    )
+    iterator = source.batches()
+    try:
+        assert (await anext(iterator)).sequence == 1
+        source.stop()
+        with pytest.raises(StopAsyncIteration):
+            await anext(iterator)
+    finally:
+        source.stop()
+        await iterator.aclose()
+
+    assert observed == [("stream-a", 1)]
+    assert len(batches) == 1
+
+
 @pytest.mark.skipif(
     os.environ.get("CML_RUN_HUB_NETWORK_TESTS") != "1",
     reason="requires local loopback socket permission",

@@ -248,6 +248,13 @@ async def test_strategy_output_observation_is_durable_as_a_sampled_heartbeat() -
         occurred_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
         signal_count=0,
         candidate_count=0,
+        details={
+            "market_state_input_fingerprint": "fingerprint-1",
+            "last_processed_at_before": "2026-07-03T23:58:45+00:00",
+            "gap_recovered_bucket_count": 1,
+            "hub_stream_id": "stream-a",
+            "hub_sequence": 17,
+        },
     )
     await telemetry.stop()
 
@@ -258,6 +265,11 @@ async def test_strategy_output_observation_is_durable_as_a_sampled_heartbeat() -
         "strategy_config_hash": "config-1",
         "signal_count": 0,
         "candidate_count": 0,
+        "market_state_input_fingerprint": "fingerprint-1",
+        "last_processed_at_before": "2026-07-03T23:58:45+00:00",
+        "gap_recovered_bucket_count": 1,
+        "hub_stream_id": "stream-a",
+        "hub_sequence": 17,
     }
 
 
@@ -292,6 +304,38 @@ async def test_strategy_output_heartbeat_is_sampled_per_symbol() -> None:
 
     events = [event for batch in batches for event in batch]
     assert {event["symbol"] for event in events} == {"BTCUSDT", "ETHUSDT"}
+
+
+async def test_non_empty_strategy_outputs_are_persisted_for_reconstruction() -> None:
+    batches: list[tuple[dict[str, object], ...]] = []
+
+    async def persist(events) -> None:
+        batches.append(tuple(dict(event) for event in events))
+
+    telemetry = LiveRuntimeTelemetry(
+        run_id="run-1",
+        persist=persist,
+        persist_event_types=frozenset({STRATEGY_OUTPUT_OBSERVED}),
+    )
+    timestamp = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+    await telemetry.start()
+    await telemetry.strategy_decision(
+        _state(),
+        occurred_at=timestamp,
+        signal_count=1,
+        candidate_count=1,
+    )
+    await telemetry.strategy_decision(
+        _state(),
+        occurred_at=timestamp + timedelta(seconds=15),
+        signal_count=1,
+        candidate_count=1,
+    )
+    await telemetry.stop()
+
+    events = [event for batch in batches for event in batch]
+    assert len(events) == 2
+    assert all(event["details"]["signal_count"] == 1 for event in events)
 
 
 async def test_persisted_order_events_carry_decision_slo_transition_samples() -> None:

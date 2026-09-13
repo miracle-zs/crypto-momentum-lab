@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import datetime
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -17,12 +17,18 @@ class StartupMarketStateBuffer:
     is applied instead of silently dropping states when the queue is full.
     """
 
-    def __init__(self, *, max_states: int) -> None:
+    def __init__(
+        self,
+        *,
+        max_states: int,
+        on_state_skipped: Callable[[MarketState15s], None] | None = None,
+    ) -> None:
         if max_states <= 0:
             raise ValueError("max_states must be positive")
         self._queue: asyncio.Queue[MarketState15s] = asyncio.Queue(
             maxsize=max_states
         )
+        self._on_state_skipped = on_state_skipped
         self._connection_available = False
         self._connection_reason = "market_state_hub_connecting"
         self._closed = False
@@ -150,6 +156,8 @@ class StartupMarketStateBuffer:
                 return
             previous = watermarks.get(state.symbol)
             if previous is not None and state.bucket_start <= previous:
+                if self._on_state_skipped is not None:
+                    self._on_state_skipped(state)
                 continue
             watermarks[state.symbol] = state.bucket_start
             yield state

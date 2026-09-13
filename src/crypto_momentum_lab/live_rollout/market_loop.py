@@ -8,9 +8,15 @@ in as the already-separated lanes and coordinators.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterable, Awaitable, Callable
+from collections.abc import (
+    AsyncIterable,
+    Awaitable,
+    Callable,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol
 
 import structlog
@@ -19,7 +25,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderState,
 )
-from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.market.models import JsonValue, MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     StrategyCheckpoint,
     StrategyDecision,
@@ -49,6 +55,7 @@ from crypto_momentum_lab.live_rollout.scheduled_controller import (
 from crypto_momentum_lab.live_rollout.telemetry import (
     LIVE_LANE_ENTRY,
     LiveTelemetrySink,
+    market_state_input_fingerprint,
 )
 
 log = structlog.get_logger()
@@ -96,6 +103,11 @@ class LiveMarketStateContinuityError(RuntimeError):
         self.observed_delta_seconds = observed_delta_seconds
 
 
+MarketStateGapRecovery = Callable[
+    [LiveMarketStateContinuityError], Awaitable[Sequence[MarketState15s]]
+]
+
+
 @dataclass(frozen=True, slots=True)
 class LiveDaemonResult:
     processed_state_count: int
@@ -128,6 +140,11 @@ class LiveMarketLoop:
         entry_lane: EntryExecutionLane,
         state_machine: OrderExecutionPort,
         clock: Callable[[], datetime],
+        recover_market_state_gap: MarketStateGapRecovery | None = None,
+        hub_cursor_provider: Callable[
+            [], Mapping[str, str | int] | None
+        ] | None = None,
+        commit_market_state_cursor: Callable[[MarketState15s], None] | None = None,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
@@ -148,6 +165,9 @@ class LiveMarketLoop:
         self._entry_lane = entry_lane
         self._state_machine = state_machine
         self._clock = clock
+        self._recover_market_state_gap = recover_market_state_gap
+        self._hub_cursor_provider = hub_cursor_provider
+        self._commit_market_state_cursor = commit_market_state_cursor
         self._market_gap_generation = 0
         self._strategy_gap_reset_generation_by_symbol: dict[str, int] = {}
         self._last_transient_gate_reasons: tuple[str, ...] | None = None
@@ -179,35 +199,47 @@ class LiveMarketLoop:
         state_interval_seconds = _strategy_state_interval_seconds(self._strategy)
         async for prefetched in self._context_prefetcher.stream(states):
             state = prefetched.state
+            last_processed_at = self._checkpoint_coordinator.last_processed_at(
+                state.symbol
+            )
+            recovered_states: tuple[MarketState15s, ...] = ()
             try:
                 _validate_market_state_continuity(
                     state=state,
-                    last_processed_at=(
-                        self._checkpoint_coordinator.last_processed_at(
-                            state.symbol
-                        )
-                    ),
+                    last_processed_at=last_processed_at,
                     expected_interval_seconds=state_interval_seconds,
                 )
             except LiveMarketStateContinuityError as error:
-                # A MarketState15s stream is event-driven: a quiet symbol may
-                # have no row for one or more buckets even while the Hub and
-                # the other symbols remain healthy.  Reset only this symbol's
-                # rolling indicators and watermark, then process the current
-                # state as its new warm-up boundary.  Treating the gap as a
-                # process-wide fatal error makes one illiquid symbol restart
-                # every live account and unnecessarily interrupts exits for
-                # unrelated symbols.
-                reset = getattr(self._strategy, "reset_symbol", None)
-                if callable(reset):
-                    reset(state.symbol)
-                self._checkpoint_coordinator.forget_symbol(state.symbol)
-                log.warning(
-                    "live_strategy_symbol_reset_after_market_state_gap",
-                    run_id=self._run_id,
-                    symbol=state.symbol,
-                    reason=str(error),
+                recovered_states = await self._recover_gap(error)
+                if not recovered_states:
+                    # A MarketState15s stream is event-driven: a quiet symbol
+                    # may have no row for one or more buckets even while the
+                    # Hub and the other symbols remain healthy.  Reset only
+                    # this symbol's rolling indicators and watermark, then
+                    # process the current state as its new warm-up boundary.
+                    # Treating the gap as a process-wide fatal error makes one
+                    # illiquid symbol restart every live account and
+                    # unnecessarily interrupts exits for unrelated symbols.
+                    reset = getattr(self._strategy, "reset_symbol", None)
+                    if callable(reset):
+                        reset(state.symbol)
+                    self._checkpoint_coordinator.forget_symbol(state.symbol)
+                    log.warning(
+                        "live_strategy_symbol_reset_after_market_state_gap",
+                        run_id=self._run_id,
+                        symbol=state.symbol,
+                        reason=str(error),
+                    )
+                self._strategy_gap_reset_generation_by_symbol[state.symbol] = (
+                    self._market_gap_generation
                 )
+            decision_details = _strategy_decision_details(
+                strategy=self._strategy,
+                state=state,
+                last_processed_at=last_processed_at,
+                recovered_bucket_count=len(recovered_states),
+                hub_cursor_provider=self._hub_cursor_provider,
+            )
             self._runtime_cache.prune(
                 now=self._clock(),
                 current_symbol=state.symbol,
@@ -334,13 +366,11 @@ class LiveMarketLoop:
                         occurred_at=self._clock(),
                         signal_count=len(decision.signals),
                         candidate_count=len(decision.candidates),
+                        details=decision_details,
                     )
                 processed += 1
                 final_state_at = state.bucket_start
-                self._checkpoint_coordinator.record_processed_state(
-                    state,
-                    saved_at=state.bucket_end,
-                )
+                self._record_processed_state(state, saved_at=state.bucket_end)
                 log.warning(
                     "live_runtime_context_degraded",
                     run_id=self._run_id,
@@ -379,13 +409,11 @@ class LiveMarketLoop:
                             occurred_at=self._clock(),
                             signal_count=len(decision.signals),
                             candidate_count=len(decision.candidates),
+                            details=decision_details,
                         )
                     processed += 1
                     final_state_at = state.bucket_start
-                    self._checkpoint_coordinator.record_processed_state(
-                        state,
-                        saved_at=context.now,
-                    )
+                    self._record_processed_state(state, saved_at=context.now)
                     continue
                 self._last_transient_gate_reasons = None
                 await self._checkpoint_coordinator.save_final()
@@ -442,6 +470,7 @@ class LiveMarketLoop:
                     occurred_at=decision_recorded_at,
                     signal_count=len(decision.signals),
                     candidate_count=len(decision.candidates),
+                    details=decision_details,
                 )
             entry_outcome = await self._entry_lane.process(
                 decision=decision,
@@ -454,10 +483,7 @@ class LiveMarketLoop:
             submitted += entry_outcome.submitted_order_count
             processed += 1
             final_state_at = state.bucket_start
-            self._checkpoint_coordinator.record_processed_state(
-                state,
-                saved_at=context.now,
-            )
+            self._record_processed_state(state, saved_at=context.now)
         await self._checkpoint_coordinator.save_final()
         return LiveDaemonResult(
             processed,
@@ -492,6 +518,127 @@ class LiveMarketLoop:
             if not result.state.terminal:
                 return "orphan_cancel_not_confirmed"
         return None
+
+    def _record_processed_state(
+        self,
+        state: MarketState15s,
+        *,
+        saved_at: datetime,
+    ) -> None:
+        if self._commit_market_state_cursor is not None:
+            self._commit_market_state_cursor(state)
+        self._checkpoint_coordinator.record_processed_state(
+            state,
+            saved_at=saved_at,
+        )
+
+    async def _recover_gap(
+        self,
+        error: LiveMarketStateContinuityError,
+    ) -> tuple[MarketState15s, ...]:
+        loader = self._recover_market_state_gap
+        if loader is None:
+            return ()
+        try:
+            states = tuple(await loader(error))
+        except asyncio.CancelledError:
+            raise
+        except Exception as recovery_error:
+            log.warning(
+                "live_strategy_market_state_gap_recovery_failed",
+                run_id=self._run_id,
+                symbol=error.symbol,
+                previous_at=error.previous_at.isoformat(),
+                current_at=error.current_at.isoformat(),
+                error_type=type(recovery_error).__name__,
+            )
+            return ()
+        if not _is_complete_gap_recovery(error, states, self._strategy):
+            return ()
+        warm_market_state = getattr(self._strategy, "warm_market_state", None)
+        if not callable(warm_market_state):
+            return ()
+        try:
+            for recovered in states:
+                warm_market_state(recovered)
+                self._checkpoint_coordinator.record_recovered_state(
+                    recovered,
+                    saved_at=self._clock(),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as recovery_error:
+            reset = getattr(self._strategy, "reset_symbol", None)
+            if callable(reset):
+                reset(error.symbol)
+            self._checkpoint_coordinator.forget_symbol(error.symbol)
+            log.warning(
+                "live_strategy_market_state_gap_recovery_failed",
+                run_id=self._run_id,
+                symbol=error.symbol,
+                previous_at=error.previous_at.isoformat(),
+                current_at=error.current_at.isoformat(),
+                error_type=type(recovery_error).__name__,
+            )
+            return ()
+        log.warning(
+            "live_strategy_market_state_gap_recovered",
+            run_id=self._run_id,
+            symbol=error.symbol,
+            previous_at=error.previous_at.isoformat(),
+            current_at=error.current_at.isoformat(),
+            recovered_bucket_count=len(states),
+        )
+        return states
+
+
+def _strategy_decision_details(
+    *,
+    strategy: LiveRuntimeStrategy,
+    state: MarketState15s,
+    last_processed_at: datetime | None,
+    recovered_bucket_count: int,
+    hub_cursor_provider: Callable[
+        [], Mapping[str, str | int] | None
+    ] | None,
+) -> dict[str, JsonValue]:
+    details: dict[str, JsonValue] = {
+        "market_state_input_fingerprint": market_state_input_fingerprint(state),
+        "last_processed_at_before": (
+            None
+            if last_processed_at is None
+            else last_processed_at.isoformat()
+        ),
+        "gap_recovered_bucket_count": recovered_bucket_count,
+        "input_data_complete": state.data_complete,
+        "input_missing_agg_trade_count": state.missing_agg_trade_count,
+    }
+    for attribute, key in (
+        ("buffered_state_count", "strategy_buffered_state_count"),
+        ("buffered_symbol_count", "strategy_buffered_symbol_count"),
+    ):
+        value = getattr(strategy, attribute, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            details[key] = value
+    if hub_cursor_provider is None:
+        return details
+    try:
+        cursor = hub_cursor_provider()
+    except Exception as error:
+        log.warning(
+            "live_strategy_hub_cursor_snapshot_failed",
+            error_type=type(error).__name__,
+        )
+        return details
+    if not isinstance(cursor, Mapping):
+        return details
+    stream_id = cursor.get("stream_id")
+    sequence = cursor.get("sequence")
+    if isinstance(stream_id, str) and stream_id.strip():
+        details["hub_stream_id"] = stream_id
+    if isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 0:
+        details["hub_sequence"] = sequence
+    return details
 
 
 def _is_transient_runtime_error(error: Exception) -> bool:
@@ -570,9 +717,47 @@ def _reset_strategy_for_gap(
         reset(symbol)
 
 
+def _is_complete_gap_recovery(
+    error: LiveMarketStateContinuityError,
+    states: Sequence[MarketState15s],
+    strategy: LiveRuntimeStrategy,
+) -> bool:
+    if (
+        error.observed_delta_seconds <= 0
+        or error.observed_delta_seconds % error.expected_interval_seconds != 0
+    ):
+        return False
+    missing_bucket_count = (
+        error.observed_delta_seconds // error.expected_interval_seconds - 1
+    )
+    interval = timedelta(seconds=error.expected_interval_seconds)
+    expected = tuple(
+        error.previous_at + interval * index
+        for index in range(1, missing_bucket_count + 1)
+    )
+    if not states or len(states) != len(expected):
+        return False
+    ordered = tuple(sorted(states, key=lambda state: state.bucket_start))
+    if any(state.symbol != error.symbol for state in ordered):
+        return False
+    if tuple(state.bucket_start for state in ordered) != expected:
+        return False
+    if any(not getattr(state, "data_complete", True) for state in ordered):
+        return False
+    required_data = getattr(strategy, "required_data", None)
+    if not callable(required_data):
+        return True
+    required_fields = tuple(getattr(required_data(), "required_fields", ()))
+    return all(
+        all(getattr(state, field, None) is not None for field in required_fields)
+        for state in ordered
+    )
+
+
 __all__ = [
     "LiveDaemonResult",
     "LiveMarketLoop",
     "LiveMarketStateContinuityError",
+    "MarketStateGapRecovery",
     "LiveRuntimeStrategy",
 ]

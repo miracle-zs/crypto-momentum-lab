@@ -491,6 +491,8 @@ class WebSocketMarketStateSource:
         consumer_id: str,
         config: MarketStateHubConfig | None = None,
         on_connection_change: Callable[[bool, str | None], None] | None = None,
+        on_batch: Callable[[MarketStateBatch], None] | None = None,
+        on_cursor_change: Callable[[str, int], None] | None = None,
         fail_on_replay_unavailable: bool = False,
         preserve_sequence_on_overflow: bool = False,
     ) -> None:
@@ -505,6 +507,8 @@ class WebSocketMarketStateSource:
         self._consumer_id = consumer_id
         self._config = config or MarketStateHubConfig()
         self._on_connection_change = on_connection_change
+        self._on_batch = on_batch
+        self._on_cursor_change = on_cursor_change
         self._fail_on_replay_unavailable = fail_on_replay_unavailable
         self._preserve_sequence_on_overflow = preserve_sequence_on_overflow
         self._connection_available: bool | None = None
@@ -736,8 +740,10 @@ class WebSocketMarketStateSource:
                                         f"expected={expected_sequence}, "
                                         f"received={batch.sequence}"
                                     )
+                            self._notify_batch(batch)
                             yield batch
                             self._last_sequence = batch.sequence
+                            self._notify_cursor_change()
                             if self._rewarm_required:
                                 self._rewarm_required = False
                                 self._notify_connection_change(True, None)
@@ -919,6 +925,37 @@ class WebSocketMarketStateSource:
                 available=available,
                 environment=self._environment,
                 consumer_id=self._consumer_id,
+            )
+
+    def _notify_cursor_change(self) -> None:
+        if self._on_cursor_change is None or self._stream_id is None:
+            return
+        sequence = self._last_sequence
+        if sequence is None:
+            return
+        try:
+            self._on_cursor_change(self._stream_id, sequence)
+        except Exception:
+            log.exception(
+                "market_state_hub_cursor_callback_failed",
+                environment=self._environment,
+                consumer_id=self._consumer_id,
+                stream_id=self._stream_id,
+                sequence=sequence,
+            )
+
+    def _notify_batch(self, batch: MarketStateBatch) -> None:
+        if self._on_batch is None:
+            return
+        try:
+            self._on_batch(batch)
+        except Exception:
+            log.exception(
+                "market_state_hub_batch_callback_failed",
+                environment=self._environment,
+                consumer_id=self._consumer_id,
+                stream_id=batch.stream_id,
+                sequence=batch.sequence,
             )
 
 

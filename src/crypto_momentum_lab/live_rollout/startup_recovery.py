@@ -1,8 +1,9 @@
 """Warmup and checkpoint recovery for live strategy startup."""
 
+import asyncio
 from collections.abc import Callable, Collection, Mapping
 from datetime import UTC, datetime, timedelta
-from time import perf_counter
+from time import monotonic, perf_counter
 
 import structlog
 
@@ -20,6 +21,9 @@ log = structlog.get_logger()
 MIN_WARMUP_SECONDS = 60
 WARMUP_STATE_LIMIT = 100_000
 WARMUP_BATCH_SIZE = 5_000
+_DURABLE_CUTOVER_WAIT_SECONDS = 5.0
+_DURABLE_CUTOVER_POLL_SECONDS = 0.1
+_MARKET_GAP_RECOVERY_WAIT_SECONDS = 0.5
 
 WarmupStatusCallback = Callable[[LiveWarmupStatus], None]
 
@@ -40,6 +44,147 @@ def cursor_after_market_bucket(bucket_start: datetime) -> RuntimeStateCursor:
         bucket_start=bucket_start + timedelta(microseconds=1),
         symbol="",
     )
+
+
+async def wait_for_durable_market_state_cutover(
+    *,
+    repository: PostgresRuntimeMarketStateRepository,
+    environment: str,
+    requested_cutover: datetime,
+    timeout_seconds: float = _DURABLE_CUTOVER_WAIT_SECONDS,
+    poll_interval_seconds: float = _DURABLE_CUTOVER_POLL_SECONDS,
+) -> datetime:
+    """Return a startup boundary that is visible in the market database.
+
+    A closed bucket is published by the Hub before the PostgreSQL writer has
+    necessarily committed it.  Recovery must not warm to a wall-clock bucket
+    that is still in that commit window: doing so lets one consumer receive a
+    bucket from the Hub while another consumer starts from the previous
+    durable watermark.  Waiting for the requested bucket (or falling back to
+    the newest durable bucket on timeout) makes the recovery boundary an
+    explicit database visibility fence.
+    """
+
+    if not environment.strip():
+        raise ValueError("environment must not be empty")
+    _require_aware(requested_cutover, "requested_cutover")
+    if timeout_seconds < 0:
+        raise ValueError("timeout_seconds must not be negative")
+    if poll_interval_seconds <= 0:
+        raise ValueError("poll_interval_seconds must be positive")
+
+    deadline = monotonic() + timeout_seconds
+    latest_durable: datetime | None = None
+    while True:
+        latest_durable = await repository.load_latest_bucket(
+            environment=environment,
+        )
+        if latest_durable is not None:
+            _require_aware(latest_durable, "latest_durable")
+            if latest_durable >= requested_cutover:
+                return requested_cutover
+        if monotonic() >= deadline:
+            fallback = (
+                requested_cutover
+                if latest_durable is None
+                else min(requested_cutover, latest_durable)
+            )
+            log.warning(
+                "live_startup_durable_cutover_timeout",
+                environment=environment,
+                requested_cutover=requested_cutover.isoformat(),
+                latest_durable=(
+                    None
+                    if latest_durable is None
+                    else latest_durable.isoformat()
+                ),
+                selected_cutover=fallback.isoformat(),
+                timeout_seconds=timeout_seconds,
+            )
+            return fallback
+        await _sleep_for_durable_cutover(
+            min(poll_interval_seconds, max(0.0, deadline - monotonic()))
+        )
+
+
+async def load_live_market_state_gap(
+    *,
+    repository: PostgresRuntimeMarketStateRepository,
+    environment: str,
+    symbol: str,
+    previous_at: datetime,
+    current_at: datetime,
+    interval_seconds: int = 15,
+    timeout_seconds: float = _MARKET_GAP_RECOVERY_WAIT_SECONDS,
+    poll_interval_seconds: float = _DURABLE_CUTOVER_POLL_SECONDS,
+) -> tuple[MarketState15s, ...]:
+    """Load durable intermediate buckets for one live continuity gap.
+
+    The market stream is sparse, so an absent intermediate row is not itself
+    an error.  This helper only returns a recovery set when every canonical
+    intermediate bucket is present; callers can then decide whether the
+    strategy may be warmed in place or must reset the symbol.
+    """
+
+    if not environment.strip():
+        raise ValueError("environment must not be empty")
+    if not symbol.strip():
+        raise ValueError("symbol must not be empty")
+    _require_aware(previous_at, "previous_at")
+    _require_aware(current_at, "current_at")
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    if current_at <= previous_at:
+        return ()
+    if timeout_seconds < 0:
+        raise ValueError("timeout_seconds must not be negative")
+    if poll_interval_seconds <= 0:
+        raise ValueError("poll_interval_seconds must be positive")
+
+    delta_seconds = (current_at - previous_at).total_seconds()
+    bucket_count = int(delta_seconds // interval_seconds)
+    missing_count = bucket_count - 1
+    if delta_seconds % interval_seconds != 0 or missing_count <= 0:
+        return ()
+
+    cursor = RuntimeStateCursor(bucket_start=previous_at, symbol="")
+    upper_bound = current_at - timedelta(microseconds=1)
+    deadline = monotonic() + timeout_seconds
+    while True:
+        states = await repository.load_after(
+            environment=environment,
+            cursor=cursor,
+            limit=missing_count,
+            upper_bound=upper_bound,
+            symbols=(symbol,),
+        )
+        canonical = tuple(
+            sorted(
+                (
+                    state
+                    for state in states
+                    if state.symbol == symbol
+                    and previous_at < state.bucket_start < current_at
+                ),
+                key=lambda state: state.bucket_start,
+            )
+        )
+        expected = tuple(
+            previous_at + timedelta(seconds=interval_seconds * index)
+            for index in range(1, bucket_count)
+        )
+        if tuple(state.bucket_start for state in canonical) == expected:
+            return canonical
+        if monotonic() >= deadline:
+            return ()
+        await _sleep_for_durable_cutover(
+            min(poll_interval_seconds, max(0.0, deadline - monotonic()))
+        )
+
+
+async def _sleep_for_durable_cutover(seconds: float) -> None:
+    if seconds > 0:
+        await asyncio.sleep(seconds)
 
 
 async def load_live_warmup_symbols(
@@ -518,15 +663,22 @@ def _required_warmup_buckets(strategy: LiveRuntimeStrategy) -> int:
     return max(1, int(required_data().warmup_buckets))
 
 
+def _require_aware(value: datetime, field_name: str) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+
+
 __all__ = [
     "checkpoint_needs_market_recovery",
     "cursor_after_market_bucket",
+    "load_live_market_state_gap",
     "live_market_state_cutover",
     "live_warmup_seconds",
     "load_live_warmup_symbols",
     "restore_live_strategy_from_checkpoint",
     "strategy_last_processed_at_by_symbol",
     "validate_live_warmup_coverage",
+    "wait_for_durable_market_state_cutover",
     "WarmupStatusCallback",
     "warm_live_strategy",
     "warm_live_strategy_then_start_fresh",

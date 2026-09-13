@@ -8,9 +8,11 @@ turning telemetry into another reason to stop submitting or closing orders.
 """
 
 import asyncio
+import hashlib
+import json
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Collection, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta
 from typing import Literal, Protocol
 from uuid import NAMESPACE_URL, uuid5
@@ -205,6 +207,7 @@ class LiveTelemetrySink(Protocol):
         occurred_at: datetime,
         signal_count: int,
         candidate_count: int,
+        details: Mapping[str, JsonValue] | None = None,
     ) -> None: ...
 
     async def entry_filter_ready(
@@ -423,6 +426,22 @@ def state_trace_id(state: MarketState15s, lane: str) -> str:
     """Return the stable trace key for one symbol/bucket/lane."""
 
     return f"{lane}:{state.symbol}:{state.bucket_start.isoformat()}"
+
+
+def market_state_input_fingerprint(state: MarketState15s) -> str:
+    """Hash the canonical market-state fields used as a strategy input."""
+
+    payload = {
+        field.name: _json_value(getattr(state, field.name))
+        for field in fields(state)
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class LiveRuntimeTelemetry:
@@ -850,7 +869,15 @@ class LiveRuntimeTelemetry:
         occurred_at: datetime,
         signal_count: int,
         candidate_count: int,
+        details: Mapping[str, JsonValue] | None = None,
     ) -> None:
+        decision_details: dict[str, JsonValue] = dict(details or {})
+        decision_details.update(
+            {
+                "signal_count": signal_count,
+                "candidate_count": candidate_count,
+            }
+        )
         await self._record_phase(
             phase=STRATEGY_DECISION,
             trace_id=state_trace_id(state, LIVE_LANE_ENTRY),
@@ -858,18 +885,17 @@ class LiveRuntimeTelemetry:
             symbol=state.symbol,
             bucket_start=state.bucket_start,
             occurred_at=occurred_at,
-            details={
-                "signal_count": signal_count,
-                "candidate_count": candidate_count,
-            },
+            details=decision_details,
         )
-        # Keep a low-frequency zero-output heartbeat as well as the full
-        # signal rows.  A missing output from one otherwise healthy account is
-        # itself a fork condition; persisting only non-empty decisions cannot
-        # distinguish that from a legitimate empty strategy result.
+        # Keep a low-frequency zero-output heartbeat as well as every
+        # non-empty output.  A missing output from one otherwise healthy
+        # account is itself a fork condition; persisting only non-empty
+        # decisions cannot distinguish that from a legitimate empty result.
         last_output_at = self._last_strategy_output_at_by_symbol.get(state.symbol)
         if (
-            last_output_at is None
+            signal_count > 0
+            or candidate_count > 0
+            or last_output_at is None
             or occurred_at - last_output_at >= timedelta(seconds=60)
         ):
             if state.symbol not in self._last_strategy_output_at_by_symbol and (
@@ -890,8 +916,7 @@ class LiveRuntimeTelemetry:
                 details={
                     "account_label": self._account_label,
                     "strategy_config_hash": self._strategy_config_hash,
-                    "signal_count": signal_count,
-                    "candidate_count": candidate_count,
+                    **decision_details,
                 },
             )
 
@@ -1645,6 +1670,7 @@ __all__ = [
     "LiveTriggerSource",
     "MARKET_STATE_PROGRESS",
     "MARKET_STATE_RECEIVED",
+    "market_state_input_fingerprint",
     "PERSISTED_ORDER_TELEMETRY_EVENTS",
     "PERSISTED_OPERATIONAL_TELEMETRY_EVENTS",
     "RISK_APPROVED",
