@@ -8,6 +8,7 @@ from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
+import structlog
 
 from crypto_momentum_lab.domain.market.models import (
     AggTradeGap,
@@ -18,6 +19,12 @@ from crypto_momentum_lab.domain.market.models import (
     RawEnvelope,
 )
 from crypto_momentum_lab.market_data.binance.rest import BinanceAggTrade
+
+log = structlog.get_logger()
+
+# Only surface gap recoveries that failed or that ate a meaningful slice of the
+# 1s budget; healthy recoveries stay silent.
+_SLOW_RECOVERY_SECONDS = 0.5
 
 
 class AggTradeHistory(Protocol):
@@ -178,8 +185,24 @@ class AggTradeGapRecoverer:
                 )
             accepted_indices.add(index)
 
+        async def _timed_recover(request: _GapRequest) -> _RecoveryResult:
+            started_at = time.monotonic()
+            result = await self._recover(request)
+            elapsed = time.monotonic() - started_at
+            if result.failure_reason is not None or elapsed >= _SLOW_RECOVERY_SECONDS:
+                log.warning(
+                    "agg_trade_gap_recovery_outcome",
+                    symbol=request.current.symbol,
+                    missing_count=request.missing_count,
+                    outcome=result.failure_reason or "recovered",
+                    recovered_trades=len(result.trades),
+                    elapsed_seconds=round(elapsed, 3),
+                    budget_seconds=self._recovery_timeout_seconds,
+                )
+            return result
+
         results = await asyncio.gather(
-            *(self._recover(request) for request in requests)
+            *(_timed_recover(request) for request in requests)
         )
         recovered_before: dict[int, tuple[RawEnvelope, ...]] = {}
         gaps: list[AggTradeGap] = []

@@ -149,7 +149,8 @@ async def load_live_market_state_gap(
 
     cursor = RuntimeStateCursor(bucket_start=previous_at, symbol="")
     upper_bound = current_at - timedelta(microseconds=1)
-    deadline = monotonic() + timeout_seconds
+    started_at = monotonic()
+    deadline = started_at + timeout_seconds
     while True:
         states = await repository.load_after(
             environment=environment,
@@ -174,8 +175,27 @@ async def load_live_market_state_gap(
             for index in range(1, bucket_count)
         )
         if tuple(state.bucket_start for state in canonical) == expected:
+            log.info(
+                "live_market_state_gap_recovery_outcome",
+                symbol=symbol,
+                outcome="complete",
+                waited_seconds=round(monotonic() - started_at, 3),
+                bucket_count=bucket_count,
+                timeout_seconds=timeout_seconds,
+            )
             return canonical
         if monotonic() >= deadline:
+            # Record the real wait so the 500ms budget can be judged from data
+            # instead of guessed at.
+            log.warning(
+                "live_market_state_gap_recovery_outcome",
+                symbol=symbol,
+                outcome="timeout",
+                waited_seconds=round(monotonic() - started_at, 3),
+                expected_buckets=missing_count,
+                observed_buckets=len(canonical),
+                timeout_seconds=timeout_seconds,
+            )
             return ()
         await _sleep_for_durable_cutover(
             min(poll_interval_seconds, max(0.0, deadline - monotonic()))

@@ -1,6 +1,8 @@
 from collections.abc import Iterable
 from datetime import date, datetime
+from time import monotonic
 
+import structlog
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -16,6 +18,11 @@ from crypto_momentum_lab.persistence.postgres.models import (
     RawArchiveManifestRow,
 )
 
+log = structlog.get_logger()
+
+# The observability budgets are 1s; only surface calls that get close.
+_SLOW_OBSERVABILITY_CALL_SECONDS = 0.5
+
 
 class PostgresCaptureRepository:
     def __init__(
@@ -25,21 +32,41 @@ class PostgresCaptureRepository:
         self._session_factory = session_factory
 
     async def save_manifest(self, manifest: ArchiveManifest) -> None:
-        async with self._session_factory() as session:
-            async with session.begin():
-                existing = await session.scalar(
-                    select(RawArchiveManifestRow).where(
-                        RawArchiveManifestRow.relative_path
-                        == str(manifest.relative_path)
-                    )
-                )
-                if existing is not None:
-                    if existing.sha256 != manifest.sha256:
-                        raise ValueError(
-                            "archive manifest checksum conflict"
+        # The observability pool holds a single connection and both its pool and
+        # command budgets are 1s, so record calls that fail or approach that
+        # budget instead of guessing whether the timeout is too tight.
+        started_at = monotonic()
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    existing = await session.scalar(
+                        select(RawArchiveManifestRow).where(
+                            RawArchiveManifestRow.relative_path
+                            == str(manifest.relative_path)
                         )
-                    return
-                session.add(_manifest_row(manifest))
+                    )
+                    if existing is not None:
+                        if existing.sha256 != manifest.sha256:
+                            raise ValueError(
+                                "archive manifest checksum conflict"
+                            )
+                        return
+                    session.add(_manifest_row(manifest))
+        except Exception as error:
+            log.warning(
+                "capture_repository_call_failed",
+                operation="save_manifest",
+                error_type=type(error).__name__,
+                elapsed_seconds=round(monotonic() - started_at, 3),
+            )
+            raise
+        elapsed = monotonic() - started_at
+        if elapsed >= _SLOW_OBSERVABILITY_CALL_SECONDS:
+            log.warning(
+                "capture_repository_call_slow",
+                operation="save_manifest",
+                elapsed_seconds=round(elapsed, 3),
+            )
 
     async def load_manifest_paths_before(
         self,
