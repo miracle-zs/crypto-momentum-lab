@@ -47,7 +47,7 @@ x-execution-account-command: &execution-account-command
   - --fill-interval-seconds
   - "300"
   - --rest-reconciliation-interval-seconds
-  - "300"
+  - ${CML_ACCOUNT_REST_RECONCILIATION_INTERVAL_SECONDS:-60}
   - --historical-fill-reconciliation-interval-seconds
   - ${CML_ACCOUNT_HISTORICAL_FILL_RECONCILIATION_INTERVAL_SECONDS:-21600}
   - --historical-fill-reconciliation-batch-size
