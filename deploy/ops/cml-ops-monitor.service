@@ -18,7 +18,9 @@ Environment=CML_CRASH_LOG_DIRECTORY=/var/lib/crypto-momentum-lab/crash-logs
 # Compose files above. CML_MONITOR_SERVICES and CML_MONITOR_LIVE_ACCOUNTS remain
 # supported in /etc/crypto-momentum-lab/ops-monitor.env for explicit overrides.
 EnvironmentFile=-/etc/crypto-momentum-lab/ops-monitor.env
-ExecStart=/usr/bin/python3 /opt/crypto-momentum-lab/deploy/ops/cml_ops_monitor.py
+# Live containers use a 90-second stop grace period. Keep monitor operations
+# bounded while allowing a targeted restart to finish cleanly.
+ExecStart=/usr/bin/python3 /opt/crypto-momentum-lab/deploy/ops/cml_ops_monitor.py --command-timeout-seconds 120
 Restart=always
 RestartSec=10s
 NoNewPrivileges=true
