@@ -31,6 +31,7 @@ from uuid import UUID, uuid4
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import structlog
 
 from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
@@ -51,6 +52,8 @@ from crypto_momentum_lab.research_collector.models import (
     SourceKind,
     require_utc,
 )
+
+log = structlog.get_logger()
 
 _STATE_KEY = tuple[str, str, datetime]
 _METADATA_COLUMNS = frozenset(
@@ -126,6 +129,10 @@ _PARQUET_SCHEMA = pa.schema(
 class SinkAppendResult:
     selected_rows: int
     duplicate_rows: int
+    # Rows whose natural key was already present with a different payload.
+    # They are not fatal: the existing row wins and the mismatch is surfaced
+    # through logs/health instead of stopping collection.
+    conflicting_rows: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,6 +318,7 @@ class ParquetWindowSink:
         selected_by_symbol = selection.by_symbol
         selected_rows = 0
         duplicate_rows = 0
+        conflicting_rows = 0
         for state in collection_batch.states:
             selected = selected_by_symbol.get(state.symbol)
             if selected is None:
@@ -327,14 +335,28 @@ class ParquetWindowSink:
                 if _same_state_payload(existing, row):
                     duplicate_rows += 1
                     continue
-                raise CollectorStateConflict(
-                    f"different payloads for market-state key {key!r} in {path}"
+                # A durable consumer can legitimately re-receive a bucket it
+                # already archived (Hub rewarm after a restart, a window that
+                # was quarantined, or a gap recovery that returned a
+                # lower-fidelity copy).  Keeping the row we already have is the
+                # safe choice, but it must not stop collection: record it and
+                # let logs/health surface the mismatch instead of failing
+                # closed and crash-looping the whole collector.
+                conflicting_rows += 1
+                log.warning(
+                    "research_collector_state_conflict_kept_existing",
+                    path=str(path),
+                    environment=key[0],
+                    symbol=key[1],
+                    bucket_start=key[2].isoformat(),
                 )
+                continue
             rows[key] = row
             selected_rows += 1
         return SinkAppendResult(
             selected_rows=selected_rows,
             duplicate_rows=duplicate_rows,
+            conflicting_rows=conflicting_rows,
         )
 
     def flush_ready(self, latest_bucket_start: datetime) -> SinkFlushResult:

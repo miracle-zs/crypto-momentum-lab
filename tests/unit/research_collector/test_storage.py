@@ -3,12 +3,10 @@ from datetime import datetime
 from decimal import Decimal
 
 import pyarrow.parquet as pq
-import pytest
 
 from crypto_momentum_lab.market_data.hub import MarketStateBatch
 from crypto_momentum_lab.research_collector.models import (
     CollectionBatch,
-    CollectorStateConflict,
     SelectedSymbol,
     SelectionSnapshot,
 )
@@ -54,7 +52,9 @@ def test_local_spool_round_trips_selected_batch(tmp_path) -> None:
     assert loaded[0].selection == selection
 
 
-def test_parquet_sink_deduplicates_and_detects_payload_conflict(tmp_path) -> None:
+def test_parquet_sink_deduplicates_and_keeps_existing_on_payload_conflict(
+    tmp_path,
+) -> None:
     state = fixture_state("BTCUSDT", 0)
     selection = _selection(state.symbol, state.bucket_start)
     sink = ParquetWindowSink(
@@ -72,10 +72,17 @@ def test_parquet_sink_deduplicates_and_detects_payload_conflict(tmp_path) -> Non
     assert duplicate.selected_rows == 0
     assert duplicate.duplicate_rows == 1
 
+    # A republished bucket with a different payload must not stop collection:
+    # the already-archived row wins and the mismatch is counted, not raised.
     changed = replace(state, close_price=Decimal("102"))
-    with pytest.raises(CollectorStateConflict, match="different payloads"):
-        sink.append(_batch(changed, 3), selection)
+    conflicting = sink.append(_batch(changed, 3), selection)
+    assert conflicting.selected_rows == 0
+    assert conflicting.duplicate_rows == 0
+    assert conflicting.conflicting_rows == 1
 
     paths = tuple(tmp_path.joinpath("parquet").rglob("*.parquet"))
     assert len(paths) == 1
-    assert pq.ParquetFile(paths[0]).metadata.num_rows == 1
+    # The original row is still the only one stored for that key.
+    rows = pq.ParquetFile(paths[0]).read().to_pylist()
+    assert len(rows) == 1
+    assert Decimal(rows[0]["close_price"]) == state.close_price
