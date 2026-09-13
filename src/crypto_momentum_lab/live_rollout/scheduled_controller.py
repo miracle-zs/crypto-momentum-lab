@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
 
@@ -457,23 +457,27 @@ class ScheduledRiskWindowController:
             < retry_interval_seconds
         ):
             return None
-        states = self._latest_scheduled_states()
+        states, state_failure = await self._scheduled_flatten_states(now)
         if not states:
             log.error(
                 "live_scheduled_flatten_market_state_unavailable",
                 run_id=self._config.run_id,
             )
-            return "scheduled_flatten_market_state_unavailable"
+            return state_failure or "scheduled_flatten_market_state_unavailable"
 
         self._scheduled_flatten_attempt += 1
         attempt = self._scheduled_flatten_attempt
         self._scheduled_flatten_last_attempt_at = now
         total_approved = 0
         total_submitted = 0
-        failure: str | None = None
+        failure: str | None = state_failure
+        # Refresh the account view once per flatten attempt.  Refreshing once
+        # per cached market state makes a scheduled attempt serialize dozens
+        # of full account reads and invalidates normal exit submissions while
+        # they are waiting for the exchange coordinator.
+        self._invalidate_context_cache()
         for state in states:
             try:
-                self._invalidate_context_cache()
                 context = await self._context_provider(state)
                 self._sync_pending_entry_plans(context)
                 await self._publish_managed_position_symbols(context)
@@ -624,6 +628,7 @@ class ScheduledRiskWindowController:
                         state=state,
                         context=context,
                         reference_price=_scheduled_reference_price(state),
+                        invalidate_context=False,
                     )
                 )
             except asyncio.CancelledError:
@@ -656,6 +661,82 @@ class ScheduledRiskWindowController:
             failure=failure,
         )
         return failure
+
+    async def _scheduled_flatten_states(
+        self,
+        now: datetime,
+    ) -> tuple[tuple[MarketState15s, ...], str | None]:
+        """Return one state per current exchange position symbol.
+
+        The wall-clock controller cannot assume that the ordered market-state
+        stream has already delivered every symbol.  During startup or a replay
+        gap the old implementation therefore saw no state for a real
+        position and silently produced no flatten request.  The exchange
+        position read is authoritative for the target set; a compact synthetic
+        state supplies the symbol-specific context/rules until a live state
+        arrives.
+        """
+
+        cached_states = self._latest_scheduled_states()
+        if self._fetch_exchange_positions is None:
+            return cached_states, None if cached_states else (
+                "scheduled_flatten_market_state_unavailable"
+            )
+        try:
+            exchange_positions = tuple(await self._fetch_exchange_positions())
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            # Keep the previous state-driven fallback available during a
+            # transient REST outage.  The authoritative verification phase
+            # will still report the read failure if no flatten can be made.
+            log.warning(
+                "live_scheduled_flatten_position_read_failed",
+                run_id=self._config.run_id,
+                error_type=type(error).__name__,
+            )
+            return (
+                cached_states,
+                f"scheduled_flatten_position_read_failed:{type(error).__name__}"
+                if not cached_states
+                else None,
+            )
+
+        active_positions = {
+            position.symbol: position
+            for position in exchange_positions
+            if position.position_amt != 0
+        }
+        if not active_positions:
+            # Keep the established state-driven path as a compatibility
+            # fallback.  A just-filled reduce-only order can make the REST
+            # position read reach zero before the durable context catches up;
+            # the normal request path will then safely suppress a stale
+            # managed position instead of skipping the attempt altogether.
+            return cached_states, None
+
+        cached_by_symbol = {state.symbol: state for state in cached_states}
+        states: list[MarketState15s] = []
+        missing_reference_symbols: list[str] = []
+        for symbol, position in sorted(active_positions.items()):
+            state = cached_by_symbol.get(symbol)
+            if state is None:
+                state = _market_state_for_position(position, now=now)
+            if state is None:
+                missing_reference_symbols.append(symbol)
+                continue
+            states.append(state)
+        if missing_reference_symbols:
+            log.error(
+                "live_scheduled_flatten_position_reference_unavailable",
+                run_id=self._config.run_id,
+                symbols=missing_reference_symbols,
+            )
+        return tuple(states), (
+            "scheduled_flatten_position_reference_unavailable"
+            if not states
+            else None
+        )
 
     async def _cancel_active_scheduled_exit_orders(
         self,
@@ -772,3 +853,44 @@ def _scheduled_reference_price(state: MarketState15s) -> Decimal:
         if price is not None and price > 0:
             return price
     raise ValueError(f"market state has no positive reference price: {state.symbol}")
+
+
+def _market_state_for_position(
+    position: AccountPositionSnapshot,
+    *,
+    now: datetime,
+) -> MarketState15s | None:
+    """Build a current, symbol-specific state from an exchange position read."""
+
+    reference_price = position.mark_price
+    if reference_price <= 0:
+        reference_price = position.entry_price
+    if reference_price <= 0:
+        return None
+    return MarketState15s(
+        schema_version=1,
+        exchange="binance-usdm",
+        environment="live",
+        symbol=position.symbol,
+        bucket_start=now - timedelta(seconds=15),
+        bucket_end=now,
+        open_price=reference_price,
+        high_price=reference_price,
+        low_price=reference_price,
+        close_price=reference_price,
+        trade_count=0,
+        trade_notional=Decimal("0"),
+        aggressive_buy_notional=Decimal("0"),
+        aggressive_sell_notional=Decimal("0"),
+        last_bid_price=reference_price,
+        last_ask_price=reference_price,
+        spread=Decimal("0"),
+        midpoint=reference_price,
+        liquidation_count=0,
+        liquidation_notional=Decimal("0"),
+        mark_price=reference_price,
+        closed_kline_count=0,
+        source_event_count=0,
+        first_received_at=now,
+        last_received_at=now,
+    )

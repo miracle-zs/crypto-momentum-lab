@@ -1912,6 +1912,75 @@ async def test_risk_control_flatten_reuses_reduce_only_exit_processor() -> None:
     assert exchange.plans[0].order_type == "MARKET"
 
 
+async def test_scheduled_flatten_targets_exchange_position_before_market_state_arrives(
+) -> None:
+    exchange = PlanAwareExchange()
+    position = ManagedLivePosition(
+        symbol="BTCUSDT",
+        side="long",
+        position_side=FuturesPositionSide.LONG,
+        quantity=Decimal("0.001"),
+        entry_price=Decimal("30000"),
+        opened_at=NOW - timedelta(minutes=1),
+    )
+
+    async def position_context(state: object) -> LiveDaemonRuntimeContext:
+        del state
+        return replace(
+            _runtime_context(),
+            open_position_symbols=frozenset({"BTCUSDT"}),
+            managed_positions=(position,),
+        )
+
+    async def fetch_positions() -> tuple[AccountPositionSnapshot, ...]:
+        return (
+            AccountPositionSnapshot(
+                environment="live",
+                account_label="primary",
+                symbol="BTCUSDT",
+                position_side="LONG",
+                position_amt=Decimal("0.001"),
+                entry_price=Decimal("30000"),
+                mark_price=Decimal("30000"),
+                unrealized_pnl=Decimal("0"),
+                notional=Decimal("30"),
+                leverage=10,
+                margin_type="CROSSED",
+                observed_at=NOW,
+                raw_payload={},
+            ),
+        )
+
+    daemon = _daemon(
+        exchange=exchange,
+        context_provider=position_context,
+        exit_manager=LiveExitManager(
+            config=LiveExitConfig(
+                run_id="run-1",
+                strategy_name="compression_breakout",
+                strategy_version="v0",
+                strategy_config_hash="a" * 64,
+                policy=PositionExitPolicy(),
+            )
+        ),
+        clock=lambda: NOW,
+        fetch_exchange_positions=fetch_positions,
+    )
+    # The market loop has only delivered another symbol so far.  The
+    # exchange position must still be flattened immediately.
+    daemon._scheduled_controller.observe_state(
+        replace(_state(), symbol="ETHUSDT")
+    )
+
+    failure = await daemon.request_flatten(now=NOW)
+
+    assert failure is None
+    assert len(exchange.plans) == 1
+    assert exchange.plans[0].symbol == "BTCUSDT"
+    assert exchange.plans[0].reduce_only is True
+    assert exchange.plans[0].order_type == "MARKET"
+
+
 @pytest.mark.parametrize("unmanaged_symbols", [frozenset(), frozenset({"ETHUSDT"})])
 async def test_scheduled_risk_window_flattens_verifies_and_reopens_entries(
     unmanaged_symbols,

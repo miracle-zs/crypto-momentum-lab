@@ -52,6 +52,7 @@ from crypto_momentum_lab.live_rollout.exit_lane import ExitLaneOutcome
 from crypto_momentum_lab.live_rollout.exits import (
     LiveExitCancellationRequest,
     LiveExitManager,
+    LiveExitOrderRequest,
     LiveExitRequest,
 )
 from crypto_momentum_lab.live_rollout.submission import LiveCandidateSubmission
@@ -557,6 +558,84 @@ class LiveExitProcessor:
                 self._exit_recovery_next_attempt_at.pop(root, None)
             return recovery_result
 
+    async def _refresh_context_if_stale(
+        self,
+        *,
+        state: MarketState15s,
+        context: LiveDaemonRuntimeContext,
+    ) -> tuple[LiveDaemonRuntimeContext, str | None]:
+        """Reload an exit context invalidated by another live lane.
+
+        Account events and exits for other symbols share one provider cache.
+        A refresh in a different lane can therefore fence a perfectly valid
+        reduce-only candidate between risk approval and submission.  Exits
+        are safe to retry against a fresh context; silently dropping them is
+        not.
+        """
+
+        if self._context_is_current(context):
+            return context, None
+        self._invalidate_context_cache()
+        try:
+            refreshed = await self._context_provider(state)
+            self._sync_pending_entry_plans(refreshed)
+            await self._publish_managed_position_symbols(refreshed)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            return context, f"exit_context_refresh_failed:{type(error).__name__}"
+        pending_symbols = getattr(refreshed, "pending_position_symbols", ())
+        if state.symbol in pending_symbols:
+            symbols = ",".join(sorted(pending_symbols))
+            return refreshed, f"pending_live_positions:{symbols}"
+        unmanaged_symbols = getattr(refreshed, "unmanaged_position_symbols", ())
+        if state.symbol in unmanaged_symbols:
+            symbols = ",".join(sorted(unmanaged_symbols))
+            return refreshed, f"unmanaged_live_positions:{symbols}"
+        if not self._context_is_current(refreshed):
+            return refreshed, "exit_context_stale"
+        return refreshed, None
+
+    async def _execute_exit_submission(
+        self,
+        request: LiveExitOrderRequest,
+        *,
+        state: MarketState15s,
+        context: LiveDaemonRuntimeContext,
+        reference_price: Decimal | None,
+    ) -> tuple[
+        OrderExecutionResult | None,
+        LiveDaemonRuntimeContext,
+        str | None,
+    ]:
+        """Submit a reduce-only candidate, retrying one stale-context fence."""
+
+        context, failure = await self._refresh_context_if_stale(
+            state=state,
+            context=context,
+        )
+        if failure is not None:
+            return None, context, failure
+        for attempt in range(2):
+            result = await self._submission.execute(
+                request.candidate,
+                requested_quantity=request.quantity,
+                state=state,
+                context=context,
+                reference_price=reference_price,
+            )
+            if result is not None or self._context_is_current(context):
+                return result, context, None
+            if attempt == 1:
+                break
+            context, failure = await self._refresh_context_if_stale(
+                state=state,
+                context=context,
+            )
+            if failure is not None:
+                return None, context, failure
+        return None, context, "exit_context_stale"
+
     async def process_requests(
         self,
         requests: tuple[LiveExitRequest, ...],
@@ -754,13 +833,14 @@ class LiveExitProcessor:
                 if result.state is ExchangeOrderState.REJECTED:
                     return approved, submitted, "grace_timeout_market_close_rejected"
                 continue
-            result = await self._submission.execute(
-                request.candidate,
-                requested_quantity=request.quantity,
+            result, context, context_failure = await self._execute_exit_submission(
+                request,
                 state=state,
                 context=context,
                 reference_price=reference_price,
             )
+            if context_failure is not None:
+                return approved, submitted, context_failure
             if result is None:
                 continue
             if invalidate_context:
@@ -953,6 +1033,3 @@ def _exit_strategy_side(plan: OrderExecutionPlan) -> StrategySide:
     if plan.side == "BUY":
         return StrategySide.SHORT
     raise ValueError(f"unsupported exit side: {plan.side}")
-
-
-

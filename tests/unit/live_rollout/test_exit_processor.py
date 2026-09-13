@@ -149,6 +149,61 @@ async def test_process_requests_counts_suppressed_exit_without_exchange_submissi
 
 
 @pytest.mark.asyncio
+async def test_process_requests_retries_when_context_is_fenced_during_submission(
+) -> None:
+    current = [True]
+
+    class StaleOnceSubmission(RecordingSubmission):
+        async def execute(self, *args, **kwargs):
+            if not self.calls:
+                current[0] = False
+                self.calls.append(
+                    (args[0], kwargs["requested_quantity"], kwargs["state"])
+                )
+                return None
+            return await super().execute(*args, **kwargs)
+
+    submission = StaleOnceSubmission(_acknowledged_result())
+    context_loads = 0
+
+    async def provide_context(_state: MarketState15s) -> LiveDaemonRuntimeContext:
+        nonlocal context_loads
+        context_loads += 1
+        current[0] = True
+        return _context()
+
+    async def publish_positions(_context: LiveDaemonRuntimeContext) -> None:
+        return None
+
+    processor = LiveExitProcessor(
+        config=ExitProcessorConfig(run_id="run-1"),
+        exit_manager=None,
+        exit_recovery_client=None,
+        state_machine=cast(OrderExecutionPort, object()),
+        submission=cast(LiveCandidateSubmission, submission),
+        telemetry=None,
+        clock=lambda: NOW,
+        is_exit_enabled=lambda: True,
+        context_provider=cast(LiveContextProvider, provide_context),
+        sync_pending_entry_plans=lambda _context: None,
+        publish_managed_position_symbols=publish_positions,
+        invalidate_context_cache=lambda: None,
+        context_is_current=lambda _context: current[0],
+    )
+    candidate = replace(_intent(), candidate_id="exit-stale", reduce_only=True)
+
+    approved, submitted, failure = await processor.process_requests(
+        (LiveExitOrderRequest(candidate=candidate, quantity=Decimal("0.001")),),
+        state=_state(),
+        context=_context(),
+    )
+
+    assert (approved, submitted, failure) == (1, 1, None)
+    assert len(submission.calls) == 2
+    assert context_loads == 1
+
+
+@pytest.mark.asyncio
 async def test_process_requests_serializes_same_symbol_batches() -> None:
     submission = BlockingSubmission()
     processor = _processor(submission)
