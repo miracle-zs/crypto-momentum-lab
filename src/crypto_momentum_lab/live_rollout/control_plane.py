@@ -42,6 +42,13 @@ def is_consumer_lag_reason(reason: str | None) -> bool:
             "sequence_gap",
             "sequencegap",
             "replay_unavailable",
+            "stream_reset",
+            "stream reset",
+            "replay is unavailable",
+            "market_state_replaying",
+            "market_state_rewarming",
+            "continuity",
+            "missing market-state bucket",
         )
     )
 
@@ -192,12 +199,12 @@ class LiveControlPlaneRuntime:
             self._market_state_unavailable_reason = (
                 reason or "market_state_hub_unavailable"
             )
+            # Any transition away from an available stream invalidates the
+            # rolling strategy state.  A reconnect is safe only after the
+            # source has replayed the exact cursor or the worker has rebuilt
+            # from durable history; both paths must remain fail-closed.
             if reason is not None and (
-                reason.startswith("market_state_consumer_lagged")
-                or (
-                    reason.startswith("MarketStateHubSequenceGap")
-                    and "consumer queue overflowed" not in reason
-                )
+                was_available or is_consumer_lag_reason(reason)
             ):
                 self._notify_market_state_gap(reason)
         self._refresh_entry_gate()

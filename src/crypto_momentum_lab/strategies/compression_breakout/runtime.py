@@ -144,6 +144,13 @@ class CompressionBreakoutRuntimeStrategy:
         buffer.append(signal_state)
         self._warmup[signal_state.symbol] = len(buffer)
 
+    def clear_market_state_buffers(self) -> None:
+        """Drop checkpointed rolling data before a durable live rewarm."""
+
+        self._buffers = {}
+        self._pending_signal_states = {}
+        self._warmup = {}
+
     def reset_symbol(self, symbol: str) -> None:
         """Drop buffered state after the live source skips a data gap."""
         self._buffers.pop(symbol, None)

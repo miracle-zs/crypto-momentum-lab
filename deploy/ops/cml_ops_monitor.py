@@ -21,6 +21,7 @@ import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -42,6 +43,13 @@ _DEFAULT_ALERT_COOLDOWN_SECONDS = 900.0
 _DEFAULT_COMMAND_TIMEOUT_SECONDS = 15.0
 _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS = 900.0
 _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS = 3
+_DEFAULT_MARKET_STATE_STALE_AFTER_SECONDS = 120.0
+_DEFAULT_MARKET_DELAY_WARNING_MS = 30_000.0
+_DEFAULT_MARKET_DELAY_CRITICAL_MS = 120_000.0
+_DEFAULT_ACCOUNT_STATE_STALE_AFTER_SECONDS = 120.0
+_DEFAULT_POSITION_STALE_AFTER_SECONDS = 120.0
+_DEFAULT_POSITION_QUANTITY_TOLERANCE = Decimal("0.00000001")
+_DEFAULT_CONSISTENCY_WINDOW_SECONDS = 300.0
 _BEIJING_TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
 _SEVERITY_LABELS = {
     "critical": "严重",
@@ -63,6 +71,14 @@ _ALERT_LABELS = {
     "market_task_not_alive": "行情连接任务停止",
     "live_session_not_ready": "实时会话未就绪",
     "live_checkpoint_stale": "实时状态 checkpoint 已过期",
+    "live_account_lifecycle_not_ready": "账户生命周期未就绪",
+    "live_account_reconciliation_stale": "账户对账状态过期或失败",
+    "live_market_state_stale": "行情进度过期",
+    "live_market_state_delay": "行情延迟过高",
+    "live_signal_divergence": "账户信号发生分叉",
+    "live_position_divergence": "账户持仓发生差异",
+    "live_unknown_orders": "存在未确认在途订单",
+    "live_consistency_check_failed": "跨账户一致性检查失败",
     "database_check_failed": "数据库健康检查失败",
     "database_query_stats_unavailable": "数据库查询统计不可用",
     "database_io_timing_disabled": "数据库 I/O 耗时监控未开启",
@@ -71,6 +87,7 @@ _ALERT_LABELS = {
     "live_heartbeat_auto_restarted": "实时策略已触发自动重启",
     "live_heartbeat_restart_failed": "实时策略自动重启失败",
     "live_heartbeat_restart_suppressed": "实时策略自动重启已达上限",
+    "live_crash_log_archive_failed": "worker 崩溃日志归档失败",
     "ops_monitor_failed": "运维监控自身异常",
 }
 _ALERT_IMPACTS = {
@@ -90,6 +107,18 @@ _ALERT_IMPACTS = {
     "market_task_not_alive": "策略可能无法持续接收行情，开平仓判断可能受影响。",
     "live_session_not_ready": "该实时账户未处于可安全运行状态。",
     "live_checkpoint_stale": "策略状态可能没有及时持久化，重启恢复风险增加。",
+    "live_account_lifecycle_not_ready": "该账户没有处于可安全交易的生命周期状态。",
+    "live_account_reconciliation_stale": (
+        "该账户的交易所快照或对账结果不新鲜，持仓和订单归属无法确认。"
+    ),
+    "live_market_state_stale": "该账户没有持续推进完整行情桶，策略已进入风险状态。",
+    "live_market_state_delay": (
+        "该账户收到的行情相对桶结束时间明显滞后，信号时点可能失真。"
+    ),
+    "live_signal_divergence": "相同策略配置的账户对同一行情桶产生了不同输出。",
+    "live_position_divergence": "可比账户的交易所持仓快照不一致，存在分叉风险。",
+    "live_unknown_orders": "交易所订单状态未能与本地订单安全对齐。",
+    "live_consistency_check_failed": "无法确认账户之间的信号和持仓是否一致。",
     "database_check_failed": "暂时无法确认实时会话、租约和 checkpoint 是否健康。",
     "database_query_stats_unavailable": (
         "不影响交易本身，但会降低数据库问题的定位能力。"
@@ -101,6 +130,9 @@ _ALERT_IMPACTS = {
     "live_heartbeat_restart_failed": "该账户仍可能无法处理行情和订单，需要人工介入。",
     "live_heartbeat_restart_suppressed": (
         "该账户仍处于异常状态，监控已停止继续自动重启。"
+    ),
+    "live_crash_log_archive_failed": (
+        "worker 重启前的日志没有可靠留存，故障根因可能无法复盘。"
     ),
     "ops_monitor_failed": "监控自身可能无法继续发现新的异常。",
 }
@@ -131,11 +163,34 @@ _ALERT_ACTIONS = {
         "请检查实时会话、租约和 checkpoint；未确认安全前不要扩大交易范围。"
     ),
     "live_checkpoint_stale": "请检查 PostgreSQL、策略进程和 checkpoint 写入延迟。",
+    "live_account_lifecycle_not_ready": (
+        "请检查 execution account 的状态转换、账户同步和 worker 日志。"
+    ),
+    "live_account_reconciliation_stale": (
+        "请检查交易所 REST 同步、成交回调和 account_reconciliation_runs。"
+    ),
+    "live_market_state_stale": "请检查行情断流、缺桶、durable rewarm 和策略进程日志。",
+    "live_market_state_delay": "请检查行情连接、事件循环阻塞、数据库负载和网络延迟。",
+    "live_signal_divergence": (
+        "先暂停扩大仓位，核对两账户的 config hash、checkpoint、行情桶和信号明细。"
+    ),
+    "live_position_divergence": (
+        "先以交易所快照为准核对仓位，确认归属后再做补单或退出。"
+    ),
+    "live_unknown_orders": (
+        "禁止重发同一意图；先按 client_order_id 查询交易所并完成人工或自动对账。"
+    ),
+    "live_consistency_check_failed": (
+        "请检查监控查询权限、PostgreSQL 连接和一致性查询耗时。"
+    ),
     "database_check_failed": "请检查 PostgreSQL 容器、连接和监控查询权限。",
     "database_query_stats_unavailable": "请在低风险窗口启用 pg_stat_statements。",
     "database_io_timing_disabled": "请核对 PostgreSQL 的 I/O timing 配置。",
     "database_parallel_maintenance_enabled": (
         "请核对维护参数，避免与实时交易查询争用资源。"
+    ),
+    "live_crash_log_archive_failed": (
+        "请检查 crash log 目录权限、磁盘空间和 Docker 日志读取权限。"
     ),
     "live_heartbeat_stale": "已发现心跳过期；若自动恢复未启用，需要人工检查策略进程。",
     "ops_monitor_failed": "请检查 cml-ops-monitor.service 和 journald 日志。",
@@ -213,6 +268,198 @@ class DatabaseState:
     track_io_timing: bool
     track_wal_io_timing: bool
     max_parallel_maintenance_workers: int | None
+    latest_market_progress_age_seconds: float | None = None
+    latest_market_delay_ms: float | None = None
+    account_process_state: str | None = None
+    account_process_age_seconds: float | None = None
+    latest_reconciliation_status: str | None = None
+    latest_reconciliation_age_seconds: float | None = None
+    unknown_order_count: int = 0
+    oldest_unknown_order_age_seconds: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SignalObservation:
+    """One account's durable output for one market bucket."""
+
+    account_label: str
+    symbol: str
+    bucket_start: str
+    strategy_config_hash: str
+    signal_count: int
+    candidate_count: int
+    fingerprint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PositionObservation:
+    """One row from the latest authoritative account reconciliation snapshot."""
+
+    account_label: str
+    status: str
+    age_seconds: float | None
+    symbol: str = ""
+    position_side: str = ""
+    position_amt: Decimal = Decimal("0")
+
+
+def evaluate_signal_divergence(
+    observations: Sequence[SignalObservation],
+) -> tuple[Alert, ...]:
+    """Detect different outputs for the same symbol/bucket/config group.
+
+    A configuration hash is part of the comparison key.  Accounts with
+    intentionally different strategy parameters therefore do not create a
+    false positive; accounts claiming the same config must agree on both the
+    output count and the durable content fingerprint.
+    """
+
+    groups: dict[tuple[str, str, str], dict[str, SignalObservation]] = {}
+    for observation in observations:
+        if not observation.account_label.strip() or not observation.symbol.strip():
+            continue
+        key = (
+            observation.symbol,
+            observation.bucket_start,
+            observation.strategy_config_hash,
+        )
+        groups.setdefault(key, {})[observation.account_label] = observation
+
+    differences: list[dict[str, object]] = []
+    for (symbol, bucket_start, config_hash), account_values in sorted(groups.items()):
+        if len(account_values) < 2:
+            continue
+        outputs = tuple(account_values.values())
+        fingerprints = {value.fingerprint for value in outputs}
+        counts = {
+            (value.signal_count, value.candidate_count) for value in outputs
+        }
+        if len(fingerprints) <= 1 and len(counts) <= 1:
+            continue
+        differences.append(
+            {
+                "symbol": symbol,
+                "bucket_start": bucket_start,
+                "strategy_config_hash": config_hash,
+                "accounts": [
+                    {
+                        "account_label": value.account_label,
+                        "signal_count": value.signal_count,
+                        "candidate_count": value.candidate_count,
+                        "fingerprint": value.fingerprint,
+                    }
+                    for value in sorted(outputs, key=lambda item: item.account_label)
+                ],
+            }
+        )
+
+    if not differences:
+        return ()
+    return (
+        Alert(
+            "live_signal_divergence",
+            "critical",
+            "Comparable live accounts produced divergent strategy output",
+            {
+                "group_count": len(differences),
+                "differences": differences[:20],
+            },
+        ),
+    )
+
+
+def evaluate_position_divergence(
+    observations: Sequence[PositionObservation],
+    *,
+    stale_after_seconds: float,
+    quantity_tolerance: Decimal = _DEFAULT_POSITION_QUANTITY_TOLERANCE,
+) -> tuple[Alert, ...]:
+    """Compare the latest ready account snapshots without trusting stale rows."""
+
+    if stale_after_seconds <= 0:
+        raise ValueError("stale_after_seconds must be positive")
+    if quantity_tolerance < 0:
+        raise ValueError("quantity_tolerance must not be negative")
+
+    positions_by_account: dict[str, dict[tuple[str, str], Decimal]] = {}
+    freshness_by_account: dict[str, tuple[str, float | None]] = {}
+    for observation in observations:
+        if not observation.account_label.strip():
+            continue
+        freshness_by_account[observation.account_label] = (
+            observation.status,
+            observation.age_seconds,
+        )
+        if observation.status != "ready":
+            continue
+        if (
+            observation.age_seconds is None
+            or observation.age_seconds < 0
+            or observation.age_seconds > stale_after_seconds
+        ):
+            continue
+        account_positions = positions_by_account.setdefault(
+            observation.account_label,
+            {},
+        )
+        if not observation.symbol.strip() or not observation.position_side.strip():
+            continue
+        if observation.position_amt == 0:
+            continue
+        key = (observation.symbol, observation.position_side)
+        account_positions[key] = (
+            account_positions.get(key, Decimal("0")) + observation.position_amt
+        )
+
+    account_labels = tuple(sorted(positions_by_account))
+    differences: list[dict[str, object]] = []
+    for index, left_label in enumerate(account_labels):
+        for right_label in account_labels[index + 1 :]:
+            left = positions_by_account[left_label]
+            right = positions_by_account[right_label]
+            keys = sorted(set(left) | set(right))
+            quantity_differences = []
+            for symbol, position_side in keys:
+                left_quantity = left.get((symbol, position_side), Decimal("0"))
+                right_quantity = right.get((symbol, position_side), Decimal("0"))
+                if abs(left_quantity - right_quantity) <= quantity_tolerance:
+                    continue
+                quantity_differences.append(
+                    {
+                        "symbol": symbol,
+                        "position_side": position_side,
+                        "left_quantity": str(left_quantity),
+                        "right_quantity": str(right_quantity),
+                    }
+                )
+            if quantity_differences:
+                differences.append(
+                    {
+                        "accounts": [left_label, right_label],
+                        "quantity_differences": quantity_differences[:50],
+                    }
+                )
+
+    if not differences:
+        return ()
+    return (
+        Alert(
+            "live_position_divergence",
+            "critical",
+            "Comparable live account position snapshots diverged",
+            {
+                "pair_count": len(differences),
+                "differences": differences[:20],
+                "freshness": {
+                    account: {
+                        "status": status,
+                        "age_seconds": age,
+                    }
+                    for account, (status, age) in sorted(freshness_by_account.items())
+                },
+            },
+        ),
+    )
 
 
 def evaluate_database_state(
@@ -225,11 +472,116 @@ def evaluate_database_state(
     track_wal_io_timing: bool,
     max_parallel_maintenance_workers: int | None,
     stale_after_seconds: float,
+    market_state_stale_after_seconds: float = (
+        _DEFAULT_MARKET_STATE_STALE_AFTER_SECONDS
+    ),
+    market_delay_warning_ms: float = _DEFAULT_MARKET_DELAY_WARNING_MS,
+    market_delay_critical_ms: float = _DEFAULT_MARKET_DELAY_CRITICAL_MS,
+    account_state_stale_after_seconds: float = (
+        _DEFAULT_ACCOUNT_STATE_STALE_AFTER_SECONDS
+    ),
+    account_process_state: str | None = None,
+    account_process_age_seconds: float | None = None,
+    latest_reconciliation_status: str | None = None,
+    latest_reconciliation_age_seconds: float | None = None,
+    latest_market_progress_age_seconds: float | None = None,
+    latest_market_delay_ms: float | None = None,
+    unknown_order_count: int = 0,
+    oldest_unknown_order_age_seconds: float | None = None,
 ) -> tuple[Alert, ...]:
     """Return alerts for live liveness and PostgreSQL observability."""
 
     del now
     alerts: list[Alert] = []
+    if account_process_state != "ready_readonly" or (
+        account_process_age_seconds is None
+        or account_process_age_seconds < 0
+        or account_process_age_seconds > account_state_stale_after_seconds
+    ):
+        alerts.append(
+            Alert(
+                "live_account_lifecycle_not_ready",
+                "critical",
+                "Execution account lifecycle is not ready",
+                {
+                    "state": account_process_state,
+                    "age_seconds": account_process_age_seconds,
+                    "threshold_seconds": account_state_stale_after_seconds,
+                },
+            )
+        )
+    if latest_reconciliation_status != "ready" or (
+        latest_reconciliation_age_seconds is None
+        or latest_reconciliation_age_seconds < 0
+        or latest_reconciliation_age_seconds > account_state_stale_after_seconds
+    ):
+        alerts.append(
+            Alert(
+                "live_account_reconciliation_stale",
+                "critical",
+                "Latest account reconciliation is missing, stale, or failed",
+                {
+                    "status": latest_reconciliation_status,
+                    "age_seconds": latest_reconciliation_age_seconds,
+                    "threshold_seconds": account_state_stale_after_seconds,
+                },
+            )
+        )
+    if (
+        latest_market_progress_age_seconds is None
+        or latest_market_progress_age_seconds < 0
+        or latest_market_progress_age_seconds > market_state_stale_after_seconds
+    ):
+        alerts.append(
+            Alert(
+                "live_market_state_stale",
+                "critical",
+                "Durable market-state progress is missing or stale",
+                {
+                    "age_seconds": latest_market_progress_age_seconds,
+                    "threshold_seconds": market_state_stale_after_seconds,
+                },
+            )
+        )
+    if latest_market_delay_ms is not None and latest_market_delay_ms >= 0:
+        if latest_market_delay_ms >= market_delay_critical_ms:
+            alerts.append(
+                Alert(
+                    "live_market_state_delay",
+                    "critical",
+                    "Market-state receive delay exceeded the critical budget",
+                    {
+                        "delay_ms": round(latest_market_delay_ms, 3),
+                        "warning_threshold_ms": market_delay_warning_ms,
+                        "critical_threshold_ms": market_delay_critical_ms,
+                    },
+                )
+            )
+        elif latest_market_delay_ms >= market_delay_warning_ms:
+            alerts.append(
+                Alert(
+                    "live_market_state_delay",
+                    "warning",
+                    "Market-state receive delay exceeded the warning budget",
+                    {
+                        "delay_ms": round(latest_market_delay_ms, 3),
+                        "warning_threshold_ms": market_delay_warning_ms,
+                        "critical_threshold_ms": market_delay_critical_ms,
+                    },
+                )
+            )
+    if unknown_order_count > 0:
+        alerts.append(
+            Alert(
+                "live_unknown_orders",
+                "critical",
+                "Exchange order state is pending reconciliation",
+                {
+                    "unknown_order_count": unknown_order_count,
+                    "oldest_age_seconds": oldest_unknown_order_age_seconds,
+                },
+            )
+        )
     if not live_session_ready:
         alerts.append(
             Alert(
@@ -548,6 +900,9 @@ class MonitorConfig:
     alert_cooldown_seconds: float = _DEFAULT_ALERT_COOLDOWN_SECONDS
     command_timeout_seconds: float = _DEFAULT_COMMAND_TIMEOUT_SECONDS
     state_path: Path = Path("/var/lib/crypto-momentum-lab/ops-monitor.json")
+    # ``None`` means a persistent sibling of state_path.  This keeps the
+    # default durable on both the production host and local test hosts.
+    crash_log_directory: Path | None = None
     webhook_url: str | None = None
     serverchan_sendkey: str | None = None
     external_heartbeat_url: str | None = None
@@ -556,6 +911,17 @@ class MonitorConfig:
     auto_restart_stale_live_services: bool = True
     live_restart_cooldown_seconds: float = _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS
     live_restart_max_attempts: int = _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS
+    market_state_stale_after_seconds: float = (
+        _DEFAULT_MARKET_STATE_STALE_AFTER_SECONDS
+    )
+    market_delay_warning_ms: float = _DEFAULT_MARKET_DELAY_WARNING_MS
+    market_delay_critical_ms: float = _DEFAULT_MARKET_DELAY_CRITICAL_MS
+    account_state_stale_after_seconds: float = (
+        _DEFAULT_ACCOUNT_STATE_STALE_AFTER_SECONDS
+    )
+    position_stale_after_seconds: float = _DEFAULT_POSITION_STALE_AFTER_SECONDS
+    position_quantity_tolerance: Decimal = _DEFAULT_POSITION_QUANTITY_TOLERANCE
+    consistency_window_seconds: float = _DEFAULT_CONSISTENCY_WINDOW_SECONDS
 
 
 class OpsMonitor:
@@ -591,11 +957,28 @@ class OpsMonitor:
             raise ValueError("live_restart_cooldown_seconds must be positive")
         if config.live_restart_max_attempts <= 0:
             raise ValueError("live_restart_max_attempts must be positive")
+        if config.market_state_stale_after_seconds <= 0:
+            raise ValueError("market_state_stale_after_seconds must be positive")
+        if not (
+            0 < config.market_delay_warning_ms < config.market_delay_critical_ms
+        ):
+            raise ValueError("market delay thresholds are invalid")
+        if config.account_state_stale_after_seconds <= 0:
+            raise ValueError("account_state_stale_after_seconds must be positive")
+        if config.position_stale_after_seconds <= 0:
+            raise ValueError("position_stale_after_seconds must be positive")
+        if config.position_quantity_tolerance < 0:
+            raise ValueError("position_quantity_tolerance must not be negative")
+        if config.consistency_window_seconds <= 0:
+            raise ValueError("consistency_window_seconds must be positive")
         self._config = config
         self._runner = runner or SubprocessRunner()
         self._clock = clock
         self._sleeper = sleeper
         self._state = _load_state(config.state_path)
+        self._crash_log_directory = config.crash_log_directory or (
+            config.state_path.parent / "crash-logs"
+        )
 
     def run_forever(self) -> None:
         while True:
@@ -746,6 +1129,32 @@ class OpsMonitor:
                             database_state.max_parallel_maintenance_workers
                         ),
                         stale_after_seconds=self._config.telemetry_stale_after_seconds,
+                        market_state_stale_after_seconds=(
+                            self._config.market_state_stale_after_seconds
+                        ),
+                        market_delay_warning_ms=self._config.market_delay_warning_ms,
+                        market_delay_critical_ms=self._config.market_delay_critical_ms,
+                        account_state_stale_after_seconds=(
+                            self._config.account_state_stale_after_seconds
+                        ),
+                        account_process_state=database_state.account_process_state,
+                        account_process_age_seconds=(
+                            database_state.account_process_age_seconds
+                        ),
+                        latest_reconciliation_status=(
+                            database_state.latest_reconciliation_status
+                        ),
+                        latest_reconciliation_age_seconds=(
+                            database_state.latest_reconciliation_age_seconds
+                        ),
+                        latest_market_progress_age_seconds=(
+                            database_state.latest_market_progress_age_seconds
+                        ),
+                        latest_market_delay_ms=database_state.latest_market_delay_ms,
+                        unknown_order_count=database_state.unknown_order_count,
+                        oldest_unknown_order_age_seconds=(
+                            database_state.oldest_unknown_order_age_seconds
+                        ),
                     )
                     alerts.extend(
                         replace(
@@ -758,6 +1167,38 @@ class OpsMonitor:
                         )
                         for alert in account_alerts
                     )
+
+            try:
+                signal_observations, position_observations = (
+                    self._consistency_observations(postgres_id)
+                )
+            except Exception as error:
+                alerts.append(
+                    Alert(
+                        "live_consistency_check_failed",
+                        "critical",
+                        "Cross-account consistency query failed",
+                        {
+                            "error_type": type(error).__name__,
+                            "error": str(error),
+                            "accounts": [
+                                account_label
+                                for account_label, _run_id, _lease_owner in (
+                                    self._config.live_accounts
+                                )
+                            ],
+                        },
+                    )
+                )
+            else:
+                alerts.extend(evaluate_signal_divergence(signal_observations))
+                alerts.extend(
+                    evaluate_position_divergence(
+                        position_observations,
+                        stale_after_seconds=self._config.position_stale_after_seconds,
+                        quantity_tolerance=self._config.position_quantity_tolerance,
+                    )
+                )
 
         active_keys = {alert.name for alert in alerts}
         for alert in alerts:
@@ -893,6 +1334,27 @@ class OpsMonitor:
             },
         )
         alerts = [stale_alert]
+        if state.get("log_archive_container_id") != snapshot.container_id:
+            archive_path, archive_error = self._archive_container_logs(
+                snapshot,
+                observed_at=now,
+            )
+            if archive_path is not None:
+                state["log_archive_container_id"] = snapshot.container_id
+                state["log_archive_at"] = now
+                details["crash_log_archive"] = str(archive_path)
+            if archive_error is not None:
+                alerts.append(
+                    Alert(
+                        f"live_crash_log_archive_failed:{account_label}",
+                        "critical",
+                        "Worker crash logs could not be archived before recovery",
+                        {
+                            **details,
+                            "error_type": type(archive_error).__name__,
+                        },
+                    )
+                )
         if not self._config.auto_restart_stale_live_services:
             return tuple(alerts)
 
@@ -1006,6 +1468,58 @@ class OpsMonitor:
                 )
             )
         return tuple(alerts)
+
+    def _archive_container_logs(
+        self,
+        snapshot: ContainerSnapshot,
+        *,
+        observed_at: float,
+    ) -> tuple[Path | None, Exception | None]:
+        """Copy Docker's retained log stream before a worker recovery.
+
+        A Compose restart normally keeps the container, but a deployment or a
+        crash-loop can recreate it and erase the only useful traceback.  The
+        archive is therefore a best-effort side effect and never blocks the
+        actual recovery command on a logging failure.
+        """
+
+        directory = self._crash_log_directory
+        if directory is None:  # pragma: no cover - explicit disablement hook
+            return None, None
+        safe_service = re.sub(r"[^A-Za-z0-9_.-]+", "_", snapshot.service)
+        safe_container = re.sub(r"[^A-Za-z0-9_.-]+", "_", snapshot.container_id)
+        timestamp = datetime.fromtimestamp(observed_at, UTC).strftime(
+            "%Y%m%dT%H%M%S.%fZ"
+        )
+        destination = directory / (
+            f"{timestamp}_{safe_service}_{safe_container[:24]}.log"
+        )
+        temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            output = self._runner.run(
+                ["docker", "logs", "--timestamps", snapshot.container_id],
+                timeout_seconds=self._config.command_timeout_seconds,
+            )
+            temporary.write_text(
+                "# service="
+                + snapshot.service
+                + " container_id="
+                + snapshot.container_id
+                + " observed_at="
+                + datetime.fromtimestamp(observed_at, UTC).isoformat()
+                + "\n"
+                + output,
+                encoding="utf-8",
+            )
+            os.replace(temporary, destination)
+        except Exception as error:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            return None, error
+        return destination, None
 
     def _container_id(self, service: str) -> str | None:
         # Docker labels avoid re-interpolating every Compose file on each
@@ -1263,6 +1777,64 @@ SELECT 'track_wal_io_timing' || E'\\t' || current_setting('track_wal_io_timing')
 SELECT 'parallel_maintenance' || E'\\t' || current_setting(
   'max_parallel_maintenance_workers'
 );
+SELECT 'market_progress_age' || E'\\t' || COALESCE(
+  EXTRACT(EPOCH FROM (clock_timestamp() - max(occurred_at)))::text, '-1'
+)
+FROM strategy_runtime_events
+WHERE run_id = {run_id} AND event_type = 'market_state_progress';
+SELECT 'market_delay_ms' || E'\\t' || COALESCE(
+  (
+    SELECT details->>'market_delay_ms'
+    FROM strategy_runtime_events
+    WHERE run_id = {run_id} AND event_type = 'market_state_progress'
+    ORDER BY occurred_at DESC
+    LIMIT 1
+  ), '-1'
+);
+SELECT 'account_process_state' || E'\\t' || COALESCE(
+  (
+    SELECT state
+    FROM execution_account_process_states
+    WHERE environment = 'live' AND account_label = {account_label}
+    ORDER BY occurred_at DESC
+    LIMIT 1
+  ), ''
+);
+SELECT 'account_process_age' || E'\\t' || COALESCE(
+  (
+    SELECT EXTRACT(EPOCH FROM (clock_timestamp() - occurred_at))::text
+    FROM execution_account_process_states
+    WHERE environment = 'live' AND account_label = {account_label}
+    ORDER BY occurred_at DESC
+    LIMIT 1
+  ), '-1'
+);
+SELECT 'reconciliation_status' || E'\\t' || COALESCE(
+  (
+    SELECT status
+    FROM account_reconciliation_runs
+    WHERE environment = 'live' AND account_label = {account_label}
+    ORDER BY observed_at DESC
+    LIMIT 1
+  ), ''
+);
+SELECT 'reconciliation_age' || E'\\t' || COALESCE(
+  (
+    SELECT EXTRACT(EPOCH FROM (clock_timestamp() - observed_at))::text
+    FROM account_reconciliation_runs
+    WHERE environment = 'live' AND account_label = {account_label}
+    ORDER BY observed_at DESC
+    LIMIT 1
+  ), '-1'
+);
+SELECT 'unknown_order_count' || E'\\t' || count(*)::text
+FROM exchange_orders
+WHERE run_id = {run_id} AND state = 'unknown_pending_reconciliation';
+SELECT 'oldest_unknown_order_age' || E'\\t' || COALESCE(
+  EXTRACT(EPOCH FROM (clock_timestamp() - min(created_at)))::text, '-1'
+)
+FROM exchange_orders
+WHERE run_id = {run_id} AND state = 'unknown_pending_reconciliation';
 """
         output = self._runner.run(
             [
@@ -1287,6 +1859,13 @@ SELECT 'parallel_maintenance' || E'\\t' || current_setting(
             if separator:
                 values[key] = value.strip()
         age = _parse_float(values.get("checkpoint_age"))
+        market_progress_age = _parse_float(values.get("market_progress_age"))
+        market_delay_ms = _parse_float(values.get("market_delay_ms"))
+        account_process_age = _parse_float(values.get("account_process_age"))
+        reconciliation_age = _parse_float(values.get("reconciliation_age"))
+        oldest_unknown_order_age = _parse_float(
+            values.get("oldest_unknown_order_age")
+        )
         return DatabaseState(
             latest_checkpoint_age_seconds=None if age is None or age < 0 else age,
             live_session_ready=_parse_bool(values.get("live_ready")),
@@ -1296,7 +1875,187 @@ SELECT 'parallel_maintenance' || E'\\t' || current_setting(
             max_parallel_maintenance_workers=_parse_int(
                 values.get("parallel_maintenance")
             ),
+            latest_market_progress_age_seconds=(
+                None
+                if market_progress_age is None or market_progress_age < 0
+                else market_progress_age
+            ),
+            latest_market_delay_ms=(
+                None
+                if market_delay_ms is None or market_delay_ms < 0
+                else market_delay_ms
+            ),
+            account_process_state=values.get("account_process_state") or None,
+            account_process_age_seconds=(
+                None
+                if account_process_age is None or account_process_age < 0
+                else account_process_age
+            ),
+            latest_reconciliation_status=(
+                values.get("reconciliation_status") or None
+            ),
+            latest_reconciliation_age_seconds=(
+                None
+                if reconciliation_age is None or reconciliation_age < 0
+                else reconciliation_age
+            ),
+            unknown_order_count=_parse_int(values.get("unknown_order_count")) or 0,
+            oldest_unknown_order_age_seconds=(
+                None
+                if oldest_unknown_order_age is None or oldest_unknown_order_age < 0
+                else oldest_unknown_order_age
+            ),
         )
+
+    def _consistency_observations(
+        self,
+        container_id: str,
+    ) -> tuple[tuple[SignalObservation, ...], tuple[PositionObservation, ...]]:
+        """Read a bounded cross-account consistency window from PostgreSQL."""
+
+        accounts = tuple(self._config.live_accounts)
+        account_labels = tuple(account_label for account_label, _, _ in accounts)
+        run_ids = tuple(run_id for _, run_id, _ in accounts)
+        account_sql = _sql_list(account_labels)
+        run_sql = _sql_list(run_ids)
+        window_seconds = _sql_numeric(self._config.consistency_window_seconds)
+        sql = f"""
+SELECT 'signal' || E'\\t' || account_label || E'\\t' || symbol || E'\\t'
+  || source_state_at::text || E'\\t' || config_hash || E'\\t'
+  || count(*)::text || E'\\t'
+  || md5(string_agg(
+    signal_kind || ':' || side || ':' || reason || ':'
+      || features::text || ':' || reference_prices::text,
+    E'\\x1f'
+    ORDER BY signal_kind, side, reason, features::text, reference_prices::text
+  ))
+FROM live_strategy_signals
+WHERE account_label IN ({account_sql})
+  AND run_id IN ({run_sql})
+  AND source_state_at >= clock_timestamp()
+    - ({window_seconds} * interval '1 second')
+GROUP BY account_label, symbol, source_state_at, config_hash;
+SELECT 'output' || E'\\t' || run_id || E'\\t' || symbol || E'\\t'
+  || bucket_start::text || E'\\t'
+  || COALESCE(details->>'strategy_config_hash', '') || E'\\t'
+  || COALESCE(details->>'signal_count', '0') || E'\\t'
+  || COALESCE(details->>'candidate_count', '0')
+FROM (
+  SELECT DISTINCT ON (run_id, symbol, bucket_start)
+    run_id, symbol, bucket_start, details, occurred_at
+  FROM strategy_runtime_events
+  WHERE event_type = 'strategy_output_observed'
+    AND run_id IN ({run_sql})
+    AND bucket_start IS NOT NULL
+    AND occurred_at >= clock_timestamp()
+      - ({window_seconds} * interval '1 second')
+  ORDER BY run_id, symbol, bucket_start, occurred_at DESC
+) latest_output;
+WITH latest_reconciliation AS (
+  SELECT DISTINCT ON (account_label)
+    account_label, status, observed_at
+  FROM account_reconciliation_runs
+  WHERE environment = 'live' AND account_label IN ({account_sql})
+  ORDER BY account_label, observed_at DESC
+), position_cutoff AS (
+  SELECT
+    r.account_label,
+    r.status,
+    r.observed_at,
+    max(p.observed_at) AS position_observed_at
+  FROM latest_reconciliation r
+  LEFT JOIN account_position_snapshots p
+    ON p.environment = 'live'
+   AND p.account_label = r.account_label
+   AND p.observed_at <= r.observed_at
+  GROUP BY r.account_label, r.status, r.observed_at
+)
+SELECT 'position' || E'\\t' || r.account_label || E'\\t' || r.status
+  || E'\\t' || EXTRACT(EPOCH FROM (clock_timestamp() - r.observed_at))::text
+  || E'\\t' || COALESCE(p.symbol, '') || E'\\t'
+  || COALESCE(p.position_side, '') || E'\\t'
+  || COALESCE(p.position_amt::text, '0')
+FROM position_cutoff r
+LEFT JOIN account_position_snapshots p
+  ON p.environment = 'live'
+ AND p.account_label = r.account_label
+ AND p.observed_at = r.position_observed_at
+WHERE p.position_amt IS NULL OR p.position_amt <> 0;
+"""
+        output = self._runner.run(
+            [
+                "docker",
+                "exec",
+                container_id,
+                "psql",
+                "-At",
+                "-q",
+                "-U",
+                "cml",
+                "-d",
+                "cml",
+                "-c",
+                sql,
+            ],
+            timeout_seconds=self._config.command_timeout_seconds,
+        )
+        account_by_run_id = {
+            run_id: account_label
+            for account_label, run_id, _ in accounts
+        }
+        signals_by_key: dict[
+            tuple[str, str, str, str], SignalObservation
+        ] = {}
+        positions: list[PositionObservation] = []
+        for line in output.splitlines():
+            parts = line.split("\t")
+            if not parts:
+                continue
+            if parts[0] == "signal" and len(parts) == 7:
+                key = (parts[1], parts[2], parts[3], parts[4])
+                previous = signals_by_key.get(key)
+                signals_by_key[key] = SignalObservation(
+                    account_label=parts[1],
+                    symbol=parts[2],
+                    bucket_start=parts[3],
+                    strategy_config_hash=parts[4],
+                    signal_count=int(parts[5]),
+                    candidate_count=(
+                        0 if previous is None else previous.candidate_count
+                    ),
+                    fingerprint=parts[6] or None,
+                )
+                continue
+            if parts[0] == "output" and len(parts) == 7:
+                account_label = account_by_run_id.get(parts[1])
+                if account_label is None:
+                    continue
+                key = (account_label, parts[2], parts[3], parts[4])
+                previous = signals_by_key.get(key)
+                signals_by_key[key] = SignalObservation(
+                    account_label=account_label,
+                    symbol=parts[2],
+                    bucket_start=parts[3],
+                    strategy_config_hash=parts[4],
+                    signal_count=int(parts[5]),
+                    candidate_count=int(parts[6]),
+                    fingerprint=(
+                        None if previous is None else previous.fingerprint
+                    ),
+                )
+                continue
+            if parts[0] == "position" and len(parts) == 7:
+                positions.append(
+                    PositionObservation(
+                        account_label=parts[1],
+                        status=parts[2],
+                        age_seconds=_parse_float(parts[3]),
+                        symbol=parts[4],
+                        position_side=parts[5],
+                        position_amt=Decimal(parts[6]),
+                    )
+                )
+        return tuple(signals_by_key.values()), tuple(positions)
 
     def _memory_pressure_alerts(
         self,
@@ -1591,6 +2350,19 @@ def _parse_env_bool(value: str | None, *, default: bool) -> bool:
 
 def _sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def _sql_list(values: Sequence[str]) -> str:
+    normalized = tuple(value.strip() for value in values if value.strip())
+    if not normalized:
+        raise ValueError("SQL IN list must not be empty")
+    return ", ".join(_sql_literal(value) for value in normalized)
+
+
+def _sql_numeric(value: float) -> str:
+    if value <= 0 or value != value or value in {float("inf"), float("-inf")}:
+        raise ValueError("SQL numeric value must be finite and positive")
+    return format(value, ".6f")
 
 
 def _load_state(path: Path) -> dict[str, Any]:
@@ -2065,6 +2837,11 @@ def _monitor_services_for_accounts(
 
 def build_config(args: argparse.Namespace) -> MonitorConfig:
     compose_env_file = _env_path("CML_COMPOSE_ENV_FILE", None)
+    crash_log_directory_value = getattr(
+        args,
+        "crash_log_directory",
+        os.environ.get("CML_CRASH_LOG_DIRECTORY"),
+    )
     live_run_id = (
         args.live_run_id
         or os.environ.get("CML_LIVE_SESSION_ID")
@@ -2154,7 +2931,84 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
                 _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS,
             )
         ),
+        market_state_stale_after_seconds=float(
+            getattr(
+                args,
+                "market_state_stale_after_seconds",
+                os.environ.get(
+                    "CML_MARKET_STATE_STALE_AFTER_SECONDS",
+                    _DEFAULT_MARKET_STATE_STALE_AFTER_SECONDS,
+                ),
+            )
+        ),
+        market_delay_warning_ms=float(
+            getattr(
+                args,
+                "market_delay_warning_ms",
+                os.environ.get(
+                    "CML_MARKET_DELAY_WARNING_MS",
+                    _DEFAULT_MARKET_DELAY_WARNING_MS,
+                ),
+            )
+        ),
+        market_delay_critical_ms=float(
+            getattr(
+                args,
+                "market_delay_critical_ms",
+                os.environ.get(
+                    "CML_MARKET_DELAY_CRITICAL_MS",
+                    _DEFAULT_MARKET_DELAY_CRITICAL_MS,
+                ),
+            )
+        ),
+        account_state_stale_after_seconds=float(
+            getattr(
+                args,
+                "account_state_stale_after_seconds",
+                os.environ.get(
+                    "CML_ACCOUNT_STATE_STALE_AFTER_SECONDS",
+                    _DEFAULT_ACCOUNT_STATE_STALE_AFTER_SECONDS,
+                ),
+            )
+        ),
+        position_stale_after_seconds=float(
+            getattr(
+                args,
+                "position_stale_after_seconds",
+                os.environ.get(
+                    "CML_POSITION_STALE_AFTER_SECONDS",
+                    _DEFAULT_POSITION_STALE_AFTER_SECONDS,
+                ),
+            )
+        ),
+        position_quantity_tolerance=Decimal(
+            str(
+                getattr(
+                    args,
+                    "position_quantity_tolerance",
+                    os.environ.get(
+                        "CML_POSITION_QUANTITY_TOLERANCE",
+                        _DEFAULT_POSITION_QUANTITY_TOLERANCE,
+                    ),
+                )
+            )
+        ),
+        consistency_window_seconds=float(
+            getattr(
+                args,
+                "consistency_window_seconds",
+                os.environ.get(
+                    "CML_CONSISTENCY_WINDOW_SECONDS",
+                    _DEFAULT_CONSISTENCY_WINDOW_SECONDS,
+                ),
+            )
+        ),
         state_path=Path(args.state_path),
+        crash_log_directory=(
+            Path(crash_log_directory_value)
+            if crash_log_directory_value
+            else None
+        ),
         webhook_url=os.environ.get("CML_ALERT_WEBHOOK_URL") or None,
         serverchan_sendkey=(
             os.environ.get("SERVERCHAN_SENDKEY")
@@ -2218,6 +3072,73 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=_DEFAULT_TELEMETRY_STALE_AFTER_SECONDS,
     )
     parser.add_argument(
+        "--market-state-stale-after-seconds",
+        type=float,
+        default=float(
+            os.environ.get(
+                "CML_MARKET_STATE_STALE_AFTER_SECONDS",
+                _DEFAULT_MARKET_STATE_STALE_AFTER_SECONDS,
+            )
+        ),
+    )
+    parser.add_argument(
+        "--market-delay-warning-ms",
+        type=float,
+        default=float(
+            os.environ.get(
+                "CML_MARKET_DELAY_WARNING_MS",
+                _DEFAULT_MARKET_DELAY_WARNING_MS,
+            )
+        ),
+    )
+    parser.add_argument(
+        "--market-delay-critical-ms",
+        type=float,
+        default=float(
+            os.environ.get(
+                "CML_MARKET_DELAY_CRITICAL_MS",
+                _DEFAULT_MARKET_DELAY_CRITICAL_MS,
+            )
+        ),
+    )
+    parser.add_argument(
+        "--account-state-stale-after-seconds",
+        type=float,
+        default=float(
+            os.environ.get(
+                "CML_ACCOUNT_STATE_STALE_AFTER_SECONDS",
+                _DEFAULT_ACCOUNT_STATE_STALE_AFTER_SECONDS,
+            )
+        ),
+    )
+    parser.add_argument(
+        "--position-stale-after-seconds",
+        type=float,
+        default=float(
+            os.environ.get(
+                "CML_POSITION_STALE_AFTER_SECONDS",
+                _DEFAULT_POSITION_STALE_AFTER_SECONDS,
+            )
+        ),
+    )
+    parser.add_argument(
+        "--position-quantity-tolerance",
+        default=os.environ.get(
+            "CML_POSITION_QUANTITY_TOLERANCE",
+            str(_DEFAULT_POSITION_QUANTITY_TOLERANCE),
+        ),
+    )
+    parser.add_argument(
+        "--consistency-window-seconds",
+        type=float,
+        default=float(
+            os.environ.get(
+                "CML_CONSISTENCY_WINDOW_SECONDS",
+                _DEFAULT_CONSISTENCY_WINDOW_SECONDS,
+            )
+        ),
+    )
+    parser.add_argument(
         "--rss-warning-fraction",
         type=float,
         default=_DEFAULT_RSS_WARNING_FRACTION,
@@ -2268,6 +3189,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "CML_OPS_MONITOR_STATE_PATH",
             "/var/lib/crypto-momentum-lab/ops-monitor.json",
         ),
+    )
+    parser.add_argument(
+        "--crash-log-directory",
+        default=os.environ.get("CML_CRASH_LOG_DIRECTORY"),
     )
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)

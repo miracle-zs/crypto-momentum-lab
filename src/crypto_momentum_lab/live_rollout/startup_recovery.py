@@ -329,6 +329,23 @@ async def restore_live_strategy_from_checkpoint(
         raise RuntimeError(
             "strategy does not support compact checkpoint recovery"
         )
+    clear_market_state_buffers = getattr(
+        strategy,
+        "clear_market_state_buffers",
+        None,
+    )
+    if not callable(clear_market_state_buffers):
+        raise RuntimeError(
+            "strategy does not support forced durable market rewarm"
+        )
+    # A checkpoint may come from an older worker that persisted derived
+    # buffers.  Never combine those buffers with a new stream epoch: discard
+    # them first and rebuild from the durable market-state table below.
+    clear_market_state_buffers()
+    log.info(
+        "live_strategy_market_buffers_discarded_before_durable_rewarm",
+        environment=environment,
+    )
     recovery_cutover = cutover_at or live_market_state_cutover(
         datetime.now(tz=UTC)
     )
@@ -408,10 +425,15 @@ async def restore_live_strategy_from_checkpoint(
 
 
 def checkpoint_needs_market_recovery(checkpoint: StrategyCheckpoint) -> bool:
-    return not any(
-        key in checkpoint.payload
-        for key in ("market_state_buffers", "signal_buffers")
-    )
+    """Return whether live startup must rebuild derivable state durably.
+
+    The parameter is retained for callers that use this as a policy hook, but
+    live workers must rewarm after every restart.  Persisted rolling buffers
+    are not an authoritative source for a new sequence/epoch.
+    """
+
+    del checkpoint
+    return True
 
 
 def live_warmup_seconds(strategy: LiveRuntimeStrategy) -> int:

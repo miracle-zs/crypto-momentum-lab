@@ -50,6 +50,9 @@ class RuntimeStrategyProtocol(Protocol):
     def warm_market_state(self, state: MarketState15s) -> None:
         pass
 
+    def clear_market_state_buffers(self) -> None:
+        pass
+
 
 class StrategyRegistryError(ValueError):
     pass

@@ -103,6 +103,17 @@ class StrategyRuntimeState:
             # erase the buffer we just restored.
             self.last_processed[state.symbol] = state.bucket_start
 
+    def clear_market_state_buffers(self) -> None:
+        """Discard derived market data while preserving trading control state.
+
+        Live restart recovery must rebuild rolling features from the durable
+        market-state table.  Cooldowns, processed-watermarks, and signal
+        sequence numbers are control state and therefore remain intact.
+        """
+
+        self.buffers = {}
+        self.warmup = {}
+
     def reset_symbol(self, symbol: str) -> None:
         self.buffers.pop(symbol, None)
         self.warmup.pop(symbol, None)

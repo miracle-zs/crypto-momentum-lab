@@ -22,6 +22,10 @@ async def _raise_account_failure() -> None:
     raise RuntimeError("account stream failed")
 
 
+async def _raise_worker_failure() -> None:
+    raise RuntimeError("worker crashed")
+
+
 async def _close_nothing() -> None:
     return None
 
@@ -29,13 +33,17 @@ async def _close_nothing() -> None:
 def _runtime_tasks(
     *,
     account: asyncio.Task[None],
-    shutdown: asyncio.Task[None] | None = None,
+    startup_market: asyncio.Task[None] | None = None,
+    local_health: asyncio.Task[None] | None = None,
+    shutdown: asyncio.Task[bool] | None = None,
 ) -> LiveRuntimeTasks:
     return LiveRuntimeTasks(
         market=asyncio.create_task(_wait_for_market_result()),
         account=account,
         lease=asyncio.create_task(_wait_forever()),
         reconcile=asyncio.create_task(_wait_forever()),
+        startup_market=startup_market,
+        local_health=local_health,
         shutdown=shutdown,
     )
 
@@ -52,6 +60,30 @@ async def test_supervisor_fails_when_account_channel_stops() -> None:
 
     await asyncio.sleep(0)
     with pytest.raises(RuntimeError, match="account stream failed"):
+        await supervisor.run()
+
+    await supervisor.stop()
+
+
+@pytest.mark.parametrize("worker", ["startup_market", "local_health"])
+async def test_supervisor_fails_when_critical_worker_crashes(worker: str) -> None:
+    failure = asyncio.create_task(_raise_worker_failure())
+    tasks = _runtime_tasks(
+        account=asyncio.create_task(_wait_forever()),
+        startup_market=failure if worker == "startup_market" else None,
+        local_health=failure if worker == "local_health" else None,
+    )
+    supervisor = LiveRuntimeSupervisor(
+        tasks=tasks,
+        block_entry_submissions=lambda: None,
+        stop_sources=lambda: None,
+        close_risk_control=_close_nothing,
+        stop_entry_caches=_close_nothing,
+        run_id="session-1",
+    )
+
+    await asyncio.sleep(0)
+    with pytest.raises(RuntimeError, match="worker crashed"):
         await supervisor.run()
 
     await supervisor.stop()

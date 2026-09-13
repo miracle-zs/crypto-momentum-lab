@@ -19,7 +19,11 @@ from crypto_momentum_lab.execution_account.risk_control_hub import (
     RiskControlEvent,
     RiskControlHubError,
 )
-from crypto_momentum_lab.market_data.hub import MarketStateHubError
+from crypto_momentum_lab.market_data.hub import (
+    MarketStateHubEpochError,
+    MarketStateHubError,
+    MarketStateHubReplayUnavailable,
+)
 from crypto_momentum_lab.market_data.quote_hub import MarketQuoteHubError
 
 log = structlog.get_logger(__name__)
@@ -28,6 +32,7 @@ async def _resilient_stream[StreamItem](
     source: AsyncIterable[StreamItem],
     *,
     error_type: type[Exception],
+    fatal_error_type: type[Exception] | tuple[type[Exception], ...] | None = None,
     retry_event: str,
     retry_delay_seconds: float,
 ) -> AsyncIterator[StreamItem]:
@@ -40,6 +45,11 @@ async def _resilient_stream[StreamItem](
         except asyncio.CancelledError:
             raise
         except error_type as error:
+            if fatal_error_type is not None and isinstance(
+                error,
+                fatal_error_type,
+            ):
+                raise
             log.warning(
                 retry_event,
                 error_type=type(error).__name__,
@@ -62,6 +72,10 @@ async def resilient_market_state_stream(
     async for state in _resilient_stream(
         states,
         error_type=MarketStateHubError,
+        fatal_error_type=(
+            MarketStateHubReplayUnavailable,
+            MarketStateHubEpochError,
+        ),
         retry_event="live_market_state_stream_retry",
         retry_delay_seconds=retry_delay_seconds,
     ):

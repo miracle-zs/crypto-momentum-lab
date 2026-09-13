@@ -205,6 +205,63 @@ async def test_terminal_fill_updates_order_state_and_persists_fill() -> None:
     assert repository.events[-1].state is ExchangeOrderState.FILLED
 
 
+async def test_replayed_snapshot_does_not_repeat_fill_or_order_event_side_effects(
+) -> None:
+    fill = ExchangeOrderFill(
+        fill_id="fill-1",
+        client_order_id=_plan().client_order_id,
+        exchange_trade_id="trade-1",
+        price=Decimal("30000"),
+        quantity=Decimal("0.003"),
+        fee=Decimal("0.01"),
+        fee_asset="USDT",
+        filled_at=NOW,
+        details={},
+    )
+
+    class IdempotentRepository(FakeOrderRepository):
+        async def append_order_event(self, event: ExchangeOrderEvent) -> bool:
+            if any(existing.event_id == event.event_id for existing in self.events):
+                return False
+            self.events.append(event)
+            return True
+
+        async def save_fill(self, value: ExchangeOrderFill) -> bool:
+            if any(
+                existing.client_order_id == value.client_order_id
+                and existing.exchange_trade_id == value.exchange_trade_id
+                for existing in self.fills
+            ):
+                return False
+            self.fills.append(value)
+            return True
+
+    repository = IdempotentRepository()
+    callbacks: list[ExchangeOrderEvent] = []
+
+    async def on_event(_plan: OrderExecutionPlan, event: ExchangeOrderEvent) -> None:
+        callbacks.append(event)
+
+    machine = OrderExecutionStateMachine(
+        exchange=FakeExchange(
+            submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED)
+        ),
+        repository=repository,
+        submit_policy=SubmitPolicy.LIVE_SUBMIT,
+        live_submit_enabled=True,
+        clock=lambda: NOW,
+        on_event=on_event,
+    )
+
+    snapshot = _snapshot(ExchangeOrderState.FILLED, fills=(fill,))
+    await machine.apply_observed_snapshot(_plan(), snapshot)
+    await machine.apply_observed_snapshot(_plan(), snapshot)
+
+    assert repository.fills == [fill]
+    assert len(repository.events) == 1
+    assert callbacks == repository.events
+
+
 async def test_reconcile_order_promotes_acknowledged_order_to_filled() -> None:
     exchange = FakeExchange(
         submit_result=_snapshot(ExchangeOrderState.ACKNOWLEDGED),

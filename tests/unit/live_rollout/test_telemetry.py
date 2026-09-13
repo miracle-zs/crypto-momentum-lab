@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -13,7 +14,9 @@ from crypto_momentum_lab.live_rollout.telemetry import (
     CONSUMER_HEALTH,
     EXCHANGE_REQUEST_STARTED,
     EXCHANGE_RESPONSE_RECEIVED,
+    MARKET_STATE_PROGRESS,
     MARKET_STATE_RECEIVED,
+    STRATEGY_OUTPUT_OBSERVED,
     LiveRuntimeTelemetry,
 )
 from tests.unit.shadow_operation.test_service import _intent, _state
@@ -186,6 +189,109 @@ async def test_consumer_health_persists_low_cardinality_operational_event() -> N
         "reason": "market_state_consumer_lagged",
         "sequence": None,
     }
+
+
+async def test_market_progress_persists_sampled_delay_and_account_identity() -> None:
+    batches: list[tuple[dict[str, object], ...]] = []
+
+    async def persist(events) -> None:
+        batches.append(tuple(dict(event) for event in events))
+
+    telemetry = LiveRuntimeTelemetry(
+        run_id="run-1",
+        account_label="account-2",
+        strategy_config_hash="config-1",
+        persist=persist,
+        persist_event_types=frozenset({MARKET_STATE_PROGRESS}),
+    )
+    state = _state()
+    await telemetry.start()
+    telemetry.market_state_progress(
+        state,
+        occurred_at=datetime(2026, 7, 4, 0, 0, 45, tzinfo=UTC),
+        received_at=datetime(2026, 7, 4, 0, 0, 45, tzinfo=UTC),
+    )
+    telemetry.market_state_progress(
+        state,
+        occurred_at=datetime(2026, 7, 4, 0, 1, 15, tzinfo=UTC),
+        received_at=datetime(2026, 7, 4, 0, 1, 16, tzinfo=UTC),
+    )
+    await telemetry.stop()
+
+    assert len(batches) == 1
+    event = batches[0][0]
+    assert event["event_type"] == MARKET_STATE_PROGRESS
+    assert event["symbol"] == state.symbol
+    assert event["bucket_start"] == state.bucket_start
+    assert event["details"]["account_label"] == "account-2"
+    assert event["details"]["strategy_config_hash"] == "config-1"
+    assert event["details"]["market_delay_ms"] == 30_000.0
+
+
+async def test_strategy_output_observation_is_durable_as_a_sampled_heartbeat() -> None:
+    batches: list[tuple[dict[str, object], ...]] = []
+
+    async def persist(events) -> None:
+        batches.append(tuple(dict(event) for event in events))
+
+    telemetry = LiveRuntimeTelemetry(
+        run_id="run-1",
+        account_label="primary",
+        strategy_config_hash="config-1",
+        persist=persist,
+        persist_event_types=frozenset({STRATEGY_OUTPUT_OBSERVED}),
+    )
+    state = _state()
+    await telemetry.start()
+    await telemetry.strategy_decision(
+        state,
+        occurred_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        signal_count=0,
+        candidate_count=0,
+    )
+    await telemetry.stop()
+
+    event = batches[0][0]
+    assert event["event_type"] == STRATEGY_OUTPUT_OBSERVED
+    assert event["details"] == {
+        "account_label": "primary",
+        "strategy_config_hash": "config-1",
+        "signal_count": 0,
+        "candidate_count": 0,
+    }
+
+
+async def test_strategy_output_heartbeat_is_sampled_per_symbol() -> None:
+    batches: list[tuple[dict[str, object], ...]] = []
+
+    async def persist(events) -> None:
+        batches.append(tuple(dict(event) for event in events))
+
+    telemetry = LiveRuntimeTelemetry(
+        run_id="run-1",
+        account_label="primary",
+        strategy_config_hash="config-1",
+        persist=persist,
+        persist_event_types=frozenset({STRATEGY_OUTPUT_OBSERVED}),
+    )
+    timestamp = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+    await telemetry.start()
+    await telemetry.strategy_decision(
+        _state(),
+        occurred_at=timestamp,
+        signal_count=0,
+        candidate_count=0,
+    )
+    await telemetry.strategy_decision(
+        replace(_state(), symbol="ETHUSDT"),
+        occurred_at=timestamp,
+        signal_count=1,
+        candidate_count=1,
+    )
+    await telemetry.stop()
+
+    events = [event for batch in batches for event in batch]
+    assert {event["symbol"] for event in events} == {"BTCUSDT", "ETHUSDT"}
 
 
 async def test_persisted_order_events_carry_decision_slo_transition_samples() -> None:
@@ -439,7 +545,7 @@ async def test_high_frequency_telemetry_stays_in_memory_when_not_persisted() -> 
     await telemetry.stop()
 
     assert batches == []
-    assert telemetry.recorded_event_count == 2
+    assert telemetry.recorded_event_count == 3
     assert telemetry.persist_failure_count == 0
 
 

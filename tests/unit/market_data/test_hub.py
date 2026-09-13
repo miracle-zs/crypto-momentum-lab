@@ -10,6 +10,7 @@ import crypto_momentum_lab.market_data.hub as hub_module
 from crypto_momentum_lab.market_data.hub import (
     MarketStateHub,
     MarketStateHubConfig,
+    MarketStateHubEpochError,
     MarketStateHubError,
     MarketStateHubReplayUnavailable,
     WebSocketMarketStateSource,
@@ -166,6 +167,116 @@ async def test_batch_source_can_fail_closed_with_replay_metadata(monkeypatch) ->
     assert raised.value.oldest_sequence == 20
     assert raised.value.latest_sequence == 30
     assert raised.value.stream_id == "stream-a"
+
+
+async def test_durable_market_state_source_requires_ready_stream_epoch(
+    monkeypatch,
+) -> None:
+    messages = [
+        json.dumps(
+            {
+                "type": "market_state_hub_ready",
+                "schema_version": 1,
+                "environment": "research",
+                "replay_available": True,
+            }
+        )
+    ]
+
+    class FakeConnection:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, _message):
+            return None
+
+        async def recv(self):
+            return messages.pop(0)
+
+    monkeypatch.setattr(
+        hub_module,
+        "connect",
+        lambda *_args, **_kwargs: FakeConnection(),
+    )
+    source = WebSocketMarketStateSource(
+        url="ws://unused",
+        environment="research",
+        consumer_id="test-live",
+        config=MarketStateHubConfig(reconnect_delays=(0,)),
+        fail_on_replay_unavailable=True,
+    )
+    iterator = source.batches()
+    try:
+        with pytest.raises(
+            MarketStateHubEpochError,
+            match="omitted stream epoch",
+        ):
+            await anext(iterator)
+    finally:
+        source.stop()
+        await iterator.aclose()
+
+
+async def test_durable_market_state_source_requires_batch_stream_epoch(
+    monkeypatch,
+) -> None:
+    state = fixture_state("BTCUSDT", 0)
+    messages = [
+        json.dumps(
+            {
+                "type": "market_state_hub_ready",
+                "schema_version": 1,
+                "environment": "research",
+                "stream_id": "stream-a",
+                "replay_available": True,
+                "latest_sequence": 0,
+            }
+        ),
+        encode_market_state_batch(
+            (state,),
+            sequence=1,
+            published_at=state.bucket_end,
+        ),
+    ]
+
+    class FakeConnection:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, _message):
+            return None
+
+        async def recv(self):
+            return messages.pop(0)
+
+    monkeypatch.setattr(
+        hub_module,
+        "connect",
+        lambda *_args, **_kwargs: FakeConnection(),
+    )
+    source = WebSocketMarketStateSource(
+        url="ws://unused",
+        environment="research",
+        consumer_id="test-live",
+        config=MarketStateHubConfig(reconnect_delays=(0,)),
+        fail_on_replay_unavailable=True,
+    )
+    iterator = source.batches()
+    try:
+        with pytest.raises(
+            MarketStateHubEpochError,
+            match="omitted stream epoch",
+        ):
+            await anext(iterator)
+    finally:
+        source.stop()
+        await iterator.aclose()
 
 
 @pytest.mark.skipif(
@@ -701,6 +812,7 @@ async def test_market_state_source_requests_durable_recovery_on_stream_reset(
 ) -> None:
     state = fixture_state("BTCUSDT", 0)
     sent_messages: list[str] = []
+    connection_changes: list[tuple[bool, str | None]] = []
     ready = json.dumps(
         {
             "type": "market_state_hub_ready",
@@ -751,6 +863,9 @@ async def test_market_state_source_requests_durable_recovery_on_stream_reset(
             reconnect_delays=(0,),
             unavailable_timeout_seconds=10,
         ),
+        on_connection_change=lambda available, reason: connection_changes.append(
+            (available, reason)
+        ),
         fail_on_replay_unavailable=True,
     )
     source.set_resume_cursor(stream_id="stream-a", sequence=7)
@@ -767,3 +882,5 @@ async def test_market_state_source_requests_durable_recovery_on_stream_reset(
     subscription = json.loads(sent_messages[0])
     assert subscription["stream_id"] == "stream-a"
     assert subscription["last_sequence"] == 7
+    assert connection_changes[-1][0] is False
+    assert "replay is unavailable" in (connection_changes[-1][1] or "").lower()

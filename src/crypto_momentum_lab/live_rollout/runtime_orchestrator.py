@@ -402,6 +402,8 @@ async def run_live_daemon(
         telemetry_repository = PostgresRuntimeTelemetryRepository(observability_factory)
         telemetry = LiveRuntimeTelemetry(
             run_id=session_id,
+            account_label=account_label,
+            strategy_config_hash=strategy_config_hash,
             persist=telemetry_repository.save_runtime_events,
             persist_event_types=(
                 PERSISTED_ORDER_TELEMETRY_EVENTS
@@ -674,6 +676,12 @@ async def run_live_daemon(
                 environment=market_environment,
                 consumer_id=f"live-strategy:{session_id}",
                 on_connection_change=on_startup_market_connection_change,
+                # A live worker may only consume a contiguous epoch.  If the
+                # bounded Hub replay cannot bridge a reconnect, let the
+                # worker fail so the durable startup rewarm path rebuilds the
+                # strategy before it can submit again.
+                fail_on_replay_unavailable=True,
+                preserve_sequence_on_overflow=True,
             )
             startup_market_state_task = asyncio.create_task(
                 _collect_startup_market_states(
@@ -946,6 +954,9 @@ async def run_live_daemon(
             telemetry=telemetry,
             clock=lambda: datetime.now(tz=UTC),
         )
+        order_reconciliation.on_unknown_order = (
+            control_plane_runtime.on_account_snapshot_recovery
+        )
 
         risk_control_runtime = LiveRiskControlRuntime(
             enabled=risk_control_enabled,
@@ -1032,6 +1043,9 @@ async def run_live_daemon(
             is_order_identity_conflict=_is_order_identity_conflict,
             on_exit_failure=on_exit_failure,
             on_account_snapshot=control_plane_runtime.on_account_snapshot,
+            on_account_snapshot_recovery=(
+                control_plane_runtime.on_account_snapshot_recovery
+            ),
             pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
         )
         if risk_control_enabled:
@@ -1173,6 +1187,7 @@ async def run_live_daemon(
                 if execution_coordinator is not None
                 else None
             ),
+            run_id=session_id,
             shutdown_timeout_seconds=_LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS,
         )
         try:
@@ -1188,6 +1203,12 @@ async def run_live_daemon(
         )
         return result
     except Exception as exc:
+        log.exception(
+            "live_runtime_failed",
+            account_label=account_label,
+            session_id=session_id,
+            error_type=type(exc).__name__,
+        )
         if startup_phase and _is_retryable_live_startup_error(exc):
             raise _LiveStartupRetryableError(exc) from exc
         if session_lifecycle is not None and risk_config_hash:
@@ -1308,6 +1329,7 @@ async def _run_account_event_channel(
     telemetry: LiveTelemetrySink | None = None,
     on_exit_failure: Callable[[str, str | None], None] | None = None,
     on_account_snapshot: Callable[[AccountEvent], None] | None = None,
+    on_account_snapshot_recovery: Callable[[str], None] | None = None,
 ) -> None:
     if (
         order_reconciliation is None
@@ -1319,6 +1341,7 @@ async def _run_account_event_channel(
             order_repository=order_repository,
             state_machine=state_machine,
             run_id=run_id,
+            on_unknown_order=on_account_snapshot_recovery,
         )
     runtime = LiveAccountEventRuntime(
         daemon=daemon,
@@ -1331,6 +1354,7 @@ async def _run_account_event_channel(
         is_order_identity_conflict=_is_order_identity_conflict,
         on_exit_failure=on_exit_failure,
         on_account_snapshot=on_account_snapshot,
+        on_account_snapshot_recovery=on_account_snapshot_recovery,
         pending_position_retry_delays=_PENDING_POSITION_RETRY_DELAYS_SECONDS,
     )
     await runtime.run(source)

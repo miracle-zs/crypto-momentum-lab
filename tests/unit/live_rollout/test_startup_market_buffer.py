@@ -69,3 +69,21 @@ async def test_append_backpressures_instead_of_dropping_history() -> None:
     assert await anext(stream) is second
     with pytest.raises(StopAsyncIteration):
         await anext(stream)
+
+
+@pytest.mark.asyncio
+async def test_stream_fails_before_draining_states_after_fatal_close() -> None:
+    buffer = StartupMarketStateBuffer(max_states=2)
+    await buffer.append(  # type: ignore[arg-type]
+        SimpleNamespace(
+            symbol="BTCUSDT",
+            bucket_start=datetime(2026, 9, 12, tzinfo=UTC),
+        )
+    )
+    failure = RuntimeError("durable market rewarm required")
+    buffer.close(failure)
+
+    with pytest.raises(RuntimeError, match="startup buffer stopped") as raised:
+        await anext(buffer.stream())
+
+    assert raised.value.__cause__ is failure

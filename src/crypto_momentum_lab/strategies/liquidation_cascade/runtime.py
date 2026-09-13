@@ -89,6 +89,11 @@ class LiquidationCascadeRuntimeStrategy:
             max_buffer_length=self.required_data().warmup_buckets + 16,
         )
 
+    def clear_market_state_buffers(self) -> None:
+        """Drop checkpointed rolling data before a durable live rewarm."""
+
+        self._runtime.clear_market_state_buffers()
+
     def reset_symbol(self, symbol: str) -> None:
         """Drop buffered state after the live source skips a data gap."""
         self._runtime.reset_symbol(symbol)

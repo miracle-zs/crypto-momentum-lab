@@ -31,6 +31,7 @@ from crypto_momentum_lab.execution_account.user_data_sync import (
 from crypto_momentum_lab.market_data.hub import (
     MarketStateHub,
     MarketStateHubConfig,
+    MarketStateHubEpochError,
     MarketStateHubReplayUnavailable,
     WebSocketMarketStateSource,
     encode_market_state_batch,
@@ -164,6 +165,82 @@ async def test_fault_injection_market_hub_gap_and_replay_window_fail_closed(
     assert json.loads(sent_messages[1])["last_sequence"] == 1
     assert error_info.value.oldest_sequence == 20
     assert error_info.value.latest_sequence == 30
+
+
+async def test_fault_injection_durable_market_hub_missing_epoch_fails_closed(
+    monkeypatch,
+) -> None:
+    """A durable worker must reject a batch that lost its stream epoch."""
+
+    state = fixture_state("BTCUSDT", 0)
+    sent_messages: list[str] = []
+
+    ready = json.dumps(
+        {
+            "type": "market_state_hub_ready",
+            "schema_version": 1,
+            "environment": "research",
+            "stream_id": "stream-a",
+            "replay_available": True,
+            "oldest_sequence": 1,
+            "latest_sequence": 0,
+        }
+    )
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self._messages = [
+                ready,
+                encode_market_state_batch(
+                    (state,),
+                    sequence=1,
+                    published_at=state.bucket_end,
+                ),
+            ]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, message: str) -> None:
+            sent_messages.append(message)
+
+        async def recv(self):
+            message = self._messages.pop(0)
+            if isinstance(message, BaseException):
+                raise message
+            return message
+
+    monkeypatch.setattr(
+        market_hub_module,
+        "connect",
+        lambda *_args, **_kwargs: FakeConnection(),
+    )
+    source = WebSocketMarketStateSource(
+        url="ws://unused",
+        environment="research",
+        consumer_id="fault-gate-epoch",
+        config=MarketStateHubConfig(
+            reconnect_delays=(0,),
+            unavailable_timeout_seconds=10,
+        ),
+        fail_on_replay_unavailable=True,
+    )
+    iterator = source.batches()
+    try:
+        with pytest.raises(
+            MarketStateHubEpochError,
+            match="batch omitted stream epoch",
+        ):
+            await anext(iterator)
+    finally:
+        source.stop()
+        await iterator.aclose()
+
+    assert len(sent_messages) == 1
+    assert "stream_id" not in json.loads(sent_messages[0])
 
 
 class _InterruptibleSubmitExchange(FakeExchange):

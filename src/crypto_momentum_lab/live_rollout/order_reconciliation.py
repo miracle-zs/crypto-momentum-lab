@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import structlog
 
+from crypto_momentum_lab.domain.execution import ExchangeOrderState
 from crypto_momentum_lab.execution_account.hub import AccountEvent
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
@@ -40,6 +41,7 @@ class LiveOrderReconciliation:
     state_machine: OrderExecutionPort
     run_id: str
     interval_seconds: float = DEFAULT_RECONCILE_INTERVAL_SECONDS
+    on_unknown_order: Callable[[str], None] | None = None
 
     def __post_init__(self) -> None:
         if self.interval_seconds <= 0:
@@ -57,6 +59,31 @@ class LiveOrderReconciliation:
             if order.plan.client_order_id == event.client_order_id:
                 await self.state_machine.reconcile_order(order.plan)
                 return
+        load_order = getattr(self.order_repository, "load_order", None)
+        if callable(load_order):
+            persisted = await load_order(event.client_order_id)
+            if persisted is not None:
+                if persisted.state is ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
+                    await self.state_machine.reconcile_order(persisted.plan)
+                    return
+                if not persisted.state.terminal:
+                    await self.state_machine.reconcile_order(persisted.plan)
+                    return
+                log.info(
+                    "live_account_event_duplicate_terminal_order",
+                    run_id=self.run_id,
+                    client_order_id=event.client_order_id,
+                    state=persisted.state.value,
+                )
+                return
+        reason = "account_event_order_missing_from_local_journal"
+        log.warning(
+            "live_account_event_order_missing_from_local_journal",
+            run_id=self.run_id,
+            client_order_id=event.client_order_id,
+        )
+        if self.on_unknown_order is not None:
+            self.on_unknown_order(reason)
 
     async def reconcile_all(self) -> None:
         """Reconcile every unresolved order for the live session."""

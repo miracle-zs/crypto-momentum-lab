@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from inspect import signature
@@ -31,7 +32,11 @@ from crypto_momentum_lab.live_rollout.stream_recovery import (
     resilient_account_event_stream,
     resilient_market_state_stream,
 )
-from crypto_momentum_lab.market_data.hub import MarketStateHubError
+from crypto_momentum_lab.market_data.hub import (
+    MarketStateHubEpochError,
+    MarketStateHubError,
+    MarketStateHubReplayUnavailable,
+)
 
 app = main.app
 
@@ -1281,6 +1286,9 @@ async def test_compact_checkpoint_recovery_warms_without_evaluating_signals() ->
         def required_data(self):
             return SimpleNamespace(warmup_buckets=1)
 
+        def clear_market_state_buffers(self) -> None:
+            seen["buffers_cleared"] = True
+
         def warm_market_state(self, state) -> None:
             warmed.append(state)
 
@@ -1307,7 +1315,10 @@ async def test_compact_checkpoint_recovery_warms_without_evaluating_signals() ->
         last_processed_at_by_symbol={"BTCUSDT": now},
         warmup_buckets_by_symbol={"BTCUSDT": 7},
         cooldown_buckets_remaining_by_symbol={"BTCUSDT": 2},
-        payload={"signal_sequence": 4},
+        payload={
+            "signal_sequence": 4,
+            "market_state_buffers": {"BTCUSDT": [{"bucket_start": "old"}]},
+        },
     )
 
     await restore_live_strategy_from_checkpoint(
@@ -1318,6 +1329,7 @@ async def test_compact_checkpoint_recovery_warms_without_evaluating_signals() ->
     )
 
     assert len(warmed) == 1
+    assert seen["buffers_cleared"] is True
     assert seen["environment"] == "research"
     assert seen["last_processed_at_by_symbol"] == {"BTCUSDT": now}
 
@@ -1449,6 +1461,9 @@ async def test_live_warmup_defers_symbols_without_a_complete_window() -> None:
                 required_fields=(),
             )
 
+        def clear_market_state_buffers(self) -> None:
+            return None
+
         def warm_market_state(self, state):
             return None
 
@@ -1536,6 +1551,9 @@ async def test_live_checkpoint_recovery_scales_limit_to_symbol_universe() -> Non
                 base_state_interval_seconds=15,
                 required_fields=(),
             )
+
+        def clear_market_state_buffers(self) -> None:
+            return None
 
         def warm_market_state(self, state):
             return None
@@ -1629,6 +1647,41 @@ async def test_resilient_market_state_stream_retries_after_hub_failure() -> None
 
     assert observed == [state]
     assert source.attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_resilient_market_state_stream_propagates_durable_recovery_failure(
+) -> None:
+    error = MarketStateHubReplayUnavailable(
+        "market-state replay is unavailable: Hub stream reset"
+    )
+
+    async def source() -> AsyncIterator[object]:
+        raise error
+        yield  # pragma: no cover
+
+    with pytest.raises(MarketStateHubReplayUnavailable, match="stream reset"):
+        async for _item in resilient_market_state_stream(
+            source(),
+            retry_delay_seconds=0,
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_resilient_market_state_stream_propagates_epoch_failure() -> None:
+    error = MarketStateHubEpochError("market-state batch omitted stream epoch")
+
+    async def source() -> AsyncIterator[object]:
+        raise error
+        yield  # pragma: no cover
+
+    with pytest.raises(MarketStateHubEpochError, match="omitted stream epoch"):
+        async for _item in resilient_market_state_stream(
+            source(),
+            retry_delay_seconds=0,
+        ):
+            pass
 
 
 @pytest.mark.asyncio

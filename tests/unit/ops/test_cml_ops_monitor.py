@@ -3,6 +3,7 @@ import json
 import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 
@@ -12,6 +13,8 @@ from deploy.ops.cml_ops_monitor import (
     LogSignals,
     MonitorConfig,
     OpsMonitor,
+    PositionObservation,
+    SignalObservation,
     _deliver_external_heartbeat,
     _serverchan_endpoint,
     _serverchan_form,
@@ -21,6 +24,8 @@ from deploy.ops.cml_ops_monitor import (
     evaluate_container_memory_growth,
     evaluate_database_state,
     evaluate_log_signals,
+    evaluate_position_divergence,
+    evaluate_signal_divergence,
 )
 
 
@@ -91,6 +96,12 @@ def test_database_state_alerts_when_live_checkpoint_is_stale() -> None:
         track_wal_io_timing=True,
         max_parallel_maintenance_workers=0,
         stale_after_seconds=900,
+        account_process_state="ready_readonly",
+        account_process_age_seconds=12,
+        latest_reconciliation_status="ready",
+        latest_reconciliation_age_seconds=12,
+        latest_market_progress_age_seconds=12,
+        latest_market_delay_ms=100,
     )
 
     assert [alert.name for alert in alerts] == ["live_checkpoint_stale"]
@@ -107,6 +118,12 @@ def test_database_state_does_not_alert_when_only_order_telemetry_is_quiet() -> N
         track_wal_io_timing=True,
         max_parallel_maintenance_workers=0,
         stale_after_seconds=900,
+        account_process_state="ready_readonly",
+        account_process_age_seconds=12,
+        latest_reconciliation_status="ready",
+        latest_reconciliation_age_seconds=12,
+        latest_market_progress_age_seconds=12,
+        latest_market_delay_ms=100,
     )
 
     assert alerts == ()
@@ -398,6 +415,14 @@ def test_database_state_parses_postgres_boolean_text(tmp_path) -> None:
                 "track_io_timing\ton\n"
                 "track_wal_io_timing\tt\n"
                 "parallel_maintenance\t0\n"
+                "market_progress_age\t15\n"
+                "market_delay_ms\t250\n"
+                "account_process_state\tready_readonly\n"
+                "account_process_age\t5\n"
+                "reconciliation_status\tready\n"
+                "reconciliation_age\t6\n"
+                "unknown_order_count\t0\n"
+                "oldest_unknown_order_age\t-1\n"
             )
 
     monitor = OpsMonitor(
@@ -413,6 +438,14 @@ def test_database_state_parses_postgres_boolean_text(tmp_path) -> None:
     assert state.track_io_timing is True
     assert state.track_wal_io_timing is True
     assert state.max_parallel_maintenance_workers == 0
+    assert state.latest_market_progress_age_seconds == 15
+    assert state.latest_market_delay_ms == 250
+    assert state.account_process_state == "ready_readonly"
+    assert state.account_process_age_seconds == 5
+    assert state.latest_reconciliation_status == "ready"
+    assert state.latest_reconciliation_age_seconds == 6
+    assert state.unknown_order_count == 0
+    assert state.oldest_unknown_order_age_seconds is None
 
 
 def test_database_state_uses_live_checkpoint_and_lease_not_order_events(
@@ -450,7 +483,112 @@ def test_database_state_uses_live_checkpoint_and_lease_not_order_events(
     assert "strategy_runtime_checkpoints" in sql
     assert "trading_leases" in sql
     assert "live_session_transitions" in sql
-    assert "strategy_runtime_events" not in sql
+    assert "strategy_runtime_events" in sql
+    assert "market_state_progress" in sql
+    assert "execution_account_process_states" in sql
+    assert "account_reconciliation_runs" in sql
+
+
+def test_database_state_alerts_on_lifecycle_market_and_unknown_order_state() -> None:
+    alerts = evaluate_database_state(
+        now=datetime(2026, 8, 29, 1, 0, tzinfo=UTC),
+        latest_checkpoint_age_seconds=12,
+        live_session_ready=True,
+        pg_stat_statements_ready=True,
+        track_io_timing=True,
+        track_wal_io_timing=True,
+        max_parallel_maintenance_workers=0,
+        stale_after_seconds=900,
+        account_process_state="degraded",
+        account_process_age_seconds=3,
+        latest_reconciliation_status="halted",
+        latest_reconciliation_age_seconds=3,
+        latest_market_progress_age_seconds=181,
+        latest_market_delay_ms=121_000,
+        unknown_order_count=1,
+        oldest_unknown_order_age_seconds=42,
+    )
+
+    assert {alert.name for alert in alerts} == {
+        "live_account_lifecycle_not_ready",
+        "live_account_reconciliation_stale",
+        "live_market_state_stale",
+        "live_market_state_delay",
+        "live_unknown_orders",
+    }
+
+
+def test_signal_divergence_compares_only_same_strategy_configuration() -> None:
+    common = {
+        "symbol": "BTCUSDT",
+        "bucket_start": "2026-09-01T00:00:00+00:00",
+        "strategy_config_hash": "same-config",
+        "signal_count": 1,
+        "candidate_count": 1,
+    }
+    assert evaluate_signal_divergence(
+        (
+            SignalObservation("primary", fingerprint="same", **common),
+            SignalObservation("account-2", fingerprint="same", **common),
+        )
+    ) == ()
+
+    alerts = evaluate_signal_divergence(
+        (
+            SignalObservation("primary", fingerprint="long", **common),
+            SignalObservation("account-2", fingerprint="short", **common),
+            SignalObservation(
+                "account-3",
+                fingerprint="different-config",
+                strategy_config_hash="other-config",
+                **{
+                    key: value
+                    for key, value in common.items()
+                    if key != "strategy_config_hash"
+                },
+            ),
+        )
+    )
+
+    assert [alert.name for alert in alerts] == ["live_signal_divergence"]
+    assert alerts[0].details["group_count"] == 1
+
+
+def test_position_divergence_ignores_stale_reconciliation() -> None:
+    observations = (
+        PositionObservation(
+            "primary",
+            "ready",
+            10,
+            "BTCUSDT",
+            "BOTH",
+            Decimal("1"),
+        ),
+        PositionObservation(
+            "account-2",
+            "ready",
+            10,
+            "BTCUSDT",
+            "BOTH",
+            Decimal("2"),
+        ),
+        PositionObservation(
+            "account-3",
+            "ready",
+            999,
+            "BTCUSDT",
+            "BOTH",
+            Decimal("99"),
+        ),
+    )
+
+    alerts = evaluate_position_divergence(
+        observations,
+        stale_after_seconds=120,
+    )
+
+    assert [alert.name for alert in alerts] == ["live_position_divergence"]
+    assert alerts[0].details["pair_count"] == 1
 
 
 def test_build_config_reads_live_session_from_compose_env(
@@ -821,6 +959,15 @@ def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
     assert restart_commands[0][-2:] == ["restart", "live-strategy-account-2"]
     assert any(
         alert.name == "live_heartbeat_stale:account-2"
+        for alert in first_alerts
+    )
+    archives = tuple((tmp_path / "crash-logs").glob("*.log"))
+    assert len(archives) == 1
+    assert "container_id=account-2-container" in archives[0].read_text(
+        encoding="utf-8"
+    )
+    assert any(
+        alert.details.get("crash_log_archive") == str(archives[0])
         for alert in first_alerts
     )
 

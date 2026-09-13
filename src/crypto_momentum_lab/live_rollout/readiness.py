@@ -146,7 +146,7 @@ class LiveReadinessPublisher:
 
         try:
             requirement = strategy.required_data()
-            required_buckets = int(getattr(requirement, "warmup_buckets"))
+            required_buckets = int(requirement.warmup_buckets)
             checkpoint = strategy.checkpoint(
                 include_market_state_buffers=False
             )

@@ -56,6 +56,9 @@ from crypto_momentum_lab.live_rollout.exits import (
     ManagedLivePosition,
 )
 from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
+from crypto_momentum_lab.live_rollout.market_loop import (
+    LiveMarketStateContinuityError,
+)
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
 )
@@ -1316,7 +1319,7 @@ async def test_closed_candle_exit_uses_direct_event_without_rest_loader() -> Non
     assert exchange.plans[0].reduce_only is True
 
 
-async def test_live_daemon_processes_delayed_startup_state_without_age_gate() -> None:
+async def test_live_daemon_fails_closed_when_delayed_states_skip_buckets() -> None:
     exchange = PlanAwareExchange()
     stale = replace(
         _state(),
@@ -1333,12 +1336,13 @@ async def test_live_daemon_processes_delayed_startup_state_without_age_gate() ->
         max_gross_exposure=Decimal("100"),
     )
 
-    result = await daemon.run(states())
+    with pytest.raises(
+        LiveMarketStateContinuityError,
+        match="missing market-state bucket",
+    ):
+        await daemon.run(states())
 
-    assert result.processed_state_count == 2
-    assert result.approved_intent_count == 2
-    assert result.halt_reason is None
-    assert exchange.calls == ["submit", "submit"]
+    assert exchange.calls == ["submit"]
 
 
 async def test_live_daemon_reconciles_once_per_market_bucket() -> None:
@@ -1380,11 +1384,14 @@ async def test_live_daemon_resets_strategy_after_market_state_gap() -> None:
 
     daemon = _daemon(exchange=exchange, strategy=strategy)
 
-    result = await daemon.run(states())
+    with pytest.raises(
+        LiveMarketStateContinuityError,
+        match="missing market-state bucket",
+    ):
+        await daemon.run(states())
 
-    assert result.halt_reason is None
-    assert strategy.reset_symbols == ["BTCUSDT"]
-    assert strategy.reset_counts_at_decision == [0, 1]
+    assert strategy.reset_symbols == []
+    assert strategy.reset_counts_at_decision == [0]
 
 
 async def test_live_daemon_resets_each_symbol_after_explicit_market_gap() -> None:

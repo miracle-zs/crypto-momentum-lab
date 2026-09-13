@@ -1,6 +1,7 @@
 """Runtime policy for account-event fan-out in live execution."""
 
 import asyncio
+from collections import deque
 from collections.abc import AsyncIterable, Callable
 
 import structlog
@@ -27,6 +28,8 @@ from crypto_momentum_lab.live_rollout.telemetry import LiveTelemetrySink
 
 log = structlog.get_logger()
 
+_MAX_SEEN_FILL_KEYS = 8192
+
 
 def _never_order_identity_conflict(_error: Exception) -> bool:
     return False
@@ -48,6 +51,7 @@ class LiveAccountEventRuntime:
         is_order_identity_conflict: Callable[[Exception], bool] | None = None,
         on_exit_failure: Callable[[str, str | None], None] | None = None,
         on_account_snapshot: Callable[[AccountEvent], None] | None = None,
+        on_account_snapshot_recovery: Callable[[str], None] | None = None,
         pending_position_retry_delays: tuple[float, ...] = (
             DEFAULT_PENDING_POSITION_RETRY_DELAYS_SECONDS
         ),
@@ -68,7 +72,12 @@ class LiveAccountEventRuntime:
         )
         self._on_exit_failure = on_exit_failure
         self._on_account_snapshot = on_account_snapshot
+        self._on_account_snapshot_recovery = on_account_snapshot_recovery
         self._pending_position_retry_delays = pending_position_retry_delays
+        self._seen_fill_keys: set[tuple[str, str]] = set()
+        self._seen_fill_order: deque[tuple[str, str]] = deque(
+            maxlen=_MAX_SEEN_FILL_KEYS
+        )
 
     async def run(self, source: AsyncIterable[AccountEvent]) -> None:
         """Consume a reconnecting account stream until it closes."""
@@ -79,7 +88,11 @@ class LiveAccountEventRuntime:
     async def _process_event(self, event: AccountEvent) -> None:
         reconciliation_run_id = self._reconciliation_run_id
         try:
-            if self._telemetry is not None and event.has_fill:
+            if (
+                self._telemetry is not None
+                and event.has_fill
+                and self._remember_fill(event)
+            ):
                 await self._telemetry.account_fill(
                     event,
                     occurred_at=event.received_at,
@@ -154,6 +167,10 @@ class LiveAccountEventRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            if not self._is_transient_error(error):
+                self._request_account_snapshot_recovery(
+                    f"account_event_processing_failed:{type(error).__name__}"
+                )
             if self._is_order_identity_conflict(error):
                 failure = ORDER_IDENTITY_CONFLICT_REASON
                 if self._on_exit_failure is not None:
@@ -166,6 +183,7 @@ class LiveAccountEventRuntime:
                     error_type=type(error).__name__,
                     reason=failure,
                 )
+
                 return
             if not self._is_transient_error(error):
                 raise
@@ -177,6 +195,48 @@ class LiveAccountEventRuntime:
                 run_id=reconciliation_run_id,
                 event_type=event.event_type,
                 error_type=type(error).__name__,
+            )
+
+    def _remember_fill(self, event: AccountEvent) -> bool:
+        """Return false for a replayed fill while keeping the stream live."""
+
+        trade_id = event.trade_id
+        if trade_id is None:
+            log.warning(
+                "live_account_fill_missing_trade_id",
+                run_id=self._reconciliation_run_id,
+                symbol=event.symbol,
+            )
+            return True
+        key = (event.symbol or "UNKNOWN", trade_id)
+        if key in self._seen_fill_keys:
+            log.info(
+                "live_account_fill_duplicate_ignored",
+                run_id=self._reconciliation_run_id,
+                symbol=key[0],
+                trade_id=trade_id,
+            )
+            return False
+        if len(self._seen_fill_order) == self._seen_fill_order.maxlen:
+            expired = self._seen_fill_order.popleft()
+            self._seen_fill_keys.discard(expired)
+        self._seen_fill_order.append(key)
+        self._seen_fill_keys.add(key)
+        return True
+
+    def _request_account_snapshot_recovery(self, reason: str) -> None:
+        if self._on_account_snapshot_recovery is None:
+            return
+        try:
+            self._on_account_snapshot_recovery(reason)
+        except Exception:
+            # Recovery notification is a safety side effect.  Preserve the
+            # original processing error so the supervisor can restart the
+            # worker and rebuild all durable projections.
+            log.exception(
+                "live_account_snapshot_recovery_callback_failed",
+                run_id=self._reconciliation_run_id,
+                reason=reason,
             )
 
     @property

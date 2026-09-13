@@ -59,8 +59,8 @@ async def test_runtime_retries_pending_position_sync(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     event = SimpleNamespace(
-        event_type="ACCOUNT_UPDATE",
-        client_order_id=None,
+        event_type="ORDER_TRADE_UPDATE",
+        client_order_id="entry-1",
         has_fill=False,
         received_at=NOW,
         symbols=("BTCUSDT",),
@@ -123,3 +123,93 @@ async def test_runtime_retries_pending_position_sync(
     assert daemon.calls == 2
     assert delays == [0.25]
     assert failures == [("BTCUSDT", None)]
+
+
+@pytest.mark.asyncio
+async def test_runtime_invalidates_account_snapshot_before_non_transient_crash(
+) -> None:
+    event = SimpleNamespace(
+        event_type="ORDER_TRADE_UPDATE",
+        client_order_id="entry-1",
+        has_fill=False,
+        received_at=NOW,
+        symbols=("BTCUSDT",),
+    )
+    recovery_reasons: list[str] = []
+
+    class Reconciliation:
+        run_id = "run-1"
+
+        async def reconcile_account_event(self, _event: object) -> None:
+            raise RuntimeError("order journal unavailable")
+
+    class Source:
+        def __aiter__(self) -> AsyncIterator[object]:
+            async def stream() -> AsyncIterator[object]:
+                yield event
+
+            return stream()
+
+    class EmptyCache:
+        def for_symbols(self, _symbols: tuple[str, ...]) -> tuple[object, ...]:
+            return ()
+
+    runtime = LiveAccountEventRuntime(
+        daemon=object(),  # type: ignore[arg-type]
+        latest_market_states=EmptyCache(),  # type: ignore[arg-type]
+        latest_market_quotes=EmptyCache(),  # type: ignore[arg-type]
+        order_reconciliation=Reconciliation(),  # type: ignore[arg-type]
+        is_transient_error=lambda _error: False,
+        on_account_snapshot_recovery=recovery_reasons.append,
+    )
+
+    with pytest.raises(RuntimeError, match="order journal unavailable"):
+        await runtime.run(Source())  # type: ignore[arg-type]
+
+    assert recovery_reasons == [
+        "account_event_processing_failed:RuntimeError",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_deduplicates_fill_telemetry_after_account_stream_replay(
+) -> None:
+    event = SimpleNamespace(
+        event_type="ORDER_TRADE_UPDATE",
+        client_order_id="entry-1",
+        has_fill=True,
+        trade_id="trade-1",
+        symbol="BTCUSDT",
+        received_at=NOW,
+        symbols=(),
+    )
+    fill_events: list[object] = []
+
+    class Telemetry:
+        async def account_fill(self, received_event: object, *, occurred_at) -> None:
+            del occurred_at
+            fill_events.append(received_event)
+
+    class Source:
+        def __aiter__(self) -> AsyncIterator[object]:
+            async def stream() -> AsyncIterator[object]:
+                yield event
+                yield event
+
+            return stream()
+
+    class EmptyCache:
+        def for_symbols(self, _symbols: tuple[str, ...]) -> tuple[object, ...]:
+            return ()
+
+    runtime = LiveAccountEventRuntime(
+        daemon=object(),  # type: ignore[arg-type]
+        latest_market_states=EmptyCache(),  # type: ignore[arg-type]
+        latest_market_quotes=EmptyCache(),  # type: ignore[arg-type]
+        telemetry=Telemetry(),  # type: ignore[arg-type]
+        is_transient_error=lambda _error: False,
+    )
+
+    await runtime.run(Source())  # type: ignore[arg-type]
+
+    assert fill_events == [event]

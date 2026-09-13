@@ -9,7 +9,7 @@ The daemon supplies context, execution, and gate adapters at this seam.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -20,9 +20,11 @@ import structlog
 from crypto_momentum_lab.domain.account import AccountPositionSnapshot
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderState,
+    FuturesPositionSide,
     OrderExecutionPlan,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
 )
@@ -34,6 +36,7 @@ from crypto_momentum_lab.live_rollout.exits import (
     LiveExitCancellationRequest,
     LiveExitManager,
     LiveExitRequest,
+    ManagedLivePosition,
 )
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
@@ -113,6 +116,10 @@ class ScheduledRiskWindowController:
         self._fetch_exchange_positions = fetch_exchange_positions
         self._clock = clock
         self._latest_market_states: dict[str, MarketState15s] = {}
+        self._latest_exchange_positions: dict[
+            tuple[str, str],
+            AccountPositionSnapshot,
+        ] = {}
         self._scheduled_window_lock = asyncio.Lock()
         self._scheduled_window_day: date | None = None
         self._scheduled_entry_blocked = False
@@ -506,20 +513,41 @@ class ScheduledRiskWindowController:
                     symbols=symbols,
                 )
                 continue
-            if state.symbol in context.unmanaged_position_symbols:
-                symbols = ",".join(sorted(context.unmanaged_position_symbols))
-                failure = f"unmanaged_live_positions:{symbols}"
-                log.error(
-                    "live_scheduled_flatten_unmanaged_position",
-                    run_id=self._config.run_id,
-                    symbols=symbols,
-                )
-                continue
             positions = tuple(
                 position
                 for position in context.managed_positions
                 if position.symbol == state.symbol
             )
+            if state.symbol in context.unmanaged_position_symbols:
+                # An unmanaged position is precisely the state that must be
+                # flattened during recovery.  Prefer any durable managed
+                # view still present in the context; otherwise construct a
+                # reduce-only view from the authoritative account snapshot.
+                if not positions:
+                    positions = _unmanaged_position_views(
+                        context,
+                        symbol=state.symbol,
+                        exchange_positions=tuple(
+                            self._latest_exchange_positions.values()
+                        ),
+                    )
+                if not positions:
+                    failure = (
+                        "unmanaged_live_positions_missing_snapshot:"
+                        f"{state.symbol}"
+                    )
+                    log.error(
+                        "live_scheduled_flatten_unmanaged_position_snapshot_missing",
+                        run_id=self._config.run_id,
+                        symbol=state.symbol,
+                    )
+                    continue
+                log.warning(
+                    "live_scheduled_flatten_unmanaged_position_recovery",
+                    run_id=self._config.run_id,
+                    symbol=state.symbol,
+                    position_count=len(positions),
+                )
             if not positions:
                 continue
             requests = await exit_manager.requests_for_scheduled_flatten(
@@ -589,17 +617,26 @@ class ScheduledRiskWindowController:
                     )
                     failure = f"pending_live_positions:{symbols}"
                     continue
-                if state.symbol in context.unmanaged_position_symbols:
-                    symbols = ",".join(
-                        sorted(context.unmanaged_position_symbols)
-                    )
-                    failure = f"unmanaged_live_positions:{symbols}"
-                    continue
                 positions = tuple(
                     position
                     for position in context.managed_positions
                     if position.symbol == state.symbol
                 )
+                if state.symbol in context.unmanaged_position_symbols:
+                    if not positions:
+                        positions = _unmanaged_position_views(
+                            context,
+                            symbol=state.symbol,
+                            exchange_positions=tuple(
+                                self._latest_exchange_positions.values()
+                            ),
+                        )
+                    if not positions:
+                        failure = (
+                            "unmanaged_live_positions_missing_snapshot:"
+                            f"{state.symbol}"
+                        )
+                        continue
                 if not positions:
                     continue
                 requests = await exit_manager.requests_for_scheduled_flatten(
@@ -678,6 +715,7 @@ class ScheduledRiskWindowController:
         """
 
         cached_states = self._latest_scheduled_states()
+        self._latest_exchange_positions = {}
         if self._fetch_exchange_positions is None:
             return cached_states, None if cached_states else (
                 "scheduled_flatten_market_state_unavailable"
@@ -701,6 +739,12 @@ class ScheduledRiskWindowController:
                 if not cached_states
                 else None,
             )
+
+        self._latest_exchange_positions = {
+            (position.symbol, position.position_side): position
+            for position in exchange_positions
+            if position.position_amt != 0
+        }
 
         active_positions = {
             position.symbol: position
@@ -853,6 +897,50 @@ def _scheduled_reference_price(state: MarketState15s) -> Decimal:
         if price is not None and price > 0:
             return price
     raise ValueError(f"market state has no positive reference price: {state.symbol}")
+
+
+def _unmanaged_position_views(
+    context: LiveDaemonRuntimeContext,
+    *,
+    symbol: str,
+    exchange_positions: Sequence[AccountPositionSnapshot] = (),
+) -> tuple[ManagedLivePosition, ...]:
+    """Build safe reduce-only views for positions without strategy identity."""
+
+    snapshot = context.account_snapshot
+    source_positions = (
+        tuple(exchange_positions)
+        if exchange_positions
+        else (() if snapshot is None else snapshot.positions)
+    )
+    views: list[ManagedLivePosition] = []
+    for position in source_positions:
+        if position.symbol != symbol or position.position_amt == 0:
+            continue
+        reference_price = position.mark_price or position.entry_price
+        if reference_price <= 0 or position.entry_price <= 0:
+            continue
+        side = (
+            StrategySide.LONG
+            if position.position_amt > 0
+            else StrategySide.SHORT
+        )
+        position_side = FuturesPositionSide(position.position_side)
+        views.append(
+            ManagedLivePosition(
+                symbol=position.symbol,
+                side=side,
+                position_side=position_side,
+                quantity=abs(position.position_amt),
+                entry_price=position.entry_price,
+                opened_at=position.observed_at,
+                batch_id=(
+                    f"unmanaged:{position.symbol}:"
+                    f"{position.position_side}"
+                ),
+            )
+        )
+    return tuple(views)
 
 
 def _market_state_for_position(

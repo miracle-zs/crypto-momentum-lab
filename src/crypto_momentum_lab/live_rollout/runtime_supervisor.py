@@ -44,12 +44,14 @@ class LiveRuntimeTasks:
             self.account,
             self.lease,
             self.reconcile,
+            *(() if self.startup_market is None else (self.startup_market,)),
             *(() if self.quote is None else (self.quote,)),
             *(() if self.closed_candle is None else (self.closed_candle,)),
             *(() if self.grace_timeout is None else (self.grace_timeout,)),
             *(() if self.risk_control is None else (self.risk_control,)),
             *(() if self.entry_filter_cache is None else (self.entry_filter_cache,)),
             *(() if self.entry_symbol_cache is None else (self.entry_symbol_cache,)),
+            *(() if self.local_health is None else (self.local_health,)),
             *(() if self.shutdown is None else (self.shutdown,)),
         }
 
@@ -95,10 +97,14 @@ class LiveRuntimeSupervisor:
         close_risk_control: Callable[[], Awaitable[None]],
         stop_entry_caches: Callable[[], Awaitable[None]],
         wait_for_entry_submissions_idle: Callable[[], Awaitable[None]] | None = None,
+        run_id: str = "unknown",
         shutdown_timeout_seconds: float = _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
     ) -> None:
+        if not run_id.strip():
+            raise ValueError("run_id must not be empty")
         if shutdown_timeout_seconds <= 0:
             raise ValueError("shutdown_timeout_seconds must be positive")
+        self._run_id = run_id
         self._tasks = tasks
         self._block_entry_submissions = block_entry_submissions
         self._stop_sources = stop_sources
@@ -116,10 +122,21 @@ class LiveRuntimeSupervisor:
             return_when=asyncio.FIRST_COMPLETED,
         )
         if self._tasks.shutdown is not None and self._tasks.shutdown in done:
-            log.info("live_shutdown_requested")
+            log.info("live_shutdown_requested", run_id=self._run_id)
             return LiveDaemonResult(0, 0, 0, "shutdown_requested", None)
         await self._raise_if_unexpected_completion()
-        return await self._tasks.market
+        try:
+            return await self._tasks.market
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            log.exception(
+                "live_runtime_market_task_failed",
+                run_id=self._run_id,
+                task_name=self._tasks.market.get_name(),
+                error_type=type(error).__name__,
+            )
+            raise
 
     async def stop(self) -> None:
         """Stop all owned tasks in the safety-critical order exactly once."""
@@ -239,6 +256,7 @@ class LiveRuntimeSupervisor:
 
     async def _raise_if_unexpected_completion(self) -> None:
         checks = (
+            (self._tasks.startup_market, "startup market buffer"),
             (self._tasks.account, "account event channel"),
             (self._tasks.risk_control, "risk-control channel"),
             (self._tasks.quote, "market quote channel"),
@@ -248,10 +266,35 @@ class LiveRuntimeSupervisor:
             (self._tasks.reconcile, "live order reconcile task"),
             (self._tasks.entry_filter_cache, "live entry filter cache task"),
             (self._tasks.entry_symbol_cache, "live entry symbol cache task"),
+            (self._tasks.local_health, "local health monitor"),
         )
         for task, label in checks:
             if task is not None and task.done():
-                await task
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    log.error(
+                        "live_runtime_critical_task_cancelled",
+                        run_id=self._run_id,
+                        task_name=task.get_name(),
+                        task_role=label,
+                    )
+                    raise
+                except Exception as error:
+                    log.exception(
+                        "live_runtime_critical_task_failed",
+                        run_id=self._run_id,
+                        task_name=task.get_name(),
+                        task_role=label,
+                        error_type=type(error).__name__,
+                    )
+                    raise
+                log.error(
+                    "live_runtime_critical_task_stopped",
+                    run_id=self._run_id,
+                    task_name=task.get_name(),
+                    task_role=label,
+                )
                 raise RuntimeError(f"{label} stopped unexpectedly")
 
     @staticmethod

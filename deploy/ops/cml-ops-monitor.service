@@ -13,6 +13,7 @@ Environment=CML_PROJECT_DIRECTORY=/opt/crypto-momentum-lab
 Environment=CML_COMPOSE_FILE=/opt/crypto-momentum-lab/compose.server.yaml,/opt/crypto-momentum-lab/compose.live.accounts.yaml
 Environment=CML_COMPOSE_PROFILES=live
 Environment=CML_COMPOSE_ENV_FILE=/opt/crypto-momentum-lab/.env.server
+Environment=CML_CRASH_LOG_DIRECTORY=/var/lib/crypto-momentum-lab/crash-logs
 # cml_ops_monitor derives live services, sessions, and lease owners from the
 # Compose files above. CML_MONITOR_SERVICES and CML_MONITOR_LIVE_ACCOUNTS remain
 # supported in /etc/crypto-momentum-lab/ops-monitor.env for explicit overrides.

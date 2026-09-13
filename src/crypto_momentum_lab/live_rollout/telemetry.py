@@ -41,6 +41,8 @@ SOURCE_RECEIVED = "source_received"
 TRACE_TERMINATED = "trace_terminated"
 CONSUMER_HEALTH = "consumer_health"
 TERMINAL_REASON = "terminal_reason"
+MARKET_STATE_PROGRESS = "market_state_progress"
+STRATEGY_OUTPUT_OBSERVED = "strategy_output_observed"
 
 LIVE_TRIGGER_SOURCE_ACCOUNT: LiveTriggerSource = "account"
 LIVE_TRIGGER_SOURCE_QUOTE: LiveTriggerSource = "quote"
@@ -97,6 +99,7 @@ _EXCHANGE_BOUNDARY_EVENTS = frozenset(
 _MAX_EVENT_BATCH = 128
 _PERSIST_BATCH_TIMEOUT_SECONDS = 0.25
 _MAX_PENDING_EXCHANGE_REQUESTS = 32
+_MAX_STRATEGY_OUTPUT_SAMPLES = 8192
 
 # Market-state and strategy-decision events remain available in the in-memory
 # trace, but are intentionally not durable by default.  Persisting those
@@ -116,7 +119,12 @@ PERSISTED_ORDER_TELEMETRY_EVENTS = frozenset(
     }
 )
 PERSISTED_OPERATIONAL_TELEMETRY_EVENTS = frozenset(
-    {CONSUMER_HEALTH, TERMINAL_REASON}
+    {
+        CONSUMER_HEALTH,
+        MARKET_STATE_PROGRESS,
+        STRATEGY_OUTPUT_OBSERVED,
+        TERMINAL_REASON,
+    }
 )
 
 _DECISION_SLO_LATENCY_KEY = "decision_slo_latency_ms"
@@ -141,6 +149,14 @@ class LiveTelemetrySink(Protocol):
         recovery: bool = False,
         lag: bool = False,
         sequence: int | None = None,
+    ) -> None: ...
+
+    def market_state_progress(
+        self,
+        state: MarketState15s,
+        *,
+        occurred_at: datetime,
+        received_at: datetime,
     ) -> None: ...
 
     async def source_received(self, ingress: "SourceIngress") -> None: ...
@@ -428,6 +444,8 @@ class LiveRuntimeTelemetry:
         self,
         *,
         run_id: str,
+        account_label: str | None = None,
+        strategy_config_hash: str | None = None,
         persist: RuntimeEventBatchSink | None = None,
         persist_event_types: Collection[str] | None = None,
         persist_exchange_operations: Collection[str] | None = None,
@@ -443,7 +461,15 @@ class LiveRuntimeTelemetry:
             raise ValueError("max_trace_count must be positive")
         if max_samples_per_metric <= 0:
             raise ValueError("max_samples_per_metric must be positive")
+        if account_label is not None and not account_label.strip():
+            raise ValueError("account_label must not be empty when present")
+        if strategy_config_hash is not None and not strategy_config_hash.strip():
+            raise ValueError(
+                "strategy_config_hash must not be empty when present"
+            )
         self._run_id = run_id
+        self._account_label = account_label
+        self._strategy_config_hash = strategy_config_hash
         self._persist = persist
         self._persist_event_types = (
             None
@@ -479,6 +505,8 @@ class LiveRuntimeTelemetry:
         self._recorded_event_count = 0
         self._dropped_event_count = 0
         self._persist_failure_count = 0
+        self._last_market_progress_at: datetime | None = None
+        self._last_strategy_output_at_by_symbol: dict[str, datetime] = {}
 
     @property
     def recorded_event_count(self) -> int:
@@ -654,6 +682,53 @@ class LiveRuntimeTelemetry:
             },
         )
 
+    def market_state_progress(
+        self,
+        state: MarketState15s,
+        *,
+        occurred_at: datetime,
+        received_at: datetime,
+    ) -> None:
+        """Persist a sampled market watermark and receive-delay observation.
+
+        The market loop calls this for every state, but the durable stream only
+        receives one observation per account every minute.  That gives the
+        operations monitor a durable freshness fence without turning every
+        15-second bucket into a WAL write.
+        """
+
+        _require_aware(occurred_at, "occurred_at")
+        _require_aware(received_at, "received_at")
+        if (
+            self._last_market_progress_at is not None
+            and occurred_at - self._last_market_progress_at
+            < timedelta(seconds=60)
+        ):
+            return
+        self._last_market_progress_at = occurred_at
+        self._record_observation(
+            event_type=MARKET_STATE_PROGRESS,
+            occurred_at=occurred_at,
+            symbol=state.symbol,
+            bucket_start=state.bucket_start,
+            details={
+                "account_label": self._account_label,
+                "strategy_config_hash": self._strategy_config_hash,
+                "bucket_end": state.bucket_end.isoformat(),
+                "received_at": received_at.isoformat(),
+                "market_delay_ms": max(
+                    0.0,
+                    (received_at - state.bucket_end).total_seconds() * 1000,
+                ),
+                "source_last_received_at": _optional_iso(
+                    state.last_received_at
+                ),
+                "source_event_count": state.source_event_count,
+                "data_complete": state.data_complete,
+                "missing_agg_trade_count": state.missing_agg_trade_count,
+            },
+        )
+
     async def trace_terminated(
         self,
         ingress: SourceIngress,
@@ -788,6 +863,37 @@ class LiveRuntimeTelemetry:
                 "candidate_count": candidate_count,
             },
         )
+        # Keep a low-frequency zero-output heartbeat as well as the full
+        # signal rows.  A missing output from one otherwise healthy account is
+        # itself a fork condition; persisting only non-empty decisions cannot
+        # distinguish that from a legitimate empty strategy result.
+        last_output_at = self._last_strategy_output_at_by_symbol.get(state.symbol)
+        if (
+            last_output_at is None
+            or occurred_at - last_output_at >= timedelta(seconds=60)
+        ):
+            if state.symbol not in self._last_strategy_output_at_by_symbol and (
+                len(self._last_strategy_output_at_by_symbol)
+                >= _MAX_STRATEGY_OUTPUT_SAMPLES
+            ):
+                oldest_symbol = min(
+                    self._last_strategy_output_at_by_symbol,
+                    key=self._last_strategy_output_at_by_symbol.__getitem__,
+                )
+                self._last_strategy_output_at_by_symbol.pop(oldest_symbol, None)
+            self._last_strategy_output_at_by_symbol[state.symbol] = occurred_at
+            self._record_observation(
+                event_type=STRATEGY_OUTPUT_OBSERVED,
+                occurred_at=occurred_at,
+                symbol=state.symbol,
+                bucket_start=state.bucket_start,
+                details={
+                    "account_label": self._account_label,
+                    "strategy_config_hash": self._strategy_config_hash,
+                    "signal_count": signal_count,
+                    "candidate_count": candidate_count,
+                },
+            )
 
     async def entry_filter_ready(
         self,
@@ -1103,6 +1209,8 @@ class LiveRuntimeTelemetry:
         *,
         event_type: str,
         occurred_at: datetime,
+        symbol: str | None = None,
+        bucket_start: datetime | None = None,
         details: Mapping[str, JsonValue],
     ) -> None:
         """Record an event without requiring an async caller."""
@@ -1119,8 +1227,8 @@ class LiveRuntimeTelemetry:
             run_id=self._run_id,
             event_type=event_type,
             occurred_at=occurred_at,
-            symbol=None,
-            bucket_start=None,
+            symbol=symbol,
+            bucket_start=bucket_start,
             details={key: _json_value(value) for key, value in details.items()},
         )
         self._recorded_event_count += 1
@@ -1535,6 +1643,7 @@ __all__ = [
     "LiveRuntimeTelemetry",
     "LiveTelemetrySink",
     "LiveTriggerSource",
+    "MARKET_STATE_PROGRESS",
     "MARKET_STATE_RECEIVED",
     "PERSISTED_ORDER_TELEMETRY_EVENTS",
     "PERSISTED_OPERATIONAL_TELEMETRY_EVENTS",
@@ -1543,6 +1652,7 @@ __all__ = [
     "SOURCE_RECEIVED",
     "SourceIngress",
     "STRATEGY_DECISION",
+    "STRATEGY_OUTPUT_OBSERVED",
     "SUBMITTING",
     "TERMINAL_REASON",
     "TerminalReasonSummary",

@@ -657,8 +657,9 @@ class OrderExecutionStateMachine:
             exchange_order_id=exchange_order_id,
             details=details or {},
         )
-        await self._repository.append_order_event(event)
-        await self._notify_event(plan, event)
+        inserted = await self._repository.append_order_event(event)
+        if inserted:
+            await self._notify_event(plan, event)
 
     async def _notify_event(
         self,

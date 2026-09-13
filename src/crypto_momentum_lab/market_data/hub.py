@@ -51,6 +51,10 @@ class MarketStateHubProtocolError(MarketStateHubError):
     """Raised when a hub message is malformed or has an incompatible schema."""
 
 
+class MarketStateHubEpochError(MarketStateHubProtocolError):
+    """Raised when a durable consumer cannot prove the stream epoch."""
+
+
 class MarketStateHubReplayUnavailable(MarketStateHubError):
     """Raised when the requested sequence is older than the replay window."""
 
@@ -603,6 +607,10 @@ class WebSocketMarketStateSource:
                             "market-state hub environment mismatch"
                         )
                     ready_stream_id = _optional_string(ready, "stream_id")
+                    if self._fail_on_replay_unavailable and ready_stream_id is None:
+                        raise MarketStateHubEpochError(
+                            "market-state hub omitted stream epoch"
+                        )
                     stream_changed = (
                         self._stream_id is not None
                         and ready_stream_id is not None
@@ -697,12 +705,18 @@ class WebSocketMarketStateSource:
                             if isinstance(item, Exception):
                                 raise item
                             batch = item
+                            if self._fail_on_replay_unavailable and (
+                                batch.stream_id is None
+                            ):
+                                raise MarketStateHubEpochError(
+                                    "market-state batch omitted stream epoch"
+                                )
                             if (
                                 self._stream_id is not None
                                 and batch.stream_id is not None
                                 and batch.stream_id != self._stream_id
                             ):
-                                raise MarketStateHubProtocolError(
+                                raise MarketStateHubEpochError(
                                     "market-state stream mismatch"
                                 )
                             if self._last_sequence is not None:
@@ -747,10 +761,14 @@ class WebSocketMarketStateSource:
                 TimeoutError,
                 MarketStateHubError,
             ) as error:
-                if (
-                    isinstance(error, MarketStateHubReplayUnavailable)
-                    and self._fail_on_replay_unavailable
+                if self._fail_on_replay_unavailable and isinstance(
+                    error,
+                    (MarketStateHubReplayUnavailable, MarketStateHubEpochError),
                 ):
+                    self._notify_connection_change(
+                        False,
+                        f"{type(error).__name__}: {error}",
+                    )
                     raise
                 self._notify_connection_change(
                     False,
@@ -782,12 +800,16 @@ class WebSocketMarketStateSource:
                     await connection.recv(),
                     expected_environment=self._environment,
                 )
+                if self._fail_on_replay_unavailable and batch.stream_id is None:
+                    raise MarketStateHubEpochError(
+                        "market-state batch omitted stream epoch"
+                    )
                 if (
                     self._stream_id is not None
                     and batch.stream_id is not None
                     and batch.stream_id != self._stream_id
                 ):
-                    raise MarketStateHubProtocolError(
+                    raise MarketStateHubEpochError(
                         "market-state stream mismatch"
                     )
                 self._enqueue_market_state_batch(receive_queue, batch)

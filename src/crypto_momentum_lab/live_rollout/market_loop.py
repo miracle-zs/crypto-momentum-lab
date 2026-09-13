@@ -65,6 +65,36 @@ class LiveRuntimeStrategy(Protocol):
 
     def warm_market_state(self, state: MarketState15s) -> None: ...
 
+    def clear_market_state_buffers(self) -> None: ...
+
+
+class LiveMarketStateContinuityError(RuntimeError):
+    """Raised when an ordered live state stream skips a required bucket."""
+
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        previous_at: datetime,
+        current_at: datetime,
+        expected_interval_seconds: int,
+    ) -> None:
+        observed_delta_seconds = int(
+            (current_at - previous_at).total_seconds()
+        )
+        super().__init__(
+            "missing market-state bucket: "
+            f"symbol={symbol} previous={previous_at.isoformat()} "
+            f"current={current_at.isoformat()} "
+            f"expected_interval_seconds={expected_interval_seconds} "
+            f"observed_delta_seconds={observed_delta_seconds}"
+        )
+        self.symbol = symbol
+        self.previous_at = previous_at
+        self.current_at = current_at
+        self.expected_interval_seconds = expected_interval_seconds
+        self.observed_delta_seconds = observed_delta_seconds
+
 
 @dataclass(frozen=True, slots=True)
 class LiveDaemonResult:
@@ -146,8 +176,23 @@ class LiveMarketLoop:
         final_state_at: datetime | None = None
         last_reconciled_bucket: datetime | None = None
         max_gap_seconds = _strategy_max_gap_seconds(self._strategy)
+        state_interval_seconds = _strategy_state_interval_seconds(self._strategy)
         async for prefetched in self._context_prefetcher.stream(states):
             state = prefetched.state
+            try:
+                _validate_market_state_continuity(
+                    state=state,
+                    last_processed_at=(
+                        self._checkpoint_coordinator.last_processed_at(
+                            state.symbol
+                        )
+                    ),
+                    expected_interval_seconds=state_interval_seconds,
+                )
+            except LiveMarketStateContinuityError as error:
+                self.notify_market_state_gap(reason=str(error))
+                await self._checkpoint_coordinator.save_final()
+                raise
             self._runtime_cache.prune(
                 now=self._clock(),
                 current_symbol=state.symbol,
@@ -173,6 +218,17 @@ class LiveMarketLoop:
                     occurred_at=prefetched.received_at,
                     lane=LIVE_LANE_ENTRY,
                 )
+                market_state_progress = getattr(
+                    self._telemetry,
+                    "market_state_progress",
+                    None,
+                )
+                if callable(market_state_progress):
+                    market_state_progress(
+                        state,
+                        occurred_at=prefetched.received_at,
+                        received_at=prefetched.received_at,
+                    )
             exit_lane_failure = self._exit_lane.failure
             if exit_lane_failure is not None:
                 await self._checkpoint_coordinator.save_final()
@@ -448,6 +504,40 @@ def _strategy_max_gap_seconds(strategy: LiveRuntimeStrategy) -> int | None:
     return None if value is None else int(value)
 
 
+def _strategy_state_interval_seconds(strategy: LiveRuntimeStrategy) -> int:
+    required_data = getattr(strategy, "required_data", None)
+    if not callable(required_data):
+        return 15
+    requirement = required_data()
+    value = getattr(requirement, "base_state_interval_seconds", 15)
+    interval_seconds = int(value)
+    if interval_seconds <= 0:
+        raise ValueError("strategy state interval must be positive")
+    return interval_seconds
+
+
+def _validate_market_state_continuity(
+    *,
+    state: MarketState15s,
+    last_processed_at: datetime | None,
+    expected_interval_seconds: int,
+) -> None:
+    if last_processed_at is None:
+        return
+    delta_seconds = (state.bucket_start - last_processed_at).total_seconds()
+    # Multiple messages for one bucket are valid because the Hub publishes
+    # one state per symbol.  A strictly later timestamp must be the next
+    # canonical bucket; otherwise at least one bucket was lost or skipped.
+    if delta_seconds <= 0 or delta_seconds == expected_interval_seconds:
+        return
+    raise LiveMarketStateContinuityError(
+        symbol=state.symbol,
+        previous_at=last_processed_at,
+        current_at=state.bucket_start,
+        expected_interval_seconds=expected_interval_seconds,
+    )
+
+
 def _reset_strategy_for_gap(
     *,
     strategy: LiveRuntimeStrategy,
@@ -465,4 +555,9 @@ def _reset_strategy_for_gap(
         reset(symbol)
 
 
-__all__ = ["LiveDaemonResult", "LiveMarketLoop", "LiveRuntimeStrategy"]
+__all__ = [
+    "LiveDaemonResult",
+    "LiveMarketLoop",
+    "LiveMarketStateContinuityError",
+    "LiveRuntimeStrategy",
+]

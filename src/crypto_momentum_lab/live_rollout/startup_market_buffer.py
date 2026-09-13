@@ -59,7 +59,36 @@ class StartupMarketStateBuffer:
         # Backpressure is deliberate: dropping a state would invalidate the
         # per-symbol rolling window.  The Hub client will fail closed if this
         # consumer remains behind long enough for its own queue to overflow.
-        await self._queue.put(state)
+        if not self._queue.full():
+            self._queue.put_nowait(state)
+            return
+        put_task = asyncio.create_task(self._queue.put(state))
+        closed_task = asyncio.create_task(self._closed_event.wait())
+        try:
+            done, pending = await asyncio.wait(
+                (put_task, closed_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except asyncio.CancelledError:
+            put_task.cancel()
+            closed_task.cancel()
+            await asyncio.gather(
+                put_task,
+                closed_task,
+                return_exceptions=True,
+            )
+            raise
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        if put_task in done:
+            put_task.result()
+            return
+        if self._error is not None:
+            raise RuntimeError(
+                "live market-state startup buffer stopped"
+            ) from self._error
 
     def close(self, error: BaseException | None = None) -> None:
         if self._closed:
@@ -108,6 +137,10 @@ class StartupMarketStateBuffer:
 
         watermarks = dict(skip_through or {})
         while True:
+            if self._error is not None:
+                raise RuntimeError(
+                    "live market-state startup buffer stopped"
+                ) from self._error
             state = await self._next_item()
             if state is None:
                 if self._error is not None:
