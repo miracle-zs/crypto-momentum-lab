@@ -308,10 +308,11 @@ def evaluate_signal_divergence(
 ) -> tuple[Alert, ...]:
     """Detect different outputs for the same symbol/bucket/config group.
 
-    A configuration hash is part of the comparison key.  Accounts with
+    A configuration hash is part of the comparison key. Accounts with
     intentionally different strategy parameters therefore do not create a
-    false positive; accounts claiming the same config must agree on both the
-    output count and the durable content fingerprint.
+    false positive; accounts claiming the same config must agree on the signal
+    count and durable content fingerprint. Candidate persistence is checked
+    asynchronously and is deliberately excluded from this alert.
     """
 
     groups: dict[tuple[str, str, str], dict[str, SignalObservation]] = {}
@@ -331,10 +332,10 @@ def evaluate_signal_divergence(
             continue
         outputs = tuple(account_values.values())
         fingerprints = {value.fingerprint for value in outputs}
-        counts = {
-            (value.signal_count, value.candidate_count) for value in outputs
+        signal_outputs = {
+            (value.signal_count, value.fingerprint) for value in outputs
         }
-        if len(fingerprints) <= 1 and len(counts) <= 1:
+        if len(signal_outputs) <= 1:
             continue
         differences.append(
             {

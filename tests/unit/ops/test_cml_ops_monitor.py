@@ -554,6 +554,23 @@ def test_signal_divergence_compares_only_same_strategy_configuration() -> None:
     assert alerts[0].details["group_count"] == 1
 
 
+def test_signal_divergence_ignores_async_candidate_count_difference() -> None:
+    common = {
+        "symbol": "XPINUSDT",
+        "bucket_start": "2026-09-13T05:39:15+00:00",
+        "strategy_config_hash": "same-config",
+        "signal_count": 1,
+        "fingerprint": "same-signal",
+    }
+
+    assert evaluate_signal_divergence(
+        (
+            SignalObservation("primary", candidate_count=1, **common),
+            SignalObservation("account-2", candidate_count=0, **common),
+        )
+    ) == ()
+
+
 def test_position_divergence_ignores_stale_reconciliation() -> None:
     observations = (
         PositionObservation(
