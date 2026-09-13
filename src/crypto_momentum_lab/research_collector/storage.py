@@ -77,6 +77,23 @@ def _timestamp_field(name: str) -> pa.Field:
     return pa.field(name, pa.timestamp("us", tz="UTC"))
 
 
+# The two sources close the same bucket on different clocks: the hub publishes
+# after a 1s realtime closure, while the PostgreSQL durable row is closed after
+# 3s and therefore also folds in events that arrived in between.  When both
+# versions of one key disagree, the more complete source wins.
+_SOURCE_PRIORITY: dict[str, int] = {
+    SourceKind.POSTGRES_BACKFILL.value: 2,
+    SourceKind.HUB.value: 1,
+}
+
+
+def _source_priority(row: dict[str, object]) -> int:
+    kind = row.get("source_kind")
+    if not isinstance(kind, str):
+        return 0
+    return _SOURCE_PRIORITY.get(kind, 0)
+
+
 _PARQUET_SCHEMA = pa.schema(
     [
         pa.field("schema_version", pa.int32()),
@@ -129,10 +146,13 @@ _PARQUET_SCHEMA = pa.schema(
 class SinkAppendResult:
     selected_rows: int
     duplicate_rows: int
-    # Rows whose natural key was already present with a different payload.
-    # They are not fatal: the existing row wins and the mismatch is surfaced
-    # through logs/health instead of stopping collection.
+    # Rows whose natural key was already present with a different payload and
+    # that did NOT win: the archived row was kept.  Not fatal -- the mismatch is
+    # surfaced through logs/health instead of stopping collection.
     conflicting_rows: int = 0
+    # Rows whose natural key was already present with a different payload and
+    # that DID win: a more complete source superseded the archived copy.
+    upgraded_rows: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +339,7 @@ class ParquetWindowSink:
         selected_rows = 0
         duplicate_rows = 0
         conflicting_rows = 0
+        upgraded_rows = 0
         for state in collection_batch.states:
             selected = selected_by_symbol.get(state.symbol)
             if selected is None:
@@ -336,12 +357,25 @@ class ParquetWindowSink:
                     duplicate_rows += 1
                     continue
                 # A durable consumer can legitimately re-receive a bucket it
-                # already archived (Hub rewarm after a restart, a window that
-                # was quarantined, or a gap recovery that returned a
-                # lower-fidelity copy).  Keeping the row we already have is the
-                # safe choice, but it must not stop collection: record it and
-                # let logs/health surface the mismatch instead of failing
-                # closed and crash-looping the whole collector.
+                # already archived: the hub rewarm after a restart, a window
+                # that was quarantined, or a gap recovery from PostgreSQL.
+                # Either way this must not stop collection.  Resolve it by
+                # source instead of failing closed: the durable backfill copy
+                # supersedes the hub copy, everything else keeps the row that
+                # was accepted when the bucket closed.
+                if _source_priority(row) > _source_priority(existing):
+                    rows[key] = row
+                    upgraded_rows += 1
+                    log.warning(
+                        "research_collector_state_conflict_upgraded",
+                        path=str(path),
+                        environment=key[0],
+                        symbol=key[1],
+                        bucket_start=key[2].isoformat(),
+                        kept_source_kind=existing.get("source_kind"),
+                        incoming_source_kind=row.get("source_kind"),
+                    )
+                    continue
                 conflicting_rows += 1
                 log.warning(
                     "research_collector_state_conflict_kept_existing",
@@ -349,6 +383,8 @@ class ParquetWindowSink:
                     environment=key[0],
                     symbol=key[1],
                     bucket_start=key[2].isoformat(),
+                    kept_source_kind=existing.get("source_kind"),
+                    incoming_source_kind=row.get("source_kind"),
                 )
                 continue
             rows[key] = row
@@ -357,6 +393,7 @@ class ParquetWindowSink:
             selected_rows=selected_rows,
             duplicate_rows=duplicate_rows,
             conflicting_rows=conflicting_rows,
+            upgraded_rows=upgraded_rows,
         )
 
     def flush_ready(self, latest_bucket_start: datetime) -> SinkFlushResult:
