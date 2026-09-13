@@ -57,8 +57,8 @@ def test_dashboard_app_mounts_static_index() -> None:
         response = client.get("/")
 
     assert response.status_code == 200
-    assert "Execution" in response.text
-    assert "Control Room" in response.text
+    assert "运行控制" in response.text
+    assert "执行风控" in response.text
 
 
 class FakeQueries:

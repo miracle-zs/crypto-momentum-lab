@@ -466,7 +466,23 @@ if [[ "$target_commit" == "$previous_commit" \
   recovery_run=1
   resume_from_phase="${deploy_state_phase:-checkout}"
   if [[ -n "$deploy_state_base" ]]; then
-    : # The persisted base above restores the exact affected service groups.
+    # The persisted base above restores the exact affected service groups.
+    # A recorded runtime that still points at an older image means the target
+    # was never rolled out, so the persisted phase is not a safe resume point:
+    # replay the full rollout from the checkout phase instead of reusing the
+    # stale runtime identity for the preflight below.
+    if [[ "$runtime_commit" != "$target_commit" ]]; then
+      resume_from_phase="checkout"
+      runtime_changed=1
+      market_changed=1
+      research_changed=1
+      paper_changed=1
+      dashboard_changed=1
+      schema_changed=1
+      if [[ "$live_update" == 1 ]]; then
+        live_changed=1
+      fi
+    fi
   elif [[ "$runtime_commit" == "$target_commit" ]]; then
     runtime_changed=1
     market_changed=1

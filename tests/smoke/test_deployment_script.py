@@ -323,6 +323,58 @@ def test_retry_classification_preserves_dashboard_only_scope(tmp_path: Path) -> 
     assert result.endswith("1:0:1:0:0:0")
 
 
+def test_stale_runtime_behind_target_replays_full_rollout(tmp_path: Path) -> None:
+    """A recorded runtime behind the target must not resume a stale phase.
+
+    When the checkout is already at the target commit but the recorded runtime
+    still points at the previous image, the persisted phase is not a safe
+    resume point: the previous attempt never rolled the target image out, so
+    the whole rollout has to be replayed from the checkout phase.
+    """
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(
+            ["git", "-C", str(tmp_path), *args], text=True
+        ).strip()
+
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    git("commit", "--allow-empty", "-qm", "deployed")
+    stale_runtime = git("rev-parse", "HEAD")
+    git("commit", "--allow-empty", "-qm", "target")
+    target = git("rev-parse", "HEAD")
+
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    classification = script[
+        script.index("runtime_changed=0\n"):
+        script.index('if [[ "$runtime_changed" == 1 ]]; then')
+    ]
+    result = subprocess.check_output(
+        ["bash", "-c", 'set -eu\n' + classification +
+         '\nprintf "%s|%s" "$runtime_changed:$schema_changed:'
+         '$dashboard_changed:$market_changed:$paper_changed:$live_changed" '
+         '"$resume_from_phase"'],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "deployment_base_commit": target,
+            "target_commit": target,
+            "previous_commit": target,
+            "deploy_state_checkout": target,
+            "deploy_state_target": target,
+            "deploy_state_status": "failed",
+            "deploy_state_phase": "live-preflight",
+            "deploy_state_base": target,
+            "runtime_commit": stale_runtime,
+            "live_update": "1",
+        },
+        text=True,
+    )
+    assert result.strip().splitlines()[-1] == "1:1:1:1:1:1|checkout"
+
+
 def test_migration_phase_runs_one_shot_only_for_schema_changes() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
 

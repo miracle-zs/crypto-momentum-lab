@@ -3,6 +3,7 @@
 .env
 .env.live
 .env.server
+.reasonix/
 .mypy_cache/
 .local-backups/
 .pytest_cache/
