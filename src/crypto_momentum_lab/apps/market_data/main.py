@@ -1180,6 +1180,12 @@ async def run_market_data(
                 "background_tasks_started",
                 auxiliary_task_count=len(auxiliary_tasks),
             )
+            if health is not None:
+                # Publish readiness as soon as capture is running instead of
+                # waiting for the first 15s state to land. The durable-state
+                # callback keeps refreshing the marker afterwards, so a stalled
+                # persistence path still lets it expire.
+                health.heartbeat(database_ok=True)
             monitored_tasks: tuple[asyncio.Task[object], ...] = (
                 capture_task,
                 *auxiliary_tasks,

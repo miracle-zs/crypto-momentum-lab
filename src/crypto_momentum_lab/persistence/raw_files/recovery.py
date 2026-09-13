@@ -19,6 +19,10 @@ from crypto_momentum_lab.domain.market.models import (
 from crypto_momentum_lab.persistence.raw_files.archive import ZstdJsonlArchive
 
 _RECOVERY_BATCH_SIZE = 250
+_TEMPORARY_ARCHIVE_SUFFIX = ".tmp"
+_RECOVERY_INTERNAL_DIRECTORIES = frozenset(
+    {".recovery-quarantine", ".recovery-working"}
+)
 
 
 class EmptyTemporaryArchiveError(ValueError):
@@ -39,18 +43,7 @@ async def recover_archive_root(
     capture_version: str,
 ) -> tuple[RecoveryResult, ...]:
     await asyncio.to_thread(_cleanup_recovery_working, root)
-    temporary_paths = await asyncio.to_thread(
-        lambda: tuple(
-            sorted(
-                path
-                for path in root.rglob("*.tmp")
-                if not {
-                    ".recovery-quarantine",
-                    ".recovery-working",
-                }.intersection(path.parts)
-            )
-        )
-    )
+    temporary_paths = await asyncio.to_thread(_temporary_archive_paths, root)
     results = []
     for temporary in temporary_paths:
         try:
@@ -263,6 +256,29 @@ def _promote_recovered_files(
         destination.parent.mkdir(parents=True, exist_ok=True)
         os.replace(source, destination)
         _fsync_directory(destination.parent)
+
+
+def _temporary_archive_paths(root: Path) -> tuple[Path, ...]:
+    """Return interrupted ``*.tmp`` archives in a stable order.
+
+    The archive root holds tens of thousands of hourly symbol directories, so
+    ``Path.rglob`` - a pure-Python recursive walk that materialises a ``Path``
+    for every entry - dominates startup. ``os.walk`` uses the C ``scandir`` fast
+    path and lets us prune the recovery bookkeeping trees in place.
+    """
+
+    found: list[Path] = []
+    for directory, subdirectories, filenames in os.walk(root):
+        subdirectories[:] = [
+            name
+            for name in subdirectories
+            if name not in _RECOVERY_INTERNAL_DIRECTORIES
+        ]
+        for filename in filenames:
+            if filename.endswith(_TEMPORARY_ARCHIVE_SUFFIX):
+                found.append(Path(directory, filename))
+    found.sort()
+    return tuple(found)
 
 
 def _cleanup_recovery_working(archive_root: Path) -> None:

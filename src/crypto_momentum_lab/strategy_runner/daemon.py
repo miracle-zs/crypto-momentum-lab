@@ -447,6 +447,11 @@ def run_paired_paper_live_daemon(
             ),
         )
 
+    # Publish local readiness once the consumer is wired up instead of waiting
+    # for the first checkpoint flush; checkpoint notifications keep refreshing
+    # the marker afterwards.
+    _notify_checkpoint_persisted(on_checkpoint_persisted)
+
     first_state_received_logged = False
     first_state_processed_logged = False
     first_checkpoint_logged = False
@@ -1527,6 +1532,11 @@ def run_paper_live_daemon(
             pending_candidate_count=len(pending_candidates),
             open_position_count=len(open_positions),
         )
+
+    # Publish local readiness once the consumer is wired up instead of waiting
+    # for the first checkpoint flush; checkpoint notifications keep refreshing
+    # the marker afterwards.
+    _notify_checkpoint_persisted(on_checkpoint_persisted)
 
     first_state_received_logged = False
     first_state_processed_logged = False
