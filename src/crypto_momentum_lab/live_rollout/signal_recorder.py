@@ -2,7 +2,7 @@
 
 import asyncio
 from collections import defaultdict, deque
-from collections.abc import Awaitable, Callable, Collection, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -27,7 +27,13 @@ log = structlog.get_logger()
 
 _SIGNAL_SCHEMA_VERSION = 2
 _MAX_SIGNAL_BATCH = 128
-_PERSIST_BATCH_TIMEOUT_SECONDS = 0.25
+# A batch that misses this budget is retried a bounded number of times before
+# the records are dropped.  The previous 0.25s budget was tight enough that a
+# transient disk stall dropped whole batches, which then surfaced in the ops
+# monitor as a phantom "signal divergence" between comparable accounts.
+_PERSIST_BATCH_TIMEOUT_SECONDS = 2.0
+_PERSIST_BATCH_ATTEMPTS = 3
+_PERSIST_BATCH_RETRY_DELAY_SECONDS = 0.25
 
 
 class LiveSignalRecorderPort(Protocol):
@@ -483,12 +489,7 @@ class LiveStrategySignalRecorder:
                     break
                 batch.append(next_record)
             try:
-                await asyncio.wait_for(
-                    self._persist(
-                        tuple(record.row() for record in batch)
-                    ),
-                    timeout=_PERSIST_BATCH_TIMEOUT_SECONDS,
-                )
+                await self._persist_batch(batch)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -501,6 +502,36 @@ class LiveStrategySignalRecorder:
                 )
             if stop_after_batch:
                 return
+
+    async def _persist_batch(self, batch: Sequence[LiveSignalObservation]) -> None:
+        """Persist one batch, retrying transient timeouts before giving up.
+
+        A client-side timeout cancels the statement but the server may still
+        have committed the rows, so a retry has to stay idempotent.  It does:
+        the observation id is derived deterministically and the sink inserts
+        with ``ON CONFLICT (observation_id) DO NOTHING``.
+        """
+
+        rows = tuple(record.row() for record in batch)
+        for attempt in range(1, _PERSIST_BATCH_ATTEMPTS + 1):
+            try:
+                await asyncio.wait_for(
+                    self._persist(rows),
+                    timeout=_PERSIST_BATCH_TIMEOUT_SECONDS,
+                )
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if attempt >= _PERSIST_BATCH_ATTEMPTS:
+                    raise
+                log.warning(
+                    "live_strategy_signal_persist_retry",
+                    run_id=self._run_id,
+                    attempt=attempt,
+                    event_count=len(batch),
+                )
+                await asyncio.sleep(_PERSIST_BATCH_RETRY_DELAY_SECONDS)
 
 
 def _candidate_context(

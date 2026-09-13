@@ -361,7 +361,7 @@ def test_memory_pressure_alerts_only_after_cgroup_counter_advances(
     assert alerts[0].details["memory_swap_current_bytes"] == 128
 
 
-def test_memory_stats_prefers_cgroup_current_and_keeps_working_set(
+def test_memory_stats_prefers_working_set_and_keeps_cgroup_current(
     tmp_path,
 ) -> None:
     class Runner:
@@ -394,9 +394,9 @@ def test_memory_stats_prefers_cgroup_current_and_keeps_working_set(
 
     stats = monitor._memory_stats("postgres")
 
-    assert stats.observed_bytes == 700
+    assert stats.observed_bytes == 10 * 1_048_576
     assert stats.memory_limit_bytes == 1_000
-    assert stats.source == "cgroup_memory_current"
+    assert stats.source == "docker_stats_working_set"
     assert stats.working_set_bytes == 10 * 1_048_576
     assert stats.current_bytes == 700
     assert stats.peak_bytes == 900
@@ -503,7 +503,7 @@ def test_database_state_alerts_on_lifecycle_market_and_unknown_order_state() -> 
         account_process_age_seconds=3,
         latest_reconciliation_status="halted",
         latest_reconciliation_age_seconds=3,
-        latest_market_progress_age_seconds=181,
+        latest_market_progress_age_seconds=901,
         latest_market_delay_ms=121_000,
         unknown_order_count=1,
         oldest_unknown_order_age_seconds=42,

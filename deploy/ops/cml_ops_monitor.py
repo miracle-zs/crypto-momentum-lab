@@ -43,11 +43,15 @@ _DEFAULT_ALERT_COOLDOWN_SECONDS = 900.0
 _DEFAULT_COMMAND_TIMEOUT_SECONDS = 15.0
 _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS = 900.0
 _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS = 3
-_DEFAULT_MARKET_STATE_STALE_AFTER_SECONDS = 120.0
+# The monitor polls every 60s and the underlying progress signals are themselves
+# sampled on a ~60s cadence, so a 120s budget left only two samples of headroom
+# and flapped on every tail-latency spike.  Measured live medians sit around
+# 70-140s, so allow several samples before declaring staleness.
+_DEFAULT_MARKET_STATE_STALE_AFTER_SECONDS = 300.0
 _DEFAULT_MARKET_DELAY_WARNING_MS = 30_000.0
 _DEFAULT_MARKET_DELAY_CRITICAL_MS = 120_000.0
-_DEFAULT_ACCOUNT_STATE_STALE_AFTER_SECONDS = 120.0
-_DEFAULT_POSITION_STALE_AFTER_SECONDS = 120.0
+_DEFAULT_ACCOUNT_STATE_STALE_AFTER_SECONDS = 300.0
+_DEFAULT_POSITION_STALE_AFTER_SECONDS = 300.0
 _DEFAULT_POSITION_QUANTITY_TOLERANCE = Decimal("0.00000001")
 _DEFAULT_CONSISTENCY_WINDOW_SECONDS = 300.0
 _BEIJING_TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
@@ -331,7 +335,6 @@ def evaluate_signal_divergence(
         if len(account_values) < 2:
             continue
         outputs = tuple(account_values.values())
-        fingerprints = {value.fingerprint for value in outputs}
         signal_outputs = {
             (value.signal_count, value.fingerprint) for value in outputs
         }
@@ -1605,13 +1608,17 @@ class OpsMonitor:
 
         cgroup = self._cgroup_memory_stats(container_id)
         current_bytes = cgroup.get("memory.current")
+        # Judge pressure by the working set, not by cgroup memory.current: the
+        # latter includes reclaimable page cache, so a database that mostly
+        # caches files reported ~95% of its limit while its real working set sat
+        # near 16%, which produced a permanent "memory high" alert for postgres.
         memory_bytes = (
-            current_bytes if current_bytes is not None else working_set_bytes
+            working_set_bytes if working_set_bytes is not None else current_bytes
         )
         source = (
-            "cgroup_memory_current"
-            if current_bytes is not None
-            else "docker_stats_working_set"
+            "docker_stats_working_set"
+            if working_set_bytes is not None
+            else "cgroup_memory_current"
         )
         return ContainerMemoryStats(
             observed_bytes=memory_bytes,
