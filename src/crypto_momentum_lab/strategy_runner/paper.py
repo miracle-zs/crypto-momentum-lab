@@ -240,9 +240,9 @@ def run_paper_trading(
         )
         paper_fills.extend(fills)
         for fill in fills:
-            position = position_from_entry_fill(config.run_id, fill)
-            if position is not None:
-                positions_by_id[position.position_id] = position
+            opened = position_from_entry_fill(config.run_id, fill)
+            if opened is not None:
+                positions_by_id[opened.position_id] = opened
         last_processed_at_by_symbol[state.symbol] = state.bucket_start
 
     if input_state_count == 0:
@@ -256,9 +256,9 @@ def run_paper_trading(
     )
     paper_fills.extend(shutdown_fills)
     for fill in shutdown_fills:
-        position = position_from_entry_fill(config.run_id, fill)
-        if position is not None:
-            positions_by_id[position.position_id] = position
+        reopened = position_from_entry_fill(config.run_id, fill)
+        if reopened is not None:
+            positions_by_id[reopened.position_id] = reopened
 
     signal_tuple = tuple(signals)
     candidate_tuple = tuple(candidates)

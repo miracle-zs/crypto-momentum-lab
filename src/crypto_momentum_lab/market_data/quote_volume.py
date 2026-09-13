@@ -44,11 +44,11 @@ class QuoteVolume24hSnapshot:
                 raise ValueError(f"{field_name} must not be empty")
         if self.quote_volume < 0:
             raise ValueError("quote_volume must be non-negative")
-        for value, field_name in (
+        for moment, field_name in (
             (self.source_at, "source_at"),
             (self.fetched_at, "fetched_at"),
         ):
-            if value.tzinfo is None or value.utcoffset() is None:
+            if moment.tzinfo is None or moment.utcoffset() is None:
                 raise ValueError(f"{field_name} must be timezone-aware")
 
 

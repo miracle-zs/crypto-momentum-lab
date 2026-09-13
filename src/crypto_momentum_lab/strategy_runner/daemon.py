@@ -1113,13 +1113,15 @@ def _paper_ema_filter_passes(
 ) -> bool:
     entry_price = _entry_price_for_side(context, side)
     if entry_filter.require_price_above_ema5 and (
-        entry_price is None
+        context is None
+        or entry_price is None
         or context.ema5 is None
         or entry_price <= context.ema5
     ):
         return False
     if entry_filter.require_price_above_ema10 and (
-        entry_price is None
+        context is None
+        or entry_price is None
         or context.ema10 is None
         or entry_price <= context.ema10
     ):

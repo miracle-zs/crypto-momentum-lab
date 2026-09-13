@@ -1528,11 +1528,13 @@ class LiveRuntimeTelemetry:
         ``ON CONFLICT (event_id) DO NOTHING``.
         """
 
+        persist = self._persist
+        assert persist is not None  # _write_events only calls this with a sink
         rows = tuple(event.row() for event in batch)
         for attempt in range(1, _PERSIST_BATCH_ATTEMPTS + 1):
             try:
                 await asyncio.wait_for(
-                    self._persist(rows),
+                    persist(rows),
                     timeout=_PERSIST_BATCH_TIMEOUT_SECONDS,
                 )
                 return
