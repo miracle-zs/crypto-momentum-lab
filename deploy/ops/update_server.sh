@@ -20,6 +20,7 @@ Environment:
   CML_DEPLOY_BUILD_TIMEOUT_SECONDS  image build timeout (default: 900)
   CML_DASHBOARD_REQUIRED  require the dashboard endpoint (default: 1)
   CML_DASHBOARD_PROXY_URL  local reverse-proxy health URL (default: http://127.0.0.1/momentum/api/health)
+  CML_CRASH_LOG_DIRECTORY  persistent pre-restart log archive (default: /var/lib/crypto-momentum-lab/crash-logs)
   CML_SSH_PASSWORD  optional password for sshpass; prefer an SSH key
 
 The live profile is never touched unless --live is supplied. Live updates run
@@ -28,6 +29,8 @@ restarting any non-Live service, then run the full preflight immediately before
 restarting each Live container and verify its structured readiness snapshot.
 The additional-account overlay is loaded only when an account-2/3/4
 service is already running; stopped accounts are not started implicitly.
+The default paper rollout keeps only paper-orderflow-gainer10-pair active;
+retired paper containers are archived, stopped, and removed during the update.
 --refresh-approvals is an explicit opt-in that refreshes active approvals from
 the target runtime while preserving their existing limits and operator fields;
 it requires --live and an explicit git-ref. The SSH connection uses an
@@ -105,6 +108,7 @@ deploy_operation_timeout="${CML_DEPLOY_OPERATION_TIMEOUT_SECONDS:-300}"
 deploy_build_timeout="${CML_DEPLOY_BUILD_TIMEOUT_SECONDS:-900}"
 dashboard_required="${CML_DASHBOARD_REQUIRED:-1}"
 dashboard_proxy_url="${CML_DASHBOARD_PROXY_URL:-http://127.0.0.1/momentum/api/health}"
+crash_log_directory="${CML_CRASH_LOG_DIRECTORY:-/var/lib/crypto-momentum-lab/crash-logs}"
 
 if [[ "$dashboard_required" != 0 && "$dashboard_required" != 1 ]]; then
   echo "Invalid CML_DASHBOARD_REQUIRED: $dashboard_required" >&2
@@ -113,6 +117,10 @@ fi
 
 if [[ -z "$dashboard_proxy_url" ]]; then
   echo "Invalid CML_DASHBOARD_PROXY_URL: value must not be empty" >&2
+  exit 64
+fi
+if [[ -z "$crash_log_directory" ]]; then
+  echo "Invalid CML_CRASH_LOG_DIRECTORY: value must not be empty" >&2
   exit 64
 fi
 
@@ -152,6 +160,7 @@ if "${ssh_command[@]}" "${ssh_opts[@]}" "${server_user}@${server_host}" bash -s 
   "$live_stop_timeout" \
   "$deploy_operation_timeout" "$deploy_build_timeout" \
   "$refresh_approvals" "$dashboard_required" "$dashboard_proxy_url" \
+  "$crash_log_directory" \
   <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
@@ -170,6 +179,7 @@ deploy_build_timeout="${12}"
 refresh_approvals="${13}"
 dashboard_required="${14}"
 dashboard_proxy_url="${15}"
+crash_log_directory="${16}"
 for timeout_name in \
   CML_DEPLOY_WAIT_TIMEOUT_SECONDS \
   CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS \
@@ -202,6 +212,10 @@ if [[ "$dashboard_required" != 0 && "$dashboard_required" != 1 ]]; then
 fi
 if [[ -z "$dashboard_proxy_url" ]]; then
   echo "Invalid dashboard proxy URL: value must not be empty" >&2
+  exit 64
+fi
+if [[ -z "$crash_log_directory" ]]; then
+  echo "Invalid crash log directory: value must not be empty" >&2
   exit 64
 fi
 if ! command -v timeout >/dev/null 2>&1; then
@@ -558,6 +572,16 @@ if [[ "$live_overlay_required" == 1 ]]; then
     --profile live
   )
 fi
+# Keep the active paper set explicit. The other paper services remain in the
+# Compose file under the retired-paper profile for historical reference, but
+# an update must remove any containers created before that profile was added.
+active_paper_services=(paper-orderflow-gainer10-pair)
+retired_paper_services=(
+  paper-orderflow-pair
+  paper-b1-gainer100
+  paper-b1-gainer100-ema
+)
+compose_project_name=crypto-momentum-lab
 deploy_phase=compose
 
 phase_rank() {
@@ -572,7 +596,7 @@ phase_rank() {
     # start wave. It must still retry the research stop before the wave.
     dashboard|research-stop) echo 6 ;;
     dashboard-market-data|market-data) echo 7 ;;
-    consumers) echo 8 ;;
+    paper-retired-cleanup|consumers) echo 8 ;;
     live-preflight) echo 9 ;;
     live-restart) echo 10 ;;
     verify) echo 11 ;;
@@ -613,7 +637,77 @@ failure_service=""
 print_service_logs() {
   local service="$1"
   echo "failure_logs_service=$service" >&2
+  archive_service_logs "$service"
   "${compose[@]}" logs --no-color --tail=200 "$service" >&2 || true
+}
+
+archive_container_logs() {
+  local service="$1"
+  local container_id="$2"
+  [[ -n "$container_id" ]] || return 0
+  local safe_service safe_container timestamp archive_path temporary
+  safe_service="${service//[^A-Za-z0-9_.-]/_}"
+  safe_container="${container_id//[^A-Za-z0-9_.-]/_}"
+  timestamp="$(date -u +%Y%m%dT%H%M%S.%NZ)"
+  archive_path="$crash_log_directory/${timestamp}_${safe_service}_${safe_container:0:24}.log"
+  temporary="${archive_path}.tmp.$$"
+  if ! mkdir -p -- "$crash_log_directory"; then
+    echo "crash log archive directory unavailable: $crash_log_directory" >&2
+    return 0
+  fi
+  if docker logs --timestamps "$container_id" >"$temporary" 2>&1; then
+    if mv -f -- "$temporary" "$archive_path"; then
+      echo "crash_log_archive service=$service path=$archive_path" >&2
+    else
+      rm -f -- "$temporary"
+      echo "crash log archive rename failed: service=$service" >&2
+    fi
+  else
+    rm -f -- "$temporary"
+    echo "crash log archive read failed: service=$service container=$container_id" >&2
+  fi
+}
+
+archive_service_logs() {
+  local service="$1"
+  local container_id
+  [[ -n "$service" ]] || return 0
+  container_id="$("${compose[@]}" ps -q "$service" 2>/dev/null || true)"
+  archive_container_logs "$service" "$container_id"
+}
+
+stop_retired_paper_services() {
+  local service container_id state container_ids
+  for service in "${retired_paper_services[@]}"; do
+    container_ids="$(docker ps -aq \
+      --filter "label=com.docker.compose.project=$compose_project_name" \
+      --filter "label=com.docker.compose.service=$service")"
+    while IFS= read -r container_id; do
+      [[ -n "$container_id" ]] || continue
+      failure_service="$service"
+      archive_container_logs "$service" "$container_id"
+      state="$(docker inspect -f '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
+      [[ -n "$state" ]] || continue
+      case "$state" in
+        running|restarting)
+          run_with_timeout "stop-retired-paper:$service" \
+            "$deploy_operation_timeout" \
+            docker stop --time 20 "$container_id"
+          ;;
+        paused)
+          run_with_timeout "unpause-retired-paper:$service" \
+            "$deploy_operation_timeout" \
+            docker unpause "$container_id"
+          run_with_timeout "stop-retired-paper:$service" \
+            "$deploy_operation_timeout" \
+            docker stop --time 20 "$container_id"
+          ;;
+      esac
+      run_with_timeout "remove-retired-paper:$service" \
+        "$deploy_operation_timeout" \
+        docker rm "$container_id"
+    done <<<"$container_ids"
+  done
 }
 
 print_failure_context() {
@@ -833,9 +927,12 @@ up_and_wait() {
   if (( $# == 0 )); then
     return 0
   fi
-  local restart_started_at operation_status
+  local restart_started_at operation_status service
   restart_started_at="$(date +%s)"
   failure_service="$1"
+  for service in "$@"; do
+    archive_service_logs "$service"
+  done
   record_restart_baseline "$@"
   if run_with_timeout "compose-up:$*" "$deploy_operation_timeout" \
     "${compose[@]}" up -d --force-recreate --no-deps "$@"; then
@@ -862,9 +959,12 @@ up_and_wait_parallel() {
   if (( $# == 0 )); then
     return 0
   fi
-  local restart_started_at operation_status
+  local restart_started_at operation_status service
   restart_started_at="$(date +%s)"
   failure_service="$1"
+  for service in "$@"; do
+    archive_service_logs "$service"
+  done
   record_restart_baseline "$@"
   if run_with_timeout "compose-up:$*" "$deploy_operation_timeout" \
     "${compose[@]}" --parallel "$parallel" up -d --force-recreate --no-deps "$@"; then
@@ -1188,6 +1288,7 @@ print(
     for service in "${live_old_services[@]}"; do
       container_id="$("${compose[@]}" ps -q "$service" 2>/dev/null || true)"
       live_old_container_ids+=("$container_id")
+      archive_container_logs "$service" "$container_id"
     done
   }
 
@@ -1528,6 +1629,19 @@ else
   echo "phase=dashboard-market-data skipped resume_from_phase=$resume_from_phase"
 fi
 
+# Remove paper containers created before the retired-paper profile was added.
+# This is intentionally separate from the active consumer restart so a failed
+# active-paper health check cannot silently leave the retired runners alive.
+if [[ "$paper_changed" == 1 ]] && should_run_phase paper-retired-cleanup; then
+  deploy_phase=paper-retired-cleanup
+  write_deploy_state running "$deploy_phase"
+  retired_paper_started_at="$(date +%s)"
+  stop_retired_paper_services
+  echo "phase=paper-retired-cleanup elapsed_seconds=$(( $(date +%s) - retired_paper_started_at ))"
+else
+  echo "phase=paper-retired-cleanup skipped paper_changed=$paper_changed resume_from_phase=$resume_from_phase"
+fi
+
 dashboard_check_required=0
 if [[ "$dashboard_required" == 1 || "$dashboard_changed" == 1 ]]; then
   dashboard_check_required=1
@@ -1564,12 +1678,7 @@ if [[ "$research_changed" == 1 ]]; then
   consumer_candidates+=(research-collector)
 fi
 if [[ "$paper_changed" == 1 ]]; then
-  consumer_candidates+=(
-    paper-orderflow-pair
-    paper-orderflow-gainer10-pair
-    paper-b1-gainer100
-    paper-b1-gainer100-ema
-  )
+  consumer_candidates+=("${active_paper_services[@]}")
 fi
 consumer_services=()
 for service in "${consumer_candidates[@]}"; do

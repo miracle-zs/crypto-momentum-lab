@@ -131,16 +131,16 @@ adds read-only account synchronization and one gated live strategy; see
 ## Server Paper Deployment
 
 The production-style paper stack includes PostgreSQL, migrations, an initial
-universe refresh, public Binance market-data capture, three independent paper
-strategy daemons, and the read-only operator dashboard. Each strategy daemon
-reads market states once and fans the same entry decision into its fixed-exit
-and 15-minute-candle-exit accounts; positions and exits remain independent. It
-never receives Binance private API credentials and cannot place orders.
+universe refresh, public Binance market-data capture, one active paper strategy
+daemon, and the read-only operator dashboard. The daemon reads market states
+once and fans the same entry decision into the active B8 and B1 Top10-gainer
+accounts; positions and exits remain independent. It never receives Binance
+private API credentials and cannot place orders.
 
 The server compression profile evaluates 20 closed 5-minute bars, representing
-a 100-minute compression window. The order-flow and liquidation profiles use
-15-second states. Raw 15-second states remain the execution and risk-monitoring
-clock for all three accounts.
+a 100-minute compression window. The active order-flow profile uses 15-second
+states. Raw 15-second states remain the execution and risk-monitoring clock for
+both active accounts.
 
 ```bash
 cp .env.server.example .env.server
