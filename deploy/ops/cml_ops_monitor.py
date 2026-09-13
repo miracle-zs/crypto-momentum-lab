@@ -2660,7 +2660,14 @@ def _serverchan_form(payload: Mapping[str, object]) -> dict[str, str]:
         if details:
             body.append(
                 "- **技术详情**：\n```json\n"
-                + json.dumps(details, ensure_ascii=False, sort_keys=True)
+                + json.dumps(
+                    details,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    # Indent so nested divergence payloads stay readable in the
+                    # WeChat card instead of one very wide scrolling line.
+                    indent=2,
+                )
                 + "\n```"
             )
     else:
