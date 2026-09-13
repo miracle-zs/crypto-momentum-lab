@@ -27,7 +27,7 @@ from crypto_momentum_lab.domain.market.models import (
     RawEnvelope,
 )
 from crypto_momentum_lab.domain.universe.models import UniverseSnapshot
-from crypto_momentum_lab.health import LocalHealthWriter
+from crypto_momentum_lab.health import LocalHealthWriter, StartupPhaseTimer
 from crypto_momentum_lab.health.memory import configure_tracemalloc
 from crypto_momentum_lab.market_data.agg_trade_recovery import (
     AggTradeGapRecoverer,
@@ -667,8 +667,14 @@ async def build_market_data_runtime(
     config_path: Path,
     *,
     on_durable_state_persisted: Callable[[datetime], None] | None = None,
+    startup_timer: StartupPhaseTimer | None = None,
 ) -> AsyncIterator[MarketDataRuntime]:
     runtime = load_runtime_config(config_path)
+    if startup_timer is not None:
+        startup_timer.mark(
+            "runtime_config_loaded",
+            environment=runtime.environment,
+        )
     database_url = _market_database_url(runtime.database_url)
     market_engine = create_market_database_engine(database_url)
     observability_engine = create_observability_database_engine(database_url)
@@ -689,6 +695,8 @@ async def build_market_data_runtime(
     paper_repository = PostgresPaperDaemonRepository(maintenance_sessions)
     account_repository = PostgresAccountRepository(maintenance_sessions)
     runtime_state_repository = PostgresRuntimeMarketStateRepository(market_sessions)
+    if startup_timer is not None:
+        startup_timer.mark("database_resources_created")
     state_hub = MarketStateHub(
         MarketStateHubConfig(
             host=os.environ.get(
@@ -740,6 +748,13 @@ async def build_market_data_runtime(
     enabled_streams = tuple(
         CaptureStream(item) for item in runtime.capture.enabled_streams
     )
+    if startup_timer is not None:
+        startup_timer.mark(
+            "initial_symbols_loaded",
+            membership_count=len(initial_memberships),
+            initial_symbol_count=len(initial_symbols),
+            stream_count=len(enabled_streams),
+        )
     capture_version = behavior_hash(runtime)
     archive_config = runtime.capture.archive
     archive_config.root.mkdir(parents=True, exist_ok=True)
@@ -777,12 +792,19 @@ async def build_market_data_runtime(
         except SQLAlchemyError:
             await manifest_journal.append(manifest)
 
+    recovered_manifest_count = 0
     for recovery_result in await recover_archive_root(
         archive_config.root,
         environment=runtime.environment,
         capture_version=capture_version,
     ):
         await save_manifest(recovery_result.manifest)
+        recovered_manifest_count += 1
+    if startup_timer is not None:
+        startup_timer.mark(
+            "archive_recovery_completed",
+            recovered_manifest_count=recovered_manifest_count,
+        )
 
     async def save_replayed_manifest(manifest: ArchiveManifest) -> None:
         # A replay must fail and leave its journal entry in place when the
@@ -796,12 +818,19 @@ async def build_market_data_runtime(
             "pending_manifest_journal_replayed",
             count=replayed_manifest_count,
         )
+    if startup_timer is not None:
+        startup_timer.mark(
+            "manifest_journal_replayed",
+            replayed_manifest_count=replayed_manifest_count,
+        )
 
     await prune_expired_raw_archives(
         maintenance_capture_repository,
         archive_config.root,
         retention_days=archive_config.retention_days,
     )
+    if startup_timer is not None:
+        startup_timer.mark("archive_retention_checked")
 
     archive = ZstdJsonlArchive(
         root=archive_config.root,
@@ -926,6 +955,8 @@ async def build_market_data_runtime(
         observer=observer,
         daily_open_prefetcher=daily_open_prefetcher,
     )
+    if startup_timer is not None:
+        startup_timer.mark("runtime_components_built")
     try:
         yield MarketDataRuntime(
             capture=capture,
@@ -997,16 +1028,36 @@ async def run_market_data(
     *,
     stop_requested: asyncio.Event | None = None,
 ) -> None:
+    startup_timer = StartupPhaseTimer(
+        log,
+        event="market_data_startup_phase",
+        service="market-data",
+    )
+    log.info(
+        "market_data_startup_started",
+        config_path=str(config_path),
+    )
     configure_tracemalloc()
     health = LocalHealthWriter.from_environment()
-    health_callback = (
-        None
-        if health is None
-        else lambda _watermark: health.heartbeat(database_ok=True)
-    )
+
+    first_durable_state_logged = False
+
+    def on_durable_state_persisted(watermark: datetime) -> None:
+        nonlocal first_durable_state_logged
+        if not first_durable_state_logged:
+            startup_timer.mark(
+                "first_durable_state_persisted",
+                watermark=watermark.isoformat(),
+            )
+            first_durable_state_logged = True
+        if health is not None:
+            health.heartbeat(database_ok=True)
+
+    health_callback = on_durable_state_persisted
     async with build_market_data_runtime(
         config_path,
         on_durable_state_persisted=health_callback,
+        startup_timer=startup_timer,
     ) as runtime:
         capture_task: asyncio.Task[None] | None = None
         auxiliary_tasks: tuple[asyncio.Task[None], ...] = ()
@@ -1016,13 +1067,23 @@ async def run_market_data(
         daily_open_prefetcher = getattr(runtime, "daily_open_prefetcher", None)
         try:
             await runtime.state_hub.start()
+            startup_timer.mark("state_hub_started")
             if quote_hub is not None:
                 await quote_hub.start()
+                startup_timer.mark("quote_hub_started")
+            else:
+                startup_timer.mark("quote_hub_skipped")
             await runtime.runtime_state_publisher.start()
+            startup_timer.mark("runtime_state_publisher_started")
             await runtime.capture.start(
                 symbols=runtime.initial_symbols,
                 streams=runtime.enabled_streams,
                 generation=1,
+            )
+            startup_timer.mark(
+                "capture_started",
+                initial_symbol_count=len(runtime.initial_symbols),
+                stream_count=len(runtime.enabled_streams),
             )
             startup_observed_at = datetime.now(UTC).replace(
                 second=0,
@@ -1030,7 +1091,11 @@ async def run_market_data(
             )
             if daily_open_prefetcher is not None:
                 await daily_open_prefetcher.bootstrap_current_day(startup_observed_at)
+                startup_timer.mark("daily_open_bootstrap_completed")
                 await daily_open_prefetcher.start()
+                startup_timer.mark("daily_open_prefetch_started")
+            else:
+                startup_timer.mark("daily_open_prefetch_skipped")
             startup_snapshot = await runtime.universe.refresh(
                 observed_at=startup_observed_at
             )
@@ -1038,9 +1103,18 @@ async def run_market_data(
                 "universe_startup_refresh",
                 observed_at=startup_snapshot.observed_at.isoformat(),
             )
+            startup_timer.mark(
+                "universe_startup_refresh_completed",
+                membership_count=len(startup_snapshot.memberships),
+                target_symbol_count=len(startup_snapshot.ranking.target_symbols),
+            )
             if quote_volume_publisher is not None:
                 await quote_volume_publisher.start()
+                startup_timer.mark("quote_volume_publisher_started")
+            else:
+                startup_timer.mark("quote_volume_publisher_skipped")
             capture_task = asyncio.create_task(runtime.capture.run())
+            startup_timer.mark("capture_task_scheduled")
             auxiliary_tasks = (
                 asyncio.create_task(
                     run_scheduler_loop(
@@ -1102,6 +1176,10 @@ async def run_market_data(
                         )
                     ),
                 )
+            startup_timer.mark(
+                "background_tasks_started",
+                auxiliary_task_count=len(auxiliary_tasks),
+            )
             monitored_tasks: tuple[asyncio.Task[object], ...] = (
                 capture_task,
                 *auxiliary_tasks,

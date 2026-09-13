@@ -14,7 +14,9 @@ import typer
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.config import resolve_database_url
+from crypto_momentum_lab.health import StartupPhaseTimer
 from crypto_momentum_lab.market_data.hub import (
+    MarketStateBatch,
     MarketStateHubConfig,
     WebSocketMarketStateSource,
 )
@@ -235,6 +237,17 @@ async def _run_collector(
     late_tolerance_seconds: int,
     max_spool_gib: float,
 ) -> None:
+    startup_timer = StartupPhaseTimer(
+        log,
+        event="research_collector_startup_phase",
+        service="research-collector",
+        environment=environment,
+    )
+    log.info(
+        "research_collector_startup_started",
+        hub_url=hub_url,
+        root=str(root),
+    )
     resolved_database_url = resolve_database_url(
         database_url,
         "CML_MARKET_DATABASE_URL",
@@ -245,6 +258,13 @@ async def _run_collector(
             "database URL is required for replay recovery; set "
             "CML_MARKET_DATABASE_URL or CML_DATABASE_URL"
         )
+    startup_timer.mark(
+        "configuration_resolved",
+        all_symbols=all_symbols,
+        top_count=top_count,
+        window_seconds=window_seconds,
+        late_tolerance_seconds=late_tolerance_seconds,
+    )
     if account_label is None:
         account_label = os.environ.get("CML_LIVE_ACCOUNT_LABEL")
 
@@ -256,6 +276,7 @@ async def _run_collector(
         command_timeout_seconds=5,
     )
     sessions = async_sessionmaker(engine, expire_on_commit=False)
+    startup_timer.mark("database_resources_created")
     universe_repository = PostgresUniverseRepository(sessions)
     account_repository = (
         None if account_label is None else PostgresAccountRepository(sessions)
@@ -273,14 +294,41 @@ async def _run_collector(
             position_environment=position_environment,
         )
     )
+
+    first_hub_ready_logged = False
+    first_batch_logged = False
+
+    def on_connection_change(available: bool, reason: str | None) -> None:
+        nonlocal first_hub_ready_logged
+        if available and not first_hub_ready_logged:
+            startup_timer.mark(
+                "hub_ready",
+                reason=reason or "ready",
+            )
+            first_hub_ready_logged = True
+
+    def on_batch(batch: MarketStateBatch) -> None:
+        nonlocal first_batch_logged
+        if not first_batch_logged:
+            startup_timer.mark(
+                "first_batch_received",
+                sequence=batch.sequence,
+                state_count=len(batch.states),
+                stream_id=batch.stream_id,
+            )
+            first_batch_logged = True
+
     source = WebSocketMarketStateSource(
         url=hub_url,
         environment=environment,
         consumer_id=f"research-collector:{environment}",
         config=MarketStateHubConfig(),
+        on_connection_change=on_connection_change,
+        on_batch=on_batch,
         fail_on_replay_unavailable=True,
         preserve_sequence_on_overflow=True,
     )
+    startup_timer.mark("source_constructed")
     collector_config = CollectorConfig(
         environment=environment,
         root=root,
@@ -296,11 +344,13 @@ async def _run_collector(
         config=collector_config,
         source=source,
         selector=selector,
+        startup_timer=startup_timer,
         backfill_source=PostgresMarketStateBackfillSource(
             runtime_repository,
             environment=environment,
         ),
     )
+    startup_timer.mark("collector_constructed")
     stop_requested = asyncio.Event()
     loop = asyncio.get_running_loop()
     registered_signals: list[signal.Signals] = []
@@ -324,6 +374,7 @@ async def _run_collector(
         registered_signals.append(shutdown_signal)
 
     collector_task = asyncio.create_task(collector.run())
+    startup_timer.mark("collector_task_scheduled")
     stop_task = asyncio.create_task(stop_requested.wait())
     try:
         done, _pending = await asyncio.wait(

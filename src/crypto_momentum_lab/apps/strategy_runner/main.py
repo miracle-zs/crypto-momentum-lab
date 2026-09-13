@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
 
+import structlog
 import typer
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -18,7 +19,7 @@ from crypto_momentum_lab.domain.strategy import (
     StrategyRunIdentity,
     deterministic_config_hash,
 )
-from crypto_momentum_lab.health import LocalHealthWriter
+from crypto_momentum_lab.health import LocalHealthWriter, StartupPhaseTimer
 from crypto_momentum_lab.persistence.parquet import read_market_states_15s_dataset
 from crypto_momentum_lab.persistence.postgres import (
     PostgresPaperDaemonRepository,
@@ -72,6 +73,7 @@ from crypto_momentum_lab.strategy_runner.registry import (
 )
 
 app = typer.Typer(no_args_is_help=True)
+log = structlog.get_logger()
 
 
 @app.callback()
@@ -915,6 +917,26 @@ def paper_live_daemon_command(
     resolved_database_url = resolve_database_url(database_url, "CML_DATABASE_URL")
     if not resolved_database_url:
         raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
+    startup_timer = StartupPhaseTimer(
+        log,
+        event="paper_consumer_startup_phase",
+        service="strategy-runner",
+        mode="paper-live-daemon",
+        environment=environment,
+    )
+    log.info(
+        "paper_consumer_startup_started",
+        mode="paper-live-daemon",
+        strategy_name=strategy_name,
+        environment=environment,
+    )
+    startup_timer.mark(
+        "configuration_resolved",
+        poll_interval_seconds=poll_interval_seconds,
+        idle_timeout_seconds=idle_timeout_seconds,
+        batch_size=batch_size,
+        max_states=max_states,
+    )
     health = LocalHealthWriter.from_environment()
     health_callback = (
         None
@@ -939,6 +961,7 @@ def paper_live_daemon_command(
         max_states=max_states,
         batch_size=batch_size,
     )
+    startup_timer.mark("market_state_source_constructed")
     compression_breakout = CompressionBreakoutConfig(
         compression_window_buckets=compression_window_buckets,
         max_range_width_pct=Decimal(max_range_width_pct),
@@ -974,7 +997,9 @@ def paper_live_daemon_command(
         ),
         identity=identity,
     )
+    startup_timer.mark("strategy_constructed")
     repository = build_paper_daemon_repository(resolved_database_url)
+    startup_timer.mark("artifact_repository_constructed")
     resolved_exit_mode = PaperExitMode(exit_mode)
     if entry_positive_gainer_top_count is None:
         entry_symbol_loader = source.load_active_symbols_at
@@ -1106,6 +1131,7 @@ def paper_live_daemon_command(
                 None if comparison_sink is None else comparison_sink
             ),
             on_checkpoint_persisted=health_callback,
+            startup_timer=startup_timer,
         )
     typer.echo(
         "Paper live daemon completed: "
@@ -1414,6 +1440,26 @@ def paper_live_pair_command(
     resolved_database_url = resolve_database_url(database_url, "CML_DATABASE_URL")
     if not resolved_database_url:
         raise typer.BadParameter("--database-url or CML_DATABASE_URL is required")
+    startup_timer = StartupPhaseTimer(
+        log,
+        event="paper_consumer_startup_phase",
+        service="strategy-runner",
+        mode="paper-live-pair",
+        environment=environment,
+    )
+    log.info(
+        "paper_consumer_startup_started",
+        mode="paper-live-pair",
+        strategy_name=strategy_name,
+        environment=environment,
+    )
+    startup_timer.mark(
+        "configuration_resolved",
+        poll_interval_seconds=poll_interval_seconds,
+        idle_timeout_seconds=idle_timeout_seconds,
+        batch_size=batch_size,
+        max_states=max_states,
+    )
     health = LocalHealthWriter.from_environment()
     health_callback = (
         None
@@ -1437,6 +1483,7 @@ def paper_live_pair_command(
         max_states=max_states,
         batch_size=batch_size,
     )
+    startup_timer.mark("market_state_source_constructed")
     compression_breakout = CompressionBreakoutConfig(
         compression_window_buckets=compression_window_buckets,
         max_range_width_pct=Decimal(max_range_width_pct),
@@ -1482,7 +1529,9 @@ def paper_live_pair_command(
         ),
         identity=fixed_identity or candle_identity,
     )
+    startup_timer.mark("strategy_constructed")
     repository = build_paper_daemon_repository(resolved_database_url)
+    startup_timer.mark("artifact_repository_constructed")
     account_specs: list[_PairedAccountSpec] = []
     if fixed_run_id is not None:
         if fixed_identity is None:
@@ -1646,6 +1695,7 @@ def paper_live_pair_command(
             entry_symbol_loader=entry_symbol_loader,
             candle_source=candle_source,
             on_checkpoint_persisted=health_callback,
+            startup_timer=startup_timer,
         )
     states_processed = result.account_results[0].processed_state_count
     halt_reason = result.account_results[0].halt_reason

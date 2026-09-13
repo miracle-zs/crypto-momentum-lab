@@ -18,6 +18,7 @@ from pathlib import Path
 import structlog
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.health import StartupPhaseTimer
 from crypto_momentum_lab.market_data.hub import (
     MarketStateHubReplayUnavailable,
 )
@@ -74,6 +75,7 @@ class ResearchStateCollector:
         sink: ParquetWindowSink | None = None,
         checkpoint_store: CheckpointStore | None = None,
         backfill_source: PostgresMarketStateBackfillSource | None = None,
+        startup_timer: StartupPhaseTimer | None = None,
     ) -> None:
         config.root.mkdir(parents=True, exist_ok=True)
         self._config = config
@@ -99,6 +101,10 @@ class ResearchStateCollector:
             global_pause_free_bytes=config.global_pause_free_bytes,
         )
         self._backfill_source = backfill_source
+        self._startup_timer = startup_timer
+        self._startup_source_consumer_logged = False
+        self._startup_durable_rows_logged = False
+        self._startup_health_ready_logged = False
         self._checkpoint: CollectorCheckpoint | None = None
         self._pending_records: dict[Path, SpoolRecord] = {}
         self._record_committed_keys: dict[Path, set[_STATE_KEY]] = {}
@@ -202,6 +208,12 @@ class ResearchStateCollector:
             pending_records=len(pending),
             last_sequence=self._checkpoint.last_sequence,
         )
+        if self._startup_timer is not None:
+            self._startup_timer.mark(
+                "collector_initialized",
+                pending_record_count=len(pending),
+                last_sequence=self._checkpoint.last_sequence,
+            )
 
     async def ingest(self, collection_batch: CollectionBatch) -> CollectionReceipt:
         """Validate, select, spool, and durably stage one canonical batch."""
@@ -350,6 +362,12 @@ class ResearchStateCollector:
 
     async def _consume_source_once(self) -> None:
         iterator = self._source.batches()
+        if (
+            self._startup_timer is not None
+            and not self._startup_source_consumer_logged
+        ):
+            self._startup_timer.mark("source_consumer_started")
+            self._startup_source_consumer_logged = True
         self._connected = True
         try:
             while not self._stopping:
@@ -472,6 +490,21 @@ class ResearchStateCollector:
 
     async def _apply_flush_result(self, result: SinkFlushResult) -> None:
         self._persisted_rows += result.committed_rows
+        if (
+            result.committed_rows > 0
+            and self._startup_timer is not None
+            and not self._startup_durable_rows_logged
+        ):
+            self._startup_timer.mark(
+                "first_rows_durable",
+                committed_rows=result.committed_rows,
+                last_bucket_start=(
+                    None
+                    if result.last_bucket_start is None
+                    else result.last_bucket_start.isoformat()
+                ),
+            )
+            self._startup_durable_rows_logged = True
         if result.last_bucket_start is not None:
             if (
                 self._last_persisted_bucket is None
@@ -533,12 +566,21 @@ class ResearchStateCollector:
     def _publish_health(self) -> None:
         checkpoint = self._checkpoint
         snapshot = self._capacity_snapshot
+        ready = not self._paused and not self._stopping and snapshot is not None
+        if (
+            ready
+            and self._startup_timer is not None
+            and not self._startup_health_ready_logged
+        ):
+            self._startup_timer.mark(
+                "health_ready",
+                capacity_state=snapshot.state.value if snapshot is not None else None,
+            )
+            self._startup_health_ready_logged = True
         self._health_store.save(
             {
                 "environment": self._config.environment,
-                "ready": not self._paused
-                and not self._stopping
-                and snapshot is not None,
+                "ready": ready,
                 "last_sequence": None
                 if checkpoint is None
                 else checkpoint.last_sequence,

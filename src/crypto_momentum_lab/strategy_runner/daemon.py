@@ -28,6 +28,7 @@ from crypto_momentum_lab.domain.strategy import (
     compare_entry_policy_request,
     summarize_entry_policy_comparisons,
 )
+from crypto_momentum_lab.health import StartupPhaseTimer
 from crypto_momentum_lab.strategy_runner.candle_source import (
     ClosedCandle15mSource,
     ClosedCandleSourceError,
@@ -267,6 +268,7 @@ def run_paired_paper_live_daemon(
         Callable[[MarketState15s], PaperEntryFilterContext | None] | None
     ) = None,
     on_checkpoint_persisted: Callable[[], None] | None = None,
+    startup_timer: StartupPhaseTimer | None = None,
 ) -> PairedPaperLiveDaemonResult:
     """Run multiple exit-only variants from one shared strategy calculation."""
     if len(accounts) < 2:
@@ -296,6 +298,12 @@ def run_paired_paper_live_daemon(
             raise ValueError("paired accounts must share checkpoint phase")
 
     checkpoints = _load_paired_checkpoints(accounts)
+    if startup_timer is not None:
+        startup_timer.mark(
+            "checkpoints_loaded",
+            account_count=len(accounts),
+            checkpoint_count=sum(checkpoint is not None for checkpoint in checkpoints),
+        )
     cooldown_remaining_by_account: list[dict[str, int]] = [
         {}
         if checkpoint is None
@@ -321,6 +329,15 @@ def run_paired_paper_live_daemon(
                 source=source,
                 checkpoint=restored_checkpoint,
             )
+    if startup_timer is not None:
+        startup_timer.mark(
+            "strategy_state_restored",
+            checkpoint_present=restored_checkpoint is not None,
+            market_recovery=(
+                restored_checkpoint is not None
+                and _checkpoint_needs_market_recovery(restored_checkpoint)
+            ),
+        )
 
     pending_by_account: list[list[OrderIntentCandidate]] = []
     open_positions_by_account: list[dict[str, PaperPosition]] = []
@@ -331,7 +348,7 @@ def run_paired_paper_live_daemon(
     candle_history_by_account: list[
         dict[str, deque[ClosedCandle15m]]
     ] = []
-    for account in accounts:
+    for account_index, account in enumerate(accounts):
         config = account.config
         identity = config.run_identity
         if identity is None:
@@ -345,21 +362,38 @@ def run_paired_paper_live_daemon(
                 config.entry_filter,
             )
         )
-        pending_by_account.append(
-            list(
-                _run_async(
-                    account.artifact_repository.load_pending_candidates(
-                        config.run_id
-                    )
+        if startup_timer is not None:
+            startup_timer.mark(
+                "account_run_initialized",
+                account_index=account_index,
+                run_id=config.run_id,
+            )
+        pending_candidates = list(
+            _run_async(
+                account.artifact_repository.load_pending_candidates(
+                    config.run_id
                 )
             )
         )
+        pending_by_account.append(pending_candidates)
+        if startup_timer is not None:
+            startup_timer.mark(
+                "account_pending_candidates_loaded",
+                account_index=account_index,
+                pending_candidate_count=len(pending_candidates),
+            )
         open_positions = _run_async(
             account.artifact_repository.load_open_positions(config.run_id)
         )
         open_positions_by_account.append(
             {position.position_id: position for position in open_positions}
         )
+        if startup_timer is not None:
+            startup_timer.mark(
+                "account_open_positions_loaded",
+                account_index=account_index,
+                open_position_count=len(open_positions),
+            )
         last_position_persisted_at_by_account.append(
             {position.position_id: position.updated_at for position in open_positions}
         )
@@ -401,7 +435,41 @@ def run_paired_paper_live_daemon(
     )
     max_gap_seconds = _strategy_max_gap_seconds(strategy)
 
+    if startup_timer is not None:
+        startup_timer.mark(
+            "consumer_ready_for_states",
+            account_count=len(accounts),
+            pending_candidate_count=sum(
+                len(candidates) for candidates in pending_by_account
+            ),
+            open_position_count=sum(
+                len(positions) for positions in open_positions_by_account
+            ),
+        )
+
+    first_state_received_logged = False
+    first_state_processed_logged = False
+    first_checkpoint_logged = False
+
+    def notify_checkpoint_persisted() -> None:
+        nonlocal first_checkpoint_logged
+        if not first_checkpoint_logged:
+            if startup_timer is not None:
+                startup_timer.mark(
+                    "first_checkpoint_persisted",
+                    account_count=len(accounts),
+                )
+            first_checkpoint_logged = True
+        _notify_checkpoint_persisted(on_checkpoint_persisted)
+
     for state in source:
+        if startup_timer is not None and not first_state_received_logged:
+            startup_timer.mark(
+                "first_market_state_received",
+                symbol=state.symbol,
+                bucket_start=state.bucket_start.isoformat(),
+            )
+            first_state_received_logged = True
         if state.environment != first_config.environment:
             raise ValueError("runtime state environment mismatch")
         if _already_processed(state, restored_checkpoint):
@@ -692,6 +760,13 @@ def run_paired_paper_live_daemon(
         processed += 1
         processed_since_checkpoint += 1
         final_cursor = state.bucket_start
+        if startup_timer is not None and not first_state_processed_logged:
+            startup_timer.mark(
+                "first_market_state_processed",
+                symbol=state.symbol,
+                bucket_start=state.bucket_start.isoformat(),
+            )
+            first_state_processed_logged = True
         checkpoint_due = (
             now >= checkpoint_not_before
             and (
@@ -711,7 +786,7 @@ def run_paired_paper_live_daemon(
                     cooldown_remaining_by_account
                 ),
             )
-            _notify_checkpoint_persisted(on_checkpoint_persisted)
+            notify_checkpoint_persisted()
             checkpoint_dirty = False
             processed_since_checkpoint = 0
             last_checkpoint_saved_at = now
@@ -727,7 +802,7 @@ def run_paired_paper_live_daemon(
             saved_at=saved_at,
             cooldown_remaining_by_account=tuple(cooldown_remaining_by_account),
         )
-        _notify_checkpoint_persisted(on_checkpoint_persisted)
+        notify_checkpoint_persisted()
         last_checkpoint_saved_at = saved_at
 
     return _paired_result(
@@ -1330,16 +1405,30 @@ def run_paper_live_daemon(
         PaperEntryPolicyComparisonObserver | None
     ) = None,
     on_checkpoint_persisted: Callable[[], None] | None = None,
+    startup_timer: StartupPhaseTimer | None = None,
 ) -> PaperLiveDaemonResult:
     checkpoint = _run_async(repository.load_checkpoint(config.run_id))
+    if startup_timer is not None:
+        startup_timer.mark(
+            "checkpoint_loaded",
+            checkpoint_present=checkpoint is not None,
+        )
+    market_recovery = False
     if checkpoint is not None:
         strategy.restore_checkpoint(checkpoint)
         if _checkpoint_needs_market_recovery(checkpoint):
+            market_recovery = True
             _restore_paper_strategy_from_checkpoint(
                 strategy=strategy,
                 source=source,
                 checkpoint=checkpoint,
             )
+    if startup_timer is not None:
+        startup_timer.mark(
+            "strategy_state_restored",
+            checkpoint_present=checkpoint is not None,
+            market_recovery=market_recovery,
+        )
     pending_candidates: list[OrderIntentCandidate] = []
     open_positions: dict[str, PaperPosition] = {}
     last_position_persisted_at: dict[str, datetime] = {}
@@ -1355,11 +1444,21 @@ def run_paper_live_daemon(
                 config.entry_filter,
             )
         )
+        if startup_timer is not None:
+            startup_timer.mark(
+                "artifact_run_initialized",
+                run_id=config.run_id,
+            )
         pending_candidates.extend(
             _run_async(
                 artifact_repository.load_pending_candidates(config.run_id)
             )
         )
+        if startup_timer is not None:
+            startup_timer.mark(
+                "pending_candidates_loaded",
+                pending_candidate_count=len(pending_candidates),
+            )
         loaded_open_positions = _run_async(
             artifact_repository.load_open_positions(config.run_id)
         )
@@ -1372,6 +1471,11 @@ def run_paper_live_daemon(
                 for position in loaded_open_positions
             }
         )
+        if startup_timer is not None:
+            startup_timer.mark(
+                "open_positions_loaded",
+                open_position_count=len(loaded_open_positions),
+            )
         initial_candle_cursors = _initial_candle_cursors(
             loaded_open_positions
         )
@@ -1417,7 +1521,33 @@ def run_paper_live_daemon(
         else None
     )
 
+    if startup_timer is not None:
+        startup_timer.mark(
+            "consumer_ready_for_states",
+            pending_candidate_count=len(pending_candidates),
+            open_position_count=len(open_positions),
+        )
+
+    first_state_received_logged = False
+    first_state_processed_logged = False
+    first_checkpoint_logged = False
+
+    def notify_checkpoint_persisted() -> None:
+        nonlocal first_checkpoint_logged
+        if not first_checkpoint_logged:
+            if startup_timer is not None:
+                startup_timer.mark("first_checkpoint_persisted")
+            first_checkpoint_logged = True
+        _notify_checkpoint_persisted(on_checkpoint_persisted)
+
     for state in source:
+        if startup_timer is not None and not first_state_received_logged:
+            startup_timer.mark(
+                "first_market_state_received",
+                symbol=state.symbol,
+                bucket_start=state.bucket_start.isoformat(),
+            )
+            first_state_received_logged = True
         if state.environment != config.environment:
             raise ValueError("runtime state environment mismatch")
         if _already_processed(state, checkpoint):
@@ -1666,6 +1796,13 @@ def run_paper_live_daemon(
         processed += 1
         processed_since_checkpoint += 1
         final_cursor = state.bucket_start
+        if startup_timer is not None and not first_state_processed_logged:
+            startup_timer.mark(
+                "first_market_state_processed",
+                symbol=state.symbol,
+                bucket_start=state.bucket_start.isoformat(),
+            )
+            first_state_processed_logged = True
 
         should_checkpoint_by_count = (
             processed_since_checkpoint >= config.checkpoint_every_states
@@ -1685,7 +1822,7 @@ def run_paper_live_daemon(
                     now,
                 )
             )
-            _notify_checkpoint_persisted(on_checkpoint_persisted)
+            notify_checkpoint_persisted()
             last_checkpoint_saved_at = now
             checkpoint_dirty = False
             processed_since_checkpoint = 0
@@ -1702,7 +1839,7 @@ def run_paper_live_daemon(
                 saved_at,
             )
         )
-        _notify_checkpoint_persisted(on_checkpoint_persisted)
+        notify_checkpoint_persisted()
         last_checkpoint_saved_at = saved_at
 
     return PaperLiveDaemonResult(

@@ -707,6 +707,7 @@ def test_paper_live_daemon_builds_daemon_config(
     config = calls[0]["config"]
     assert calls[0]["repository"] is repository
     assert calls[0]["artifact_repository"] is repository
+    assert calls[0]["startup_timer"] is not None
     assert calls[0]["entry_symbol_loader"](
         datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
     ) == frozenset({"BTCUSDT"})
@@ -845,6 +846,7 @@ def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
     assert result.exit_code == 0
     assert len(calls) == 1
     assert calls[0]["strategy"] is not None
+    assert calls[0]["startup_timer"] is not None
     assert len(strategy_calls) == 1
     assert strategy_calls[0]["order_flow_min_aggressive_imbalance"] == Decimal(
         "0.40"

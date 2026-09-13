@@ -424,7 +424,9 @@ async def test_run_market_data_keeps_consumer_alive_while_capture_stops(
         config_path: Path,
         *,
         on_durable_state_persisted=None,
+        startup_timer=None,
     ):
+        assert startup_timer is not None
         del config_path, on_durable_state_persisted
         yield runtime
 
