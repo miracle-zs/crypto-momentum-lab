@@ -7,6 +7,12 @@ from datetime import datetime, timedelta
 
 import structlog
 
+from crypto_momentum_lab.health.memory import (
+    cgroup_memory_snapshot,
+    current_rss_bytes,
+    tracemalloc_memory_snapshot,
+)
+
 log = structlog.get_logger()
 
 _CACHE_MAINTENANCE_INTERVAL = timedelta(minutes=1)
@@ -112,6 +118,35 @@ class LiveRuntimeCacheMaintenance:
                 )
 
         self._last_maintenance_at = now
+        log.info(
+            "live_runtime_memory_snapshot",
+            run_id=self._run_id,
+            rss_bytes=current_rss_bytes(),
+            **cgroup_memory_snapshot(),
+            **tracemalloc_memory_snapshot(),
+            protected_symbol_count=len(protected_symbols),
+            evicted_strategy_symbols=len(evicted_strategy_symbols),
+            evicted_telemetry_series=evicted_telemetry_series,
+            buffered_symbol_count=getattr(
+                self._strategy,
+                "buffered_symbol_count",
+                None,
+            ),
+            buffered_state_count=getattr(
+                self._strategy,
+                "buffered_state_count",
+                None,
+            ),
+            telemetry_sample_series_count=(
+                None
+                if self._telemetry is None
+                else getattr(
+                    self._telemetry,
+                    "sample_series_count",
+                    None,
+                )
+            ),
+        )
         if evicted_strategy_symbols or evicted_telemetry_series:
             log.info(
                 "live_runtime_cache_pruned",

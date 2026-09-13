@@ -26,6 +26,23 @@ async def test_market_data_health_monitor_reports_runtime_signals(
             reported.set()
 
     monkeypatch.setattr(observability, "log", FakeLog())
+    monkeypatch.setattr(
+        observability,
+        "cgroup_memory_snapshot",
+        lambda: {
+            "cgroup_memory_current_bytes": 1000,
+            "cgroup_memory_limit_bytes": 2000,
+        },
+    )
+    monkeypatch.setattr(
+        observability,
+        "tracemalloc_memory_snapshot",
+        lambda: {
+            "tracemalloc_enabled": True,
+            "tracemalloc_current_bytes": 123,
+            "tracemalloc_peak_bytes": 456,
+        },
+    )
 
     task = asyncio.create_task(
         observability.monitor_market_data_health(
@@ -59,6 +76,10 @@ async def test_market_data_health_monitor_reports_runtime_signals(
     assert records[0]["received_message_rate"] > 0
     assert records[0]["event_loop_lag_ms"] is not None
     assert records[0]["rss_bytes"] is not None
+    assert records[0]["cgroup_memory_current_bytes"] == 1000
+    assert records[0]["cgroup_memory_limit_bytes"] == 2000
+    assert records[0]["tracemalloc_current_bytes"] == 123
+    assert records[0]["tracemalloc_peak_bytes"] == 456
 
 
 @pytest.mark.asyncio

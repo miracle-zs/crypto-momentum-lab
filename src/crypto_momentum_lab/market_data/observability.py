@@ -1,13 +1,15 @@
 """Low-overhead runtime signals for the market-data process."""
 
 import asyncio
-import os
-import resource
-import sys
 from collections.abc import Callable
 
 import structlog
 
+from crypto_momentum_lab.health.memory import (
+    cgroup_memory_snapshot,
+    current_rss_bytes,
+    tracemalloc_memory_snapshot,
+)
 from crypto_momentum_lab.market_data.binance.connection_pool import (
     BinanceConnectionPoolMetricsSnapshot,
 )
@@ -16,20 +18,6 @@ from crypto_momentum_lab.market_data.capture.service import (
 )
 
 log = structlog.get_logger(__name__)
-
-
-def current_rss_bytes() -> int | None:
-    """Return the current process RSS when the platform exposes it."""
-    try:
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        with open("/proc/self/statm", encoding="ascii") as statm:
-            resident_pages = int(statm.read().split()[1])
-        return resident_pages * page_size
-    except (FileNotFoundError, IndexError, OSError, ValueError):
-        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        if usage <= 0:
-            return None
-        return usage if sys.platform == "darwin" else usage * 1024
 
 
 async def monitor_market_data_health(
@@ -198,6 +186,8 @@ async def monitor_market_data_health(
         log.info(
             "market_data_health_snapshot",
             rss_bytes=current_rss_bytes(),
+            **cgroup_memory_snapshot(),
+            **tracemalloc_memory_snapshot(),
             event_loop_lag_ms=round(maximum_lag_seconds * 1000, 3),
             queue_events=capture.queue_events,
             queue_bytes=capture.queue_bytes,

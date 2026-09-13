@@ -49,6 +49,7 @@ from crypto_momentum_lab.execution_account.risk_control_hub import (
     RiskControlEvent,
     WebSocketRiskControlPublisher,
 )
+from crypto_momentum_lab.health.memory import configure_tracemalloc
 from crypto_momentum_lab.live_rollout.commands import (
     CANCEL_ALL_OPEN_ENTRIES_COMMAND,
     CANCEL_ALL_OPEN_ENTRIES_CONFIRMATION,
@@ -1391,6 +1392,7 @@ def run_command(
         )
     if not confirmation:
         raise typer.BadParameter("--i-understand-this-places-real-orders is required")
+    configure_tracemalloc()
     credentials = _resolve_live_cli_credentials(
         api_key_env=api_key_env,
         api_secret_env=api_secret_env,

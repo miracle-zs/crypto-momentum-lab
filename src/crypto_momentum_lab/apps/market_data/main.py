@@ -28,6 +28,7 @@ from crypto_momentum_lab.domain.market.models import (
 )
 from crypto_momentum_lab.domain.universe.models import UniverseSnapshot
 from crypto_momentum_lab.health import LocalHealthWriter
+from crypto_momentum_lab.health.memory import configure_tracemalloc
 from crypto_momentum_lab.market_data.agg_trade_recovery import (
     AggTradeGapRecoverer,
     agg_trade_gap_quality_event,
@@ -990,6 +991,7 @@ async def run_market_data(
     *,
     stop_requested: asyncio.Event | None = None,
 ) -> None:
+    configure_tracemalloc()
     health = LocalHealthWriter.from_environment()
     health_callback = (
         None

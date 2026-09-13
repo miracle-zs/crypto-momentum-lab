@@ -6,8 +6,11 @@ name: crypto-momentum-lab
 x-default-logging: &default-logging
   driver: json-file
   options:
-    max-size: "10m"
-    max-file: "3"
+    # Keep enough history to diagnose a crash even when the monitor is
+    # restarting the container.  The monitor also copies the stream to the
+    # persistent crash-log directory before recovery.
+    max-size: "20m"
+    max-file: "10"
 
 x-live-account-app: &live-account-app
   image: crypto-momentum-lab-app:${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
@@ -18,6 +21,9 @@ x-live-account-app: &live-account-app
     CML_OBSERVABILITY_DATABASE_URL: ${CML_OBSERVABILITY_DATABASE_URL:-}
     CML_LOCAL_HEALTH_DIR: /run/cml/health
     CML_CODE_COMMIT: ${CML_CODE_COMMIT:?set CML_CODE_COMMIT}
+    # Opt-in memory attribution for a controlled diagnostic restart.
+    CML_TRACEMALLOC: ${CML_TRACEMALLOC:-0}
+    CML_TRACEMALLOC_FRAMES: ${CML_TRACEMALLOC_FRAMES:-1}
     CML_RISK_CONTROL_HUB_TOKEN: ${CML_RISK_CONTROL_HUB_TOKEN:-}
     CML_BINANCE_SHARED_REQUEST_PACER_PATH: /run/cml/binance-rest-pacer/private-read.lock
     CML_BINANCE_SHARED_COMMAND_REQUEST_PACER_PATH: /run/cml/binance-rest-pacer/private-command.lock
