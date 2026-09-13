@@ -127,6 +127,12 @@ class CompressionBreakoutRuntimeStrategy:
 
     def warm_market_state(self, state: MarketState15s) -> None:
         """Rebuild signal buckets without changing cooldown or signal ids."""
+        previous = self._last_processed.get(state.symbol)
+        if previous is None or state.bucket_start >= previous:
+            # A durable bucket without a usable close still advances the
+            # market-state watermark.  Otherwise a symbol retained in an old
+            # checkpoint can look like a live continuity gap after restart.
+            self._last_processed[state.symbol] = state.bucket_start
         if _state_price(state) is None:
             return
         signal_state = self._ingest_signal_state(state)

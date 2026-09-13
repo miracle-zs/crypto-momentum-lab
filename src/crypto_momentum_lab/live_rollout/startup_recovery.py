@@ -349,8 +349,9 @@ async def restore_live_strategy_from_checkpoint(
     recovery_cutover = cutover_at or live_market_state_cutover(
         datetime.now(tz=UTC)
     )
+    checkpoint_symbols = set(checkpoint.last_processed_at_by_symbol)
     if warmup_symbols is None:
-        expected_symbols = set(checkpoint.last_processed_at_by_symbol)
+        expected_symbols = set(checkpoint_symbols)
         expected_symbols.update(
             await load_live_warmup_symbols(
                 repository=repository,
@@ -358,16 +359,24 @@ async def restore_live_strategy_from_checkpoint(
                 observed_at=recovery_cutover,
             )
         )
+        recovery_symbols = expected_symbols
     else:
         expected_symbols = set(
             symbol.strip() for symbol in warmup_symbols if symbol.strip()
         )
+        # The entry universe is intentionally small, but a compact checkpoint
+        # can still contain symbols that were processed before the universe
+        # changed.  Replaying only the current entry symbols leaves those old
+        # watermarks behind; the first post-restart state for a retained symbol
+        # then looks like a continuity gap and restarts the worker.  Rewarm
+        # the union while keeping readiness scoped to the current entry set.
+        recovery_symbols = checkpoint_symbols | expected_symbols
     recovery_bounds = {
         symbol: checkpoint.last_processed_at_by_symbol.get(
             symbol,
             recovery_cutover,
         )
-        for symbol in expected_symbols
+        for symbol in recovery_symbols
     }
     states = await repository.load_recovery_window(
         environment=environment,
@@ -375,7 +384,7 @@ async def restore_live_strategy_from_checkpoint(
         lookback_seconds=live_warmup_seconds(strategy),
         limit=_recovery_state_limit(
             strategy=strategy,
-            symbol_count=len(expected_symbols),
+            symbol_count=len(recovery_symbols),
             lookback_seconds=live_warmup_seconds(strategy),
         ),
         upper_bound=recovery_cutover,

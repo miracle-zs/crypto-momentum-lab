@@ -83,6 +83,20 @@ def test_runtime_records_warmup_and_missing_price_rejections() -> None:
     assert missing.rejections[0].reason is RejectionReason.MISSING_REQUIRED_PRICE
 
 
+def test_runtime_warm_recovery_advances_over_missing_price_bucket() -> None:
+    strategy = _strategy()
+    state = _state(0, close=None)
+
+    strategy.warm_market_state(state)
+
+    checkpoint = strategy.checkpoint(include_market_state_buffers=False)
+
+    assert checkpoint.last_processed_at_by_symbol == {
+        "BTCUSDT": state.bucket_start,
+    }
+    assert checkpoint.payload["buffer_sizes"] == {}
+
+
 def test_runtime_applies_cooldown_after_signal() -> None:
     strategy = _strategy(cooldown_buckets=2)
     first_breakout = (

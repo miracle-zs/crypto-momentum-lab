@@ -1335,6 +1335,63 @@ async def test_compact_checkpoint_recovery_warms_without_evaluating_signals() ->
 
 
 @pytest.mark.asyncio
+async def test_compact_checkpoint_recovery_rewarms_symbols_outside_entry_universe() -> None:
+    now = datetime(2026, 8, 23, 0, 0, tzinfo=UTC)
+    warmed: list[str] = []
+    seen: dict[str, object] = {}
+
+    class Strategy:
+        def required_data(self):
+            return SimpleNamespace(
+                warmup_buckets=1,
+                base_state_interval_seconds=15,
+                required_fields=(),
+            )
+
+        def clear_market_state_buffers(self) -> None:
+            return None
+
+        def warm_market_state(self, state) -> None:
+            warmed.append(state.symbol)
+
+        def checkpoint(self, *, include_market_state_buffers=True):
+            return StrategyCheckpoint(
+                last_processed_at_by_symbol={
+                    "BTCUSDT": now,
+                    "4USDT": now,
+                },
+                warmup_buckets_by_symbol={},
+                cooldown_buckets_remaining_by_symbol={},
+                payload={},
+            )
+
+    class Repository:
+        async def load_recovery_window(self, **kwargs):
+            seen.update(kwargs)
+            return tuple(
+                SimpleNamespace(symbol=symbol, bucket_start=now)
+                for symbol in ("BTCUSDT", "4USDT")
+            )
+
+    await restore_live_strategy_from_checkpoint(
+        strategy=Strategy(),
+        checkpoint=StrategyCheckpoint(
+            last_processed_at_by_symbol={"4USDT": now - timedelta(minutes=30)},
+            warmup_buckets_by_symbol={"4USDT": 0},
+            cooldown_buckets_remaining_by_symbol={},
+            payload={},
+        ),
+        repository=Repository(),
+        environment="research",
+        cutover_at=now,
+        warmup_symbols={"BTCUSDT"},
+    )
+
+    assert set(warmed) == {"BTCUSDT", "4USDT"}
+    assert set(seen["last_processed_at_by_symbol"]) == {"BTCUSDT", "4USDT"}
+
+
+@pytest.mark.asyncio
 async def test_periodic_reconcile_runs_outside_market_state_loop() -> None:
     calls = 0
     delays: list[float] = []
