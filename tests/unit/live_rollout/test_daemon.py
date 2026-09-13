@@ -1319,7 +1319,7 @@ async def test_closed_candle_exit_uses_direct_event_without_rest_loader() -> Non
     assert exchange.plans[0].reduce_only is True
 
 
-async def test_live_daemon_fails_closed_when_delayed_states_skip_buckets() -> None:
+async def test_live_daemon_resets_only_symbol_when_delayed_states_skip_buckets() -> None:
     exchange = PlanAwareExchange()
     stale = replace(
         _state(),
@@ -1336,13 +1336,10 @@ async def test_live_daemon_fails_closed_when_delayed_states_skip_buckets() -> No
         max_gross_exposure=Decimal("100"),
     )
 
-    with pytest.raises(
-        LiveMarketStateContinuityError,
-        match="missing market-state bucket",
-    ):
-        await daemon.run(states())
+    result = await daemon.run(states())
 
-    assert exchange.calls == ["submit"]
+    assert result.halt_reason is None
+    assert exchange.calls == ["submit", "submit"]
 
 
 async def test_live_daemon_reconciles_once_per_market_bucket() -> None:
@@ -1384,14 +1381,11 @@ async def test_live_daemon_resets_strategy_after_market_state_gap() -> None:
 
     daemon = _daemon(exchange=exchange, strategy=strategy)
 
-    with pytest.raises(
-        LiveMarketStateContinuityError,
-        match="missing market-state bucket",
-    ):
-        await daemon.run(states())
+    result = await daemon.run(states())
 
-    assert strategy.reset_symbols == []
-    assert strategy.reset_counts_at_decision == [0]
+    assert result.halt_reason is None
+    assert strategy.reset_symbols == ["BTCUSDT"]
+    assert strategy.reset_counts_at_decision == [0, 1]
 
 
 async def test_live_daemon_resets_each_symbol_after_explicit_market_gap() -> None:

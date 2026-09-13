@@ -190,9 +190,24 @@ class LiveMarketLoop:
                     expected_interval_seconds=state_interval_seconds,
                 )
             except LiveMarketStateContinuityError as error:
-                self.notify_market_state_gap(reason=str(error))
-                await self._checkpoint_coordinator.save_final()
-                raise
+                # A MarketState15s stream is event-driven: a quiet symbol may
+                # have no row for one or more buckets even while the Hub and
+                # the other symbols remain healthy.  Reset only this symbol's
+                # rolling indicators and watermark, then process the current
+                # state as its new warm-up boundary.  Treating the gap as a
+                # process-wide fatal error makes one illiquid symbol restart
+                # every live account and unnecessarily interrupts exits for
+                # unrelated symbols.
+                reset = getattr(self._strategy, "reset_symbol", None)
+                if callable(reset):
+                    reset(state.symbol)
+                self._checkpoint_coordinator.forget_symbol(state.symbol)
+                log.warning(
+                    "live_strategy_symbol_reset_after_market_state_gap",
+                    run_id=self._run_id,
+                    symbol=state.symbol,
+                    reason=str(error),
+                )
             self._runtime_cache.prune(
                 now=self._clock(),
                 current_symbol=state.symbol,
