@@ -1335,7 +1335,7 @@ async def test_compact_checkpoint_recovery_warms_without_evaluating_signals() ->
 
 
 @pytest.mark.asyncio
-async def test_compact_checkpoint_recovery_rewarms_symbols_outside_entry_universe() -> None:
+async def test_compact_checkpoint_recovery_rewarms_outside_entry_universe() -> None:
     now = datetime(2026, 8, 23, 0, 0, tzinfo=UTC)
     warmed: list[str] = []
     seen: dict[str, object] = {}

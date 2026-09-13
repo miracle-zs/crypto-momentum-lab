@@ -56,9 +56,6 @@ from crypto_momentum_lab.live_rollout.exits import (
     ManagedLivePosition,
 )
 from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
-from crypto_momentum_lab.live_rollout.market_loop import (
-    LiveMarketStateContinuityError,
-)
 from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
     ScheduledRiskWindowConfig,
 )
@@ -1319,7 +1316,7 @@ async def test_closed_candle_exit_uses_direct_event_without_rest_loader() -> Non
     assert exchange.plans[0].reduce_only is True
 
 
-async def test_live_daemon_resets_only_symbol_when_delayed_states_skip_buckets() -> None:
+async def test_live_daemon_resets_only_symbol_when_states_skip_buckets() -> None:
     exchange = PlanAwareExchange()
     stale = replace(
         _state(),
