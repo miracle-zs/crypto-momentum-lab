@@ -1439,6 +1439,58 @@ async def test_trade_client_warm_entry_leverage_removes_first_order_round_trip(
     assert requested_paths == ["/fapi/v1/leverage", "/fapi/v1/order"]
 
 
+async def test_trade_client_warms_entry_leverage_in_bounded_batches() -> None:
+    in_flight = 0
+    max_in_flight = 0
+    requested_symbols: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal in_flight, max_in_flight
+        assert request.url.path == "/fapi/v1/leverage"
+        symbol = parse_qs(request.content.decode())["symbol"][0]
+        requested_symbols.append(symbol)
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return httpx.Response(
+            200,
+            json={"symbol": symbol, "leverage": 5},
+        )
+
+    client = BinanceUsdMTradeClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        live_submit_enabled=True,
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        request_interval_seconds=0,
+        command_request_interval_seconds=0,
+        entry_leverage=5,
+    )
+
+    try:
+        await client.warm_entry_leverage(
+            ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT")
+        )
+    finally:
+        await client.aclose()
+
+    assert max_in_flight == 3
+    assert set(requested_symbols) == {
+        "ADAUSDT",
+        "BTCUSDT",
+        "ETHUSDT",
+        "SOLUSDT",
+        "XRPUSDT",
+    }
+
+
 async def test_trade_client_falls_back_two_leverage_levels() -> None:
     requested_paths: list[str] = []
     requested_leverages: list[int] = []

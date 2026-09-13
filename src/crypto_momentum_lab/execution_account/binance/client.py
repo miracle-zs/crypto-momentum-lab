@@ -57,6 +57,7 @@ _DEFAULT_POOL_TIMEOUT_SECONDS = 5.0
 _COMMAND_EXIT_PRIORITY = 0
 _COMMAND_ENTRY_PRIORITY = 10
 _COMMAND_BACKGROUND_PRIORITY = 20
+_ENTRY_LEVERAGE_WARMUP_CONCURRENCY = 3
 _MARGIN_TYPE_ALIASES = {
     "CROSS": "CROSSED",
     "CROSSED": "CROSSED",
@@ -726,8 +727,22 @@ class BinanceUsdMTradeClient(BinanceUsdMPrivateReadClient):
             )
         if self._entry_leverage is None:
             return
-        for symbol in _normalize_symbols(symbols):
-            await self._ensure_entry_leverage(symbol)
+        normalized_symbols = _normalize_symbols(symbols)
+        for offset in range(
+            0,
+            len(normalized_symbols),
+            _ENTRY_LEVERAGE_WARMUP_CONCURRENCY,
+        ):
+            batch = normalized_symbols[
+                offset : offset + _ENTRY_LEVERAGE_WARMUP_CONCURRENCY
+            ]
+            results = await asyncio.gather(
+                *(self._ensure_entry_leverage(symbol) for symbol in batch),
+                return_exceptions=True,
+            )
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
 
     async def warm_entry_margin_type(
         self,
