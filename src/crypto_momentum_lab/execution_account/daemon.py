@@ -225,10 +225,6 @@ class UserDataAccountEventStream(Protocol):
 @dataclass(frozen=True, slots=True)
 class UserDataAccountSyncConfig:
     rest_reconciliation_interval_seconds: float = 300.0
-    # A REST-only historical fill may never be replayed by a newly connected
-    # user-data stream. Keep a bounded, non-blocking retry window so that one
-    # such fill cannot trigger reconnects forever.
-    missing_fill_max_age_seconds: float = _DEFAULT_MISSING_FILL_MAX_AGE_SECONDS
     snapshot_interval_seconds: float = 15.0
     heartbeat_interval_seconds: float = 30.0
     failure_backoff_initial_seconds: float = 10.0
@@ -236,6 +232,10 @@ class UserDataAccountSyncConfig:
     event_queue_size: int = 256
     persistence_queue_size: int = 256
     deferred_event_buffer_size: int = 512
+    # A REST-only historical fill may never be replayed by a newly connected
+    # user-data stream. Keep a bounded, non-blocking retry window so that one
+    # such fill cannot trigger reconnects forever.
+    missing_fill_max_age_seconds: float = _DEFAULT_MISSING_FILL_MAX_AGE_SECONDS
 
     def __post_init__(self) -> None:
         if self.rest_reconciliation_interval_seconds <= 0:
