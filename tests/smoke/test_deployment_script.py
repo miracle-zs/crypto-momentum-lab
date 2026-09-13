@@ -62,6 +62,34 @@ def test_deployment_script_reports_service_level_timings() -> None:
     assert 'log_service_timing "verify"' in script
 
 
+def test_paper_rollout_keeps_gainer10_and_removes_retired_services() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    active_start = script.index("active_paper_services=(")
+    active_end = script.index("compose_project_name=", active_start)
+    active_config = script[active_start:active_end]
+    assert "active_paper_services=(paper-orderflow-gainer10-pair)" in active_config
+    for service in (
+        "paper-orderflow-pair",
+        "paper-b1-gainer100",
+        "paper-b1-gainer100-ema",
+    ):
+        assert service in active_config
+
+    cleanup_start = script.index("stop_retired_paper_services()")
+    cleanup_end = script.index("print_failure_context()", cleanup_start)
+    cleanup = script[cleanup_start:cleanup_end]
+    assert "docker stop --time 20" in cleanup
+    assert 'docker rm "$container_id"' in cleanup
+    assert "com.docker.compose.project" in cleanup
+    assert "archive_container_logs" in cleanup
+
+    cleanup_phase = script.index("deploy_phase=paper-retired-cleanup")
+    consumers_phase = script.index("consumer_candidates=()")
+    assert cleanup_phase < consumers_phase
+    assert 'consumer_candidates+=("${active_paper_services[@]}")' in script
+
+
 def test_live_control_plane_concurrency_is_separate_from_restart_concurrency() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
 

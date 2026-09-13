@@ -8,7 +8,7 @@ import argparse
 import csv
 import json
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -113,6 +113,11 @@ def parse_args() -> argparse.Namespace:
         default=Path("reports/optimization-comparison-20260910-exclude-0800-1000-volume7.html"),
     )
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument(
+        "--report-date",
+        default=None,
+        help="display date for this report version (YYYY-MM-DD)",
+    )
     return parser.parse_args()
 
 
@@ -401,12 +406,19 @@ CUSTOM_STYLE = r"""
       .recommend-card.caution .headline { color: var(--amber); }
       .recommend-card p { color: var(--muted); font-size: 12px; line-height: 1.65; }
       .recommend-card code { margin: 12px 0; }
-      .latest-grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(310px, .55fr); gap: 18px; align-items: start; margin-top: 18px; }
-      .profile-table { min-width: 1050px; }
+      .latest-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; margin-top: 18px; }
+      .latest-grid > .panel { min-width: 0; }
+      .table-wrap { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      .profile-table { width: 1160px; min-width: 1160px; table-layout: fixed; }
+      .profile-table th, .profile-table td { padding-left: 8px; padding-right: 8px; }
+      .profile-table th:nth-child(1), .profile-table td:nth-child(1) { width: 105px; }
+      .profile-table th:nth-child(2), .profile-table td:nth-child(2) { width: 310px; }
+      .profile-table th:nth-child(3), .profile-table td:nth-child(3) { width: 85px; }
+      .profile-table th:nth-child(n + 4), .profile-table td:nth-child(n + 4) { width: 93px; }
       .profile-table th, .profile-table td { white-space: nowrap; }
       .profile-table .selected-row { background: rgba(25, 123, 105, .08); }
       .profile-table .recommend-row { background: rgba(183, 122, 28, .08); }
-      .profile-table td.config { text-align: left; color: var(--muted); }
+      .profile-table td.config { text-align: left; color: var(--muted); font-size: 11px; }
       .profile-badge { display: inline-block; margin-right: 6px; padding: 2px 5px; border-radius: 999px; background: var(--ink); color: var(--paper); font: 500 10px var(--mono); }
       .profile-badge.risk { background: var(--teal); }
       .account-grid { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 16px; }
@@ -773,14 +785,44 @@ BODY_TEMPLATE = r"""
 def build_html(args: argparse.Namespace) -> str:
     payload, curves = build_payload(args)
     template = args.template.read_text(encoding="utf-8")
+    report_date = args.report_date
+    if report_date is None:
+        report_date = datetime.now(tz=UTC).date().isoformat()
+    try:
+        parsed_report_date = datetime.strptime(report_date, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise SystemExit("--report-date must use YYYY-MM-DD") from exc
+    previous_date = (parsed_report_date - timedelta(days=1)).isoformat()
+    two_back_date = (parsed_report_date - timedelta(days=2)).isoformat()
+    current_compact = report_date.replace("-", "")
+    previous_compact = previous_date.replace("-", "")
+    two_back_compact = two_back_date.replace("-", "")
     head = template.split("<body>", 1)[0]
     head = head.replace(
         "<title>新增数据后的参数回放对比</title>",
+        f"<title>完整回补后的七维联合寻优 · {report_date}</title>",
+        1,
+    )
+    head = head.replace(
         "<title>完整回补后的七维联合寻优 · 2026-09-10</title>",
+        f"<title>完整回补后的七维联合寻优 · {report_date}</title>",
         1,
     )
     head = head.replace("</head>", CUSTOM_STYLE + "</head>", 1)
-    body = BODY_TEMPLATE.replace(
+    body_template = BODY_TEMPLATE.replace(
+        f'<a href="optimization-comparison-{two_back_compact}-exclude-0800-1000-volume7.html">上一轮 · {two_back_date}</a>',
+        f'<a href="optimization-comparison-{previous_compact}-exclude-0800-1000-volume7.html">上一轮 · {previous_date}</a>',
+        1,
+    ).replace(
+        '<a href="optimization-comparison-20260910-exclude-0800-1000-volume7.html" aria-current="page">本轮 · 2026-09-10</a>',
+        f'<a href="optimization-comparison-{current_compact}-exclude-0800-1000-volume7.html" aria-current="page">本轮 · {report_date}</a>',
+        1,
+    ).replace(
+        "LOCAL RESEARCH REPLAY / 2026-09-10 · 七维联合",
+        f"LOCAL RESEARCH REPLAY / {report_date} · 七维联合",
+        1,
+    )
+    body = body_template.replace(
         "__REPORT__", json.dumps(payload, ensure_ascii=False, separators=(",", ":")), 1
     ).replace(
         "__CURVES__", json.dumps(curves, ensure_ascii=False, separators=(",", ":")), 1

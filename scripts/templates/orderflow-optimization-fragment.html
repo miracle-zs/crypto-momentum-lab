@@ -1,0 +1,307 @@
+<div id="orderflow-optimization" aria-label="Order-flow impulse parameter optimization visualization">
+  <style>
+    #orderflow-optimization {
+      --foreground: light-dark(#17202a, #edf2f7);
+      --muted: light-dark(#5b6672, #aab6c3);
+      --border: light-dark(#cbd5df, #455463);
+      --viz-series-1: light-dark(#1769aa, #63b3ed);
+      --viz-series-2: light-dark(#b5482f, #f28f79);
+      --viz-series-3: light-dark(#2f855a, #68d391);
+      --popover: light-dark(#ffffff, #1c2733);
+      --popover-foreground: light-dark(#17202a, #edf2f7);
+      display: block;
+      color: var(--foreground);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 12px;
+      line-height: 1.35;
+      width: 100%;
+    }
+
+    #orderflow-optimization .viz-title {
+      color: var(--foreground);
+      font-size: 16px;
+      font-weight: 650;
+      margin: 0 0 6px;
+    }
+
+    #orderflow-optimization .viz-subtitle {
+      color: var(--muted);
+      margin: 0 0 8px;
+    }
+
+    #orderflow-optimization .viz-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 14px;
+      margin: 0 0 8px;
+    }
+
+    #orderflow-optimization .viz-legend button {
+      align-items: center;
+      background: transparent;
+      border: 0;
+      color: var(--foreground);
+      cursor: pointer;
+      display: inline-flex;
+      font: inherit;
+      gap: 5px;
+      padding: 0;
+    }
+
+    #orderflow-optimization .viz-legend button[aria-pressed="false"] {
+      color: var(--muted);
+      text-decoration: line-through;
+    }
+
+    #orderflow-optimization .swatch {
+      background: var(--swatch);
+      display: inline-block;
+      height: 3px;
+      width: 16px;
+    }
+
+    #orderflow-optimization svg {
+      display: block;
+      height: auto;
+      overflow: visible;
+      width: 100%;
+    }
+
+    #orderflow-optimization text {
+      fill: var(--foreground);
+      font-size: 12px;
+    }
+
+    #orderflow-optimization .muted {
+      fill: var(--muted);
+    }
+
+    #orderflow-optimization .frame,
+    #orderflow-optimization .grid-line {
+      fill: none;
+      stroke: var(--border);
+      stroke-width: 1;
+    }
+
+    #orderflow-optimization .grid-line {
+      stroke-dasharray: 2 3;
+      opacity: 0.65;
+    }
+
+    #orderflow-optimization .tooltip {
+      background: var(--popover);
+      border: 1px solid var(--border);
+      color: var(--popover-foreground);
+      display: none;
+      max-width: 260px;
+      padding: 6px 8px;
+      pointer-events: none;
+      position: absolute;
+      z-index: 2;
+    }
+  </style>
+
+  <div class="viz-title">Order-flow impulse：参数寻优稳定性</div>
+  <p class="viz-subtitle">验证集最优点与留出集表现、基准曲线，以及固定切片的验证集平均净收益</p>
+  <div class="viz-legend" aria-label="序列图例">
+    <button type="button" aria-pressed="true" data-series="baseline">
+      <span class="swatch" style="--swatch: var(--viz-series-1)"></span>
+      <span>基准</span>
+    </button>
+    <button type="button" aria-pressed="true" data-series="best_validation">
+      <span class="swatch" style="--swatch: var(--viz-series-2)"></span>
+      <span>验证集最优</span>
+    </button>
+  </div>
+
+  <svg id="orderflow-optimization-svg" role="img" aria-label="参数稳定性、权益曲线和参数热力图">
+    <g id="orderflow-optimization-chart"></g>
+  </svg>
+  <div class="tooltip" id="orderflow-optimization-tooltip" role="tooltip"></div>
+
+  <script>
+    (() => {
+      const root = document.getElementById("orderflow-optimization");
+      const svg = document.getElementById("orderflow-optimization-svg");
+      const chart = document.getElementById("orderflow-optimization-chart");
+      const tooltip = document.getElementById("orderflow-optimization-tooltip");
+      const data = __DATA__;
+      const NS = "http://www.w3.org/2000/svg";
+
+      const create = (name, attrs, parent = chart) => {
+        const node = document.createElementNS(NS, name);
+        Object.entries(attrs || {}).forEach(([key, value]) => node.setAttribute(key, String(value)));
+        parent.appendChild(node);
+        return node;
+      };
+
+      const text = (parent, x, y, value, attrs = {}) => create("text", { x, y, ...attrs }, parent).appendChild(document.createTextNode(value));
+      const clear = (node) => { while (node.firstChild) node.removeChild(node.firstChild); };
+      const finite = (value) => Number.isFinite(Number(value));
+      const values = (items, accessor) => items.map(accessor).filter(finite).map(Number);
+      const extent = (items, accessor) => {
+        const current = values(items, accessor);
+        if (!current.length) return [0, 1];
+        return [Math.min(...current), Math.max(...current)];
+      };
+      const padded = (domain, minimumSpan = 1) => {
+        const span = Math.max(domain[1] - domain[0], minimumSpan);
+        const pad = span * 0.12;
+        return [domain[0] - pad, domain[1] + pad];
+      };
+      const scale = (domain, range) => (value) => {
+        const span = domain[1] - domain[0] || 1;
+        return range[0] + (Number(value) - domain[0]) / span * (range[1] - range[0]);
+      };
+      const nearestIndex = (items, value, accessor) => {
+        let best = 0;
+        let distance = Infinity;
+        items.forEach((item, index) => {
+          const next = Math.abs(Number(accessor(item)) - value);
+          if (next < distance) { best = index; distance = next; }
+        });
+        return best;
+      };
+      const fmt = (value, digits = 2) => finite(value) ? Number(value).toFixed(digits) : "—";
+      const showTip = (event, content) => {
+        const bounds = root.getBoundingClientRect();
+        tooltip.innerHTML = content;
+        tooltip.style.display = "block";
+        tooltip.style.left = `${event.clientX - bounds.left + 10}px`;
+        tooltip.style.top = `${event.clientY - bounds.top + 10}px`;
+      };
+      const hideTip = () => { tooltip.style.display = "none"; };
+      const axis = (parent, domain, range, ticks, horizontal, formatter = fmt) => {
+        const converter = scale(domain, range);
+        ticks.forEach((value) => {
+          const position = converter(value);
+          if (horizontal) {
+            create("line", { x1: position, x2: position, y1: range[1], y2: range[1] + 4, class: "frame" }, parent);
+            text(parent, position, range[1] + 18, formatter(value), { "text-anchor": "middle" });
+          } else {
+            create("line", { x1: range[0] - 4, x2: range[0], y1: position, y2: position, class: "frame" }, parent);
+            text(parent, range[0] - 8, position + 4, formatter(value), { "text-anchor": "end" });
+          }
+        });
+        return converter;
+      };
+      const tickValues = (domain, count = 4) => {
+        const span = domain[1] - domain[0] || 1;
+        return Array.from({ length: count }, (_, index) => domain[0] + span * index / (count - 1));
+      };
+      const panel = (x, y, width, height, title) => {
+        const group = create("g", { transform: `translate(${x},${y})` });
+        create("rect", { x: 0, y: 0, width, height, class: "frame", "data-chart-frame": "true" }, group);
+        text(group, 10, 18, title, { "font-weight": "650" });
+        return group;
+      };
+
+      function drawScatter(group, width, height) {
+        const left = 62, right = 16, top = 34, bottom = 42;
+        const plotWidth = width - left - right;
+        const plotHeight = height - top - bottom;
+        const rows = data.top_candidates;
+        const xDomain = padded(extent(rows, (row) => row.validation_mean_net_return_pct), 0.2);
+        const yDomain = padded(extent(rows, (row) => row.holdout_mean_net_return_pct), 0.2);
+        const x = axis(group, xDomain, [left, left + plotWidth], tickValues(xDomain), true, (v) => fmt(v, 1));
+        const y = axis(group, yDomain, [top + plotHeight, top], tickValues(yDomain), false, (v) => fmt(v, 1));
+        tickValues(xDomain).forEach((value) => create("line", { x1: x(value), x2: x(value), y1: top, y2: top + plotHeight, class: "grid-line" }, group));
+        tickValues(yDomain).forEach((value) => create("line", { x1: left, x2: left + plotWidth, y1: y(value), y2: y(value), class: "grid-line" }, group));
+        if (xDomain[0] < 0 && xDomain[1] > 0) create("line", { x1: x(0), x2: x(0), y1: top, y2: top + plotHeight, class: "frame" }, group);
+        if (yDomain[0] < 0 && yDomain[1] > 0) create("line", { x1: left, x2: left + plotWidth, y1: y(0), y2: y(0), class: "frame" }, group);
+        text(group, left + plotWidth / 2, height - 8, "validation mean net return (%)", { class: "axis-title", "data-axis": "x", "text-anchor": "middle" });
+        const yTitle = create("text", { x: 14, y: top + plotHeight / 2, class: "axis-title", "data-axis": "y", "text-anchor": "middle", transform: `rotate(-90 14 ${top + plotHeight / 2})` }, group);
+        yTitle.appendChild(document.createTextNode("holdout mean net return (%)"));
+        rows.forEach((row, index) => {
+          const point = create("circle", { cx: x(row.validation_mean_net_return_pct), cy: y(row.holdout_mean_net_return_pct), r: index < 5 ? 5 : 4, fill: index < 5 ? "var(--viz-series-2)" : "var(--viz-series-1)", "data-chart-hit": "true" }, group);
+          point.addEventListener("pointermove", (event) => showTip(event, `<strong>#${index + 1}</strong><br>验证 ${fmt(row.validation_mean_net_return_pct, 3)}%<br>留出 ${fmt(row.holdout_mean_net_return_pct, 3)}%<br>参数 ${row.impulse_window_buckets}/${row.confirmation_buckets}/${fmt(row.min_return_pct, 2)}/${fmt(row.min_imbalance, 2)}/${fmt(row.min_intensity, 1)}/${row.cooldown_buckets}`));
+          point.addEventListener("pointerleave", hideTip);
+          if (index < 5) text(group, x(row.validation_mean_net_return_pct) + 7, y(row.holdout_mean_net_return_pct) - 6, `#${index + 1}`, { class: "muted" });
+        });
+      }
+
+      function drawEquity(group, width, height) {
+        const left = 62, right = 16, top = 34, bottom = 42;
+        const plotWidth = width - left - right;
+        const plotHeight = height - top - bottom;
+        const rows = data.equity;
+        const xDomain = [0, Math.max(1, rows.length - 1)];
+        const yDomain = padded(extent(rows.flatMap((row) => [row.baseline_cumulative_pnl_usdt, row.best_validation_cumulative_pnl_usdt]), (value) => value), 1);
+        const x = axis(group, xDomain, [left, left + plotWidth], tickValues(xDomain, 4), true, (v) => String(Math.round(v)));
+        const y = axis(group, yDomain, [top + plotHeight, top], tickValues(yDomain, 4), false, (v) => fmt(v, 0));
+        tickValues(yDomain, 4).forEach((value) => create("line", { x1: left, x2: left + plotWidth, y1: y(value), y2: y(value), class: "grid-line" }, group));
+        if (yDomain[0] < 0 && yDomain[1] > 0) create("line", { x1: left, x2: left + plotWidth, y1: y(0), y2: y(0), class: "frame" }, group);
+        text(group, left + plotWidth / 2, height - 8, "chronological event sequence", { class: "axis-title", "data-axis": "x", "text-anchor": "middle" });
+        const yTitle = create("text", { x: 14, y: top + plotHeight / 2, class: "axis-title", "data-axis": "y", "text-anchor": "middle", transform: `rotate(-90 14 ${top + plotHeight / 2})` }, group);
+        yTitle.appendChild(document.createTextNode("cumulative event-study PnL (USDT)"));
+        const lines = [
+          ["baseline", "baseline_cumulative_pnl_usdt", "var(--viz-series-1)"],
+          ["best_validation", "best_validation_cumulative_pnl_usdt", "var(--viz-series-2)"],
+        ];
+        lines.forEach(([name, key, color]) => {
+          const lineGroup = create("g", { "data-series-group": name });
+          const path = rows.map((row, index) => `${index ? "L" : "M"}${x(index)},${y(row[key])}`).join(" ");
+          create("path", { d: path, fill: "none", stroke: color, "stroke-width": 2 }, lineGroup);
+          group.appendChild(lineGroup);
+        });
+        const overlay = create("rect", { x: left, y: top, width: plotWidth, height: plotHeight, fill: "transparent", "data-chart-hit": "true", "data-chart-hover-overlay": "cross-series" }, group);
+        overlay.addEventListener("pointermove", (event) => {
+          const bounds = overlay.getBoundingClientRect();
+          const index = Math.max(0, Math.min(rows.length - 1, Math.round((event.clientX - bounds.left) / bounds.width * (rows.length - 1))));
+          const row = rows[index];
+          showTip(event, `<strong>${row.timestamp.replace("T", " ").replace("+00:00", " UTC")}</strong><br>基准 ${fmt(row.baseline_cumulative_pnl_usdt, 2)} USDT<br>验证集最优 ${fmt(row.best_validation_cumulative_pnl_usdt, 2)} USDT`);
+        });
+        overlay.addEventListener("pointerleave", hideTip);
+      }
+
+      function heatColor(value) {
+        if (!finite(value)) return "var(--border)";
+        return Number(value) >= 0 ? "var(--viz-series-3)" : "var(--viz-series-2)";
+      }
+
+      function drawHeatmap(group, width, height) {
+        const left = 62, right = 16, top = 42, bottom = 54;
+        const plotWidth = width - left - right;
+        const plotHeight = height - top - bottom;
+        const xs = data.heatmap.x_values;
+        const ys = data.heatmap.y_values;
+        const cellWidth = plotWidth / Math.max(1, xs.length);
+        const cellHeight = plotHeight / Math.max(1, ys.length);
+        text(group, left + plotWidth / 2, height - 10, "minimum impulse return threshold (%)", { class: "axis-title", "data-axis": "x", "text-anchor": "middle" });
+        const yTitle = create("text", { x: 14, y: top + plotHeight / 2, class: "axis-title", "data-axis": "y", "text-anchor": "middle", transform: `rotate(-90 14 ${top + plotHeight / 2})` }, group);
+        yTitle.appendChild(document.createTextNode("minimum directional imbalance"));
+        xs.forEach((value, index) => text(group, left + cellWidth * (index + 0.5), top + plotHeight + 18, fmt(value, 2), { "text-anchor": "middle" }));
+        [...ys].reverse().forEach((value, index) => text(group, left - 8, top + cellHeight * (index + 0.5) + 4, fmt(value, 2), { "text-anchor": "end" }));
+        const lookup = new Map(data.heatmap.cells.map((cell) => [`${cell.x}|${cell.y}`, cell]));
+        [...ys].reverse().forEach((yValue, rowIndex) => xs.forEach((xValue, columnIndex) => {
+          const cell = lookup.get(`${xValue}|${yValue}`) || {};
+          const rect = create("rect", { x: left + columnIndex * cellWidth + 1, y: top + rowIndex * cellHeight + 1, width: Math.max(1, cellWidth - 2), height: Math.max(1, cellHeight - 2), fill: heatColor(cell.value), opacity: finite(cell.value) ? Math.min(0.9, 0.28 + Math.abs(Number(cell.value)) * 1.6) : 0.25, "data-chart-hit": "true" }, group);
+          text(group, left + cellWidth * (columnIndex + 0.5), top + cellHeight * (rowIndex + 0.5) + 4, finite(cell.value) ? fmt(cell.value, 2) : "—", { "text-anchor": "middle" });
+          rect.addEventListener("pointermove", (event) => showTip(event, `阈值 ${fmt(xValue, 2)}% / 失衡 ${fmt(yValue, 2)}<br>验证平均净收益 ${fmt(cell.value, 3)}%`));
+          rect.addEventListener("pointerleave", hideTip);
+        }));
+      }
+
+      function draw() {
+        const width = Math.max(320, Math.round(svg.parentElement.getBoundingClientRect().width || 960));
+        const height = 870;
+        svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+        clear(chart);
+        drawScatter(panel(0, 0, width, 250, "1. 参数稳定性：验证集 vs 留出集"), width, 250);
+        drawEquity(panel(0, 270, width, 270, "2. 基准与验证集最优：5 分钟事件研究权益曲线"), width, 270);
+        drawHeatmap(panel(0, 560, width, 280, "3. 固定窗口 / 强度 / 冷却切片：验证集平均净收益 (%)"), width, 280);
+      }
+
+      root.querySelectorAll("button[data-series]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const series = button.dataset.series;
+          const active = button.getAttribute("aria-pressed") === "true";
+          button.setAttribute("aria-pressed", String(!active));
+          root.querySelectorAll(`[data-series-group="${series}"]`).forEach((group) => { group.style.display = active ? "none" : "inline"; });
+        });
+      });
+      draw();
+      if (typeof ResizeObserver !== "undefined") new ResizeObserver(draw).observe(svg.parentElement);
+    })();
+  </script>
+</div>

@@ -756,6 +756,62 @@ class ExitOpportunity:
 
 
 @dataclass(frozen=True, slots=True)
+class OfficialCandle15m:
+    candle_start: int
+    candle_end: int
+    open_price: float
+    close_price: float
+
+
+def read_official_candles(
+    path: Path,
+) -> dict[str, tuple[OfficialCandle15m, ...]]:
+    """Read and validate immutable Binance 15m candles used by the replay."""
+
+    candles: dict[str, list[OfficialCandle15m]] = defaultdict(list)
+    with gzip.open(path, "rt", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            symbol = row["symbol"].strip().upper()
+            candle_start = parse_utc_seconds(row["candle_start"])
+            candle_end = parse_utc_seconds(row["candle_end"])
+            open_price = float(row["open_price"])
+            close_price = float(row["close_price"])
+            if candle_end != candle_start + 15 * 60:
+                raise ValueError(
+                    f"invalid official candle duration for {symbol} at "
+                    f"{iso_utc(candle_start)}"
+                )
+            if open_price <= 0 or close_price <= 0:
+                raise ValueError(
+                    f"invalid official candle price for {symbol} at "
+                    f"{iso_utc(candle_start)}"
+                )
+            candles[symbol].append(
+                OfficialCandle15m(
+                    candle_start=candle_start,
+                    candle_end=candle_end,
+                    open_price=open_price,
+                    close_price=close_price,
+                )
+            )
+
+    output: dict[str, tuple[OfficialCandle15m, ...]] = {}
+    for symbol, values in candles.items():
+        ordered = tuple(sorted(values, key=lambda candle: candle.candle_start))
+        for previous, current in zip(ordered, ordered[1:], strict=False):
+            if current.candle_start != previous.candle_start + 15 * 60:
+                raise ValueError(
+                    f"official candle gap for {symbol}: "
+                    f"{iso_utc(previous.candle_start)} -> "
+                    f"{iso_utc(current.candle_start)}"
+                )
+        output[symbol] = ordered
+    if not output:
+        raise ValueError(f"official candle file is empty: {path}")
+    return output
+
+
+@dataclass(frozen=True, slots=True)
 class Trade:
     candidate_id: str
     family: str
@@ -793,13 +849,63 @@ class ExitIndex:
     partial_15m_bars: int
 
     @classmethod
-    def build(cls, states: SymbolStates) -> ExitIndex:
+    def build(
+        cls,
+        states: SymbolStates,
+        *,
+        official_candles: tuple[OfficialCandle15m, ...] = (),
+    ) -> ExitIndex:
         quote_indices = [
             index for index in range(len(states.at)) if states.valid_quote(index)
         ]
+        # A persisted 15s state contains the completed interval, so its
+        # executable quote is not known at bucket_start.  Keep the quote
+        # timestamp aligned with the closed-state availability boundary.
         quote_known_at = [
             states.at[index] + STATE_INTERVAL_SECONDS for index in quote_indices
         ]
+
+        if official_candles:
+            adverse_long: list[ExitOpportunity] = []
+            adverse_short: list[ExitOpportunity] = []
+            for candle in official_candles:
+                quote_position = bisect.bisect_left(
+                    quote_known_at,
+                    candle.candle_end,
+                )
+                if (
+                    quote_position >= len(quote_indices)
+                    or quote_known_at[quote_position] >= candle.candle_end + 15 * 60
+                ):
+                    # The live fallback asks for only the candle immediately
+                    # preceding the current 15m bucket. If no executable quote
+                    # is observed during that bucket, the candle is not replayed
+                    # later as an old exit event.
+                    continue
+                opportunity = ExitOpportunity(
+                    completed_at=candle.candle_end,
+                    quote_index=quote_indices[quote_position],
+                    quote_known_at=quote_known_at[quote_position],
+                    candle_close=candle.close_price,
+                )
+                if candle.close_price < candle.open_price:
+                    adverse_long.append(opportunity)
+                elif candle.close_price > candle.open_price:
+                    adverse_short.append(opportunity)
+            return cls(
+                quote_indices=quote_indices,
+                quote_known_at=quote_known_at,
+                adverse_long=adverse_long,
+                adverse_short=adverse_short,
+                adverse_long_completed=[
+                    opportunity.completed_at for opportunity in adverse_long
+                ],
+                adverse_short_completed=[
+                    opportunity.completed_at for opportunity in adverse_short
+                ],
+                complete_15m_bars=len(official_candles),
+                partial_15m_bars=0,
+            )
 
         minute_bars: dict[int, dict[int, tuple[int, float, float]]] = defaultdict(dict)
         for index, open_at in enumerate(states.kline_open_at):
@@ -878,6 +984,19 @@ class ExitIndex:
             return None
         return quote_index
 
+    def first_quote_at_or_after_index(
+        self,
+        states: SymbolStates,
+        condition_index: int,
+    ) -> int | None:
+        position = bisect.bisect_left(self.quote_indices, condition_index)
+        if position >= len(self.quote_indices):
+            return None
+        quote_index = self.quote_indices[position]
+        if states.segment[quote_index] != states.segment[condition_index]:
+            return None
+        return quote_index
+
     def quote_at_or_after(self, known_at: int) -> int | None:
         position = bisect.bisect_left(self.quote_known_at, known_at)
         return (
@@ -923,7 +1042,11 @@ def candidate_entry(
     exits: ExitIndex,
     event: CascadeEvent,
     candidate: Candidate,
+    *,
+    entry_latency_buckets: int = 1,
 ) -> Entry | None:
+    if entry_latency_buckets < 0:
+        raise ValueError("entry_latency_buckets must be non-negative")
     condition_index = event.index
     side = "long" if event.direction == "up" else "short"
     segment = states.segment[event.index]
@@ -990,7 +1113,10 @@ def candidate_entry(
         if condition_index < 0:
             return None
 
-    quote_index = exits.first_quote_after_index(states, condition_index)
+    if entry_latency_buckets == 0:
+        quote_index = exits.first_quote_at_or_after_index(states, condition_index)
+    else:
+        quote_index = exits.first_quote_after_index(states, condition_index)
     if quote_index is None:
         return None
     bid = states.bid[quote_index]
@@ -1054,7 +1180,7 @@ def simulate_trade(
     if adverse_is_first:
         assert adverse is not None
         exit_index = adverse.quote_index
-        closed_at = adverse.quote_known_at
+        closed_at = adverse.completed_at
         official_exit_price = adverse.candle_close
         close_reason = "first_adverse_15m"
     elif deadline_quote_index is not None:
@@ -1091,7 +1217,13 @@ def simulate_trade(
     bid = states.bid[exit_index]
     ask = states.ask[exit_index]
     assert bid is not None and ask is not None
-    exit_price = bid if entry.side == "long" else ask
+    exit_price = (
+        official_exit_price
+        if close_reason == "first_adverse_15m" and official_exit_price is not None
+        else bid
+        if entry.side == "long"
+        else ask
+    )
     quantity = POSITION_NOTIONAL / entry.entry_price
     official_price = (
         official_exit_price if official_exit_price is not None else exit_price
@@ -1627,6 +1759,7 @@ def replay_pass(
     collect_coverage: bool = False,
     replication_start: int | None = None,
     memberships: MembershipTimeline | None = None,
+    official_candles_by_symbol: dict[str, tuple[OfficialCandle15m, ...]] | None = None,
 ) -> tuple[Coverage, set[tuple[str, str, int]]]:
     coverage = Coverage()
     replication: set[tuple[str, str, int]] = set()
@@ -1637,7 +1770,14 @@ def replay_pass(
     for symbol_number, states in enumerate(
         iter_symbol_states(sorted_states_path), start=1
     ):
-        exits = ExitIndex.build(states)
+        exits = ExitIndex.build(
+            states,
+            official_candles=(
+                ()
+                if official_candles_by_symbol is None
+                else official_candles_by_symbol.get(states.symbol, ())
+            ),
+        )
         if collect_coverage:
             coverage.observe(states, exits)
         detected = detect_events(states)
@@ -1682,7 +1822,13 @@ def replay_pass(
                         *entry_signature,
                     )
                     if trade_key not in trade_cache:
-                        entry = candidate_entry(states, exits, event, candidate)
+                        entry = candidate_entry(
+                            states,
+                            exits,
+                            event,
+                            candidate,
+                            entry_latency_buckets=0,
+                        )
                         trade: Trade | None = None
                         if entry is not None and (
                             memberships is None
@@ -1975,6 +2121,7 @@ def run_replay(
     output_dir: Path,
     *,
     force_prepare: bool = False,
+    official_klines_path: Path | None = None,
 ) -> dict[str, object]:
     output_dir.mkdir(parents=True, exist_ok=True)
     source_path = snapshot_dir / "runtime_market_states_15s.csv.gz"
@@ -1992,6 +2139,11 @@ def run_replay(
     boundaries = SplitBoundaries.from_range(first_at, last_at)
     candidates = ALL_CANDIDATES
     memberships = read_membership_timeline(snapshots_path, memberships_path)
+    official_candles_by_symbol = (
+        None
+        if official_klines_path is None
+        else read_official_candles(official_klines_path)
+    )
     metrics_by_id = {
         candidate.candidate_id: CandidateMetrics(candidate) for candidate in candidates
     }
@@ -2007,6 +2159,7 @@ def run_replay(
         collect_coverage=True,
         replication_start=run_started_at,
         memberships=memberships,
+        official_candles_by_symbol=official_candles_by_symbol,
     )
     actual_signals = read_actual_signals(signals_path, BASELINE_RUN_ID)
     replication = signal_replication_payload(actual_signals, replayed_signals)
@@ -2049,6 +2202,7 @@ def run_replay(
         allowed_splits={"train", "validation"},
         trade_store=store,
         memberships=memberships,
+        official_candles_by_symbol=official_candles_by_symbol,
     )
     store.create_indexes()
     risk_by_id = {
@@ -2093,6 +2247,7 @@ def run_replay(
             metrics_by_id=metrics_by_id,
             trade_store=store,
             memberships=memberships,
+            official_candles_by_symbol=official_candles_by_symbol,
         )
         passed, test_failures = test_passes(metrics_by_id[evaluated.candidate_id])
         if passed:
@@ -2153,6 +2308,14 @@ def run_replay(
         "snapshot_dir": str(snapshot_dir),
         "work_dir": str(work_dir),
         "output_dir": str(output_dir),
+        "official_klines_path": (
+            str(official_klines_path) if official_klines_path is not None else None
+        ),
+        "official_klines_symbols": (
+            len(official_candles_by_symbol)
+            if official_candles_by_symbol is not None
+            else 0
+        ),
         "prepare_manifest": prepare_manifest,
         "coverage": coverage.payload(),
         "memberships": memberships.payload(),
@@ -2171,6 +2334,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--snapshot-dir", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--official-klines-path", type=Path, required=True)
     parser.add_argument("--force-prepare", action="store_true")
     return parser
 
@@ -2182,6 +2346,7 @@ def main() -> None:
         args.work_dir,
         args.output_dir,
         force_prepare=args.force_prepare,
+        official_klines_path=args.official_klines_path,
     )
     print(json.dumps(result["selection"], ensure_ascii=False, indent=2))
 

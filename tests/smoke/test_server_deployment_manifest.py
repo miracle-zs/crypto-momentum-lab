@@ -72,6 +72,13 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
             "/usr/local/bin/cml-local-healthcheck",
             "180",
         ]
+    assert services["paper-orderflow-gainer10-pair"].get("profiles") is None
+    for service in (
+        "paper-orderflow-pair",
+        "paper-b1-gainer100",
+        "paper-b1-gainer100-ema",
+    ):
+        assert services[service]["profiles"] == ["retired-paper"]
     for service in (
         "paper-orderflow-pair",
     ):
@@ -104,12 +111,6 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         if item.strip()
     }
     assert configured_run_ids == {
-        "paper-account-05-orderflow-candle15m-v1",
-        "paper-account-10-orderflow-b2-long-candle15m-v1",
-        "paper-account-12-orderflow-b1-long-candle15m-v1",
-        "paper-account-13-orderflow-b8-long-candle15m-v1",
-        "paper-account-14-orderflow-b1-gainer100-v1",
-        "paper-account-15-orderflow-b1-gainer100-ema-v1",
         "paper-account-16-orderflow-b8-gainer10-imbalance040-v1",
         "paper-account-17-orderflow-b1-gainer10-imbalance040-v1",
     }

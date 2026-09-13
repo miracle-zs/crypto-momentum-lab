@@ -1,7 +1,7 @@
 # Server Paper Deployment
 
-This deployment consumes Binance public USD-M market data and runs two active
-strategy families in paper mode. The default profile does not accept
+This deployment consumes Binance public USD-M market data and runs one active
+strategy family with two paper accounts in paper mode. The default profile does not accept
 Binance credentials and cannot place orders. The opt-in `live` profile is
 documented separately in `small-capital-live-session.md`.
 
@@ -22,21 +22,15 @@ monitoring, while entry signals use the frozen one-minute shadow profile:
 - two closed one-minute buckets for acceptance;
 - 60 one-minute buckets, or 60 minutes, of per-symbol cooldown.
 
-The eight active virtual accounts are isolated by run ID and each starts with
+The two active virtual accounts are isolated by run ID and each starts with
 1,000 USDT:
 
-- `paper-account-05-orderflow-candle15m-v1`: `orderflow_impulse`, existing first adverse 15M close account;
-- `paper-account-10-orderflow-b2-long-candle15m-v1`: B2 long-only signals, first adverse 15M close;
-- `paper-account-12-orderflow-b1-long-candle15m-v1`: B1 long-only signals, entry-price limit for one 15M bar after the first adverse close;
-- `paper-account-13-orderflow-b8-long-candle15m-v1`: B8 long-only signals, entry-price limit for eight 15M bars after the first adverse close.
-- `paper-account-14-orderflow-b1-gainer100-v1`: positive Top100 gainer, long-only, B1 exit;
-- `paper-account-15-orderflow-b1-gainer100-ema-v1`: positive Top100 gainer, long-only, EMA5/EMA10 filter, B1 exit;
 - `paper-account-16-orderflow-b8-gainer10-imbalance040-v1`: positive Top10 gainer, long-only, minimum aggressive imbalance `0.40`, B8 exit;
 - `paper-account-17-orderflow-b1-gainer10-imbalance040-v1`: positive Top10 gainer, long-only, minimum aggressive imbalance `0.40`, B1 exit.
 
-These versioned run IDs replace the previous `0.50`-threshold runs so their
-configuration hashes and performance histories remain separate. The previous
-run IDs are retained for historical analysis.
+The other paper run IDs remain in PostgreSQL for historical analysis, but their
+Compose services use the `retired-paper` profile and are not part of the
+default server stack.
 
 For all `candle_15m` exits, the candle containing the entry is observation-only;
 the first eligible exit candle is the next complete 15-minute candle.
@@ -54,18 +48,15 @@ kept in the database for historical analysis but are no longer active runners.
 No Liquidation trading account is deployed. The preregistered C0/C1/C2 replay
 found no candidate that passed both train and validation gates.
 
-The B1, B2, and B8 filters are applied after the shared baseline Orderflow decision.
-Rejected signals still advance the baseline strategy cooldown, so these accounts
-remain strict subsets of the same signal stream used by the historical filter
-study. Accounts 16 and 17 additionally share one positive Top10 gainer entry
-universe and a `0.40` minimum aggressive imbalance, which makes their
-B8-versus-B1 comparison synchronous.
+The active B1 and B8 filters are applied after the shared baseline Orderflow
+decision. Rejected signals still advance the baseline strategy cooldown, so
+accounts 16 and 17 remain strict subsets of the same signal stream used by the
+historical filter study. They share one positive Top10 gainer entry universe
+and a `0.40` minimum aggressive imbalance, which makes their B8-versus-B1
+comparison synchronous.
 
-The standalone account 14 runner (`paper-account-14-orderflow-b1-gainer100-v1`)
-uses a `0.40` minimum aggressive imbalance and explicitly disables EMA5/EMA10
-entry filters. Account 15 keeps the EMA5/EMA10 filters. Their previous run
-metadata must be migrated or versioned when the strategy configuration hash
-changes; do not silently reuse a mismatched run.
+The retired Top100 and baseline variants remain available in the database for
+comparison, but they are not restarted by the normal deployment path.
 
 ## Deploy
 
@@ -99,8 +90,7 @@ changes; do not silently reuse a mismatched run.
    docker compose --env-file .env.server -f compose.server.yaml up -d --no-deps market-data
    docker compose --env-file .env.server -f compose.server.yaml ps market-data
    docker compose --env-file .env.server -f compose.server.yaml up -d --no-deps \
-     paper-orderflow-pair paper-orderflow-gainer10-pair \
-     paper-b1-gainer100 paper-b1-gainer100-ema
+     paper-orderflow-gainer10-pair
    ```
 
    Do not run the final command until `market-data` reports `healthy`. Each
@@ -132,8 +122,8 @@ changes; do not silently reuse a mismatched run.
 ### Deployment timing and efficient verification
 
 The 2026-09-08 deployment took approximately 13 minutes end to end, including
-operator checks. Image building took about 82 seconds and recreating the four
-paper containers plus dashboard took about 23 seconds. Paper readiness took
+operator checks. Image building took about 82 seconds and recreating the active
+paper container plus dashboard took about 23 seconds. Paper readiness took
 roughly 2–3 minutes, including the first checkpoint and subsequent probe.
 Repeated serial checks and interactive SSH calls that waited after command
 completion added avoidable time. Total deployment duration is not service
@@ -162,8 +152,7 @@ archive recovery, database load, and checkpoint restoration can take longer.
 ```bash
 docker compose --env-file .env.server -f compose.server.yaml ps
 docker compose --env-file .env.server -f compose.server.yaml logs --tail=200 \
-  market-data paper-orderflow-pair paper-orderflow-gainer10-pair \
-  paper-b1-gainer100 paper-b1-gainer100-ema
+  market-data paper-orderflow-gainer10-pair
 curl -fsS http://127.0.0.1:8765/api/health
 curl -fsS http://127.0.0.1/momentum/api/health
 ```
@@ -202,7 +191,7 @@ use `SIGKILL` for planned deployments.
 
 The remote console is available at `https://<server>/momentum/`. The
 exchange-account panel remains empty because this stack intentionally has no
-Binance private-account credentials; the five active paper-account panels
+Binance private-account credentials; the two active paper-account panels
 remain active.
 
 ## Paper Artifacts
@@ -217,7 +206,7 @@ immediately using that state's executable bid or ask. This matches the live
 order path. It does not remove the inherent 15-second aggregation delay; a
 signal that depends on a bucket is only known when that bucket closes.
 
-The dashboard separates the five active paper accounts by strategy and exit mode into:
+The dashboard separates the two active paper accounts by strategy and exit mode into:
 
 - account equity and balance history;
 - currently open positions with mark price and unrealized PnL;
@@ -229,15 +218,14 @@ use `查看全部历史` to load its complete closed-trade and lifecycle history
 demand.
 
 Each account starts with 1,000 USDT of virtual equity and opens 100 USDT per
-filled entry. A filled entry opens a paper position. The B0 and B2 accounts use
-the first adverse completed 15-minute candle as their primary exit. B1 and B8
-first close profitably at the warning candle's official close (or the current
-executable mark if it has recovered into net profit). Only a net-losing warning
-arms a reduce-only recovery limit at 0.58% above entry for long positions (or
-0.58% below entry for short positions); a quote touching that limit closes at
-the executable quote, and otherwise the account exits at the first executable
-mark on the one-bar or eight-bar timeout. All retain the existing 24-hour
-maximum-holding safeguard.
+filled entry. A filled entry opens a paper position. The active B1 and B8
+accounts first close profitably at the warning candle's official close (or the
+current executable mark if it has recovered into net profit). Only a net-losing
+warning arms a reduce-only recovery limit at 0.58% above entry for long
+positions (or 0.58% below entry for short positions); a quote touching that
+limit closes at the executable quote, and otherwise the account exits at the
+first executable mark on the one-bar or eight-bar timeout. Both retain the
+existing 24-hour maximum-holding safeguard.
 
 PnL includes both entry and exit taker fees. All paper accounts evaluate the
 closed state's trade close, rather than intrabucket high/low.

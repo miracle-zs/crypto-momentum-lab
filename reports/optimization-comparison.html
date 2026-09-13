@@ -54,6 +54,49 @@
       padding: 42px 0 64px;
     }
 
+    .version-nav {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0 0 22px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255, 252, 246, 0.52);
+      box-shadow: 0 6px 18px var(--shadow);
+    }
+
+    .version-nav-label {
+      padding: 0 7px 0 9px;
+      color: var(--muted);
+      font: 500 11px/1.4 var(--mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .version-nav a {
+      border: 1px solid transparent;
+      border-radius: 999px;
+      color: var(--muted);
+      padding: 7px 11px;
+      text-decoration: none;
+      font: 500 12px var(--mono);
+      transition: 160ms ease;
+    }
+
+    .version-nav a:hover,
+    .version-nav a:focus-visible {
+      border-color: var(--line-strong);
+      color: var(--ink);
+      outline: none;
+    }
+
+    .version-nav a[aria-current="page"] {
+      background: var(--ink);
+      color: var(--paper);
+    }
+
     .masthead {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(230px, 0.48fr);
@@ -531,6 +574,13 @@
 </head>
 <body>
   <main class="shell" id="comparison-app">
+    <nav class="version-nav" aria-label="报告版本">
+      <span class="version-nav-label">报告版本</span>
+      <a href="optimization-comparison.html" aria-current="page">历史版 · 2026-09-06</a>
+      <a href="optimization-comparison-20260907.html">本轮 · 2026-09-07</a>
+      <a href="optimization-comparison-20260909.html">最新完整回补 · 2026-09-09</a>
+      <a href="optimization-comparison-index.html">版本索引</a>
+    </nav>
     <header class="masthead">
       <div>
         <div class="eyebrow">LOCAL RESEARCH REPLAY / 2026-09-06</div>
@@ -624,11 +674,11 @@
           </div>
           <div class="config-row">
             <label>实盘 acc02 参数</label>
-            <code id="account-2-config">2 / 1 / 0.50% / 0.50 / 3.0 / 0</code>
+            <code id="account-2-config">2 / 1 / 0.50% / 0.60 / 2.0 / 0</code>
           </div>
           <div class="config-row">
             <label>实盘 acc03 参数</label>
-            <code id="account-3-config">2 / 1 / 0.50% / 0.50 / 2.0 / 0</code>
+            <code id="account-3-config">3 / 1 / 1.50% / 0.30 / 2.0 / 0</code>
           </div>
           <div class="config-row">
             <label>上一轮推荐参数</label>
