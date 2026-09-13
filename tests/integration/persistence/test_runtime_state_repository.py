@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import delete
@@ -82,6 +83,96 @@ async def test_conflicting_closed_state_fails(
             source_watermark_at=datetime(2026, 7, 3, 0, 0, 45, tzinfo=UTC),
             sequence_range=RuntimeStateSequenceRange(1, 1),
         )
+
+
+async def test_synthetic_duplicate_does_not_replace_event_backed_state(
+    runtime_state_repository: PostgresRuntimeMarketStateRepository,
+) -> None:
+    state = fixture_state("BTCUSDT", 0)
+    synthetic = replace(
+        state,
+        open_price=None,
+        high_price=None,
+        low_price=None,
+        close_price=None,
+        trade_count=0,
+        trade_notional=Decimal("0"),
+        aggressive_buy_notional=Decimal("0"),
+        aggressive_sell_notional=Decimal("0"),
+        last_bid_price=None,
+        last_ask_price=None,
+        spread=None,
+        midpoint=None,
+        mark_price=None,
+        source_event_count=0,
+        first_received_at=None,
+        last_received_at=None,
+    )
+
+    await runtime_state_repository.save_closed_states(
+        (state,),
+        source_watermark_at=datetime(2026, 7, 3, 0, 0, 45, tzinfo=UTC),
+        sequence_range=RuntimeStateSequenceRange(1, 3),
+    )
+    await runtime_state_repository.save_closed_states(
+        (synthetic,),
+        source_watermark_at=datetime(2026, 7, 3, 0, 1, tzinfo=UTC),
+        sequence_range=RuntimeStateSequenceRange(),
+    )
+
+    rows = await runtime_state_repository.load_after(
+        environment="research",
+        cursor=RuntimeStateCursor(),
+        limit=10,
+    )
+
+    assert rows[0].trade_count == state.trade_count
+    assert rows[0].close_price == state.close_price
+
+
+async def test_event_backed_state_replaces_synthetic_duplicate(
+    runtime_state_repository: PostgresRuntimeMarketStateRepository,
+) -> None:
+    state = fixture_state("BTCUSDT", 0)
+    synthetic = replace(
+        state,
+        open_price=None,
+        high_price=None,
+        low_price=None,
+        close_price=None,
+        trade_count=0,
+        trade_notional=Decimal("0"),
+        aggressive_buy_notional=Decimal("0"),
+        aggressive_sell_notional=Decimal("0"),
+        last_bid_price=None,
+        last_ask_price=None,
+        spread=None,
+        midpoint=None,
+        mark_price=None,
+        source_event_count=0,
+        first_received_at=None,
+        last_received_at=None,
+    )
+
+    await runtime_state_repository.save_closed_states(
+        (synthetic,),
+        source_watermark_at=datetime(2026, 7, 3, 0, 0, 45, tzinfo=UTC),
+        sequence_range=RuntimeStateSequenceRange(),
+    )
+    await runtime_state_repository.save_closed_states(
+        (state,),
+        source_watermark_at=datetime(2026, 7, 3, 0, 1, tzinfo=UTC),
+        sequence_range=RuntimeStateSequenceRange(1, 3),
+    )
+
+    rows = await runtime_state_repository.load_after(
+        environment="research",
+        cursor=RuntimeStateCursor(),
+        limit=10,
+    )
+
+    assert rows[0].trade_count == state.trade_count
+    assert rows[0].close_price == state.close_price
 
 
 async def test_mark_incomplete_invalidates_existing_runtime_state(

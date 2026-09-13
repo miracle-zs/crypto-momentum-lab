@@ -531,7 +531,53 @@ async def _insert_batch_idempotent(
         existing_values = {name: getattr(existing, name) for name in compare_keys}
         new_values = {name: item[name] for name in compare_keys}
         if not _core_fields_match(existing_values, new_values):
+            incoming_is_synthetic = _is_synthetic_runtime_state_values(item)
+            existing_is_synthetic = _is_synthetic_runtime_state_row(existing)
+            if incoming_is_synthetic and not existing_is_synthetic:
+                # A dense-clock re-materialization can legitimately revisit a
+                # bucket that already has event-backed data.  The event-backed
+                # row is authoritative; never let a zero-event carry-forward
+                # row replace it or poison the durable writer queue.
+                continue
+            if existing_is_synthetic and not incoming_is_synthetic:
+                # If the zero-event row won the race, replace it with the
+                # event-backed state so a later rewarm is lossless.
+                update_values = {
+                    name: value
+                    for name, value in item.items()
+                    if name
+                    not in {"environment", "symbol", "bucket_start", "created_at"}
+                }
+                await session.execute(
+                    update(RuntimeMarketState15sRow)
+                    .where(
+                        RuntimeMarketState15sRow.environment == key[0],
+                        RuntimeMarketState15sRow.symbol == key[1],
+                        RuntimeMarketState15sRow.bucket_start == key[2],
+                        RuntimeMarketState15sRow.source_event_count == 0,
+                        RuntimeMarketState15sRow.input_sequence_min.is_(None),
+                        RuntimeMarketState15sRow.input_sequence_max.is_(None),
+                    )
+                    .values(update_values)
+                )
+                continue
             raise ValueError("runtime market state conflict")
+
+
+def _is_synthetic_runtime_state_values(values: dict[str, object]) -> bool:
+    return (
+        values.get("source_event_count") == 0
+        and values.get("input_sequence_min") is None
+        and values.get("input_sequence_max") is None
+    )
+
+
+def _is_synthetic_runtime_state_row(row: RuntimeMarketState15sRow) -> bool:
+    return (
+        row.source_event_count == 0
+        and row.input_sequence_min is None
+        and row.input_sequence_max is None
+    )
 
 
 def _validate_sequence_range(sequence_range: RuntimeStateSequenceRange) -> None:

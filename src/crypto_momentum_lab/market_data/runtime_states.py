@@ -333,6 +333,7 @@ class ClosedMarketStatePublisher:
         self._last_state_by_symbol: dict[tuple[str, str], MarketState15s] = {}
         self._durable_queue: asyncio.Queue[_DurableCommand | None] | None = None
         self._durable_task: asyncio.Task[None] | None = None
+        self._durable_failure: BaseException | None = None
         self._log = structlog.get_logger()
 
     def set_expected_symbols(self, symbols: Collection[str]) -> None:
@@ -353,6 +354,7 @@ class ClosedMarketStatePublisher:
     async def start(self) -> None:
         if self._durable_task is not None:
             return
+        self._durable_failure = None
         queue: asyncio.Queue[_DurableCommand | None] = asyncio.Queue(
             maxsize=self._config.persistence_queue_size
         )
@@ -498,6 +500,7 @@ class ClosedMarketStatePublisher:
             self._realtime_quote_failure_count += 1
 
     async def mark_incomplete(self, gap: AggTradeGap) -> None:
+        self._raise_if_durable_failed()
         self._incomplete_gap_count += 1
         self._missing_agg_trade_count += gap.missing_count
         previous_bucket = bucket_start_15s(gap.previous_event_at)
@@ -529,6 +532,7 @@ class ClosedMarketStatePublisher:
             await self._durable_queue.put(gap)
 
     async def observe(self, envelope: RawEnvelope) -> None:
+        self._raise_if_durable_failed()
         started_at = time.perf_counter()
         try:
             await self._observe(envelope)
@@ -893,18 +897,28 @@ class ClosedMarketStatePublisher:
         self,
         queue: asyncio.Queue[_DurableCommand | None],
     ) -> None:
-        while True:
-            command = await queue.get()
-            if command is None:
-                queue.task_done()
-                return
-            try:
-                if isinstance(command, AggTradeGap):
-                    await self._persist_gap(command)
-                else:
-                    await self._persist_batch(command)
-            finally:
-                queue.task_done()
+        try:
+            while True:
+                command = await queue.get()
+                if command is None:
+                    queue.task_done()
+                    return
+                try:
+                    if isinstance(command, AggTradeGap):
+                        await self._persist_gap(command)
+                    else:
+                        await self._persist_batch(command)
+                finally:
+                    queue.task_done()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._durable_failure = error
+            self._log.exception(
+                "runtime_state_persistence_worker_failed",
+                error=str(error),
+            )
+            raise
 
     async def _persist_batch(self, batch: _DurableBatch) -> None:
         states, watermark, sequence_range = batch
@@ -927,6 +941,13 @@ class ClosedMarketStatePublisher:
                 return
             except asyncio.CancelledError:
                 raise
+            except ValueError:
+                # Validation and non-mergeable state conflicts are permanent
+                # for this command.  Retrying them forever would leave the
+                # capture loop consuming in-memory data while durable state
+                # silently stops advancing.
+                self._durable_sink_failure_count += 1
+                raise
             except Exception as error:
                 self._durable_sink_failure_count += 1
                 self._log.exception(
@@ -935,6 +956,12 @@ class ClosedMarketStatePublisher:
                     retry_seconds=self._config.persistence_retry_seconds,
                 )
                 await asyncio.sleep(self._config.persistence_retry_seconds)
+
+    def _raise_if_durable_failed(self) -> None:
+        if self._durable_failure is not None:
+            raise RuntimeError(
+                "durable market-state persistence worker failed"
+            ) from self._durable_failure
 
     async def _persist_gap(self, gap: AggTradeGap) -> None:
         while True:

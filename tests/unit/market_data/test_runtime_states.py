@@ -4,6 +4,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
+import pytest
+
 from crypto_momentum_lab.domain.market.models import (
     AggTradeGap,
     CaptureRoute,
@@ -351,6 +353,33 @@ async def test_publisher_durable_write_runs_behind_realtime_fanout() -> None:
         await publisher.stop()
 
     assert len(repository.saved_states) == 2
+
+
+async def test_publisher_fails_closed_after_permanent_durable_write_error() -> None:
+    class FailingRepository(FakeRuntimeStateRepository):
+        async def save_closed_states(self, states, **kwargs) -> None:
+            del states, kwargs
+            raise ValueError("runtime market state conflict")
+
+    publisher = ClosedMarketStatePublisher(
+        repository=FailingRepository(),
+        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=1),
+    )
+    await publisher.start()
+    try:
+        await publisher.observe(fixture_trade(0, price="100", sequence=1))
+        await publisher.observe(fixture_trade(2, price="102", sequence=2))
+        await asyncio.sleep(0)
+
+        with pytest.raises(
+            RuntimeError,
+            match="durable market-state persistence worker failed",
+        ):
+            await publisher.observe(
+                fixture_trade(3, price="103", sequence=3)
+            )
+    finally:
+        await publisher.stop()
 
 
 async def test_publisher_reports_transport_lateness_and_close_thresholds() -> None:
