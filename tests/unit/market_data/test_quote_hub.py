@@ -43,7 +43,7 @@ async def test_realtime_and_durable_clocks_are_independent() -> None:
     repository = _Repository()
     realtime_states = []
 
-    async def realtime_sink(states) -> None:
+    async def realtime_sink(states, entered_symbols=frozenset()) -> None:
         realtime_states.extend(states)
 
     publisher = ClosedMarketStatePublisher(

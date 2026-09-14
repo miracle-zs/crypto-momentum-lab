@@ -83,7 +83,9 @@ class ClosedStateRepository(Protocol):
     async def mark_incomplete(self, gap: AggTradeGap) -> None: ...
 
 
-type RealtimeStateSink = Callable[[tuple[MarketState15s, ...]], Awaitable[None]]
+type RealtimeStateSink = Callable[
+    [tuple[MarketState15s, ...], frozenset[str]], Awaitable[None]
+]
 type RealtimeQuoteSink = Callable[[RealtimeMarketQuote], Awaitable[None]]
 type DurableStatePersistedCallback = Callable[[datetime], None]
 
@@ -698,7 +700,13 @@ class ClosedMarketStatePublisher:
                     )
             if self._realtime_state_sink is not None and realtime_states:
                 try:
-                    await self._realtime_state_sink(realtime_states)
+                    # Hand over the entry churn recorded since the last publish
+                    # so consumers can treat a newly-entered symbol's first
+                    # bucket as a baseline rather than a gap.
+                    await self._realtime_state_sink(
+                        realtime_states,
+                        self.consume_pending_entry_symbols(),
+                    )
                     self._realtime_batch_count += 1
                 except Exception:
                     self._realtime_sink_failure_count += 1

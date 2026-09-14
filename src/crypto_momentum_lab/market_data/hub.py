@@ -270,7 +270,6 @@ class MarketStateHub:
     async def publish(
         self,
         states: tuple[MarketState15s, ...],
-        *,
         entered_symbols: frozenset[str] = frozenset(),
     ) -> None:
         """Publish a closed-state batch without waiting on consumers."""

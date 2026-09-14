@@ -144,6 +144,37 @@ def test_expected_symbols_reports_real_entries_only() -> None:
     assert publisher.consume_pending_entry_symbols() == frozenset({"BTCUSDT"})
 
 
+async def test_realtime_batch_announces_pending_entry_symbols_once() -> None:
+    """The entry handover reaches the sink, and only on the first batch after."""
+
+    batches: list[tuple[object, frozenset[str]]] = []
+
+    async def realtime_sink(states, entered_symbols=frozenset()) -> None:
+        batches.append((states, entered_symbols))
+
+    publisher = ClosedMarketStatePublisher(
+        repository=FakeRuntimeStateRepository(),
+        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+        realtime_state_sink=realtime_sink,
+    )
+
+    # Baseline, then ETHUSDT joins the dense set.
+    publisher.set_expected_symbols(frozenset({"BTCUSDT"}))
+    publisher.set_expected_symbols(frozenset({"BTCUSDT", "ETHUSDT"}))
+
+    await publisher.observe(fixture_trade(0, price="100", sequence=1))
+    await publisher.observe(fixture_trade(16, price="102", sequence=2))
+    await publisher.observe(
+        fixture_trade(16, price="200", sequence=3, symbol="ETHUSDT")
+    )
+
+    assert batches, "expected at least one realtime batch"
+    announced = [entered for _states, entered in batches if "ETHUSDT" in entered]
+    # Announced exactly once: it is consumed, not repeated on every batch.
+    assert len(announced) == 1
+    assert announced[0] == frozenset({"ETHUSDT"})
+
+
 async def test_late_event_for_closed_bucket_is_rejected() -> None:
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
@@ -292,7 +323,7 @@ async def test_publisher_fanout_happens_before_durable_runtime_state_write() -> 
     repository = FakeRuntimeStateRepository()
     events: list[str] = []
 
-    async def realtime_sink(states) -> None:
+    async def realtime_sink(states, entered_symbols=frozenset()) -> None:
         assert states
         events.append("realtime")
 
