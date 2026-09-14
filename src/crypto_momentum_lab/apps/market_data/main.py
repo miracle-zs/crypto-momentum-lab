@@ -113,6 +113,9 @@ app = typer.Typer(no_args_is_help=True)
 log = structlog.get_logger()
 
 _UNIVERSE_REFRESH_TIMEOUT_SECONDS = 120.0
+# Cap the symbol lists on the membership-churn log so a first snapshot (where
+# every symbol looks "added") cannot flood the journal.
+_SYMBOL_LOG_LIMIT = 20
 _MARKET_DATA_STARTUP_GRACE_SECONDS = 120.0
 _MARKET_DATA_STALE_AFTER_SECONDS = 120.0
 _MARKET_DATA_WATCHDOG_INTERVAL_SECONDS = 15.0
@@ -451,6 +454,17 @@ class CaptureUniverseObserver:
         symbols = self._universe_symbols | protected_symbols
         if symbols == self._applied_symbols:
             return
+        # A symbol only produces market-state buckets while it is subscribed, so
+        # a symbol that leaves and later re-enters the monitored set shows up
+        # downstream as a gap.  Record the membership churn here so the live
+        # side can tell "just entered the pool" apart from "buckets were lost".
+        previous_symbols = self._applied_symbols
+        added_symbols = (
+            frozenset() if previous_symbols is None else symbols - previous_symbols
+        )
+        removed_symbols = (
+            frozenset() if previous_symbols is None else previous_symbols - symbols
+        )
         self._generation += 1
         await self._capture.apply_symbols(
             symbols,
@@ -465,7 +479,18 @@ class CaptureUniverseObserver:
             universe=len(self._universe_symbols),
             protected=len(protected_symbols - self._universe_symbols),
             total=len(symbols),
+            added=len(added_symbols),
+            removed=len(removed_symbols),
         )
+        if added_symbols or removed_symbols:
+            log.info(
+                "capture_symbols_changed",
+                generation=self._generation,
+                added=len(added_symbols),
+                removed=len(removed_symbols),
+                added_symbols=sorted(added_symbols)[:_SYMBOL_LOG_LIMIT],
+                removed_symbols=sorted(removed_symbols)[:_SYMBOL_LOG_LIMIT],
+            )
 
 
 async def reconcile_paper_exit_subscriptions(

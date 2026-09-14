@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
+from structlog.testing import capture_logs
 from typer.testing import CliRunner
 
 from crypto_momentum_lab.apps.market_data import main
@@ -658,3 +660,83 @@ async def test_market_data_watchdog_rejects_stale_stream() -> None:
             clock=lambda: now,
             sleeper=no_sleep,
         )
+
+
+async def test_capture_observer_reports_membership_churn() -> None:
+    """Entering/leaving the monitored set must be observable.
+
+    Downstream a symbol looks identical whether it never had a bucket or
+    simply was not subscribed, so the churn has to be recorded where it is
+    actually known.
+    """
+
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def apply_symbols(self, symbols, *, streams, generation) -> None:
+            self.calls.append((symbols, streams, generation))
+
+    first = fixture_snapshot()
+    second = replace(
+        first,
+        memberships=(
+            *first.memberships,
+            TrackedMembership(
+                "ETHUSDT",
+                MembershipStatus.TARGET,
+                RankingSide.GAINER,
+                None,
+            ),
+        ),
+    )
+
+    capture = FakeCapture()
+    observer = main.CaptureUniverseObserver(
+        capture,
+        streams=(CaptureStream.AGG_TRADE,),
+        initial_generation=1,
+    )
+
+    with capture_logs() as logs:
+        await observer.snapshot_updated(first)
+        await observer.snapshot_updated(second)
+
+    churn = [entry for entry in logs if entry["event"] == "capture_symbols_changed"]
+    # The first snapshot establishes the baseline; only the second reports churn.
+    assert len(churn) == 1
+    assert churn[0]["added"] == 1
+    assert churn[0]["removed"] == 0
+    assert churn[0]["added_symbols"] == ["ETHUSDT"]
+    assert churn[0]["removed_symbols"] == []
+
+
+async def test_capture_observer_reports_symbols_leaving_the_set() -> None:
+    """A departing symbol is reported too -- that is the other half of churn."""
+
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def apply_symbols(self, symbols, *, streams, generation) -> None:
+            self.calls.append((symbols, streams, generation))
+
+    first = fixture_snapshot()
+    second = replace(first, memberships=())
+
+    capture = FakeCapture()
+    observer = main.CaptureUniverseObserver(
+        capture,
+        streams=(CaptureStream.AGG_TRADE,),
+        initial_generation=1,
+    )
+
+    with capture_logs() as logs:
+        await observer.snapshot_updated(first)
+        await observer.snapshot_updated(second)
+
+    churn = [entry for entry in logs if entry["event"] == "capture_symbols_changed"]
+    assert len(churn) == 1
+    assert churn[0]["added"] == 0
+    assert churn[0]["removed"] == 1
+    assert churn[0]["removed_symbols"] == ["BTCUSDT"]
