@@ -2084,9 +2084,18 @@ FROM strategy_runtime_events
 WHERE run_id = {run_id} AND event_type = 'market_state_progress';
 SELECT 'market_delay_ms' || E'\\t' || COALESCE(
   (
+    -- Only buckets a real event advanced carry a meaningful delay.  The
+    -- market layer materializes zero-event buckets for quiet symbols so
+    -- consumers see a dense 15-second clock, and every one of those sits at a
+    -- past bucket_end by construction.  Measuring received_at - bucket_end on
+    -- such a bucket reports how old it is, not how late data arrived, which is
+    -- how an 18-minute and a 65-minute "delay" appeared while healthy buckets
+    -- sat at 1.3 seconds.  A feed that genuinely stops is covered by
+    -- market_task_not_alive and the market-data gap counters.
     SELECT details->>'market_delay_ms'
     FROM strategy_runtime_events
     WHERE run_id = {run_id} AND event_type = 'market_state_progress'
+      AND COALESCE((details->>'source_event_count')::int, 0) > 0
     ORDER BY occurred_at DESC
     LIMIT 1
   ), '-1'

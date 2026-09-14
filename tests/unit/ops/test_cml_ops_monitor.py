@@ -611,6 +611,38 @@ def test_memory_stats_prefers_working_set_and_keeps_cgroup_current(
     assert stats.events_max == 12
 
 
+def test_market_delay_reads_only_event_backed_buckets(tmp_path) -> None:
+    """Empty buckets are a dense-clock device, not a latency measurement.
+
+    market-data materializes zero-event buckets for quiet symbols so consumers
+    see a continuous 15-second clock.  Every one of them sits at a past
+    bucket_end, so received_at - bucket_end measures the bucket's age.  The
+    monitor saw 18 and 65 minute "delays" that way while healthy buckets sat at
+    1.3 seconds.
+    """
+
+    class Runner:
+        last_args = None
+
+        def run(self, args, *, timeout_seconds):
+            del timeout_seconds
+            self.last_args = args
+            return ""
+
+    runner = Runner()
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+        runner=runner,
+    )
+
+    monitor._database_state("postgres")
+    sql = str(runner.last_args[-1])
+
+    assert "'source_event_count'" in sql
+    # The filter belongs to the delay lookup and nowhere else.
+    assert sql.count("source_event_count") == 1
+
+
 def test_database_state_parses_postgres_boolean_text(tmp_path) -> None:
     class Runner:
         def run(self, args, *, timeout_seconds):
