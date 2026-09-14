@@ -802,6 +802,8 @@ def evaluate_container_memory_growth(
     growth_bytes: int,
     growth_window_seconds: float,
     metric_source: str,
+    memory_limit_bytes: int | None = None,
+    warning_fraction: float = 1.0,
 ) -> tuple[Alert, ...]:
     """Alert after a sustained container-memory increase over a trend baseline."""
 
@@ -814,8 +816,19 @@ def evaluate_container_memory_growth(
         or required_samples <= 0
         or growth_bytes <= 0
         or current_bytes - baseline_bytes < growth_bytes
+        # A container that just started grows from near-empty to its steady
+        # state, and the trend baseline is reset whenever the container changes
+        # -- so a deploy looks exactly like a leak.  Only treat the trend as a
+        # problem when the container is also approaching its limit; below that
+        # `container_memory_high` is the signal that matters.
+        or (
+            memory_limit_bytes is not None
+            and memory_limit_bytes > 0
+            and current_bytes < memory_limit_bytes * warning_fraction
+        )
     ):
         return ()
+    growth = current_bytes - baseline_bytes
     return (
         Alert(
             "container_memory_growth",
@@ -828,8 +841,13 @@ def evaluate_container_memory_growth(
                 "service": service,
                 "baseline_bytes": baseline_bytes,
                 "current_bytes": current_bytes,
-                "growth_bytes": current_bytes - baseline_bytes,
+                "growth_bytes": growth,
                 "threshold_bytes": growth_bytes,
+                # Human-readable companions: these alerts are triaged on a phone.
+                "baseline_mb": _mib(baseline_bytes),
+                "current_mb": _mib(current_bytes),
+                "growth_mb": _mib(growth),
+                "threshold_mb": _mib(growth_bytes),
                 "growth_window_seconds": growth_window_seconds,
                 "baseline_age_seconds": round(baseline_age_seconds, 3),
                 "consecutive_samples": consecutive_samples,
@@ -838,6 +856,12 @@ def evaluate_container_memory_growth(
             },
         ),
     )
+
+
+def _mib(value: int) -> float:
+    """Return bytes as MiB, rounded for display."""
+
+    return round(value / 1024 / 1024, 1)
 
 
 def evaluate_rss_growth(
@@ -1064,6 +1088,7 @@ class OpsMonitor:
                     now,
                     container_id=snapshot.container_id,
                     metric_source=snapshot.memory_source,
+                    memory_limit_bytes=snapshot.memory_limit_bytes,
                 )
             )
             account_label = live_strategy_accounts.get(snapshot.service)
@@ -2153,6 +2178,7 @@ WHERE p.position_amt IS NULL OR p.position_amt <> 0;
         *,
         container_id: str | None = None,
         metric_source: str,
+        memory_limit_bytes: int | None = None,
     ) -> tuple[Alert, ...]:
         samples_by_service = self._state.setdefault("memory_samples", {})
         if not isinstance(samples_by_service, dict):
@@ -2234,6 +2260,11 @@ WHERE p.position_amt IS NULL OR p.position_amt <> 0;
             growth_bytes=self._config.rss_growth_bytes,
             growth_window_seconds=self._config.rss_growth_window_seconds,
             metric_source=metric_source,
+            memory_limit_bytes=memory_limit_bytes,
+            warning_fraction=rss_warning_fraction_for(
+                service,
+                self._config.rss_warning_fraction,
+            ),
         )
 
     def _compose_prefix(self) -> list[str]:

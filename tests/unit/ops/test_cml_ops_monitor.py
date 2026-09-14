@@ -226,6 +226,76 @@ def test_postgres_warning_override_suppresses_page_cache_noise() -> None:
     )
 
 
+def test_memory_growth_ignores_a_restart_warmup() -> None:
+    """Growing from an empty container to steady state is not a leak.
+
+    This is the real alert: live-strategy-account-3 restarted, the trend
+    baseline was reset to its near-empty startup footprint, and the climb to
+    ~148 MiB looked like 130 MiB of growth -- at 19% of its limit.
+    """
+
+    warmup = {
+        "service": "live-strategy-account-3",
+        "baseline_bytes": 18 * 1024 * 1024,
+        "baseline_age_seconds": 1080.0,
+        "consecutive_samples": 18,
+        "required_samples": 3,
+        "growth_bytes": 64 * 1024 * 1024,
+        "growth_window_seconds": 1800.0,
+        "metric_source": "docker_stats_working_set",
+    }
+
+    # Without a limit to compare against, the old behaviour is unchanged.
+    assert evaluate_container_memory_growth(
+        **warmup,
+        current_bytes=148 * 1024 * 1024,
+    ) != ()
+
+    # With the real limit, 148 MiB of 768 MiB is far from trouble.
+    assert (
+        evaluate_container_memory_growth(
+            **warmup,
+            current_bytes=148 * 1024 * 1024,
+            memory_limit_bytes=768 * 1024 * 1024,
+            warning_fraction=0.75,
+        )
+        == ()
+    )
+
+    # A container genuinely approaching its limit still alerts.
+    alert = evaluate_container_memory_growth(
+        **{
+            **warmup,
+            "baseline_bytes": 600 * 1024 * 1024,
+            "current_bytes": 740 * 1024 * 1024,
+        },
+        memory_limit_bytes=768 * 1024 * 1024,
+        warning_fraction=0.75,
+    )
+    assert [item.name for item in alert] == ["container_memory_growth"]
+
+
+def test_memory_growth_details_include_human_readable_sizes() -> None:
+    """These are triaged on a phone; bytes alone are unreadable."""
+
+    alert = evaluate_container_memory_growth(
+        service="live-strategy",
+        current_bytes=740 * 1024 * 1024,
+        baseline_bytes=600 * 1024 * 1024,
+        baseline_age_seconds=900.0,
+        consecutive_samples=5,
+        required_samples=3,
+        growth_bytes=64 * 1024 * 1024,
+        growth_window_seconds=1800.0,
+        metric_source="docker_stats_working_set",
+    )[0]
+
+    assert alert.details["current_mb"] == 740.0
+    assert alert.details["baseline_mb"] == 600.0
+    assert alert.details["growth_mb"] == 140.0
+    assert alert.details["threshold_mb"] == 64.0
+
+
 def test_container_memory_growth_requires_consecutive_samples() -> None:
     common = {
         "service": "postgres",
@@ -260,6 +330,10 @@ def test_container_memory_growth_requires_consecutive_samples() -> None:
         "consecutive_samples": 3,
         "required_samples": 3,
         "metric_source": "cgroup_memory_current",
+        "baseline_mb": 0.0,
+        "current_mb": 0.0,
+        "growth_mb": 0.0,
+        "threshold_mb": 0.0,
     }
 
 
