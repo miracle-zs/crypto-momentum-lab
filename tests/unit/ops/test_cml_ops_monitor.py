@@ -2,7 +2,7 @@ import argparse
 import json
 import urllib.parse
 import urllib.request
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -16,6 +16,8 @@ from deploy.ops.cml_ops_monitor import (
     PositionObservation,
     SignalObservation,
     _deliver_external_heartbeat,
+    _is_within_start_grace,
+    _parse_started_at,
     _serverchan_endpoint,
     _serverchan_form,
     build_config,
@@ -189,6 +191,46 @@ def test_postgres_gets_a_higher_memory_warning_threshold() -> None:
     assert rss_warning_fraction_for("market-data", 0.75) == 0.75
     # ...including an explicitly configured one.
     assert rss_warning_fraction_for("dashboard", 0.60) == 0.60
+
+
+def test_start_grace_suppresses_alerts_while_a_container_boots() -> None:
+    """A freshly recreated container is booting, not frozen."""
+
+    started = datetime(2026, 9, 14, 2, 45, tzinfo=UTC)
+
+    assert _is_within_start_grace(
+        started,
+        now=started + timedelta(seconds=30),
+        grace_seconds=180.0,
+    )
+    # Past the window -- normal rules apply.
+    assert not _is_within_start_grace(
+        started,
+        now=started + timedelta(seconds=600),
+        grace_seconds=180.0,
+    )
+    # Unknown start time fails open to alerting.
+    assert not _is_within_start_grace(
+        None,
+        now=started,
+        grace_seconds=180.0,
+    )
+    # Disabled grace.
+    assert not _is_within_start_grace(started, now=started, grace_seconds=0)
+
+
+def test_started_at_parses_docker_nanosecond_timestamps() -> None:
+    """Docker reports nanoseconds; the parser must not choke on them."""
+
+    assert _parse_started_at("2026-09-14T02:49:21.322155481Z") == datetime(
+        2026, 9, 14, 2, 49, 21, 322155, tzinfo=UTC
+    )
+    assert _parse_started_at("2026-09-14T02:49:21Z") == datetime(
+        2026, 9, 14, 2, 49, 21, tzinfo=UTC
+    )
+    assert _parse_started_at("") is None
+    assert _parse_started_at("not-a-timestamp") is None
+    assert _parse_started_at(None) is None
 
 
 def test_postgres_warning_override_suppresses_page_cache_noise() -> None:

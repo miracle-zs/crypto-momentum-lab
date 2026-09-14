@@ -51,6 +51,10 @@ _DEFAULT_ALERT_COOLDOWN_SECONDS = 900.0
 _DEFAULT_COMMAND_TIMEOUT_SECONDS = 15.0
 _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS = 900.0
 _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS = 3
+# How long after a container starts lifecycle alerts stay quiet.  Every deploy
+# recreates containers, and a booting container is unhealthy and silent by
+# definition; without this each deploy reports a fake crash.
+_DEFAULT_START_GRACE_SECONDS = 180.0
 # The monitor polls every 60s and the underlying progress signals are themselves
 # sampled on a ~60s cadence, so a 120s budget left only two samples of headroom
 # and flapped on every tail-latency spike.  Measured live medians sit around
@@ -247,6 +251,10 @@ class ContainerSnapshot:
     memory_peak_bytes: int | None = None
     memory_swap_current_bytes: int | None = None
     memory_events_max: int | None = None
+    # When the container started.  One that was just (re)created -- by a deploy
+    # or by anything else -- is legitimately unhealthy and silent for a while,
+    # so lifecycle alerts wait out a grace period before firing.
+    started_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -864,6 +872,46 @@ def _mib(value: int) -> float:
     return round(value / 1024 / 1024, 1)
 
 
+def _is_within_start_grace(
+    started_at: datetime | None,
+    *,
+    now: datetime,
+    grace_seconds: float,
+) -> bool:
+    """Report whether a container is still inside its post-start grace period.
+
+    A container that was just (re)created is legitimately unhealthy and silent
+    while it boots, and every deploy recreates containers -- so lifecycle alerts
+    that fire on "unhealthy" or "no heartbeat" have to wait this out, or each
+    deploy produces a fake crash report.
+    """
+
+    if started_at is None or grace_seconds <= 0:
+        return False
+    age_seconds = (now - started_at).total_seconds()
+    return 0 <= age_seconds < grace_seconds
+
+
+def _parse_started_at(raw: object) -> datetime | None:
+    """Parse Docker's ``State.StartedAt``, tolerating its nanosecond precision."""
+
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip().replace("Z", "+00:00")
+    if "." in text:
+        # Docker reports nanoseconds; fromisoformat wants microseconds.
+        head, _, rest = text.partition(".")
+        fraction, _, offset = rest.partition("+")
+        text = f"{head}.{fraction[:6]}"
+        if offset:
+            text = f"{text}+{offset}"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
 def evaluate_rss_growth(
     *,
     service: str,
@@ -1325,6 +1373,16 @@ class OpsMonitor:
             restart_states.pop(snapshot.service, None)
             return ()
 
+        # A container that was just recreated is booting, not frozen.  Deploys
+        # recreate every live container, so without this each deploy reports a
+        # stale heartbeat and tries to restart a container that is still starting.
+        if _is_within_start_grace(
+            snapshot.started_at,
+            now=datetime.now(tz=UTC),
+            grace_seconds=_DEFAULT_START_GRACE_SECONDS,
+        ):
+            return ()
+
         last_restart_at = state.get("last_restart_at")
         if not isinstance(last_restart_at, int | float) or isinstance(
             last_restart_at, bool
@@ -1627,6 +1685,7 @@ class OpsMonitor:
                     memory_peak_bytes=memory.peak_bytes,
                     memory_swap_current_bytes=memory.swap_current_bytes,
                     memory_events_max=memory.events_max,
+                    started_at=_parse_started_at(state.get("StartedAt")),
                 )
             )
         return tuple(snapshots)
