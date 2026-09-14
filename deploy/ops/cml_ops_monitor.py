@@ -2147,7 +2147,7 @@ SELECT 'live_ready' || E'\\t' || (
       AND account_label = {account_label}
       AND owner = {lease_owner}
       AND state = 'active'
-      AND expires_at > clock_timestamp()
+      AND expires_at > now()
   )
   AND EXISTS (
     SELECT 1 FROM strategy_runtime_checkpoints
@@ -2336,7 +2336,7 @@ SELECT 'signal' || E'\\t' || account_label || E'\\t' || symbol || E'\\t'
 FROM live_strategy_signals
 WHERE account_label IN ({account_sql})
   AND run_id IN ({run_sql})
-  AND source_state_at >= clock_timestamp()
+  AND source_state_at >= now()
     - ({window_seconds} * interval '1 second')
 GROUP BY account_label, symbol, source_state_at, config_hash;
 SELECT 'output' || E'\\t' || run_id || E'\\t' || symbol || E'\\t'
@@ -2351,7 +2351,13 @@ FROM (
   WHERE event_type = 'strategy_output_observed'
     AND run_id IN ({run_sql})
     AND bucket_start IS NOT NULL
-    AND occurred_at >= clock_timestamp()
+    -- now() rather than clock_timestamp(): the planner can fold a stable value
+    -- into an index range condition, but clock_timestamp() is re-evaluated per
+    -- row, so it cannot -- the result is a sequential scan.  Measured on this
+    -- table: 3721 ms / 74,825 pages read with clock_timestamp(), 9 ms / 0
+    -- pages with now().  These queries are single autocommit statements, so
+    -- the two timestamps differ by well under a millisecond.
+    AND occurred_at >= now()
       - ({window_seconds} * interval '1 second')
   ORDER BY run_id, symbol, bucket_start, occurred_at DESC
 ) latest_output;
@@ -2393,7 +2399,7 @@ FROM (
   FROM live_strategy_signals
   WHERE account_label IN ({account_sql})
     AND run_id IN ({run_sql})
-    AND source_state_at >= clock_timestamp()
+    AND source_state_at >= now()
       - ({window_seconds} * interval '1 second')
 ) s
 LEFT JOIN (
@@ -2415,7 +2421,7 @@ LEFT JOIN (
     )) AS fingerprint
   FROM exchange_orders
   WHERE run_id IN ({run_sql})
-    AND created_at >= clock_timestamp()
+    AND created_at >= now()
       - ({window_seconds} * interval '1 second')
   GROUP BY run_id, symbol
 ) o ON o.run_id = s.run_id AND o.symbol = s.symbol;

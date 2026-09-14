@@ -87,6 +87,11 @@ class UniverseEntryRow(Base):
 
     __table_args__ = (
         Index("ix_universe_entries_snapshot_target", "snapshot_id", "is_target"),
+        # The archiver reads min(price_time) and counts rows below the cutoff on
+        # every run.  Without this index the planner has no choice but a
+        # sequential scan: measured 358,052 pages read versus 4 pages and
+        # 0.2 ms with it.
+        Index("ix_universe_entries_price_time", "price_time"),
     )
 
 
