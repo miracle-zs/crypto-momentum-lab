@@ -1009,3 +1009,74 @@ def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(
         alert.name == "live_heartbeat_restart_suppressed:account-2"
         for alert in final_alerts
     )
+
+
+def test_position_divergence_ignores_accounts_on_different_configs() -> None:
+    """Accounts running different strategy configs are not comparable."""
+
+    left = PositionObservation(
+        "primary",
+        "ready",
+        10,
+        "BTCUSDT",
+        "BOTH",
+        Decimal("1"),
+        "config-a",
+    )
+    right = PositionObservation(
+        "account-2",
+        "ready",
+        10,
+        "BTCUSDT",
+        "BOTH",
+        Decimal("5"),
+        "config-b",
+    )
+
+    # Different configs: the quantity gap is expected, so no alert.
+    assert (
+        evaluate_position_divergence((left, right), stale_after_seconds=60) == ()
+    )
+
+    same_config = PositionObservation(
+        "account-2",
+        "ready",
+        10,
+        "BTCUSDT",
+        "BOTH",
+        Decimal("5"),
+        "config-a",
+    )
+    alerts = evaluate_position_divergence(
+        (left, same_config),
+        stale_after_seconds=60,
+    )
+    assert [alert.name for alert in alerts] == ["live_position_divergence"]
+    assert alerts[0].details["differences"][0]["strategy_config_hash"] == "config-a"
+
+
+def test_position_divergence_groups_unknown_configs_apart() -> None:
+    """An unknown (empty) config hash must not be compared with a known one."""
+
+    known = PositionObservation(
+        "primary",
+        "ready",
+        10,
+        "BTCUSDT",
+        "BOTH",
+        Decimal("1"),
+        "config-a",
+    )
+    unknown = PositionObservation(
+        "account-2",
+        "ready",
+        10,
+        "BTCUSDT",
+        "BOTH",
+        Decimal("9"),
+    )
+
+    assert (
+        evaluate_position_divergence((known, unknown), stale_after_seconds=60)
+        == ()
+    )

@@ -281,8 +281,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 2m
-    mem_limit: 512m
-    memswap_limit: 768m
+    mem_limit: 768m
+    memswap_limit: 1024m
 
   live-strategy-account-3:
     <<: *live-account-app
@@ -410,8 +410,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 2m
-    mem_limit: 512m
-    memswap_limit: 768m
+    mem_limit: 768m
+    memswap_limit: 1024m
 
   live-strategy-account-4:
     <<: *live-account-app
@@ -539,5 +539,5 @@ services:
       timeout: 10s
       retries: 3
       start_period: 2m
-    mem_limit: 512m
-    memswap_limit: 768m
+    mem_limit: 768m
+    memswap_limit: 1024m

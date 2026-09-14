@@ -305,6 +305,9 @@ class PositionObservation:
     symbol: str = ""
     position_side: str = ""
     position_amt: Decimal = Decimal("0")
+    # Accounts are only comparable when they run the same strategy config; an
+    # empty hash means "unknown" and keeps the row in its own group.
+    strategy_config_hash: str = ""
 
 
 def evaluate_signal_divergence(
@@ -385,7 +388,7 @@ def evaluate_position_divergence(
     if quantity_tolerance < 0:
         raise ValueError("quantity_tolerance must not be negative")
 
-    positions_by_account: dict[str, dict[tuple[str, str], Decimal]] = {}
+    positions_by_account: dict[tuple[str, str], dict[tuple[str, str], Decimal]] = {}
     freshness_by_account: dict[str, tuple[str, float | None]] = {}
     for observation in observations:
         if not observation.account_label.strip():
@@ -403,7 +406,7 @@ def evaluate_position_divergence(
         ):
             continue
         account_positions = positions_by_account.setdefault(
-            observation.account_label,
+            (observation.account_label, observation.strategy_config_hash),
             {},
         )
         if not observation.symbol.strip() or not observation.position_side.strip():
@@ -415,12 +418,16 @@ def evaluate_position_divergence(
             account_positions.get(key, Decimal("0")) + observation.position_amt
         )
 
-    account_labels = tuple(sorted(positions_by_account))
+    account_groups = tuple(sorted(positions_by_account))
     differences: list[dict[str, object]] = []
-    for index, left_label in enumerate(account_labels):
-        for right_label in account_labels[index + 1 :]:
-            left = positions_by_account[left_label]
-            right = positions_by_account[right_label]
+    for index, left_group in enumerate(account_groups):
+        for right_group in account_groups[index + 1 :]:
+            # Only accounts running the SAME strategy config are comparable;
+            # comparing across configs produces false divergence.
+            if left_group[1] != right_group[1]:
+                continue
+            left = positions_by_account[left_group]
+            right = positions_by_account[right_group]
             keys = sorted(set(left) | set(right))
             quantity_differences = []
             for symbol, position_side in keys:
@@ -439,7 +446,8 @@ def evaluate_position_divergence(
             if quantity_differences:
                 differences.append(
                     {
-                        "accounts": [left_label, right_label],
+                        "accounts": [left_group[0], right_group[0]],
+                        "strategy_config_hash": left_group[1],
                         "quantity_differences": quantity_differences[:50],
                     }
                 )
@@ -2015,6 +2023,7 @@ WHERE p.position_amt IS NULL OR p.position_amt <> 0;
             tuple[str, str, str, str], SignalObservation
         ] = {}
         positions: list[PositionObservation] = []
+        config_by_account: dict[str, str] = {}
         for line in output.splitlines():
             parts = line.split("\t")
             if not parts:
@@ -2038,6 +2047,7 @@ WHERE p.position_amt IS NULL OR p.position_amt <> 0;
                 account_label = account_by_run_id.get(parts[1])
                 if account_label is None:
                     continue
+                config_by_account.setdefault(account_label, parts[4])
                 key = (account_label, parts[2], parts[3], parts[4])
                 previous = signals_by_key.get(key)
                 signals_by_key[key] = SignalObservation(
@@ -2063,6 +2073,21 @@ WHERE p.position_amt IS NULL OR p.position_amt <> 0;
                         position_amt=Decimal(parts[6]),
                     )
                 )
+        # Position rows carry no strategy config hash of their own (the
+        # snapshot table has no such column), so borrow it from the same
+        # account's signal rows.  Without this, accounts running different
+        # strategies would be compared against each other.
+        if config_by_account:
+            positions = [
+                replace(
+                    observation,
+                    strategy_config_hash=config_by_account.get(
+                        observation.account_label,
+                        "",
+                    ),
+                )
+                for observation in positions
+            ]
         return tuple(signals_by_key.values()), tuple(positions)
 
     def _memory_pressure_alerts(

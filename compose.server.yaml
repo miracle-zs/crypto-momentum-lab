@@ -648,9 +648,11 @@ services:
       retries: 3
       start_period: 2m
     stop_grace_period: 90s
-    # Observed usage is below 200 MiB; 1 GiB was over-provisioned on this host.
-    mem_limit: 512m
-    memswap_limit: 768m
+    # Startup observed below 200 MiB, so this was trimmed to 512 MiB.  In
+    # steady state the working set now sits near 400 MiB (77% of that budget),
+    # which keeps tripping container_memory_high; give it real headroom again.
+    mem_limit: 768m
+    memswap_limit: 1024m
 
   dashboard:
     <<: *app
