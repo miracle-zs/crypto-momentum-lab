@@ -25,6 +25,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
+from deploy.ops.maintenance_window import (
+    default_maintenance_path,
+    now_utc,
+    read_maintenance_window,
+)
+
 _DEFAULT_SERVICES = (
     "postgres",
     "market-data",
@@ -892,6 +898,25 @@ def _is_within_start_grace(
     return 0 <= age_seconds < grace_seconds
 
 
+# Lifecycle alerts describe container churn, and a deploy IS container churn, so
+# they are pure noise inside a declared maintenance window.  Memory and database
+# alerts are deliberately not listed: a deploy can genuinely cause those.
+_MAINTENANCE_SILENCED_PREFIXES = (
+    "container_missing",
+    "container_unhealthy",
+    "container_oom_killed",
+    "live_heartbeat_stale",
+    "live_heartbeat_auto_restarted",
+    "live_crash_log_archive_failed",
+)
+
+
+def _is_maintenance_noise(name: str) -> bool:
+    """Report whether an alert should be silenced during a maintenance window."""
+
+    return name.startswith(_MAINTENANCE_SILENCED_PREFIXES)
+
+
 def _parse_started_at(raw: object) -> datetime | None:
     """Parse Docker's ``State.StartedAt``, tolerating its nanosecond precision."""
 
@@ -1097,6 +1122,19 @@ class OpsMonitor:
             self._sleeper(max(0.0, self._config.interval_seconds - elapsed))
 
     def run_once(self) -> tuple[Alert, ...]:
+        """Evaluate one cycle, honouring any declared maintenance window."""
+
+        alerts = self._evaluate_once()
+        window = read_maintenance_window(default_maintenance_path())
+        if window is not None and window.is_active(now=now_utc()):
+            # A deploy declared this churn.  Only lifecycle alerts are noise
+            # during it; memory and database alerts still carry meaning.
+            return tuple(
+                alert for alert in alerts if not _is_maintenance_noise(alert.name)
+            )
+        return alerts
+
+    def _evaluate_once(self) -> tuple[Alert, ...]:
         now = self._clock()
         alerts: list[Alert] = []
         containers = self._container_snapshots()

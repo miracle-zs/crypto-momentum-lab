@@ -740,8 +740,46 @@ print_failure_context() {
   fi
 }
 
+maintenance_window_file() {
+  printf '%s\n' "${CML_MAINTENANCE_WINDOW_FILE:-/var/lib/crypto-momentum-lab/maintenance.json}"
+}
+
+# Tell the ops monitor that the container churn it is about to see is planned.
+# It cannot tell on its own: Docker exposes no "stopping" state, so a deploy and
+# a crash look identical (unhealthy, silent, then gone).  The window carries a
+# TTL so a deploy that dies mid-flight cannot silence the monitor forever -- the
+# monitor reports an overdue window.
+declare_maintenance_window() {
+  local path window_seconds
+  path="$(maintenance_window_file)"
+  window_seconds="${CML_MAINTENANCE_WINDOW_SECONDS:-1800}"
+  mkdir -p "$(dirname "$path")" 2>/dev/null || true
+  python3 - "$path" "$window_seconds" <<'PY' || true
+import json
+import sys
+from datetime import datetime, timezone
+
+path, seconds = sys.argv[1], float(sys.argv[2])
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(
+        {
+            "started_at": datetime.now(tz=timezone.utc).isoformat(),
+            "expected_seconds": seconds,
+            "reason": "update_server.sh",
+        },
+        handle,
+    )
+PY
+}
+
+clear_maintenance_window() {
+  rm -f "$(maintenance_window_file)" 2>/dev/null || true
+}
+
 on_deploy_exit() {
   local status="$?"
+  # Always end the declared window, whether the deploy succeeded or failed.
+  clear_maintenance_window
   if (( status != 0 )); then
     write_deploy_state failed "${deploy_phase:-unknown}" || true
     print_failure_context "$status"
@@ -749,6 +787,8 @@ on_deploy_exit() {
   exit "$status"
 }
 trap on_deploy_exit EXIT
+
+declare_maintenance_window
 
 # Resolve the full graph before stopping anything. This also catches missing
 # account credentials and malformed environment overrides early.
