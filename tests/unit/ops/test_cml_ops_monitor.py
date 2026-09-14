@@ -17,8 +17,10 @@ from deploy.ops.cml_ops_monitor import (
     PositionObservation,
     SignalObservation,
     _deliver_external_heartbeat,
+    _human_seconds,
     _is_within_start_grace,
     _parse_started_at,
+    _percent,
     _serverchan_endpoint,
     _serverchan_form,
     _serverchan_title,
@@ -411,7 +413,9 @@ def test_container_memory_growth_requires_consecutive_samples() -> None:
         "growth_bytes": 80,
         "threshold_bytes": 64,
         "growth_window_seconds": 1_800.0,
+        "growth_window_human": "30.0 分钟",
         "baseline_age_seconds": 120.0,
+        "baseline_age_human": "2.0 分钟",
         "consecutive_samples": 3,
         "required_samples": 3,
         "metric_source": "cgroup_memory_current",
@@ -658,6 +662,61 @@ def test_market_delay_reads_only_event_backed_buckets(tmp_path) -> None:
     assert "'source_event_count'" in sql
     # The filter belongs to the delay lookup and nowhere else.
     assert sql.count("source_event_count") == 1
+
+
+def test_durations_and_fractions_are_rendered_for_a_reader() -> None:
+    """A raw number in a push notification makes the reader do the arithmetic.
+
+    "1111093.444" as milliseconds, or "900.0" as seconds, or "0.9088" as a
+    ratio, each asks the person triaging on a phone to know a unit and a scale
+    they were never told.
+    """
+
+    assert _human_seconds(1111093.444 / 1000) == "18.5 分钟"
+    assert _human_seconds(906.761) == "15.1 分钟"
+    assert _human_seconds(1800) == "30.0 分钟"
+    assert _human_seconds(30) == "30.0 秒"
+    assert _human_seconds(0.25) == "250 毫秒"
+    assert _human_seconds(7200) == "2.0 小时"
+    assert _human_seconds(None) is None
+
+    assert _percent(0.9088) == 90.88
+    assert _percent(0.75) == 75.0
+    assert _percent(None) is None
+
+
+def test_memory_details_carry_readable_companions() -> None:
+    """Every byte count gets a MiB companion next to it."""
+
+    mib = 1024 * 1024
+    alerts = evaluate_container(
+        ContainerSnapshot(
+            service="postgres",
+            container_id="abc",
+            health="healthy",
+            oom_killed=False,
+            restart_count=0,
+            memory_bytes=951 * mib,
+            memory_limit_bytes=1024 * mib,
+            # postgres is judged on anon, so the ratio must come from there.
+            memory_anon_bytes=951 * mib,
+            memory_current_bytes=1000 * mib,
+            memory_peak_bytes=1024 * mib,
+            memory_swap_current_bytes=200 * mib,
+        ),
+        rss_warning_fraction=0.85,
+        rss_critical_fraction=0.90,
+    )
+
+    assert [alert.name for alert in alerts] == ["container_memory_high"]
+    details = alerts[0].details
+    assert details["memory_mb"] == 951.0
+    assert details["memory_anon_mb"] == 951.0
+    assert details["memory_limit_mb"] == 1024.0
+    assert details["memory_swap_current_mb"] == 200.0
+    # 951 / 1024 = 0.9287, rendered where a reader expects a percentage.
+    assert details["fraction"] == 0.9287
+    assert details["fraction_percent"] == 92.87
 
 
 def test_push_title_drops_the_scope_before_truncating_the_label() -> None:

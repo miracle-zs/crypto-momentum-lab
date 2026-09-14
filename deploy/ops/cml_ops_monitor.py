@@ -654,7 +654,11 @@ def evaluate_database_state(
                 {
                     "state": account_process_state,
                     "age_seconds": account_process_age_seconds,
+                    "age_human": _human_seconds(account_process_age_seconds),
                     "threshold_seconds": account_state_stale_after_seconds,
+                    "threshold_human": _human_seconds(
+                        account_state_stale_after_seconds
+                    ),
                 },
             )
         )
@@ -671,7 +675,13 @@ def evaluate_database_state(
                 {
                     "status": latest_reconciliation_status,
                     "age_seconds": latest_reconciliation_age_seconds,
+                    "age_human": _human_seconds(
+                        latest_reconciliation_age_seconds
+                    ),
                     "threshold_seconds": account_state_stale_after_seconds,
+                    "threshold_human": _human_seconds(
+                        account_state_stale_after_seconds
+                    ),
                 },
             )
         )
@@ -687,7 +697,13 @@ def evaluate_database_state(
                 "Durable market-state progress is missing or stale",
                 {
                     "age_seconds": latest_market_progress_age_seconds,
+                    "age_human": _human_seconds(
+                        latest_market_progress_age_seconds
+                    ),
                     "threshold_seconds": market_state_stale_after_seconds,
+                    "threshold_human": _human_seconds(
+                        market_state_stale_after_seconds
+                    ),
                 },
             )
         )
@@ -700,8 +716,17 @@ def evaluate_database_state(
                     "Market-state receive delay exceeded the critical budget",
                     {
                         "delay_ms": round(latest_market_delay_ms, 3),
+                        "delay_human": _human_seconds(
+                            latest_market_delay_ms / 1000
+                        ),
                         "warning_threshold_ms": market_delay_warning_ms,
+                        "warning_threshold_human": _human_seconds(
+                            market_delay_warning_ms / 1000
+                        ),
                         "critical_threshold_ms": market_delay_critical_ms,
+                        "critical_threshold_human": _human_seconds(
+                            market_delay_critical_ms / 1000
+                        ),
                     },
                 )
             )
@@ -713,8 +738,17 @@ def evaluate_database_state(
                     "Market-state receive delay exceeded the warning budget",
                     {
                         "delay_ms": round(latest_market_delay_ms, 3),
+                        "delay_human": _human_seconds(
+                            latest_market_delay_ms / 1000
+                        ),
                         "warning_threshold_ms": market_delay_warning_ms,
+                        "warning_threshold_human": _human_seconds(
+                            market_delay_warning_ms / 1000
+                        ),
                         "critical_threshold_ms": market_delay_critical_ms,
+                        "critical_threshold_human": _human_seconds(
+                            market_delay_critical_ms / 1000
+                        ),
                     },
                 )
             )
@@ -727,6 +761,9 @@ def evaluate_database_state(
                 {
                     "unknown_order_count": unknown_order_count,
                     "oldest_age_seconds": oldest_unknown_order_age_seconds,
+                    "oldest_age_human": _human_seconds(
+                        oldest_unknown_order_age_seconds
+                    ),
                 },
             )
         )
@@ -754,7 +791,9 @@ def evaluate_database_state(
                         if latest_checkpoint_age_seconds is None
                         else round(latest_checkpoint_age_seconds, 3)
                     ),
+                    "age_human": _human_seconds(latest_checkpoint_age_seconds),
                     "threshold_seconds": stale_after_seconds,
+                    "threshold_human": _human_seconds(stale_after_seconds),
                 },
             )
         )
@@ -872,18 +911,28 @@ def evaluate_container(
 
     alerts: list[Alert] = []
     pressure_bytes, pressure_source = _memory_pressure_reading(snapshot)
+    # Byte counts carry a MiB companion: these are read on a phone, where
+    # "951437312" is not a number anyone can size up at a glance.
     memory_details = {
         "service": snapshot.service,
         "memory_bytes": snapshot.memory_bytes,
+        "memory_mb": _mib(snapshot.memory_bytes),
         "memory_limit_bytes": snapshot.memory_limit_bytes,
+        "memory_limit_mb": _mib(snapshot.memory_limit_bytes),
         "memory_source": snapshot.memory_source,
         "memory_working_set_bytes": snapshot.memory_working_set_bytes,
+        "memory_working_set_mb": _mib(snapshot.memory_working_set_bytes),
         "memory_anon_bytes": snapshot.memory_anon_bytes,
+        "memory_anon_mb": _mib(snapshot.memory_anon_bytes),
         "memory_pressure_bytes": pressure_bytes,
+        "memory_pressure_mb": _mib(pressure_bytes),
         "memory_pressure_source": pressure_source,
         "memory_current_bytes": snapshot.memory_current_bytes,
+        "memory_current_mb": _mib(snapshot.memory_current_bytes),
         "memory_peak_bytes": snapshot.memory_peak_bytes,
+        "memory_peak_mb": _mib(snapshot.memory_peak_bytes),
         "memory_swap_current_bytes": snapshot.memory_swap_current_bytes,
+        "memory_swap_current_mb": _mib(snapshot.memory_swap_current_bytes),
         "memory_events_max": snapshot.memory_events_max,
     }
     if snapshot.oom_killed:
@@ -922,6 +971,7 @@ def evaluate_container(
                     {
                         **memory_details,
                         "fraction": round(fraction, 4),
+                        "fraction_percent": _percent(fraction),
                     },
                 )
             )
@@ -937,6 +987,7 @@ def evaluate_container(
                     {
                         **memory_details,
                         "fraction": round(fraction, 4),
+                        "fraction_percent": _percent(fraction),
                     },
                 )
             )
@@ -1001,7 +1052,9 @@ def evaluate_container_memory_growth(
                 "growth_mb": _mib(growth),
                 "threshold_mb": _mib(growth_bytes),
                 "growth_window_seconds": growth_window_seconds,
+                "growth_window_human": _human_seconds(growth_window_seconds),
                 "baseline_age_seconds": round(baseline_age_seconds, 3),
+                "baseline_age_human": _human_seconds(baseline_age_seconds),
                 "consecutive_samples": consecutive_samples,
                 "required_samples": required_samples,
                 "metric_source": metric_source,
@@ -1010,10 +1063,39 @@ def evaluate_container_memory_growth(
     )
 
 
-def _mib(value: int) -> float:
-    """Return bytes as MiB, rounded for display."""
+def _mib(value: int | None) -> float | None:
+    """Return bytes as MiB, rounded for display.
 
+    Named ``_mb`` in the alert payloads for continuity; the divisor is 1024.
+    """
+
+    if value is None:
+        return None
     return round(value / 1024 / 1024, 1)
+
+
+def _human_seconds(seconds: float | None) -> str | None:
+    """Render a duration the way a person would say it out loud.
+
+    Alerts are triaged on a phone: "900.0" asks the reader to know it means
+    fifteen minutes, and "1111093" as milliseconds means nothing at all.
+    """
+
+    if seconds is None:
+        return None
+    if seconds < 1:
+        return f"{seconds * 1000:.0f} 毫秒"
+    if seconds < 90:
+        return f"{seconds:.1f} 秒"
+    if seconds < 5400:
+        return f"{seconds / 60:.1f} 分钟"
+    return f"{seconds / 3600:.1f} 小时"
+
+
+def _percent(fraction: float | None) -> float | None:
+    """Render a 0-1 fraction as a percentage, which is what readers expect."""
+
+    return None if fraction is None else round(fraction * 100, 2)
 
 
 def _is_within_start_grace(
