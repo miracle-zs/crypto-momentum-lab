@@ -136,7 +136,7 @@ _ALERT_IMPACTS = {
         "服务内存相对趋势基线持续上升，需要确认缓存、查询和进程数量。"
     ),
     "container_memory_pressure": (
-        "容器已触碰 cgroup 内存上限，可能发生回收或换页。"
+        "进程的匿名内存被换出到磁盘，再次访问需要读盘，数据库查询可能因此变慢。"
     ),
     "rss_growth": "服务内存持续增长，后续可能出现性能下降或 OOM。",
     "telemetry_persist_failure": "运行时诊断数据可能不完整，不代表交易一定已停止。",
@@ -189,7 +189,7 @@ _ALERT_ACTIONS = {
         "当前未自动重启，已改为等待连续趋势证据并保留内存压力详情。"
     ),
     "container_memory_pressure": (
-        "当前未自动重启，请检查 cgroup 事件、swap、临时查询和连接池。"
+        "当前未自动重启，请检查 swap 用量、容器内存限额和查询的内存占用。"
     ),
     "rss_growth": "当前未自动重启，请检查内存趋势和进程堆积情况。",
     "telemetry_persist_failure": (
@@ -212,7 +212,8 @@ _ALERT_ACTIONS = {
     "live_market_state_stale": "请检查行情断流、缺桶、durable rewarm 和策略进程日志。",
     "live_market_state_delay": "请检查行情连接、事件循环阻塞、数据库负载和网络延迟。",
     "live_signal_divergence": (
-        "先暂停扩大仓位，核对两账户的 config hash、checkpoint、行情桶和信号明细。"
+        "先暂停扩大仓位，核对告警列出的相关账户的 config hash、checkpoint、"
+        "行情桶和信号明细。"
     ),
     "live_position_divergence": (
         "先以交易所快照为准核对仓位，确认归属后再做补单或退出。"
@@ -3186,6 +3187,23 @@ def _alert_action(alert_name: str, details: Mapping[str, object]) -> str:
     )
 
 
+# The notification title is capped, and a truncated Chinese label loses its
+# meaning -- "实时状态 checkpoint 已过" says nothing.  The scope is dropped
+# first instead: it is repeated on the body's first line, so nothing is lost.
+_SERVERCHAN_TITLE_LIMIT = 32
+
+
+def _serverchan_title(severity: str, scope: str | None, label: str) -> str:
+    """Build the push title, preferring a complete label over the scope."""
+
+    head = " | ".join(["CML", severity])
+    if scope:
+        with_scope = f"{head} | {scope} | {label}"
+        if len(with_scope) <= _SERVERCHAN_TITLE_LIMIT:
+            return with_scope
+    return f"{head} | {label}"[:_SERVERCHAN_TITLE_LIMIT]
+
+
 def _serverchan_form(payload: Mapping[str, object]) -> dict[str, str]:
     event = str(payload.get("event", "ops_alert"))
     alert_name = str(payload.get("alert_name", "ops_monitor"))
@@ -3196,11 +3214,7 @@ def _serverchan_form(payload: Mapping[str, object]) -> dict[str, str]:
     label = _friendly_alert_label(alert_name, summary)
     if event == "ops_alert":
         severity = _severity_label(payload.get("severity", "critical"))
-        title_parts = ["CML", severity]
-        if scope:
-            title_parts.append(scope)
-        title_parts.append(label)
-        title = " | ".join(title_parts)
+        title = _serverchan_title(severity, scope, label)
         body = [
             f"## [{severity}] {scope + '：' if scope else ''}{label}",
             "- **发生时间**："
@@ -3223,11 +3237,7 @@ def _serverchan_form(payload: Mapping[str, object]) -> dict[str, str]:
                 + "\n```"
             )
     else:
-        title_parts = ["CML", "恢复"]
-        if scope:
-            title_parts.append(scope)
-        title_parts.append(label)
-        title = " | ".join(title_parts)
+        title = _serverchan_title("恢复", scope, label)
         body = [
             f"## [恢复] {scope + '：' if scope else ''}{label}",
             "- **恢复时间**："
@@ -3237,7 +3247,7 @@ def _serverchan_form(payload: Mapping[str, object]) -> dict[str, str]:
             f"- **原告警编号**：`{alert_name}`",
         ]
     return {
-        "title": " ".join(title.split())[:32],
+        "title": " ".join(title.split()),
         "desp": "\n".join(body),
     }
 

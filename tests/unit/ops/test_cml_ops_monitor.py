@@ -21,6 +21,7 @@ from deploy.ops.cml_ops_monitor import (
     _parse_started_at,
     _serverchan_endpoint,
     _serverchan_form,
+    _serverchan_title,
     build_config,
     build_deadman_heartbeat_payload,
     evaluate_container,
@@ -657,6 +658,32 @@ def test_market_delay_reads_only_event_backed_buckets(tmp_path) -> None:
     assert "'source_event_count'" in sql
     # The filter belongs to the delay lookup and nowhere else.
     assert sql.count("source_event_count") == 1
+
+
+def test_push_title_drops_the_scope_before_truncating_the_label() -> None:
+    """A truncated Chinese label says nothing useful.
+
+    "实时状态 checkpoint 已过" is not a shorter version of the real label, it
+    is a different, meaningless one.  The scope is repeated on the body's
+    first line, so it is the safer thing to give up.
+    """
+
+    assert _serverchan_title("严重", "account-3", "行情延迟过高") == (
+        "CML | 严重 | account-3 | 行情延迟过高"
+    )
+
+    # Too long for the cap: the scope goes, the label survives intact.
+    title = _serverchan_title("严重", "account-4", "实时状态 checkpoint 已过期")
+    assert title == "CML | 严重 | 实时状态 checkpoint 已过期"
+    assert "已过期" in title
+
+    # Same rule on the resolution side.
+    assert _serverchan_title("恢复", "account-4", "实时状态 checkpoint 已过期") == (
+        "CML | 恢复 | 实时状态 checkpoint 已过期"
+    )
+
+    # No scope at all still renders.
+    assert _serverchan_title("恢复", "", "行情延迟过高") == "CML | 恢复 | 行情延迟过高"
 
 
 def test_database_state_parses_postgres_boolean_text(tmp_path) -> None:
