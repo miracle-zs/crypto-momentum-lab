@@ -35,6 +35,11 @@ TABLES: tuple[tuple[str, str], ...] = (
     ("account_position_snapshots", "observed_at"),
     ("exchange_order_events", "occurred_at"),
     ("paper_equity_snapshots", "observed_at"),
+    # The dashboard only reads the newest row per account, and nothing else
+    # queries this table's history -- yet it had no retention, so it had grown
+    # to 17 days / 144 MB (89 MB of that is TOAST holding six jsonb columns,
+    # so archiving it stays on the JSONL path).
+    ("live_strategy_signals", "recorded_at"),
 )
 
 
