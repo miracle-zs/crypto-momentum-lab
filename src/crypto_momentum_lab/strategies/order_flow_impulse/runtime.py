@@ -65,7 +65,7 @@ class OrderFlowImpulseRuntimeStrategy:
             base_state_interval_seconds=15,
             warmup_buckets=_warmup_buckets(event_config),
             required_fields=(
-                "close_price",
+                "effective_price",
                 "trade_notional",
                 "aggressive_buy_notional",
                 "aggressive_sell_notional",

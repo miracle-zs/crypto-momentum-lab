@@ -50,7 +50,27 @@ def test_orderflow_impulse_accepts_missing_midpoint_when_trade_price_exists() ->
 
     assert decision.signals == ()
     assert decision.rejections[0].reason is RejectionReason.INSUFFICIENT_WARMUP
-    assert "midpoint" not in strategy.required_data().required_fields
+    assert "effective_price" in strategy.required_data().required_fields
+
+
+def test_orderflow_impulse_keeps_missing_close_when_midpoint_exists() -> None:
+    strategy = _strategy()
+    state = replace(
+        _state(0, Decimal("100"), notional=Decimal("0")),
+        open_price=None,
+        high_price=None,
+        low_price=None,
+        close_price=None,
+        midpoint=Decimal("100"),
+        mark_price=Decimal("100"),
+        trade_count=0,
+    )
+
+    decision = strategy.on_market_state(state)
+
+    assert decision.signals == ()
+    assert decision.rejections[0].reason is RejectionReason.INSUFFICIENT_WARMUP
+    assert strategy.checkpoint().payload["buffer_sizes"] == {"BTCUSDT": 1}
 
 
 def test_volume_filter_requires_140_consecutive_states_for_warmup() -> None:
@@ -132,6 +152,29 @@ def test_orderflow_impulse_warm_recovery_advances_over_missing_price_bucket() ->
         "BTCUSDT": state.bucket_start,
     }
     assert checkpoint.payload["buffer_sizes"] == {}
+
+
+def test_orderflow_impulse_warm_recovery_keeps_missing_close_with_midpoint() -> None:
+    strategy = _strategy()
+    state = replace(
+        _state(0, Decimal("100"), notional=Decimal("0")),
+        open_price=None,
+        high_price=None,
+        low_price=None,
+        close_price=None,
+        midpoint=Decimal("100"),
+        mark_price=Decimal("100"),
+        trade_count=0,
+    )
+
+    strategy.warm_market_state(state)
+
+    checkpoint = strategy.checkpoint(include_market_state_buffers=False)
+
+    assert checkpoint.last_processed_at_by_symbol == {
+        "BTCUSDT": state.bucket_start,
+    }
+    assert checkpoint.payload["buffer_sizes"] == {"BTCUSDT": 1}
 
 
 def test_orderflow_impulse_resets_symbol_after_a_market_data_gap() -> None:

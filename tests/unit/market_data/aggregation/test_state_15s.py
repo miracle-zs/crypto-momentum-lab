@@ -86,6 +86,8 @@ def test_book_ticker_sets_last_spread_and_midpoint() -> None:
     assert state.last_ask_price == Decimal("101")
     assert state.spread == Decimal("1")
     assert state.midpoint == Decimal("100.5")
+    assert state.close_price is None
+    assert state.effective_price == Decimal("100.5")
 
 
 def test_liquidation_mark_price_and_closed_kline_update_bucket() -> None:

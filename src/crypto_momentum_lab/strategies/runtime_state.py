@@ -88,15 +88,15 @@ class StrategyRuntimeState:
         *,
         max_buffer_length: int,
     ) -> None:
-        if state.close_price is None:
+        if state.effective_price is None:
             previous = self.last_processed.get(state.symbol)
             if previous is None or state.bucket_start >= previous:
                 # A durable bucket with no close price is still a real
-                # market-state watermark.  The rolling feature buffer cannot
-                # use it, but leaving the old checkpoint timestamp in place
-                # makes the first valid bucket after a data outage look like
-                # a continuity break and sends every live worker into a
-                # restart loop.
+                # market-state watermark when it has no usable quote either.
+                # Leaving the old checkpoint timestamp in place makes the
+                # first valid bucket after a data outage look like a
+                # continuity break and sends every live worker into a restart
+                # loop.
                 self.last_processed[state.symbol] = state.bucket_start
             return
         self.append_market_state(
@@ -170,7 +170,7 @@ def evaluate_buffered_state[EventT](
     """Run the shared warmup/cooldown loop around a strategy-specific event."""
 
     runtime.last_processed[state.symbol] = state.bucket_start
-    if state.close_price is None:
+    if state.effective_price is None:
         return StrategyDecision(
             signals=(),
             candidates=(),
@@ -179,7 +179,7 @@ def evaluate_buffered_state[EventT](
                     reason=RejectionReason.MISSING_REQUIRED_PRICE,
                     symbol=state.symbol,
                     bucket_start=state.bucket_start,
-                    details={"field": "close_price"},
+                    details={"field": "effective_price"},
                 ),
             ),
         )

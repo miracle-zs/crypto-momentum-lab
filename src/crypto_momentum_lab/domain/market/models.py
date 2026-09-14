@@ -374,6 +374,21 @@ class MarketState15s:
     data_complete: bool = True
     missing_agg_trade_count: int = 0
 
+    @property
+    def effective_price(self) -> Decimal | None:
+        """Return the price available to rolling strategy features.
+
+        ``close_price`` is intentionally left empty for a bucket with no
+        trades.  A live strategy can still evaluate that bucket when the
+        market layer has a usable quote midpoint or mark price, matching the
+        fallback used by the research event studies.
+        """
+
+        for price in (self.close_price, self.midpoint, self.mark_price):
+            if price is not None:
+                return price
+        return None
+
     def __post_init__(self) -> None:
         if not _is_aware(self.bucket_start):
             raise ValueError("bucket_start must be timezone-aware")
