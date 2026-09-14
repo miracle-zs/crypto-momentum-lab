@@ -281,7 +281,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 2m
-    mem_limit: 768m
+    # 512m: peak measured at ~296 MiB per account.
+    mem_limit: 512m
     memswap_limit: 1024m
 
   live-strategy-account-3:
@@ -410,7 +411,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 2m
-    mem_limit: 768m
+    # 512m: peak measured at ~296 MiB per account.
+    mem_limit: 512m
     memswap_limit: 1024m
 
   live-strategy-account-4:
@@ -539,5 +541,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 2m
-    mem_limit: 768m
+    # 512m: peak measured at ~296 MiB per account.
+    mem_limit: 512m
     memswap_limit: 1024m

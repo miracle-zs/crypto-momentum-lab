@@ -145,7 +145,10 @@ services:
     # briefly use more memory than the steady-state working set.  Keep a
     # bounded 512 MiB swap allowance so the database does not take all host
     # memory while avoiding cgroup OOM during maintenance.
-    mem_limit: 1g
+    # 1280m: peak sat on the 1g ceiling (100%); a database's page cache
+    # shares this limit, so the headroom is what it caches instead of
+    # rereading from disk.
+    mem_limit: 1280m
     memswap_limit: 1536m
     # PostgreSQL maintenance can use dynamic shared memory for parallel
     # vacuum/index work.  The Docker default is only 64 MiB and previously
@@ -651,7 +654,8 @@ services:
     # Startup observed below 200 MiB, so this was trimmed to 512 MiB.  In
     # steady state the working set now sits near 400 MiB (77% of that budget),
     # which keeps tripping container_memory_high; give it real headroom again.
-    mem_limit: 768m
+    # 384m: peak measured at 173 MiB; still >2x headroom.
+    mem_limit: 384m
     memswap_limit: 1024m
 
   dashboard:
@@ -685,7 +689,8 @@ services:
       start_period: 30s
     # The dashboard process regularly uses over 200 MiB with all sections
     # loaded, so keep headroom without reserving the old live-strategy budget.
-    mem_limit: 320m
+    # 192m: peak measured at 109 MiB.
+    mem_limit: 192m
     memswap_limit: 512m
 
 volumes:
