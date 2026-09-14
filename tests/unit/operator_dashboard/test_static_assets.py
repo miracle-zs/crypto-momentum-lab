@@ -367,7 +367,7 @@ def test_universe_panel_uses_one_monitoring_table_without_duplicate_chips() -> N
         "监控池 ${monitored.length}",
         "补充监控",
         "MONITORING ADDITIONS",
-        "榜单中的目标标的已计入监控池",
+            "涨幅榜中的目标标的已计入监控池",
         "监控状态",
         "rank",
         "utc_day_return",

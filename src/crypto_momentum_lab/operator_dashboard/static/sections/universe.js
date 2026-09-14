@@ -32,7 +32,7 @@ export function renderUniverse(data) {
   };
   const sideLabel = (side) => side === "gainer" ? "涨幅" : side === "loser" ? "跌幅" : "—";
   const maxAbs = Math.max(
-    [...(data.gainers || []), ...(data.losers || []), ...monitored]
+    [...(data.gainers || []), ...monitored]
       .map((row) => Math.abs(asNumber(row.utc_day_return) ?? 0)),
     0.0001,
   );
@@ -60,7 +60,7 @@ export function renderUniverse(data) {
     { label: "UTC 日内涨跌", value: (row) => returnBar(row.utc_day_return, maxAbs), html: true },
     { label: "监控状态", value: (row) => membershipBadge(row.status), html: true },
   ], monitoringAdditions, { emptyText: "无补充监控成员", tall: monitoringAdditions.length > 24 });
-  const monitoringNote = `<div class="monitor-note">榜单中的目标标的已计入监控池；此处只展示未出现在涨幅榜/跌幅榜中的保留和持仓保护成员。</div>`;
+  const monitoringNote = `<div class="monitor-note">涨幅榜中的目标标的已计入监控池；此处只展示未出现在涨幅榜中的保留和持仓保护成员。</div>`;
   const viewTabs = `<div class="view-tabs market-view-tabs" role="tablist" aria-label="市场子视图">
     <button type="button" class="view-tab is-active" data-market-view="rankings" role="tab" aria-selected="true">UTC 排名<small>TOP 20</small></button>
     <button type="button" class="view-tab" data-market-view="monitoring" role="tab" aria-selected="false">监控池<small>PROTECTED UNIVERSE</small></button>
@@ -69,10 +69,7 @@ export function renderUniverse(data) {
     <div class="market-board" data-market-board>
       ${viewTabs}
       <div class="market-panel" data-market-panel="rankings" role="tabpanel">
-        <div class="block-split">
-          <div class="block">${blockTitle("涨幅榜 Top 20", "TOP GAINERS · UTC DAY")}${universeTable(data.gainers)}</div>
-          <div class="block">${blockTitle("跌幅榜 Top 20", "TOP LOSERS · UTC DAY")}${universeTable(data.losers)}</div>
-        </div>
+        <div class="block">${blockTitle("涨幅榜 Top 20", "TOP GAINERS · UTC DAY")}${universeTable(data.gainers)}</div>
       </div>
       <div class="market-panel" data-market-panel="monitoring" role="tabpanel" hidden>
         <div class="block">${blockTitle(`监控池 ${monitored.length}`, "MONITORED UNIVERSE", summary)}${monitoringNote}${blockTitle(`补充监控 ${monitoringAdditions.length}`, "MONITORING ADDITIONS")}${monitoringTable}</div>

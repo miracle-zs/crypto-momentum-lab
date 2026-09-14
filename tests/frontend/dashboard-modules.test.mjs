@@ -438,9 +438,10 @@ test("universe renderer keeps ranking and monitoring views distinct", () => {
   assert.match(html, /监控池 2/);
   assert.match(html, /补充监控 1/);
   assert.match(html, /MONITORING ADDITIONS/);
-  assert.match(html, /榜单中的目标标的已计入监控池/);
+  assert.match(html, /涨幅榜中的目标标的已计入监控池/);
   assert.match(html, /监控状态/);
   assert.match(html, /保留/);
+  assert.doesNotMatch(html, /跌幅榜 Top 20/);
   assert.equal(html.match(/AAAUSDT/g)?.length, 1);
   assert.equal(html.match(/CCCUSDT/g)?.length, 1);
   assert.doesNotMatch(html, /目标池 · 涨幅 Top 20/);

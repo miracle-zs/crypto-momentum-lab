@@ -425,10 +425,6 @@ class OverviewQueries:
             (entry for entry in entries if entry.gainer_rank is not None),
             key=lambda item: item.gainer_rank or 999,
         )[:20]
-        losers = sorted(
-            (entry for entry in entries if entry.loser_rank is not None),
-            key=lambda item: item.loser_rank or 999,
-        )[:20]
         return UniverseStatusResponse(
             status=freshness_status(
                 now=self._clock(),
@@ -437,7 +433,9 @@ class OverviewQueries:
             ),
             observed_at=snapshot.observed_at,
             gainers=[universe_entry(row, "gainer") for row in gainers],
-            losers=[universe_entry(row, "loser") for row in losers],
+            # Loser ranks remain in the database for historical/research
+            # compatibility, but the operational dashboard is gainer-only.
+            losers=[],
             monitored_symbols=[
                 universe_membership(row, entries_by_symbol.get(row.symbol))
                 for row in sorted(

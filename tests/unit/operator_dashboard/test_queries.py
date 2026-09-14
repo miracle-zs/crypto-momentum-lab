@@ -307,6 +307,65 @@ async def test_recent_paper_history_keeps_open_rows_and_caps_closed_query() -> N
     assert session.scalars_statements[1]._limit_clause.value == 500
 
 
+async def test_universe_dashboard_hides_loser_ranking() -> None:
+    observed_at = datetime(2026, 9, 14, 0, 0, tzinfo=UTC)
+    snapshot = SimpleNamespace(snapshot_id="snapshot", observed_at=observed_at)
+    entries = (
+        SimpleNamespace(
+            symbol="GAINERUSDT",
+            gainer_rank=1,
+            loser_rank=None,
+            utc_day_return=Decimal("0.1"),
+            current_price=Decimal("1.1"),
+        ),
+        SimpleNamespace(
+            symbol="LOSERUSDT",
+            gainer_rank=None,
+            loser_rank=1,
+            utc_day_return=Decimal("-0.1"),
+            current_price=Decimal("0.9"),
+        ),
+    )
+
+    class Session:
+        def __init__(self) -> None:
+            self.scalars_calls = 0
+
+        async def scalar(self, _statement):
+            return snapshot
+
+        async def scalars(self, _statement):
+            self.scalars_calls += 1
+            return SimpleNamespace(
+                all=lambda: entries if self.scalars_calls == 1 else ()
+            )
+
+    class SessionContext:
+        def __init__(self, session: Session) -> None:
+            self.session = session
+
+        async def __aenter__(self) -> Session:
+            return self.session
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+    class SessionFactory:
+        def __init__(self, session: Session) -> None:
+            self.session = session
+
+        def __call__(self) -> SessionContext:
+            return SessionContext(self.session)
+
+    result = await DashboardQueries(
+        SessionFactory(Session()),
+        clock=lambda: observed_at,
+    ).universe()
+
+    assert [row["symbol"] for row in result.gainers] == ["GAINERUSDT"]
+    assert result.losers == []
+
+
 def test_downsample_equity_snapshots_caps_result_to_latest_240_buckets() -> None:
     start = datetime(2026, 7, 27, tzinfo=UTC)
     rows = [
