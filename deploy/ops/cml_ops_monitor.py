@@ -96,6 +96,7 @@ _ALERT_LABELS = {
     "container_memory_high": "服务内存占用过高",
     "container_memory_growth": "服务内存趋势异常",
     "container_memory_pressure": "服务触碰内存上限",
+    "live_position_intent_divergence": "账户下单意图发生分叉",
     # Keep the legacy label so an alert written by an older monitor can still
     # be rendered correctly while its recovery record is being drained.
     "rss_growth": "服务内存持续增长",
@@ -150,6 +151,9 @@ _ALERT_IMPACTS = {
     ),
     "live_signal_divergence": "相同策略配置的账户对同一行情桶产生了不同输出。",
     "live_position_divergence": "可比账户的交易所持仓快照不一致，存在分叉风险。",
+    "live_position_intent_divergence": (
+        "相同策略配置的账户向交易所下达了不同的订单意图，执行与风控路径可能已经分叉。"
+    ),
     "live_unknown_orders": "交易所订单状态未能与本地订单安全对齐。",
     "live_consistency_check_failed": "无法确认账户之间的信号和持仓是否一致。",
     "database_check_failed": "暂时无法确认实时会话、租约和 checkpoint 是否健康。",
@@ -209,6 +213,9 @@ _ALERT_ACTIONS = {
     ),
     "live_position_divergence": (
         "先以交易所快照为准核对仓位，确认归属后再做补单或退出。"
+    ),
+    "live_position_intent_divergence": (
+        "先暂停扩大仓位，逐账户核对 exchange_orders 的方向、数量与价格是否一致。"
     ),
     "live_unknown_orders": (
         "禁止重发同一意图；先按 client_order_id 查询交易所并完成人工或自动对账。"
@@ -343,6 +350,27 @@ class PositionObservation:
     # Accounts are only comparable when they run the same strategy config; an
     # empty hash means "unknown" and keeps the row in its own group.
     strategy_config_hash: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class OrderIntentObservation:
+    """One account's order intent for one symbol inside the comparison window.
+
+    Intent -- what an account asked the exchange to do -- is what comparable
+    accounts must agree on.  How much of that intent filled is execution: a
+    partially filled limit order legitimately leaves two correct accounts
+    holding different positions, so quantity held is the wrong thing to
+    compare.
+    """
+
+    account_label: str
+    symbol: str
+    order_count: int
+    # Borrowed from the same account's signal rows: the order table carries a
+    # run id, not a strategy config, and accounts running different strategies
+    # must never be compared.
+    strategy_config_hash: str = ""
+    fingerprint: str | None = None
 
 
 def evaluate_signal_divergence(
@@ -511,6 +539,68 @@ def evaluate_position_divergence(
                     }
                     for account, (status, age) in sorted(freshness_by_account.items())
                 },
+            },
+        ),
+    )
+
+
+def evaluate_position_intent_divergence(
+    observations: Sequence[OrderIntentObservation],
+) -> tuple[Alert, ...]:
+    """Detect divergent *order intent* for one symbol/config group.
+
+    Accounts sharing a strategy config must ask the exchange to do the same
+    thing: same symbol, side, type, quantity and price.  What actually filled
+    is not comparable -- a limit order that only partially fills, or one that
+    expires before it fills, leaves two accounts with identical intent and
+    different positions.  That is execution, and reporting it as a divergence
+    tells the operator to investigate something no one can act on.
+    """
+
+    groups: dict[tuple[str, str], dict[str, OrderIntentObservation]] = {}
+    for observation in observations:
+        if not observation.account_label.strip() or not observation.symbol.strip():
+            continue
+        key = (observation.symbol, observation.strategy_config_hash)
+        groups.setdefault(key, {})[observation.account_label] = observation
+
+    differences: list[dict[str, object]] = []
+    for (symbol, config_hash), by_account in sorted(groups.items()):
+        if len(by_account) < 2:
+            continue
+        intents = {
+            (value.order_count, value.fingerprint) for value in by_account.values()
+        }
+        if len(intents) <= 1:
+            continue
+        differences.append(
+            {
+                "symbol": symbol,
+                "strategy_config_hash": config_hash,
+                "accounts": [
+                    {
+                        "account_label": value.account_label,
+                        "order_count": value.order_count,
+                        "fingerprint": value.fingerprint,
+                    }
+                    for value in sorted(
+                        by_account.values(),
+                        key=lambda item: item.account_label,
+                    )
+                ],
+            }
+        )
+
+    if not differences:
+        return ()
+    return (
+        Alert(
+            "live_position_intent_divergence",
+            "critical",
+            "Comparable live accounts sent divergent order intent",
+            {
+                "group_count": len(differences),
+                "differences": differences[:20],
             },
         ),
     )
@@ -1354,9 +1444,11 @@ class OpsMonitor:
                     )
 
             try:
-                signal_observations, position_observations = (
-                    self._consistency_observations(postgres_id)
-                )
+                (
+                    signal_observations,
+                    position_observations,
+                    order_intent_observations,
+                ) = self._consistency_observations(postgres_id)
             except Exception as error:
                 alerts.append(
                     Alert(
@@ -1378,12 +1470,12 @@ class OpsMonitor:
             else:
                 alerts.extend(evaluate_signal_divergence(signal_observations))
                 alerts.extend(
-                    evaluate_position_divergence(
-                        position_observations,
-                        stale_after_seconds=self._config.position_stale_after_seconds,
-                        quantity_tolerance=self._config.position_quantity_tolerance,
-                    )
+                    evaluate_position_intent_divergence(order_intent_observations)
                 )
+                # The spread between accounts is recorded, not alerted: it is
+                # the *result* of execution, so a difference here is the normal
+                # outcome of a partially filled order, not a fault.
+                self._record_position_spread(position_observations)
 
         active_keys = {alert.name for alert in alerts}
         for alert in alerts:
@@ -2118,7 +2210,11 @@ WHERE run_id = {run_id} AND state = 'unknown_pending_reconciliation';
     def _consistency_observations(
         self,
         container_id: str,
-    ) -> tuple[tuple[SignalObservation, ...], tuple[PositionObservation, ...]]:
+    ) -> tuple[
+        tuple[SignalObservation, ...],
+        tuple[PositionObservation, ...],
+        tuple[OrderIntentObservation, ...],
+    ]:
         """Read a bounded cross-account consistency window from PostgreSQL."""
 
         accounts = tuple(self._config.live_accounts)
@@ -2193,6 +2289,32 @@ LEFT JOIN account_position_snapshots p
  AND p.account_label = r.account_label
  AND p.observed_at = r.position_observed_at
 WHERE p.position_amt IS NULL OR p.position_amt <> 0;
+SELECT 'order' || E'\\t' || s.account_label || E'\\t' || s.symbol || E'\\t'
+  || s.config_hash || E'\\t' || COALESCE(o.order_count, 0)::text || E'\\t'
+  || COALESCE(o.fingerprint, '')
+FROM (
+  SELECT DISTINCT account_label, run_id, symbol, config_hash
+  FROM live_strategy_signals
+  WHERE account_label IN ({account_sql})
+    AND run_id IN ({run_sql})
+    AND source_state_at >= clock_timestamp()
+      - ({window_seconds} * interval '1 second')
+) s
+LEFT JOIN (
+  SELECT run_id, symbol,
+    count(*) AS order_count,
+    md5(string_agg(
+      side || ':' || order_type || ':' || quantity::text || ':'
+        || COALESCE(price::text, ''),
+      E'\\x1f'
+      ORDER BY side, order_type, quantity::text, price::text
+    )) AS fingerprint
+  FROM exchange_orders
+  WHERE run_id IN ({run_sql})
+    AND created_at >= clock_timestamp()
+      - ({window_seconds} * interval '1 second')
+  GROUP BY run_id, symbol
+) o ON o.run_id = s.run_id AND o.symbol = s.symbol;
 """
         output = self._runner.run(
             [
@@ -2219,6 +2341,7 @@ WHERE p.position_amt IS NULL OR p.position_amt <> 0;
             tuple[str, str, str, str], SignalObservation
         ] = {}
         positions: list[PositionObservation] = []
+        order_intents: list[OrderIntentObservation] = []
         config_by_account: dict[str, str] = {}
         for line in output.splitlines():
             parts = line.split("\t")
@@ -2269,6 +2392,17 @@ WHERE p.position_amt IS NULL OR p.position_amt <> 0;
                         position_amt=Decimal(parts[6]),
                     )
                 )
+                continue
+            if parts[0] == "order" and len(parts) == 6:
+                order_intents.append(
+                    OrderIntentObservation(
+                        account_label=parts[1],
+                        symbol=parts[2],
+                        strategy_config_hash=parts[3],
+                        order_count=int(parts[4]),
+                        fingerprint=parts[5] or None,
+                    )
+                )
         # Position rows carry no strategy config hash of their own (the
         # snapshot table has no such column), so borrow it from the same
         # account's signal rows.  Without this, accounts running different
@@ -2284,7 +2418,68 @@ WHERE p.position_amt IS NULL OR p.position_amt <> 0;
                 )
                 for observation in positions
             ]
-        return tuple(signals_by_key.values()), tuple(positions)
+        return (
+            tuple(signals_by_key.values()),
+            tuple(positions),
+            tuple(order_intents),
+        )
+
+    def _record_position_spread(
+        self,
+        observations: Sequence[PositionObservation],
+    ) -> None:
+        """Record the cross-account position spread without alerting on it.
+
+        What an account *holds* is the result of execution, so a difference
+        between two accounts with identical intent is the expected outcome of a
+        limit order that only partially filled.  The operator cannot act on it,
+        so it is kept as state for inspection rather than raised as alert.
+        """
+
+        by_group: dict[str, dict[str, Decimal]] = {}
+        for observation in observations:
+            if observation.status != "ready":
+                continue
+            if (
+                observation.age_seconds is None
+                or observation.age_seconds < 0
+                or observation.age_seconds > self._config.position_stale_after_seconds
+            ):
+                continue
+            if not observation.symbol.strip() or not observation.position_side.strip():
+                continue
+            if observation.position_amt == 0:
+                continue
+            account_positions = by_group.setdefault(
+                f"{observation.symbol}|{observation.strategy_config_hash}",
+                {},
+            )
+            label = f"{observation.account_label}:{observation.position_side}"
+            account_positions[label] = (
+                account_positions.get(label, Decimal("0")) + observation.position_amt
+            )
+
+        spread: list[dict[str, object]] = []
+        for group, by_account in sorted(by_group.items()):
+            if len(by_account) < 2:
+                continue
+            quantities = sorted(set(by_account.values()))
+            if len(quantities) < 2:
+                continue
+            symbol, _, config_hash = group.partition("|")
+            spread.append(
+                {
+                    "symbol": symbol,
+                    "strategy_config_hash": config_hash,
+                    "min_quantity": str(quantities[0]),
+                    "max_quantity": str(quantities[-1]),
+                    "accounts": {
+                        label: str(quantity)
+                        for label, quantity in sorted(by_account.items())
+                    },
+                }
+            )
+        self._state["position_spread"] = spread[:20]
 
     def _memory_pressure_alerts(
         self,

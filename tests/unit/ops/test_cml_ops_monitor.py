@@ -13,6 +13,7 @@ from deploy.ops.cml_ops_monitor import (
     LogSignals,
     MonitorConfig,
     OpsMonitor,
+    OrderIntentObservation,
     PositionObservation,
     SignalObservation,
     _deliver_external_heartbeat,
@@ -27,6 +28,7 @@ from deploy.ops.cml_ops_monitor import (
     evaluate_database_state,
     evaluate_log_signals,
     evaluate_position_divergence,
+    evaluate_position_intent_divergence,
     evaluate_signal_divergence,
     rss_warning_fraction_for,
 )
@@ -807,6 +809,94 @@ def test_signal_fingerprint_covers_only_account_stable_features(tmp_path) -> Non
     assert "'aggressive_imbalance'" in sql
     assert "'impulse_return_pct'" in sql
     assert "reference_prices" in sql
+
+
+def test_position_intent_divergence_compares_intent_not_fills() -> None:
+    """Accounts must agree on what they asked for, not on what filled.
+
+    The live failure this encodes: four accounts sent the same 262-lot limit
+    order, one of them only filled 198, and the position comparison reported
+    the fill difference as a critical divergence.
+    """
+
+    def intent(
+        account: str,
+        count: int,
+        fingerprint: str | None,
+    ) -> OrderIntentObservation:
+        return OrderIntentObservation(
+            account_label=account,
+            symbol="MTLUSDT",
+            order_count=count,
+            strategy_config_hash="cfg",
+            fingerprint=fingerprint,
+        )
+
+    # Identical orders everywhere -- only the fills differed, so no alert.
+    assert evaluate_position_intent_divergence(
+        (
+            intent("primary", 1, "buy-limit-262"),
+            intent("account-2", 1, "buy-limit-262"),
+            intent("account-3", 1, "buy-limit-262"),
+            intent("account-4", 1, "buy-limit-262"),
+        )
+    ) == ()
+
+    # A different quantity is a different intent.
+    alerts = evaluate_position_intent_divergence(
+        (
+            intent("account-3", 1, "buy-limit-262"),
+            intent("account-4", 1, "buy-limit-198"),
+        )
+    )
+    assert [alert.name for alert in alerts] == ["live_position_intent_divergence"]
+    assert alerts[0].severity == "critical"
+    assert alerts[0].details["group_count"] == 1
+
+    # An account that never sent anything is the worst case, not a missing row.
+    assert [
+        alert.name
+        for alert in evaluate_position_intent_divergence(
+            (intent("account-3", 1, "buy-limit-262"), intent("account-4", 0, None))
+        )
+    ] == ["live_position_intent_divergence"]
+
+    # Accounts on different configs are never comparable.
+    assert evaluate_position_intent_divergence(
+        (
+            OrderIntentObservation("primary", "MTLUSDT", 1, "cfg-a", "a"),
+            OrderIntentObservation("account-3", "MTLUSDT", 1, "cfg-b", "b"),
+        )
+    ) == ()
+
+
+def test_position_spread_is_recorded_as_state_not_raised(tmp_path) -> None:
+    """Holdings that differ because of a partial fill stay out of the alerts."""
+
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+        runner=None,
+    )
+
+    monitor._record_position_spread(
+        (
+            PositionObservation(
+                "account-3", "ready", 5.0, "MTLUSDT", "LONG", Decimal("262"), "cfg"
+            ),
+            PositionObservation(
+                "account-4", "ready", 5.0, "MTLUSDT", "LONG", Decimal("198"), "cfg"
+            ),
+        )
+    )
+
+    spread = monitor._state["position_spread"]
+    assert [entry["symbol"] for entry in spread] == ["MTLUSDT"]
+    assert spread[0]["min_quantity"] == "198"
+    assert spread[0]["max_quantity"] == "262"
+    assert spread[0]["accounts"] == {
+        "account-3:LONG": "262",
+        "account-4:LONG": "198",
+    }
 
 
 def test_position_divergence_ignores_stale_reconciliation() -> None:
