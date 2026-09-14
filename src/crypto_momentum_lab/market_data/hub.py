@@ -85,6 +85,10 @@ class MarketStateBatch:
     environment: str
     states: tuple[MarketState15s, ...]
     stream_id: str | None = None
+    # Symbols that newly entered the dense set just before this batch.  Such a
+    # symbol has no prior bucket, so consumers must treat its first bucket as a
+    # new baseline rather than as a gap.  Optional: an older publisher omits it.
+    entered_symbols: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,7 +267,12 @@ class MarketStateHub:
         self._bound_host = None
         self._bound_port = None
 
-    async def publish(self, states: tuple[MarketState15s, ...]) -> None:
+    async def publish(
+        self,
+        states: tuple[MarketState15s, ...],
+        *,
+        entered_symbols: frozenset[str] = frozenset(),
+    ) -> None:
         """Publish a closed-state batch without waiting on consumers."""
         if not states:
             return
@@ -288,6 +297,7 @@ class MarketStateHub:
                     sequence=sequence,
                     published_at=published_at,
                     stream_id=self._stream_id,
+                    entered_symbols=entered_symbols,
                 )
                 self._sequence_by_environment[environment] = sequence
                 replay_buffer = self._replay_buffers.setdefault(
@@ -965,6 +975,7 @@ def encode_market_state_batch(
     sequence: int,
     published_at: datetime,
     stream_id: str | None = None,
+    entered_symbols: frozenset[str] = frozenset(),
 ) -> str:
     if not states:
         raise ValueError("states must not be empty")
@@ -985,6 +996,10 @@ def encode_market_state_batch(
     }
     if stream_id is not None:
         payload["stream_id"] = stream_id
+    if entered_symbols:
+        # Sorted for a stable wire format, and omitted entirely when empty so a
+        # batch with no entries stays byte-identical to the old format.
+        payload["entered_symbols"] = sorted(entered_symbols)
     return json.dumps(payload, separators=(",", ":"))
 
 
@@ -1018,12 +1033,22 @@ def decode_market_state_batch_envelope(
         raise MarketStateHubProtocolError("market-state payload contains invalid state")
     if any(state.environment != environment for state in states):
         raise MarketStateHubProtocolError("market-state state environment mismatch")
+    raw_entered_symbols = payload.get("entered_symbols")
+    # Absent (older publisher) or malformed entries degrade to "nothing entered"
+    # rather than failing the batch: the field is an optimisation hint, and a
+    # consumer that ignores it behaves exactly as before.
+    entered_symbols = (
+        frozenset(item for item in raw_entered_symbols if isinstance(item, str))
+        if isinstance(raw_entered_symbols, list)
+        else frozenset()
+    )
     return MarketStateBatch(
         sequence=sequence,
         published_at=published_at,
         environment=environment,
         states=states,
         stream_id=stream_id,
+        entered_symbols=entered_symbols,
     )
 
 
