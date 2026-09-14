@@ -1,4 +1,3 @@
-from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.universe.membership import (
@@ -9,10 +8,7 @@ from crypto_momentum_lab.domain.universe.models import (
     RankEntry,
     RankingResult,
     RankingSide,
-    TrackedMembership,
 )
-
-NOW = datetime(2026, 6, 14, 12, 1, tzinfo=UTC)
 
 
 def test_persisted_extended_membership_status_is_supported() -> None:
@@ -43,11 +39,7 @@ def result(
 def test_current_target_is_immediately_monitored() -> None:
     memberships = build_monitoring_memberships(
         result(["A", "B", "C"], ["X", "Y", "Z"]),
-        previous={},
         forced_symbols=frozenset(),
-        observed_at=NOW,
-        retention_rank=3,
-        retention_duration=timedelta(hours=2),
     )
 
     assert memberships["A"].status is MembershipStatus.TARGET
@@ -57,11 +49,7 @@ def test_current_target_is_immediately_monitored() -> None:
 def test_extended_memberships_cover_positive_gainers_without_changing_targets() -> None:
     memberships = build_monitoring_memberships(
         result(["A", "B", "C", "D"], ["X", "Y", "Z"]),
-        previous={},
         forced_symbols=frozenset(),
-        observed_at=NOW,
-        retention_rank=3,
-        retention_duration=timedelta(hours=2),
         extended_gainer_count=4,
     )
 
@@ -72,67 +60,10 @@ def test_extended_memberships_cover_positive_gainers_without_changing_targets() 
     assert "Z" not in memberships
 
 
-def test_symbol_is_retained_until_time_limit_is_reached() -> None:
-    previous = {
-        "A": TrackedMembership(
-            symbol="A",
-            status=MembershipStatus.TARGET,
-            side=RankingSide.GAINER,
-            left_target_at=None,
-        )
-    }
-    first_exit = build_monitoring_memberships(
-        result(["B", "C", "A"], ["X", "Y", "Z"]),
-        previous=previous,
-        forced_symbols=frozenset(),
-        observed_at=NOW,
-        retention_rank=3,
-        retention_duration=timedelta(hours=2),
-    )
-    expired = build_monitoring_memberships(
-        result(["B", "C", "A"], ["X", "Y", "Z"]),
-        previous=first_exit,
-        forced_symbols=frozenset(),
-        observed_at=NOW + timedelta(hours=2),
-        retention_rank=3,
-        retention_duration=timedelta(hours=2),
-    )
-
-    assert first_exit["A"].status is MembershipStatus.RETAINED
-    assert first_exit["A"].left_target_at == NOW
-    assert "A" not in expired
-
-
-def test_symbol_is_removed_when_it_leaves_retention_rank() -> None:
-    previous = {
-        "A": TrackedMembership(
-            symbol="A",
-            status=MembershipStatus.RETAINED,
-            side=RankingSide.GAINER,
-            left_target_at=NOW - timedelta(hours=1),
-        )
-    }
-
-    memberships = build_monitoring_memberships(
-        result(["B", "C", "D", "A"], ["X", "Y", "Z"]),
-        previous=previous,
-        forced_symbols=frozenset(),
-        observed_at=NOW,
-        retention_rank=3,
-        retention_duration=timedelta(hours=2),
-    )
-
-    assert "A" not in memberships
-
-
 def test_forced_symbol_is_monitored_without_ranking_membership() -> None:
     memberships = build_monitoring_memberships(
         result(["A", "B"], ["X", "Y"]),
-        previous={},
         forced_symbols=frozenset({"POSITIONUSDT"}),
-        observed_at=NOW,
-        retention_rank=3,
-        retention_duration=timedelta(hours=2),
     )
 
     assert memberships["POSITIONUSDT"].status is MembershipStatus.FORCED

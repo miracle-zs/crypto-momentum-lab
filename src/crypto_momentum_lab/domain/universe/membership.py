@@ -1,5 +1,3 @@
-from datetime import datetime, timedelta
-
 from crypto_momentum_lab.domain.universe.models import (
     MembershipStatus,
     RankingResult,
@@ -18,24 +16,10 @@ def _target_side(result: RankingResult, symbol: str) -> RankingSide:
     return RankingSide.LOSER
 
 
-def _rank_for_side(
-    result: RankingResult,
-    symbol: str,
-    side: RankingSide,
-) -> int | None:
-    entries = result.gainers if side is RankingSide.GAINER else result.losers
-    entry = next((item for item in entries if item.symbol == symbol), None)
-    return None if entry is None else entry.rank
-
-
 def build_monitoring_memberships(
     result: RankingResult,
     *,
-    previous: dict[str, TrackedMembership],
     forced_symbols: frozenset[str],
-    observed_at: datetime,
-    retention_rank: int,
-    retention_duration: timedelta,
     extended_gainer_count: int = 0,
 ) -> dict[str, TrackedMembership]:
     if extended_gainer_count < 0:
@@ -49,23 +33,6 @@ def build_monitoring_memberships(
             side=_target_side(result, symbol),
             left_target_at=None,
         )
-
-    for symbol, old in sorted(previous.items()):
-        if symbol in memberships or old.side is None:
-            continue
-        left_target_at = old.left_target_at or observed_at
-        rank = _rank_for_side(result, symbol, old.side)
-        if (
-            rank is not None
-            and rank <= retention_rank
-            and observed_at - left_target_at < retention_duration
-        ):
-            memberships[symbol] = TrackedMembership(
-                symbol=symbol,
-                status=MembershipStatus.RETAINED,
-                side=old.side,
-                left_target_at=left_target_at,
-            )
 
     for entry in result.gainers:
         if (
@@ -81,19 +48,13 @@ def build_monitoring_memberships(
             )
 
     for symbol in sorted(forced_symbols):
-        if symbol not in memberships:
-            previous_membership = previous.get(symbol)
-            memberships[symbol] = TrackedMembership(
-                symbol=symbol,
-                status=MembershipStatus.FORCED,
-                side=(
-                    None if previous_membership is None else previous_membership.side
-                ),
-                left_target_at=(
-                    None
-                    if previous_membership is None
-                    else previous_membership.left_target_at
-                ),
-            )
+        if symbol in memberships:
+            continue
+        memberships[symbol] = TrackedMembership(
+            symbol=symbol,
+            status=MembershipStatus.FORCED,
+            side=None,
+            left_target_at=None,
+        )
 
     return memberships

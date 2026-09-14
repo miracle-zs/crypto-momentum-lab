@@ -90,28 +90,40 @@ class UniverseConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     top_count: int = Field(gt=0)
-    retention_rank: int = Field(gt=0)
+    loser_target_count: int | None = Field(default=None, ge=0)
     ranking_depth: int = Field(default=30, gt=0)
     extended_gainer_count: int = Field(default=0, ge=0)
     prewarm_retention_minutes: int = Field(default=0, ge=0)
-    retention_hours: int = Field(gt=0)
     activation_minute: int = Field(ge=0, le=59)
     refresh_interval_minutes: int = Field(default=60, gt=0, le=60)
 
     @model_validator(mode="after")
-    def validate_retention_rank(self) -> "UniverseConfig":
-        if self.retention_rank < self.top_count:
-            raise ValueError("retention_rank must be >= top_count")
+    def validate_ranking_depth(self) -> "UniverseConfig":
+        effective_loser_target_count = (
+            self.top_count
+            if self.loser_target_count is None
+            else self.loser_target_count
+        )
         if self.ranking_depth < max(
             self.top_count,
-            self.retention_rank,
             self.extended_gainer_count,
+            effective_loser_target_count,
         ):
             raise ValueError(
-                "ranking_depth must be >= top_count, retention_rank, "
+                "ranking_depth must be >= top_count, loser_target_count, "
                 "and extended_gainer_count"
             )
         return self
+
+    @property
+    def effective_loser_target_count(self) -> int:
+        """Return the loser target count, preserving legacy configs."""
+
+        return (
+            self.top_count
+            if self.loser_target_count is None
+            else self.loser_target_count
+        )
 
 
 class ArchiveConfig(BaseModel):

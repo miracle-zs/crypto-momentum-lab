@@ -107,8 +107,6 @@ def _write_config(
         "\n".join(
             [
                 "top_count: 20",
-                "retention_rank: 30",
-                "retention_hours: 2",
                 "activation_minute: 1",
                 "",
             ]

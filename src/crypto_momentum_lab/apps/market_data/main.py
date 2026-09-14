@@ -26,7 +26,10 @@ from crypto_momentum_lab.domain.market.models import (
     CaptureStream,
     RawEnvelope,
 )
-from crypto_momentum_lab.domain.universe.models import UniverseSnapshot
+from crypto_momentum_lab.domain.universe.models import (
+    MembershipStatus,
+    UniverseSnapshot,
+)
 from crypto_momentum_lab.health import LocalHealthWriter, StartupPhaseTimer
 from crypto_momentum_lab.health.memory import configure_tracemalloc
 from crypto_momentum_lab.market_data.agg_trade_recovery import (
@@ -805,7 +808,12 @@ async def build_market_data_runtime(
             ),
         )
 
-    initial_memberships = await universe_repository.load_active_memberships()
+    persisted_memberships = await universe_repository.load_active_memberships()
+    initial_memberships = {
+        symbol: membership
+        for symbol, membership in persisted_memberships.items()
+        if membership.status is not MembershipStatus.RETAINED
+    }
     initial_symbols = frozenset(initial_memberships) | await load_protected_symbols()
     runtime_state_publisher.set_expected_symbols(initial_symbols)
     enabled_streams = tuple(
@@ -815,6 +823,9 @@ async def build_market_data_runtime(
         startup_timer.mark(
             "initial_symbols_loaded",
             membership_count=len(initial_memberships),
+            legacy_retained_membership_count=(
+                len(persisted_memberships) - len(initial_memberships)
+            ),
             initial_symbol_count=len(initial_symbols),
             stream_count=len(enabled_streams),
         )

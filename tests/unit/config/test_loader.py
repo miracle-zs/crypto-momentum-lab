@@ -16,8 +16,6 @@ def test_load_runtime_config_is_frozen_and_hash_is_stable(
         "\n".join(
             [
                 "top_count: 20",
-                "retention_rank: 30",
-                "retention_hours: 2",
                 "activation_minute: 1",
                 "refresh_interval_minutes: 15",
             ]
@@ -86,13 +84,13 @@ def test_load_runtime_config_is_frozen_and_hash_is_stable(
         first.universe.top_count = 10  # type: ignore[misc]
 
 
-def test_rejects_retention_rank_smaller_than_target_count(
+def test_rejects_loser_target_count_larger_than_ranking_depth(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     universe_path = tmp_path / "universe.yaml"
     universe_path.write_text(
-        "top_count: 20\nretention_rank: 10\nretention_hours: 2\n"
+        "top_count: 20\nloser_target_count: 21\nranking_depth: 20\n"
         "activation_minute: 1\n",
         encoding="utf-8",
     )
@@ -143,7 +141,7 @@ def test_rejects_retention_rank_smaller_than_target_count(
         "postgresql+asyncpg://user:secret@localhost/db",
     )
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="ranking_depth"):
         load_runtime_config(environment_path)
 
 

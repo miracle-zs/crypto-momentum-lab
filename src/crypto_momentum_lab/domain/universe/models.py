@@ -12,6 +12,7 @@ class RankingSide(StrEnum):
 
 class MembershipStatus(StrEnum):
     TARGET = "target"
+    # Kept so snapshots written by the former retention policy remain readable.
     RETAINED = "retained"
     EXTENDED = "extended"
     FORCED = "forced"
@@ -73,6 +74,7 @@ class TrackedMembership:
     symbol: str
     status: MembershipStatus
     side: RankingSide | None
+    # Legacy snapshots may contain this field; new memberships leave it empty.
     left_target_at: datetime | None
 
 

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
 
@@ -96,20 +96,16 @@ class UniverseRefreshService:
             candidates,
             top_count=self._config.top_count,
             ranking_depth=self._config.ranking_depth,
+            loser_target_count=self._config.effective_loser_target_count,
         )
         activated = True
         memberships: tuple[TrackedMembership, ...] = ()
         if activated:
-            previous = await self._repository.load_active_memberships()
             forced = await self._obligations.forced_symbols()
             memberships = tuple(
                 build_monitoring_memberships(
                     ranking,
-                    previous=previous,
                     forced_symbols=forced,
-                    observed_at=observed_at,
-                    retention_rank=self._config.retention_rank,
-                    retention_duration=timedelta(hours=self._config.retention_hours),
                     extended_gainer_count=self._config.extended_gainer_count,
                 ).values()
             )

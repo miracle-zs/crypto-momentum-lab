@@ -73,7 +73,7 @@ def test_small_population_deduplicates_target_union() -> None:
     assert result.target_symbols == frozenset({"AAAUSDT", "BBBUSDT"})
 
 
-def test_retention_ranking_keeps_more_entries_than_target() -> None:
+def test_ranking_depth_keeps_entries_beyond_target_count() -> None:
     result = rank_utc_day_returns(
         [
             candidate(f"S{index}USDT", "100", str(100 + index))
@@ -86,6 +86,21 @@ def test_retention_ranking_keeps_more_entries_than_target() -> None:
     assert len(result.gainers) == 3
     assert len(result.losers) == 3
     assert result.target_symbols == frozenset({"S0USDT", "S3USDT"})
+
+
+def test_loser_target_count_can_disable_loser_monitoring() -> None:
+    result = rank_utc_day_returns(
+        [
+            candidate("GAINERUSDT", "100", "110"),
+            candidate("LOSERUSDT", "100", "90"),
+        ],
+        top_count=1,
+        loser_target_count=0,
+        ranking_depth=1,
+    )
+
+    assert [entry.symbol for entry in result.losers] == ["LOSERUSDT"]
+    assert result.target_symbols == frozenset({"GAINERUSDT"})
 
 
 def test_rejects_ranking_depth_smaller_than_target_count() -> None:

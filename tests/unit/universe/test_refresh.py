@@ -41,8 +41,6 @@ def build_service(
         repository=repository,
         config=UniverseConfig(
             top_count=20,
-            retention_rank=30,
-            retention_hours=2,
             activation_minute=1,
         ),
         config_hash="a" * 64,
@@ -93,8 +91,6 @@ async def test_refresh_persists_top_bottom_and_fetches_only_missing_opens(
         repository=fake_repository,
         config=UniverseConfig(
             top_count=1,
-            retention_rank=2,
-            retention_hours=2,
             activation_minute=1,
         ),
         config_hash="a" * 64,

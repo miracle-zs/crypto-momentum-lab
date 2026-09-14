@@ -7,7 +7,6 @@ from crypto_momentum_lab.config.models import UniverseConfig
 from crypto_momentum_lab.domain.universe.models import (
     ContractMetadata,
     DailyOpen,
-    MembershipStatus,
     PricePoint,
 )
 from crypto_momentum_lab.persistence.postgres.repository import (
@@ -82,8 +81,6 @@ def build_fixture_service(
         repository=repository,
         config=UniverseConfig(
             top_count=20,
-            retention_rank=30,
-            retention_hours=2,
             activation_minute=1,
         ),
         config_hash="a" * 64,
@@ -109,7 +106,7 @@ async def test_refresh_is_deterministic_and_persists_point_in_time(
 
 
 @pytest.mark.e2e
-async def test_rank_21_former_target_is_retained(
+async def test_rank_21_former_target_is_not_retained(
     repository: PostgresUniverseRepository,
 ) -> None:
     first_at = datetime(2026, 6, 14, 11, 1, tzinfo=UTC)
@@ -124,9 +121,6 @@ async def test_rank_21_former_target_is_retained(
     market_data.price_values["S25USDT"] = Decimal("104.5")
     second = await service.refresh(observed_at=second_at)
 
-    membership = next(
-        item for item in second.memberships if item.symbol == "S25USDT"
-    )
-    assert membership.status is MembershipStatus.RETAINED
+    assert "S25USDT" not in {item.symbol for item in second.memberships}
     assert len(second.ranking.target_symbols) == 40
-    assert len(second.memberships) == 41
+    assert len(second.memberships) == 40
