@@ -56,6 +56,11 @@ _DEFAULT_RSS_CRITICAL_FRACTION = 0.90
 _SERVICE_RSS_WARNING_FRACTION_OVERRIDES: Mapping[str, float] = {
     "postgres": 0.85,
 }
+# Services whose memory thresholds read anonymous memory instead of the Docker
+# working set.  A database keeps most of its cgroup usage as reclaimable page
+# cache: postgres reported 90-96% of its limit while `anon` sat near 15%, so
+# every deploy -- which refills that cache -- produced a false "memory high".
+_SERVICE_ANON_PRESSURE_SERVICES: frozenset[str] = frozenset({"postgres"})
 _DEFAULT_RSS_GROWTH_BYTES = 64 * 1024 * 1024
 _DEFAULT_RSS_GROWTH_WINDOW_SECONDS = 1_800.0
 _DEFAULT_MEMORY_GROWTH_REQUIRED_SAMPLES = 3
@@ -259,6 +264,7 @@ class ContainerSnapshot:
     memory_limit_bytes: int | None
     memory_source: str = "docker_stats_working_set"
     memory_working_set_bytes: int | None = None
+    memory_anon_bytes: int | None = None
     memory_current_bytes: int | None = None
     memory_peak_bytes: int | None = None
     memory_swap_current_bytes: int | None = None
@@ -277,6 +283,7 @@ class ContainerMemoryStats:
     memory_limit_bytes: int | None
     source: str
     working_set_bytes: int | None = None
+    anon_bytes: int | None = None
     current_bytes: int | None = None
     peak_bytes: int | None = None
     swap_current_bytes: int | None = None
@@ -741,6 +748,26 @@ def rss_warning_fraction_for(service: str, default: float) -> float:
     return _SERVICE_RSS_WARNING_FRACTION_OVERRIDES.get(service, default)
 
 
+def _memory_pressure_reading(
+    snapshot: ContainerSnapshot,
+) -> tuple[int | None, str]:
+    """Return the (bytes, source) behind this container's memory alerts.
+
+    Anonymous memory for the services in ``_SERVICE_ANON_PRESSURE_SERVICES`` --
+    what the process actually allocated -- and the reported working set for
+    everything else.  When the cgroup counter is unavailable this falls back to
+    the reported value rather than to ``None``, so an unreadable file cannot
+    silence a real alert.
+    """
+
+    if (
+        snapshot.service in _SERVICE_ANON_PRESSURE_SERVICES
+        and snapshot.memory_anon_bytes is not None
+    ):
+        return snapshot.memory_anon_bytes, "cgroup_memory_anon"
+    return snapshot.memory_bytes, snapshot.memory_source
+
+
 def evaluate_container(
     snapshot: ContainerSnapshot,
     *,
@@ -750,12 +777,16 @@ def evaluate_container(
     """Return alerts for Docker lifecycle and memory state."""
 
     alerts: list[Alert] = []
+    pressure_bytes, pressure_source = _memory_pressure_reading(snapshot)
     memory_details = {
         "service": snapshot.service,
         "memory_bytes": snapshot.memory_bytes,
         "memory_limit_bytes": snapshot.memory_limit_bytes,
         "memory_source": snapshot.memory_source,
         "memory_working_set_bytes": snapshot.memory_working_set_bytes,
+        "memory_anon_bytes": snapshot.memory_anon_bytes,
+        "memory_pressure_bytes": pressure_bytes,
+        "memory_pressure_source": pressure_source,
         "memory_current_bytes": snapshot.memory_current_bytes,
         "memory_peak_bytes": snapshot.memory_peak_bytes,
         "memory_swap_current_bytes": snapshot.memory_swap_current_bytes,
@@ -783,11 +814,11 @@ def evaluate_container(
             )
         )
     if (
-        snapshot.memory_bytes is not None
+        pressure_bytes is not None
         and snapshot.memory_limit_bytes is not None
         and snapshot.memory_limit_bytes > 0
     ):
-        fraction = snapshot.memory_bytes / snapshot.memory_limit_bytes
+        fraction = pressure_bytes / snapshot.memory_limit_bytes
         if fraction >= rss_critical_fraction:
             alerts.append(
                 Alert(
@@ -1180,13 +1211,14 @@ class OpsMonitor:
             alerts.extend(
                 self._memory_pressure_alerts(snapshot)
             )
+            pressure_bytes, pressure_source = _memory_pressure_reading(snapshot)
             alerts.extend(
                 self._memory_growth_alerts(
                     snapshot.service,
-                    snapshot.memory_bytes,
+                    pressure_bytes,
                     now,
                     container_id=snapshot.container_id,
-                    metric_source=snapshot.memory_source,
+                    metric_source=pressure_source,
                     memory_limit_bytes=snapshot.memory_limit_bytes,
                 )
             )
@@ -1732,6 +1764,7 @@ class OpsMonitor:
                     memory_limit_bytes=memory.memory_limit_bytes,
                     memory_source=memory.source,
                     memory_working_set_bytes=memory.working_set_bytes,
+                    memory_anon_bytes=memory.anon_bytes,
                     memory_current_bytes=memory.current_bytes,
                     memory_peak_bytes=memory.peak_bytes,
                     memory_swap_current_bytes=memory.swap_current_bytes,
@@ -1768,10 +1801,10 @@ class OpsMonitor:
 
         cgroup = self._cgroup_memory_stats(container_id)
         current_bytes = cgroup.get("memory.current")
-        # Judge pressure by the working set, not by cgroup memory.current: the
-        # latter includes reclaimable page cache, so a database that mostly
-        # caches files reported ~95% of its limit while its real working set sat
-        # near 16%, which produced a permanent "memory high" alert for postgres.
+        # Prefer the working set over cgroup memory.current: that counter counts
+        # reclaimable page cache in full, so a database that mostly caches files
+        # reports near its limit.  Services that still cache heavily are judged
+        # on `anon` instead -- see _SERVICE_ANON_PRESSURE_SERVICES.
         memory_bytes = (
             working_set_bytes if working_set_bytes is not None else current_bytes
         )
@@ -1785,6 +1818,7 @@ class OpsMonitor:
             memory_limit_bytes=memory_limit or cgroup.get("memory.max"),
             source=source,
             working_set_bytes=working_set_bytes,
+            anon_bytes=cgroup.get("memory.stat.anon"),
             current_bytes=current_bytes,
             peak_bytes=cgroup.get("memory.peak"),
             swap_current_bytes=cgroup.get("memory.swap.current"),
@@ -1813,7 +1847,12 @@ class OpsMonitor:
                         "while read -r key value _; do "
                         "if [ \"$key\" = max ]; then "
                         "printf 'memory.events.max=%s\\n' \"$value\"; "
-                        "fi; done < /sys/fs/cgroup/memory.events; fi"
+                        "fi; done < /sys/fs/cgroup/memory.events; fi; "
+                        "if [ -r /sys/fs/cgroup/memory.stat ]; then "
+                        "while read -r key value _; do "
+                        "if [ \"$key\" = anon ]; then "
+                        "printf 'memory.stat.anon=%s\\n' \"$value\"; "
+                        "fi; done < /sys/fs/cgroup/memory.stat; fi"
                     ),
                 ],
                 timeout_seconds=self._config.command_timeout_seconds,
@@ -1835,6 +1874,7 @@ class OpsMonitor:
                 "memory.max",
                 "memory.swap.current",
                 "memory.events.max",
+                "memory.stat.anon",
             } and value >= 0:
                 values[key] = value
         return values

@@ -268,6 +268,46 @@ def test_postgres_warning_override_suppresses_page_cache_noise() -> None:
     )
 
 
+def test_postgres_memory_high_reads_anon_not_working_set() -> None:
+    """The working set counts reclaimable page cache; anon does not.
+
+    Postgres reported 90-96% of its cgroup limit while its anonymous memory sat
+    near 15%, so every deploy -- which refills that cache -- raised a memory
+    alert that resolved on its own minutes later.
+    """
+
+    def snapshot(service: str, anon: int | None) -> ContainerSnapshot:
+        return ContainerSnapshot(
+            service=service,
+            container_id="abc",
+            health="healthy",
+            oom_killed=False,
+            restart_count=0,
+            memory_bytes=950 * 1024 * 1024,
+            memory_limit_bytes=1_000 * 1024 * 1024,
+            memory_anon_bytes=anon,
+        )
+
+    def names(service: str, anon: int | None) -> list[str]:
+        return [
+            alert.name
+            for alert in evaluate_container(
+                snapshot(service, anon),
+                rss_warning_fraction=rss_warning_fraction_for(service, 0.75),
+                rss_critical_fraction=0.90,
+            )
+        ]
+
+    # 95% by working set, 15% by anon: that is a cache, not memory pressure.
+    assert names("postgres", 150 * 1024 * 1024) == []
+    # The identical numbers still alert for a service judged on its working set.
+    assert names("market-data", 150 * 1024 * 1024) == ["container_memory_high"]
+    # A host where the cgroup counter is unreadable must keep alerting.
+    assert names("postgres", None) == ["container_memory_high"]
+    # Anonymous memory that really is near the limit still alerts.
+    assert names("postgres", 950 * 1024 * 1024) == ["container_memory_high"]
+
+
 def test_memory_growth_ignores_a_restart_warmup() -> None:
     """Growing from an empty container to steady state is not a leak.
 
@@ -547,6 +587,7 @@ def test_memory_stats_prefers_working_set_and_keeps_cgroup_current(
                     "memory.max=1000\n"
                     "memory.swap.current=128\n"
                     "memory.events.max=12\n"
+                    "memory.stat.anon=150\n"
                 )
             raise AssertionError(f"unexpected command: {args}")
 
@@ -561,6 +602,7 @@ def test_memory_stats_prefers_working_set_and_keeps_cgroup_current(
     assert stats.memory_limit_bytes == 1_000
     assert stats.source == "docker_stats_working_set"
     assert stats.working_set_bytes == 10 * 1_048_576
+    assert stats.anon_bytes == 150
     assert stats.current_bytes == 700
     assert stats.peak_bytes == 900
     assert stats.swap_current_bytes == 128
