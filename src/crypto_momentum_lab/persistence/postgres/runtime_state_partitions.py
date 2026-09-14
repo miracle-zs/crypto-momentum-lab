@@ -21,7 +21,13 @@ RUNTIME_STATE_TABLE: Final = "runtime_market_states_15s"
 RUNTIME_STATE_SHADOW_TABLE: Final = "runtime_market_states_15s_partitioned"
 RUNTIME_STATE_PARTITION_PREFIX: Final = "runtime_market_states_15s_p_"
 RUNTIME_STATE_PARTITION_INTERVAL: Final = timedelta(hours=6)
-RUNTIME_STATE_PARTITION_LOOKAHEAD: Final = timedelta(days=7)
+# How far ahead to create empty partitions.  This doubles as the outage
+# tolerance: a host that was down longer than this finds no partition covering
+# "now" on restart, so writes into runtime_market_states_15s fail until the
+# next retention cycle (at most 5 minutes) builds one.  Two days keeps ~17
+# partitions instead of ~37, halving the object count the planner, DDL and
+# backups have to walk.
+RUNTIME_STATE_PARTITION_LOOKAHEAD: Final = timedelta(days=2)
 
 _RUNTIME_STATE_PRIMARY_KEY: Final = (
     "pk_runtime_market_states_15s_partitioned"
