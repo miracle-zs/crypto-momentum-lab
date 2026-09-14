@@ -93,6 +93,7 @@ class UniverseConfig(BaseModel):
     retention_rank: int = Field(gt=0)
     ranking_depth: int = Field(default=30, gt=0)
     extended_gainer_count: int = Field(default=0, ge=0)
+    prewarm_retention_minutes: int = Field(default=0, ge=0)
     retention_hours: int = Field(gt=0)
     activation_minute: int = Field(ge=0, le=59)
     refresh_interval_minutes: int = Field(default=60, gt=0, le=60)

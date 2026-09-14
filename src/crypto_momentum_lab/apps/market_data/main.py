@@ -413,6 +413,7 @@ class CaptureUniverseObserver:
         *,
         streams: tuple[CaptureStream, ...],
         initial_generation: int,
+        prewarm_retention_minutes: int = 0,
         protected_symbol_loader: (
             Callable[[], Awaitable[frozenset[str]]] | None
         ) = None,
@@ -421,20 +422,29 @@ class CaptureUniverseObserver:
         self._capture = capture
         self._streams = streams
         self._generation = initial_generation
+        if prewarm_retention_minutes < 0:
+            raise ValueError("prewarm_retention_minutes must be non-negative")
+        self._prewarm_retention = timedelta(minutes=prewarm_retention_minutes)
         self._protected_symbol_loader = protected_symbol_loader
         self._on_symbols_changed = on_symbols_changed
         self._lock = asyncio.Lock()
         self._universe_symbols: frozenset[str] | None = None
         self._applied_symbols: frozenset[str] | None = None
+        self._prewarm_until_by_symbol: dict[str, datetime] = {}
 
     async def snapshot_updated(
         self,
         snapshot: UniverseSnapshot,
     ) -> None:
         async with self._lock:
-            self._universe_symbols = frozenset(
+            universe_symbols = frozenset(
                 item.symbol for item in snapshot.memberships
             )
+            self._update_prewarm_symbols(
+                universe_symbols=universe_symbols,
+                observed_at=snapshot.observed_at,
+            )
+            self._universe_symbols = universe_symbols
             await self._apply_symbols()
 
     async def refresh_protected_symbols(self) -> None:
@@ -451,7 +461,11 @@ class CaptureUniverseObserver:
             if self._protected_symbol_loader is None
             else await self._protected_symbol_loader()
         )
-        symbols = self._universe_symbols | protected_symbols
+        symbols = (
+            self._universe_symbols
+            | frozenset(self._prewarm_until_by_symbol)
+            | protected_symbols
+        )
         if symbols == self._applied_symbols:
             return
         # A symbol only produces market-state buckets while it is subscribed, so
@@ -477,6 +491,7 @@ class CaptureUniverseObserver:
         log.info(
             "capture_symbols_updated",
             universe=len(self._universe_symbols),
+            prewarm=len(self._prewarm_until_by_symbol),
             protected=len(protected_symbols - self._universe_symbols),
             total=len(symbols),
             added=len(added_symbols),
@@ -491,6 +506,29 @@ class CaptureUniverseObserver:
                 added_symbols=sorted(added_symbols)[:_SYMBOL_LOG_LIMIT],
                 removed_symbols=sorted(removed_symbols)[:_SYMBOL_LOG_LIMIT],
             )
+
+    def _update_prewarm_symbols(
+        self,
+        *,
+        universe_symbols: frozenset[str],
+        observed_at: datetime,
+    ) -> None:
+        """Keep recently exited universe symbols subscribed for re-entry."""
+
+        previous_universe = self._universe_symbols or frozenset()
+        if self._prewarm_retention > timedelta(0):
+            left_symbols = previous_universe - universe_symbols
+            expiry = observed_at + self._prewarm_retention
+            for symbol in left_symbols:
+                self._prewarm_until_by_symbol[symbol] = expiry
+
+        for symbol in universe_symbols:
+            self._prewarm_until_by_symbol.pop(symbol, None)
+        self._prewarm_until_by_symbol = {
+            symbol: expiry
+            for symbol, expiry in self._prewarm_until_by_symbol.items()
+            if expiry > observed_at
+        }
 
 
 async def reconcile_paper_exit_subscriptions(
@@ -969,6 +1007,7 @@ async def build_market_data_runtime(
         capture,
         streams=enabled_streams,
         initial_generation=1,
+        prewarm_retention_minutes=runtime.universe.prewarm_retention_minutes,
         protected_symbol_loader=load_protected_symbols,
         on_symbols_changed=runtime_state_publisher.set_expected_symbols,
     )

@@ -740,3 +740,46 @@ async def test_capture_observer_reports_symbols_leaving_the_set() -> None:
     assert churn[0]["added"] == 0
     assert churn[0]["removed"] == 1
     assert churn[0]["removed_symbols"] == ["BTCUSDT"]
+
+
+async def test_capture_observer_keeps_recently_removed_symbols_for_prewarm() -> None:
+    """A short ranking dip must not break the rolling strategy history."""
+
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def apply_symbols(self, symbols, *, streams, generation) -> None:
+            self.calls.append((symbols, streams, generation))
+
+    first = fixture_snapshot()
+    left_at = first.observed_at + timedelta(minutes=5)
+    left = replace(
+        first,
+        observed_at=left_at,
+        memberships=(),
+    )
+    expired = replace(
+        left,
+        observed_at=left_at + timedelta(minutes=41),
+    )
+
+    capture = FakeCapture()
+    observer = main.CaptureUniverseObserver(
+        capture,
+        streams=(CaptureStream.AGG_TRADE,),
+        initial_generation=1,
+        prewarm_retention_minutes=40,
+    )
+
+    await observer.snapshot_updated(first)
+    await observer.snapshot_updated(left)
+
+    # The symbol remains subscribed during the prewarm grace period.
+    assert capture.calls[-1][0] == frozenset({"BTCUSDT"})
+    assert len(capture.calls) == 1
+
+    await observer.snapshot_updated(expired)
+
+    assert capture.calls[-1][0] == frozenset()
+    assert len(capture.calls) == 2
