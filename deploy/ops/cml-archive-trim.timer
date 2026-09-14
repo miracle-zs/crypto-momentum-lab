@@ -1,0 +1,16 @@
+[Unit]
+Description=Daily 08:20 Asia/Shanghai archive and trim of cold PostgreSQL rows
+
+[Timer]
+# 08:20 Beijing time.  The server clock is UTC, so state the zone explicitly
+# rather than shifting the hour by hand -- otherwise a timezone change on the
+# host silently moves the job.
+OnCalendar=*-*-* 08:20:00 Asia/Shanghai
+# If the host was down at 08:20, run once when it comes back.
+Persistent=true
+# Spread the load slightly so we never collide with the top of the hour when
+# the partition maintenance and market-data rollups also fire.
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,18 @@
+[Unit]
+Description=Crypto Momentum Lab archive and trim of cold PostgreSQL rows
+Documentation=file:///opt/crypto-momentum-lab/docs/postgres-capacity-and-retention-2026-09-14.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/crypto-momentum-lab
+# Archives the exact range about to be dropped and verifies the manifest's row
+# count before deleting, so a failure here leaves the rows in place rather than
+# destroying the only copy.  See deploy/ops/archive_and_trim.py.
+ExecStart=/usr/bin/python3 /opt/crypto-momentum-lab/deploy/ops/archive_and_trim.py --retention-days 2
+NoNewPrivileges=true
+PrivateTmp=true
+
+# No [Install]: the timer drives this unit.
