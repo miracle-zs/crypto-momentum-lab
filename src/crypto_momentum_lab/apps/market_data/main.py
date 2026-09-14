@@ -127,7 +127,13 @@ _PAPER_EXIT_RECONCILE_SECONDS = 15.0
 _DATABASE_RETENTION_INTERVAL_SECONDS = 300.0
 _DATABASE_RETENTION_MAX_RUNTIME_SECONDS = 45.0
 _CONTRACT_METADATA_RETENTION_HOURS = 6.0
-_RUNTIME_STATE_RETENTION_HOURS = 48.0
+# Strategy warmup needs about 34 minutes of 15-second history and startup
+# recovery backfills it from this table, so 12 hours is ~20x the real
+# requirement.  research_collector also falls back to this table when its Hub
+# cursor cannot replay; the window only decides how often that fallback is
+# needed, not whether the data survives (the raw stream and the parquet
+# datasets are separate, longer-lived copies).
+_RUNTIME_STATE_RETENTION_HOURS = 12.0
 _CONTRACT_METADATA_RETENTION_BATCH_SIZE = 250
 _RUNTIME_STATE_RETENTION_BATCH_SIZE = 250
 _PAPER_EXIT_RUN_IDS_ENV = "CML_PAPER_EXIT_RUN_IDS"
