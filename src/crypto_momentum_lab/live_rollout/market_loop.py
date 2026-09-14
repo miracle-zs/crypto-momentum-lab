@@ -217,6 +217,15 @@ class LiveMarketLoop:
                 # point well before it matters.  Without this the "gap" would
                 # span the whole time it was out of the pool, and recovery would
                 # chase buckets that never existed.
+                #
+                # Note this reacts to a *market*-layer signal inside the
+                # strategy layer.  That is sound only while "left the pool"
+                # means "its momentum premise is gone" -- which is what makes
+                # dropping its rolling indicators correct rather than
+                # over-eager.  It costs nothing today because reset_symbol is a
+                # plain `pop(..., None)` and is a no-op for symbols the strategy
+                # holds no state for.  Revisit if pool membership ever stops
+                # implying that.
                 reset = getattr(self._strategy, "reset_symbol", None)
                 if callable(reset):
                     reset(state.symbol)
