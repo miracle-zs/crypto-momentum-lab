@@ -734,6 +734,39 @@ def test_signal_divergence_ignores_async_candidate_count_difference() -> None:
     ) == ()
 
 
+def test_signal_fingerprint_covers_only_account_stable_features(tmp_path) -> None:
+    """The durable fingerprint must not cover per-run rolling ratios.
+
+    Two accounts on one config recompute ``notional_5m_vs_30m`` from their own
+    local market-state window, so that value differs between them by a
+    rounding-level amount; fingerprinting the whole ``features`` blob would
+    report a divergence for every shared bucket.
+    """
+
+    class Runner:
+        last_args = None
+
+        def run(self, args, *, timeout_seconds):
+            del timeout_seconds
+            self.last_args = args
+            return ""
+
+    runner = Runner()
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+        runner=runner,
+    )
+
+    monitor._consistency_observations("postgres-container")
+    sql = str(runner.last_args[-1])
+
+    assert "features::text" not in sql
+    assert "'notional_5m_vs_30m'" not in sql
+    assert "'aggressive_imbalance'" in sql
+    assert "'impulse_return_pct'" in sql
+    assert "reference_prices" in sql
+
+
 def test_position_divergence_ignores_stale_reconciliation() -> None:
     observations = (
         PositionObservation(

@@ -348,6 +348,13 @@ def evaluate_signal_divergence(
     false positive; accounts claiming the same config must agree on the signal
     count and durable content fingerprint. Candidate persistence is checked
     asynchronously and is deliberately excluded from this alert.
+
+    The durable fingerprint covers the decision -- signal kind, side, reason,
+    reference prices, and the account-stable features named in
+    ``_SIGNAL_FINGERPRINT_FEATURE_KEYS`` -- not every recorded feature. Rolling
+    ratios such as ``notional_5m_vs_30m`` are recomputed per run from that
+    run's own market-state window, so two correct accounts sharing a config
+    disagree on them by a rounding-level amount and must not alert.
     """
 
     groups: dict[tuple[str, str, str], dict[str, SignalObservation]] = {}
@@ -2080,15 +2087,19 @@ WHERE run_id = {run_id} AND state = 'unknown_pending_reconciliation';
         account_sql = _sql_list(account_labels)
         run_sql = _sql_list(run_ids)
         window_seconds = _sql_numeric(self._config.consistency_window_seconds)
+        # Fingerprint only the decision-relevant features: the full ``features``
+        # blob carries rolling ratios that differ between two correct accounts
+        # on the same configuration (see _SIGNAL_FINGERPRINT_FEATURE_KEYS).
+        features_sql = _fingerprint_features_sql()
         sql = f"""
 SELECT 'signal' || E'\\t' || account_label || E'\\t' || symbol || E'\\t'
   || source_state_at::text || E'\\t' || config_hash || E'\\t'
   || count(*)::text || E'\\t'
   || md5(string_agg(
     signal_kind || ':' || side || ':' || reason || ':'
-      || features::text || ':' || reference_prices::text,
+      || {features_sql} || ':' || reference_prices::text,
     E'\\x1f'
-    ORDER BY signal_kind, side, reason, features::text, reference_prices::text
+    ORDER BY signal_kind, side, reason, {features_sql}, reference_prices::text
   ))
 FROM live_strategy_signals
 WHERE account_label IN ({account_sql})
@@ -2547,6 +2558,49 @@ def _sql_numeric(value: float) -> str:
     if value <= 0 or value != value or value in {float("inf"), float("-inf")}:
         raise ValueError("SQL numeric value must be finite and positive")
     return format(value, ".6f")
+
+
+# Only decision-relevant, account-stable features take part in the durable
+# signal fingerprint.  Rolling ratio features (``notional_5m_vs_30m``) are
+# recomputed per run from that run's own local market-state window, so two
+# accounts on the *same* configuration disagree there by a rounding-level
+# amount and would report a divergence forever.  A whitelist rather than a
+# list of exceptions keeps a future feature from quietly reintroducing that
+# noise.  The keys mirror ``_features`` in
+# ``strategies/order_flow_impulse/runtime.py``.
+_SIGNAL_FINGERPRINT_FEATURE_KEYS: tuple[str, ...] = (
+    "direction",
+    "impulse_start",
+    "impulse_end",
+    "impulse_start_price",
+    "impulse_end_price",
+    "impulse_return_pct",
+    "breakout_level",
+    "breakout_distance_pct",
+    "impulse_trade_count",
+    "impulse_trade_notional",
+    "aggressive_buy_notional",
+    "aggressive_sell_notional",
+    "aggressive_imbalance",
+    "baseline_notional",
+    "notional_intensity",
+    "liquidation_count",
+    "liquidation_notional",
+)
+
+
+def _fingerprint_features_sql() -> str:
+    """Render the ``features`` subset that feeds the durable signal fingerprint.
+
+    ``jsonb`` normalises key order, so the rendered text is deterministic for a
+    given set of values even though the stored column's key order is not.
+    """
+
+    pairs = ", ".join(
+        f"{_sql_literal(key)}, features->{_sql_literal(key)}"
+        for key in _SIGNAL_FINGERPRINT_FEATURE_KEYS
+    )
+    return f"jsonb_build_object({pairs})::text"
 
 
 def _load_state(path: Path) -> dict[str, Any]:
