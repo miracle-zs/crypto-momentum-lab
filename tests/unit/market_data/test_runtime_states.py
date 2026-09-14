@@ -113,6 +113,37 @@ async def test_quiet_symbol_fills_when_global_watermark_advances() -> None:
     ]
 
 
+def test_expected_symbols_reports_real_entries_only() -> None:
+    """Entering the dense set is reported once; the startup baseline is not."""
+
+    publisher = ClosedMarketStatePublisher(
+        repository=FakeRuntimeStateRepository(),
+        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+    )
+
+    # The first call is the startup baseline: nothing "just entered".
+    publisher.set_expected_symbols(frozenset({"BTCUSDT"}))
+    assert publisher.consume_pending_entry_symbols() == frozenset()
+
+    # An unchanged set reports nothing.
+    publisher.set_expected_symbols(frozenset({"BTCUSDT"}))
+    assert publisher.consume_pending_entry_symbols() == frozenset()
+
+    # A symbol joining is reported exactly once, then cleared.
+    publisher.set_expected_symbols(frozenset({"BTCUSDT", "ETHUSDT"}))
+    assert publisher.consume_pending_entry_symbols() == frozenset({"ETHUSDT"})
+    assert publisher.consume_pending_entry_symbols() == frozenset()
+
+    # A symbol leaving, or re-appearing after a leave, is not an entry.
+    publisher.set_expected_symbols(frozenset({"ETHUSDT"}))
+    assert publisher.consume_pending_entry_symbols() == frozenset()
+
+    # Re-entering after leaving IS an entry -- this is the case that used to
+    # look like lost buckets downstream.
+    publisher.set_expected_symbols(frozenset({"ETHUSDT", "BTCUSDT"}))
+    assert publisher.consume_pending_entry_symbols() == frozenset({"BTCUSDT"})
+
+
 async def test_late_event_for_closed_bucket_is_rejected() -> None:
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
