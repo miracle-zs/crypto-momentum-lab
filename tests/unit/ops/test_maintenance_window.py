@@ -1,5 +1,7 @@
 """Tests for the deploy/monitor maintenance-window handshake."""
 
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -102,3 +104,27 @@ def test_default_path_honours_the_override(monkeypatch) -> None:
     assert default_maintenance_path() == Path(
         "/var/lib/crypto-momentum-lab/maintenance.json"
     )
+
+
+def test_monitor_still_starts_when_run_as_a_script() -> None:
+    """The systemd unit runs the monitor as a script, not as a package.
+
+    Importing a sibling package from a script only works if the repository root
+    is restored to sys.path.  Getting this wrong crash-loops the monitor and
+    silently disables every alert, so it is worth a real subprocess.
+    """
+
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "deploy" / "ops" / "cml_ops_monitor.py"
+
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        capture_output=True,
+        text=True,
+        cwd="/",  # not the repo root: exactly what systemd does
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "usage:" in completed.stdout
+    assert "ModuleNotFoundError" not in completed.stderr

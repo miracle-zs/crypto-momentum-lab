@@ -25,6 +25,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
+# Run as a script (`python3 deploy/ops/cml_ops_monitor.py`, which is how the
+# systemd unit starts it) the repository root is not on sys.path, so importing
+# the sibling package below would fail with ModuleNotFoundError.  Put it back.
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from deploy.ops.maintenance_window import (
     default_maintenance_path,
     now_utc,
