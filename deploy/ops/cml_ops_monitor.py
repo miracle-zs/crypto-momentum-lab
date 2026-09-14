@@ -36,6 +36,14 @@ _DEFAULT_LOG_WINDOW_SECONDS = 120.0
 _DEFAULT_TELEMETRY_STALE_AFTER_SECONDS = 900.0
 _DEFAULT_RSS_WARNING_FRACTION = 0.75
 _DEFAULT_RSS_CRITICAL_FRACTION = 0.90
+# Per-service warning overrides.  postgres is judged on its working set, which
+# includes its page cache: under load it legitimately climbs past the generic
+# threshold while its durable footprint (anon + shared_buffers) stays under half
+# the limit, and it has never been OOM-killed.  Raising only its warning keeps
+# the pressure/growth signals -- the ones that mean real trouble -- intact.
+_SERVICE_RSS_WARNING_FRACTION_OVERRIDES: Mapping[str, float] = {
+    "postgres": 0.85,
+}
 _DEFAULT_RSS_GROWTH_BYTES = 64 * 1024 * 1024
 _DEFAULT_RSS_GROWTH_WINDOW_SECONDS = 1_800.0
 _DEFAULT_MEMORY_GROWTH_REQUIRED_SAMPLES = 3
@@ -700,6 +708,12 @@ def evaluate_log_signals(signals: LogSignals) -> tuple[Alert, ...]:
     return tuple(alerts)
 
 
+def rss_warning_fraction_for(service: str, default: float) -> float:
+    """Return the memory warning threshold that applies to one service."""
+
+    return _SERVICE_RSS_WARNING_FRACTION_OVERRIDES.get(service, default)
+
+
 def evaluate_container(
     snapshot: ContainerSnapshot,
     *,
@@ -1033,7 +1047,10 @@ class OpsMonitor:
             alerts.extend(
                 evaluate_container(
                     snapshot,
-                    rss_warning_fraction=self._config.rss_warning_fraction,
+                    rss_warning_fraction=rss_warning_fraction_for(
+                        snapshot.service,
+                        self._config.rss_warning_fraction,
+                    ),
                     rss_critical_fraction=self._config.rss_critical_fraction,
                 )
             )

@@ -26,6 +26,7 @@ from deploy.ops.cml_ops_monitor import (
     evaluate_log_signals,
     evaluate_position_divergence,
     evaluate_signal_divergence,
+    rss_warning_fraction_for,
 )
 
 
@@ -177,6 +178,52 @@ def test_container_alerts_on_oom_and_rss_limit() -> None:
         "container_memory_high",
     }
     assert all(alert.severity == "critical" for alert in alerts)
+
+
+def test_postgres_gets_a_higher_memory_warning_threshold() -> None:
+    """postgres is judged on a working set that includes its page cache."""
+
+    assert rss_warning_fraction_for("postgres", 0.75) == 0.85
+    # Services without an override keep the configured default.
+    assert rss_warning_fraction_for("live-strategy", 0.75) == 0.75
+    assert rss_warning_fraction_for("market-data", 0.75) == 0.75
+    # ...including an explicitly configured one.
+    assert rss_warning_fraction_for("dashboard", 0.60) == 0.60
+
+
+def test_postgres_warning_override_suppresses_page_cache_noise() -> None:
+    """77% of the limit warns for most services but not for postgres."""
+
+    def snapshot(service: str) -> ContainerSnapshot:
+        return ContainerSnapshot(
+            service=service,
+            container_id="abc",
+            health="healthy",
+            oom_killed=False,
+            restart_count=0,
+            memory_bytes=790 * 1024 * 1024,
+            memory_limit_bytes=1_000 * 1024 * 1024,
+        )
+
+    # The same fraction crosses the generic threshold...
+    assert [
+        alert.name
+        for alert in evaluate_container(
+            snapshot("live-strategy"),
+            rss_warning_fraction=rss_warning_fraction_for("live-strategy", 0.75),
+            rss_critical_fraction=0.90,
+        )
+    ] == ["container_memory_high"]
+
+    # ...but not postgres's, whose page cache explains it.
+    assert (
+        evaluate_container(
+            snapshot("postgres"),
+            rss_warning_fraction=rss_warning_fraction_for("postgres", 0.75),
+            rss_critical_fraction=0.90,
+        )
+        == ()
+    )
 
 
 def test_container_memory_growth_requires_consecutive_samples() -> None:
