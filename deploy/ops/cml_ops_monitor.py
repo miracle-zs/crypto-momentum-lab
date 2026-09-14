@@ -2303,11 +2303,19 @@ FROM (
 LEFT JOIN (
   SELECT run_id, symbol,
     count(*) AS order_count,
+    -- An opening order states a quantity the strategy chose, so it takes part
+    -- in the fingerprint.  A closing order does not: how much to sell is a
+    -- function of how much is held, and two accounts whose *fills* differed
+    -- hold different amounts.  Comparing those quantities would report the
+    -- fill difference again, through a different column.
     md5(string_agg(
-      side || ':' || order_type || ':' || quantity::text || ':'
-        || COALESCE(price::text, ''),
+      side || ':' || order_type || ':'
+        || CASE
+             WHEN reduce_only THEN 'close'
+             ELSE quantity::text || ':' || COALESCE(price::text, '')
+           END,
       E'\\x1f'
-      ORDER BY side, order_type, quantity::text, price::text
+      ORDER BY side, order_type, reduce_only, quantity::text, price::text
     )) AS fingerprint
   FROM exchange_orders
   WHERE run_id IN ({run_sql})

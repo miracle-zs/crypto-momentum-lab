@@ -811,6 +811,42 @@ def test_signal_fingerprint_covers_only_account_stable_features(tmp_path) -> Non
     assert "reference_prices" in sql
 
 
+def test_order_fingerprint_omits_closing_quantity(tmp_path) -> None:
+    """Closing size follows holdings; only the decision to exit is intent.
+
+    After the 04:26 partial fill, account-4 held 198 while its peers held 262.
+    Their 05:15 exit orders therefore carried different quantities and were
+    reported as divergent intent -- the same fill difference, re-raised through
+    the order table.
+    """
+
+    class Runner:
+        last_args = None
+
+        def run(self, args, *, timeout_seconds):
+            del timeout_seconds
+            self.last_args = args
+            return ""
+
+    runner = Runner()
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+        runner=runner,
+    )
+
+    monitor._consistency_observations("postgres-container")
+    sql = str(runner.last_args[-1])
+
+    assert "FROM exchange_orders" in sql
+    # A closing order contributes side/type only -- never its quantity.
+    assert "WHEN reduce_only THEN 'close'" in sql
+    # An opening order still contributes the quantity and price it chose.
+    assert "quantity::text || ':' || COALESCE(price::text, '')" in sql
+    # Orders are read against the signals that should have produced them, so
+    # an account that never sent one still appears (with order_count = 0).
+    assert "LEFT JOIN (" in sql
+
+
 def test_position_intent_divergence_compares_intent_not_fills() -> None:
     """Accounts must agree on what they asked for, not on what filled.
 
