@@ -215,6 +215,7 @@ class LiveStrategyDaemon:
         ] | None = None,
         commit_market_state_cursor: Callable[[MarketState15s], None]
         | None = None,
+        entered_symbol_lookup: Callable[[str], bool] | None = None,
     ) -> None:
         self._strategy = strategy
         self._risk_gateway = risk_gateway
@@ -415,6 +416,7 @@ class LiveStrategyDaemon:
             recover_market_state_gap=recover_market_state_gap,
             hub_cursor_provider=hub_cursor_provider,
             commit_market_state_cursor=commit_market_state_cursor,
+            entered_symbol_lookup=entered_symbol_lookup,
         )
         self._lifecycle = LiveDaemonLifecycle(
             run_id=config.run_id,

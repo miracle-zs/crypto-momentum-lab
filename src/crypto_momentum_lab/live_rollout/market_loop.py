@@ -145,6 +145,7 @@ class LiveMarketLoop:
             [], Mapping[str, str | int] | None
         ] | None = None,
         commit_market_state_cursor: Callable[[MarketState15s], None] | None = None,
+        entered_symbol_lookup: Callable[[str], bool] | None = None,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
@@ -168,6 +169,7 @@ class LiveMarketLoop:
         self._recover_market_state_gap = recover_market_state_gap
         self._hub_cursor_provider = hub_cursor_provider
         self._commit_market_state_cursor = commit_market_state_cursor
+        self._entered_symbol_lookup = entered_symbol_lookup
         self._market_gap_generation = 0
         self._strategy_gap_reset_generation_by_symbol: dict[str, int] = {}
         self._last_transient_gate_reasons: tuple[str, ...] | None = None
@@ -203,6 +205,30 @@ class LiveMarketLoop:
                 state.symbol
             )
             recovered_states: tuple[MarketState15s, ...] = ()
+            if (
+                last_processed_at is not None
+                and self._entered_symbol_lookup is not None
+                and self._entered_symbol_lookup(state.symbol)
+            ):
+                # The symbol just entered the monitored pool, so it has no
+                # prior history here: its first bucket is a new baseline, not a
+                # gap.  The monitored pool is deliberately wider than the set
+                # the strategies trade, so a symbol warms up again from this
+                # point well before it matters.  Without this the "gap" would
+                # span the whole time it was out of the pool, and recovery would
+                # chase buckets that never existed.
+                reset = getattr(self._strategy, "reset_symbol", None)
+                if callable(reset):
+                    reset(state.symbol)
+                self._checkpoint_coordinator.forget_symbol(state.symbol)
+                log.info(
+                    "live_strategy_symbol_entry_baseline",
+                    run_id=self._run_id,
+                    symbol=state.symbol,
+                )
+                # Clearing the watermark makes the continuity check a no-op,
+                # which is exactly the semantics we want for a fresh entry.
+                last_processed_at = None
             try:
                 _validate_market_state_continuity(
                     state=state,

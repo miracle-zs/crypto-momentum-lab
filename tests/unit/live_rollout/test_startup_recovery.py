@@ -7,6 +7,7 @@ from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
 from crypto_momentum_lab.live_rollout.market_loop import (
     LiveMarketLoop,
     LiveMarketStateContinuityError,
+    _validate_market_state_continuity,
 )
 from crypto_momentum_lab.live_rollout.runtime_orchestrator import (
     _hub_cursor_for_startup,
@@ -171,6 +172,92 @@ def test_hub_cursor_is_committed_only_after_the_entire_batch_is_processed() -> N
         "stream_id": "stream-a",
         "sequence": 17,
     }
+
+
+def test_hub_cursor_reports_a_symbol_entry_exactly_once() -> None:
+    """An entry is announced once, so it cannot reset the symbol repeatedly."""
+
+    start = datetime(2026, 9, 13, 5, 53, 15, tzinfo=UTC)
+    state = SimpleNamespace(symbol="4USDT", bucket_start=start)
+    cursor = _LiveHubCursorState()
+
+    # Nothing entered yet.
+    assert cursor.consume_entered_symbol("4USDT") is False
+
+    cursor.observe_batch(
+        MarketStateBatch(
+            sequence=1,
+            published_at=start,
+            environment="live",
+            states=(state,),  # type: ignore[arg-type]
+            stream_id="stream-a",
+            entered_symbols=frozenset({"4USDT"}),
+        )
+    )
+
+    assert cursor.consume_entered_symbol("4USDT") is True
+    # Consumed: a later bucket for the same symbol is an ordinary bucket.
+    assert cursor.consume_entered_symbol("4USDT") is False
+    # Other symbols are unaffected.
+    assert cursor.consume_entered_symbol("RIVERUSDT") is False
+
+
+def test_hub_cursor_entry_survives_across_batches() -> None:
+    """The entry is kept until it is consumed, not dropped with its batch."""
+
+    start = datetime(2026, 9, 13, 5, 53, 15, tzinfo=UTC)
+    cursor = _LiveHubCursorState()
+    cursor.observe_batch(
+        MarketStateBatch(
+            sequence=1,
+            published_at=start,
+            environment="live",
+            states=(SimpleNamespace(symbol="4USDT", bucket_start=start),),  # type: ignore[arg-type]
+            stream_id="stream-a",
+            entered_symbols=frozenset({"4USDT"}),
+        )
+    )
+    # A batch that carries no entries must not erase the pending one.
+    cursor.observe_batch(
+        MarketStateBatch(
+            sequence=2,
+            published_at=start,
+            environment="live",
+            states=(SimpleNamespace(symbol="XPINUSDT", bucket_start=start),),  # type: ignore[arg-type]
+            stream_id="stream-a",
+        )
+    )
+
+    assert cursor.consume_entered_symbol("4USDT") is True
+
+
+def test_continuity_check_is_a_noop_without_a_watermark() -> None:
+    """Clearing the watermark is how an entry becomes a fresh baseline.
+
+    `_validate_market_state_continuity` returning early for
+    `last_processed_at is None` is what lets the entry path skip the gap
+    detection -- and therefore the backfill -- without touching that function.
+    """
+
+    state = SimpleNamespace(
+        symbol="4USDT",
+        bucket_start=datetime(2026, 9, 13, 6, 0, 0, tzinfo=UTC),
+    )
+
+    # A three-hour delta would raise if a watermark were supplied...
+    with pytest.raises(LiveMarketStateContinuityError):
+        _validate_market_state_continuity(
+            state=state,  # type: ignore[arg-type]
+            last_processed_at=state.bucket_start - timedelta(hours=3),
+            expected_interval_seconds=15,
+        )
+
+    # ...but with no watermark (fresh entry) it is a no-op.
+    _validate_market_state_continuity(
+        state=state,  # type: ignore[arg-type]
+        last_processed_at=None,
+        expected_interval_seconds=15,
+    )
 
 
 def test_hub_cursor_is_discarded_before_durable_market_rewarm() -> None:

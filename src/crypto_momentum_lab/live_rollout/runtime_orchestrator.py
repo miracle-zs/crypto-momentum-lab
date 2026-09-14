@@ -951,6 +951,7 @@ async def run_live_daemon(
                 hub_cursor_state.snapshot
             ),
             commit_market_state_cursor=hub_cursor_state.acknowledge_state,
+            entered_symbol_lookup=hub_cursor_state.consume_entered_symbol,
         )
         order_event_runtime.set_daemon(daemon)
         assert live_repository is not None
@@ -1541,6 +1542,17 @@ class _LiveHubCursorState:
             tuple[str, datetime], tuple[str, int]
         ] = {}
         self._remaining_by_batch: dict[tuple[str, int], int] = {}
+        # Symbols the publisher reported as newly entering the monitored pool.
+        # Consumed on first report so one entry is announced exactly once.
+        self._entered_symbols: frozenset[str] = frozenset()
+
+    def consume_entered_symbol(self, symbol: str) -> bool:
+        """Report, once, whether `symbol` just entered the monitored pool."""
+
+        if symbol in self._entered_symbols:
+            self._entered_symbols = self._entered_symbols - {symbol}
+            return True
+        return False
 
     @property
     def has_cursor(self) -> bool:
@@ -1559,6 +1571,10 @@ class _LiveHubCursorState:
     def observe_batch(self, batch: MarketStateBatch) -> None:
         if batch.stream_id is None:
             return
+        if batch.entered_symbols:
+            # Carried across batches so a symbol is still recognised as a fresh
+            # entry even if its first bucket is not processed in this batch.
+            self._entered_symbols = self._entered_symbols | batch.entered_symbols
         batch_key = (batch.stream_id, batch.sequence)
         self._remaining_by_batch[batch_key] = len(batch.states)
         for state in batch.states:
