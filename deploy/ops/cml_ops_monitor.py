@@ -62,6 +62,9 @@ _SERVICE_RSS_WARNING_FRACTION_OVERRIDES: Mapping[str, float] = {
 # every deploy -- which refills that cache -- produced a false "memory high".
 _SERVICE_ANON_PRESSURE_SERVICES: frozenset[str] = frozenset({"postgres"})
 _DEFAULT_RSS_GROWTH_BYTES = 64 * 1024 * 1024
+# Anonymous memory pushed into swap is the cost that means "the process could
+# not keep the memory it asked for".  Anything smaller is noise.
+_DEFAULT_SWAP_GROWTH_BYTES = 32 * 1024 * 1024
 _DEFAULT_RSS_GROWTH_WINDOW_SECONDS = 1_800.0
 _DEFAULT_MEMORY_GROWTH_REQUIRED_SAMPLES = 3
 _DEFAULT_ALERT_COOLDOWN_SECONDS = 900.0
@@ -2510,24 +2513,53 @@ LEFT JOIN (
         self,
         snapshot: ContainerSnapshot,
     ) -> tuple[Alert, ...]:
-        """Alert when the cgroup max counter advances since the last check."""
+        """Alert when a container is *paying* for memory, not merely caching.
 
-        current = snapshot.memory_events_max
+        The old trigger was the cgroup ``memory.events.max`` counter advancing.
+        That counter moves every time the kernel reclaims something to stay
+        under the limit -- and for a database that mostly caches files that is
+        constant, normal housekeeping: the page cache refills the limit by
+        design, and stealing the oldest pages is how it makes room.  Measured
+        on the live host it read 50394 "reaches" while 40 seconds of sampling
+        showed zero page scans, zero steals, an unchanged counter, no OOM kill,
+        and a swap level drifting *down*.  The signal was the kernel doing its
+        job.
+
+        Anonymous memory pushed into swap is the cost that actually matters:
+        it means the process could not keep memory it asked for.  The baseline
+        follows the minimum so slow, steady growth still accumulates into an
+        alert, and it is re-based after reporting so the same swap is not
+        reported twice.
+        """
+
+        current = snapshot.memory_swap_current_bytes
         if current is None:
             return ()
-        counters = self._state.setdefault("memory_events_max", {})
+        counters = self._state.setdefault("memory_swap_bytes", {})
         if not isinstance(counters, dict):
             counters = {}
-            self._state["memory_events_max"] = counters
+            self._state["memory_swap_bytes"] = counters
         previous = counters.get(snapshot.service)
-        counters[snapshot.service] = current
-        if not isinstance(previous, int) or current <= previous:
+        if not isinstance(previous, int):
+            # First observation: establish the baseline, nothing to compare.
+            counters[snapshot.service] = current
             return ()
+        if current < previous:
+            # Swap draining back: carry the baseline down with it.
+            counters[snapshot.service] = current
+            return ()
+        growth = current - previous
+        if growth < _DEFAULT_SWAP_GROWTH_BYTES:
+            return ()
+        counters[snapshot.service] = current
         return (
             Alert(
                 "container_memory_pressure",
                 "warning",
-                f"Container {snapshot.service} reached its cgroup memory limit",
+                (
+                    f"Container {snapshot.service} pushed anonymous memory "
+                    "into swap"
+                ),
                 {
                     "service": snapshot.service,
                     "memory_bytes": snapshot.memory_bytes,
@@ -2535,11 +2567,10 @@ LEFT JOIN (
                     "memory_source": snapshot.memory_source,
                     "memory_current_bytes": snapshot.memory_current_bytes,
                     "memory_peak_bytes": snapshot.memory_peak_bytes,
-                    "memory_swap_current_bytes": (
-                        snapshot.memory_swap_current_bytes
-                    ),
-                    "memory_events_max": current,
-                    "memory_events_max_delta": current - previous,
+                    "memory_swap_current_bytes": current,
+                    "memory_swap_growth_bytes": growth,
+                    "memory_swap_growth_mb": _mib(growth),
+                    "memory_events_max": snapshot.memory_events_max,
                 },
             ),
         )

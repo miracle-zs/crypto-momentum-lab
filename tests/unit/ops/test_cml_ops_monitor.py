@@ -524,29 +524,25 @@ def test_memory_growth_starts_a_new_baseline_after_container_recreation(
     )
 
 
-def test_memory_pressure_alerts_only_after_cgroup_counter_advances(
+def test_memory_pressure_alerts_on_swap_growth_not_reclaim_counter(
     tmp_path,
 ) -> None:
+    """Reclaiming page cache is housekeeping; pushing anon into swap is cost.
+
+    The old trigger watched ``memory.events.max``, which advances whenever the
+    kernel steals cache to stay under the limit -- and a database that mostly
+    caches files does that constantly.  Live it read 50394 while 40 seconds of
+    sampling showed zero page scans, zero steals, an unchanged counter and a
+    swap level drifting down.
+    """
+
     monitor = OpsMonitor(
         MonitorConfig(state_path=tmp_path / "state.json"),
     )
-    snapshot = ContainerSnapshot(
-        service="postgres",
-        container_id="abc",
-        health="healthy",
-        oom_killed=False,
-        restart_count=0,
-        memory_bytes=700,
-        memory_limit_bytes=1_000,
-        memory_source="cgroup_memory_current",
-        memory_current_bytes=700,
-        memory_events_max=10,
-    )
+    mib = 1024 * 1024
 
-    assert monitor._memory_pressure_alerts(snapshot) == ()
-
-    alerts = monitor._memory_pressure_alerts(
-        ContainerSnapshot(
+    def snapshot(swap: int | None, events_max: int) -> ContainerSnapshot:
+        return ContainerSnapshot(
             service="postgres",
             container_id="abc",
             health="healthy",
@@ -556,14 +552,34 @@ def test_memory_pressure_alerts_only_after_cgroup_counter_advances(
             memory_limit_bytes=1_000,
             memory_source="cgroup_memory_current",
             memory_current_bytes=800,
-            memory_swap_current_bytes=128,
-            memory_events_max=12,
+            memory_swap_current_bytes=swap,
+            memory_events_max=events_max,
         )
-    )
 
+    # The first observation only establishes the baseline.
+    assert monitor._memory_pressure_alerts(snapshot(200 * mib, 50_000)) == ()
+
+    # The reclaim counter advancing is no longer a reason to alert.
+    assert monitor._memory_pressure_alerts(snapshot(200 * mib, 50_100)) == ()
+
+    # Swap draining back lowers the baseline instead of alerting.
+    assert monitor._memory_pressure_alerts(snapshot(180 * mib, 50_100)) == ()
+
+    # Growth below the threshold stays quiet -- and does not move the baseline,
+    # so slow steady growth still accumulates.
+    assert monitor._memory_pressure_alerts(snapshot(190 * mib, 50_100)) == ()
+
+    # Real growth past the threshold alerts, measured from the 180 baseline:
+    # 260 - 180 = 80, not merely the 70 since the last sample.
+    alerts = monitor._memory_pressure_alerts(snapshot(260 * mib, 50_100))
     assert [alert.name for alert in alerts] == ["container_memory_pressure"]
-    assert alerts[0].details["memory_events_max_delta"] == 2
-    assert alerts[0].details["memory_swap_current_bytes"] == 128
+    assert alerts[0].details["memory_swap_growth_mb"] == 80.0
+
+    # ...and the same swap is not reported a second time.
+    assert monitor._memory_pressure_alerts(snapshot(260 * mib, 50_100)) == ()
+
+    # An unreadable swap counter stays silent rather than guessing.
+    assert monitor._memory_pressure_alerts(snapshot(None, 50_100)) == ()
 
 
 def test_memory_stats_prefers_working_set_and_keeps_cgroup_current(
