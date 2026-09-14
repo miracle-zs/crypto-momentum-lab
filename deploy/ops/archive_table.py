@@ -71,6 +71,33 @@ def _psql(prefix: list[str], container: str, user: str, database: str) -> list[s
     ]
 
 
+def has_json_columns(
+    prefix: list[str],
+    *,
+    container: str,
+    user: str,
+    database: str,
+    table: str,
+) -> bool:
+    """Report whether the table holds json/jsonb, which CSV would mangle.
+
+    A jsonb column lands in CSV as one escaped string, so a table carrying
+    nested payloads is exported as JSONL instead -- one ``row_to_json`` object
+    per line, the same shape ``raw_files`` already produces.
+    """
+    sql = (
+        "SELECT count(*) FROM information_schema.columns "
+        "WHERE table_schema = 'public' "
+        f"AND table_name = '{table}' AND data_type IN ('json', 'jsonb')"
+    )
+    result = _run([*_psql(prefix, container, user, database), "-At", "-c", sql])
+    if result.returncode != 0:
+        raise SystemExit(
+            f"column probe failed: {result.stderr.decode(errors='replace').strip()}"
+        )
+    return int(result.stdout.decode().strip() or "0") > 0
+
+
 def count_rows(
     prefix: list[str],
     *,
@@ -108,6 +135,7 @@ def export_range(
     start: str,
     end: str,
     destination: Path,
+    as_jsonl: bool,
 ) -> None:
     """Stream ``COPY ... TO STDOUT`` through zstd into ``destination``.
 
@@ -115,12 +143,23 @@ def export_range(
     this table is hundreds of megabytes, and the point of archiving on a host
     with 3.6 GiB is to *not* hold it all at once.  Nothing uncompressed ever
     touches the disk either.
+
+    ``as_jsonl`` wraps each row in ``row_to_json`` so nested jsonb survives as
+    structure instead of a quoted string.
     """
-    copy = (
-        f'COPY (SELECT * FROM "{table}" '
-        f"WHERE \"{column}\" >= '{start}+00' AND \"{column}\" < '{end}+00' "
-        f"ORDER BY \"{column}\") TO STDOUT WITH (FORMAT csv, HEADER)"
-    )
+    if as_jsonl:
+        copy = (
+            "COPY (SELECT row_to_json(t) FROM ("
+            f'SELECT * FROM "{table}" '
+            f"WHERE \"{column}\" >= '{start}+00' AND \"{column}\" < '{end}+00' "
+            f'ORDER BY "{column}") t) TO STDOUT'
+        )
+    else:
+        copy = (
+            f'COPY (SELECT * FROM "{table}" '
+            f"WHERE \"{column}\" >= '{start}+00' AND \"{column}\" < '{end}+00' "
+            f"ORDER BY \"{column}\") TO STDOUT WITH (FORMAT csv, HEADER)"
+        )
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     with destination.open("wb") as sink:
@@ -187,11 +226,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{args.table}: nothing in [{args.from_date}, {args.to_date})")
         return 0
 
+    as_jsonl = has_json_columns(
+        prefix,
+        container=args.container,
+        user=args.user,
+        database=args.database,
+        table=args.table,
+    )
+    suffix = "jsonl.zst" if as_jsonl else "csv.zst"
+
     start_tag = args.from_date.replace("-", "")
     end_tag = args.to_date.replace("-", "")
     stem = f"{args.table}_{start_tag}_{end_tag}"
     directory = Path(args.out) / args.table
-    destination = directory / f"{stem}.csv.zst"
+    destination = directory / f"{stem}.{suffix}"
     manifest_path = directory / f"{stem}.manifest.json"
 
     export_range(
@@ -204,6 +252,7 @@ def main(argv: list[str] | None = None) -> int:
         start=args.from_date,
         end=args.to_date,
         destination=destination,
+        as_jsonl=as_jsonl,
     )
 
     manifest = {
@@ -212,6 +261,7 @@ def main(argv: list[str] | None = None) -> int:
         "from": args.from_date,
         "to": args.to_date,
         "rows": rows,
+        "format": "jsonl" if as_jsonl else "csv",
         "compressed_bytes": destination.stat().st_size,
         "sha256": sha256_file(destination),
         "file": destination.name,
@@ -226,7 +276,8 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"{args.table} [{args.from_date}, {args.to_date}): "
         f"{rows} rows -> {destination} "
-        f"({manifest['compressed_bytes'] / 1024 / 1024:.1f} MiB)"
+        f"({manifest['compressed_bytes'] / 1024 / 1024:.1f} MiB, "
+        f"{manifest['format']})"
     )
     print(f"manifest: {manifest_path}")
     return 0
