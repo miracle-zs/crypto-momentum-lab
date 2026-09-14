@@ -2227,15 +2227,16 @@ WHERE run_id = {run_id} AND state = 'unknown_pending_reconciliation';
         # blob carries rolling ratios that differ between two correct accounts
         # on the same configuration (see _SIGNAL_FINGERPRINT_FEATURE_KEYS).
         features_sql = _fingerprint_features_sql()
+        prices_sql = _fingerprint_reference_prices_sql()
         sql = f"""
 SELECT 'signal' || E'\\t' || account_label || E'\\t' || symbol || E'\\t'
   || source_state_at::text || E'\\t' || config_hash || E'\\t'
   || count(*)::text || E'\\t'
   || md5(string_agg(
     signal_kind || ':' || side || ':' || reason || ':'
-      || {features_sql} || ':' || reference_prices::text,
+      || {features_sql} || ':' || {prices_sql},
     E'\\x1f'
-    ORDER BY signal_kind, side, reason, {features_sql}, reference_prices::text
+    ORDER BY signal_kind, side, reason, {features_sql}, {prices_sql}
   ))
 FROM live_strategy_signals
 WHERE account_label IN ({account_sql})
@@ -2377,12 +2378,19 @@ LEFT JOIN (
                 config_by_account.setdefault(account_label, parts[4])
                 key = (account_label, parts[2], parts[3], parts[4])
                 previous = signals_by_key.get(key)
+                # Only the candidate count is taken from the observed event.
+                # Its ``signal_count`` is not trustworthy: the same
+                # (run, bucket) writes it repeatedly with a value that
+                # disagrees with the durable signal rows, so borrowing it made
+                # two accounts look divergent when both had exactly one signal.
                 signals_by_key[key] = SignalObservation(
                     account_label=account_label,
                     symbol=parts[2],
                     bucket_start=parts[3],
                     strategy_config_hash=parts[4],
-                    signal_count=int(parts[5]),
+                    signal_count=(
+                        0 if previous is None else previous.signal_count
+                    ),
                     candidate_count=int(parts[6]),
                     fingerprint=(
                         None if previous is None else previous.fingerprint
@@ -2832,18 +2840,49 @@ _SIGNAL_FINGERPRINT_FEATURE_KEYS: tuple[str, ...] = (
 )
 
 
+# A reduce-only signal reports how much to *close*, which is a function of how
+# much is held -- and accounts whose fills differed hold different amounts.
+# batch_id is account-local by construction: no two accounts ever share one.
+# Both therefore describe the position, not the decision, and would report the
+# fill difference again through the signal table.
+_POSITION_DERIVED_FEATURE_KEYS: tuple[str, ...] = ("quantity", "batch_id")
+_REDUCE_ONLY_SIGNAL_KIND = "reduce_only_candidate"
+
+
 def _fingerprint_features_sql() -> str:
     """Render the ``features`` subset that feeds the durable signal fingerprint.
 
     ``jsonb`` normalises key order, so the rendered text is deterministic for a
-    given set of values even though the stored column's key order is not.
+    given set of values even though the stored column's key order is not.  A
+    reduce-only signal drops the keys that describe the position it came from.
     """
 
     pairs = ", ".join(
         f"{_sql_literal(key)}, features->{_sql_literal(key)}"
         for key in _SIGNAL_FINGERPRINT_FEATURE_KEYS
     )
-    return f"jsonb_build_object({pairs})::text"
+    built = f"jsonb_build_object({pairs})"
+    dropped = "".join(
+        f" - {_sql_literal(key)}" for key in _POSITION_DERIVED_FEATURE_KEYS
+    )
+    return (
+        f"(CASE WHEN signal_kind = {_sql_literal(_REDUCE_ONLY_SIGNAL_KIND)} "
+        f"THEN {built}{dropped} ELSE {built} END)::text"
+    )
+
+
+def _fingerprint_reference_prices_sql() -> str:
+    """Render ``reference_prices`` for the durable fingerprint.
+
+    ``desired_notional`` is quantity times price, so it follows the position
+    exactly as ``quantity`` does and is dropped for reduce-only signals.
+    """
+
+    return (
+        f"(CASE WHEN signal_kind = {_sql_literal(_REDUCE_ONLY_SIGNAL_KIND)} "
+        "THEN reference_prices - 'desired_notional' "
+        "ELSE reference_prices END)::text"
+    )
 
 
 def _load_state(path: Path) -> dict[str, Any]:

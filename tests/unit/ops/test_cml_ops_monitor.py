@@ -811,6 +811,72 @@ def test_signal_fingerprint_covers_only_account_stable_features(tmp_path) -> Non
     assert "reference_prices" in sql
 
 
+def test_signal_fingerprint_drops_position_derived_keys_for_reduce_only(
+    tmp_path,
+) -> None:
+    """A close signal states a size that follows the position, not the choice.
+
+    On 2026-09-14 05:14:45 all four accounts produced the same
+    reduce_only_candidate with the same side and reason, yet their fingerprints
+    differed on `quantity`, `batch_id` and `desired_notional` -- three values
+    that describe what each account happened to hold.
+    """
+
+    class Runner:
+        last_args = None
+
+        def run(self, args, *, timeout_seconds):
+            del timeout_seconds
+            self.last_args = args
+            return ""
+
+    runner = Runner()
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+        runner=runner,
+    )
+
+    monitor._consistency_observations("postgres-container")
+    sql = str(runner.last_args[-1])
+
+    assert "WHEN signal_kind = 'reduce_only_candidate'" in sql
+    assert "'quantity'" in sql and "'batch_id'" in sql
+    assert "reference_prices - 'desired_notional'" in sql
+
+
+def test_output_event_does_not_override_the_durable_signal_count(tmp_path) -> None:
+    """The observed event repeats itself; only its candidate count is used.
+
+    The same (run, bucket) writes strategy_output_observed up to thirty times
+    with a signal_count that disagrees with the durable rows, so borrowing it
+    made two accounts look divergent when each had exactly one signal.
+    """
+
+    class Runner:
+        def run(self, args, *, timeout_seconds):
+            del timeout_seconds
+            if args[:2] == ["docker", "exec"]:
+                return (
+                    "signal\tprimary\tMTLUSDT\t2026-09-14 05:14:45+00\tcfg\t1\tfp-a\n"
+                    "output\tlive-primary-v1\tMTLUSDT\t2026-09-14 05:14:45+00"
+                    "\tcfg\t7\t3\n"
+                )
+            raise AssertionError(f"unexpected command: {args}")
+
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+        runner=Runner(),
+    )
+
+    signals, _positions, _orders = monitor._consistency_observations("postgres")
+
+    assert len(signals) == 1
+    # The durable row's count wins; the event's own count is ignored.
+    assert signals[0].signal_count == 1
+    # The candidate count is the one thing the event is trusted for.
+    assert signals[0].candidate_count == 3
+
+
 def test_order_fingerprint_omits_closing_quantity(tmp_path) -> None:
     """Closing size follows holdings; only the decision to exit is intent.
 
