@@ -226,3 +226,19 @@ def test_account_timeout_returns_gateway_timeout() -> None:
 
     assert response.status_code == 504
     assert response.json()["detail"] == "dashboard account query timed out"
+
+
+def test_static_assets_cache_headers() -> None:
+    with TestClient(create_dashboard_app(queries=FakeQueries())) as client:
+        vendor_res = client.get("/static/vendor/echarts.min.js")
+        assert vendor_res.status_code == 200
+        assert "max-age=31536000" in vendor_res.headers.get("Cache-Control", "")
+
+        css_res = client.get("/static/dashboard.css")
+        assert css_res.status_code == 200
+        assert "max-age=86400" in css_res.headers.get("Cache-Control", "")
+
+        html_res = client.get("/static/index.html")
+        assert html_res.status_code == 200
+        assert "max-age" not in html_res.headers.get("Cache-Control", "")
+

@@ -10,11 +10,12 @@ from typing import Annotated, Literal, Protocol, TypeVar, cast
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from starlette.types import Scope
 
 from crypto_momentum_lab.operator_dashboard.queries import (
     FIXED_COMMON_EQUITY_START_AT,
@@ -211,12 +212,8 @@ def create_dashboard_app(
     overview_cache_ttl_seconds: float = _OVERVIEW_CACHE_TTL_SECONDS,
     overview_query_timeout_seconds: float = _OVERVIEW_QUERY_TIMEOUT_SECONDS,
 ) -> FastAPI:
-    resolved_auth_username = auth_username or os.environ.get(
-        "CML_DASHBOARD_USERNAME"
-    )
-    resolved_auth_password = auth_password or os.environ.get(
-        "CML_DASHBOARD_PASSWORD"
-    )
+    resolved_auth_username = auth_username or os.environ.get("CML_DASHBOARD_USERNAME")
+    resolved_auth_password = auth_password or os.environ.get("CML_DASHBOARD_PASSWORD")
     if (resolved_auth_username is None) != (resolved_auth_password is None):
         raise ValueError(
             "dashboard authentication requires both CML_DASHBOARD_USERNAME "
@@ -254,6 +251,24 @@ def create_dashboard_app(
         if engine is not None:
             await engine.dispose()
 
+    class _CachedStaticFiles(StaticFiles):
+        def file_response(
+            self,
+            full_path: Path | str,
+            stat_result: os.stat_result,
+            scope: Scope,
+            status_code: int = 200,
+        ) -> Response:
+            response = super().file_response(full_path, stat_result, scope, status_code)
+            path_str = str(full_path)
+            if "vendor" in path_str:
+                response.headers["Cache-Control"] = (
+                    "public, max-age=31536000, immutable"
+                )
+            elif path_str.endswith((".css", ".js", ".svg", ".png", ".woff2")):
+                response.headers["Cache-Control"] = "public, max-age=86400"
+            return response
+
     dashboard = FastAPI(
         title="Crypto Momentum Operator Console",
         docs_url=None,
@@ -261,7 +276,7 @@ def create_dashboard_app(
         lifespan=lifespan,
     )
     dashboard.add_middleware(GZipMiddleware, minimum_size=1024)
-    dashboard.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    dashboard.mount("/static", _CachedStaticFiles(directory=STATIC_DIR), name="static")
     response_cache = _ResponseCache(_PAPER_CACHE_TTL_SECONDS)
 
     def require_dashboard_auth(
@@ -444,6 +459,7 @@ def create_dashboard_app(
                     equity_range,
                     account_label=account_label,
                 )
+
             return await response_cache.get(
                 cache_key,
                 load_account,
