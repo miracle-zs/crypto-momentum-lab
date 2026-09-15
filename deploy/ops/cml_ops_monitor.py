@@ -98,19 +98,19 @@ _ALERT_LABELS = {
     "container_oom_killed": "服务被内存限制杀死",
     "container_memory_high": "服务内存占用过高",
     "container_memory_growth": "服务内存趋势异常",
-    "container_memory_pressure": "服务触碰内存上限",
+    "container_memory_pressure": "服务匿名内存被换出",
     "live_position_intent_divergence": "账户下单意图发生分叉",
     # Keep the legacy label so an alert written by an older monitor can still
     # be rendered correctly while its recovery record is being drained.
     "rss_growth": "服务内存持续增长",
     "telemetry_persist_failure": "运行时遥测写入失败",
     "live_legacy_order_identity_conflict": "订单身份发生冲突",
-    "market_task_not_alive": "行情连接任务停止",
+    "market_task_not_alive": "行情连接任务无响应",
     "live_session_not_ready": "实时会话未就绪",
     "live_checkpoint_stale": "实时状态 checkpoint 已过期",
     "live_account_lifecycle_not_ready": "账户生命周期未就绪",
-    "live_account_reconciliation_stale": "账户对账状态过期或失败",
-    "live_market_state_stale": "行情进度过期",
+    "live_account_reconciliation_stale": "账户对账状态缺失、过期或失败",
+    "live_market_state_stale": "行情进度缺失或过期",
     "live_market_state_delay": "行情延迟过高",
     "live_signal_divergence": "账户信号发生分叉",
     "live_position_divergence": "账户持仓发生差异",
@@ -129,14 +129,14 @@ _ALERT_LABELS = {
 }
 _ALERT_IMPACTS = {
     "container_missing": "对应服务未运行，相关功能不可用。",
-    "container_unhealthy": "对应服务可能无法正常处理行情、订单或账户任务。",
+    "container_unhealthy": "对应服务可能无法正常处理其职责范围内的任务。",
     "container_oom_killed": "对应服务已被系统终止，相关任务已中断。",
     "container_memory_high": "服务可能出现性能下降，继续增长可能触发 OOM。",
     "container_memory_growth": (
         "服务内存相对趋势基线持续上升，需要确认缓存、查询和进程数量。"
     ),
     "container_memory_pressure": (
-        "进程的匿名内存被换出到磁盘，再次访问需要读盘，数据库查询可能因此变慢。"
+        "进程的匿名内存被换出到磁盘，再次访问需要读盘，服务响应可能因此变慢。"
     ),
     "rss_growth": "服务内存持续增长，后续可能出现性能下降或 OOM。",
     "telemetry_persist_failure": "运行时诊断数据可能不完整，不代表交易一定已停止。",
@@ -318,6 +318,12 @@ class DatabaseState:
     track_io_timing: bool
     track_wal_io_timing: bool
     max_parallel_maintenance_workers: int | None
+    # The three arms of live_session_ready, reported separately so a not-ready
+    # alert can name the failing one.  Default True keeps older SQL output
+    # (which omits them) from being read as "not ready".
+    live_session_state_ready: bool = True
+    live_lease_active: bool = True
+    live_checkpoint_present: bool = True
     latest_market_progress_age_seconds: float | None = None
     latest_market_delay_ms: float | None = None
     account_process_state: str | None = None
@@ -622,6 +628,9 @@ def evaluate_database_state(
     now: datetime,
     latest_checkpoint_age_seconds: float | None,
     live_session_ready: bool,
+    live_session_state_ready: bool = True,
+    live_lease_active: bool = True,
+    live_checkpoint_present: bool = True,
     pg_stat_statements_ready: bool,
     track_io_timing: bool,
     track_wal_io_timing: bool,
@@ -780,6 +789,21 @@ def evaluate_database_state(
                 "live_session_not_ready",
                 "critical",
                 "Live session checkpoint or lease is not ready",
+                {
+                    # Which of the three arms of live_ready actually failed.
+                    "session_state_ready": live_session_state_ready,
+                    "lease_active": live_lease_active,
+                    "checkpoint_present": live_checkpoint_present,
+                    "checkpoint_age_seconds": (
+                        None
+                        if latest_checkpoint_age_seconds is None
+                        else round(latest_checkpoint_age_seconds, 3)
+                    ),
+                    "checkpoint_age_human": _human_seconds(
+                        latest_checkpoint_age_seconds
+                    ),
+                    "stale_after_seconds": stale_after_seconds,
+                },
             )
         )
     elif (
@@ -1490,6 +1514,13 @@ class OpsMonitor:
                             database_state.latest_checkpoint_age_seconds
                         ),
                         live_session_ready=database_state.live_session_ready,
+                        live_session_state_ready=(
+                            database_state.live_session_state_ready
+                        ),
+                        live_lease_active=database_state.live_lease_active,
+                        live_checkpoint_present=(
+                            database_state.live_checkpoint_present
+                        ),
                         pg_stat_statements_ready=database_state.pg_stat_statements_ready,
                         track_io_timing=database_state.track_io_timing,
                         track_wal_io_timing=database_state.track_wal_io_timing,
@@ -2161,6 +2192,31 @@ SELECT 'live_ready' || E'\\t' || (
     WHERE run_id = {run_id}
   )
 );
+  -- The three arms of live_ready are reported separately so a not-ready alert can
+  -- name the failing arm instead of sending the operator to three tables.
+  SELECT 'live_session_state_ready' || E'\t' || (
+    EXISTS (
+      SELECT 1 FROM live_session_transitions
+      WHERE session_id = {run_id}
+        AND state IN ('live_enabled', 'draining')
+    )
+  )::text;
+  SELECT 'live_lease_active' || E'\t' || (
+    EXISTS (
+      SELECT 1 FROM trading_leases
+      WHERE environment = 'live'
+        AND account_label = {account_label}
+        AND owner = {lease_owner}
+        AND state = 'active'
+        AND expires_at > now()
+    )
+  )::text;
+  SELECT 'live_checkpoint_present' || E'\t' || (
+    EXISTS (
+      SELECT 1 FROM strategy_runtime_checkpoints
+      WHERE run_id = {run_id}
+    )
+  )::text;
 SELECT 'pg_stat_statements' || E'\\t' || (
   EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements')
   AND position('pg_stat_statements' in current_setting('shared_preload_libraries')) > 0
@@ -2271,6 +2327,15 @@ WHERE run_id = {run_id} AND state = 'unknown_pending_reconciliation';
         return DatabaseState(
             latest_checkpoint_age_seconds=None if age is None or age < 0 else age,
             live_session_ready=_parse_bool(values.get("live_ready")),
+            live_session_state_ready=_parse_bool_default(
+                values.get("live_session_state_ready"), True
+            ),
+            live_lease_active=_parse_bool_default(
+                values.get("live_lease_active"), True
+            ),
+            live_checkpoint_present=_parse_bool_default(
+                values.get("live_checkpoint_present"), True
+            ),
             pg_stat_statements_ready=_parse_bool(values.get("pg_stat_statements")),
             track_io_timing=_parse_bool(values.get("track_io_timing")),
             track_wal_io_timing=_parse_bool(values.get("track_wal_io_timing")),
@@ -2926,6 +2991,14 @@ def _parse_bool(value: str | None) -> bool:
     """Parse the boolean spellings emitted by PostgreSQL's text output."""
 
     return (value or "").strip().lower() in {"1", "on", "t", "true", "yes"}
+
+
+def _parse_bool_default(value: str | None, default: bool) -> bool:
+    """Parse a boolean that older SQL output may not have emitted yet."""
+
+    if value is None or not str(value).strip():
+        return default
+    return _parse_bool(value)
 
 
 def _parse_env_bool(value: str | None, *, default: bool) -> bool:

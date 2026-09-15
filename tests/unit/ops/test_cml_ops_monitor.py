@@ -116,6 +116,62 @@ def test_database_state_alerts_when_live_checkpoint_is_stale() -> None:
     assert alerts[0].severity == "critical"
 
 
+
+
+def test_database_state_reports_which_live_ready_arm_failed() -> None:
+    """A not-ready live session names the failing arm, not three tables to check."""
+
+    alerts = evaluate_database_state(
+        now=datetime(2026, 8, 29, 1, 0, tzinfo=UTC),
+        latest_checkpoint_age_seconds=12,
+        live_session_ready=False,
+        live_session_state_ready=True,
+        live_lease_active=False,
+        live_checkpoint_present=True,
+        pg_stat_statements_ready=True,
+        track_io_timing=True,
+        track_wal_io_timing=True,
+        max_parallel_maintenance_workers=0,
+        stale_after_seconds=900,
+        account_process_state="ready_readonly",
+        account_process_age_seconds=12,
+        latest_reconciliation_status="ready",
+        latest_reconciliation_age_seconds=12,
+        latest_market_progress_age_seconds=12,
+        latest_market_delay_ms=100,
+    )
+
+    assert [alert.name for alert in alerts] == ["live_session_not_ready"]
+    assert alerts[0].details["session_state_ready"] is True
+    assert alerts[0].details["lease_active"] is False
+    assert alerts[0].details["checkpoint_present"] is True
+    assert alerts[0].details["checkpoint_age_seconds"] == 12
+    assert alerts[0].details["stale_after_seconds"] == 900
+
+
+def test_database_state_treats_absent_live_ready_arms_as_ready() -> None:
+    """Older SQL output omits the three arms; absence must not read as not-ready."""
+
+    alerts = evaluate_database_state(
+        now=datetime(2026, 8, 29, 1, 0, tzinfo=UTC),
+        latest_checkpoint_age_seconds=12,
+        live_session_ready=True,
+        pg_stat_statements_ready=True,
+        track_io_timing=True,
+        track_wal_io_timing=True,
+        max_parallel_maintenance_workers=0,
+        stale_after_seconds=900,
+        account_process_state="ready_readonly",
+        account_process_age_seconds=12,
+        latest_reconciliation_status="ready",
+        latest_reconciliation_age_seconds=12,
+        latest_market_progress_age_seconds=12,
+        latest_market_delay_ms=100,
+    )
+
+    assert [alert.name for alert in alerts] == []
+
+
 def test_database_state_does_not_alert_when_only_order_telemetry_is_quiet() -> None:
     alerts = evaluate_database_state(
         now=datetime(2026, 8, 29, 1, 0, tzinfo=UTC),
@@ -1457,7 +1513,7 @@ def test_serverchan_config_and_payload(monkeypatch, tmp_path) -> None:
     assert form["title"] == "CML | 严重 | primary | 服务健康检查失败"
     assert "[严重] primary：服务健康检查失败" in form["desp"]
     assert "2026-09-01 20:00:00（北京时间）" in form["desp"]
-    assert "对应服务可能无法正常处理行情、订单或账户任务。" in form["desp"]
+    assert "对应服务可能无法正常处理其职责范围内的任务。" in form["desp"]
     assert "live-strategy" in form["desp"]
 
 
