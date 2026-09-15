@@ -808,21 +808,6 @@ class LiveExitManager:
         quantity: Decimal | None = None,
     ) -> LiveExitOrderRequest:
         identity_trigger_at = identity_trigger_at or trigger_at
-        batch_component = (
-            "" if position.batch_id is None else f":batch:{position.batch_id}"
-        )
-        identity = (
-            f"{self._config.run_id}:{position.symbol}:"
-            f"{position.position_side.value}:{position.opened_at.isoformat()}"
-            f"{batch_component}:"
-            f"{reason}:{identity_trigger_at.isoformat()}"
-        )
-        signal_id = f"live-exit-signal-{uuid5(NAMESPACE_URL, identity)}"
-        candidate_id = f"live-exit-{uuid5(NAMESPACE_URL, signal_id)}"
-        if created_at is None:
-            if state is None:
-                raise ValueError("state or created_at is required")
-            created_at = state.bucket_end
         order_quantity = (
             _uncovered_position_quantity(position)
             if quantity is None
@@ -830,6 +815,28 @@ class LiveExitManager:
         )
         if order_quantity <= 0:
             raise ValueError("exit order quantity must be positive")
+        batch_component = (
+            "" if position.batch_id is None else f":batch:{position.batch_id}"
+        )
+        # The quantity is part of the identity on purpose.  Everything else here
+        # can repeat across episodes -- a recovery boundary taken from an older
+        # terminal order, the same grace-timeout reason, the same symbol -- so two
+        # exits of different sizes used to derive the same candidate/client order
+        # ID.  The second one then failed the durable order-identity check and the
+        # position could never be closed.
+        identity = (
+            f"{self._config.run_id}:{position.symbol}:"
+            f"{position.position_side.value}:{position.opened_at.isoformat()}"
+            f"{batch_component}:"
+            f"{reason}:{identity_trigger_at.isoformat()}"
+            f":quantity:{order_quantity}"
+        )
+        signal_id = f"live-exit-signal-{uuid5(NAMESPACE_URL, identity)}"
+        candidate_id = f"live-exit-{uuid5(NAMESPACE_URL, signal_id)}"
+        if created_at is None:
+            if state is None:
+                raise ValueError("state or created_at is required")
+            created_at = state.bucket_end
         return LiveExitOrderRequest(
             candidate=OrderIntentCandidate(
                 candidate_id=candidate_id,

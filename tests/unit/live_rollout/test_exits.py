@@ -618,6 +618,48 @@ class FakeCandleLoader:
         return self._candles
 
 
+async def test_exit_identity_includes_quantity() -> None:
+    """Different exit quantities must not derive the same order identity.
+
+    Everything else in the identity can repeat across position episodes -- a
+    recovery boundary taken from an older terminal order, the same grace-timeout
+    reason, the same symbol.  Without the quantity, a later exit of a different
+    size reused the earlier candidate ID, the durable order-identity check
+    rejected it, and the position could never be closed.
+    """
+
+    state = replace(
+        _state(),
+        bucket_start=datetime(2026, 7, 4, 0, 5, tzinfo=UTC),
+        bucket_end=datetime(2026, 7, 4, 0, 5, 15, tzinfo=UTC),
+    )
+    manager = LiveExitManager(config=_config(PositionExitMode.CANDLE_15M))
+    position = _long_position()
+
+    def build(quantity: Decimal):
+        return manager._build_order_request(
+            state=state,
+            position=position,
+            reason="candle_15m_grace_timeout_8",
+            trigger_at=datetime(2026, 7, 4, 0, 5, 15, tzinfo=UTC),
+            identity_trigger_at=datetime(2026, 7, 1, 0, 0, tzinfo=UTC),
+            reference_price=Decimal("99"),
+            quantity=quantity,
+        )
+
+    first = build(Decimal("555"))
+    repeat = build(Decimal("555"))
+    second = build(Decimal("4542"))
+
+    # Rebuilding the same exit stays idempotent ...
+    assert first.candidate.candidate_id == repeat.candidate.candidate_id
+    assert first.candidate.signal_id == repeat.candidate.signal_id
+
+    # ... but a different quantity must not collide.
+    assert first.candidate.candidate_id != second.candidate.candidate_id
+    assert first.candidate.signal_id != second.candidate.signal_id
+
+
 def _config(
     mode: PositionExitMode,
     *,
