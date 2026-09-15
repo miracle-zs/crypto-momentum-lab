@@ -38,11 +38,11 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         "120",
     ]
     assert services["market-data"]["stop_grace_period"] == "60s"
-    assert services["postgres"]["mem_limit"] == "1g"
+    assert services["postgres"]["mem_limit"] == "1280m"
     assert services["postgres"]["memswap_limit"] == "1536m"
     assert services["execution-account-live"]["mem_limit"] == "160m"
-    assert services["live-strategy"]["mem_limit"] == "768m"
-    assert services["dashboard"]["mem_limit"] == "320m"
+    assert services["live-strategy"]["mem_limit"] == "512m"
+    assert services["dashboard"]["mem_limit"] == "192m"
     assert services["execution-account-live"]["healthcheck"]["interval"] == "60s"
     assert services["execution-account-live"]["healthcheck"]["retries"] == 2
     assert services["execution-account-live"]["healthcheck"]["start_interval"] == "5s"

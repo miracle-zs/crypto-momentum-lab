@@ -1822,9 +1822,57 @@ def test_position_intent_divergence_scope_action_and_serverchan() -> None:
     assert form["title"] == "CML | 严重 | BTWUSDT | 账户下单意图发生分叉"
     assert "BTWUSDT" in form["desp"]
     assert "c223e6db" in form["desp"]
-    assert "account-2`：已下单 **1** 笔 `BUY LIMIT 141@0.707` [指纹: a7be2db0]" in form["desp"]
+    assert "account-2`（已下单 **1** 笔）：买入 141 @ 0.707（限价）" in form["desp"]
     assert "primary`：**未下单**（0 笔）" in form["desp"]
     assert "检测到单边未下单" in form["desp"]
+    assert "- **影响**" not in form["desp"]
+
+
+def test_position_intent_divergence_multi_order_and_zero_trimming() -> None:
+    details = {
+        "differences": [
+            {
+                "symbol": "FFUSDT",
+                "strategy_config_hash": "c223e6dbad4d588e2916b47fa303762c6241bc18346765786950e51b3cd5cbdd",
+                "accounts": [
+                    {
+                        "account_label": "account-2",
+                        "order_count": 2,
+                        "intent_summary": "BUY LIMIT 684.000000000000000000@0.146040000000000000, BUY LIMIT 691.000000000000000000@0.144540000000000000",
+                    },
+                    {
+                        "account_label": "primary",
+                        "order_count": 1,
+                        "intent_summary": "买入 691 @ 0.14454（限价）",
+                    },
+                ],
+            }
+        ],
+        "group_count": 1,
+    }
+    form = _serverchan_form(
+        {
+            "event": "ops_alert",
+            "alert_name": "live_position_intent_divergence",
+            "severity": "critical",
+            "summary": "Live accounts diverged on order intent for identical strategy configs",
+            "observed_at": "2026-09-15T10:19:51+00:00",
+            "details": details,
+        }
+    )
+
+    expected_account2 = (
+        "  - `account-2`（已下单 **2** 笔）：\n"
+        "    - 买入 684 @ 0.14604（限价）\n"
+        "    - 买入 691 @ 0.14454（限价）"
+    )
+    expected_primary = "  - `primary`（已下单 **1** 笔）：买入 691 @ 0.14454（限价）"
+
+    assert expected_account2 in form["desp"]
+    assert expected_primary in form["desp"]
+    assert "0000000000000000" not in form["desp"]
+    assert "指纹" not in form["desp"]
+    assert "- **影响**" not in form["desp"]
 
 
 def test_container_memory_pressure_human_formatting() -> None:

@@ -2486,13 +2486,15 @@ LEFT JOIN (
   SELECT run_id, symbol,
     count(*) AS order_count,
     string_agg(
-      side || ' ' || order_type || ' '
-        || CASE
-             WHEN reduce_only THEN 'close'
-             ELSE quantity::text || '@' || COALESCE(price::text, 'MARKET')
-           END,
-      ', '
-      ORDER BY side, order_type, reduce_only, quantity::text, price::text
+      (CASE WHEN upper(side) = 'BUY' THEN '买入' WHEN upper(side) = 'SELL' THEN '卖出' ELSE side END)
+      || ' '
+      || CASE
+           WHEN reduce_only THEN '平仓'
+           ELSE trim_scale(quantity)::text || ' @ ' || COALESCE(trim_scale(price)::text, '市价')
+         END
+      || '（' || (CASE WHEN upper(order_type) = 'LIMIT' THEN '限价' WHEN upper(order_type) = 'MARKET' THEN '市价' ELSE order_type END) || '）',
+      E'\\x1e'
+      ORDER BY side, order_type, reduce_only, quantity, price
     ) AS intent_summary,
     -- An opening order states a quantity the strategy chose, so it takes part
     -- in the fingerprint.  A closing order does not: how much to sell is a
@@ -3525,6 +3527,43 @@ def _serverchan_title(severity: str, scope: str | None, label: str) -> str:
     return f"{head} | {label}"[:_SERVERCHAN_TITLE_LIMIT]
 
 
+def _format_order_intent_items(raw_summary: str | None) -> list[str]:
+    """Parse and normalize order intent items into clean Chinese strings."""
+    if not raw_summary:
+        return []
+    items = [x.strip() for x in re.split(r'[\x1e,]', raw_summary) if x.strip()]
+    formatted: list[str] = []
+    for item in items:
+        # Strip trailing zeros from decimals (e.g. 684.000000000000000000 -> 684, 0.146040000000000000 -> 0.14604)
+        normalized = re.sub(r'(\.\d*?[1-9])0+(?=[^\d]|$)', r'\1', item)
+        normalized = re.sub(r'\.0+(?=[^\d]|$)', r'', normalized)
+        m = re.match(
+            r'^(BUY|SELL|买入|卖出)\s+(LIMIT|MARKET|限价|市价)?\s*(.*?)$',
+            normalized,
+            re.IGNORECASE,
+        )
+        if m:
+            side_raw, type_raw, rest = m.groups()
+            side = "买入" if side_raw.upper() in ("BUY", "买入") else "卖出"
+            order_type = (
+                "限价"
+                if (type_raw and type_raw.upper() in ("LIMIT", "限价"))
+                else "市价"
+            )
+            if "close" in rest.lower() or "平仓" in rest:
+                formatted.append(f"{side} 平仓（{order_type}）")
+            elif "@" in rest:
+                parts = rest.split("@", 1)
+                formatted.append(
+                    f"{side} {parts[0].strip()} @ {parts[1].strip()}（{order_type}）"
+                )
+            else:
+                formatted.append(f"{side} {rest.strip()}（{order_type}）")
+        else:
+            formatted.append(normalized)
+    return formatted
+
+
 def _format_alert_human_details(
     alert_name: str, details: Mapping[str, object]
 ) -> list[str]:
@@ -3553,16 +3592,21 @@ def _format_alert_human_details(
                         acc_lbl = acc.get("account_label", "")
                         cnt = acc.get("order_count", 0)
                         summary = acc.get("intent_summary")
-                        fp = acc.get("fingerprint")
-                        fp_str = f" [指纹: {str(fp)[:8]}]" if fp else ""
                         if cnt == 0:
                             lines.append(f"  - `{acc_lbl}`：**未下单**（0 笔）")
                         else:
-                            summary_str = f" `{summary}`" if summary else ""
-                            lines.append(
-                                f"  - `{acc_lbl}`：已下单 **{cnt}** 笔"
-                                f"{summary_str}{fp_str}"
-                            )
+                            order_items = _format_order_intent_items(summary)
+                            if len(order_items) <= 1:
+                                desc = f"：{order_items[0]}" if order_items else ""
+                                lines.append(
+                                    f"  - `{acc_lbl}`（已下单 **{cnt}** 笔）{desc}"
+                                )
+                            else:
+                                lines.append(
+                                    f"  - `{acc_lbl}`（已下单 **{cnt}** 笔）："
+                                )
+                                for order_item in order_items:
+                                    lines.append(f"    - {order_item}")
 
     # 2. Position divergence
     elif base_name == "live_position_divergence":
@@ -3831,9 +3875,10 @@ def _serverchan_form(payload: Mapping[str, object]) -> dict[str, str]:
         human_lines = _format_alert_human_details(alert_name, details)
         if human_lines:
             body.extend(human_lines)
-        impact = _alert_impact(alert_name, details)
-        if impact:
-            body.append(f"- **影响**：{impact}")
+        if not conclusion:
+            impact = _alert_impact(alert_name, details)
+            if impact:
+                body.append(f"- **影响**：{impact}")
         body.append(f"- **处置建议**：{_alert_action(alert_name, details)}")
         body.append(f"- **事件编号**：`{alert_name}`")
     else:
