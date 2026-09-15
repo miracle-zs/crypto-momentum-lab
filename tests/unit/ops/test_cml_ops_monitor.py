@@ -1,4 +1,5 @@
 import argparse
+import dataclasses
 import json
 import urllib.parse
 import urllib.request
@@ -21,6 +22,7 @@ from deploy.ops.cml_ops_monitor import (
     _deliver_external_heartbeat,
     _human_seconds,
     _is_within_start_grace,
+    _merge_log_signals,
     _parse_log_record,
     _parse_started_at,
     _percent,
@@ -194,6 +196,55 @@ def test_database_state_does_not_alert_when_only_order_telemetry_is_quiet() -> N
     )
 
     assert alerts == ()
+
+
+def test_merge_log_signals_keeps_every_field() -> None:
+    """Every LogSignals field must survive the per-account merge.
+
+    The merge lists fields by hand; a field omitted there is dropped for every
+    account but the last, which is how a stuck exit stayed invisible.
+    """
+
+    left = LogSignals(
+        telemetry_persist_failures=1,
+        legacy_order_identity_conflicts=2,
+        exit_processing_degraded_symbols=("龙虾USDT",),
+        entry_lane_disabled_runs=("live-b1-long-100u-5x-v1",),
+        dead_connection_tasks=("grp-a",),
+        latest_rss_bytes=100,
+        rss_observed_at=datetime(2026, 9, 15, tzinfo=UTC),
+    )
+    right = LogSignals(
+        telemetry_persist_failures=3,
+        legacy_order_identity_conflicts=4,
+        exit_processing_degraded_symbols=("BTWUSDT",),
+        entry_lane_disabled_runs=("live-account-2-v1",),
+        dead_connection_tasks=("grp-b",),
+    )
+
+    merged = _merge_log_signals(left, right)
+
+    assert merged.telemetry_persist_failures == 4
+    assert merged.legacy_order_identity_conflicts == 6
+    assert merged.exit_processing_degraded_symbols == ("龙虾USDT", "BTWUSDT")
+    assert merged.entry_lane_disabled_runs == (
+        "live-b1-long-100u-5x-v1",
+        "live-account-2-v1",
+    )
+    assert merged.dead_connection_tasks == ("grp-a", "grp-b")
+    assert merged.latest_rss_bytes == 100
+    assert merged.rss_observed_at is not None
+
+    # Any field added to LogSignals must be merged above; keep this list honest.
+    assert {f.name for f in dataclasses.fields(LogSignals)} == {
+        "telemetry_persist_failures",
+        "legacy_order_identity_conflicts",
+        "exit_processing_degraded_symbols",
+        "entry_lane_disabled_runs",
+        "dead_connection_tasks",
+        "latest_rss_bytes",
+        "rss_observed_at",
+    }
 
 
 def test_console_log_record_parses_like_json() -> None:

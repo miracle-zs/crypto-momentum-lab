@@ -885,6 +885,48 @@ def evaluate_database_state(
     return tuple(alerts)
 
 
+def _merge_log_signals(left: LogSignals, right: LogSignals) -> LogSignals:
+    """Combine two accounts' log signals without dropping any field.
+
+    The live accounts are scanned one container at a time and merged.  Listing
+    the fields by hand here means a newly added field is silently discarded for
+    every account but the last, which is exactly how a stuck exit stayed
+    invisible.  Keep this in step with LogSignals.
+    """
+
+    return LogSignals(
+        telemetry_persist_failures=(
+            left.telemetry_persist_failures + right.telemetry_persist_failures
+        ),
+        legacy_order_identity_conflicts=(
+            left.legacy_order_identity_conflicts
+            + right.legacy_order_identity_conflicts
+        ),
+        exit_processing_degraded_symbols=(
+            *left.exit_processing_degraded_symbols,
+            *right.exit_processing_degraded_symbols,
+        ),
+        entry_lane_disabled_runs=(
+            *left.entry_lane_disabled_runs,
+            *right.entry_lane_disabled_runs,
+        ),
+        dead_connection_tasks=(
+            *left.dead_connection_tasks,
+            *right.dead_connection_tasks,
+        ),
+        latest_rss_bytes=(
+            right.latest_rss_bytes
+            if right.latest_rss_bytes is not None
+            else left.latest_rss_bytes
+        ),
+        rss_observed_at=(
+            right.rss_observed_at
+            if right.rss_observed_at is not None
+            else left.rss_observed_at
+        ),
+    )
+
+
 def evaluate_log_signals(signals: LogSignals) -> tuple[Alert, ...]:
     """Return alerts represented by recent structured application logs."""
 
@@ -1484,30 +1526,7 @@ class OpsMonitor:
                 live_id,
                 since_seconds=self._config.log_window_seconds,
             )
-            combined_signals = LogSignals(
-                telemetry_persist_failures=(
-                    combined_signals.telemetry_persist_failures
-                    + signals.telemetry_persist_failures
-                ),
-                legacy_order_identity_conflicts=(
-                    combined_signals.legacy_order_identity_conflicts
-                    + signals.legacy_order_identity_conflicts
-                ),
-                dead_connection_tasks=(
-                    *combined_signals.dead_connection_tasks,
-                    *signals.dead_connection_tasks,
-                ),
-                latest_rss_bytes=(
-                    signals.latest_rss_bytes
-                    if signals.latest_rss_bytes is not None
-                    else combined_signals.latest_rss_bytes
-                ),
-                rss_observed_at=(
-                    signals.rss_observed_at
-                    if signals.rss_observed_at is not None
-                    else combined_signals.rss_observed_at
-                ),
-            )
+            combined_signals = _merge_log_signals(combined_signals, signals)
         alerts.extend(evaluate_log_signals(combined_signals))
         if combined_signals.latest_rss_bytes is not None:
             alerts.extend(
