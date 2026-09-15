@@ -21,6 +21,7 @@ from deploy.ops.cml_ops_monitor import (
     _deliver_external_heartbeat,
     _human_seconds,
     _is_within_start_grace,
+    _parse_log_record,
     _parse_started_at,
     _percent,
     _serverchan_endpoint,
@@ -193,6 +194,70 @@ def test_database_state_does_not_alert_when_only_order_telemetry_is_quiet() -> N
     )
 
     assert alerts == ()
+
+
+def test_console_log_record_parses_like_json() -> None:
+    """The containers emit structlog's console renderer, not JSON."""
+
+    record = _parse_log_record(
+        "2026-09-15 12:20:54 [warning  ] live_grace_timeout_processing_degraded "
+        "error_type=ValueError reason=order_identity_conflict "
+        "retry_delay_seconds=60.0 symbol=龙虾USDT"
+    )
+
+    assert record["event"] == "live_grace_timeout_processing_degraded"
+    assert record["level"] == "warning"
+    assert record["symbol"] == "龙虾USDT"
+    assert record["reason"] == "order_identity_conflict"
+    assert record["retry_delay_seconds"] == 60.0
+
+
+def test_console_log_record_coerces_booleans_and_keeps_json_working() -> None:
+    record = _parse_log_record(
+        "2026-09-15 12:20:54 [warning  ] live_entry_lane_state_changed "
+        "enabled=False state_changed=True"
+    )
+    assert record["enabled"] is False
+    assert record["state_changed"] is True
+
+    as_json = _parse_log_record('{"event": "x", "value": 3}')
+    assert as_json["event"] == "x"
+    assert as_json["value"] == 3
+
+
+def test_log_signals_reads_console_output_and_ignores_re_enable(tmp_path) -> None:
+    """A stuck exit must alert; a lane coming back up must not."""
+
+    class Runner:
+        def run(self, args, *, timeout_seconds):
+            del timeout_seconds
+            if args[:2] == ["docker", "logs"]:
+                return (
+                    "2026-09-15 12:20:54 [warning  ] "
+                    "live_grace_timeout_processing_degraded "
+                    "error_type=ValueError reason=order_identity_conflict "
+                    "retry_delay_seconds=60.0 symbol=龙虾USDT\n"
+                    "2026-09-15 12:20:54 [warning  ] live_entry_lane_state_changed "
+                    "enabled=False reason=exit_failure:龙虾USDT:"
+                    "order_identity_conflict "
+                    "run_id=live-b1-long-100u-5x-v1\n"
+                    "2026-09-15 12:21:54 [warning  ] live_entry_lane_state_changed "
+                    "enabled=True run_id=live-b1-long-100u-5x-v1\n"
+                )
+            return ""
+
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+        runner=Runner(),
+    )
+
+    signals = monitor._log_signals(None, "live-1", since_seconds=60)
+
+    assert signals.exit_processing_degraded_symbols == ("龙虾USDT",)
+    assert signals.entry_lane_disabled_runs == ("live-b1-long-100u-5x-v1",)
+
+    names = [alert.name for alert in evaluate_log_signals(signals)]
+    assert names == ["live_exit_processing_degraded", "live_entry_lane_disabled"]
 
 
 def test_log_signals_alert_on_persist_failure_and_dead_task() -> None:

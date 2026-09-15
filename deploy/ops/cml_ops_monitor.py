@@ -105,6 +105,8 @@ _ALERT_LABELS = {
     "rss_growth": "服务内存持续增长",
     "telemetry_persist_failure": "运行时遥测写入失败",
     "live_legacy_order_identity_conflict": "订单身份发生冲突",
+    "live_exit_processing_degraded": "平仓处理降级，仓位可能无法退出",
+    "live_entry_lane_disabled": "入场通道已被禁用",
     "market_task_not_alive": "行情连接任务无响应",
     "live_session_not_ready": "实时会话未就绪",
     "live_checkpoint_stale": "实时状态 checkpoint 已过期",
@@ -141,6 +143,12 @@ _ALERT_IMPACTS = {
     "rss_growth": "服务内存持续增长，后续可能出现性能下降或 OOM。",
     "telemetry_persist_failure": "运行时诊断数据可能不完整，不代表交易一定已停止。",
     "live_legacy_order_identity_conflict": "订单与交易所订单的归属可能无法安全关联。",
+    "live_exit_processing_degraded": (
+        "退出流程反复失败，持仓无法按策略平掉，浮亏可能持续扩大。"
+    ),
+    "live_entry_lane_disabled": (
+        "该账户因退出失败被暂停开新仓，策略不再接受新的入场机会。"
+    ),
     "market_task_not_alive": "策略可能无法持续接收行情，开平仓判断可能受影响。",
     "live_session_not_ready": "该实时账户未处于可安全运行状态。",
     "live_checkpoint_stale": "策略状态可能没有及时持久化，重启恢复风险增加。",
@@ -197,6 +205,12 @@ _ALERT_ACTIONS = {
     ),
     "live_legacy_order_identity_conflict": (
         "请暂停相关排障范围内的自动处理并核对订单归属。"
+    ),
+    "live_exit_processing_degraded": (
+        "请核对退出订单的身份冲突与批次绑定，确认持仓能否安全平掉。"
+    ),
+    "live_entry_lane_disabled": (
+        "先解决触发禁用的退出失败；恢复前该账户不会再开新仓。"
     ),
     "market_task_not_alive": "请检查行情连接、网络和策略进程；本告警不代表已自动恢复。",
     "live_session_not_ready": (
@@ -305,6 +319,8 @@ class ContainerMemoryStats:
 class LogSignals:
     telemetry_persist_failures: int = 0
     legacy_order_identity_conflicts: int = 0
+    exit_processing_degraded_symbols: tuple[str, ...] = ()
+    entry_lane_disabled_runs: tuple[str, ...] = ()
     dead_connection_tasks: tuple[str, ...] = ()
     latest_rss_bytes: int | None = None
     rss_observed_at: datetime | None = None
@@ -894,6 +910,24 @@ def evaluate_log_signals(signals: LogSignals) -> tuple[Alert, ...]:
                         signals.legacy_order_identity_conflicts
                     )
                 },
+            )
+        )
+    if signals.exit_processing_degraded_symbols:
+        alerts.append(
+            Alert(
+                "live_exit_processing_degraded",
+                "critical",
+                "Live exit processing is degraded and positions may not close",
+                {"symbols": signals.exit_processing_degraded_symbols},
+            )
+        )
+    if signals.entry_lane_disabled_runs:
+        alerts.append(
+            Alert(
+                "live_entry_lane_disabled",
+                "critical",
+                "Live entry lane is disabled after an exit failure",
+                {"run_ids": signals.entry_lane_disabled_runs},
             )
         )
     if signals.dead_connection_tasks:
@@ -2106,6 +2140,8 @@ class OpsMonitor:
     ) -> LogSignals:
         telemetry_failures = 0
         legacy_order_identity_conflicts = 0
+        degraded_exit_symbols: set[str] = set()
+        disabled_entry_runs: set[str] = set()
         dead_tasks: list[str] = []
         latest_rss: int | None = None
         latest_rss_at: datetime | None = None
@@ -2133,6 +2169,16 @@ class OpsMonitor:
                     telemetry_failures += 1
                 elif event == "live_legacy_order_identity_conflict":
                     legacy_order_identity_conflicts += 1
+                elif event == "live_grace_timeout_processing_degraded":
+                    symbol = record.get("symbol")
+                    if symbol:
+                        degraded_exit_symbols.add(str(symbol))
+                elif event == "live_entry_lane_state_changed":
+                    # The lane toggles regularly; only a disable is an incident.
+                    if record.get("enabled") is False:
+                        run_id = record.get("run_id")
+                        if run_id:
+                            disabled_entry_runs.add(str(run_id))
                 elif event == "market_data_connection_task_not_alive":
                     values = record.get("group_ids")
                     if isinstance(values, list | tuple):
@@ -2150,6 +2196,8 @@ class OpsMonitor:
         return LogSignals(
             telemetry_persist_failures=telemetry_failures,
             legacy_order_identity_conflicts=legacy_order_identity_conflicts,
+            exit_processing_degraded_symbols=tuple(sorted(degraded_exit_symbols)),
+            entry_lane_disabled_runs=tuple(sorted(disabled_entry_runs)),
             dead_connection_tasks=tuple(sorted(set(dead_tasks))),
             latest_rss_bytes=latest_rss,
             rss_observed_at=latest_rss_at,
@@ -2940,15 +2988,68 @@ LEFT JOIN (
                 contexts.pop(name, None)
 
 
+# structlog's console renderer -- what the containers actually emit -- looks like
+#   2026-09-15 12:20:54 [warning  ] event_name  key=value key=value
+# The JSON branch below never matched it, so every event comparison in
+# _log_signals was silently false: no log-based alert could ever fire.
+_CONSOLE_LOG_HEAD_RE = re.compile(
+    r"^\S+[ T]\S+\s+\[\s*(?P<level>[A-Za-z]+)\s*\]\s+"
+    r"(?P<event>\S+)\s*(?P<fields>.*)$"
+)
+_CONSOLE_LOG_FIELD_RE = re.compile(
+    r'(?P<key>[A-Za-z_][A-Za-z0-9_.]*)=(?P<value>"[^"]*"|\S+)'
+)
+
+
+def _coerce_console_value(value: str) -> object:
+    """Give console fields the same types the JSON renderer would produce."""
+
+    if value == "True":
+        return True
+    if value == "False":
+        return False
+    if value == "None":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    return value
+
+
+def _parse_console_log_record(line: str) -> dict[str, object] | None:
+    head = _CONSOLE_LOG_HEAD_RE.match(line)
+    if head is None:
+        return None
+    record: dict[str, object] = {
+        "event": head.group("event"),
+        "level": head.group("level"),
+    }
+    for match in _CONSOLE_LOG_FIELD_RE.finditer(head.group("fields")):
+        raw = match.group("value")
+        if len(raw) >= 2 and raw[:1] == '"' and raw[-1:] == '"':
+            raw = raw[1:-1]
+        record[match.group("key")] = _coerce_console_value(raw)
+    return record
+
+
 def _parse_log_record(line: str) -> dict[str, object]:
     start = line.find("{")
-    if start < 0:
-        return {"event": line}
-    try:
-        value = json.loads(line[start:])
-    except json.JSONDecodeError:
-        return {"event": line}
-    return value if isinstance(value, dict) else {"event": line}
+    if start >= 0:
+        try:
+            value = json.loads(line[start:])
+        except json.JSONDecodeError:
+            value = None
+        if isinstance(value, dict):
+            return value
+    console = _parse_console_log_record(line)
+    if console is not None:
+        return console
+    return {"event": line}
 
 
 def _record_timestamp(record: Mapping[str, object]) -> datetime:
