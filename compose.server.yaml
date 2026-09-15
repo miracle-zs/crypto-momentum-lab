@@ -654,8 +654,14 @@ services:
     # Startup observed below 200 MiB, so this was trimmed to 512 MiB.  In
     # steady state the working set now sits near 400 MiB (77% of that budget),
     # which keeps tripping container_memory_high; give it real headroom again.
-    # 384m: peak measured at 173 MiB; still >2x headroom.
-    mem_limit: 384m
+    # 512m: aligned with live-strategy-account-2/3/4 in
+    # compose.live.accounts.yaml.  The earlier 384m rested on a post-restart
+    # reading of ~173 MiB, but the steady state grows well past that: it was
+    # observed at 364 MiB (95% of 384m) with container_memory_high firing and
+    # container_memory_growth reporting +81.9 MiB in 30 minutes.  A post-restart
+    # peak is not a steady-state figure.  The limit is a ceiling, not a
+    # reservation.
+    mem_limit: 512m
     memswap_limit: 1024m
 
   dashboard:
