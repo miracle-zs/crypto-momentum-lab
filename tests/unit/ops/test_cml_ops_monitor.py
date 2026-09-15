@@ -1847,10 +1847,10 @@ def test_container_memory_pressure_human_formatting() -> None:
         }
     )
     assert "[警告] market-data：服务匿名内存被换出" in form["desp"]
-    assert "影响服务**：`market-data`" in form["desp"]
+    assert "market-data" in form["desp"]
     assert "物理内存用量**：`260.6 MB` / `640.0 MB`（占比 **40.7%**，峰值 262.9 MB）" in form["desp"]
     assert "Swap 换出情况**：当前换出 `32.6 MB` （本次新增: `+32.6 MB`）" in form["desp"]
-    assert "物理内存占用充足（<60%）" in form["desp"]
+    assert "物理内存充足" in form["desp"]
 
 
 def test_position_and_signal_divergence_human_formatting() -> None:

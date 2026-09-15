@@ -3412,6 +3412,16 @@ def _format_duration(seconds: object) -> str:
 
 def _alert_impact(alert_name: str, details: Mapping[str, object]) -> str:
     base_name, _scope = _split_alert_name(alert_name)
+    if base_name == "container_memory_pressure":
+        curr_mb = details.get("memory_current_mb")
+        limit_mb = details.get("memory_limit_mb")
+        if (
+            isinstance(curr_mb, (int, float))
+            and isinstance(limit_mb, (int, float))
+            and limit_mb > 0
+            and (curr_mb / limit_mb) < 0.6
+        ):
+            return "仅低频冷页置换入 Swap，物理内存充足，核心查询无延迟影响。"
     impact = _ALERT_IMPACTS.get(base_name)
     if impact is not None:
         return impact
@@ -3617,8 +3627,6 @@ def _format_alert_human_details(
         swap_mb = details.get("memory_swap_current_mb")
         swap_growth = details.get("memory_swap_growth_mb")
         peak_mb = details.get("memory_peak_mb")
-        if svc:
-            lines.append(f"- **影响服务**：`{svc}`")
         if (
             isinstance(curr_mb, (int, float))
             and isinstance(limit_mb, (int, float))
@@ -3643,15 +3651,6 @@ def _format_alert_human_details(
             lines.append(
                 f"- **Swap 换出情况**：当前换出 `{swap_mb:.1f} MB` {growth_str}"
             )
-        if (
-            isinstance(curr_mb, (int, float))
-            and isinstance(limit_mb, (int, float))
-            and limit_mb > 0
-        ):
-            if (curr_mb / limit_mb) < 0.6:
-                lines.append(
-                    "- **状态诊断**：物理内存占用充足（<60%），系 Linux 内核置换低频冷页，属于正常优化现象，无需重启服务。"
-                )
 
     # 5. Container memory high / growth / rss_growth
     elif base_name in (
@@ -3735,6 +3734,51 @@ def _format_alert_human_details(
     return lines
 
 
+def _alert_conclusion(
+    alert_name: str, details: Mapping[str, object]
+) -> str | None:
+    """Provide a one-line executive takeaway for the alert header."""
+
+    base_name, _scope = _split_alert_name(alert_name)
+    if base_name == "container_memory_pressure":
+        curr_mb = details.get("memory_current_mb")
+        limit_mb = details.get("memory_limit_mb")
+        if (
+            isinstance(curr_mb, (int, float))
+            and isinstance(limit_mb, (int, float))
+            and limit_mb > 0
+        ):
+            pct = (curr_mb / limit_mb) * 100
+            if pct < 60:
+                return (
+                    f"物理内存充足（仅占 {pct:.1f}%），系 Linux 内核置换低频冷页入 Swap，"
+                    "**服务运行正常，无需人工干预**。"
+                )
+            return (
+                f"物理内存占用偏高（{pct:.1f}%）且持续换出，**建议关注内存增长趋势与慢查询**。"
+            )
+    if base_name == "live_position_intent_divergence":
+        differences = details.get("differences")
+        if isinstance(differences, Sequence) and differences:
+            for diff in differences:
+                if isinstance(diff, Mapping):
+                    accounts = diff.get("accounts")
+                    if isinstance(accounts, Sequence):
+                        for acc in accounts:
+                            if isinstance(acc, Mapping) and acc.get("order_count") == 0:
+                                return "检测到单边漏单（主/从账户下单意图分叉），**执行与风控路径已失步**。"
+        return "同配置账户向交易所下达了不同的订单参数，**下单意图已分叉**。"
+    if base_name == "live_position_divergence":
+        return "可比账户在交易所的实际持仓数量不一致，**存在单边未平仓或对账失步风险**。"
+    if base_name == "live_signal_divergence":
+        return "同配置账户在同一行情时间桶产出了不同的信号决策，**策略计算可能已分叉**。"
+    if base_name in ("container_oom_killed",):
+        return "容器超出内存限制配额，**已被系统 OOM Killer 强行终止**。"
+    if base_name in ("container_missing",):
+        return "核心服务容器未运行或已异常退出，**相关功能已中断**。"
+    return None
+
+
 def _serverchan_form(payload: Mapping[str, object]) -> dict[str, str]:
     event = str(payload.get("event", "ops_alert"))
     alert_name = str(payload.get("alert_name", "ops_monitor"))
@@ -3746,30 +3790,24 @@ def _serverchan_form(payload: Mapping[str, object]) -> dict[str, str]:
     if event == "ops_alert":
         severity = _severity_label(payload.get("severity", "critical"))
         title = _serverchan_title(severity, scope, label)
+        conclusion = _alert_conclusion(alert_name, details)
         body = [
             f"## [{severity}] {scope + '：' if scope else ''}{label}",
-            "- **发生时间**："
-            f"{_format_alert_time(payload.get('observed_at'))}（北京时间）",
-            f"- **影响**：{_alert_impact(alert_name, details)}",
-            f"- **处置**：{_alert_action(alert_name, details)}",
-            f"- **事件编号**：`{alert_name}`",
         ]
-        if details:
-            human_lines = _format_alert_human_details(alert_name, details)
-            if human_lines:
-                body.extend(human_lines)
-            body.append(
-                "- **技术详情**：\n```json\n"
-                + json.dumps(
-                    details,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    # Indent so nested divergence payloads stay readable in the
-                    # WeChat card instead of one very wide scrolling line.
-                    indent=2,
-                )
-                + "\n```"
-            )
+        if conclusion:
+            body.append(f"> **诊断结论**：{conclusion}\n")
+        body.append(
+            f"- **发生时间**："
+            f"{_format_alert_time(payload.get('observed_at'))}（北京时间）"
+        )
+        human_lines = _format_alert_human_details(alert_name, details)
+        if human_lines:
+            body.extend(human_lines)
+        impact = _alert_impact(alert_name, details)
+        if impact:
+            body.append(f"- **影响**：{impact}")
+        body.append(f"- **处置建议**：{_alert_action(alert_name, details)}")
+        body.append(f"- **事件编号**：`{alert_name}`")
     else:
         title = _serverchan_title("恢复", scope, label)
         body = [
