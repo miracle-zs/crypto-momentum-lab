@@ -3154,12 +3154,20 @@ def _fingerprint_reference_prices_sql() -> str:
 
     ``desired_notional`` is quantity times price, so it follows the position
     exactly as ``quantity`` does and is dropped for reduce-only signals.
+    Numeric values are normalized through ``trim_scale`` so that equal values
+    with different trailing zeros compare equal.
     """
 
-    return (
-        f"(CASE WHEN signal_kind = {_sql_literal(_REDUCE_ONLY_SIGNAL_KIND)} "
+    filtered = (
+        f"CASE WHEN signal_kind = {_sql_literal(_REDUCE_ONLY_SIGNAL_KIND)} "
         "THEN reference_prices - 'desired_notional' "
-        "ELSE reference_prices END)::text"
+        "ELSE reference_prices END"
+    )
+    return (
+        f"(SELECT COALESCE(jsonb_object_agg(k, "
+        "CASE WHEN v ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' "
+        "THEN trim_scale(v::numeric)::text ELSE v END), '{}'::jsonb) "
+        f"FROM jsonb_each_text({filtered}) t(k, v))::text"
     )
 
 
@@ -3607,16 +3615,36 @@ def _format_alert_human_details(
                 )
                 accs = diff.get("accounts")
                 if isinstance(accs, Sequence):
-                    lines.append("- **各账户信号表现**：")
+                    sig_counts = [
+                        acc.get("signal_count")
+                        for acc in accs
+                        if isinstance(acc, Mapping)
+                    ]
+                    cand_counts = [
+                        acc.get("candidate_count")
+                        for acc in accs
+                        if isinstance(acc, Mapping)
+                    ]
+                    if (
+                        len(set(sig_counts)) == 1
+                        and len(set(cand_counts)) == 1
+                    ):
+                        lines.append(
+                            "- **各账户信号表现**（数量相同，但决策特征/价格参数不一致）："
+                        )
+                    else:
+                        lines.append("- **各账户信号表现**：")
                     for acc in accs:
                         if not isinstance(acc, Mapping):
                             continue
                         acc_lbl = acc.get("account_label", "")
                         sig_cnt = acc.get("signal_count", 0)
                         cand_cnt = acc.get("candidate_count", 0)
+                        fp = acc.get("fingerprint")
+                        fp_str = f" [指纹: `{str(fp)[:8]}`]" if fp else ""
                         lines.append(
                             f"  - `{acc_lbl}`：有效信号 **{sig_cnt}** 个"
-                            f"（候选: {cand_cnt}）"
+                            f"（候选: {cand_cnt}）{fp_str}"
                         )
 
     # 4. Container memory pressure (swap)
