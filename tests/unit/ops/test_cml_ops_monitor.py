@@ -209,7 +209,6 @@ def test_merge_log_signals_keeps_every_field() -> None:
         telemetry_persist_failures=1,
         legacy_order_identity_conflicts=2,
         exit_processing_degraded_symbols=("龙虾USDT",),
-        entry_lane_disabled_runs=("live-b1-long-100u-5x-v1",),
         dead_connection_tasks=("grp-a",),
         latest_rss_bytes=100,
         rss_observed_at=datetime(2026, 9, 15, tzinfo=UTC),
@@ -218,7 +217,6 @@ def test_merge_log_signals_keeps_every_field() -> None:
         telemetry_persist_failures=3,
         legacy_order_identity_conflicts=4,
         exit_processing_degraded_symbols=("BTWUSDT",),
-        entry_lane_disabled_runs=("live-account-2-v1",),
         dead_connection_tasks=("grp-b",),
     )
 
@@ -227,10 +225,6 @@ def test_merge_log_signals_keeps_every_field() -> None:
     assert merged.telemetry_persist_failures == 4
     assert merged.legacy_order_identity_conflicts == 6
     assert merged.exit_processing_degraded_symbols == ("龙虾USDT", "BTWUSDT")
-    assert merged.entry_lane_disabled_runs == (
-        "live-b1-long-100u-5x-v1",
-        "live-account-2-v1",
-    )
     assert merged.dead_connection_tasks == ("grp-a", "grp-b")
     assert merged.latest_rss_bytes == 100
     assert merged.rss_observed_at is not None
@@ -240,7 +234,6 @@ def test_merge_log_signals_keeps_every_field() -> None:
         "telemetry_persist_failures",
         "legacy_order_identity_conflicts",
         "exit_processing_degraded_symbols",
-        "entry_lane_disabled_runs",
         "dead_connection_tasks",
         "latest_rss_bytes",
         "rss_observed_at",
@@ -332,10 +325,9 @@ def test_log_signals_reads_console_output_and_ignores_re_enable(tmp_path) -> Non
     signals = monitor._log_signals(None, "live-1", since_seconds=60)
 
     assert signals.exit_processing_degraded_symbols == ("龙虾USDT",)
-    assert signals.entry_lane_disabled_runs == ("live-b1-long-100u-5x-v1",)
 
     names = [alert.name for alert in evaluate_log_signals(signals)]
-    assert names == ["live_exit_processing_degraded", "live_entry_lane_disabled"]
+    assert names == ["live_exit_processing_degraded"]
 
 
 def test_log_signals_alert_on_persist_failure_and_dead_task() -> None:

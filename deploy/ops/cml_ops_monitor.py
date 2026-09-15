@@ -106,7 +106,6 @@ _ALERT_LABELS = {
     "telemetry_persist_failure": "运行时遥测写入失败",
     "live_legacy_order_identity_conflict": "订单身份发生冲突",
     "live_exit_processing_degraded": "平仓处理降级，仓位可能无法退出",
-    "live_entry_lane_disabled": "入场通道已被禁用",
     "market_task_not_alive": "行情连接任务无响应",
     "live_session_not_ready": "实时会话未就绪",
     "live_checkpoint_stale": "实时状态 checkpoint 已过期",
@@ -145,9 +144,6 @@ _ALERT_IMPACTS = {
     "live_legacy_order_identity_conflict": "订单与交易所订单的归属可能无法安全关联。",
     "live_exit_processing_degraded": (
         "退出流程反复失败，持仓无法按策略平掉，浮亏可能持续扩大。"
-    ),
-    "live_entry_lane_disabled": (
-        "该账户因退出失败被暂停开新仓，策略不再接受新的入场机会。"
     ),
     "market_task_not_alive": "策略可能无法持续接收行情，开平仓判断可能受影响。",
     "live_session_not_ready": "该实时账户未处于可安全运行状态。",
@@ -208,9 +204,6 @@ _ALERT_ACTIONS = {
     ),
     "live_exit_processing_degraded": (
         "请核对退出订单的身份冲突与批次绑定，确认持仓能否安全平掉。"
-    ),
-    "live_entry_lane_disabled": (
-        "先解决触发禁用的退出失败；恢复前该账户不会再开新仓。"
     ),
     "market_task_not_alive": "请检查行情连接、网络和策略进程；本告警不代表已自动恢复。",
     "live_session_not_ready": (
@@ -320,7 +313,6 @@ class LogSignals:
     telemetry_persist_failures: int = 0
     legacy_order_identity_conflicts: int = 0
     exit_processing_degraded_symbols: tuple[str, ...] = ()
-    entry_lane_disabled_runs: tuple[str, ...] = ()
     dead_connection_tasks: tuple[str, ...] = ()
     latest_rss_bytes: int | None = None
     rss_observed_at: datetime | None = None
@@ -906,10 +898,6 @@ def _merge_log_signals(left: LogSignals, right: LogSignals) -> LogSignals:
             *left.exit_processing_degraded_symbols,
             *right.exit_processing_degraded_symbols,
         ),
-        entry_lane_disabled_runs=(
-            *left.entry_lane_disabled_runs,
-            *right.entry_lane_disabled_runs,
-        ),
         dead_connection_tasks=(
             *left.dead_connection_tasks,
             *right.dead_connection_tasks,
@@ -961,15 +949,6 @@ def evaluate_log_signals(signals: LogSignals) -> tuple[Alert, ...]:
                 "critical",
                 "Live exit processing is degraded and positions may not close",
                 {"symbols": signals.exit_processing_degraded_symbols},
-            )
-        )
-    if signals.entry_lane_disabled_runs:
-        alerts.append(
-            Alert(
-                "live_entry_lane_disabled",
-                "critical",
-                "Live entry lane is disabled after an exit failure",
-                {"run_ids": signals.entry_lane_disabled_runs},
             )
         )
     if signals.dead_connection_tasks:
@@ -2160,7 +2139,6 @@ class OpsMonitor:
         telemetry_failures = 0
         legacy_order_identity_conflicts = 0
         degraded_exit_symbols: set[str] = set()
-        disabled_entry_runs: set[str] = set()
         dead_tasks: list[str] = []
         latest_rss: int | None = None
         latest_rss_at: datetime | None = None
@@ -2192,12 +2170,6 @@ class OpsMonitor:
                     symbol = record.get("symbol")
                     if symbol:
                         degraded_exit_symbols.add(str(symbol))
-                elif event == "live_entry_lane_state_changed":
-                    # The lane toggles regularly; only a disable is an incident.
-                    if record.get("enabled") is False:
-                        run_id = record.get("run_id")
-                        if run_id:
-                            disabled_entry_runs.add(str(run_id))
                 elif event == "market_data_connection_task_not_alive":
                     values = record.get("group_ids")
                     if isinstance(values, list | tuple):
@@ -2216,7 +2188,6 @@ class OpsMonitor:
             telemetry_persist_failures=telemetry_failures,
             legacy_order_identity_conflicts=legacy_order_identity_conflicts,
             exit_processing_degraded_symbols=tuple(sorted(degraded_exit_symbols)),
-            entry_lane_disabled_runs=tuple(sorted(disabled_entry_runs)),
             dead_connection_tasks=tuple(sorted(set(dead_tasks))),
             latest_rss_bytes=latest_rss,
             rss_observed_at=latest_rss_at,
