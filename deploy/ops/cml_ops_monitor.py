@@ -2995,6 +2995,48 @@ _SIGNAL_FINGERPRINT_FEATURE_KEYS: tuple[str, ...] = (
 _POSITION_DERIVED_FEATURE_KEYS: tuple[str, ...] = ("quantity", "batch_id")
 _REDUCE_ONLY_SIGNAL_KIND = "reduce_only_candidate"
 
+# Features that carry a number.  They are stored as JSON *strings*, and two
+# correct accounts do not always render the same value with the same trailing
+# zeros: one writes 0.1469 as "0.1469000" and the other as
+# "0.146900000000000000" (Decimal(float) expands to the full IEEE value).
+# The numbers are equal, so comparing the raw text reports a divergence that
+# is not there.  trim_scale drops trailing zeros while keeping the significant
+# digits, and leaves integers alone.
+_SIGNAL_FINGERPRINT_NUMERIC_KEYS: frozenset[str] = frozenset(
+    {
+        "impulse_start_price",
+        "impulse_end_price",
+        "impulse_return_pct",
+        "breakout_level",
+        "breakout_distance_pct",
+        "impulse_trade_count",
+        "impulse_trade_notional",
+        "aggressive_buy_notional",
+        "aggressive_sell_notional",
+        "aggressive_imbalance",
+        "baseline_notional",
+        "notional_intensity",
+        "liquidation_count",
+        "liquidation_notional",
+    }
+)
+
+
+def _fingerprint_feature_value_sql(key: str) -> str:
+    """Render one feature for the fingerprint, normalising numeric ones.
+
+    Numeric features are stored as JSON strings and the same value can carry
+    different trailing zeros between two accounts.  Those are equal numbers, so
+    the raw text must not be compared.  ``->>`` is used (not ``->``) because
+    the JSON string still carries its quotes and would not cast to numeric.
+    """
+
+    if key in _SIGNAL_FINGERPRINT_NUMERIC_KEYS:
+        return (
+            f"trim_scale((features->>{_sql_literal(key)})::numeric)"
+        )
+    return f"features->{_sql_literal(key)}"
+
 
 def _fingerprint_features_sql() -> str:
     """Render the ``features`` subset that feeds the durable signal fingerprint.
@@ -3002,10 +3044,12 @@ def _fingerprint_features_sql() -> str:
     ``jsonb`` normalises key order, so the rendered text is deterministic for a
     given set of values even though the stored column's key order is not.  A
     reduce-only signal drops the keys that describe the position it came from.
+    Numeric features go through ``trim_scale`` so that equal values written with
+    different trailing zeros compare equal.
     """
 
     pairs = ", ".join(
-        f"{_sql_literal(key)}, features->{_sql_literal(key)}"
+        f"{_sql_literal(key)}, {_fingerprint_feature_value_sql(key)}"
         for key in _SIGNAL_FINGERPRINT_FEATURE_KEYS
     )
     built = f"jsonb_build_object({pairs})"

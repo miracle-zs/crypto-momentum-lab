@@ -978,6 +978,43 @@ def test_signal_fingerprint_drops_position_derived_keys_for_reduce_only(
     assert "reference_prices - 'desired_notional'" in sql
 
 
+def test_fingerprint_normalises_numeric_feature_rendering(tmp_path) -> None:
+    """Equal numbers written with different trailing zeros must compare equal.
+
+    On 2026-09-15 04:04 two accounts on the same config, same symbol and same
+    bucket both reported breakout_level = 0.1469 -- one rendered as
+    "0.1469000" and the other as "0.146900000000000000" (Decimal(float)
+    expands to the full IEEE value).  Every other feature matched digit for
+    digit, yet the raw-text fingerprint differed, so the alert fired on a
+    rendering difference rather than a decision difference.
+    """
+
+    class Runner:
+        last_args = None
+
+        def run(self, args, *, timeout_seconds):
+            del timeout_seconds
+            self.last_args = args
+            return ""
+
+    runner = Runner()
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+        runner=runner,
+    )
+
+    monitor._consistency_observations("postgres-container")
+    sql = str(runner.last_args[-1])
+
+    # Numeric features are cast through trim_scale, and read with ->> so the
+    # JSON string's quotes do not break the cast.
+    assert "trim_scale((features->>'breakout_level')::numeric)" in sql
+    assert "trim_scale((features->>'impulse_return_pct')::numeric)" in sql
+    # Non-numeric features keep their raw JSON value.
+    assert "trim_scale((features->>'direction')" not in sql
+    assert "trim_scale((features->>'impulse_start')" not in sql
+
+
 def test_signal_divergence_sql_excludes_close_candidates(tmp_path) -> None:
     """A close candidate exists because the account holds the symbol.
 
