@@ -1,0 +1,12 @@
+/* ============ section: reports ============ */
+.report-list { display: grid; gap: 10px; }
+.report-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}

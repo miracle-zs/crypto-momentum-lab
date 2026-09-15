@@ -1,0 +1,133 @@
+/* ============ paper account cards ============ */
+
+.acct-cards {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.acct-strategy-column {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(122, 162, 247, .035), var(--surface) 34%);
+}
+
+.acct-strategy-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 42px;
+  padding: 1px 2px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.acct-strategy-head div { min-width: 0; }
+.acct-strategy-head span {
+  display: block;
+  color: var(--faint);
+  font: 9px var(--mono);
+  letter-spacing: .14em;
+}
+.acct-strategy-head strong {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.acct-strategy-head small { flex: none; color: var(--faint); font-size: 9px; white-space: nowrap; }
+
+.acct-strategy-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 10px;
+  padding-top: 10px;
+}
+
+.acct-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color .15s ease, background .15s ease, transform .15s ease;
+}
+
+.acct-card:hover { border-color: var(--line-strong); background: var(--surface-3); }
+
+.acct-card.is-active {
+  border-color: color-mix(in srgb, var(--brand) 65%, transparent);
+  background: linear-gradient(180deg, rgba(122, 162, 247, .1), var(--surface-2) 70%);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand) 35%, transparent);
+}
+
+.acct-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; min-width: 0; }
+.acct-top > span { min-width: 0; color: var(--faint); font: 9.5px var(--mono); letter-spacing: .14em; }
+.acct-top .acct-mode {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--brand);
+  letter-spacing: .06em;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.acct-top > .pill { flex: 0 0 auto; }
+
+.acct-name { min-width: 0; font-size: 14.5px; font-weight: 700; overflow: hidden; overflow-wrap: anywhere; text-overflow: ellipsis; white-space: nowrap; }
+
+.acct-equity { display: flex; align-items: baseline; gap: 10px; }
+.acct-equity strong { font: 500 23px/1 var(--mono); font-variant-numeric: tabular-nums; }
+.acct-total { display: inline-flex; align-items: baseline; gap: 5px; }
+.acct-total small { color: var(--faint); font-size: 8px; letter-spacing: .06em; }
+.acct-total em { font-style: normal; font-size: 12px; }
+
+.acct-window {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: -4px;
+}
+
+.acct-window span { color: var(--faint); font-size: 9px; letter-spacing: .03em; }
+.acct-window b { font-size: 10.5px; font-weight: 500; }
+
+.spark { width: 100%; height: 38px; }
+.spark polyline { fill: none; stroke: currentColor; stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+.spark-zero { stroke: var(--line-strong); stroke-width: 1; stroke-dasharray: 3 4; }
+.spark.pos { color: var(--up); }
+.spark.neg { color: var(--down); }
+.spark.fixed { color: var(--brand); }
+.spark.candle { color: var(--up); }
+.spark-empty { display: grid; place-items: center; color: var(--faint); background: var(--surface-3); border-radius: 6px; }
+
+.lazy-detail {
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  padding: 28px 18px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--surface-2) 72%, transparent);
+  text-align: center;
+}
+
+.lazy-detail strong { color: var(--muted); font-size: 13px; }
+.lazy-detail small { color: var(--faint); font-size: 10.5px; }
+.lazy-detail .history-button { margin-top: 4px; }
+
+.acct-card small { color: var(--faint); font-size: 10.5px; }
+
+.paper-account-detail { margin-top: 20px; }

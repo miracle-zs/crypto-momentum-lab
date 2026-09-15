@@ -6,7 +6,7 @@ import {
   price,
   relToNow,
 } from "../dashboard-formatters.js";
-import { blockTitle, dataTable, emptyBox } from "../dashboard-ui.js";
+import { blockTitle, dataTable, emptyBox, searchBox } from "../dashboard-ui.js";
 import { returnBar } from "../dashboard-charts.js";
 
 export function renderUniverse(data) {
@@ -69,10 +69,10 @@ export function renderUniverse(data) {
     <div class="market-board" data-market-board>
       ${viewTabs}
       <div class="market-panel" data-market-panel="rankings" role="tabpanel">
-        <div class="block">${blockTitle("涨幅榜 Top 20", "TOP GAINERS · UTC DAY")}${universeTable(data.gainers)}</div>
+        <div class="block">${blockTitle("涨幅榜 Top 20", "TOP GAINERS · UTC DAY", searchBox("过滤币种...", "[data-market-panel='rankings']"))}${universeTable(data.gainers)}</div>
       </div>
       <div class="market-panel" data-market-panel="monitoring" role="tabpanel" hidden>
-        <div class="block">${blockTitle(`监控池 ${monitored.length}`, "MONITORED UNIVERSE", summary)}${monitoringNote}${blockTitle(`补充监控 ${monitoringAdditions.length}`, "MONITORING ADDITIONS")}${monitoringTable}</div>
+        <div class="block">${blockTitle(`监控池 ${monitored.length}`, "MONITORED UNIVERSE", summary)}${monitoringNote}${blockTitle(`补充监控 ${monitoringAdditions.length}`, "MONITORING ADDITIONS", searchBox("过滤补充监控...", "[data-market-panel='monitoring']"))}${monitoringTable}</div>
       </div>
     </div>`;
   return [data.status, body];

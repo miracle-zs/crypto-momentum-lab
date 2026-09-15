@@ -269,6 +269,37 @@ function applyMarketView(board, view = "rankings") {
   });
 }
 
+function wireTableFilters(root) {
+  if (!root) return;
+  root.querySelectorAll(".search-box").forEach((box) => {
+    if (box.dataset.wired === "true") return;
+    box.dataset.wired = "true";
+    const input = box.querySelector("input[data-filter-table]");
+    const clearBtn = box.querySelector(".search-clear");
+    if (!input) return;
+    const update = () => {
+      const query = input.value.trim().toLowerCase();
+      if (clearBtn) clearBtn.hidden = !query;
+      const targetSelector = input.dataset.filterTable;
+      const container = targetSelector
+        ? box.closest(targetSelector) || root.querySelector(targetSelector)
+        : box.closest(".block, .card, .market-panel");
+      if (!container) return;
+      const rows = container.querySelectorAll("tbody tr");
+      rows.forEach((row) => {
+        const text = row.textContent.toLowerCase();
+        row.hidden = query.length > 0 && !text.includes(query);
+      });
+    };
+    input.addEventListener("input", update);
+    clearBtn?.addEventListener("click", () => {
+      input.value = "";
+      update();
+      input.focus();
+    });
+  });
+}
+
 function wireMarketViews(root, selectedView = null) {
   const board = root?.querySelector("[data-market-board]");
   if (!board) return;
@@ -296,6 +327,7 @@ async function refreshSection(id) {
       replaceChildrenFromHtml(body, html);
       sectionRenderKeys.set(id, renderKey);
       if (id === "universe") wireMarketViews(body, selectedMarketView);
+      wireTableFilters(body);
     }
     body.classList.remove("loading");
     body.removeAttribute("aria-busy");

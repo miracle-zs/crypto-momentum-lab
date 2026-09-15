@@ -1,0 +1,46 @@
+/* ============ universe ============ */
+
+.ret { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.ret .num { min-width: 62px; text-align: right; font-size: 11.5px; }
+.ret-track { width: 74px; height: 4px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
+.ret-track i { display: block; height: 100%; border-radius: 999px; }
+.ret-track i.pos { background: var(--up); }
+.ret-track i.neg { background: var(--down); }
+
+.membership-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.membership-status::before {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+
+.membership-status.target { color: var(--info); background: rgba(138, 180, 255, .1); }
+.membership-status.retained { color: var(--warn); background: rgba(245, 183, 85, .1); }
+.membership-status.forced { color: var(--live); background: rgba(103, 232, 249, .1); }
+.membership-status.unknown { color: var(--faint); background: rgba(115, 128, 153, .1); }
+
+.monitor-note {
+  margin: 0 0 12px;
+  padding: 9px 11px;
+  border-left: 2px solid var(--info);
+  background: rgba(138, 180, 255, .06);
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.monitor-summary { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.monitor-summary b { color: var(--text); font: 600 10px var(--mono); }

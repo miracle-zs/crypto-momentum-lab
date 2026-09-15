@@ -51,6 +51,9 @@ export const emptyBox = (text = "暂无数据", hint = "") =>
 export const blockTitle = (title, eyebrow, aside = "") =>
   `<div class="block-title"><div><b>${esc(title)}</b><small>${esc(eyebrow)}</small></div>${aside ? `<span>${aside}</span>` : ""}</div>`;
 
+export const searchBox = (placeholder = "快速过滤...", filterTarget = "") =>
+  `<div class="search-box"><input type="search" class="search-input" data-filter-table="${esc(filterTarget)}" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}"><button type="button" class="search-clear" aria-label="清空搜索" hidden>×</button></div>`;
+
 export const disclosure = (
   title,
   eyebrow,

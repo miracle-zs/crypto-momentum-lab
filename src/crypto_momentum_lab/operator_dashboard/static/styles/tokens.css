@@ -1,0 +1,54 @@
+/* ============ design tokens ============ */
+
+:root {
+  --bg: #0c1017;
+  --bg-raise: #121824;
+  --surface: #151d2c;
+  --surface-2: #1b2537;
+  --surface-3: #222f46;
+  
+  --line: #26344b;
+  --line-strong: #384b6c;
+  --line-subtle: rgba(237, 243, 246, 0.07);
+
+  --text: #edf2f8;
+  --muted: #9eb1cb;
+  --faint: #6c809e;
+
+  --brand: #58a6ff;
+  --accent: var(--brand);
+
+  --up: #34d399;
+  --down: #f87171;
+  --warn: #fbbf24;
+  --info: #60a5fa;
+  --live: #34d399;
+
+  --series-fixed: #7aa2f7;
+  --series-candle: #34d399;
+  --series-live: #67e8f9;
+  --series-amber: #f5b755;
+  --series-violet: #c084fc;
+  --series-cyan: #22d3ee;
+  --series-coral: #fb7185;
+  --series-lime: #a3e635;
+  --series-sky: #38bdf8;
+
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "IBM Plex Mono", Menlo,
+    Consolas, monospace;
+
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.28);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.36);
+  --shadow-glow: 0 0 16px rgba(88, 166, 255, 0.18);
+}
+
+/* status -> accent color mapping (--s) */
+.status-READY, .status-FRESH, .status-ACTIVE, .status-COMPLETED { --s: var(--up); }
+.status-SHADOW, .status-NEW, .status-SHADOW-RUNNING { --s: var(--info); }
+.status-STALE, .status-PENDING-CANCEL, .status-PARTIALLY-FILLED { --s: var(--warn); }
+.status-DEGRADED, .status-ATTENTION, .status-REVIEW { --s: var(--warn); }
+.status-HALTED, .status-DOWN, .status-ABORTED, .status-REJECTED, .status-BLOCKED { --s: var(--down); }
+.status-LIVE, .status-LIVE-ENABLED { --s: var(--live); }
+.status-UNKNOWN, .status-NO-DATA, .is-locked { --s: var(--faint); }

@@ -682,7 +682,7 @@ export function liveAccountMetricChart(
   const legend = model.series.map((series) => (
     `<span class="live-metric-legend-item"><i style="--series-color:${esc(series.color)}"></i>${esc(series.label)}</span>`
   )).join("");
-  return `<div class="live-metric-chart echart-shell" data-echart-chart data-echart-kind="metric-comparison" data-echart-id="${esc(chartId)}" tabindex="0" role="group" aria-label="${esc(ariaLabel)}；使用左右方向键查看数据点">
+  return `<div class="live-metric-chart echart-shell" data-echart-chart data-echart-kind="metric-comparison" data-echart-group="live-account-fleet" data-echart-id="${esc(chartId)}" tabindex="0" role="group" aria-label="${esc(ariaLabel)}；使用左右方向键查看数据点">
     <div class="live-metric-legend">${legend}</div>
     <div class="echart-surface" aria-hidden="true"></div>
   </div>`;

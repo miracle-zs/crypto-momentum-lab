@@ -1,0 +1,21 @@
+/* ============ section: risk ============ */
+.card-risk { border-top-color: color-mix(in srgb, var(--warn) 44%, var(--line)); }
+.risk-priority-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(230px, .75fr);
+  gap: 12px;
+  align-items: stretch;
+}
+.risk-priority-grid .block { margin-top: 0; }
+.risk-decision-callout {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  padding: 12px 15px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(245, 183, 85, .08), var(--surface) 60%);
+}
+.risk-decision-callout h4 { margin: 0 0 4px; font-size: 13px; }
+.risk-decision-callout p { margin: 0; color: var(--muted); font-size: 11px; }

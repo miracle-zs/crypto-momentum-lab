@@ -133,16 +133,16 @@ function baseTooltip(colors) {
       lineStyle: { color: colors.brand, type: "dashed", width: 1 },
       crossStyle: { color: colors.brand, type: "dashed", width: 1 },
     },
-    backgroundColor: colors.surface,
+    backgroundColor: "rgba(18, 24, 34, 0.94)",
     borderColor: colors.lineStrong,
     borderWidth: 1,
-    padding: [8, 10],
+    padding: [8, 12],
     textStyle: {
       color: colors.text,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-      fontSize: 10,
+      fontSize: 11,
     },
-    extraCssText: "box-shadow:0 7px 22px rgba(0,0,0,.28);",
+    extraCssText: "backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.45);",
   };
 }
 
@@ -249,12 +249,16 @@ function comparisonOption(payload, colors) {
   option.grid.bottom = 40;
   option.tooltip.formatter = (params) => {
     const entries = Array.isArray(params) ? params : [params];
+    const header = `<div style="font-weight:600;font-size:11px;margin-bottom:6px;color:${esc(colors.text)};border-bottom:1px solid ${esc(colors.line)};padding-bottom:4px;">${esc(tooltipTime(params, payload))}</div>`;
     const rows = entries.map((param) => {
       const value = tooltipValue(param);
       const color = param.color || colors.muted;
-      return `<div><span style="color:${esc(color)}">●</span> ${esc(param.seriesName)} <b>${esc(chartValue(value, payload.valueFormat || "signed-money"))}</b></div>`;
+      return `<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin:3px 0;">
+        <span style="display:inline-flex;align-items:center;gap:6px;"><span style="color:${esc(color)};font-size:12px;line-height:1;">●</span><span>${esc(param.seriesName)}</span></span>
+        <b style="font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;color:${esc(colors.text)}">${esc(chartValue(value, payload.valueFormat || "signed-money"))}</b>
+      </div>`;
     }).join("");
-    return `<div>${esc(tooltipTime(params, payload))}</div>${rows}`;
+    return `<div style="min-width:140px;">${header}${rows}</div>`;
   };
   option.series = payload.series.map((series, index) => {
     const seriesColor = resolveSeriesColor(series.color, colors);
@@ -328,6 +332,13 @@ function mountChart(shell, doc) {
   }
   const chart = chartLibrary.init(surface, null, { renderer: "svg" });
   chart.setOption(buildChartOption(payload), { notMerge: true, lazyUpdate: false });
+  const group = payload.group || shell.dataset.echartGroup;
+  if (group) {
+    chart.group = group;
+    if (typeof chartLibrary.connect === "function") {
+      chartLibrary.connect(group);
+    }
+  }
   CHART_INSTANCES.set(shell, chart);
   shell.dataset.echartMounted = "true";
   shell.removeAttribute("data-echart-state");

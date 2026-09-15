@@ -250,6 +250,164 @@ export function wireAccountEquityRanges(root, onSelect) {
   });
 }
 
+function renderAccountHero(data, syncStatus, freshnessSeconds) {
+  const accountHeroDescription = syncStatus === "ready" && freshnessSeconds != null && freshnessSeconds <= 120
+    ? "只读同步正常 · 实盘订单由 live-strategy 执行管控"
+    : syncStatus === "ready" && freshnessSeconds != null
+      ? "只读同步数据延迟 · 实盘订单由 live-strategy 执行管控，请检查同步服务"
+      : syncStatus === "halted"
+        ? "只读同步已停止 · 实盘订单由 live-strategy 执行管控，请检查同步服务"
+        : "只读同步状态待确认 · 实盘订单由 live-strategy 执行管控";
+
+  return `<div class="account-hero">
+    <div>
+      <div class="account-eyebrow">${esc(String(data.environment || "LIVE").toUpperCase())} · EXECUTION ACCOUNT</div>
+      <h3>${esc(data.account_label || "交易所账户")}</h3>
+      <p>${esc(accountHeroDescription)}</p>
+    </div>
+    <div class="account-hero-meta">
+      <div class="account-hero-status"><small>同步状态</small>${pill(data.status)}</div>
+      <span>同步 <b class="num">${esc(dayTime(data.observed_at))}</b></span>
+      <small>${esc(relToNow(data.observed_at))}</small>
+    </div>
+  </div>`;
+}
+
+function renderAccountStateGrid(syncState, configState, executionState, reconciliationState, freshnessState) {
+  const stateCard = (label, state) => `<div class="account-state-card ${state.className}">
+    <span>${esc(label)}</span>
+    <strong>${esc(state.label)}</strong>
+    <small>${esc(state.detail)}</small>
+  </div>`;
+
+  return `<div class="account-state-grid" aria-label="实盘账户状态">
+    ${stateCard("同步服务", syncState)}
+    ${stateCard("账户配置", configState)}
+    ${stateCard("实盘执行", executionState)}
+    ${stateCard("对账状态", reconciliationState)}
+    ${stateCard("数据新鲜度", freshnessState)}
+  </div>`;
+}
+
+function renderAccountKpiGrid(summary) {
+  return `<div class="tile-grid account-kpi-grid">
+    ${tile("USDT 钱包余额", money(summary.usdt_wallet_balance), "账户钱包余额", "hero")}
+    ${tile("USDT 可用余额", money(summary.usdt_available_balance), "可用于开仓/保证金")}
+    ${tile("总未实现盈亏", signedMoney(summary.total_unrealized_pnl), `${summary.position_count || 0} 个交易所持仓`, pnlClass(summary.total_unrealized_pnl))}
+    ${tile("持仓名义价值", money(summary.gross_position_notional), "当前交易所总暴露")}
+    ${tile("挂单 / 最近成交", `${summary.open_order_count ?? 0} / ${summary.recent_trade_count ?? summary.recent_fill_count ?? 0}`, "当前挂单 / 最近 20 笔订单")}
+  </div>`;
+}
+
+function renderAccountEquityBlock(data, accountEquity, selectedEquityRange, accountSample, accountEquityDelta, latestAccountEquity) {
+  const equityDataStart = accountEquity[0]?.observed_at;
+  const requestedStartMs = new Date(data.equity_window_start || "").getTime();
+  const dataStartMs = new Date(equityDataStart || "").getTime();
+  const bucketMs = (asNumber(data.equity_sample_interval_seconds) || DEFAULT_EQUITY_BUCKET_SECONDS) * 1000;
+  const hasPartialHistory = Number.isFinite(requestedStartMs)
+    && Number.isFinite(dataStartMs)
+    && dataStartMs - requestedStartMs > bucketMs * 2;
+  const equityCoverage = hasPartialHistory
+    ? `<p class="equity-coverage-note">可用历史始于 <b class="num">${esc(fullDateTime(equityDataStart))} ${DISPLAY_TIME_ZONE_LABEL}</b>（随实盘运行持续沉淀）。</p>`
+    : "";
+  const equityValue = `<span class="account-equity-value"><small>${esc(selectedEquityRange.shortLabel)} 期末权益</small><strong class="num ${pnlClass(accountEquityDelta)}">${esc(money(latestAccountEquity))}</strong></span>`;
+
+  return `<div class="block account-equity-block" data-equity-range="${selectedEquityRange.key}">
+    ${blockTitle("实盘账户权益", `ROLLING ${selectedEquityRange.shortLabel} · ${accountSample} BUCKETS`, `${equityRangeControls(selectedEquityRange.key)}${equityValue}`)}
+    <div class="chart-context"><span>${esc(`${selectedEquityRange.key === "1y" ? fullDateTime(data.equity_window_start) : dayTime(data.equity_window_start)} → ${selectedEquityRange.key === "1y" ? fullDateTime(data.equity_window_end) : dayTime(data.equity_window_end)} ${DISPLAY_TIME_ZONE_LABEL}`)}</span><b class="num">${accountEquity.length} 个采样点</b></div>
+    ${equityCoverage}
+    ${equityChart(accountEquity, "live-account-equity", data.equity_window_start, data.equity_window_end)}
+  </div>`;
+}
+
+function renderAccountFacts(config, reconciliation, mismatchCount, modeLabel, reconciliationLabel) {
+  return `<div class="account-facts">
+    <div><span>实盘下单通道</span><b class="pos">live-strategy</b></div>
+    <div><span>同步服务模式</span><b class="muted">只读同步 · 不下单</b></div>
+    <div><span>持仓模式</span><b>${esc(modeLabel(config.hedge_mode, "Hedge · 双向", "One-way · 单向"))}</b></div>
+    <div><span>保证金模式</span><b>${esc(modeLabel(config.multi_assets_mode, "Multi-Assets · 多资产", "Single-Asset · 单资产"))}</b></div>
+    <div><span>手续费等级</span><b>${esc(config.fee_tier == null ? "—" : `VIP ${config.fee_tier}`)}</b></div>
+    <div><span>对账状态</span><b>${esc(reconciliationLabel(reconciliation.status))}</b></div>
+    <div><span>对账差异项</span><b class="${mismatchCount > 0 ? "neg" : "pos"}">${esc(reconciliation.mismatch_count == null ? "—" : `${reconciliation.mismatch_count} 项`)}</b></div>
+    <div><span>对账快照 资产 / 持仓</span><b>${esc(`${reconciliation.balance_count ?? "—"} / ${reconciliation.position_count ?? "—"}`)}</b></div>
+    <div><span>对账快照 挂单 / 成交</span><b>${esc(`${reconciliation.open_order_count ?? "—"} / ${reconciliation.fill_count ?? "—"}`)}</b></div>
+  </div>
+  <div class="account-facts-note"><b>怎么读</b>：<code>只读同步</code>不会下单；实盘订单由 <code>live-strategy</code> 与风控闸门共同决定。<code>对账一致 / 0 项</code>表示本次快照未发现差异。</div>`;
+}
+
+function renderBalancesTable(usdtBalances) {
+  return dataTable([
+    { label: "资产", key: "asset", cls: "sym" },
+    { label: "钱包余额", value: (row) => num(row.wallet_balance, 4), align: "right" },
+    { label: "可用余额", value: (row) => num(row.available_balance, 4), align: "right" },
+    { label: "未实现盈亏", value: (row) => signedMoney(row.unrealized_pnl), align: "right", cls: (row) => pnlClass(row.unrealized_pnl) },
+  ], usdtBalances, { emptyText: "尚无 USDT 余额快照", tall: true });
+}
+
+function renderPositionsTable(positions, strategy) {
+  const positionRows = (positions || []).map((row) => ({
+    ...row,
+    roi: asNumber(row.entry_notional) ? asNumber(row.unrealized_pnl) / asNumber(row.entry_notional) : null,
+  }));
+  return dataTable([
+    { label: "币种", key: "symbol", cls: "sym" },
+    { label: "方向", value: (row) => pill(row.position_side || "BOTH"), html: true },
+    { label: "策略", value: (row) => strategy(row.strategy_name), html: true },
+    { label: "持仓量", value: (row) => num(row.position_amt, 4), align: "right" },
+    { label: "开仓 / 标记", value: (row) => `${price(row.entry_price)} / ${price(row.mark_price)}`, align: "right" },
+    { label: "杠杆", value: (row) => row.leverage ? `${esc(row.leverage)}x` : "—", align: "right", cls: "muted" },
+    { label: "保证金", value: (row) => row.margin_type || "—", cls: "muted" },
+    { label: "名义价值", value: (row) => money(row.notional), align: "right" },
+    { label: "未实现盈亏", value: (row) => signedMoney(row.unrealized_pnl), align: "right", cls: (row) => pnlClass(row.unrealized_pnl) },
+    { label: "ROI", value: (row) => signedPercent(row.roi), align: "right", cls: (row) => pnlClass(row.roi) },
+  ], positionRows, { emptyText: "交易所无持仓", tall: true });
+}
+
+function renderOrdersTable(openOrders, strategy) {
+  return dataTable([
+    { label: "币种", key: "symbol", cls: "sym" },
+    { label: "策略", value: (row) => strategy(row.strategy_name), html: true },
+    { label: "方向", key: "side", cls: (row) => row.side === "BUY" ? "pos" : "neg" },
+    { label: "类型 / 价格", value: (row) => `${row.order_type || "—"} / ${price(row.price)}`, align: "right" },
+    { label: "数量", value: (row) => `${num(row.executed_quantity, 4)} / ${num(row.original_quantity, 4)}`, align: "right" },
+    { label: "状态", value: (row) => pill(row.status), html: true },
+    { label: "只减仓", value: (row) => row.reduce_only ? "是" : "否", cls: "muted" },
+    { label: "更新时间", value: (row) => dayTime(row.observed_at), align: "right", cls: "muted" },
+  ], openOrders, { emptyText: "无挂单", tall: true });
+}
+
+function renderFillsTable(fills, strategy) {
+  return dataTable([
+    { label: "时间", value: (row) => dayTime(row.trade_at), align: "right", cls: "muted" },
+    { label: "币种", key: "symbol", cls: "sym" },
+    { label: "订单", value: (row) => shortHash(row.order_id), cls: "num cut" },
+    { label: "策略", value: (row) => strategy(row.strategy_name), html: true },
+    { label: "方向", key: "side", cls: (row) => row.side === "BUY" ? "pos" : "neg" },
+    { label: "均价", value: (row) => price(row.price), align: "right" },
+    { label: "数量", value: (row) => num(row.quantity, 4), align: "right" },
+    { label: "成交片数", value: (row) => `${row.fill_count || 1} 片`, align: "right", cls: "muted" },
+    { label: "已实现盈亏", value: (row) => signedMoney(row.realized_pnl), align: "right", cls: (row) => pnlClass(row.realized_pnl) },
+    { label: "手续费", value: (row) => `${num(row.fee, 4)} ${row.fee_asset || ""}`, align: "right" },
+    { label: "平仓原因", value: (row) => row.reduce_only ? (row.close_reason || "原因未记录") : "开仓", cls: "muted" },
+  ], fills, { emptyText: "尚无成交记录", tall: true });
+}
+
+function renderLiveSignalsContent(liveSignals) {
+  const liveSignalsTable = dataTable([
+    { label: "触发时间", value: (row) => dayTime(row.detected_at), align: "right", cls: "muted" },
+    { label: "类型", value: liveSignalKindCell, html: true },
+    { label: "币种", key: "symbol", cls: "sym" },
+    { label: "方向", value: (row) => sideTag(row.side), html: true },
+    { label: "24H 成交额", value: liveSignalVolume, align: "right" },
+    { label: "信号时排名", value: liveSignalRanking, html: true, cls: "live-signal-rank-cell" },
+    { label: "触发依据", value: signalEvidence, html: true, cls: "signal-evidence-cell" },
+    { label: "过滤 / 门控", value: liveSignalFilterSummary, html: true, cls: "live-signal-filter-cell" },
+    { label: "记录延迟", value: liveSignalRecordLag, align: "right", cls: "muted" },
+  ], liveSignals, { emptyText: "尚无实盘策略信号", tall: true, stateKey: "live-strategy-signals-table" });
+
+  return `<div class="live-signal-log">${liveSignalMeta(liveSignals)}${liveSignalsTable}</div>`;
+}
+
 export function renderAccount(data) {
   const summary = data.summary || {};
   const config = data.account_config || {};
@@ -294,147 +452,43 @@ export function renderAccount(data) {
     : freshnessSeconds <= 120
       ? { className: "status-FRESH", label: "数据新鲜", detail: `${relToNow(data.observed_at)} · 最近一次同步` }
       : { className: "status-STALE", label: "数据过期", detail: `${relToNow(data.observed_at)} · 请检查同步服务` };
-  const accountHeroDescription = syncStatus === "ready" && freshnessSeconds != null && freshnessSeconds <= 120
-    ? "只读同步正常 · 实盘订单由 live-strategy 执行管控"
-    : syncStatus === "ready" && freshnessSeconds != null
-      ? "只读同步数据延迟 · 实盘订单由 live-strategy 执行管控，请检查同步服务"
-      : syncStatus === "halted"
-        ? "只读同步已停止 · 实盘订单由 live-strategy 执行管控，请检查同步服务"
-        : "只读同步状态待确认 · 实盘订单由 live-strategy 执行管控";
   const executionState = {
     className: "status-SHADOW",
     label: "live-strategy",
     detail: "实盘下单通道 · 状态见全局实盘状态与风控",
   };
-  const stateCard = (label, state) => `<div class="account-state-card ${state.className}">
-    <span>${esc(label)}</span>
-    <strong>${esc(state.label)}</strong>
-    <small>${esc(state.detail)}</small>
-  </div>`;
   const strategy = (value) => value
     ? `<span class="account-strategy">${esc(value)}</span>`
     : `<span class="muted">未关联</span>`;
-  const hero = `<div class="account-hero">
-      <div>
-      <div class="account-eyebrow">${esc(String(data.environment || "LIVE").toUpperCase())} · EXECUTION ACCOUNT</div>
-      <h3>${esc(data.account_label || "交易所账户")}</h3>
-      <p>${esc(accountHeroDescription)}</p>
-    </div>
-    <div class="account-hero-meta">
-      <div class="account-hero-status"><small>同步状态</small>${pill(data.status)}</div>
-      <span>同步 <b class="num">${esc(dayTime(data.observed_at))}</b></span>
-      <small>${esc(relToNow(data.observed_at))}</small>
-    </div>
-  </div>`;
-  const stateGrid = `<div class="account-state-grid" aria-label="实盘账户状态">
-    ${stateCard("同步服务", syncState)}
-    ${stateCard("账户配置", configState)}
-    ${stateCard("实盘执行", executionState)}
-    ${stateCard("对账状态", reconciliationState)}
-    ${stateCard("数据新鲜度", freshnessState)}
-  </div>`;
-  const kpis = `<div class="tile-grid account-kpi-grid">
-    ${tile("USDT 钱包余额", money(summary.usdt_wallet_balance), "账户钱包余额", "hero")}
-    ${tile("USDT 可用余额", money(summary.usdt_available_balance), "可用于开仓/保证金")}
-    ${tile("总未实现盈亏", signedMoney(summary.total_unrealized_pnl), `${summary.position_count || 0} 个交易所持仓`, pnlClass(summary.total_unrealized_pnl))}
-    ${tile("持仓名义价值", money(summary.gross_position_notional), "当前交易所总暴露")}
-    ${tile("挂单 / 最近成交", `${summary.open_order_count ?? 0} / ${summary.recent_trade_count ?? summary.recent_fill_count ?? 0}`, "当前挂单 / 最近 20 笔订单")}
-  </div>`;
-  const equityDataStart = accountEquity[0]?.observed_at;
-  const requestedStartMs = new Date(data.equity_window_start || "").getTime();
-  const dataStartMs = new Date(equityDataStart || "").getTime();
-  const bucketMs = (asNumber(data.equity_sample_interval_seconds) || DEFAULT_EQUITY_BUCKET_SECONDS) * 1000;
-  const hasPartialHistory = Number.isFinite(requestedStartMs)
-    && Number.isFinite(dataStartMs)
-    && dataStartMs - requestedStartMs > bucketMs * 2;
-  const equityCoverage = hasPartialHistory
-    ? `<p class="equity-coverage-note">可用历史始于 <b class="num">${esc(fullDateTime(equityDataStart))} ${DISPLAY_TIME_ZONE_LABEL}</b>（随实盘运行持续沉淀）。</p>`
-    : "";
-  const equityValue = `<span class="account-equity-value"><small>${esc(selectedEquityRange.shortLabel)} 期末权益</small><strong class="num ${pnlClass(accountEquityDelta)}">${esc(money(latestAccountEquity))}</strong></span>`;
-  const equityChartBlock = `<div class="block account-equity-block" data-equity-range="${selectedEquityRange.key}">
-    ${blockTitle("实盘账户权益", `ROLLING ${selectedEquityRange.shortLabel} · ${accountSample} BUCKETS`, `${equityRangeControls(selectedEquityRange.key)}${equityValue}`)}
-    <div class="chart-context"><span>${esc(`${selectedEquityRange.key === "1y" ? fullDateTime(data.equity_window_start) : dayTime(data.equity_window_start)} → ${selectedEquityRange.key === "1y" ? fullDateTime(data.equity_window_end) : dayTime(data.equity_window_end)} ${DISPLAY_TIME_ZONE_LABEL}`)}</span><b class="num">${accountEquity.length} 个采样点</b></div>
-    ${equityCoverage}
-    ${equityChart(accountEquity, "live-account-equity", data.equity_window_start, data.equity_window_end)}
-  </div>`;
-  const accountFacts = `<div class="account-facts">
-    <div><span>实盘下单通道</span><b class="pos">live-strategy</b></div>
-    <div><span>同步服务模式</span><b class="muted">只读同步 · 不下单</b></div>
-    <div><span>持仓模式</span><b>${esc(modeLabel(config.hedge_mode, "Hedge · 双向", "One-way · 单向"))}</b></div>
-    <div><span>保证金模式</span><b>${esc(modeLabel(config.multi_assets_mode, "Multi-Assets · 多资产", "Single-Asset · 单资产"))}</b></div>
-    <div><span>手续费等级</span><b>${esc(config.fee_tier == null ? "—" : `VIP ${config.fee_tier}`)}</b></div>
-    <div><span>对账状态</span><b>${esc(reconciliationLabel(reconciliation.status))}</b></div>
-    <div><span>对账差异项</span><b class="${mismatchCount > 0 ? "neg" : "pos"}">${esc(reconciliation.mismatch_count == null ? "—" : `${reconciliation.mismatch_count} 项`)}</b></div>
-    <div><span>对账快照 资产 / 持仓</span><b>${esc(`${reconciliation.balance_count ?? "—"} / ${reconciliation.position_count ?? "—"}`)}</b></div>
-    <div><span>对账快照 挂单 / 成交</span><b>${esc(`${reconciliation.open_order_count ?? "—"} / ${reconciliation.fill_count ?? "—"}`)}</b></div>
-  </div>
-  <div class="account-facts-note"><b>怎么读</b>：<code>只读同步</code>不会下单；实盘订单由 <code>live-strategy</code> 与风控闸门共同决定。<code>对账一致 / 0 项</code>表示本次快照未发现差异。</div>`;
+
+  const hero = renderAccountHero(data, syncStatus, freshnessSeconds);
+  const stateGrid = renderAccountStateGrid(syncState, configState, executionState, reconciliationState, freshnessState);
+  const kpis = renderAccountKpiGrid(summary);
+  const equityChartBlock = renderAccountEquityBlock(
+    data,
+    accountEquity,
+    selectedEquityRange,
+    accountSample,
+    accountEquityDelta,
+    latestAccountEquity,
+  );
+  const accountFacts = renderAccountFacts(config, reconciliation, mismatchCount, modeLabel, reconciliationLabel);
   const usdtBalances = (data.balances || []).filter((row) => String(row.asset || "").toUpperCase() === "USDT");
-  const balancesTable = dataTable([
-    { label: "资产", key: "asset", cls: "sym" },
-    { label: "钱包余额", value: (row) => num(row.wallet_balance, 4), align: "right" },
-    { label: "可用余额", value: (row) => num(row.available_balance, 4), align: "right" },
-    { label: "未实现盈亏", value: (row) => signedMoney(row.unrealized_pnl), align: "right", cls: (row) => pnlClass(row.unrealized_pnl) },
-  ], usdtBalances, { emptyText: "尚无 USDT 余额快照", tall: true });
-  const positionRows = (data.positions || []).map((row) => ({
-    ...row,
-    roi: asNumber(row.entry_notional) ? asNumber(row.unrealized_pnl) / asNumber(row.entry_notional) : null,
-  }));
-  const positionsTable = dataTable([
-    { label: "币种", key: "symbol", cls: "sym" },
-    { label: "方向", value: (row) => pill(row.position_side || "BOTH"), html: true },
-    { label: "策略", value: (row) => strategy(row.strategy_name), html: true },
-    { label: "持仓量", value: (row) => num(row.position_amt, 4), align: "right" },
-    { label: "开仓 / 标记", value: (row) => `${price(row.entry_price)} / ${price(row.mark_price)}`, align: "right" },
-    { label: "杠杆", value: (row) => row.leverage ? `${esc(row.leverage)}x` : "—", align: "right", cls: "muted" },
-    { label: "保证金", value: (row) => row.margin_type || "—", cls: "muted" },
-    { label: "名义价值", value: (row) => money(row.notional), align: "right" },
-    { label: "未实现盈亏", value: (row) => signedMoney(row.unrealized_pnl), align: "right", cls: (row) => pnlClass(row.unrealized_pnl) },
-    { label: "ROI", value: (row) => signedPercent(row.roi), align: "right", cls: (row) => pnlClass(row.roi) },
-  ], positionRows, { emptyText: "交易所无持仓", tall: true });
-  const ordersTable = dataTable([
-    { label: "币种", key: "symbol", cls: "sym" },
-    { label: "策略", value: (row) => strategy(row.strategy_name), html: true },
-    { label: "方向", key: "side", cls: (row) => row.side === "BUY" ? "pos" : "neg" },
-    { label: "类型 / 价格", value: (row) => `${row.order_type || "—"} / ${price(row.price)}`, align: "right" },
-    { label: "数量", value: (row) => `${num(row.executed_quantity, 4)} / ${num(row.original_quantity, 4)}`, align: "right" },
-    { label: "状态", value: (row) => pill(row.status), html: true },
-    { label: "只减仓", value: (row) => row.reduce_only ? "是" : "否", cls: "muted" },
-    { label: "更新时间", value: (row) => dayTime(row.observed_at), align: "right", cls: "muted" },
-  ], data.open_orders, { emptyText: "无挂单", tall: true });
-  const fillsTable = dataTable([
-    { label: "时间", value: (row) => dayTime(row.trade_at), align: "right", cls: "muted" },
-    { label: "币种", key: "symbol", cls: "sym" },
-    { label: "订单", value: (row) => shortHash(row.order_id), cls: "num cut" },
-    { label: "策略", value: (row) => strategy(row.strategy_name), html: true },
-    { label: "方向", key: "side", cls: (row) => row.side === "BUY" ? "pos" : "neg" },
-    { label: "均价", value: (row) => price(row.price), align: "right" },
-    { label: "数量", value: (row) => num(row.quantity, 4), align: "right" },
-    { label: "成交片数", value: (row) => `${row.fill_count || 1} 片`, align: "right", cls: "muted" },
-    { label: "已实现盈亏", value: (row) => signedMoney(row.realized_pnl), align: "right", cls: (row) => pnlClass(row.realized_pnl) },
-    { label: "手续费", value: (row) => `${num(row.fee, 4)} ${row.fee_asset || ""}`, align: "right" },
-    { label: "平仓原因", value: (row) => row.reduce_only ? (row.close_reason || "原因未记录") : "开仓", cls: "muted" },
-  ], data.fills, { emptyText: "尚无成交记录", tall: true });
+  const balancesTable = renderBalancesTable(usdtBalances);
+  const positions = data.positions || [];
+  const positionsTable = renderPositionsTable(positions, strategy);
+  const openOrders = data.open_orders || [];
+  const ordersTable = renderOrdersTable(openOrders, strategy);
+  const fills = data.fills || [];
+  const fillsTable = renderFillsTable(fills, strategy);
   const liveSignals = data.live_signals || [];
-  const liveSignalsTable = dataTable([
-    { label: "触发时间", value: (row) => dayTime(row.detected_at), align: "right", cls: "muted" },
-    { label: "类型", value: liveSignalKindCell, html: true },
-    { label: "币种", key: "symbol", cls: "sym" },
-    { label: "方向", value: (row) => sideTag(row.side), html: true },
-    { label: "24H 成交额", value: liveSignalVolume, align: "right" },
-    { label: "信号时排名", value: liveSignalRanking, html: true, cls: "live-signal-rank-cell" },
-    { label: "触发依据", value: signalEvidence, html: true, cls: "signal-evidence-cell" },
-    { label: "过滤 / 门控", value: liveSignalFilterSummary, html: true, cls: "live-signal-filter-cell" },
-    { label: "记录延迟", value: liveSignalRecordLag, align: "right", cls: "muted" },
-  ], liveSignals, { emptyText: "尚无实盘策略信号", tall: true, stateKey: "live-strategy-signals-table" });
-  const liveSignalContent = `<div class="live-signal-log">${liveSignalMeta(liveSignals)}${liveSignalsTable}</div>`;
+  const liveSignalContent = renderLiveSignalsContent(liveSignals);
+
   const accountNeedsReview = mismatchCount > 0
     || hasUncertainStatus(syncStatus)
     || hasUncertainStatus(normalized(reconciliation.status))
     || !data.observed_at;
-  const positions = data.positions || [];
-  const openOrders = data.open_orders || [];
-  const fills = data.fills || [];
+
   const body = `<div class="detail-meta"><span>同步时间 <b class="num">${esc(dayTime(data.observed_at))} ${DISPLAY_TIME_ZONE_LABEL}</b></span><span>${esc(relToNow(data.observed_at))}</span></div>
     ${hero}${stateGrid}${kpis}${equityChartBlock}
     ${disclosure("实盘策略信号", "LIVE SIGNALS · NON-BLOCKING OBSERVATION · LATEST 30", liveSignalContent,
