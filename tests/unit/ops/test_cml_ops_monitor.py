@@ -263,6 +263,33 @@ def test_console_log_record_parses_like_json() -> None:
     assert record["retry_delay_seconds"] == 60.0
 
 
+def test_console_log_record_parses_docker_timestamp_prefix() -> None:
+    """_log_signals reads `docker logs --timestamps`, which prepends its own stamp.
+
+    A real line therefore carries two timestamps before the level marker.
+    """
+
+    record = _parse_log_record(
+        "2026-09-15T14:41:35.736643867Z 2026-09-15 14:41:35 [warning  ] "
+        "live_grace_timeout_processing_degraded error_type=ValueError "
+        "reason=order_identity_conflict retry_delay_seconds=60.0 symbol=龙虾USDT"
+    )
+
+    assert record["event"] == "live_grace_timeout_processing_degraded"
+    assert record["symbol"] == "龙虾USDT"
+    assert record["retry_delay_seconds"] == 60.0
+
+    lane = _parse_log_record(
+        "2026-09-15T14:41:35.736643867Z 2026-09-15 14:41:35 [warning  ] "
+        "live_entry_lane_state_changed enabled=False "
+        "run_id=live-b1-long-100u-5x-v1 state_changed=True"
+    )
+
+    assert lane["event"] == "live_entry_lane_state_changed"
+    assert lane["enabled"] is False
+    assert lane["run_id"] == "live-b1-long-100u-5x-v1"
+
+
 def test_console_log_record_coerces_booleans_and_keeps_json_working() -> None:
     record = _parse_log_record(
         "2026-09-15 12:20:54 [warning  ] live_entry_lane_state_changed "

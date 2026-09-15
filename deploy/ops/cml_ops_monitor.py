@@ -3011,9 +3011,11 @@ LEFT JOIN (
 #   2026-09-15 12:20:54 [warning  ] event_name  key=value key=value
 # The JSON branch below never matched it, so every event comparison in
 # _log_signals was silently false: no log-based alert could ever fire.
+# docker logs --timestamps prepends its own RFC3339 stamp, so a real line holds
+# two timestamps before the structlog level marker.  Anchor on the marker rather
+# than the line start so both spellings parse.
 _CONSOLE_LOG_HEAD_RE = re.compile(
-    r"^\S+[ T]\S+\s+\[\s*(?P<level>[A-Za-z]+)\s*\]\s+"
-    r"(?P<event>\S+)\s*(?P<fields>.*)$"
+    r"\[\s*(?P<level>[A-Za-z]+)\s*\]\s+(?P<event>\S+)\s*(?P<fields>.*)$"
 )
 _CONSOLE_LOG_FIELD_RE = re.compile(
     r'(?P<key>[A-Za-z_][A-Za-z0-9_.]*)=(?P<value>"[^"]*"|\S+)'
@@ -3041,7 +3043,7 @@ def _coerce_console_value(value: str) -> object:
 
 
 def _parse_console_log_record(line: str) -> dict[str, object] | None:
-    head = _CONSOLE_LOG_HEAD_RE.match(line)
+    head = _CONSOLE_LOG_HEAD_RE.search(line)
     if head is None:
         return None
     record: dict[str, object] = {
