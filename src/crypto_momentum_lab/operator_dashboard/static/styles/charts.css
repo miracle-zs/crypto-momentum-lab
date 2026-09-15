@@ -173,3 +173,20 @@
   line-height: 1.45;
   pointer-events: none;
 }
+
+.pair-grid { gap: 14px; }
+
+.pair-panel { padding: 15px 16px 12px; border-radius: 12px; background: rgba(21, 33, 44, .76); }
+
+.pair-head strong { font-size: 13px; }
+
+.pair-legend { margin-top: 13px; }
+
+.pair-panel footer { padding-top: 9px; }
+
+.pair-section .pair-legend {
+  max-height: 54px;
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
+}

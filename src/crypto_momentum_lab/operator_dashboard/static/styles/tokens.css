@@ -1,29 +1,23 @@
 /* ============ design tokens ============ */
 
 :root {
-  --bg: #0c1017;
-  --bg-raise: #121824;
-  --surface: #151d2c;
-  --surface-2: #1b2537;
-  --surface-3: #222f46;
-  
-  --line: #26344b;
-  --line-strong: #384b6c;
-  --line-subtle: rgba(237, 243, 246, 0.07);
-
-  --text: #edf2f8;
-  --muted: #9eb1cb;
-  --faint: #6c809e;
-
-  --brand: #58a6ff;
+  --bg: #0b0e14;
+  --bg-raise: #10141c;
+  --surface: #12161f;
+  --surface-2: #171c27;
+  --surface-3: #1d2431;
+  --line: #273043;
+  --line-strong: #3a4960;
+  --text: #e9edf4;
+  --muted: #a5b0c3;
+  --faint: #738099;
   --accent: var(--brand);
-
+  --brand: #7aa2f7;
   --up: #34d399;
-  --down: #f87171;
-  --warn: #fbbf24;
-  --info: #60a5fa;
+  --down: #fb7185;
+  --warn: #f5b755;
+  --info: #8ab4ff;
   --live: #34d399;
-
   --series-fixed: #7aa2f7;
   --series-candle: #34d399;
   --series-live: #67e8f9;
@@ -33,22 +27,77 @@
   --series-coral: #fb7185;
   --series-lime: #a3e635;
   --series-sky: #38bdf8;
-
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
     "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "IBM Plex Mono", Menlo,
     Consolas, monospace;
-
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.28);
-  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.36);
-  --shadow-glow: 0 0 16px rgba(88, 166, 255, 0.18);
 }
 
-/* status -> accent color mapping (--s) */
+/* status → accent color (--s) */
 .status-READY, .status-FRESH, .status-ACTIVE, .status-COMPLETED { --s: var(--up); }
 .status-SHADOW, .status-NEW, .status-SHADOW-RUNNING { --s: var(--info); }
 .status-STALE, .status-PENDING-CANCEL, .status-PARTIALLY-FILLED { --s: var(--warn); }
-.status-DEGRADED, .status-ATTENTION, .status-REVIEW { --s: var(--warn); }
-.status-HALTED, .status-DOWN, .status-ABORTED, .status-REJECTED, .status-BLOCKED { --s: var(--down); }
+.status-DEGRADED, .status-ATTENTION { --s: var(--warn); }
+.status-HALTED, .status-DOWN, .status-ABORTED, .status-REJECTED { --s: var(--down); }
 .status-LIVE, .status-LIVE-ENABLED { --s: var(--live); }
 .status-UNKNOWN, .status-NO-DATA, .is-locked { --s: var(--faint); }
+
+* { box-sizing: border-box; }
+
+html { background: var(--bg); color-scheme: dark; scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  min-width: 320px;
+  overflow-x: hidden;
+  color: var(--text);
+  background:
+    radial-gradient(1000px 480px at 18% -8%, rgba(122, 162, 247, .07), transparent 62%),
+    radial-gradient(820px 420px at 96% 4%, rgba(52, 211, 153, .045), transparent 58%),
+    var(--bg);
+  font: 13px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection { background: rgba(122, 162, 247, .32); }
+
+:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.pos { color: var(--up); }
+.neg { color: var(--down); }
+.warn { color: var(--warn); }
+.hero { color: var(--brand); }
+
+:root {
+  --bg: #070b10;
+  --bg-raise: #0b1219;
+  --surface: #101922;
+  --surface-2: #15212c;
+  --surface-3: #1b2a37;
+  --line: #293b4b;
+  --line-strong: #466075;
+  --text: #edf3f6;
+  --muted: #aebbc5;
+  --faint: #8293a2;
+  --brand: #71d6d0;
+  --accent: var(--brand);
+  --up: #65d39a;
+  --down: #f4777f;
+  --warn: #e9b45b;
+  --info: #86aef5;
+  --live: #65d39a;
+  --series-fixed: #86aef5;
+  --series-candle: #65d39a;
+  --series-live: #71d6d0;
+  --sans: "Avenir Next", "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+
+.status-REVIEW { --s: var(--warn); }
+
+.status-BLOCKED { --s: var(--down); }
+
+.poll-state.status-STALE strong { color: var(--down); }
+
+.poll-state.status-UNKNOWN strong { color: var(--faint); }

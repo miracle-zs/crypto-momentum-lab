@@ -19,3 +19,62 @@
 .service-meter i { display: block; height: 100%; border-radius: 999px; background: var(--s, var(--faint)); }
 
 .service-age { color: var(--faint); font-size: 10.5px; text-align: right; }
+
+.service-list { gap: 8px; }
+
+.service-row { min-height: 52px; padding: 10px 14px; border-radius: 11px; background: rgba(21, 33, 44, .76); }
+
+.service-row b { font-size: 13px; }
+
+.overview-account-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.overview-account-status-card {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--text);
+  background: var(--surface-2);
+  text-decoration: none;
+  transition: border-color .15s ease, background .15s ease, transform .15s ease;
+}
+
+.overview-account-status-card:hover,
+
+.overview-account-status-card:focus-visible {
+  border-color: var(--brand);
+  background: var(--surface-3);
+  transform: translateY(-1px);
+}
+
+.overview-account-status-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--faint);
+  font: 9px var(--mono);
+  letter-spacing: .12em;
+}
+
+.overview-account-status-card strong {
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overview-account-status-card small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

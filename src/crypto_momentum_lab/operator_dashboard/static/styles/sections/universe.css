@@ -44,3 +44,11 @@
 
 .monitor-summary { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; white-space: nowrap; }
 .monitor-summary b { color: var(--text); font: 600 10px var(--mono); }
+
+.market-panel[hidden] { display: none !important; }
+
+.market-panel > .block-split { margin-top: 0; }
+
+.market-panel > .block-split .block { margin-top: 18px; }
+
+.market-panel > .block { margin-top: 18px; }

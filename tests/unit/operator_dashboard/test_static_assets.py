@@ -1,6 +1,23 @@
+import re
 from pathlib import Path
 
 STATIC = Path("src/crypto_momentum_lab/operator_dashboard/static")
+
+
+def read_stylesheet(target: Path | None = None) -> str:
+    path = target or (STATIC / "dashboard.css")
+    text = path.read_text(encoding="utf-8")
+    import_re = re.compile(r'@import\s+["\'](\./styles/[^"\']+)["\'];')
+    imports = import_re.findall(text)
+    if not imports:
+        return text
+    parts = []
+    for imp in imports:
+        rel_path = imp.split("?")[0]
+        full_path = (STATIC / rel_path).resolve()
+        if full_path.is_file():
+            parts.append(full_path.read_text(encoding="utf-8"))
+    return "\n".join(parts) + "\n" + text
 
 
 def test_static_index_contains_dashboard_mount() -> None:
@@ -144,7 +161,7 @@ def test_strategy_panel_renders_portfolio_and_position_lifecycle() -> None:
 
 def test_account_panel_renders_historical_live_signal_ranking() -> None:
     account = (STATIC / "sections" / "account.js").read_text(encoding="utf-8")
-    css = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+    css = read_stylesheet()
 
     for marker in (
         "liveSignalRanking",
@@ -198,7 +215,7 @@ def test_strategy_panel_renders_pair_matched_equity_comparisons() -> None:
 
 def test_strategy_comparison_layout_adapts_to_visible_strategy_count() -> None:
     strategy = (STATIC / "sections" / "strategy.js").read_text(encoding="utf-8")
-    css = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+    css = read_stylesheet(STATIC / "styles/charts.css")
 
     assert 'data-comparison-count="${comparisonModels.length}"' in strategy
     assert '.pair-section[data-comparison-count="1"]' in css
@@ -291,7 +308,7 @@ def test_live_account_panel_renders_equity_and_close_reasons() -> None:
 def test_live_account_equity_supports_longer_time_ranges() -> None:
     render_code = (STATIC / "sections" / "account.js").read_text(encoding="utf-8")
     dashboard = (STATIC / "dashboard.js").read_text(encoding="utf-8")
-    stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+    stylesheet = read_stylesheet(STATIC / "styles/sections/account.css")
 
     for marker in (
         'key: "24h", label: "24小时"',
@@ -330,7 +347,7 @@ def test_dashboard_skips_unchanged_section_replacements() -> None:
 def test_equity_charts_use_the_local_echarts_adapter() -> None:
     charts = (STATIC / "dashboard-charts.js").read_text(encoding="utf-8")
     engine = (STATIC / "dashboard-chart-engine.js").read_text(encoding="utf-8")
-    stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+    stylesheet = read_stylesheet(STATIC / "styles/charts.css")
 
     assert "registerChartPayload" in charts
     assert "data-echart-chart" in charts
@@ -343,7 +360,7 @@ def test_equity_charts_use_the_local_echarts_adapter() -> None:
 
 
 def test_live_status_uses_active_green_semantics() -> None:
-    stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+    stylesheet = read_stylesheet(STATIC / "styles/tokens.css")
 
     assert "--live: #34d399;" in stylesheet
     assert ".status-LIVE, .status-LIVE-ENABLED { --s: var(--live); }" in stylesheet
@@ -351,7 +368,7 @@ def test_live_status_uses_active_green_semantics() -> None:
 
 
 def test_live_b1_equity_series_uses_distinct_solid_accent() -> None:
-    stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+    stylesheet = read_stylesheet()
     engine = (STATIC / "dashboard-chart-engine.js").read_text(encoding="utf-8")
 
     assert "--series-live: #67e8f9;" in stylesheet
@@ -468,7 +485,7 @@ def test_dashboard_separates_live_status_from_heartbeat() -> None:
 
 
 def test_mobile_account_cards_wrap_without_horizontal_overflow() -> None:
-    stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+    stylesheet = read_stylesheet()
 
     for marker in (
         "overflow-x: hidden",
@@ -484,7 +501,7 @@ def test_mobile_account_cards_wrap_without_horizontal_overflow() -> None:
 
 
 def test_paper_account_cards_use_responsive_variant_grid() -> None:
-    text = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+    text = (STATIC / "styles/sections/strategy.css").read_text(encoding="utf-8")
 
     card_styles = text[text.index(".acct-cards"):text.index(".acct-strategy-column")]
     variant_styles = text[
@@ -497,6 +514,40 @@ def test_paper_account_cards_use_responsive_variant_grid() -> None:
     )
     assert ".acct-strategy-column" in text
     assert "grid-auto-flow: column" not in text
+
+
+def test_dashboard_loads_stable_css_modules() -> None:
+    stylesheet = (STATIC / "dashboard.css").read_text(encoding="utf-8")
+    for module in (
+        "./styles/tokens.css",
+        "./styles/base.css",
+        "./styles/layout.css",
+        "./styles/components.css",
+        "./styles/charts.css",
+        "./styles/sections/overview.css",
+        "./styles/sections/universe.css",
+        "./styles/sections/risk.css",
+        "./styles/sections/account.css",
+        "./styles/sections/strategy.css",
+        "./styles/sections/reports.css",
+        "./styles/sections/collector.css",
+    ):
+        assert module in stylesheet
+    for mod_path in (
+        STATIC / "styles/tokens.css",
+        STATIC / "styles/base.css",
+        STATIC / "styles/layout.css",
+        STATIC / "styles/components.css",
+        STATIC / "styles/charts.css",
+        STATIC / "styles/sections/overview.css",
+        STATIC / "styles/sections/universe.css",
+        STATIC / "styles/sections/risk.css",
+        STATIC / "styles/sections/account.css",
+        STATIC / "styles/sections/strategy.css",
+        STATIC / "styles/sections/reports.css",
+        STATIC / "styles/sections/collector.css",
+    ):
+        assert mod_path.exists()
 
 
 def test_fixed_tp_sl_accounts_are_not_rendered() -> None:

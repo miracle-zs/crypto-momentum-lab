@@ -131,3 +131,27 @@
 .acct-card small { color: var(--faint); font-size: 10.5px; }
 
 .paper-account-detail { margin-top: 20px; }
+
+.acct-cards { gap: 14px; }
+
+.acct-strategy-column { padding: 13px; border-radius: 14px; background: linear-gradient(180deg, rgba(113, 214, 208, .045), rgba(16, 25, 34, .88) 38%); }
+
+.acct-strategy-head { min-height: 46px; padding-bottom: 13px; }
+
+.acct-strategy-head strong { font-size: 14px; }
+
+.acct-strategy-cards { gap: 11px; padding-top: 11px; }
+
+.acct-card { min-height: 196px; gap: 9px; padding: 15px 16px; border-radius: 12px; background: rgba(21, 33, 44, .88); }
+
+.acct-card.is-active { border-color: color-mix(in srgb, var(--brand) 60%, transparent); background: linear-gradient(180deg, rgba(113, 214, 208, .1), rgba(21, 33, 44, .9) 72%); box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand) 24%, transparent); }
+
+.acct-name { font-size: 15px; }
+
+.acct-equity strong { font-size: 24px; }
+
+.paper-account-detail { margin-top: 24px; }
+
+.paper-account-detail .tile-grid { margin-top: 2px; }
+
+.acct-strategy-head small { color: var(--brand); }

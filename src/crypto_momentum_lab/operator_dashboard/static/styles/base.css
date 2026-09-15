@@ -1,49 +1,23 @@
-/* ============ base & reset ============ */
+/* ============ scrollbars ============ */
 
-* { box-sizing: border-box; }
-
-html {
-  background: var(--bg);
-  color-scheme: dark;
-  scroll-behavior: smooth;
+.table-scroll::-webkit-scrollbar, .sidebar::-webkit-scrollbar { width: 8px; height: 8px; }
+.table-scroll::-webkit-scrollbar-thumb, .sidebar::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
 }
+.table-scroll::-webkit-scrollbar-track, .sidebar::-webkit-scrollbar-track { background: transparent; }
 
 [hidden] { display: none !important; }
 
 body {
-  margin: 0;
-  min-width: 320px;
-  overflow-x: hidden;
-  color: var(--text);
   background:
-    radial-gradient(1100px 520px at 20% -10%, rgba(88, 166, 255, .08), transparent 62%),
-    radial-gradient(850px 440px at 95% 5%, rgba(52, 211, 153, .05), transparent 58%),
+    linear-gradient(rgba(113, 214, 208, .025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(113, 214, 208, .02) 1px, transparent 1px),
+    radial-gradient(900px 520px at 76% -12%, rgba(113, 214, 208, .085), transparent 65%),
+    radial-gradient(740px 420px at 10% 20%, rgba(134, 174, 245, .055), transparent 65%),
     var(--bg);
-  font: 13.5px/1.6 var(--sans);
-  -webkit-font-smoothing: antialiased;
-}
-
-::selection { background: rgba(88, 166, 255, .32); }
-
-:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
-
-.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.muted { color: var(--muted); }
-.pos { color: var(--up); }
-.neg { color: var(--down); }
-.warn { color: var(--warn); }
-.hero { color: var(--brand); }
-
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border-width: 0;
+  background-size: 56px 56px, 56px 56px, auto, auto, auto;
+  font-size: 14px;
 }
 
 .skip-link {
@@ -64,13 +38,8 @@ body {
 
 .skip-link:focus { transform: translateY(0); }
 
-/* scrollbars */
-::-webkit-scrollbar { width: 7px; height: 7px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb {
-  background: var(--line-strong);
-  border-radius: 4px;
-  border: 2px solid transparent;
-  background-clip: content-box;
-}
-::-webkit-scrollbar-thumb:hover { background-color: var(--faint); }
+body[data-active-workspace="data"] .nav a.active { --brand: var(--info); }
+
+body[data-active-workspace="data"] .workspace-tab.is-active { --brand: var(--info); }
+
+body[data-active-workspace="data"] .topbar-workspace-kicker { color: var(--info); }

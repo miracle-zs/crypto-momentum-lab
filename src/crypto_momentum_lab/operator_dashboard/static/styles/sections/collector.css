@@ -95,3 +95,20 @@
 
 .collector-facts small { display: block; color: var(--faint); font-size: 9px; letter-spacing: .05em; }
 .collector-facts b { display: block; margin-top: 3px; overflow: hidden; color: var(--muted); font-size: 11px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (max-width: 1100px) {
+  .collector-kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 760px) {
+  .collector-hero { align-items: stretch; flex-direction: column; gap: 14px; padding: 16px; }
+  .collector-state-rail { min-width: 0; }
+  .collector-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .collector-meter-grid { grid-template-columns: 1fr; }
+  .collector-facts { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 520px) {
+  .collector-kpi-grid { grid-template-columns: 1fr 1fr; }
+  .collector-facts { grid-template-columns: 1fr; }
+}
