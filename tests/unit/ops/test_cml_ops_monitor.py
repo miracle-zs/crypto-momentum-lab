@@ -16,6 +16,8 @@ from deploy.ops.cml_ops_monitor import (
     OrderIntentObservation,
     PositionObservation,
     SignalObservation,
+    _alert_action,
+    _alert_scope,
     _deliver_external_heartbeat,
     _human_seconds,
     _is_within_start_grace,
@@ -1770,3 +1772,155 @@ def test_position_divergence_groups_unknown_configs_apart() -> None:
         evaluate_position_divergence((known, unknown), stale_after_seconds=60)
         == ()
     )
+
+
+def test_position_intent_divergence_scope_action_and_serverchan() -> None:
+    intent_a = OrderIntentObservation(
+        account_label="primary",
+        symbol="BTWUSDT",
+        order_count=0,
+        strategy_config_hash="c223e6dbad4d588e2916b47fa303762c6241bc18346765786950e51b3cd5cbdd",
+        fingerprint=None,
+        intent_summary=None,
+    )
+    intent_b = OrderIntentObservation(
+        account_label="account-2",
+        symbol="BTWUSDT",
+        order_count=1,
+        strategy_config_hash="c223e6dbad4d588e2916b47fa303762c6241bc18346765786950e51b3cd5cbdd",
+        fingerprint="a7be2db0c92b62b91f58651c26b62f27",
+        intent_summary="BUY LIMIT 141@0.707",
+    )
+
+    alerts = evaluate_position_intent_divergence((intent_a, intent_b))
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert.name == "live_position_intent_divergence"
+
+    details = alert.details
+    # 1. Test scope extracts symbol
+    scope = _alert_scope(alert.name, details)
+    assert scope == "BTWUSDT"
+
+    # 2. Test dynamic action detects missing order (zero count)
+    action = _alert_action(alert.name, details)
+    assert "检测到单边未下单" in action
+    assert "primary" in action
+
+    # 3. Test serverchan form formatting
+    form = _serverchan_form(
+        {
+            "event": "ops_alert",
+            "alert_name": alert.name,
+            "severity": "critical",
+            "summary": alert.summary,
+            "observed_at": "2026-09-15T07:57:44+00:00",
+            "details": details,
+        }
+    )
+
+    assert form["title"] == "CML | 严重 | BTWUSDT | 账户下单意图发生分叉"
+    assert "BTWUSDT" in form["desp"]
+    assert "c223e6db" in form["desp"]
+    assert "account-2`：已下单 **1** 笔 `BUY LIMIT 141@0.707` [指纹: a7be2db0]" in form["desp"]
+    assert "primary`：**未下单**（0 笔）" in form["desp"]
+    assert "检测到单边未下单" in form["desp"]
+
+
+def test_container_memory_pressure_human_formatting() -> None:
+    details = {
+        "service": "market-data",
+        "memory_current_mb": 260.6,
+        "memory_limit_mb": 640.0,
+        "memory_swap_current_mb": 32.6,
+        "memory_swap_growth_mb": 32.6,
+        "memory_peak_mb": 262.9,
+    }
+    form = _serverchan_form(
+        {
+            "event": "ops_alert",
+            "alert_name": "container_memory_pressure",
+            "severity": "warning",
+            "summary": "Container market-data pushed anonymous memory into swap",
+            "observed_at": "2026-09-15T06:41:53+00:00",
+            "details": details,
+        }
+    )
+    assert "[警告] market-data：服务匿名内存被换出" in form["desp"]
+    assert "影响服务**：`market-data`" in form["desp"]
+    assert "物理内存用量**：`260.6 MB` / `640.0 MB`（占比 **40.7%**，峰值 262.9 MB）" in form["desp"]
+    assert "Swap 换出情况**：当前换出 `32.6 MB` （本次新增: `+32.6 MB`）" in form["desp"]
+    assert "物理内存占用充足（<60%）" in form["desp"]
+
+
+def test_position_and_signal_divergence_human_formatting() -> None:
+    # 1. Position divergence
+    pos_details = {
+        "pair_count": 1,
+        "differences": [
+            {
+                "accounts": ["primary", "account-2"],
+                "strategy_config_hash": "c223e6dbad4d588e2916b47fa303762c6241bc18346765786950e51b3cd5cbdd",
+                "quantity_differences": [
+                    {
+                        "symbol": "BTWUSDT",
+                        "position_side": "BOTH",
+                        "left_quantity": "141",
+                        "right_quantity": "0",
+                    }
+                ],
+            }
+        ],
+    }
+    pos_form = _serverchan_form(
+        {
+            "event": "ops_alert",
+            "alert_name": "live_position_divergence",
+            "severity": "critical",
+            "summary": "Comparable live account position snapshots diverged",
+            "observed_at": "2026-09-15T07:57:44+00:00",
+            "details": pos_details,
+        }
+    )
+    assert pos_form["title"] == "CML | 严重 | BTWUSDT | 账户持仓发生差异"
+    assert "分叉标的**：`BTWUSDT`（方向: `BOTH`，配置: `c223e6db`）" in pos_form["desp"]
+    assert "`primary`：持仓 **141**" in pos_form["desp"]
+    assert "`account-2`：持仓 **0**" in pos_form["desp"]
+
+    # 2. Signal divergence
+    sig_details = {
+        "group_count": 1,
+        "differences": [
+            {
+                "symbol": "BTCUSDT",
+                "bucket_start": "2026-09-15 15:55:00",
+                "strategy_config_hash": "c223e6dbad4d588e2916b47fa303762c6241bc18346765786950e51b3cd5cbdd",
+                "accounts": [
+                    {
+                        "account_label": "primary",
+                        "signal_count": 1,
+                        "candidate_count": 3,
+                    },
+                    {
+                        "account_label": "account-2",
+                        "signal_count": 0,
+                        "candidate_count": 0,
+                    },
+                ],
+            }
+        ],
+    }
+    sig_form = _serverchan_form(
+        {
+            "event": "ops_alert",
+            "alert_name": "live_signal_divergence",
+            "severity": "critical",
+            "summary": "Comparable live accounts emitted divergent signals",
+            "observed_at": "2026-09-15T07:57:44+00:00",
+            "details": sig_details,
+        }
+    )
+    assert sig_form["title"] == "CML | 严重 | BTCUSDT | 账户信号发生分叉"
+    assert "分叉标的**：`BTCUSDT`（时间桶: `2026-09-15 15:55:00`，配置: `c223e6db`）" in sig_form["desp"]
+    assert "`primary`：有效信号 **1** 个（候选: 3）" in sig_form["desp"]
+    assert "`account-2`：有效信号 **0** 个（候选: 0）" in sig_form["desp"]

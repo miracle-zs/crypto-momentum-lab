@@ -381,6 +381,7 @@ class OrderIntentObservation:
     # must never be compared.
     strategy_config_hash: str = ""
     fingerprint: str | None = None
+    intent_summary: str | None = None
 
 
 def evaluate_signal_divergence(
@@ -599,6 +600,7 @@ def evaluate_position_intent_divergence(
                         "account_label": value.account_label,
                         "order_count": value.order_count,
                         "fingerprint": value.fingerprint,
+                        "intent_summary": value.intent_summary,
                     }
                     for value in sorted(
                         by_account.values(),
@@ -2471,7 +2473,7 @@ LEFT JOIN account_position_snapshots p
 WHERE p.position_amt IS NULL OR p.position_amt <> 0;
 SELECT 'order' || E'\\t' || s.account_label || E'\\t' || s.symbol || E'\\t'
   || s.config_hash || E'\\t' || COALESCE(o.order_count, 0)::text || E'\\t'
-  || COALESCE(o.fingerprint, '')
+  || COALESCE(o.fingerprint, '') || E'\\t' || COALESCE(o.intent_summary, '')
 FROM (
   SELECT DISTINCT account_label, run_id, symbol, config_hash
   FROM live_strategy_signals
@@ -2483,6 +2485,15 @@ FROM (
 LEFT JOIN (
   SELECT run_id, symbol,
     count(*) AS order_count,
+    string_agg(
+      side || ' ' || order_type || ' '
+        || CASE
+             WHEN reduce_only THEN 'close'
+             ELSE quantity::text || '@' || COALESCE(price::text, 'MARKET')
+           END,
+      ', '
+      ORDER BY side, order_type, reduce_only, quantity::text, price::text
+    ) AS intent_summary,
     -- An opening order states a quantity the strategy chose, so it takes part
     -- in the fingerprint.  A closing order does not: how much to sell is a
     -- function of how much is held, and two accounts whose *fills* differed
@@ -2588,7 +2599,7 @@ LEFT JOIN (
                     )
                 )
                 continue
-            if parts[0] == "order" and len(parts) == 6:
+            if parts[0] == "order" and len(parts) >= 6:
                 order_intents.append(
                     OrderIntentObservation(
                         account_label=parts[1],
@@ -2596,6 +2607,9 @@ LEFT JOIN (
                         strategy_config_hash=parts[3],
                         order_count=int(parts[4]),
                         fingerprint=parts[5] or None,
+                        intent_summary=(
+                            parts[6] if len(parts) >= 7 and parts[6] else None
+                        ),
                     )
                 )
         # Position rows carry no strategy config hash of their own (the
@@ -3342,6 +3356,22 @@ def _alert_scope(alert_name: str, details: Mapping[str, object]) -> str | None:
     service_scope = _service_scope(details.get("service"))
     if service_scope:
         return service_scope
+    differences = details.get("differences")
+    if isinstance(differences, Sequence) and differences:
+        first_diff = differences[0]
+        if isinstance(first_diff, Mapping):
+            if first_diff.get("symbol"):
+                return str(first_diff["symbol"])
+            qd = first_diff.get("quantity_differences")
+            if (
+                isinstance(qd, Sequence)
+                and qd
+                and isinstance(qd[0], Mapping)
+                and qd[0].get("symbol")
+            ):
+                return str(qd[0]["symbol"])
+    if details.get("symbol"):
+        return str(details["symbol"])
     _base_name, suffix = _split_alert_name(alert_name)
     return suffix
 
@@ -3404,6 +3434,56 @@ def _alert_action(alert_name: str, details: Mapping[str, object]) -> str:
         return "自动重启失败，需要人工检查容器、日志和数据库。"
     if base_name == "live_heartbeat_restart_suppressed":
         return "已达到自动重启上限，不再继续重启，需要人工处理。"
+    if base_name == "live_position_intent_divergence":
+        differences = details.get("differences")
+        if isinstance(differences, Sequence) and differences:
+            zero_accounts: list[str] = []
+            for diff in differences:
+                if isinstance(diff, Mapping):
+                    accounts = diff.get("accounts")
+                    if isinstance(accounts, Sequence):
+                        for acc in accounts:
+                            if isinstance(acc, Mapping) and acc.get("order_count") == 0:
+                                label = str(acc.get("account_label", ""))
+                                if label and label not in zero_accounts:
+                                    zero_accounts.append(label)
+            if zero_accounts:
+                zero_str = f"（如 {', '.join(zero_accounts)}）"
+                return (
+                    f"检测到单边未下单，请优先排查未下单账户{zero_str}的可用保证金、"
+                    "持仓上限、对账状态或风控阻断原因；确认前暂停扩大仓位。"
+                )
+        return (
+            "检测到同配置账户下单参数分歧，请核对各账户 exchange_orders 的"
+            "方向、数量与委托价格；确认前暂停扩大仓位。"
+        )
+    if base_name == "live_position_divergence":
+        return (
+            "优先核对各账户在交易所的实际持仓快照，确认是否存在漏平仓或未成交；"
+            "在确认仓位归属前暂停扩大仓位。"
+        )
+    if base_name == "live_signal_divergence":
+        return (
+            "检测到同一行情桶输出不同信号，请暂停扩大仓位，核对各账户策略配置、"
+            "K线数据新鲜度及近期事件循环日志。"
+        )
+    if base_name == "container_memory_pressure":
+        curr_mb = details.get("memory_current_mb")
+        limit_mb = details.get("memory_limit_mb")
+        if (
+            isinstance(curr_mb, (int, float))
+            and isinstance(limit_mb, (int, float))
+            and limit_mb > 0
+            and (curr_mb / limit_mb) < 0.6
+        ):
+            return "物理内存充足，属于系统冷页置换入 Swap，无需重启服务，建议继续观察。"
+        return "请检查该容器近期查询占用与堆缓存，必要时调大容器内存限额。"
+    if base_name == "live_market_state_delay":
+        delay = details.get("delay_ms")
+        delay_str = f"（当前 {delay:.0f}ms）" if isinstance(delay, (int, float)) else ""
+        return f"行情延迟过高{delay_str}，请检查主机到交易所网络连通性及数据库并发负载。"
+    if base_name == "live_unknown_orders":
+        return "禁止重发同一订单意图；请先按 client_order_id 查询交易所并完成账目对齐。"
     return _ALERT_ACTIONS.get(
         base_name,
         "已记录告警，建议结合技术详情检查相关服务。",
@@ -3427,6 +3507,234 @@ def _serverchan_title(severity: str, scope: str | None, label: str) -> str:
     return f"{head} | {label}"[:_SERVERCHAN_TITLE_LIMIT]
 
 
+def _format_alert_human_details(
+    alert_name: str, details: Mapping[str, object]
+) -> list[str]:
+    """Format human-readable markdown summary lines for ServerChan push."""
+
+    base_name, _scope = _split_alert_name(alert_name)
+    lines: list[str] = []
+
+    # 1. Intent divergence
+    if base_name == "live_position_intent_divergence":
+        differences = details.get("differences")
+        if isinstance(differences, Sequence):
+            for diff in differences:
+                if not isinstance(diff, Mapping):
+                    continue
+                sym = diff.get("symbol", "")
+                cfg_hash = str(diff.get("strategy_config_hash", ""))
+                short_cfg = cfg_hash[:8] if cfg_hash else "未知"
+                lines.append(f"- **分叉标的**：`{sym}`（策略配置: `{short_cfg}`）")
+                accs = diff.get("accounts")
+                if isinstance(accs, Sequence):
+                    lines.append("- **各账户意图表现**：")
+                    for acc in accs:
+                        if not isinstance(acc, Mapping):
+                            continue
+                        acc_lbl = acc.get("account_label", "")
+                        cnt = acc.get("order_count", 0)
+                        summary = acc.get("intent_summary")
+                        fp = acc.get("fingerprint")
+                        fp_str = f" [指纹: {str(fp)[:8]}]" if fp else ""
+                        if cnt == 0:
+                            lines.append(f"  - `{acc_lbl}`：**未下单**（0 笔）")
+                        else:
+                            summary_str = f" `{summary}`" if summary else ""
+                            lines.append(
+                                f"  - `{acc_lbl}`：已下单 **{cnt}** 笔"
+                                f"{summary_str}{fp_str}"
+                            )
+
+    # 2. Position divergence
+    elif base_name == "live_position_divergence":
+        differences = details.get("differences")
+        if isinstance(differences, Sequence):
+            for diff in differences:
+                if not isinstance(diff, Mapping):
+                    continue
+                accs = diff.get("accounts")
+                cfg_hash = str(diff.get("strategy_config_hash", ""))
+                short_cfg = cfg_hash[:8] if cfg_hash else "未知"
+                qds = diff.get("quantity_differences")
+                if isinstance(qds, Sequence):
+                    for qd in qds:
+                        if not isinstance(qd, Mapping):
+                            continue
+                        sym = qd.get("symbol", "")
+                        side = qd.get("position_side", "")
+                        left_q = qd.get("left_quantity", "0")
+                        right_q = qd.get("right_quantity", "0")
+                        left_acc = (
+                            accs[0]
+                            if isinstance(accs, Sequence) and len(accs) > 0
+                            else "账户1"
+                        )
+                        right_acc = (
+                            accs[1]
+                            if isinstance(accs, Sequence) and len(accs) > 1
+                            else "账户2"
+                        )
+                        lines.append(
+                            f"- **分叉标的**：`{sym}`（方向: `{side}`，配置: `{short_cfg}`）"
+                        )
+                        lines.append(f"  - `{left_acc}`：持仓 **{left_q}**")
+                        lines.append(f"  - `{right_acc}`：持仓 **{right_q}**")
+
+    # 3. Signal divergence
+    elif base_name == "live_signal_divergence":
+        differences = details.get("differences")
+        if isinstance(differences, Sequence):
+            for diff in differences:
+                if not isinstance(diff, Mapping):
+                    continue
+                sym = diff.get("symbol", "")
+                bucket = diff.get("bucket_start", "")
+                cfg_hash = str(diff.get("strategy_config_hash", ""))
+                short_cfg = cfg_hash[:8] if cfg_hash else "未知"
+                lines.append(
+                    f"- **分叉标的**：`{sym}`（时间桶: `{bucket}`，配置: `{short_cfg}`）"
+                )
+                accs = diff.get("accounts")
+                if isinstance(accs, Sequence):
+                    lines.append("- **各账户信号表现**：")
+                    for acc in accs:
+                        if not isinstance(acc, Mapping):
+                            continue
+                        acc_lbl = acc.get("account_label", "")
+                        sig_cnt = acc.get("signal_count", 0)
+                        cand_cnt = acc.get("candidate_count", 0)
+                        lines.append(
+                            f"  - `{acc_lbl}`：有效信号 **{sig_cnt}** 个"
+                            f"（候选: {cand_cnt}）"
+                        )
+
+    # 4. Container memory pressure (swap)
+    elif base_name == "container_memory_pressure":
+        svc = details.get("service", "")
+        curr_mb = details.get("memory_current_mb")
+        limit_mb = details.get("memory_limit_mb")
+        swap_mb = details.get("memory_swap_current_mb")
+        swap_growth = details.get("memory_swap_growth_mb")
+        peak_mb = details.get("memory_peak_mb")
+        if svc:
+            lines.append(f"- **影响服务**：`{svc}`")
+        if (
+            isinstance(curr_mb, (int, float))
+            and isinstance(limit_mb, (int, float))
+            and limit_mb > 0
+        ):
+            pct = (curr_mb / limit_mb) * 100
+            peak_str = (
+                f"，峰值 {peak_mb:.1f} MB"
+                if isinstance(peak_mb, (int, float))
+                else ""
+            )
+            lines.append(
+                f"- **物理内存用量**：`{curr_mb:.1f} MB` / `{limit_mb:.1f} MB`"
+                f"（占比 **{pct:.1f}%**{peak_str}）"
+            )
+        if isinstance(swap_mb, (int, float)):
+            growth_str = (
+                f"（本次新增: `+{swap_growth:.1f} MB`）"
+                if isinstance(swap_growth, (int, float)) and swap_growth > 0
+                else ""
+            )
+            lines.append(
+                f"- **Swap 换出情况**：当前换出 `{swap_mb:.1f} MB` {growth_str}"
+            )
+        if (
+            isinstance(curr_mb, (int, float))
+            and isinstance(limit_mb, (int, float))
+            and limit_mb > 0
+        ):
+            if (curr_mb / limit_mb) < 0.6:
+                lines.append(
+                    "- **状态诊断**：物理内存占用充足（<60%），系 Linux 内核置换低频冷页，属于正常优化现象，无需重启服务。"
+                )
+
+    # 5. Container memory high / growth / rss_growth
+    elif base_name in (
+        "container_memory_high",
+        "container_memory_growth",
+        "rss_growth",
+    ):
+        svc = details.get("service") or details.get("account_label") or ""
+        curr_mb = details.get("memory_current_mb") or details.get("rss_mb")
+        limit_mb = details.get("memory_limit_mb")
+        growth_mb = details.get("memory_growth_mb") or details.get("growth_mb")
+        if svc:
+            lines.append(f"- **影响服务**：`{svc}`")
+        if (
+            isinstance(curr_mb, (int, float))
+            and isinstance(limit_mb, (int, float))
+            and limit_mb > 0
+        ):
+            pct = (curr_mb / limit_mb) * 100
+            lines.append(
+                f"- **内存用量**：`{curr_mb:.1f} MB` / `{limit_mb:.1f} MB`"
+                f"（占比 **{pct:.1f}%**）"
+            )
+        elif isinstance(curr_mb, (int, float)):
+            lines.append(f"- **内存用量**：`{curr_mb:.1f} MB`")
+        if isinstance(growth_mb, (int, float)):
+            lines.append(f"- **增长幅度**：窗口内持续增长 `+{growth_mb:.1f} MB`")
+
+    # 6. Heartbeat & Live session
+    elif base_name in (
+        "live_heartbeat_stale",
+        "live_heartbeat_auto_restarted",
+        "live_heartbeat_restart_failed",
+        "live_heartbeat_restart_suppressed",
+    ):
+        acc = details.get("account_label", "")
+        age = details.get("heartbeat_age_seconds")
+        attempt = details.get("attempt")
+        if acc:
+            lines.append(f"- **责任账户**：`{acc}`")
+        if isinstance(age, (int, float)):
+            lines.append(f"- **心跳中断时长**：已失联 **{age:.0f} 秒**")
+        if attempt:
+            lines.append(f"- **自愈进度**：已执行定向自动重启（第 **{attempt}** 次）")
+
+    # 7. Market delay & stale
+    elif base_name == "live_market_state_delay":
+        acc = details.get("account_label", "")
+        delay = details.get("delay_ms")
+        if acc:
+            lines.append(f"- **受影响账户**：`{acc}`")
+        if isinstance(delay, (int, float)):
+            lines.append(f"- **行情滞后延迟**：**{delay:.0f} ms**（超过安全阈值）")
+
+    # 8. Unknown orders
+    elif base_name == "live_unknown_orders":
+        acc = details.get("account_label", "")
+        cnt = details.get("unknown_order_count")
+        oldest = details.get("oldest_unknown_order_age_seconds")
+        if acc:
+            lines.append(f"- **异常账户**：`{acc}`")
+        if isinstance(cnt, (int, float)):
+            lines.append(f"- **在途失步订单**：共 **{cnt}** 笔")
+        if isinstance(oldest, (int, float)):
+            lines.append(f"- **最长挂起时间**：**{oldest:.0f} 秒**")
+
+    # 9. Container unhealthy / missing / oom
+    elif base_name in (
+        "container_unhealthy",
+        "container_missing",
+        "container_oom_killed",
+    ):
+        svc = details.get("service", "")
+        cid = str(details.get("container_id", ""))
+        if svc:
+            lines.append(
+                f"- **异常服务容器**：`{svc}`"
+                + (f" (`{cid[:12]}`)" if cid else "")
+            )
+
+    return lines
+
+
 def _serverchan_form(payload: Mapping[str, object]) -> dict[str, str]:
     event = str(payload.get("event", "ops_alert"))
     alert_name = str(payload.get("alert_name", "ops_monitor"))
@@ -3447,6 +3755,9 @@ def _serverchan_form(payload: Mapping[str, object]) -> dict[str, str]:
             f"- **事件编号**：`{alert_name}`",
         ]
         if details:
+            human_lines = _format_alert_human_details(alert_name, details)
+            if human_lines:
+                body.extend(human_lines)
             body.append(
                 "- **技术详情**：\n```json\n"
                 + json.dumps(
