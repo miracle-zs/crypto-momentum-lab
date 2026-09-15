@@ -394,6 +394,13 @@ def evaluate_signal_divergence(
     ratios such as ``notional_5m_vs_30m`` are recomputed per run from that
     run's own market-state window, so two correct accounts sharing a config
     disagree on them by a rounding-level amount and must not alert.
+
+    Opening signals only.  ``reduce_only_candidate`` carries the position into
+    the comparison -- it exists because the account *holds* the symbol -- so
+    including it would make this alert fire whenever the two accounts' fills
+    differed, which is execution, not decision.  Where an account *asked the
+    exchange* to close is compared by ``evaluate_position_intent_divergence``,
+    which compares order intent and deliberately ignores the closing quantity.
     """
 
     groups: dict[tuple[str, str, str], dict[str, SignalObservation]] = {}
@@ -2336,6 +2343,12 @@ SELECT 'signal' || E'\\t' || account_label || E'\\t' || symbol || E'\\t'
 FROM live_strategy_signals
 WHERE account_label IN ({account_sql})
   AND run_id IN ({run_sql})
+  -- reduce_only_candidate is not a strategy decision: it means "this account
+  -- holds the symbol and a close condition fired", so its presence depends on
+  -- what filled -- and fills legitimately differ between two correct accounts.
+  -- Requiring it to match reports the position difference through the signal
+  -- table, the same way comparing a closing order's quantity would.
+  AND signal_kind <> {_sql_literal(_REDUCE_ONLY_SIGNAL_KIND)}
   AND source_state_at >= now()
     - ({window_seconds} * interval '1 second')
 GROUP BY account_label, symbol, source_state_at, config_hash;

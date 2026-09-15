@@ -978,6 +978,39 @@ def test_signal_fingerprint_drops_position_derived_keys_for_reduce_only(
     assert "reference_prices - 'desired_notional'" in sql
 
 
+def test_signal_divergence_sql_excludes_close_candidates(tmp_path) -> None:
+    """A close candidate exists because the account holds the symbol.
+
+    Whether one appears at all follows the position, and positions diverge
+    between two correct accounts as soon as their fills differ -- so requiring
+    close candidates to match compares execution through the signal table.
+    That the account *asked the exchange* to close is covered separately by
+    ``evaluate_position_intent_divergence``, which ignores the closing
+    quantity.  On 2026-09-14 the same four accounts produced matching close
+    candidates whose only difference was what each happened to hold; this
+    filter removes the other half of that comparison.
+    """
+
+    class Runner:
+        last_args = None
+
+        def run(self, args, *, timeout_seconds):
+            del timeout_seconds
+            self.last_args = args
+            return ""
+
+    runner = Runner()
+    monitor = OpsMonitor(
+        MonitorConfig(state_path=tmp_path / "state.json"),
+        runner=runner,
+    )
+
+    monitor._consistency_observations("postgres-container")
+    sql = str(runner.last_args[-1])
+
+    assert "signal_kind <> 'reduce_only_candidate'" in sql
+
+
 def test_output_event_does_not_override_the_durable_signal_count(tmp_path) -> None:
     """The observed event repeats itself; only its candidate count is used.
 
