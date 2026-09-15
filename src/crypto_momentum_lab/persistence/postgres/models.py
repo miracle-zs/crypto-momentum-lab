@@ -1120,6 +1120,24 @@ class ExchangeOrderRow(Base):
         Index("ix_exchange_orders_state_updated", "state", "updated_at"),
         Index("ix_exchange_orders_symbol_state", "symbol", "state"),
         Index("ix_exchange_orders_run_updated", "run_id", "updated_at"),
+        # The unresolved-orders probe runs ~150k times in 8 hours and each time
+        # has to confirm "nothing is unresolved".  Without this it is a
+        # sequential scan of every row (203 pages, ~2 ms); with it, an
+        # index-only scan of an empty partial index (1 page, 0.067 ms, ~30x).
+        #
+        # The state list must match OrderState: the enum value is "canceled"
+        # with one L (domain/execution/order_state.py) -- a "cancelled" entry
+        # would leave every canceled order inside the index.
+        Index(
+            "ix_exchange_orders_unresolved_partial",
+            "run_id",
+            "updated_at",
+            "client_order_id",
+            postgresql_where=text(
+                "state NOT IN ('filled', 'canceled', 'absent_reconciled', "
+                "'rejected', 'expired', 'suppressed')"
+            ),
+        ),
     )
 
 
