@@ -46,6 +46,7 @@ _BASIC_AUTH = HTTPBasic(auto_error=False)
 _PAPER_CACHE_TTL_SECONDS = 5.0
 _PAPER_EQUITY_CACHE_TTL_SECONDS = 30.0
 _PAPER_EQUITY_STALE_GRACE_SECONDS = 60.0
+_DEFAULT_STALE_GRACE_SECONDS = 60.0
 _OVERVIEW_CACHE_TTL_SECONDS = 15.0
 _OVERVIEW_QUERY_TIMEOUT_SECONDS = 10.0
 _T = TypeVar("_T")
@@ -211,6 +212,7 @@ def create_dashboard_app(
     research_collector_root: Path | None = None,
     overview_cache_ttl_seconds: float = _OVERVIEW_CACHE_TTL_SECONDS,
     overview_query_timeout_seconds: float = _OVERVIEW_QUERY_TIMEOUT_SECONDS,
+    default_stale_grace_seconds: float = _DEFAULT_STALE_GRACE_SECONDS,
 ) -> FastAPI:
     resolved_auth_username = auth_username or os.environ.get("CML_DASHBOARD_USERNAME")
     resolved_auth_password = auth_password or os.environ.get("CML_DASHBOARD_PASSWORD")
@@ -340,6 +342,7 @@ def create_dashboard_app(
             f"decision-slo:{window}",
             lambda: query_service().decision_slo(window),
             ttl_seconds=15.0,
+            stale_while_revalidate_seconds=default_stale_grace_seconds,
         )
 
     @dashboard.get(
@@ -354,6 +357,7 @@ def create_dashboard_app(
                     "overview",
                     query_service().overview,
                     ttl_seconds=overview_cache_ttl_seconds,
+                    stale_while_revalidate_seconds=default_stale_grace_seconds,
                 ),
                 timeout=overview_query_timeout_seconds,
             )
@@ -373,6 +377,7 @@ def create_dashboard_app(
             "research-collector",
             query_service().research_collector,
             ttl_seconds=15.0,
+            stale_while_revalidate_seconds=default_stale_grace_seconds,
         )
 
     @dashboard.get(
@@ -381,7 +386,11 @@ def create_dashboard_app(
         dependencies=[Depends(require_dashboard_auth)],
     )
     async def universe() -> UniverseStatusResponse:
-        return await response_cache.get("universe", query_service().universe)
+        return await response_cache.get(
+            "universe",
+            query_service().universe,
+            stale_while_revalidate_seconds=default_stale_grace_seconds,
+        )
 
     @dashboard.get(
         "/api/strategy-runs/current",
@@ -389,7 +398,11 @@ def create_dashboard_app(
         dependencies=[Depends(require_dashboard_auth)],
     )
     async def strategy_run() -> StrategyRunResponse:
-        return await response_cache.get("strategy-run", query_service().strategy_run)
+        return await response_cache.get(
+            "strategy-run",
+            query_service().strategy_run,
+            stale_while_revalidate_seconds=default_stale_grace_seconds,
+        )
 
     @dashboard.get(
         "/api/paper-accounts",
@@ -400,6 +413,7 @@ def create_dashboard_app(
         return await response_cache.get(
             "paper-accounts",
             query_service().paper_accounts,
+            stale_while_revalidate_seconds=default_stale_grace_seconds,
         )
 
     @dashboard.get(
@@ -424,6 +438,7 @@ def create_dashboard_app(
         return await response_cache.get(
             f"paper-account:{run_id}",
             lambda: query_service().paper_account(run_id),
+            stale_while_revalidate_seconds=default_stale_grace_seconds,
         )
 
     @dashboard.get(
@@ -438,6 +453,7 @@ def create_dashboard_app(
         return await response_cache.get(
             f"paper-history:{run_id}:{'full' if full else 'recent'}",
             lambda: query_service().paper_history(run_id, full=full),
+            stale_while_revalidate_seconds=default_stale_grace_seconds,
         )
 
     @dashboard.get(
@@ -463,6 +479,7 @@ def create_dashboard_app(
             return await response_cache.get(
                 cache_key,
                 load_account,
+                stale_while_revalidate_seconds=default_stale_grace_seconds,
             )
         except TimeoutError as exc:
             raise HTTPException(
@@ -481,6 +498,7 @@ def create_dashboard_app(
                 "live-accounts",
                 query_service().live_accounts,
                 ttl_seconds=_OVERVIEW_CACHE_TTL_SECONDS,
+                stale_while_revalidate_seconds=default_stale_grace_seconds,
             )
         except TimeoutError as exc:
             raise HTTPException(
@@ -518,6 +536,7 @@ def create_dashboard_app(
         return await response_cache.get(
             "risk-execution",
             query_service().risk_execution,
+            stale_while_revalidate_seconds=default_stale_grace_seconds,
         )
 
     @dashboard.get(
@@ -526,6 +545,10 @@ def create_dashboard_app(
         dependencies=[Depends(require_dashboard_auth)],
     )
     async def reports() -> RunReportSummaryResponse:
-        return await response_cache.get("reports", query_service().reports)
+        return await response_cache.get(
+            "reports",
+            query_service().reports,
+            stale_while_revalidate_seconds=default_stale_grace_seconds,
+        )
 
     return dashboard
