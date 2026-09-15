@@ -3527,6 +3527,16 @@ def _serverchan_title(severity: str, scope: str | None, label: str) -> str:
     return f"{head} | {label}"[:_SERVERCHAN_TITLE_LIMIT]
 
 
+def _trim_decimal(val: object) -> str:
+    """Trim trailing zeros from decimal strings or numbers."""
+    if val is None:
+        return "0"
+    s = str(val).strip()
+    s = re.sub(r'(\.\d*?[1-9])0+$', r'\1', s)
+    s = re.sub(r'\.0+$', r'', s)
+    return s
+
+
 def _format_order_intent_items(raw_summary: str | None) -> list[str]:
     """Parse and normalize order intent items into clean Chinese strings."""
     if not raw_summary:
@@ -3624,9 +3634,14 @@ def _format_alert_human_details(
                         if not isinstance(qd, Mapping):
                             continue
                         sym = qd.get("symbol", "")
-                        side = qd.get("position_side", "")
-                        left_q = qd.get("left_quantity", "0")
-                        right_q = qd.get("right_quantity", "0")
+                        side = str(qd.get("position_side", "")).upper()
+                        side_label = (
+                            "多头 (LONG)"
+                            if side == "LONG"
+                            else ("空头 (SHORT)" if side == "SHORT" else side)
+                        )
+                        left_q = _trim_decimal(qd.get("left_quantity", "0"))
+                        right_q = _trim_decimal(qd.get("right_quantity", "0"))
                         left_acc = (
                             accs[0]
                             if isinstance(accs, Sequence) and len(accs) > 0
@@ -3638,7 +3653,7 @@ def _format_alert_human_details(
                             else "账户2"
                         )
                         lines.append(
-                            f"- **分叉标的**：`{sym}`（方向: `{side}`，配置: `{short_cfg}`）"
+                            f"- **分叉标的**：`{sym}`（方向: {side_label}，策略配置: `{short_cfg}`）"
                         )
                         lines.append(f"  - `{left_acc}`：持仓 **{left_q}**")
                         lines.append(f"  - `{right_acc}`：持仓 **{right_q}**")
@@ -3651,11 +3666,14 @@ def _format_alert_human_details(
                 if not isinstance(diff, Mapping):
                     continue
                 sym = diff.get("symbol", "")
-                bucket = diff.get("bucket_start", "")
+                raw_bucket = diff.get("bucket_start", "")
+                formatted_bucket = (
+                    _format_alert_time(raw_bucket) if raw_bucket else "未知"
+                )
                 cfg_hash = str(diff.get("strategy_config_hash", ""))
                 short_cfg = cfg_hash[:8] if cfg_hash else "未知"
                 lines.append(
-                    f"- **分叉标的**：`{sym}`（时间桶: `{bucket}`，配置: `{short_cfg}`）"
+                    f"- **分叉标的**：`{sym}`（时间桶: `{formatted_bucket}`，策略配置: `{short_cfg}`）"
                 )
                 accs = diff.get("accounts")
                 if isinstance(accs, Sequence):
@@ -3685,7 +3703,7 @@ def _format_alert_human_details(
                         sig_cnt = acc.get("signal_count", 0)
                         cand_cnt = acc.get("candidate_count", 0)
                         fp = acc.get("fingerprint")
-                        fp_str = f" [指纹: `{str(fp)[:8]}`]" if fp else ""
+                        fp_str = f"（特征指纹: `{str(fp)[:8]}`）" if fp else ""
                         lines.append(
                             f"  - `{acc_lbl}`：有效信号 **{sig_cnt}** 个"
                             f"（候选: {cand_cnt}）{fp_str}"
@@ -3693,7 +3711,6 @@ def _format_alert_human_details(
 
     # 4. Container memory pressure (swap)
     elif base_name == "container_memory_pressure":
-        svc = details.get("service", "")
         curr_mb = details.get("memory_current_mb")
         limit_mb = details.get("memory_limit_mb")
         swap_mb = details.get("memory_swap_current_mb")
@@ -3772,10 +3789,16 @@ def _format_alert_human_details(
     elif base_name == "live_market_state_delay":
         acc = details.get("account_label", "")
         delay = details.get("delay_ms")
+        warn_th = details.get("warning_threshold_ms")
         if acc:
             lines.append(f"- **受影响账户**：`{acc}`")
         if isinstance(delay, (int, float)):
-            lines.append(f"- **行情滞后延迟**：**{delay:.0f} ms**（超过安全阈值）")
+            warn_str = (
+                f"（警戒阈值: {warn_th:.0f} ms）"
+                if isinstance(warn_th, (int, float))
+                else ""
+            )
+            lines.append(f"- **行情滞后延迟**：**{delay:.0f} ms**{warn_str}")
 
     # 8. Unknown orders
     elif base_name == "live_unknown_orders":
@@ -3797,11 +3820,120 @@ def _format_alert_human_details(
     ):
         svc = details.get("service", "")
         cid = str(details.get("container_id", ""))
+        health = details.get("health")
+        restart_cnt = details.get("restart_count")
         if svc:
             lines.append(
                 f"- **异常服务容器**：`{svc}`"
                 + (f" (`{cid[:12]}`)" if cid else "")
             )
+        if health:
+            lines.append(f"- **健康状态**：`{health}`")
+        if restart_cnt is not None:
+            lines.append(f"- **已重启次数**：**{restart_cnt}** 次")
+
+    # 10. Account lifecycle & reconciliation
+    elif base_name == "live_account_lifecycle_not_ready":
+        acc = details.get("account_label", "")
+        state = details.get("state", "")
+        age_human = details.get("age_human", "")
+        thresh_human = details.get("threshold_human", "")
+        if acc:
+            lines.append(f"- **责任账户**：`{acc}`")
+        if state:
+            lines.append(f"- **生命周期状态**：`{state}`")
+        if age_human:
+            thresh_str = f"（安全阈值: {thresh_human}）" if thresh_human else ""
+            lines.append(f"- **异常停滞时间**：已停滞 **{age_human}**{thresh_str}")
+
+    elif base_name == "live_account_reconciliation_stale":
+        acc = details.get("account_label", "")
+        status = details.get("status", "")
+        age_human = details.get("age_human", "")
+        thresh_human = details.get("threshold_human", "")
+        if acc:
+            lines.append(f"- **责任账户**：`{acc}`")
+        if status:
+            lines.append(f"- **对账状态**：`{status}`")
+        if age_human:
+            thresh_str = f"（安全阈值: {thresh_human}）" if thresh_human else ""
+            lines.append(f"- **对账停滞时长**：距上次对账已 **{age_human}**{thresh_str}")
+
+    # 11. Market state stale & checkpoint stale
+    elif base_name == "live_market_state_stale":
+        acc = details.get("account_label", "")
+        age_human = details.get("age_human", "")
+        thresh_human = details.get("threshold_human", "")
+        if acc:
+            lines.append(f"- **责任账户**：`{acc}`")
+        if age_human:
+            thresh_str = f"（安全阈值: {thresh_human}）" if thresh_human else ""
+            lines.append(f"- **行情停滞时长**：已中断 **{age_human}**{thresh_str}")
+
+    elif base_name == "live_checkpoint_stale":
+        acc = details.get("account_label", "")
+        age_human = details.get("age_human", "")
+        thresh_human = details.get("threshold_human", "")
+        if acc:
+            lines.append(f"- **责任账户**：`{acc}`")
+        if age_human:
+            thresh_str = f"（安全阈值: {thresh_human}）" if thresh_human else ""
+            lines.append(f"- **状态停滞时长**：距上次写入已 **{age_human}**{thresh_str}")
+
+    # 12. Live session not ready
+    elif base_name == "live_session_not_ready":
+        acc = details.get("account_label", "")
+        s_ready = details.get("session_state_ready")
+        l_active = details.get("lease_active")
+        c_present = details.get("checkpoint_present")
+        if acc:
+            lines.append(f"- **责任账户**：`{acc}`")
+        if s_ready is not None:
+            lines.append(f"- **会话状态**：{'就绪' if s_ready else '未就绪（异常）'}")
+        if l_active is not None:
+            lines.append(f"- **分布式租约**：{'有效' if l_active else '失效（异常）'}")
+        if c_present is not None:
+            lines.append(f"- **策略检查点**：{'存在' if c_present else '缺失（异常）'}")
+
+    # 13. Telemetry & legacy order conflict & market tasks
+    elif base_name == "telemetry_persist_failure":
+        failures = details.get("failure_count")
+        if failures:
+            lines.append(f"- **落库失败批次**：**{failures}** 次")
+
+    elif base_name == "live_legacy_order_identity_conflict":
+        conflicts = details.get("conflict_count")
+        if conflicts:
+            lines.append(f"- **冲突记录数**：**{conflicts}** 笔")
+
+    elif base_name == "market_task_not_alive":
+        group_ids = details.get("group_ids")
+        if isinstance(group_ids, Sequence) and group_ids:
+            tasks_str = ", ".join(f"`{g}`" for g in group_ids)
+            lines.append(f"- **异常连接任务**：{tasks_str}")
+
+    # 14. Operational errors & database failures
+    elif base_name in (
+        "database_check_failed",
+        "live_consistency_check_failed",
+        "ops_monitor_failed",
+    ):
+        acc = details.get("account_label")
+        err_type = details.get("error_type")
+        err_msg = str(details.get("error") or "")
+        if acc:
+            lines.append(f"- **责任账户**：`{acc}`")
+        if err_type:
+            lines.append(f"- **异常类型**：`{err_type}`")
+        if err_msg:
+            clean_err = " ".join(err_msg.split())[:120]
+            lines.append(f"- **异常摘要**：`{clean_err}`")
+
+    # 15. Database advisory warnings
+    elif base_name == "database_parallel_maintenance_enabled":
+        workers = details.get("max_parallel_maintenance_workers")
+        if workers is not None:
+            lines.append(f"- **当前工作进程数**：`{workers}`（建议配置为 0 或 1）")
 
     return lines
 
@@ -3829,6 +3961,25 @@ def _alert_conclusion(
             return (
                 f"物理内存占用偏高（{pct:.1f}%）且持续换出，**建议关注内存增长趋势与慢查询**。"
             )
+    if base_name == "container_memory_high":
+        curr_mb = details.get("memory_current_mb")
+        limit_mb = details.get("memory_limit_mb")
+        if (
+            isinstance(curr_mb, (int, float))
+            and isinstance(limit_mb, (int, float))
+            and limit_mb > 0
+        ):
+            pct = (curr_mb / limit_mb) * 100
+            return f"容器内存占用已达 {pct:.1f}%，**接近限额，存在触发 OOM 崩溃风险**。"
+        return "容器内存占用已达到警戒水位，**存在触发 OOM 崩溃风险**。"
+    if base_name in ("container_memory_growth", "rss_growth"):
+        growth_mb = details.get("memory_growth_mb") or details.get("growth_mb")
+        if isinstance(growth_mb, (int, float)):
+            return (
+                f"容器内存在监控窗口内持续净增长 +{growth_mb:.1f} MB，"
+                "**需排查内存泄漏或缓存积压**。"
+            )
+        return "容器内存呈现持续增长趋势，**需排查内存泄漏或缓存积压**。"
     if base_name == "live_position_intent_divergence":
         differences = details.get("differences")
         if isinstance(differences, Sequence) and differences:
@@ -3848,6 +3999,62 @@ def _alert_conclusion(
         return "容器超出内存限制配额，**已被系统 OOM Killer 强行终止**。"
     if base_name in ("container_missing",):
         return "核心服务容器未运行或已异常退出，**相关功能已中断**。"
+    if base_name in ("container_unhealthy",):
+        return "容器健康检查持续失败，**服务可能处于假死或无法正常响应状态**。"
+    if base_name == "live_market_state_delay":
+        delay = details.get("delay_ms")
+        delay_str = f"（当前 {delay:.0f}ms）" if isinstance(delay, (int, float)) else ""
+        return f"行情接收严重滞后{delay_str}，**存在信号失效与成交滑点风险**。"
+    if base_name == "live_market_state_stale":
+        return "行情数据推进中断，**策略已暂停基于实时 K 线的开平仓计算**。"
+    if base_name == "live_checkpoint_stale":
+        return "策略持久化状态已过期，**若发生异常退出可能丢失最新运行时状态**。"
+    if base_name == "live_session_not_ready":
+        return "实时交易会话、租约或状态未就绪，**策略无法进入安全交易状态**。"
+    if base_name == "live_account_lifecycle_not_ready":
+        state = details.get("state", "")
+        state_str = f"（状态: {state}）" if state else ""
+        return f"账户进程生命周期未就绪{state_str}，**交易执行已挂起**。"
+    if base_name == "live_account_reconciliation_stale":
+        status = details.get("status", "")
+        status_str = f"（状态: {status}）" if status else ""
+        return f"交易所对账快照已失步{status_str}，**持仓和订单真实性暂无法核实**。"
+    if base_name == "live_unknown_orders":
+        cnt = details.get("unknown_order_count", 0)
+        cnt_str = f"（共 {cnt} 笔）" if cnt else ""
+        return f"发现未确认在途订单{cnt_str}，**本地与交易所订单失步，严禁盲目重发**。"
+    if base_name == "market_task_not_alive":
+        return "行情 WebSocket 连接任务挂死，**部分币种实时行情已断开**。"
+    if base_name == "telemetry_persist_failure":
+        return "数据库遥测批次批量落库失败，**监控与运行诊断数据存在丢失风险**。"
+    if base_name == "live_legacy_order_identity_conflict":
+        return "检测到本地订单 ID 重复关联交易所订单，**订单生命周期可能冲突**。"
+    if base_name == "live_heartbeat_stale":
+        age = details.get("heartbeat_age_seconds")
+        age_str = f"（已失联 {age:.0f} 秒）" if isinstance(age, (int, float)) else ""
+        return f"策略主循环心跳停滞{age_str}，**交易与行情推进可能已挂死**。"
+    if base_name == "live_heartbeat_auto_restarted":
+        attempt = details.get("attempt")
+        attempt_str = f"（第 {attempt} 次）" if attempt else ""
+        return f"策略心跳超时，**已自动执行定向重启自愈{attempt_str}**。"
+    if base_name == "live_heartbeat_restart_failed":
+        return "策略自动重启自愈执行失败，**需要紧急人工介入排查**。"
+    if base_name == "live_heartbeat_restart_suppressed":
+        return "策略连续自动重启已达上限，**自愈保护熔断，已暂停自动重启**。"
+    if base_name == "live_crash_log_archive_failed":
+        return "策略崩溃日志转储失败，**重启前现场日志可能未完整留存**。"
+    if base_name == "database_check_failed":
+        return "PostgreSQL 状态检查查询失败，**暂无法确认数据库读写是否健康**。"
+    if base_name == "database_query_stats_unavailable":
+        return "pg_stat_statements 扩展未载入，**慢查询与 SQL 分析受限（不影响交易）**。"
+    if base_name == "database_io_timing_disabled":
+        return "PostgreSQL I/O 耗时跟踪未开启，**数据库磁盘 I/O 延迟定位能力受限**。"
+    if base_name == "database_parallel_maintenance_enabled":
+        return "数据库并行维护工作进程超过护栏，**高并发时可能争用交易资源**。"
+    if base_name == "live_consistency_check_failed":
+        return "跨账户一致性校验查询超时或失败，**多账户运行状态暂无法比对**。"
+    if base_name == "ops_monitor_failed":
+        return "运维监控自身主循环发生未捕获异常，**请检查监控进程日志**。"
     return None
 
 

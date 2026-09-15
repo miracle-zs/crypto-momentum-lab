@@ -1515,7 +1515,7 @@ def test_serverchan_config_and_payload(monkeypatch, tmp_path) -> None:
     assert form["title"] == "CML | 严重 | primary | 服务健康检查失败"
     assert "[严重] primary：服务健康检查失败" in form["desp"]
     assert "2026-09-01 20:00:00（北京时间）" in form["desp"]
-    assert "对应服务可能无法正常处理其职责范围内的任务。" in form["desp"]
+    assert "诊断结论" in form["desp"]
     assert "live-strategy" in form["desp"]
 
 
@@ -1931,7 +1931,7 @@ def test_position_and_signal_divergence_human_formatting() -> None:
         }
     )
     assert pos_form["title"] == "CML | 严重 | BTWUSDT | 账户持仓发生差异"
-    assert "分叉标的**：`BTWUSDT`（方向: `BOTH`，配置: `c223e6db`）" in pos_form["desp"]
+    assert "分叉标的**：`BTWUSDT`（方向: BOTH，策略配置: `c223e6db`）" in pos_form["desp"]
     assert "`primary`：持仓 **141**" in pos_form["desp"]
     assert "`account-2`：持仓 **0**" in pos_form["desp"]
 
@@ -1969,6 +1969,6 @@ def test_position_and_signal_divergence_human_formatting() -> None:
         }
     )
     assert sig_form["title"] == "CML | 严重 | BTCUSDT | 账户信号发生分叉"
-    assert "分叉标的**：`BTCUSDT`（时间桶: `2026-09-15 15:55:00`，配置: `c223e6db`）" in sig_form["desp"]
+    assert "分叉标的**：`BTCUSDT`（时间桶: `2026-09-15 23:55:00`，策略配置: `c223e6db`）" in sig_form["desp"]
     assert "`primary`：有效信号 **1** 个（候选: 3）" in sig_form["desp"]
     assert "`account-2`：有效信号 **0** 个（候选: 0）" in sig_form["desp"]
