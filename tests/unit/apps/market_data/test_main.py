@@ -76,6 +76,47 @@ def fixture_snapshot() -> UniverseSnapshot:
     )
 
 
+def fixture_tiered_snapshot() -> UniverseSnapshot:
+    at = datetime(2026, 6, 14, 11, 1, tzinfo=UTC)
+    gainers = tuple(
+        RankEntry(
+            f"S{rank:02d}USDT",
+            Decimal("0.1") - Decimal(rank) / Decimal("1000"),
+            rank,
+            RankingSide.GAINER,
+        )
+        for rank in range(1, 41)
+    )
+    memberships = tuple(
+        TrackedMembership(
+            entry.symbol,
+            (
+                MembershipStatus.TARGET
+                if entry.rank <= 20
+                else MembershipStatus.EXTENDED
+            ),
+            RankingSide.GAINER,
+            None,
+        )
+        for entry in gainers
+    )
+    return UniverseSnapshot(
+        snapshot_id=UUID("00000000-0000-0000-0000-000000000002"),
+        observed_at=at,
+        utc_day=at.date(),
+        config_hash="b" * 64,
+        activated=True,
+        ranking=RankingResult(
+            candidates=(),
+            gainers=gainers,
+            losers=(),
+            target_symbols=frozenset(entry.symbol for entry in gainers[:20]),
+            exclusions={},
+        ),
+        memberships=memberships,
+    )
+
+
 def test_refresh_command_prints_snapshot_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -574,6 +615,90 @@ async def test_capture_observer_applies_membership_symbols() -> None:
         )
     ]
     assert changed_symbols == [frozenset({"BTCUSDT"})]
+
+
+async def test_capture_observer_limits_trade_streams_to_top_gainer_rank() -> None:
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def apply_symbols(self, symbols, *, streams, generation) -> None:
+            self.calls.append((symbols, streams, generation))
+
+    capture = FakeCapture()
+    changed: list[frozenset[str]] = []
+    observer = main.CaptureUniverseObserver(
+        capture,
+        streams=(CaptureStream.AGG_TRADE, CaptureStream.FORCE_ORDER),
+        initial_generation=1,
+        full_stream_max_gainer_rank=30,
+        on_symbols_changed=changed.append,
+    )
+
+    await observer.snapshot_updated(fixture_tiered_snapshot())
+
+    applied = capture.calls[0][0]
+    assert len(applied) == 30
+    assert applied == frozenset(f"S{rank:02d}USDT" for rank in range(1, 31))
+    assert "S31USDT" not in applied
+    assert "S40USDT" not in applied
+    assert changed == [applied]
+
+
+async def test_capture_observer_tier_zero_keeps_all_monitoring_symbols() -> None:
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def apply_symbols(self, symbols, *, streams, generation) -> None:
+            self.calls.append(symbols)
+
+    capture = FakeCapture()
+    observer = main.CaptureUniverseObserver(
+        capture,
+        streams=(CaptureStream.AGG_TRADE,),
+        initial_generation=1,
+        full_stream_max_gainer_rank=0,
+    )
+
+    await observer.snapshot_updated(fixture_tiered_snapshot())
+
+    assert capture.calls[0] == frozenset(
+        f"S{rank:02d}USDT" for rank in range(1, 41)
+    )
+
+
+async def test_capture_observer_tier_promotes_when_rank_improves() -> None:
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def apply_symbols(self, symbols, *, streams, generation) -> None:
+            self.calls.append(symbols)
+
+    capture = FakeCapture()
+    observer = main.CaptureUniverseObserver(
+        capture,
+        streams=(CaptureStream.AGG_TRADE,),
+        initial_generation=1,
+        full_stream_max_gainer_rank=30,
+    )
+    first = fixture_tiered_snapshot()
+    await observer.snapshot_updated(first)
+    assert "S35USDT" not in capture.calls[-1]
+
+    promoted = replace(
+        first,
+        ranking=replace(
+            first.ranking,
+            gainers=tuple(
+                replace(entry, rank=12) if entry.symbol == "S35USDT" else entry
+                for entry in first.ranking.gainers
+            ),
+        ),
+    )
+    await observer.snapshot_updated(promoted)
+    assert "S35USDT" in capture.calls[-1]
 
 
 async def test_capture_observer_keeps_open_position_symbols_subscribed() -> None:

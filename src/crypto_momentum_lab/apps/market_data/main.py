@@ -423,6 +423,7 @@ class CaptureUniverseObserver:
         streams: tuple[CaptureStream, ...],
         initial_generation: int,
         prewarm_retention_minutes: int = 0,
+        full_stream_max_gainer_rank: int = 0,
         protected_symbol_loader: (
             Callable[[], Awaitable[frozenset[str]]] | None
         ) = None,
@@ -433,11 +434,16 @@ class CaptureUniverseObserver:
         self._generation = initial_generation
         if prewarm_retention_minutes < 0:
             raise ValueError("prewarm_retention_minutes must be non-negative")
+        if full_stream_max_gainer_rank < 0:
+            raise ValueError("full_stream_max_gainer_rank must be non-negative")
         self._prewarm_retention = timedelta(minutes=prewarm_retention_minutes)
+        self._full_stream_max_gainer_rank = full_stream_max_gainer_rank
         self._protected_symbol_loader = protected_symbol_loader
         self._on_symbols_changed = on_symbols_changed
         self._lock = asyncio.Lock()
         self._universe_symbols: frozenset[str] | None = None
+        self._universe_forced_symbols: frozenset[str] = frozenset()
+        self._gainer_rank_by_symbol: dict[str, int] = {}
         self._applied_symbols: frozenset[str] | None = None
         self._prewarm_until_by_symbol: dict[str, datetime] = {}
 
@@ -449,6 +455,14 @@ class CaptureUniverseObserver:
             universe_symbols = frozenset(
                 item.symbol for item in snapshot.memberships
             )
+            self._universe_forced_symbols = frozenset(
+                item.symbol
+                for item in snapshot.memberships
+                if item.status is MembershipStatus.FORCED
+            )
+            self._gainer_rank_by_symbol = {
+                entry.symbol: entry.rank for entry in snapshot.ranking.gainers
+            }
             self._update_prewarm_symbols(
                 universe_symbols=universe_symbols,
                 observed_at=snapshot.observed_at,
@@ -462,6 +476,36 @@ class CaptureUniverseObserver:
                 return
             await self._apply_symbols()
 
+    def _trade_stream_symbols(
+        self,
+        *,
+        universe_symbols: frozenset[str],
+        protected_symbols: frozenset[str],
+    ) -> frozenset[str]:
+        """Return symbols that keep per-symbol trade streams (T0/T1).
+
+        With ``full_stream_max_gainer_rank == 0`` every monitoring symbol is
+        subscribed, matching the historical single-tier behaviour.  Above that
+        cutoff, extended gainers stay in the universe for ranking but only see
+        the global bookTicker stream until they promote.
+        """
+
+        prewarm = frozenset(self._prewarm_until_by_symbol)
+        if self._full_stream_max_gainer_rank <= 0:
+            return universe_symbols | prewarm | protected_symbols
+        if not self._gainer_rank_by_symbol:
+            # No ranking yet (startup): keep the conservative full subscription
+            # until the first universe snapshot lands.
+            return universe_symbols | prewarm | protected_symbols
+        full = {
+            symbol
+            for symbol in universe_symbols
+            if self._gainer_rank_by_symbol.get(symbol, 10**9)
+            <= self._full_stream_max_gainer_rank
+        }
+        full |= self._universe_forced_symbols & universe_symbols
+        return frozenset(full) | prewarm | protected_symbols
+
     async def _apply_symbols(self) -> None:
         if self._universe_symbols is None:
             return
@@ -470,10 +514,9 @@ class CaptureUniverseObserver:
             if self._protected_symbol_loader is None
             else await self._protected_symbol_loader()
         )
-        symbols = (
-            self._universe_symbols
-            | frozenset(self._prewarm_until_by_symbol)
-            | protected_symbols
+        symbols = self._trade_stream_symbols(
+            universe_symbols=self._universe_symbols,
+            protected_symbols=protected_symbols,
         )
         if symbols == self._applied_symbols:
             return
@@ -497,12 +540,15 @@ class CaptureUniverseObserver:
         self._applied_symbols = symbols
         if self._on_symbols_changed is not None:
             self._on_symbols_changed(symbols)
+        watch_symbols = self._universe_symbols - symbols
         log.info(
             "capture_symbols_updated",
             universe=len(self._universe_symbols),
             prewarm=len(self._prewarm_until_by_symbol),
             protected=len(protected_symbols - self._universe_symbols),
             total=len(symbols),
+            watch_only=len(watch_symbols),
+            full_stream_max_gainer_rank=self._full_stream_max_gainer_rank,
             added=len(added_symbols),
             removed=len(removed_symbols),
         )
@@ -1029,6 +1075,9 @@ async def build_market_data_runtime(
         streams=enabled_streams,
         initial_generation=1,
         prewarm_retention_minutes=runtime.universe.prewarm_retention_minutes,
+        full_stream_max_gainer_rank=(
+            runtime.universe.full_stream_max_gainer_rank
+        ),
         protected_symbol_loader=load_protected_symbols,
         on_symbols_changed=runtime_state_publisher.set_expected_symbols,
     )

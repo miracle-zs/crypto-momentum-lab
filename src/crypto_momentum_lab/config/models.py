@@ -94,6 +94,11 @@ class UniverseConfig(BaseModel):
     ranking_depth: int = Field(default=30, gt=0)
     extended_gainer_count: int = Field(default=0, ge=0)
     prewarm_retention_minutes: int = Field(default=0, ge=0)
+    # Gainer ranks at or below this keep per-symbol trade streams (aggTrade /
+    # forceOrder).  0 disables tiering and subscribes every monitoring symbol.
+    # Symbols above the cutoff stay in the universe for ranking but only see
+    # the global bookTicker stream until they promote.
+    full_stream_max_gainer_rank: int = Field(default=0, ge=0)
     activation_minute: int = Field(ge=0, le=59)
     refresh_interval_minutes: int = Field(default=60, gt=0, le=60)
 
@@ -112,6 +117,13 @@ class UniverseConfig(BaseModel):
             raise ValueError(
                 "ranking_depth must be >= top_count, loser_target_count, "
                 "and extended_gainer_count"
+            )
+        if (
+            self.full_stream_max_gainer_rank
+            and self.ranking_depth < self.full_stream_max_gainer_rank
+        ):
+            raise ValueError(
+                "ranking_depth must be >= full_stream_max_gainer_rank"
             )
         return self
 

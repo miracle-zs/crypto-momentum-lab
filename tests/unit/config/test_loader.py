@@ -181,6 +181,21 @@ def test_loads_websocket_capture_configuration(
     assert config.capture.archive.retention_check_interval_seconds == 3600
 
 
+def test_server_paper_universe_enables_tiered_trade_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "CML_DATABASE_URL",
+        "postgresql+asyncpg://cml:cml@localhost:54329/cml",
+    )
+    universe = load_runtime_config(
+        Path("configs/environments/server_paper.yaml")
+    ).universe
+    assert universe.extended_gainer_count == 70
+    assert universe.full_stream_max_gainer_rank == 30
+    assert universe.prewarm_retention_minutes == 40
+
+
 def test_research_and_server_capture_configs_keep_shared_defaults_aligned(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
