@@ -402,7 +402,7 @@ async def _create_shadow_indexes(session: AsyncSession) -> None:
         text(
             f"ALTER TABLE {shadow} ADD CONSTRAINT "
             f"{_quote_identifier(_EVENT_PRIMARY_KEY)} PRIMARY KEY "
-            f"(\"event_id\")"
+            f"(\"event_id\", \"occurred_at\")"
         )
     )
     for index_name, columns in _EVENT_INDEXES:

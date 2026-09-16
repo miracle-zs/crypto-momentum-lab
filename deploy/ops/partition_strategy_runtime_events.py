@@ -64,7 +64,7 @@ def _table_exists(table: str, **kw: str) -> bool:
 
 def _ensure_partitions(parent: str, start: datetime, end: datetime, **kw: str) -> int:
     existing_raw = _psql(
-        "SELECT child.relname FROM pg_inherits i "
+        "SELECT c.relname FROM pg_inherits i "
         "JOIN pg_class p ON p.oid = i.inhparent "
         "JOIN pg_class c ON c.oid = i.inhrelid "
         f"WHERE p.oid = to_regclass('{parent}')",
@@ -95,7 +95,7 @@ def phase_prepare(*, lookahead_days: int, **kw: str) -> None:
         raise SystemExit(f"shadow already exists: {_SHADOW}")
 
     summary = _psql(
-        f'SELECT count(*)::text || \'|\' || min("occurred_at")::text || \'|\' '
+        f'SELECT count(*)::text || \'|\' || min("occurred_at")::text || \'|\' || '
         f'max("occurred_at")::text FROM {_TABLE}',
         **kw,
     )
@@ -125,7 +125,8 @@ def phase_prepare(*, lookahead_days: int, **kw: str) -> None:
     _psql(f'INSERT INTO "{_SHADOW}" SELECT * FROM "{_TABLE}"', **kw)
     _psql(
         f'ALTER TABLE "{_SHADOW}" ADD CONSTRAINT '
-        f'"pk_strategy_runtime_events_partitioned" PRIMARY KEY ("event_id")',
+        f'"pk_strategy_runtime_events_partitioned" '
+        f'PRIMARY KEY ("event_id", "occurred_at")',
         **kw,
     )
     _psql(
