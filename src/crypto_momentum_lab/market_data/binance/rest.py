@@ -244,6 +244,44 @@ class BinanceUsdMRestClient:
             for item in response.json()
         )
 
+    async def fetch_agg_trades_window(
+        self,
+        symbol: str,
+        *,
+        start: datetime,
+        end: datetime,
+        limit: int = 1000,
+    ) -> tuple[BinanceAggTrade, ...]:
+        """Fetch aggTrades in ``[start, end)`` for promotion backfill."""
+
+        if start.tzinfo is None or end.tzinfo is None:
+            raise ValueError("window bounds must be timezone-aware")
+        if end <= start:
+            raise ValueError("end must be after start")
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        response = await self._get(
+            "/fapi/v1/aggTrades",
+            params={
+                "symbol": symbol.upper(),
+                "startTime": int(start.timestamp() * 1000),
+                "endTime": int(end.timestamp() * 1000),
+                "limit": limit,
+            },
+        )
+        return tuple(
+            BinanceAggTrade(
+                aggregate_trade_id=int(item["a"]),
+                price=Decimal(str(item["p"])),
+                quantity=Decimal(str(item["q"])),
+                first_trade_id=int(item["f"]),
+                last_trade_id=int(item["l"]),
+                event_at=_utc_from_ms(int(item["T"])),
+                buyer_is_maker=bool(item["m"]),
+            )
+            for item in response.json()
+        )
+
     async def fetch_daily_open(
         self,
         symbol: str,

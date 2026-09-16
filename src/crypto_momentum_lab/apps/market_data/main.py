@@ -36,6 +36,7 @@ from crypto_momentum_lab.market_data.agg_trade_recovery import (
     AggTradeGapRecoverer,
     agg_trade_gap_quality_event,
 )
+from crypto_momentum_lab.market_data.backfill import PromotionHistoryBackfiller
 from crypto_momentum_lab.market_data.binance.connection_pool import (
     BinanceConnectionPool,
 )
@@ -428,6 +429,9 @@ class CaptureUniverseObserver:
             Callable[[], Awaitable[frozenset[str]]] | None
         ) = None,
         on_symbols_changed: Callable[[frozenset[str]], None] | None = None,
+        on_trade_symbols_promoted: (
+            Callable[[frozenset[str]], Awaitable[None]] | None
+        ) = None,
     ) -> None:
         self._capture = capture
         self._streams = streams
@@ -440,6 +444,7 @@ class CaptureUniverseObserver:
         self._full_stream_max_gainer_rank = full_stream_max_gainer_rank
         self._protected_symbol_loader = protected_symbol_loader
         self._on_symbols_changed = on_symbols_changed
+        self._on_trade_symbols_promoted = on_trade_symbols_promoted
         self._lock = asyncio.Lock()
         self._universe_symbols: frozenset[str] | None = None
         self._universe_forced_symbols: frozenset[str] = frozenset()
@@ -561,6 +566,14 @@ class CaptureUniverseObserver:
                 added_symbols=sorted(added_symbols)[:_SYMBOL_LOG_LIMIT],
                 removed_symbols=sorted(removed_symbols)[:_SYMBOL_LOG_LIMIT],
             )
+        # Startup applies the whole monitoring set in one shot; only later
+        # universe refreshes represent a real promotion into the trade tier.
+        if (
+            previous_symbols is not None
+            and added_symbols
+            and self._on_trade_symbols_promoted is not None
+        ):
+            await self._on_trade_symbols_promoted(added_symbols)
 
     def _update_prewarm_symbols(
         self,
@@ -1070,6 +1083,11 @@ async def build_market_data_runtime(
         disk_free_bytes_provider=lambda: shutil.disk_usage(archive_config.root).free,
         coordinator=coordinator,
     )
+    promotion_backfiller = PromotionHistoryBackfiller(
+        client=rest_client,
+        publisher=state_hub,
+        environment=runtime.environment,
+    )
     observer = CaptureUniverseObserver(
         capture,
         streams=enabled_streams,
@@ -1080,6 +1098,7 @@ async def build_market_data_runtime(
         ),
         protected_symbol_loader=load_protected_symbols,
         on_symbols_changed=runtime_state_publisher.set_expected_symbols,
+        on_trade_symbols_promoted=promotion_backfiller.backfill_symbols,
     )
     universe = UniverseRefreshService(
         market_data=rest_client,
