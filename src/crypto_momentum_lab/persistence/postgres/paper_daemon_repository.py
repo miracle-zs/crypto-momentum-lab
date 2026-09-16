@@ -721,7 +721,9 @@ class PostgresPaperDaemonRepository:
                 await session.execute(
                     insert(StrategyRuntimeEventRow)
                     .values(values)
-                    .on_conflict_do_nothing(index_elements=["event_id"])
+                    .on_conflict_do_nothing(
+                        index_elements=["event_id", "occurred_at"]
+                    )
                 )
 
     async def load_checkpoint(self, run_id: str) -> StrategyCheckpoint | None:

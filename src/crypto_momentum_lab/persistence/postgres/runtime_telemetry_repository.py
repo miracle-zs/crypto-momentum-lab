@@ -37,7 +37,9 @@ class PostgresRuntimeTelemetryRepository:
                 await session.execute(
                     insert(StrategyRuntimeEventRow)
                     .values(values)
-                    .on_conflict_do_nothing(index_elements=["event_id"])
+                    .on_conflict_do_nothing(
+                        index_elements=["event_id", "occurred_at"]
+                    )
                 )
 
 
