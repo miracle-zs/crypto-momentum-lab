@@ -31,8 +31,11 @@ _NEW_POSITION_FILL_LOOKBACK = timedelta(minutes=30)
 _DEFAULT_HISTORICAL_FILL_RECONCILIATION_BATCH_SIZE = 10
 # Dashboard and ops-monitor only need a fresh enough "still ready" sample.
 # Writing every ~30s heartbeat produced ~12k identical ready_readonly rows
-# per day per account; refresh the same state on this cadence instead.
-_PROCESS_STATE_REFRESH = timedelta(minutes=5)
+# per day per account.  ops-monitor fires live_account_lifecycle_not_ready
+# when the latest row is older than 300s, so the refresh window must stay
+# well below that threshold -- 5 minutes raced the alert and flapped
+# critical every cycle.
+_PROCESS_STATE_REFRESH = timedelta(minutes=2)
 
 
 @dataclass(frozen=True, slots=True)
