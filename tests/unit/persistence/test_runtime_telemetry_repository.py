@@ -59,4 +59,4 @@ async def test_runtime_telemetry_uses_non_durable_observability_commit() -> None
     compiled = str(
         session.statements[1].compile(dialect=postgresql.dialect())
     )
-    assert "ON CONFLICT (event_id) DO NOTHING" in compiled
+    assert "ON CONFLICT (event_id, occurred_at) DO NOTHING" in compiled

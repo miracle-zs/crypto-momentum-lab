@@ -600,10 +600,14 @@ class StrategyCheckpointRow(Base):
 class StrategyRuntimeEventRow(Base):
     __tablename__ = "strategy_runtime_events"
 
+    # Partitioned tables require the partition key inside any unique
+    # constraint, so the primary key is (event_id, occurred_at).
     event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     run_id: Mapped[str] = mapped_column(String(128))
     event_type: Mapped[str] = mapped_column(String(64))
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), primary_key=True
+    )
     symbol: Mapped[str | None] = mapped_column(String(32))
     bucket_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     details: Mapped[dict[str, object]] = mapped_column(JSONB)
