@@ -797,6 +797,15 @@ def build_html(args: argparse.Namespace) -> str:
     current_compact = report_date.replace("-", "")
     previous_compact = previous_date.replace("-", "")
     two_back_compact = two_back_date.replace("-", "")
+    exclusion = payload["meta"].get("exclusion") or {}
+    exclusion_window = str(exclusion.get("window", ""))
+    exclusion_timezone = str(exclusion.get("timezone", "Asia/Shanghai"))
+    exclusion_display = f"{exclusion_window} {exclusion_timezone}".strip()
+    exclusion_slug = exclusion_window.replace(":", "").replace("–", "-")
+    current_filename = (
+        f"optimization-comparison-{current_compact}-exclude-"
+        f"{exclusion_slug}-volume7.html"
+    )
     head = template.split("<body>", 1)[0]
     head = head.replace(
         "<title>新增数据后的参数回放对比</title>",
@@ -808,6 +817,14 @@ def build_html(args: argparse.Namespace) -> str:
         f"<title>完整回补后的七维联合寻优 · {report_date}</title>",
         1,
     )
+    title_start = head.find("<title>")
+    title_end = head.find("</title>", title_start)
+    if title_start >= 0 and title_end > title_start:
+        head = (
+            head[:title_start]
+            + f"<title>完整回补后的七维联合寻优 · {report_date}</title>"
+            + head[title_end + len("</title>") :]
+        )
     head = head.replace("</head>", CUSTOM_STYLE + "</head>", 1)
     body_template = BODY_TEMPLATE.replace(
         f'<a href="optimization-comparison-{two_back_compact}-exclude-0800-1000-volume7.html">上一轮 · {two_back_date}</a>',
@@ -820,6 +837,31 @@ def build_html(args: argparse.Namespace) -> str:
     ).replace(
         "LOCAL RESEARCH REPLAY / 2026-09-10 · 七维联合",
         f"LOCAL RESEARCH REPLAY / {report_date} · 七维联合",
+        1,
+    )
+    body_template = body_template.replace(
+        '<a href="optimization-comparison-20260910-exclude-0800-1000-volume7.html" aria-current="page">本轮 · 2026-09-10</a>',
+        f'<a href="{current_filename}" aria-current="page">本轮 · {report_date}</a>',
+        1,
+    ).replace(
+        "开仓过滤：<span class=\"mono\">08:00–10:00 Asia/Shanghai</span>",
+        f"开仓过滤：<span class=\"mono\">{exclusion_display}</span>",
+        1,
+    ).replace(
+        "过滤北京时间 08:00–10:00 的实际成交开仓。",
+        f"过滤北京时间 {exclusion_window} 的实际成交开仓。",
+        1,
+    ).replace(
+        "实际成交开仓时间在北京时间 08:00–10:00 的记录已排除。",
+        f"实际成交开仓时间在北京时间 {exclusion_window} 的记录已排除。",
+        1,
+    ).replace(
+        "四个实盘账户均使用七维放量阈值 1.50x，当前配置统一为最新推荐参数。",
+        "四个实盘账户均使用七维放量阈值 1.50x；当前参数按账户分组展示。",
+        1,
+    ).replace(
+        "推荐结论：无上限收益优先看 A；如果同时考虑回撤和保证金占用，B–G 的共同解更稳健。",
+        "推荐结论：页面分别展示收益优先的 A 与加入保证金/回撤约束后的 B–G，最终方案需结合风险约束判断。",
         1,
     )
     body = body_template.replace(

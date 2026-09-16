@@ -3577,8 +3577,7 @@ def _alert_action(alert_name: str, details: Mapping[str, object]) -> str:
         )
     if base_name == "live_signal_divergence":
         return (
-            "检测到同一行情桶输出不同信号，请暂停扩大仓位，核对各账户策略配置、"
-            "K线数据新鲜度及近期事件循环日志。"
+            "暂停扩仓；核对各账户策略配置差异、K 线数据新鲜度及近期事件循环日志。"
         )
     if base_name == "container_memory_pressure":
         curr_mb = details.get("memory_current_mb")
@@ -3617,6 +3616,12 @@ def _serverchan_title(severity: str, scope: str | None, label: str) -> str:
         with_scope = f"{head} | {scope} | {label}"
         if len(with_scope) <= _SERVERCHAN_TITLE_LIMIT:
             return with_scope
+        compact = f"CML[{severity}] {scope} | {label}"
+        if len(compact) <= _SERVERCHAN_TITLE_LIMIT:
+            return compact
+        compact2 = f"[{severity}] {scope} | {label}"
+        if len(compact2) <= _SERVERCHAN_TITLE_LIMIT:
+            return compact2
     return f"{head} | {label}"[:_SERVERCHAN_TITLE_LIMIT]
 
 
@@ -3640,6 +3645,9 @@ def _format_order_intent_items(raw_summary: str | None) -> list[str]:
         # Strip trailing zeros from decimals (e.g. 684.000000000000000000 -> 684, 0.146040000000000000 -> 0.14604)
         normalized = re.sub(r'(\.\d*?[1-9])0+(?=[^\d]|$)', r'\1', item)
         normalized = re.sub(r'\.0+(?=[^\d]|$)', r'', normalized)
+        if re.search(r'（(限价|市价)）$', normalized):
+            formatted.append(normalized)
+            continue
         m = re.match(
             r'^(BUY|SELL|买入|卖出)\s+(LIMIT|MARKET|限价|市价)?\s*(.*?)$',
             normalized,
@@ -3687,8 +3695,10 @@ def _format_alert_human_details(
                 short_cfg = cfg_hash[:8] if cfg_hash else "未知"
                 lines.append(f"- **分叉标的**：`{sym}`（策略配置: `{short_cfg}`）")
                 accs = diff.get("accounts")
-                if isinstance(accs, Sequence):
-                    lines.append("- **各账户意图表现**：")
+                if isinstance(accs, Sequence) and accs:
+                    lines.append("")
+                    lines.append("| 账户 | 委托状态 | 委托详情 |")
+                    lines.append("| :--- | :---: | :--- |")
                     for acc in accs:
                         if not isinstance(acc, Mapping):
                             continue
@@ -3696,20 +3706,14 @@ def _format_alert_human_details(
                         cnt = acc.get("order_count", 0)
                         summary = acc.get("intent_summary")
                         if cnt == 0:
-                            lines.append(f"  - `{acc_lbl}`：**未下单**（0 笔）")
+                            lines.append(f"| `{acc_lbl}` | **未下单** (0 笔) | *(无委托)* |")
                         else:
                             order_items = _format_order_intent_items(summary)
-                            if len(order_items) <= 1:
-                                desc = f"：{order_items[0]}" if order_items else ""
-                                lines.append(
-                                    f"  - `{acc_lbl}`（已下单 **{cnt}** 笔）{desc}"
-                                )
-                            else:
-                                lines.append(
-                                    f"  - `{acc_lbl}`（已下单 **{cnt}** 笔）："
-                                )
-                                for order_item in order_items:
-                                    lines.append(f"    - {order_item}")
+                            order_str = "<br>".join(order_items) if order_items else "未知"
+                            lines.append(
+                                f"| `{acc_lbl}` | 已下单 (**{cnt}** 笔) | {order_str} |"
+                            )
+                    lines.append("")
 
     # 2. Position divergence
     elif base_name == "live_position_divergence":
@@ -3748,8 +3752,12 @@ def _format_alert_human_details(
                         lines.append(
                             f"- **分叉标的**：`{sym}`（方向: {side_label}，策略配置: `{short_cfg}`）"
                         )
-                        lines.append(f"  - `{left_acc}`：持仓 **{left_q}**")
-                        lines.append(f"  - `{right_acc}`：持仓 **{right_q}**")
+                        lines.append("")
+                        lines.append("| 账户 | 方向 | 实际持仓 |")
+                        lines.append("| :--- | :---: | :---: |")
+                        lines.append(f"| `{left_acc}` | {side} | **{left_q}** |")
+                        lines.append(f"| `{right_acc}` | {side} | **{right_q}** |")
+                        lines.append("")
 
     # 3. Signal divergence
     elif base_name == "live_signal_divergence":
@@ -3769,26 +3777,10 @@ def _format_alert_human_details(
                     f"- **分叉标的**：`{sym}`（时间桶: `{formatted_bucket}`，策略配置: `{short_cfg}`）"
                 )
                 accs = diff.get("accounts")
-                if isinstance(accs, Sequence):
-                    sig_counts = [
-                        acc.get("signal_count")
-                        for acc in accs
-                        if isinstance(acc, Mapping)
-                    ]
-                    cand_counts = [
-                        acc.get("candidate_count")
-                        for acc in accs
-                        if isinstance(acc, Mapping)
-                    ]
-                    if (
-                        len(set(sig_counts)) == 1
-                        and len(set(cand_counts)) == 1
-                    ):
-                        lines.append(
-                            "- **各账户信号表现**（数量相同，但决策特征/价格参数不一致）："
-                        )
-                    else:
-                        lines.append("- **各账户信号表现**：")
+                if isinstance(accs, Sequence) and accs:
+                    lines.append("")
+                    lines.append("| 账户 | 信号 / 候选 | 决策指纹 |")
+                    lines.append("| :--- | :---: | :---: |")
                     for acc in accs:
                         if not isinstance(acc, Mapping):
                             continue
@@ -3796,11 +3788,11 @@ def _format_alert_human_details(
                         sig_cnt = acc.get("signal_count", 0)
                         cand_cnt = acc.get("candidate_count", 0)
                         fp = acc.get("fingerprint")
-                        fp_str = f"（特征指纹: `{str(fp)[:8]}`）" if fp else ""
+                        fp_str = f"`{str(fp)[:8]}`" if fp else "-"
                         lines.append(
-                            f"  - `{acc_lbl}`：有效信号 **{sig_cnt}** 个"
-                            f"（候选: {cand_cnt}）{fp_str}"
+                            f"| `{acc_lbl}` | **{sig_cnt}** / {cand_cnt} | {fp_str} |"
                         )
+                    lines.append("")
 
     # 4. Container memory pressure (swap)
     elif base_name == "container_memory_pressure":
@@ -4087,7 +4079,7 @@ def _alert_conclusion(
     if base_name == "live_position_divergence":
         return "可比账户在交易所的实际持仓数量不一致，**存在单边未平仓或对账失步风险**。"
     if base_name == "live_signal_divergence":
-        return "同配置账户在同一行情时间桶产出了不同的信号决策，**策略计算可能已分叉**。"
+        return "同配置账户信号指纹不一致，**策略计算已失步**。"
     if base_name in ("container_oom_killed",):
         return "容器超出内存限制配额，**已被系统 OOM Killer 强行终止**。"
     if base_name in ("container_missing",):
@@ -4161,10 +4153,11 @@ def _serverchan_form(payload: Mapping[str, object]) -> dict[str, str]:
     label = _friendly_alert_label(alert_name, summary)
     if event == "ops_alert":
         severity = _severity_label(payload.get("severity", "critical"))
+        icon = "🚨" if severity == "严重" else ("⚠️" if severity == "警告" else "ℹ️")
         title = _serverchan_title(severity, scope, label)
         conclusion = _alert_conclusion(alert_name, details)
         body = [
-            f"## [{severity}] {scope + '：' if scope else ''}{label}",
+            f"## {icon} [{severity}] {scope + '：' if scope else ''}{label}",
         ]
         if conclusion:
             body.append(f"> **诊断结论**：{conclusion}\n")
@@ -4184,7 +4177,7 @@ def _serverchan_form(payload: Mapping[str, object]) -> dict[str, str]:
     else:
         title = _serverchan_title("恢复", scope, label)
         body = [
-            f"## [恢复] {scope + '：' if scope else ''}{label}",
+            f"## 🟢 [恢复] {scope + '：' if scope else ''}{label}",
             "- **恢复时间**："
             f"{_format_alert_time(payload.get('observed_at'))}（北京时间）",
             f"- **持续时间**：{_format_duration(payload.get('duration_seconds'))}",

@@ -1957,8 +1957,8 @@ def test_position_intent_divergence_scope_action_and_serverchan() -> None:
     assert form["title"] == "CML | 严重 | BTWUSDT | 账户下单意图发生分叉"
     assert "BTWUSDT" in form["desp"]
     assert "c223e6db" in form["desp"]
-    assert "account-2`（已下单 **1** 笔）：买入 141 @ 0.707（限价）" in form["desp"]
-    assert "primary`：**未下单**（0 笔）" in form["desp"]
+    assert "| `account-2` | 已下单 (**1** 笔) | 买入 141 @ 0.707（限价） |" in form["desp"]
+    assert "| `primary` | **未下单** (0 笔) | *(无委托)* |" in form["desp"]
     assert "检测到单边未下单" in form["desp"]
     assert "- **影响**" not in form["desp"]
 
@@ -1997,11 +1997,10 @@ def test_position_intent_divergence_multi_order_and_zero_trimming() -> None:
     )
 
     expected_account2 = (
-        "  - `account-2`（已下单 **2** 笔）：\n"
-        "    - 买入 684 @ 0.14604（限价）\n"
-        "    - 买入 691 @ 0.14454（限价）"
+        "| `account-2` | 已下单 (**2** 笔) | "
+        "买入 684 @ 0.14604（限价）<br>买入 691 @ 0.14454（限价） |"
     )
-    expected_primary = "  - `primary`（已下单 **1** 笔）：买入 691 @ 0.14454（限价）"
+    expected_primary = "| `primary` | 已下单 (**1** 笔) | 买入 691 @ 0.14454（限价） |"
 
     assert expected_account2 in form["desp"]
     assert expected_primary in form["desp"]
@@ -2067,8 +2066,8 @@ def test_position_and_signal_divergence_human_formatting() -> None:
     )
     assert pos_form["title"] == "CML | 严重 | BTWUSDT | 账户持仓发生差异"
     assert "分叉标的**：`BTWUSDT`（方向: BOTH，策略配置: `c223e6db`）" in pos_form["desp"]
-    assert "`primary`：持仓 **141**" in pos_form["desp"]
-    assert "`account-2`：持仓 **0**" in pos_form["desp"]
+    assert "| `primary` | BOTH | **141** |" in pos_form["desp"]
+    assert "| `account-2` | BOTH | **0** |" in pos_form["desp"]
 
     # 2. Signal divergence
     sig_details = {
@@ -2105,5 +2104,71 @@ def test_position_and_signal_divergence_human_formatting() -> None:
     )
     assert sig_form["title"] == "CML | 严重 | BTCUSDT | 账户信号发生分叉"
     assert "分叉标的**：`BTCUSDT`（时间桶: `2026-09-15 23:55:00`，策略配置: `c223e6db`）" in sig_form["desp"]
-    assert "`primary`：有效信号 **1** 个（候选: 3）" in sig_form["desp"]
-    assert "`account-2`：有效信号 **0** 个（候选: 0）" in sig_form["desp"]
+    assert "| `primary` | **1** / 3 | - |" in sig_form["desp"]
+    assert "| `account-2` | **0** / 0 | - |" in sig_form["desp"]
+
+
+def test_signal_divergence_with_fingerprint_table_and_action() -> None:
+    details = {
+        "group_count": 1,
+        "differences": [
+            {
+                "symbol": "USELESSUSDT",
+                "bucket_start": "2026-09-16 12:56:00",
+                "strategy_config_hash": "c223e6dbad4d588e2916b47fa303762c6241bc18346765786950e51b3cd5cbdd",
+                "accounts": [
+                    {
+                        "account_label": "account-2",
+                        "signal_count": 1,
+                        "candidate_count": 1,
+                        "fingerprint": "b243168a12345678",
+                    },
+                    {
+                        "account_label": "primary",
+                        "signal_count": 1,
+                        "candidate_count": 1,
+                        "fingerprint": "3fb5a01687654321",
+                    },
+                ],
+            }
+        ],
+    }
+    form = _serverchan_form(
+        {
+            "event": "ops_alert",
+            "alert_name": "live_signal_divergence",
+            "severity": "critical",
+            "summary": "Comparable live accounts emitted divergent signals",
+            "observed_at": "2026-09-16T12:55:58+00:00",
+            "details": details,
+        }
+    )
+
+    # 1. Compact title preserves 11-char scope USELESSUSDT without truncation
+    assert form["title"] == "CML[严重] USELESSUSDT | 账户信号发生分叉"
+    assert len(form["title"]) <= 32
+
+    # 2. Markdown table properly compares fingerprints
+    assert "| `account-2` | **1** / 1 | `b243168a` |" in form["desp"]
+    assert "| `primary` | **1** / 1 | `3fb5a016` |" in form["desp"]
+
+    # 3. Action and conclusion are concise
+    assert "同配置账户信号指纹不一致" in form["desp"]
+    assert "暂停扩仓；核对各账户策略配置差异" in form["desp"]
+
+
+def test_serverchan_title_compact_preserves_long_symbol() -> None:
+    # 7-char symbol fits in standard pipe format (32 chars)
+    t1 = _serverchan_title("严重", "BTCUSDT", "账户信号发生分叉")
+    assert t1 == "CML | 严重 | BTCUSDT | 账户信号发生分叉"
+    assert len(t1) <= 32
+
+    # 11-char symbol fits in compact bracket format (30 chars)
+    t2 = _serverchan_title("严重", "USELESSUSDT", "账户信号发生分叉")
+    assert t2 == "CML[严重] USELESSUSDT | 账户信号发生分叉"
+    assert len(t2) <= 32
+
+    # 13-char symbol fits in compact format (32 chars)
+    t3 = _serverchan_title("严重", "1000PEPEUSDT", "账户信号发生分叉")
+    assert t3 == "CML[严重] 1000PEPEUSDT | 账户信号发生分叉"
+    assert len(t3) <= 32
