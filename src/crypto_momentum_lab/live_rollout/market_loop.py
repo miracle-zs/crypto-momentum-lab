@@ -402,6 +402,11 @@ class LiveMarketLoop:
                         signal_count=len(decision.signals),
                         candidate_count=len(decision.candidates),
                         details=decision_details,
+                        empty_heartbeat_eligible=_empty_heartbeat_eligible(
+                            state.symbol,
+                            entry_symbols=self._entry_lane.entry_symbols,
+                            open_position_symbols=None,
+                        ),
                     )
                 processed += 1
                 final_state_at = state.bucket_start
@@ -445,6 +450,11 @@ class LiveMarketLoop:
                             signal_count=len(decision.signals),
                             candidate_count=len(decision.candidates),
                             details=decision_details,
+                            empty_heartbeat_eligible=_empty_heartbeat_eligible(
+                                state.symbol,
+                                entry_symbols=self._entry_lane.entry_symbols,
+                                open_position_symbols=context.open_position_symbols,
+                            ),
                         )
                     processed += 1
                     final_state_at = state.bucket_start
@@ -506,6 +516,11 @@ class LiveMarketLoop:
                     signal_count=len(decision.signals),
                     candidate_count=len(decision.candidates),
                     details=decision_details,
+                    empty_heartbeat_eligible=_empty_heartbeat_eligible(
+                        state.symbol,
+                        entry_symbols=self._entry_lane.entry_symbols,
+                        open_position_symbols=context.open_position_symbols,
+                    ),
                 )
             entry_outcome = await self._entry_lane.process(
                 decision=decision,
@@ -711,6 +726,26 @@ def _strategy_state_interval_seconds(strategy: LiveRuntimeStrategy) -> int:
     if interval_seconds <= 0:
         raise ValueError("strategy state interval must be positive")
     return interval_seconds
+
+
+def _empty_heartbeat_eligible(
+    symbol: str,
+    *,
+    entry_symbols: frozenset[str] | None,
+    open_position_symbols: frozenset[str] | None,
+) -> bool:
+    """Whether an empty strategy-output heartbeat should be durable for ``symbol``.
+
+    ``entry_symbols is None`` means the pool is unconfigured (legacy), so every
+    monitored symbol stays eligible.  Otherwise only entry-pool members and
+    symbols that currently hold a position keep the 60s empty heartbeat.
+    """
+
+    if entry_symbols is None:
+        return True
+    if symbol in entry_symbols:
+        return True
+    return symbol in (open_position_symbols or frozenset())
 
 
 def _validate_market_state_continuity(

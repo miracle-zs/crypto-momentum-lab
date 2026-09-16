@@ -319,6 +319,8 @@ async def test_strategy_output_observation_is_durable_as_a_sampled_heartbeat() -
             "market_state_input_fingerprint": "fingerprint-1",
             "last_processed_at_before": "2026-07-03T23:58:45+00:00",
             "gap_recovered_bucket_count": 1,
+            "input_data_complete": True,
+            "input_missing_agg_trade_count": 0,
             "hub_stream_id": "stream-a",
             "hub_sequence": 17,
         },
@@ -327,17 +329,85 @@ async def test_strategy_output_observation_is_durable_as_a_sampled_heartbeat() -
 
     event = batches[0][0]
     assert event["event_type"] == STRATEGY_OUTPUT_OBSERVED
+    # Empty heartbeats stay durable but carry only the compact payload.
     assert event["details"] == {
         "account_label": "primary",
         "strategy_config_hash": "config-1",
         "signal_count": 0,
         "candidate_count": 0,
-        "market_state_input_fingerprint": "fingerprint-1",
-        "last_processed_at_before": "2026-07-03T23:58:45+00:00",
-        "gap_recovered_bucket_count": 1,
-        "hub_stream_id": "stream-a",
-        "hub_sequence": 17,
+        "input_data_complete": True,
+        "input_missing_agg_trade_count": 0,
     }
+
+
+async def test_empty_strategy_heartbeat_skipped_when_symbol_not_eligible() -> None:
+    batches: list[tuple[dict[str, object], ...]] = []
+
+    async def persist(events) -> None:
+        batches.append(tuple(dict(event) for event in events))
+
+    telemetry = LiveRuntimeTelemetry(
+        run_id="run-1",
+        account_label="primary",
+        strategy_config_hash="config-1",
+        persist=persist,
+        persist_event_types=frozenset({STRATEGY_OUTPUT_OBSERVED}),
+    )
+    state = _state()
+    await telemetry.start()
+    await telemetry.strategy_decision(
+        state,
+        occurred_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        signal_count=0,
+        candidate_count=0,
+        empty_heartbeat_eligible=False,
+    )
+    await telemetry.stop()
+
+    assert batches == [] or all(
+        event["event_type"] != STRATEGY_OUTPUT_OBSERVED
+        for batch in batches
+        for event in batch
+    )
+
+
+async def test_non_empty_strategy_output_persisted_even_when_not_heartbeat_eligible() -> None:
+    batches: list[tuple[dict[str, object], ...]] = []
+
+    async def persist(events) -> None:
+        batches.append(tuple(dict(event) for event in events))
+
+    telemetry = LiveRuntimeTelemetry(
+        run_id="run-1",
+        account_label="primary",
+        strategy_config_hash="config-1",
+        persist=persist,
+        persist_event_types=frozenset({STRATEGY_OUTPUT_OBSERVED}),
+    )
+    state = _state()
+    await telemetry.start()
+    await telemetry.strategy_decision(
+        state,
+        occurred_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        signal_count=1,
+        candidate_count=0,
+        empty_heartbeat_eligible=False,
+        details={
+            "market_state_input_fingerprint": "fingerprint-1",
+            "input_data_complete": True,
+        },
+    )
+    await telemetry.stop()
+
+    events = [event for batch in batches for event in batch]
+    observed = [
+        event
+        for event in events
+        if event["event_type"] == STRATEGY_OUTPUT_OBSERVED
+    ]
+    assert len(observed) == 1
+    assert observed[0]["details"]["signal_count"] == 1
+    assert observed[0]["details"]["market_state_input_fingerprint"] == "fingerprint-1"
 
 
 async def test_strategy_output_heartbeat_is_sampled_per_symbol() -> None:

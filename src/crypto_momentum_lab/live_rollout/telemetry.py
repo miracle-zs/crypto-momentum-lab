@@ -135,6 +135,19 @@ PERSISTED_OPERATIONAL_TELEMETRY_EVENTS = frozenset(
     }
 )
 
+# Empty strategy-output heartbeats dominate the runtime-event table (~96% of
+# rows).  Keep the 60s cadence for symbols that can still trade, but persist a
+# compact payload: fingerprint and buffer gauges stay on the in-memory trace
+# and in process logs rather than the durable heartbeat.
+_EMPTY_HEARTBEAT_DETAIL_KEYS: tuple[str, ...] = (
+    "account_label",
+    "strategy_config_hash",
+    "signal_count",
+    "candidate_count",
+    "input_data_complete",
+    "input_missing_agg_trade_count",
+)
+
 _DECISION_SLO_LATENCY_KEY = "decision_slo_latency_ms"
 _DECISION_SLO_TRANSITIONS: dict[str, tuple[tuple[str, str], ...]] = {
     CANDIDATE_ACCEPTED: (
@@ -214,6 +227,7 @@ class LiveTelemetrySink(Protocol):
         signal_count: int,
         candidate_count: int,
         details: Mapping[str, JsonValue] | None = None,
+        empty_heartbeat_eligible: bool = True,
     ) -> None: ...
 
     async def entry_filter_ready(
@@ -876,6 +890,7 @@ class LiveRuntimeTelemetry:
         signal_count: int,
         candidate_count: int,
         details: Mapping[str, JsonValue] | None = None,
+        empty_heartbeat_eligible: bool = True,
     ) -> None:
         decision_details: dict[str, JsonValue] = dict(details or {})
         decision_details.update(
@@ -893,14 +908,19 @@ class LiveRuntimeTelemetry:
             occurred_at=occurred_at,
             details=decision_details,
         )
+        has_output = signal_count > 0 or candidate_count > 0
         # Keep a low-frequency zero-output heartbeat as well as every
         # non-empty output.  A missing output from one otherwise healthy
         # account is itself a fork condition; persisting only non-empty
         # decisions cannot distinguish that from a legitimate empty result.
+        # Empty heartbeats stay limited to symbols that can still trade
+        # (entry pool or open position) so the 60s cadence remains useful
+        # without writing the whole monitoring universe every minute.
+        if not has_output and not empty_heartbeat_eligible:
+            return
         last_output_at = self._last_strategy_output_at_by_symbol.get(state.symbol)
         if (
-            signal_count > 0
-            or candidate_count > 0
+            has_output
             or last_output_at is None
             or occurred_at - last_output_at >= timedelta(seconds=60)
         ):
@@ -914,16 +934,23 @@ class LiveRuntimeTelemetry:
                 )
                 self._last_strategy_output_at_by_symbol.pop(oldest_symbol, None)
             self._last_strategy_output_at_by_symbol[state.symbol] = occurred_at
+            observed_details: dict[str, JsonValue] = {
+                "account_label": self._account_label,
+                "strategy_config_hash": self._strategy_config_hash,
+                **decision_details,
+            }
+            if not has_output:
+                observed_details = {
+                    key: observed_details[key]
+                    for key in _EMPTY_HEARTBEAT_DETAIL_KEYS
+                    if key in observed_details
+                }
             self._record_observation(
                 event_type=STRATEGY_OUTPUT_OBSERVED,
                 occurred_at=occurred_at,
                 symbol=state.symbol,
                 bucket_start=state.bucket_start,
-                details={
-                    "account_label": self._account_label,
-                    "strategy_config_hash": self._strategy_config_hash,
-                    **decision_details,
-                },
+                details=observed_details,
             )
 
     async def entry_filter_ready(
