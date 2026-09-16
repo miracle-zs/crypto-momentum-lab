@@ -231,6 +231,10 @@ async def test_operational_retention_uses_bounded_batches() -> None:
             self.calls.append(("runtime", batch_size))
             return 0
 
+        async def ensure_strategy_runtime_event_partitions(self) -> int:
+            self.calls.append(("event_partitions", 0))
+            return 0
+
     repository = RecordingRetention()
 
     await main.prune_operational_database_once(
@@ -238,7 +242,11 @@ async def test_operational_retention_uses_bounded_batches() -> None:
         now=datetime(2026, 6, 14, 11, 1, tzinfo=UTC),
     )
 
-    assert repository.calls == [("contract", 250), ("runtime", 250)]
+    assert repository.calls == [
+        ("contract", 250),
+        ("runtime", 250),
+        ("event_partitions", 0),
+    ]
 
 
 def test_run_market_data_uses_combined_service(

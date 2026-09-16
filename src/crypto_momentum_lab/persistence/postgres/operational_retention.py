@@ -19,6 +19,12 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_partitions import (
     ensure_runtime_state_partitions,
     runtime_state_table_is_partitioned,
 )
+from crypto_momentum_lab.persistence.postgres.strategy_runtime_event_partitions import (
+    EVENT_PARTITION_LOOKAHEAD,
+    drop_expired_event_partitions,
+    ensure_event_partitions,
+    event_table_is_partitioned,
+)
 
 _ACCOUNT_SNAPSHOT_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
@@ -172,6 +178,47 @@ class PostgresOperationalRetentionRepository:
             "bucket_start",
             before=before,
             batch_size=batch_size,
+        )
+
+    async def prune_strategy_runtime_events(
+        self,
+        *,
+        before: datetime,
+        batch_size: int = 1_000,
+    ) -> int:
+        """Drop or delete strategy runtime events outside the retention window.
+
+        Once the table is partitioned by day, whole partitions go away.  The
+        unpartitioned fallback is the small-batch delete used before the
+        cutover; keep it so a rolled-back deployment still ages out history.
+        """
+
+        if await event_table_is_partitioned(self._session_factory):
+            observed_at = datetime.now(UTC)
+            await ensure_event_partitions(
+                self._session_factory,
+                through=observed_at + EVENT_PARTITION_LOOKAHEAD,
+            )
+            return await drop_expired_event_partitions(
+                self._session_factory,
+                before=before,
+            )
+        return await self._delete_batch(
+            "strategy_runtime_events",
+            "occurred_at",
+            before=before,
+            batch_size=batch_size,
+        )
+
+    async def ensure_strategy_runtime_event_partitions(self) -> int:
+        """Create missing daily event partitions; no-op when unpartitioned."""
+
+        if not await event_table_is_partitioned(self._session_factory):
+            return 0
+        observed_at = datetime.now(UTC)
+        return await ensure_event_partitions(
+            self._session_factory,
+            through=observed_at + EVENT_PARTITION_LOOKAHEAD,
         )
 
     async def prune_account_snapshots(

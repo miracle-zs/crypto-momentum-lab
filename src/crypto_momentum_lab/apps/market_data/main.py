@@ -654,11 +654,15 @@ async def prune_operational_database_once(
         before=runtime_cutoff,
         batch_size=runtime_state_batch_size,
     )
-    if deleted_contracts or deleted_states:
+    # Keep tomorrow's event partitions present so live-strategy writers never
+    # miss a day boundary.  Deletion stays on the daily archive-and-trim job.
+    event_partitions_ensured = await repository.ensure_strategy_runtime_event_partitions()
+    if deleted_contracts or deleted_states or event_partitions_ensured:
         log.info(
             "operational_database_retention_pruned",
             contract_metadata_deleted=deleted_contracts,
             runtime_market_states_deleted=deleted_states,
+            event_partitions_ensured=event_partitions_ensured,
             contract_metadata_cutoff=contract_cutoff.isoformat(),
             runtime_state_cutoff=runtime_cutoff.isoformat(),
         )

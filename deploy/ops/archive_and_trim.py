@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -78,6 +78,50 @@ def _psql(sql: str, *, container: str, database: str, user: str) -> str:
 
 def _scalar(sql: str, **kw: str) -> str:
     return _psql(sql, **kw).splitlines()[0].strip()
+
+
+def _table_is_partitioned(table: str, **kw: str) -> bool:
+    value = _scalar(
+        "SELECT c.relkind = 'p' FROM pg_class c "
+        f"WHERE c.oid = to_regclass('{table}')",
+        **kw,
+    )
+    return value == "t"
+
+
+def _drop_expired_partitions(table: str, cutoff: date, **kw: str) -> int:
+    """Drop day partitions whose upper bound is on or before ``cutoff``.
+
+    Only the strategy-runtime-event table uses this path today.  Identifiers
+    come from the fixed prefix plus a YYYYMMDD token parsed out of the catalog.
+    """
+
+    rows = _psql(
+        "SELECT child.relname FROM pg_inherits i "
+        "JOIN pg_class parent ON parent.oid = i.inhparent "
+        "JOIN pg_class child ON child.oid = i.inhrelid "
+        "WHERE parent.oid = to_regclass('" + table + "') "
+        "AND child.relispartition ORDER BY child.relname",
+        **kw,
+    )
+    dropped = 0
+    for name in rows.splitlines():
+        name = name.strip()
+        if not name.startswith("strategy_runtime_events_p_"):
+            continue
+        day_token = name.removeprefix("strategy_runtime_events_p_")
+        if len(day_token) != 8 or not day_token.isdigit():
+            continue
+        partition_day = datetime.strptime(day_token, "%Y%m%d").replace(
+            tzinfo=UTC
+        ).date()
+        # A partition covers [day, day+1); it is fully outside the window
+        # once day+1 <= cutoff, i.e. day < cutoff.
+        if partition_day < cutoff:
+            _psql(f'DROP TABLE IF EXISTS "{name}"', **kw)
+            print(f"  dropped partition {name}")
+            dropped += 1
+    return dropped
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -166,6 +210,13 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         print(f"  manifest verified: {recorded} rows")
+
+        if table == "strategy_runtime_events" and _table_is_partitioned(
+            table, **db
+        ):
+            dropped = _drop_expired_partitions(table, cutoff, **db)
+            print(f"  dropped {dropped} expired partitions")
+            continue
 
         deleted = 0
         while True:
