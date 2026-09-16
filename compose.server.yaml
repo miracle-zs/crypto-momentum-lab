@@ -389,6 +389,11 @@ services:
 
   paper-orderflow-gainer10-pair:
     <<: *paper
+    # Retired 2026-09-16: it consumed ~84 MB of RAM and ~55 MB of swap on a
+    # 2C4G host that is chronically short of memory, for a research-only paper
+    # strategy.  Kept here for reference; the deployment script removes any
+    # container left over from before this profile was added.
+    profiles: ["retired-paper"]
     environment:
       <<: *app-environment
     command:

@@ -588,14 +588,17 @@ if [[ "$live_overlay_required" == 1 ]]; then
     --profile live
   )
 fi
-# Keep the active paper set explicit. The other paper services remain in the
-# Compose file under the retired-paper profile for historical reference, but
-# an update must remove any containers created before that profile was added.
-active_paper_services=(paper-orderflow-gainer10-pair)
+# No paper service is active any more: the last one was retired on 2026-09-16
+# because it held ~84 MB of RAM plus ~55 MB of swap on a host that is short of
+# memory, to run a research-only strategy.  Every paper service now lives under
+# the retired-paper profile, and an update must remove any container that was
+# created before it was moved there.
+active_paper_services=()
 retired_paper_services=(
   paper-orderflow-pair
   paper-b1-gainer100
   paper-b1-gainer100-ema
+  paper-orderflow-gainer10-pair
 )
 compose_project_name=crypto-momentum-lab
 deploy_phase=compose
