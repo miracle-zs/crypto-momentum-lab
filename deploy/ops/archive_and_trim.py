@@ -28,6 +28,10 @@ _ARCHIVE_ROOT = Path("/var/lib/crypto-momentum-lab/table-archive")
 _DEFAULT_CONTAINER = "crypto-momentum-lab-postgres-1"
 
 # table, time column -- the window is half-open [oldest, cutoff).
+# Order matters only for readability; each table is independent.  Deleting
+# universe_snapshots cascades to monitoring_memberships and leftover
+# universe_entries, so those child tables must be archived first when they
+# need their own copy (universe_entries already is).
 TABLES: tuple[tuple[str, str], ...] = (
     ("strategy_runtime_events", "occurred_at"),
     ("universe_entries", "price_time"),
@@ -40,6 +44,19 @@ TABLES: tuple[tuple[str, str], ...] = (
     # to 17 days / 144 MB (89 MB of that is TOAST holding six jsonb columns,
     # so archiving it stays on the JSONL path).
     ("live_strategy_signals", "recorded_at"),
+    # State-machine transitions for execution-account daemons.  Only the
+    # latest row per account is load-bearing; history is audit and had no
+    # retention (~12k rows/day, 24 MB and growing).
+    ("execution_account_process_states", "occurred_at"),
+    # Market-data quality diagnostics (jsonb -> JSONL archive).  Volume
+    # spikes with connection churn; without a window this table grows
+    # without bound.
+    ("market_data_quality_events", "occurred_at"),
+    # Parent of monitoring_memberships + universe_entries (both ON DELETE
+    # CASCADE).  Entries are archived above; deleting an old snapshot then
+    # drops its membership rows in one statement.  11k snapshots / 1M
+    # membership rows had accumulated from 2026-07-25 with no TTL.
+    ("universe_snapshots", "observed_at"),
 )
 
 
