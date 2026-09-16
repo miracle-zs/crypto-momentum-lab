@@ -701,6 +701,117 @@ async def test_capture_observer_tier_promotes_when_rank_improves() -> None:
     assert "S35USDT" in capture.calls[-1]
 
 
+async def test_capture_observer_backfills_when_t1_promotes_into_must_warm() -> None:
+    class FakeCapture:
+        async def apply_symbols(self, symbols, *, streams, generation) -> None:
+            return None
+
+    backfilled: list[frozenset[str]] = []
+
+    async def on_promoted(symbols: frozenset[str]) -> None:
+        backfilled.append(symbols)
+
+    observer = main.CaptureUniverseObserver(
+        FakeCapture(),
+        streams=(CaptureStream.AGG_TRADE,),
+        initial_generation=1,
+        full_stream_max_gainer_rank=30,
+        must_warm_max_gainer_rank=20,
+        on_trade_symbols_promoted=on_promoted,
+    )
+    first = fixture_tiered_snapshot()
+    # Move S15 out of the must-warm band so the next refresh is a real T1→T0.
+    first = replace(
+        first,
+        ranking=replace(
+            first.ranking,
+            gainers=tuple(
+                replace(entry, rank=25) if entry.symbol == "S15USDT" else entry
+                for entry in first.ranking.gainers
+            ),
+        ),
+    )
+    # First apply is startup: no promotion callback.
+    await observer.snapshot_updated(first)
+    assert backfilled == []
+
+    # S15 was already in the trade tier (rank 25).  Crossing into the
+    # must-warm band (rank <= 20) after only a few minutes must still
+    # REST-backfill even though the subscription set is unchanged.
+    promoted = replace(
+        first,
+        observed_at=first.observed_at + timedelta(minutes=5),
+        ranking=replace(
+            first.ranking,
+            gainers=tuple(
+                replace(entry, rank=5) if entry.symbol == "S15USDT" else entry
+                for entry in first.ranking.gainers
+            ),
+        ),
+    )
+    await observer.snapshot_updated(promoted)
+    await asyncio.sleep(0)
+    assert backfilled == [frozenset({"S15USDT"})]
+
+    # After the optimistic warm mark, the next refresh must not re-fetch.
+    await observer.snapshot_updated(
+        replace(
+            promoted,
+            observed_at=promoted.observed_at + timedelta(minutes=5),
+        )
+    )
+    await asyncio.sleep(0)
+    assert backfilled == [frozenset({"S15USDT"})]
+
+
+async def test_capture_observer_skips_backfill_after_full_trade_tier_residence() -> None:
+    class FakeCapture:
+        async def apply_symbols(self, symbols, *, streams, generation) -> None:
+            return None
+
+    backfilled: list[frozenset[str]] = []
+
+    async def on_promoted(symbols: frozenset[str]) -> None:
+        backfilled.append(symbols)
+
+    observer = main.CaptureUniverseObserver(
+        FakeCapture(),
+        streams=(CaptureStream.AGG_TRADE,),
+        initial_generation=1,
+        full_stream_max_gainer_rank=30,
+        must_warm_max_gainer_rank=20,
+        on_trade_symbols_promoted=on_promoted,
+    )
+    first = fixture_tiered_snapshot()
+    first = replace(
+        first,
+        ranking=replace(
+            first.ranking,
+            gainers=tuple(
+                replace(entry, rank=25) if entry.symbol == "S15USDT" else entry
+                for entry in first.ranking.gainers
+            ),
+        ),
+    )
+    await observer.snapshot_updated(first)
+
+    # 40 minutes later S15 has a full local window; T1→T0 needs no REST.
+    promoted = replace(
+        first,
+        observed_at=first.observed_at + timedelta(minutes=40),
+        ranking=replace(
+            first.ranking,
+            gainers=tuple(
+                replace(entry, rank=5) if entry.symbol == "S15USDT" else entry
+                for entry in first.ranking.gainers
+            ),
+        ),
+    )
+    await observer.snapshot_updated(promoted)
+    await asyncio.sleep(0)
+    assert backfilled == []
+
+
 async def test_capture_observer_keeps_open_position_symbols_subscribed() -> None:
     class FakeCapture:
         def __init__(self) -> None:
