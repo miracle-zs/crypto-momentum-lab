@@ -95,7 +95,7 @@ _SEVERITY_LABELS = {
 _ALERT_LABELS = {
     "container_missing": "服务容器缺失",
     "container_unhealthy": "服务健康检查失败",
-    "container_oom_killed": "服务被内存限制杀死",
+    "container_oom_killed": "服务触发 OOM 终止",
     "container_memory_high": "服务内存占用过高",
     "container_memory_growth": "服务内存趋势异常",
     "container_memory_pressure": "服务匿名内存被换出",
@@ -105,13 +105,13 @@ _ALERT_LABELS = {
     "rss_growth": "服务内存持续增长",
     "telemetry_persist_failure": "运行时遥测写入失败",
     "live_legacy_order_identity_conflict": "订单身份发生冲突",
-    "live_exit_processing_degraded": "平仓处理降级，仓位可能无法退出",
+    "live_exit_processing_degraded": "平仓处理降级",
     "market_task_not_alive": "行情连接任务无响应",
     "live_session_not_ready": "实时会话未就绪",
-    "live_checkpoint_stale": "实时状态 checkpoint 已过期",
+    "live_checkpoint_stale": "策略检查点过期",
     "live_account_lifecycle_not_ready": "账户生命周期未就绪",
-    "live_account_reconciliation_stale": "账户对账状态缺失、过期或失败",
-    "live_market_state_stale": "行情进度缺失或过期",
+    "live_account_reconciliation_stale": "账户对账状态失步",
+    "live_market_state_stale": "行情桶推进中断",
     "live_market_state_delay": "行情延迟过高",
     "live_signal_divergence": "账户信号发生分叉",
     "live_position_divergence": "账户持仓发生差异",
@@ -120,24 +120,24 @@ _ALERT_LABELS = {
     "database_check_failed": "数据库健康检查失败",
     "database_query_stats_unavailable": "数据库查询统计不可用",
     "database_io_timing_disabled": "数据库 I/O 耗时监控未开启",
-    "database_parallel_maintenance_enabled": "数据库并行维护超过护栏",
+    "database_parallel_maintenance_enabled": "数据库并行维护超限",
     "live_heartbeat_stale": "实时策略心跳过期",
-    "live_heartbeat_auto_restarted": "实时策略已触发自动重启",
+    "live_heartbeat_auto_restarted": "实时策略已自动重启",
     "live_heartbeat_restart_failed": "实时策略自动重启失败",
-    "live_heartbeat_restart_suppressed": "实时策略自动重启已达上限",
+    "live_heartbeat_restart_suppressed": "策略自愈超限熔断",
     "live_crash_log_archive_failed": "worker 崩溃日志归档失败",
     "ops_monitor_failed": "运维监控自身异常",
 }
 _ALERT_IMPACTS = {
     "container_missing": "对应服务未运行，相关功能不可用。",
-    "container_unhealthy": "对应服务可能无法正常处理其职责范围内的任务。",
-    "container_oom_killed": "对应服务已被系统终止，相关任务已中断。",
-    "container_memory_high": "服务可能出现性能下降，继续增长可能触发 OOM。",
+    "container_unhealthy": "容器健康检查探针持续超时，服务可能处于假死或无法正常响应状态。",
+    "container_oom_killed": "对应服务已被系统内核强制终止，相关任务已中断。",
+    "container_memory_high": "服务内存占用接近上限，继续增长可能触发 OOM 强杀。",
     "container_memory_growth": (
-        "服务内存相对趋势基线持续上升，需要确认缓存、查询和进程数量。"
+        "服务内存相对基线持续上升，需排查缓存泄漏与未释放连接。"
     ),
     "container_memory_pressure": (
-        "进程的匿名内存被换出到磁盘，再次访问需要读盘，服务响应可能因此变慢。"
+        "进程匿名内存被换出到磁盘，再次访问需要读盘，服务响应可能因此变慢。"
     ),
     "rss_growth": "服务内存持续增长，后续可能出现性能下降或 OOM。",
     "telemetry_persist_failure": "运行时诊断数据可能不完整，不代表交易一定已停止。",
@@ -181,70 +181,69 @@ _ALERT_IMPACTS = {
     "ops_monitor_failed": "监控自身可能无法继续发现新的异常。",
 }
 _ALERT_ACTIONS = {
-    "container_missing": "未自动修复，请检查 Compose 服务和容器状态。",
+    "container_missing": "检查 Docker Compose 编排状态与服务日志，确认服务退出原因并重新拉起。",
     "container_unhealthy": (
-        "已记录健康检查失败；若同时存在心跳告警，将由心跳恢复流程定向重启。"
+        "排查容器 recent logs 与 /health 端点响应耗时，确认服务是否假死或死锁。"
     ),
     "container_oom_killed": (
-        "未在此告警中自动处理，请检查内存占用、容器限制和最近日志。"
+        "调大容器内存限额或排查泄漏；核对 dmesg OOM 现场日志后重启服务。"
     ),
-    "container_memory_high": "当前未自动重启，请继续观察内存趋势并检查泄漏或缓存增长。",
+    "container_memory_high": "排查服务内部堆内存、缓存积压与未释放资源，必要时调大容器内存限额。",
     "container_memory_growth": (
-        "当前未自动重启，已改为等待连续趋势证据并保留内存压力详情。"
+        "分析进程内存增长趋势与慢查询，排查未关闭的连接池或缓存泄漏。"
     ),
     "container_memory_pressure": (
-        "当前未自动重启，请检查 swap 用量、容器内存限额和查询的内存占用。"
+        "若物理内存充足以观察为主；若持续换出且影响延迟，调大限额或排查冷页。"
     ),
-    "rss_growth": "当前未自动重启，请检查内存趋势和进程堆积情况。",
+    "rss_growth": "分析进程 RSS 内存增长趋势，排查连接泄漏与队列积压。",
     "telemetry_persist_failure": (
-        "已保留告警并继续运行，建议检查 PostgreSQL 延迟和连接池。"
+        "检查 PostgreSQL 慢查询、数据库连接池耗尽或遥测批量写入缓冲队列。"
     ),
     "live_legacy_order_identity_conflict": (
-        "请暂停相关排障范围内的自动处理并核对订单归属。"
+        "核对本地 client_order_id 与交易所 order_id 绑定关系，排查跨会话重复委托。"
     ),
     "live_exit_processing_degraded": (
-        "请核对退出订单的身份冲突与批次绑定，确认持仓能否安全平掉。"
+        "退出委托受阻；紧急核对交易所实际持仓，必要时在交易所后台手动干预平仓。"
     ),
-    "market_task_not_alive": "请检查行情连接、网络和策略进程；本告警不代表已自动恢复。",
+    "market_task_not_alive": "排查对应币种 WebSocket 任务心跳、宿主机网络延迟及交易所接口连通性。",
     "live_session_not_ready": (
-        "请检查实时会话、租约和 checkpoint；未确认安全前不要扩大交易范围。"
+        "暂停交易推进；排查分布式租约有效性、会话初始化状态及检查点完整性。"
     ),
-    "live_checkpoint_stale": "请检查 PostgreSQL、策略进程和 checkpoint 写入延迟。",
+    "live_checkpoint_stale": "排查策略持久化任务阻塞、数据库写入延迟或事务死锁等待。",
     "live_account_lifecycle_not_ready": (
-        "请检查 execution account 的状态转换、账户同步和 worker 日志。"
+        "检查账户状态机流转、API 凭据有效性及 strategy worker 启动状态。"
     ),
     "live_account_reconciliation_stale": (
-        "请检查交易所 REST 同步、成交回调和 account_reconciliation_runs。"
+        "排查交易所 REST API 限频、成交回报 WebSocket 回调及对账记录表。"
     ),
-    "live_market_state_stale": "请检查行情断流、缺桶、durable rewarm 和策略进程日志。",
-    "live_market_state_delay": "请检查行情连接、事件循环阻塞、数据库负载和网络延迟。",
+    "live_market_state_stale": "检查行情是否断流、是否存在缺桶及 durable rewarm 推进进度。",
+    "live_market_state_delay": "检查交易所网络往返延迟（RTT）、事件循环调度耗时及数据库写入排队。",
     "live_signal_divergence": (
-        "先暂停扩大仓位，核对告警列出的相关账户的 config hash、checkpoint、"
-        "行情桶和信号明细。"
+        "暂停扩仓；核对各账户策略配置差异、K 线数据新鲜度及近期事件循环日志。"
     ),
     "live_position_divergence": (
-        "先以交易所快照为准核对仓位，确认归属后再做补单或退出。"
+        "核对各账户交易所实际持仓快照，确认是否存在漏平仓；确认仓位前暂停扩仓。"
     ),
     "live_position_intent_divergence": (
-        "先暂停扩大仓位，逐账户核对 exchange_orders 的方向、数量与价格是否一致。"
+        "暂停扩仓；逐账户核对 exchange_orders 的委托方向、数量与价格是否一致。"
     ),
     "live_unknown_orders": (
-        "禁止重发同一意图；先按 client_order_id 查询交易所并完成人工或自动对账。"
+        "严禁重发相同订单；立即按 client_order_id 查交易所确认真实状态并对齐账目。"
     ),
     "live_consistency_check_failed": (
-        "请检查监控查询权限、PostgreSQL 连接和一致性查询耗时。"
+        "检查监控查询连接、一致性比对 SQL 耗时及数据库并发负载。"
     ),
-    "database_check_failed": "请检查 PostgreSQL 容器、连接和监控查询权限。",
-    "database_query_stats_unavailable": "请在低风险窗口启用 pg_stat_statements。",
-    "database_io_timing_disabled": "请核对 PostgreSQL 的 I/O timing 配置。",
+    "database_check_failed": "检查 PostgreSQL 进程存活、磁盘剩余空间及监控用户只读查询权限。",
+    "database_query_stats_unavailable": "在非交易活跃窗口于 postgresql.conf 启用 shared_preload_libraries='pg_stat_statements'。",
+    "database_io_timing_disabled": "在数据库配置中启用 track_io_timing = on，以支持磁盘 I/O 延迟定位。",
     "database_parallel_maintenance_enabled": (
-        "请核对维护参数，避免与实时交易查询争用资源。"
+        "将 max_parallel_maintenance_workers 调低至 0 或 1，防止维护任务争用 CPU。"
     ),
     "live_crash_log_archive_failed": (
-        "请检查 crash log 目录权限、磁盘空间和 Docker 日志读取权限。"
+        "检查 /var/log 目录写入权限、磁盘剩余空间及 Docker 日志输出。"
     ),
-    "live_heartbeat_stale": "已发现心跳过期；若自动恢复未启用，需要人工检查策略进程。",
-    "ops_monitor_failed": "请检查 cml-ops-monitor.service 和 journald 日志。",
+    "live_heartbeat_stale": "主事件循环已失联；核对是否正在自动重启，若未自愈请人工排查阻塞或崩溃日志。",
+    "ops_monitor_failed": "检查 cml-ops-monitor 自身运行日志与未捕获异常堆栈，必要时重启监控服务。",
 }
 _COMPOSE_SERVICE_HEADER = re.compile(
     r"^  (?P<service>[A-Za-z0-9][A-Za-z0-9_-]*):\s*$"
@@ -3537,16 +3536,18 @@ def _alert_action(alert_name: str, details: Mapping[str, object]) -> str:
     if base_name == "live_heartbeat_stale":
         attempt = details.get("attempt")
         if attempt:
-            return f"已触发定向重启（第 {attempt} 次），等待健康检查恢复。"
+            return f"已触发定向重启（第 {attempt} 次），等待健康检查与行情连接恢复。"
         restart_attempts = details.get("restart_attempts")
         if restart_attempts:
-            return "已触发过自动重启，目前正在等待冷却或健康检查恢复。"
+            return "已触发过自动重启，正在等待冷却或健康检查恢复。"
     if base_name == "live_heartbeat_auto_restarted":
-        return "已执行定向重启，目前等待健康检查恢复。"
+        attempt = details.get("attempt")
+        attempt_str = f"（第 {attempt} 次）" if attempt else ""
+        return f"已执行定向重启{attempt_str}，等待健康检查与行情连接恢复。"
     if base_name == "live_heartbeat_restart_failed":
-        return "自动重启失败，需要人工检查容器、日志和数据库。"
+        return "自愈重启执行异常；紧急检查 Compose 权限、端口占用或数据库连接状态。"
     if base_name == "live_heartbeat_restart_suppressed":
-        return "已达到自动重启上限，不再继续重启，需要人工处理。"
+        return "连续自愈失败已触发熔断保护；必须立即登录主机排查崩溃根因后手动恢复。"
     if base_name == "live_position_intent_divergence":
         differences = details.get("differences")
         if isinstance(differences, Sequence) and differences:
@@ -3567,13 +3568,12 @@ def _alert_action(alert_name: str, details: Mapping[str, object]) -> str:
                     "持仓上限、对账状态或风控阻断原因；确认前暂停扩大仓位。"
                 )
         return (
-            "检测到同配置账户下单参数分歧，请核对各账户 exchange_orders 的"
-            "方向、数量与委托价格；确认前暂停扩大仓位。"
+            "同配置账户下单参数分歧，请核对各账户委托方向、"
+            "数量与价格；排查完毕前暂停扩仓。"
         )
     if base_name == "live_position_divergence":
         return (
-            "优先核对各账户在交易所的实际持仓快照，确认是否存在漏平仓或未成交；"
-            "在确认仓位归属前暂停扩大仓位。"
+            "核对各账户交易所实际持仓快照，确认是否存在漏平仓；确认仓位前暂停扩仓。"
         )
     if base_name == "live_signal_divergence":
         return (
@@ -3593,9 +3593,9 @@ def _alert_action(alert_name: str, details: Mapping[str, object]) -> str:
     if base_name == "live_market_state_delay":
         delay = details.get("delay_ms")
         delay_str = f"（当前 {delay:.0f}ms）" if isinstance(delay, (int, float)) else ""
-        return f"行情延迟过高{delay_str}，请检查主机到交易所网络连通性及数据库并发负载。"
+        return f"行情延迟过高{delay_str}，检查交易所网络往返延迟（RTT）及数据库写入排队。"
     if base_name == "live_unknown_orders":
-        return "禁止重发同一订单意图；请先按 client_order_id 查询交易所并完成账目对齐。"
+        return "严禁重发相同订单；立即按 client_order_id 查交易所确认真实状态并对齐账目。"
     return _ALERT_ACTIONS.get(
         base_name,
         "已记录告警，建议结合技术详情检查相关服务。",
@@ -4081,17 +4081,17 @@ def _alert_conclusion(
     if base_name == "live_signal_divergence":
         return "同配置账户信号指纹不一致，**策略计算已失步**。"
     if base_name in ("container_oom_killed",):
-        return "容器超出内存限制配额，**已被系统 OOM Killer 强行终止**。"
+        return "容器超出内存限制配额，**已被系统内核强制终止**。"
     if base_name in ("container_missing",):
         return "核心服务容器未运行或已异常退出，**相关功能已中断**。"
     if base_name in ("container_unhealthy",):
-        return "容器健康检查持续失败，**服务可能处于假死或无法正常响应状态**。"
+        return "容器健康检查持续失败，**服务可能处于假死或死锁状态**。"
     if base_name == "live_market_state_delay":
         delay = details.get("delay_ms")
         delay_str = f"（当前 {delay:.0f}ms）" if isinstance(delay, (int, float)) else ""
         return f"行情接收严重滞后{delay_str}，**存在信号失效与成交滑点风险**。"
     if base_name == "live_market_state_stale":
-        return "行情数据推进中断，**策略已暂停基于实时 K 线的开平仓计算**。"
+        return "行情数据推进中断，**策略已暂停基于实时 K 线的交易计算**。"
     if base_name == "live_checkpoint_stale":
         return "策略持久化状态已过期，**若发生异常退出可能丢失最新运行时状态**。"
     if base_name == "live_session_not_ready":
@@ -4109,11 +4109,11 @@ def _alert_conclusion(
         cnt_str = f"（共 {cnt} 笔）" if cnt else ""
         return f"发现未确认在途订单{cnt_str}，**本地与交易所订单失步，严禁盲目重发**。"
     if base_name == "market_task_not_alive":
-        return "行情 WebSocket 连接任务挂死，**部分币种实时行情已断开**。"
+        return "行情 WebSocket 连接任务挂死，**部分币种实时行情已中断**。"
     if base_name == "telemetry_persist_failure":
         return "数据库遥测批次批量落库失败，**监控与运行诊断数据存在丢失风险**。"
     if base_name == "live_legacy_order_identity_conflict":
-        return "检测到本地订单 ID 重复关联交易所订单，**订单生命周期可能冲突**。"
+        return "检测到本地订单 ID 重复关联交易所订单，**订单生命周期冲突**。"
     if base_name == "live_heartbeat_stale":
         age = details.get("heartbeat_age_seconds")
         age_str = f"（已失联 {age:.0f} 秒）" if isinstance(age, (int, float)) else ""
@@ -4125,7 +4125,7 @@ def _alert_conclusion(
     if base_name == "live_heartbeat_restart_failed":
         return "策略自动重启自愈执行失败，**需要紧急人工介入排查**。"
     if base_name == "live_heartbeat_restart_suppressed":
-        return "策略连续自动重启已达上限，**自愈保护熔断，已暂停自动重启**。"
+        return "策略连续自动重启已达上限，**自愈保护熔断，交易已挂起**。"
     if base_name == "live_crash_log_archive_failed":
         return "策略崩溃日志转储失败，**重启前现场日志可能未完整留存**。"
     if base_name == "database_check_failed":

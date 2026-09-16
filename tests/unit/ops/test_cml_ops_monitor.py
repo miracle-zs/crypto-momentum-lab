@@ -17,6 +17,7 @@ from deploy.ops.cml_ops_monitor import (
     OrderIntentObservation,
     PositionObservation,
     SignalObservation,
+    _ALERT_LABELS,
     _alert_action,
     _alert_scope,
     _deliver_external_heartbeat,
@@ -2172,3 +2173,16 @@ def test_serverchan_title_compact_preserves_long_symbol() -> None:
     t3 = _serverchan_title("严重", "1000PEPEUSDT", "账户信号发生分叉")
     assert t3 == "CML[严重] 1000PEPEUSDT | 账户信号发生分叉"
     assert len(t3) <= 32
+
+
+def test_all_alert_labels_fit_in_serverchan_title() -> None:
+    for name, label in _ALERT_LABELS.items():
+        # Test with primary scope
+        title = _serverchan_title("严重", "primary", label)
+        assert len(title) <= 32, f"Alert {name} label '{label}' title too long: {title} ({len(title)} chars)"
+        # Test with no scope
+        title_no_scope = _serverchan_title("严重", None, label)
+        assert len(title_no_scope) <= 32, f"Alert {name} label '{label}' title without scope too long: {title_no_scope} ({len(title_no_scope)} chars)"
+        # Test with recovery
+        title_rec = _serverchan_title("恢复", "primary", label)
+        assert len(title_rec) <= 32, f"Alert {name} label '{label}' recovery title too long: {title_rec} ({len(title_rec)} chars)"
