@@ -796,9 +796,15 @@ class ExecutionAccountSyncService:
         details: dict[str, JsonValue] = {}
         if source is not None:
             details["source"] = source
+        # Same sparsify rule as snapshot_once / user-data persist: the in-memory
+        # snapshot keeps every asset, but durable history only stores non-zero
+        # balances and the zero that closes a previously non-zero asset.
+        # persist_reconciliation_result is the daemon's main write path and had
+        # been inserting the full multi-asset zero set every cycle.
+        persisted_balances = self._balances_to_persist(snapshot.balances)
         await self._repository.save_reconciliation_snapshot(
             config=snapshot.config,
-            balances=snapshot.balances,
+            balances=persisted_balances,
             positions=snapshot.positions,
             open_orders=snapshot.open_orders,
             fills=result.fills,
@@ -808,7 +814,7 @@ class ExecutionAccountSyncService:
                 status="ready",
                 mismatch_count=result.mismatch_count,
                 details=details,
-                balance_count=len(snapshot.balances),
+                balance_count=len(persisted_balances),
                 position_count=len(snapshot.positions),
                 open_order_count=len(snapshot.open_orders),
                 fill_count=result.fill_count,

@@ -156,7 +156,9 @@ async def test_sync_once_persists_snapshot_and_ready_state() -> None:
 
     assert result.status is ExecutionAccountStatus.READY_READONLY
     assert repository.snapshot_calls == 1
-    assert len(repository.balances) == 2
+    # Only the non-zero USDT balance is durable; the all-zero BNB row is
+    # kept in the in-memory snapshot but not written every cycle.
+    assert [item.asset for item in repository.balances] == ["USDT"]
     assert repository.process_states[-1].state is ExecutionAccountStatus.READY_READONLY
     assert repository.reconciliation_runs[-1].status == "ready"
     assert repository.reconciliation_runs[-1].details == {
@@ -185,10 +187,32 @@ async def test_realtime_sync_publishes_before_durable_persistence() -> None:
     )
 
     assert repository.snapshot_calls == 1
+    assert [item.asset for item in repository.balances] == ["USDT"]
     assert repository.process_states[-1].state is ExecutionAccountStatus.READY_READONLY
     assert repository.reconciliation_runs[-1].details == {
         "source": "rest_reconciliation"
     }
+    assert repository.reconciliation_runs[-1].balance_count == 1
+
+
+async def test_persist_reconciliation_result_skips_repeated_zero_balances() -> None:
+    repository = FakeRepository()
+    service = ExecutionAccountSyncService(
+        client=FakeClient(),
+        repository=repository,
+        config=_config(),
+    )
+
+    first = await service.sync_once_for_realtime()
+    await service.persist_reconciliation_result(first)
+    assert [item.asset for item in repository.balances] == ["USDT"]
+
+    second = await service.sync_once_for_realtime()
+    await service.persist_reconciliation_result(second)
+    # Unchanged USDT still refreshes the equity series; BNB stays zero and
+    # is not re-inserted.
+    assert [item.asset for item in repository.balances] == ["USDT", "USDT"]
+    assert all(item.asset == "USDT" for item in repository.balances)
 
 
 async def test_sync_tracks_incremental_fill_keys_and_baselines_new_symbols() -> None:
@@ -284,11 +308,8 @@ async def test_user_data_event_persists_merged_snapshot() -> None:
 
     assert result.status is ExecutionAccountStatus.READY_READONLY
     assert repository.snapshot_calls == 2
-    assert [item.asset for item in repository.balances] == [
-        "USDT",
-        "BNB",
-        "USDT",
-    ]
+    # BNB stays all-zero across both writes and is never durable.
+    assert [item.asset for item in repository.balances] == ["USDT", "USDT"]
     assert repository.configs[-1].observed_at == initial.snapshot.config.observed_at
     assert repository.configs[-1].observed_at != event.received_at
     assert repository.configs[-1].raw_payload == {
