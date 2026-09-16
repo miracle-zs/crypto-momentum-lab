@@ -368,6 +368,12 @@ class ClosedMarketStatePublisher:
                         symbol_key,
                         None,
                     )
+            # Drop the materialization fallback for symbols that left the
+            # dense set.  A later re-entry is a new baseline, not a gap, so a
+            # stale last state would be misleading as well as unbounded.
+            for symbol_key in tuple(self._last_state_by_symbol):
+                if symbol_key[1] in removed_symbols:
+                    self._last_state_by_symbol.pop(symbol_key, None)
         self._expected_symbols = expected_symbols
 
     def consume_pending_entry_symbols(self) -> frozenset[str]:

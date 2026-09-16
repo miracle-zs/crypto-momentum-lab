@@ -69,6 +69,31 @@ async def test_publisher_closes_only_buckets_behind_watermark() -> None:
     assert publisher.metrics.closed_state_count == 2
 
 
+async def test_set_expected_symbols_drops_last_state_for_removed_symbols() -> None:
+    repository = FakeRuntimeStateRepository()
+    publisher = ClosedMarketStatePublisher(
+        repository=repository,
+        config=ClosedMarketStatePublisherConfig(closure_delay_seconds=15),
+    )
+    publisher.set_expected_symbols(frozenset({"BTCUSDT", "ETHUSDT"}))
+
+    await publisher.observe(fixture_trade(0, price="100", sequence=1))
+    await publisher.observe(
+        fixture_trade(0, price="200", sequence=2, symbol="ETHUSDT")
+    )
+    await publisher.observe(fixture_trade(3, price="101", sequence=3))
+
+    assert ("research", "ETHUSDT") in publisher._last_state_by_symbol
+
+    publisher.set_expected_symbols(frozenset({"BTCUSDT"}))
+
+    assert ("research", "ETHUSDT") not in publisher._last_state_by_symbol
+    assert ("research", "BTCUSDT") in publisher._last_state_by_symbol
+    assert ("research", "ETHUSDT") not in (
+        publisher._last_materialized_bucket_by_symbol
+    )
+
+
 async def test_publisher_materializes_empty_bucket_for_expected_quiet_symbol() -> None:
     repository = FakeRuntimeStateRepository()
     publisher = ClosedMarketStatePublisher(
