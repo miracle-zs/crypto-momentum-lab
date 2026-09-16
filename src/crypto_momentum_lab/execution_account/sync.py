@@ -29,6 +29,10 @@ _FILL_KEY_CACHE_SIZE = 8192
 _FILL_FETCH_OVERLAP_MS = 60_000
 _NEW_POSITION_FILL_LOOKBACK = timedelta(minutes=30)
 _DEFAULT_HISTORICAL_FILL_RECONCILIATION_BATCH_SIZE = 10
+# Dashboard and ops-monitor only need a fresh enough "still ready" sample.
+# Writing every ~30s heartbeat produced ~12k identical ready_readonly rows
+# per day per account; refresh the same state on this cadence instead.
+_PROCESS_STATE_REFRESH = timedelta(minutes=5)
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,6 +457,8 @@ class ExecutionAccountSyncService:
         self._has_completed_sync = False
         self._latest_observation_at: datetime | None = None
         self._latest_rest_account_config: AccountConfigSnapshot | None = None
+        self._last_persisted_process_state: ExecutionAccountStatus | None = None
+        self._last_persisted_process_state_at: datetime | None = None
 
     async def snapshot_once(self, *, observed_at: datetime | None = None) -> None:
         """Persist a lightweight balance/position observation.
@@ -996,15 +1002,28 @@ class ExecutionAccountSyncService:
         config: ExecutionAccountSyncConfig | None = None,
     ) -> None:
         resolved_config = config or self._config
+        observed_at = resolved_config.observed_at
+        # Persist every state transition.  Re-persist the same state only
+        # after the refresh window so "latest row" age checks stay meaningful
+        # without writing a heartbeat every poll.
+        if (
+            state == self._last_persisted_process_state
+            and self._last_persisted_process_state_at is not None
+            and observed_at - self._last_persisted_process_state_at
+            < _PROCESS_STATE_REFRESH
+        ):
+            return
         await self._repository.save_process_state(
             ExecutionAccountProcessState(
                 environment=resolved_config.environment,
                 account_label=resolved_config.account_label,
                 state=state,
-                occurred_at=resolved_config.observed_at,
+                occurred_at=observed_at,
                 reason=reason,
             )
         )
+        self._last_persisted_process_state = state
+        self._last_persisted_process_state_at = observed_at
 
 
 def _balance_value(balance: AccountBalanceSnapshot) -> BalanceValue:

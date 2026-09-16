@@ -1,5 +1,5 @@
 from collections.abc import Iterable
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from time import monotonic
 
 import structlog
@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from crypto_momentum_lab.domain.market.models import (
     ArchiveManifest,
     MarketDataState,
+    QualityCategory,
     QualityEvent,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
@@ -22,6 +23,18 @@ log = structlog.get_logger()
 
 # The observability budgets are 1s; only surface calls that get close.
 _SLOW_OBSERVABILITY_CALL_SECONDS = 0.5
+# reconnect_gap / sequence_gap fire per symbol after a blip and dominated
+# the quality table.  Keep the first sample per (category, stream) in a
+# window; connection lifecycle and silence stay dense on purpose.
+_THROTTLED_QUALITY_CATEGORIES = frozenset(
+    {
+        QualityCategory.RECONNECT_GAP,
+        QualityCategory.SEQUENCE_GAP,
+        QualityCategory.DUPLICATE,
+        QualityCategory.EVENT_TIME_REGRESSION,
+    }
+)
+_QUALITY_THROTTLE_WINDOW = timedelta(minutes=5)
 
 
 class PostgresCaptureRepository:
@@ -30,6 +43,7 @@ class PostgresCaptureRepository:
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         self._session_factory = session_factory
+        self._quality_last_persisted_at: dict[tuple[str, str], datetime] = {}
 
     async def save_manifest(self, manifest: ArchiveManifest) -> None:
         # The observability pool holds a single connection and both its pool and
@@ -108,7 +122,10 @@ class PostgresCaptureRepository:
         self,
         events: Iterable[QualityEvent],
     ) -> None:
-        values = tuple(_quality_values(event) for event in events)
+        values = tuple(
+            _quality_values(event)
+            for event in self._throttle_quality_events(events)
+        )
         if not values:
             return
         statement = insert(MarketDataQualityEventRow).values(
@@ -120,6 +137,27 @@ class PostgresCaptureRepository:
         async with self._session_factory() as session:
             async with session.begin():
                 await session.execute(statement)
+
+    def _throttle_quality_events(
+        self,
+        events: Iterable[QualityEvent],
+    ) -> list[QualityEvent]:
+        kept: list[QualityEvent] = []
+        for event in events:
+            if event.category not in _THROTTLED_QUALITY_CATEGORIES:
+                kept.append(event)
+                continue
+            stream = event.stream.value if event.stream is not None else "_"
+            key = (event.category.value, stream)
+            occurred_at = event.occurred_at
+            if occurred_at.tzinfo is None:
+                occurred_at = occurred_at.replace(tzinfo=UTC)
+            last = self._quality_last_persisted_at.get(key)
+            if last is not None and occurred_at - last < _QUALITY_THROTTLE_WINDOW:
+                continue
+            self._quality_last_persisted_at[key] = occurred_at
+            kept.append(event)
+        return kept
 
     async def save_process_state(
         self,
