@@ -11,7 +11,12 @@ WorkingDirectory=/opt/crypto-momentum-lab
 # Archives the exact range about to be dropped and verifies the manifest's row
 # count before deleting, so a failure here leaves the rows in place rather than
 # destroying the only copy.  See deploy/ops/archive_and_trim.py.
-ExecStart=/usr/bin/python3 /opt/crypto-momentum-lab/deploy/ops/archive_and_trim.py --retention-days 2
+#
+# One day is enough for the live table: ops-monitor only looks back 5 minutes
+# at strategy_output_observed, and dashboard Decision SLO reads the sparse
+# order-lifecycle types (not the empty heartbeats).  Longer history lives in
+# /var/lib/crypto-momentum-lab/table-archive.
+ExecStart=/usr/bin/python3 /opt/crypto-momentum-lab/deploy/ops/archive_and_trim.py --retention-days 1
 NoNewPrivileges=true
 PrivateTmp=true
 
