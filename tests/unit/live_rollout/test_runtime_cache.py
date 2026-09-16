@@ -72,9 +72,7 @@ def test_runtime_cache_maintains_protection_set_and_interval() -> None:
         "COOLDOWN",
     }
     assert strategy.protected == frozenset(expected)
-    assert telemetry.protected == frozenset(expected)
     assert strategy.prune_calls == 1
-    assert telemetry.prune_calls == 1
 
     maintenance.prune(
         now=NOW + timedelta(seconds=30),
@@ -87,7 +85,6 @@ def test_runtime_cache_maintains_protection_set_and_interval() -> None:
         current_symbol="solusdt",
     )
     assert strategy.prune_calls == 2
-    assert telemetry.prune_calls == 2
 
 
 def test_runtime_cache_logs_memory_and_cache_snapshot() -> None:
@@ -138,4 +135,4 @@ def test_runtime_cache_logs_memory_and_cache_snapshot() -> None:
     assert fields["tracemalloc_peak_bytes"] == 300
     assert fields["buffered_symbol_count"] == 3
     assert fields["buffered_state_count"] == 12
-    assert fields["telemetry_sample_series_count"] == 7
+    assert "telemetry_sample_series_count" not in fields

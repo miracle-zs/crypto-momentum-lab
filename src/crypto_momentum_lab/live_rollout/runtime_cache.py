@@ -17,7 +17,6 @@ log = structlog.get_logger()
 
 _CACHE_MAINTENANCE_INTERVAL = timedelta(minutes=1)
 _STRATEGY_CACHE_INACTIVE_AFTER = timedelta(minutes=15)
-_TELEMETRY_CACHE_INACTIVE_AFTER = timedelta(hours=1)
 
 
 class LiveRuntimeCacheMaintenance:
@@ -104,19 +103,6 @@ class LiveRuntimeCacheMaintenance:
             )
 
         evicted_telemetry_series = 0
-        if self._telemetry is not None:
-            telemetry_prune = getattr(
-                self._telemetry,
-                "prune_inactive_symbols",
-                None,
-            )
-            if callable(telemetry_prune):
-                evicted_telemetry_series = telemetry_prune(
-                    now=now,
-                    protected_symbols=protected_symbols,
-                    inactive_after=_TELEMETRY_CACHE_INACTIVE_AFTER,
-                )
-
         self._last_maintenance_at = now
         log.info(
             "live_runtime_memory_snapshot",
@@ -126,7 +112,6 @@ class LiveRuntimeCacheMaintenance:
             **tracemalloc_memory_snapshot(),
             protected_symbol_count=len(protected_symbols),
             evicted_strategy_symbols=len(evicted_strategy_symbols),
-            evicted_telemetry_series=evicted_telemetry_series,
             buffered_symbol_count=getattr(
                 self._strategy,
                 "buffered_symbol_count",
@@ -137,23 +122,13 @@ class LiveRuntimeCacheMaintenance:
                 "buffered_state_count",
                 None,
             ),
-            telemetry_sample_series_count=(
-                None
-                if self._telemetry is None
-                else getattr(
-                    self._telemetry,
-                    "sample_series_count",
-                    None,
-                )
-            ),
         )
-        if evicted_strategy_symbols or evicted_telemetry_series:
+        if evicted_strategy_symbols:
             log.info(
                 "live_runtime_cache_pruned",
                 run_id=self._run_id,
                 protected_symbol_count=len(protected_symbols),
                 evicted_strategy_symbols=len(evicted_strategy_symbols),
-                evicted_telemetry_series=evicted_telemetry_series,
                 buffered_symbol_count=getattr(
                     self._strategy,
                     "buffered_symbol_count",
@@ -163,15 +138,6 @@ class LiveRuntimeCacheMaintenance:
                     self._strategy,
                     "buffered_state_count",
                     None,
-                ),
-                telemetry_sample_series_count=(
-                    None
-                    if self._telemetry is None
-                    else getattr(
-                        self._telemetry,
-                        "sample_series_count",
-                        None,
-                    )
                 ),
             )
 

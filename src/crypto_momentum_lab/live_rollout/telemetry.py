@@ -10,7 +10,7 @@ turning telemetry into another reason to stop submitting or closing orders.
 import asyncio
 import hashlib
 import json
-from collections import defaultdict, deque
+from collections import deque
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta
@@ -490,7 +490,6 @@ class LiveRuntimeTelemetry:
         persist_exchange_operations: Collection[str] | None = None,
         queue_size: int = 4096,
         max_trace_count: int = 8192,
-        max_samples_per_metric: int = 4096,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
@@ -498,8 +497,6 @@ class LiveRuntimeTelemetry:
             raise ValueError("queue_size must be positive")
         if max_trace_count <= 0:
             raise ValueError("max_trace_count must be positive")
-        if max_samples_per_metric <= 0:
-            raise ValueError("max_samples_per_metric must be positive")
         if account_label is not None and not account_label.strip():
             raise ValueError("account_label must not be empty when present")
         if strategy_config_hash is not None and not strategy_config_hash.strip():
@@ -522,7 +519,6 @@ class LiveRuntimeTelemetry:
         )
         self._queue_size = queue_size
         self._max_trace_count = max_trace_count
-        self._max_samples_per_metric = max_samples_per_metric
         self._queue: asyncio.Queue[LiveRuntimeEvent | None] | None = None
         self._writer_task: asyncio.Task[None] | None = None
         self._traces: dict[str, _Trace] = {}
@@ -531,10 +527,6 @@ class LiveRuntimeTelemetry:
         self._order_trace_by_client: dict[str, str] = {}
         self._order_lane_by_client: dict[str, str] = {}
         self._order_clients: deque[str] = deque()
-        self._samples: dict[tuple[str, str, str], deque[float]] = defaultdict(
-            lambda: deque(maxlen=self._max_samples_per_metric)
-        )
-        self._sample_last_seen: dict[tuple[str, str, str], datetime] = {}
         self._recent_events: deque[LiveRuntimeEvent] = deque(maxlen=queue_size)
         # Keep the production-facing aggregate intentionally low-cardinality:
         # lane, trigger source and terminal reason only.  Source ids and
@@ -562,49 +554,6 @@ class LiveRuntimeTelemetry:
     @property
     def recent_events(self) -> tuple[LiveRuntimeEvent, ...]:
         return tuple(self._recent_events)
-
-    @property
-    def sample_series_count(self) -> int:
-        return len(self._samples)
-
-    @property
-    def sample_count(self) -> int:
-        return sum(len(values) for values in self._samples.values())
-
-    def prune_inactive_symbols(
-        self,
-        *,
-        now: datetime,
-        protected_symbols: Collection[str] = (),
-        inactive_after: timedelta = timedelta(hours=1),
-    ) -> int:
-        """Drop latency sample series for symbols that are no longer active.
-
-        Recent events and in-flight traces remain untouched.  Telemetry is an
-        observational cache, so dropping an old sample series must never alter
-        the live decision or order path.  The caller supplies the account and
-        universe protection set; active series keep their existing sample
-        window rather than being forced through a global byte limit.
-        """
-
-        _require_aware(now, "now")
-        if inactive_after <= timedelta(0):
-            raise ValueError("inactive_after must be positive")
-        protected = {
-            symbol.strip().upper()
-            for symbol in protected_symbols
-            if symbol.strip()
-        }
-        cutoff = now - inactive_after
-        stale_keys = tuple(
-            key
-            for key, last_seen in self._sample_last_seen.items()
-            if key[0].strip().upper() not in protected and last_seen < cutoff
-        )
-        for key in stale_keys:
-            self._samples.pop(key, None)
-            self._sample_last_seen.pop(key, None)
-        return len(stale_keys)
 
     def _trace_id_for_ingress(
         self,
@@ -662,7 +611,6 @@ class LiveRuntimeTelemetry:
                 if self._persist_exchange_operations is None
                 else sorted(self._persist_exchange_operations)
             ),
-            latency_summary=self.latency_summary(),
             terminal_reason_summary=self.terminal_reason_summary(),
         )
 
@@ -1206,21 +1154,6 @@ class LiveRuntimeTelemetry:
                 f"{'request' if is_request else 'response'}"
             ),
         )
-        if (
-            not is_request
-            and request_started_at is not None
-            and occurred_at >= request_started_at
-        ):
-            self._add_sample(
-                symbol=plan.symbol,
-                lane=lane,
-                transition=(
-                    f"{operation}_request_started->"
-                    f"{operation}_response_received"
-                ),
-                value=(occurred_at - request_started_at).total_seconds() * 1000,
-                occurred_at=occurred_at,
-            )
 
     async def account_fill(
         self,
@@ -1293,25 +1226,6 @@ class LiveRuntimeTelemetry:
         self._recent_events.append(event)
         self._enqueue(event)
 
-    def latency_summary(
-        self,
-    ) -> dict[str, dict[str, dict[str, dict[str, float | int]]]]:
-        summary: dict[
-            str,
-            dict[str, dict[str, dict[str, float | int]]],
-        ] = {}
-        for (symbol, lane, transition), values in sorted(self._samples.items()):
-            symbol_summary = summary.setdefault(symbol, {})
-            lane_summary = symbol_summary.setdefault(lane, {})
-            sorted_values = sorted(values)
-            lane_summary[transition] = {
-                "count": len(sorted_values),
-                "p50_ms": _percentile(sorted_values, 0.50),
-                "p95_ms": _percentile(sorted_values, 0.95),
-                "max_ms": sorted_values[-1],
-            }
-        return summary
-
     def terminal_reason_summary(self) -> TerminalReasonSummary:
         """Return a detached run-scoped count by lane, source and reason.
 
@@ -1378,33 +1292,14 @@ class LiveRuntimeTelemetry:
                 delta_ms = (occurred_at - previous_at).total_seconds() * 1000
                 event_details["previous_phase"] = previous_phase
                 event_details["latency_ms_from_previous"] = delta_ms
-                if delta_ms >= 0 and (
-                    phase not in trace.phase_at or phase in _REPEATABLE_PHASES
-                ):
-                    self._add_sample(
-                        symbol=symbol or trace.symbol or "UNKNOWN",
-                        lane=lane,
-                        transition=f"{previous_phase}->{phase}",
-                        value=delta_ms,
-                        occurred_at=occurred_at,
-                    )
             if (
                 MARKET_STATE_RECEIVED in trace.phase_at
                 and phase != MARKET_STATE_RECEIVED
-                and (phase not in trace.phase_at or phase in _REPEATABLE_PHASES)
             ):
                 origin_delta_ms = (
                     occurred_at - trace.phase_at[MARKET_STATE_RECEIVED]
                 ).total_seconds() * 1000
                 event_details["latency_ms_from_market_state"] = origin_delta_ms
-                if origin_delta_ms >= 0:
-                    self._add_sample(
-                        symbol=symbol or trace.symbol or "UNKNOWN",
-                        lane=lane,
-                        transition=f"{MARKET_STATE_RECEIVED}->{phase}",
-                        value=origin_delta_ms,
-                        occurred_at=occurred_at,
-                    )
         if update_phase and (
             phase not in trace.phase_at or phase in _REPEATABLE_PHASES
         ):
@@ -1476,20 +1371,6 @@ class LiveRuntimeTelemetry:
         while len(self._traces) > self._max_trace_count:
             oldest = next(iter(self._traces))
             self._traces.pop(oldest, None)
-
-    def _add_sample(
-        self,
-        *,
-        symbol: str,
-        lane: str,
-        transition: str,
-        value: float,
-        occurred_at: datetime,
-    ) -> None:
-        _require_aware(occurred_at, "occurred_at")
-        key = (symbol, lane, transition)
-        self._samples[key].append(value)
-        self._sample_last_seen[key] = occurred_at
 
     def _enqueue(self, event: LiveRuntimeEvent) -> None:
         if self._queue is None:
@@ -1588,16 +1469,6 @@ def _previous_phase(phase: str, phase_at: Mapping[str, datetime]) -> str | None:
         if previous in phase_at:
             return previous
     return None
-
-
-def _percentile(values: list[float], percentile: float) -> float:
-    position = (len(values) - 1) * percentile
-    lower_index = int(position)
-    upper_index = min(lower_index + 1, len(values) - 1)
-    weight = position - lower_index
-    return values[lower_index] + (
-        values[upper_index] - values[lower_index]
-    ) * weight
 
 
 def _required_text(value: object, field_name: str) -> str:

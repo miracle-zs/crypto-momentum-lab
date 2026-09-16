@@ -120,17 +120,13 @@ async def test_live_telemetry_rolls_up_phase_latency_by_symbol_and_lane() -> Non
         occurred_at=start + timedelta(seconds=8),
     )
 
-    summary = telemetry.latency_summary()["BTCUSDT"]["entry"]
-
-    assert summary["intent_saved->submitting"]["p50_ms"] == 1000
-    assert summary["submitting->exchange_request_started"]["p50_ms"] == 100
-    assert summary["exchange_request_started->exchange_response_received"][
-        "p95_ms"
-    ] == 900
-    assert summary["exchange_response_received->exchange_filled"][
-        "p95_ms"
-    ] == 1000
-    assert summary["exchange_filled->account_fill"]["max_ms"] == 1000
+    # Derived latencies still land on event details for the dashboard path;
+    # the in-process 4096-sample deques were removed to save process memory.
+    assert any(
+        "latency_ms_from_previous" in event.details
+        or "decision_slo_latency_ms" in event.details
+        for event in telemetry.recent_events
+    )
 
 
 async def test_live_telemetry_persists_events_in_batches_without_blocking_records(
@@ -585,12 +581,6 @@ async def test_exchange_latency_pairs_each_operation_attempt() -> None:
     assert cancel_response.details["request_started_at"] == cancel_started.isoformat()
     assert cancel_response.details["latency_ms_from_request"] == 30.0
     assert "latency_ms_from_previous" not in cancel_response.details
-    assert (
-        telemetry.latency_summary()["BTCUSDT"]["entry"][
-            "cancel_request_started->cancel_response_received"
-        ]["p50_ms"]
-        == 30.0
-    )
 
 
 async def test_exchange_persistence_allowlist_keeps_submit_and_cancel_audit(
@@ -728,35 +718,6 @@ async def test_high_frequency_telemetry_stays_in_memory_when_not_persisted() -> 
     assert batches == []
     assert telemetry.recorded_event_count == 3
     assert telemetry.persist_failure_count == 0
-
-
-def test_live_telemetry_prunes_only_inactive_unprotected_series() -> None:
-    telemetry = LiveRuntimeTelemetry(run_id="run-1")
-    old = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
-    telemetry._add_sample(
-        symbol="BTCUSDT",
-        lane="entry",
-        transition="a->b",
-        value=1.0,
-        occurred_at=old,
-    )
-    telemetry._add_sample(
-        symbol="ETHUSDT",
-        lane="entry",
-        transition="a->b",
-        value=2.0,
-        occurred_at=old,
-    )
-
-    pruned = telemetry.prune_inactive_symbols(
-        now=old + timedelta(hours=2),
-        protected_symbols={"BTCUSDT"},
-        inactive_after=timedelta(hours=1),
-    )
-
-    assert pruned == 1
-    assert telemetry.sample_series_count == 1
-    assert telemetry.latency_summary()["BTCUSDT"]["entry"]["a->b"]["count"] == 1
 
 
 def test_live_database_plane_urls_prefer_explicit_plane_environment(
