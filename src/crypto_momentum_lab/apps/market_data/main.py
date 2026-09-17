@@ -992,12 +992,15 @@ async def build_market_data_runtime(
             port=parse_market_quote_hub_port(),
         )
     )
+    realtime_closure_delay_seconds = (
+        float(os.environ["CML_REALTIME_CLOSURE_DELAY_SECONDS"])
+        if "CML_REALTIME_CLOSURE_DELAY_SECONDS" in os.environ
+        else runtime.capture.realtime_closure_delay_seconds
+    )
     runtime_state_publisher = ClosedMarketStatePublisher(
         repository=runtime_state_repository,
         config=ClosedMarketStatePublisherConfig(
-            realtime_closure_delay_seconds=(
-                runtime.capture.realtime_closure_delay_seconds
-            ),
+            realtime_closure_delay_seconds=realtime_closure_delay_seconds,
             durable_closure_delay_seconds=(
                 runtime.capture.durable_closure_delay_seconds
             ),

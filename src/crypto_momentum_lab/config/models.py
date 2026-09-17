@@ -198,7 +198,7 @@ class CaptureConfig(BaseModel):
     # Realtime consumers and the durable audit path intentionally use
     # different lateness budgets.
     realtime_closure_delay_seconds: float = Field(
-        default=1.0,
+        default=0.4,
         gt=0,
         le=30,
     )

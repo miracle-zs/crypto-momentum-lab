@@ -249,7 +249,7 @@ def test_research_and_server_capture_configs_keep_shared_defaults_aligned(
     assert research.archive.streams is None
     assert server.archive.streams == ("forceOrder",)
     assert research.realtime_closure_delay_seconds == 3
-    assert server.realtime_closure_delay_seconds == 1
+    assert server.realtime_closure_delay_seconds == 0.4
 
 
 def test_capture_config_rejects_invalid_disk_hysteresis() -> None:

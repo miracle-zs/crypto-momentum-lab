@@ -43,7 +43,7 @@ type _DurableCommand = _DurableBatch | AggTradeGap
 
 _BUCKET_SECONDS = 15
 _SNAPSHOT_BUILD_YIELD_EVERY = 8
-_LATENESS_THRESHOLDS_SECONDS = (0.5, 1.0, 2.0, 3.0)
+_LATENESS_THRESHOLDS_SECONDS = (0.4, 0.5, 1.0, 2.0, 3.0)
 _LATENESS_BUCKET_UPPER_BOUNDS_MS = (
     0.0,
     50.0,
@@ -100,7 +100,7 @@ class ClosedMarketStatePublisherConfig:
     def __init__(
         self,
         *,
-        realtime_closure_delay_seconds: float = 1.0,
+        realtime_closure_delay_seconds: float = 0.4,
         durable_closure_delay_seconds: float = 3.0,
         persistence_queue_size: int = 128,
         persistence_retry_seconds: float = 1.0,
