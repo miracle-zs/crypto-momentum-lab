@@ -20,7 +20,7 @@ def test_deployment_script_is_valid_shell_and_has_recovery_guards() -> None:
     )
 
     assert "flock -n 9" in script
-    assert "git reset --keep \"$target_commit\"" in script
+    assert 'git reset --keep "$target_commit"' in script
     assert '"$target_commit" == "$previous_commit"' in script
     assert "write_deploy_state failed" in script
     assert "phase=client-total" in script
@@ -42,9 +42,9 @@ def test_deployment_script_is_valid_shell_and_has_recovery_guards() -> None:
     assert "CML_DEPLOY_BUILD_TIMEOUT_SECONDS" in script
     assert "run_with_timeout" in script
     assert "phase=migrate" in script
-    assert 'run --rm --no-deps migrate' in script
+    assert "run --rm --no-deps migrate" in script
     assert "phase=volume-init" in script
-    assert 'run --rm --no-deps volume-init' in script
+    assert "run --rm --no-deps volume-init" in script
     assert "volume-init-check" in script
     assert "ownership=correct" in script
     assert "logs --no-color --tail=200" in script
@@ -62,17 +62,18 @@ def test_deployment_script_reports_service_level_timings() -> None:
     assert 'log_service_timing "verify"' in script
 
 
-def test_paper_rollout_keeps_gainer10_and_removes_retired_services() -> None:
+def test_paper_rollout_removes_retired_services() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
 
     active_start = script.index("active_paper_services=(")
     active_end = script.index("compose_project_name=", active_start)
     active_config = script[active_start:active_end]
-    assert "active_paper_services=(paper-orderflow-gainer10-pair)" in active_config
+    assert "active_paper_services=()" in active_config
     for service in (
         "paper-orderflow-pair",
         "paper-b1-gainer100",
         "paper-b1-gainer100-ema",
+        "paper-orderflow-gainer10-pair",
     ):
         assert service in active_config
 
@@ -95,11 +96,10 @@ def test_live_control_plane_concurrency_is_separate_from_restart_concurrency() -
 
     assert "CML_LIVE_CONTROL_CONCURRENCY" in script
     assert 'live_control_concurrency="${CML_LIVE_CONTROL_CONCURRENCY:-4}"' in script
-    assert 'run_parallel_pairs()' in script
-    assert 'live_control_concurrency' in script[script.index("run_parallel_pairs()") :]
+    assert "run_parallel_pairs()" in script
+    assert "live_control_concurrency" in script[script.index("run_parallel_pairs()") :]
     assert (
-        'live_up_and_wait_parallel "$live_wait_timeout" "$live_concurrency"'
-        in script
+        'live_up_and_wait_parallel "$live_wait_timeout" "$live_concurrency"' in script
     )
 
 
@@ -110,7 +110,7 @@ def test_live_lease_timing_is_not_hidden_by_command_output_redirection() -> None
     renew_block = script[renew_start:renew_end]
 
     assert 'run_with_timeout --quiet "renew-lease:$account"' in renew_block
-    assert '</dev/null >/dev/null' not in renew_block
+    assert "</dev/null >/dev/null" not in renew_block
 
 
 def test_health_wait_does_not_add_a_five_second_polling_gap() -> None:
@@ -125,9 +125,9 @@ def test_health_wait_does_not_add_a_five_second_polling_gap() -> None:
 
 def test_live_readiness_validator_embedded_python_is_valid() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    marker = "docker exec \"$container_id\" python -S -c '"
+    marker = 'docker exec "$container_id" python -S -c \''
     start = script.index(marker) + len(marker)
-    end = script.index("' \"$runtime_commit\"", start)
+    end = script.index('\' "$runtime_commit"', start)
 
     compile(script[start:end], "<live-readiness-validator>", "exec")
     assert "verify_live_readiness" in script
@@ -167,12 +167,12 @@ def test_live_overlay_detection_only_reports_running_extra_accounts(
         "#!/usr/bin/env bash\n"
         "set -Eeuo pipefail\n"
         "service=''\n"
-        "for argument in \"$@\"; do\n"
-        "  case \"$argument\" in\n"
-        "    label=com.docker.compose.service=*) service=\"${argument##*=}\" ;;\n"
+        'for argument in "$@"; do\n'
+        '  case "$argument" in\n'
+        '    label=com.docker.compose.service=*) service="${argument##*=}" ;;\n'
         "  esac\n"
         "done\n"
-        "case \",${RUNNING_EXTRA_SERVICES:-},\" in\n"
+        'case ",${RUNNING_EXTRA_SERVICES:-}," in\n'
         "  *,${service},*) printf 'Up 1 second\\n' ;;\n"
         "esac\n",
         encoding="utf-8",
@@ -221,7 +221,7 @@ def test_ancestor_target_reaches_reset_keep_branch(tmp_path: Path) -> None:
 
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     start = script.index('previous_commit="$(git rev-parse HEAD)"')
-    end = script.index("\nenv_runtime_commit=\"\"", start)
+    end = script.index('\nenv_runtime_commit=""', start)
     rollback_logic = script[start:end]
     command = (
         "set -Eeuo pipefail\n"
@@ -268,9 +268,7 @@ def test_live_account_services_share_the_private_request_pacer_volume() -> None:
 
 
 def test_ops_monitor_discovers_live_accounts_from_compose_files() -> None:
-    service = (ROOT / "deploy/ops/cml-ops-monitor.service").read_text(
-        encoding="utf-8"
-    )
+    service = (ROOT / "deploy/ops/cml-ops-monitor.service").read_text(encoding="utf-8")
 
     assert "CML_COMPOSE_FILE=" in service
     assert "compose.live.accounts.yaml" in service
@@ -282,10 +280,12 @@ def test_ops_monitor_discovers_live_accounts_from_compose_files() -> None:
 
 def test_retry_classification_preserves_dashboard_only_scope(tmp_path: Path) -> None:
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
     def git(*args: str) -> str:
         return subprocess.check_output(
             ["git", "-C", str(tmp_path), *args], text=True
         ).strip()
+
     git("config", "user.email", "test@example.com")
     git("config", "user.name", "Test")
     git("commit", "--allow-empty", "-qm", "base")
@@ -298,13 +298,19 @@ def test_retry_classification_preserves_dashboard_only_scope(tmp_path: Path) -> 
     target = git("rev-parse", "HEAD")
     script = DEPLOY_SCRIPT.read_text()
     classification = script[
-        script.index("runtime_changed=0\n"):
-        script.index('if [[ "$runtime_changed" == 1 ]]; then')
+        script.index("runtime_changed=0\n") : script.index(
+            'if [[ "$runtime_changed" == 1 ]]; then'
+        )
     ]
     result = subprocess.check_output(
-        ["bash", "-c", 'set -eu\n' + classification +
-         '\nprintf "%s" "$runtime_changed:$schema_changed:'
-         '$dashboard_changed:$market_changed:$paper_changed:$live_changed"'],
+        [
+            "bash",
+            "-c",
+            "set -eu\n"
+            + classification
+            + '\nprintf "%s" "$runtime_changed:$schema_changed:'
+            '$dashboard_changed:$market_changed:$paper_changed:$live_changed"',
+        ],
         cwd=tmp_path,
         env={
             **os.environ,
@@ -318,7 +324,8 @@ def test_retry_classification_preserves_dashboard_only_scope(tmp_path: Path) -> 
             "deploy_state_base": base,
             "runtime_commit": target,
             "live_update": "1",
-        }, text=True,
+        },
+        text=True,
     )
     assert result.endswith("1:0:1:0:0:0")
 
@@ -348,14 +355,20 @@ def test_stale_runtime_behind_target_replays_full_rollout(tmp_path: Path) -> Non
 
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     classification = script[
-        script.index("runtime_changed=0\n"):
-        script.index('if [[ "$runtime_changed" == 1 ]]; then')
+        script.index("runtime_changed=0\n") : script.index(
+            'if [[ "$runtime_changed" == 1 ]]; then'
+        )
     ]
     result = subprocess.check_output(
-        ["bash", "-c", 'set -eu\n' + classification +
-         '\nprintf "%s|%s" "$runtime_changed:$schema_changed:'
-         '$dashboard_changed:$market_changed:$paper_changed:$live_changed" '
-         '"$resume_from_phase"'],
+        [
+            "bash",
+            "-c",
+            "set -eu\n"
+            + classification
+            + '\nprintf "%s|%s" "$runtime_changed:$schema_changed:'
+            '$dashboard_changed:$market_changed:$paper_changed:$live_changed" '
+            '"$resume_from_phase"',
+        ],
         cwd=tmp_path,
         env={
             **os.environ,
@@ -391,8 +404,8 @@ def test_migration_phase_runs_one_shot_only_for_schema_changes() -> None:
     assert "schema_changed=0" in classification
     assert "alembic.ini|alembic/*" in classification
     assert 'if [[ "$schema_changed" == 1 ]]; then' in migration
-    assert 'run --rm --no-deps migrate' in migration
-    assert 'phase=migrate skipped schema_changed=$schema_changed' in migration
+    assert "run --rm --no-deps migrate" in migration
+    assert "phase=migrate skipped schema_changed=$schema_changed" in migration
 
 
 def test_alembic_change_sets_schema_changed(tmp_path: Path) -> None:
@@ -538,7 +551,7 @@ def test_live_restart_waits_for_old_containers_before_recreate() -> None:
         "sleep 1"
     )
     assert restart_block.index("stop_live_services") < restart_block.index(
-        'up -d --force-recreate --no-deps'
+        "up -d --force-recreate --no-deps"
     )
     assert script.count("live_up_and_wait_parallel") >= 3
 
@@ -550,9 +563,7 @@ def test_live_preflight_has_no_side_effects_before_validation() -> None:
     consumers_phase = script.index("consumer_candidates=()")
     preflight_start = script.index("preflight_started_at=")
     lease_start = script.index("lease_started_at=")
-    env_commit_write = script.index(
-        'set_env_value CML_CODE_COMMIT "$runtime_commit"'
-    )
+    env_commit_write = script.index('set_env_value CML_CODE_COMMIT "$runtime_commit"')
     verify_elapsed = script.index("phase=verify elapsed_seconds=")
 
     assert consumers_phase < preflight_phase
@@ -610,12 +621,10 @@ def test_dashboard_and_market_data_share_a_start_wave_with_health_barriers() -> 
 def test_release_identity_does_not_precede_dependency_layer() -> None:
     lines = DOCKERFILE.read_text(encoding="utf-8").splitlines()
     dependency_install = next(
-        index for index, line in enumerate(lines)
-        if "pip" in line and "install" in line
+        index for index, line in enumerate(lines) if "pip" in line and "install" in line
     )
     release_arg = next(
-        index for index, line in enumerate(lines)
-        if line == "ARG CML_CODE_COMMIT"
+        index for index, line in enumerate(lines) if line == "ARG CML_CODE_COMMIT"
     )
 
     assert release_arg > dependency_install

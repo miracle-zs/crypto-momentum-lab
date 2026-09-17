@@ -37,9 +37,7 @@ _SUBSCRIBE_MESSAGE = "subscribe_market_states"
 _READY_MESSAGE = "market_state_hub_ready"
 _BATCH_MESSAGE = "market_state_batch"
 _CLIENT_RECEIVE_QUEUE_SIZE = 2
-_ASYNC_GENERATOR_CLOSE_RACE = (
-    "aclose(): asynchronous generator is already running"
-)
+_ASYNC_GENERATOR_CLOSE_RACE = "aclose(): asynchronous generator is already running"
 _ASYNC_GENERATOR_CLOSE_RETRIES = 3
 
 
@@ -351,9 +349,7 @@ class MarketStateHub:
             last_sequence = _optional_int(request, "last_sequence")
             requested_stream_id = _optional_string(request, "stream_id")
             if last_sequence is not None and last_sequence < 0:
-                raise MarketStateHubProtocolError(
-                    "last_sequence must not be negative"
-                )
+                raise MarketStateHubProtocolError("last_sequence must not be negative")
             stream_reset = (
                 requested_stream_id is not None
                 and requested_stream_id != self._stream_id
@@ -504,6 +500,7 @@ class WebSocketMarketStateSource:
         on_cursor_change: Callable[[str, int], None] | None = None,
         fail_on_replay_unavailable: bool = False,
         preserve_sequence_on_overflow: bool = False,
+        client_receive_queue_size: int | None = None,
     ) -> None:
         if not url.strip():
             raise ValueError("url must not be empty")
@@ -511,6 +508,8 @@ class WebSocketMarketStateSource:
             raise ValueError("environment must not be empty")
         if not consumer_id.strip():
             raise ValueError("consumer_id must not be empty")
+        if client_receive_queue_size is not None and client_receive_queue_size <= 0:
+            raise ValueError("client_receive_queue_size must be positive")
         self._url = url
         self._environment = environment
         self._consumer_id = consumer_id
@@ -520,6 +519,11 @@ class WebSocketMarketStateSource:
         self._on_cursor_change = on_cursor_change
         self._fail_on_replay_unavailable = fail_on_replay_unavailable
         self._preserve_sequence_on_overflow = preserve_sequence_on_overflow
+        self._client_receive_queue_size = (
+            client_receive_queue_size
+            if client_receive_queue_size is not None
+            else _CLIENT_RECEIVE_QUEUE_SIZE
+        )
         self._connection_available: bool | None = None
         self._connection_reason: str | None = None
         self._stream_id: str | None = None
@@ -589,7 +593,7 @@ class WebSocketMarketStateSource:
 
     async def _iterate_batches(self) -> AsyncIterator[MarketStateBatch]:
         self._notify_connection_change(False, "connecting")
-        unavailable_since = time.monotonic()
+        unavailable_since: float | None = time.monotonic()
         reconnect_attempt = 0
         while not self._stopping:
             try:
@@ -679,6 +683,7 @@ class WebSocketMarketStateSource:
                         and self._last_sequence >= ready_latest_sequence
                     ):
                         self._notify_connection_change(True, None)
+                        unavailable_since = None
                     else:
                         self._notify_connection_change(
                             False,
@@ -688,10 +693,9 @@ class WebSocketMarketStateSource:
                                 else "market_state_replaying"
                             ),
                         )
-                    unavailable_since = time.monotonic()
                     reconnect_attempt = 0
-                    receive_queue: asyncio.Queue[_MarketStateQueueItem] = (
-                        asyncio.Queue(maxsize=_CLIENT_RECEIVE_QUEUE_SIZE)
+                    receive_queue: asyncio.Queue[_MarketStateQueueItem] = asyncio.Queue(
+                        maxsize=self._client_receive_queue_size
                     )
                     reader_task = asyncio.create_task(
                         self._read_market_state_batches(
@@ -753,6 +757,7 @@ class WebSocketMarketStateSource:
                             yield batch
                             self._last_sequence = batch.sequence
                             self._notify_cursor_change()
+                            unavailable_since = None
                             if self._rewarm_required:
                                 self._rewarm_required = False
                                 self._notify_connection_change(True, None)
@@ -789,10 +794,10 @@ class WebSocketMarketStateSource:
                     False,
                     f"{type(error).__name__}: {error}",
                 )
-                if (
-                    time.monotonic() - unavailable_since
-                    >= self._config.unavailable_timeout_seconds
-                ):
+                now = time.monotonic()
+                if unavailable_since is None:
+                    unavailable_since = now
+                if now - unavailable_since >= self._config.unavailable_timeout_seconds:
                     raise MarketStateHubError(
                         "market-state hub unavailable for "
                         f"{self._config.unavailable_timeout_seconds:.1f} seconds"
@@ -824,9 +829,7 @@ class WebSocketMarketStateSource:
                     and batch.stream_id is not None
                     and batch.stream_id != self._stream_id
                 ):
-                    raise MarketStateHubEpochError(
-                        "market-state stream mismatch"
-                    )
+                    raise MarketStateHubEpochError("market-state stream mismatch")
                 self._enqueue_market_state_batch(receive_queue, batch)
                 # Yield to the strategy consumer after each buffered message.
                 # Without this fairness point a burst can be drained and
@@ -848,10 +851,7 @@ class WebSocketMarketStateSource:
                 queued_items.append(receive_queue.get_nowait())
             except asyncio.QueueEmpty:
                 break
-        if any(
-            isinstance(item, _MarketStateQueueOverflow)
-            for item in queued_items
-        ):
+        if any(isinstance(item, _MarketStateQueueOverflow) for item in queued_items):
             receive_queue.put_nowait(
                 _MarketStateQueueOverflow(latest_sequence=batch.sequence)
             )
@@ -1083,12 +1083,8 @@ def market_state_from_payload(payload: dict[str, object]) -> MarketState15s:
         close_price=_optional_decimal(payload, "close_price"),
         trade_count=_require_int(payload, "trade_count"),
         trade_notional=_require_decimal(payload, "trade_notional"),
-        aggressive_buy_notional=_require_decimal(
-            payload, "aggressive_buy_notional"
-        ),
-        aggressive_sell_notional=_require_decimal(
-            payload, "aggressive_sell_notional"
-        ),
+        aggressive_buy_notional=_require_decimal(payload, "aggressive_buy_notional"),
+        aggressive_sell_notional=_require_decimal(payload, "aggressive_sell_notional"),
         last_bid_price=_optional_decimal(payload, "last_bid_price"),
         last_ask_price=_optional_decimal(payload, "last_ask_price"),
         spread=_optional_decimal(payload, "spread"),

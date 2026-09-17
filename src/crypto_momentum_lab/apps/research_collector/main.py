@@ -161,6 +161,14 @@ def run_command(
         float,
         typer.Option("--max-spool-gib", min=0.1, help="Write-ahead spool quota."),
     ] = 1.0,
+    hub_receive_queue_size: Annotated[
+        int,
+        typer.Option(
+            "--hub-receive-queue-size",
+            min=1,
+            help="In-memory receive queue capacity for market state batches.",
+        ),
+    ] = 128,
 ) -> None:
     """Run the collector until SIGTERM or SIGINT."""
 
@@ -182,6 +190,7 @@ def run_command(
                 window_seconds=window_seconds,
                 late_tolerance_seconds=late_tolerance_seconds,
                 max_spool_gib=max_spool_gib,
+                hub_receive_queue_size=hub_receive_queue_size,
             )
         )
     except CollectorPaused as error:
@@ -236,6 +245,7 @@ async def _run_collector(
     window_seconds: int,
     late_tolerance_seconds: int,
     max_spool_gib: float,
+    hub_receive_queue_size: int = 128,
 ) -> None:
     startup_timer = StartupPhaseTimer(
         log,
@@ -327,6 +337,7 @@ async def _run_collector(
         on_batch=on_batch,
         fail_on_replay_unavailable=True,
         preserve_sequence_on_overflow=True,
+        client_receive_queue_size=hub_receive_queue_size,
     )
     startup_timer.mark("source_constructed")
     collector_config = CollectorConfig(

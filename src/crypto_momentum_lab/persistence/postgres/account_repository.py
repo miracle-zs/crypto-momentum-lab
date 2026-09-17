@@ -161,8 +161,7 @@ class PostgresAccountRepository:
                 )
                 latest_reconciliation_observed_at = await session.scalar(
                     select(func.max(AccountReconciliationRunRow.observed_at)).where(
-                        AccountReconciliationRunRow.environment
-                        == config.environment,
+                        AccountReconciliationRunRow.environment == config.environment,
                         AccountReconciliationRunRow.account_label
                         == config.account_label,
                         AccountReconciliationRunRow.status == "ready",
@@ -176,8 +175,7 @@ class PostgresAccountRepository:
                     await session.execute(
                         delete(AccountOpenOrderRow).where(
                             AccountOpenOrderRow.environment == config.environment,
-                            AccountOpenOrderRow.account_label
-                            == config.account_label,
+                            AccountOpenOrderRow.account_label == config.account_label,
                         )
                     )
                     await self._insert_in_session(
@@ -242,8 +240,7 @@ class PostgresAccountRepository:
             rows = await session.scalars(
                 select(AccountFillReconciliationCursorRow).where(
                     AccountFillReconciliationCursorRow.environment == environment,
-                    AccountFillReconciliationCursorRow.account_label
-                    == account_label,
+                    AccountFillReconciliationCursorRow.account_label == account_label,
                 )
             )
             return {
@@ -266,13 +263,8 @@ class PostgresAccountRepository:
             return
         async with self._session_factory() as session:
             async with session.begin():
-                values = [
-                    fill_reconciliation_cursor_row(cursor)
-                    for cursor in cursors
-                ]
-                statement = insert(AccountFillReconciliationCursorRow).values(
-                    values
-                )
+                values = [fill_reconciliation_cursor_row(cursor) for cursor in cursors]
+                statement = insert(AccountFillReconciliationCursorRow).values(values)
                 statement = statement.on_conflict_do_update(
                     index_elements=[
                         "environment",
@@ -341,9 +333,7 @@ class PostgresAccountRepository:
                     AccountReconciliationRunRow.observed_at.label(
                         "reconciliation_observed_at"
                     ),
-                    AccountReconciliationRunRow.position_count.label(
-                        "position_count"
-                    ),
+                    AccountReconciliationRunRow.position_count.label("position_count"),
                 )
                 .where(
                     AccountReconciliationRunRow.environment == environment,
@@ -412,31 +402,23 @@ class PostgresAccountRepository:
         async with self._session_factory() as session:
             latest_runs = (
                 select(
-                    AccountReconciliationRunRow.account_label.label(
-                        "account_label"
-                    ),
-                    AccountReconciliationRunRow.position_count.label(
-                        "position_count"
-                    ),
-                    func.row_number()
-                    .over(
-                        partition_by=AccountReconciliationRunRow.account_label,
-                        order_by=(
-                            AccountReconciliationRunRow.observed_at.desc(),
-                            AccountReconciliationRunRow.reconciliation_id.desc(),
-                        ),
-                    )
-                    .label("row_number"),
+                    AccountReconciliationRunRow.account_label.label("account_label"),
+                    AccountReconciliationRunRow.position_count.label("position_count"),
                 )
+                .distinct(AccountReconciliationRunRow.account_label)
                 .where(
                     AccountReconciliationRunRow.environment == environment,
                     AccountReconciliationRunRow.status == "ready",
+                )
+                .order_by(
+                    AccountReconciliationRunRow.account_label,
+                    AccountReconciliationRunRow.observed_at.desc(),
+                    AccountReconciliationRunRow.reconciliation_id.desc(),
                 )
                 .subquery()
             )
             labels = await session.scalars(
                 select(latest_runs.c.account_label).where(
-                    latest_runs.c.row_number == 1,
                     latest_runs.c.position_count > 0,
                 )
             )
@@ -455,9 +437,7 @@ class PostgresAccountRepository:
     ) -> None:
         if not values:
             return
-        await session.execute(
-            insert(model).values(values).on_conflict_do_nothing()
-        )
+        await session.execute(insert(model).values(values).on_conflict_do_nothing())
 
 
 def _snapshot_base(

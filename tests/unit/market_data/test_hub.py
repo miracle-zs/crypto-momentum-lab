@@ -117,6 +117,7 @@ def test_market_state_batch_decoder_defaults_legacy_completeness_fields() -> Non
 
 def test_market_state_batch_decoder_handles_is_backfill() -> None:
     from dataclasses import replace
+
     state = replace(fixture_state("BTCUSDT", 0), is_backfill=True)
     encoded = encode_market_state_batch(
         (state,),
@@ -165,9 +166,10 @@ async def test_market_state_hub_replay_window_detects_unrecoverable_gap() -> Non
     assert available is True
     assert oldest == 2
     assert latest == 3
-    assert [
-        decode_market_state_batch_envelope(item).sequence for item in messages
-    ] == [2, 3]
+    assert [decode_market_state_batch_envelope(item).sequence for item in messages] == [
+        2,
+        3,
+    ]
 
     available, oldest, latest, messages = hub._replay_snapshot("research", 0)
     assert available is False
@@ -1022,3 +1024,186 @@ async def test_market_state_source_requests_durable_recovery_on_stream_reset(
     assert subscription["last_sequence"] == 7
     assert connection_changes[-1][0] is False
     assert "replay is unavailable" in (connection_changes[-1][1] or "").lower()
+
+
+def test_market_state_source_client_receive_queue_size_validation() -> None:
+    with pytest.raises(ValueError, match="client_receive_queue_size must be positive"):
+        WebSocketMarketStateSource(
+            url="ws://unused",
+            environment="research",
+            consumer_id="test",
+            client_receive_queue_size=0,
+        )
+
+    with pytest.raises(ValueError, match="client_receive_queue_size must be positive"):
+        WebSocketMarketStateSource(
+            url="ws://unused",
+            environment="research",
+            consumer_id="test",
+            client_receive_queue_size=-5,
+        )
+
+    default_source = WebSocketMarketStateSource(
+        url="ws://unused",
+        environment="research",
+        consumer_id="test",
+    )
+    assert default_source._client_receive_queue_size == 2
+
+    custom_source = WebSocketMarketStateSource(
+        url="ws://unused",
+        environment="research",
+        consumer_id="test",
+        client_receive_queue_size=128,
+    )
+    assert custom_source._client_receive_queue_size == 128
+
+
+async def test_market_state_source_resets_unavailable_budget_after_healthy_run(
+    monkeypatch,
+) -> None:
+    current_time = 1000.0
+
+    def fake_monotonic() -> float:
+        return current_time
+
+    monkeypatch.setattr(hub_module.time, "monotonic", fake_monotonic)
+
+    first_state = fixture_state("BTCUSDT", 0)
+    second_state = fixture_state("BTCUSDT", 1)
+
+    ready_msg = json.dumps(
+        {
+            "type": "market_state_hub_ready",
+            "schema_version": 1,
+            "environment": "research",
+            "stream_id": "stream-test",
+            "stream_reset": False,
+            "replay_available": True,
+            "oldest_sequence": 1,
+            "latest_sequence": 2,
+        }
+    )
+
+    class FirstConnection:
+        def __init__(self) -> None:
+            self._messages = [
+                ready_msg,
+                encode_market_state_batch(
+                    (first_state,),
+                    sequence=1,
+                    published_at=first_state.bucket_end,
+                    stream_id="stream-test",
+                ),
+            ]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, _message):
+            return None
+
+        async def recv(self):
+            if self._messages:
+                return self._messages.pop(0)
+            raise ConnectionResetError("Connection lost after healthy period")
+
+    class SecondConnection:
+        def __init__(self) -> None:
+            self._messages = [
+                ready_msg,
+                encode_market_state_batch(
+                    (second_state,),
+                    sequence=2,
+                    published_at=second_state.bucket_end,
+                    stream_id="stream-test",
+                ),
+            ]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, _message):
+            return None
+
+        async def recv(self):
+            if self._messages:
+                return self._messages.pop(0)
+            await asyncio.sleep(10)
+
+    connections = [FirstConnection(), SecondConnection()]
+
+    monkeypatch.setattr(
+        hub_module,
+        "connect",
+        lambda *_args, **_kwargs: connections.pop(0),
+    )
+
+    source = WebSocketMarketStateSource(
+        url="ws://unused",
+        environment="research",
+        consumer_id="test",
+        config=MarketStateHubConfig(
+            reconnect_delays=(0,),
+            unavailable_timeout_seconds=120,
+        ),
+    )
+
+    batches = source.batches()
+    batch1 = await anext(batches)
+    assert batch1.sequence == 1
+
+    current_time += 300.0
+
+    batch2 = await anext(batches)
+    assert batch2.sequence == 2
+    source.stop()
+    await batches.aclose()
+
+
+async def test_market_state_source_raises_after_continuous_unavailable_timeout(
+    monkeypatch,
+) -> None:
+    current_time = 1000.0
+
+    def fake_monotonic() -> float:
+        return current_time
+
+    monkeypatch.setattr(hub_module.time, "monotonic", fake_monotonic)
+
+    class FailingConnection:
+        async def __aenter__(self):
+            nonlocal current_time
+            current_time += 20.0
+            raise ConnectionRefusedError("Hub down")
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(
+        hub_module,
+        "connect",
+        lambda *_args, **_kwargs: FailingConnection(),
+    )
+
+    source = WebSocketMarketStateSource(
+        url="ws://unused",
+        environment="research",
+        consumer_id="test",
+        config=MarketStateHubConfig(
+            reconnect_delays=(0,),
+            unavailable_timeout_seconds=60,
+        ),
+    )
+
+    with pytest.raises(
+        MarketStateHubError,
+        match="market-state hub unavailable for 60.0 seconds",
+    ):
+        await anext(source.batches())
