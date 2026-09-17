@@ -485,6 +485,15 @@ class CaptureUniverseObserver:
             self._universe_symbols = universe_symbols
             await self._apply_symbols(now=snapshot.observed_at)
 
+    @property
+    def monitored_symbols(self) -> frozenset[str] | None:
+        if self._universe_symbols is None:
+            return None
+        prewarm = frozenset(self._prewarm_until_by_symbol)
+        forced = self._universe_forced_symbols
+        applied = self._applied_symbols or frozenset()
+        return self._universe_symbols | prewarm | forced | applied
+
     async def refresh_protected_symbols(self) -> None:
         async with self._lock:
             if self._universe_symbols is None:
@@ -1142,9 +1151,13 @@ async def build_market_data_runtime(
         rest_client,
         universe_repository,
     )
+    observer: CaptureUniverseObserver | None = None
     quote_volume_publisher = Binance24hQuoteVolumePublisher(
         rest_client,
         publish=quote_hub.publish_volume,
+        symbols_filter=lambda: (
+            observer.monitored_symbols if observer is not None else None
+        ),
         environment=runtime.environment,
     )
 

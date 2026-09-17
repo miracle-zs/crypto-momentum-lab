@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -67,6 +67,7 @@ class Binance24hQuoteVolumePublisher:
         client: Binance24hTickerClient,
         *,
         publish: QuoteVolumeSink,
+        symbols_filter: Callable[[], Collection[str] | None] | None = None,
         environment: str = "research",
         refresh_interval_seconds: float = _DEFAULT_REFRESH_INTERVAL_SECONDS,
         clock: Callable[[], datetime] | None = None,
@@ -77,6 +78,7 @@ class Binance24hQuoteVolumePublisher:
             raise ValueError("refresh_interval_seconds must be positive")
         self._client = client
         self._publish = publish
+        self._symbols_filter = symbols_filter
         self._environment = environment
         self._refresh_interval_seconds = refresh_interval_seconds
         self._clock = clock or (lambda: datetime.now(tz=UTC))
@@ -111,6 +113,17 @@ class Binance24hQuoteVolumePublisher:
         fetched_at = self._clock()
         _require_aware(fetched_at, "fetched_at")
         tickers = await self._client.fetch_24h_tickers()
+        allowed_set: frozenset[str] | None = None
+        if self._symbols_filter is not None:
+            try:
+                allowed_symbols = self._symbols_filter()
+                if allowed_symbols is not None:
+                    allowed_set = frozenset(s.upper() for s in allowed_symbols)
+            except Exception as error:
+                log.warning(
+                    "market_data_quote_volume_filter_failed",
+                    error_type=type(error).__name__,
+                )
         snapshots = tuple(
             QuoteVolume24hSnapshot(
                 symbol=ticker.symbol.upper(),
@@ -122,6 +135,7 @@ class Binance24hQuoteVolumePublisher:
             )
             for ticker in tickers.values()
             if ticker.symbol.upper().endswith("USDT")
+            and (allowed_set is None or ticker.symbol.upper() in allowed_set)
         )
         await self._publish(snapshots)
         self._last_refresh_at = fetched_at

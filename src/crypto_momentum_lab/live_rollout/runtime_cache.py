@@ -29,6 +29,7 @@ class LiveRuntimeCacheMaintenance:
         strategy: object,
         telemetry: object | None,
         pending_entry_symbols: Callable[[], Iterable[str]],
+        volume_metrics_provider: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
@@ -36,6 +37,7 @@ class LiveRuntimeCacheMaintenance:
         self._strategy = strategy
         self._telemetry = telemetry
         self._pending_entry_symbols = pending_entry_symbols
+        self._volume_metrics_provider = volume_metrics_provider
         self._managed_position_symbols: frozenset[str] = frozenset()
         self._managed_order_symbols: frozenset[str] = frozenset()
         self._known = False
@@ -104,6 +106,13 @@ class LiveRuntimeCacheMaintenance:
 
         evicted_telemetry_series = 0
         self._last_maintenance_at = now
+        volume_metrics: dict[str, object] = {}
+        if self._volume_metrics_provider is not None:
+            try:
+                volume_metrics = self._volume_metrics_provider() or {}
+            except Exception:
+                volume_metrics = {}
+
         log.info(
             "live_runtime_memory_snapshot",
             run_id=self._run_id,
@@ -122,6 +131,11 @@ class LiveRuntimeCacheMaintenance:
                 "buffered_state_count",
                 None,
             ),
+            volume_cached_symbols=volume_metrics.get("cached_symbol_count"),
+            volume_total_snapshots=volume_metrics.get("total_snapshot_count"),
+            volume_oldest_age_seconds=volume_metrics.get("oldest_snapshot_age_seconds"),
+            volume_hit_count=volume_metrics.get("lookup_hit_count"),
+            volume_miss_count=volume_metrics.get("lookup_miss_count"),
         )
         if evicted_strategy_symbols:
             log.info(

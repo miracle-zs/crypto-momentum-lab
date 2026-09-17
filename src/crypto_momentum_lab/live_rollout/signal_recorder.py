@@ -213,23 +213,36 @@ class LiveStrategySignalRecorder:
         return self._volume_lookup_failure_count
 
     @property
+    def volume_metrics(self) -> dict[str, object]:
+        provider = self._quote_volume_provider
+        if provider is None:
+            return {}
+        metrics_fn = getattr(provider, "metrics_snapshot", None)
+        if callable(metrics_fn):
+            return metrics_fn()
+        return {}
+
+    @property
     def recent_records(self) -> tuple[LiveSignalObservation, ...]:
         return tuple(self._recent_records)
 
     async def start(self) -> None:
-        if self._persist is None or self._writer_task is not None:
+        if self._writer_task is not None:
+            return
+        if self._persist is None:
             return
         self._queue = asyncio.Queue(maxsize=self._queue_size)
         self._writer_task = asyncio.create_task(
             self._write_records(),
-            name="live-strategy-signal-writer",
+            name=f"live-signal-recorder:{self._run_id}",
         )
 
     async def stop(self) -> None:
         writer_task = self._writer_task
         queue = self._queue
-        if writer_task is None or queue is None:
+        if writer_task is None:
             return
+        assert queue is not None
         try:
             await queue.put(None)
             await writer_task
@@ -243,6 +256,7 @@ class LiveStrategySignalRecorder:
         else:
             self._writer_task = None
             self._queue = None
+        vol_metrics = self.volume_metrics
         log.info(
             "live_strategy_signal_recorder_stopped",
             run_id=self._run_id,
@@ -251,6 +265,8 @@ class LiveStrategySignalRecorder:
             persist_failure_count=self._persist_failure_count,
             build_failure_count=self._build_failure_count,
             volume_lookup_failure_count=self._volume_lookup_failure_count,
+            volume_hit_count=vol_metrics.get("lookup_hit_count"),
+            volume_miss_count=vol_metrics.get("lookup_miss_count"),
         )
 
     def record_decision(

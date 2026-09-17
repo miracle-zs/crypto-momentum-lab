@@ -41,6 +41,12 @@ class QuoteVolume24hProvider(Protocol):
         as_of: datetime,
     ) -> "QuoteVolume24hSnapshot | None": ...
 
+    def metrics_snapshot(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, object]: ...
+
 
 class _QuoteVolumeHistory:
     def __init__(self, history_size: int) -> None:
@@ -49,6 +55,40 @@ class _QuoteVolumeHistory:
         self._history_size = history_size
         self._snapshots: dict[str, deque[QuoteVolume24hSnapshot]] = {}
         self.last_refresh_at: datetime | None = None
+        self._lookup_hit_count: int = 0
+        self._lookup_miss_count: int = 0
+
+    @property
+    def cached_symbol_count(self) -> int:
+        return len(self._snapshots)
+
+    @property
+    def total_snapshot_count(self) -> int:
+        return sum(len(history) for history in self._snapshots.values())
+
+    @property
+    def lookup_hit_count(self) -> int:
+        return self._lookup_hit_count
+
+    @property
+    def lookup_miss_count(self) -> int:
+        return self._lookup_miss_count
+
+    def oldest_snapshot_age_seconds(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> float | None:
+        oldest_at: datetime | None = None
+        for history in self._snapshots.values():
+            if history:
+                first = history[0].fetched_at
+                if oldest_at is None or first < oldest_at:
+                    oldest_at = first
+        if oldest_at is None:
+            return None
+        current = now or datetime.now(tz=UTC)
+        return max(0.0, (current - oldest_at).total_seconds())
 
     def observe(self, snapshot: QuoteVolume24hSnapshot) -> bool:
         # The live strategy trades USDT-margined perpetuals.  The global
@@ -85,10 +125,13 @@ class _QuoteVolumeHistory:
         _require_aware(as_of, "as_of")
         history = self._snapshots.get(symbol.upper())
         if not history:
+            self._lookup_miss_count += 1
             return None
         for snapshot in reversed(history):
             if snapshot.fetched_at <= as_of:
+                self._lookup_hit_count += 1
                 return snapshot
+        self._lookup_miss_count += 1
         return None
 
 
@@ -121,6 +164,42 @@ class Binance24hQuoteVolumeCache:
     @property
     def last_refresh_at(self) -> datetime | None:
         return self._history.last_refresh_at
+
+    @property
+    def cached_symbol_count(self) -> int:
+        return self._history.cached_symbol_count
+
+    @property
+    def total_snapshot_count(self) -> int:
+        return self._history.total_snapshot_count
+
+    @property
+    def lookup_hit_count(self) -> int:
+        return self._history.lookup_hit_count
+
+    @property
+    def lookup_miss_count(self) -> int:
+        return self._history.lookup_miss_count
+
+    def oldest_snapshot_age_seconds(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> float | None:
+        return self._history.oldest_snapshot_age_seconds(now=now)
+
+    def metrics_snapshot(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, object]:
+        return {
+            "cached_symbol_count": self.cached_symbol_count,
+            "total_snapshot_count": self.total_snapshot_count,
+            "oldest_snapshot_age_seconds": self.oldest_snapshot_age_seconds(now=now),
+            "lookup_hit_count": self.lookup_hit_count,
+            "lookup_miss_count": self.lookup_miss_count,
+        }
 
     async def start(self) -> None:
         if self._refresh_task is not None:
@@ -212,6 +291,42 @@ class WebSocketQuoteVolumeProvider:
     @property
     def last_refresh_at(self) -> datetime | None:
         return self._history.last_refresh_at
+
+    @property
+    def cached_symbol_count(self) -> int:
+        return self._history.cached_symbol_count
+
+    @property
+    def total_snapshot_count(self) -> int:
+        return self._history.total_snapshot_count
+
+    @property
+    def lookup_hit_count(self) -> int:
+        return self._history.lookup_hit_count
+
+    @property
+    def lookup_miss_count(self) -> int:
+        return self._history.lookup_miss_count
+
+    def oldest_snapshot_age_seconds(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> float | None:
+        return self._history.oldest_snapshot_age_seconds(now=now)
+
+    def metrics_snapshot(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, object]:
+        return {
+            "cached_symbol_count": self.cached_symbol_count,
+            "total_snapshot_count": self.total_snapshot_count,
+            "oldest_snapshot_age_seconds": self.oldest_snapshot_age_seconds(now=now),
+            "lookup_hit_count": self.lookup_hit_count,
+            "lookup_miss_count": self.lookup_miss_count,
+        }
 
     async def start(self) -> None:
         if self._task is not None:

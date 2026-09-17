@@ -74,3 +74,56 @@ async def test_failed_refresh_keeps_previous_snapshot() -> None:
     assert snapshot is not None
     assert snapshot.quote_volume == Decimal("100")
 
+
+@pytest.mark.asyncio
+async def test_cache_metrics_tracking() -> None:
+    client = FakeTickerClient()
+    t0 = datetime(2026, 8, 28, 0, 0, tzinfo=UTC)
+    cache = Binance24hQuoteVolumeCache(client, clock=lambda: t0)
+
+    # Initial empty metrics
+    assert cache.cached_symbol_count == 0
+    assert cache.total_snapshot_count == 0
+    assert cache.lookup_hit_count == 0
+    assert cache.lookup_miss_count == 0
+    assert cache.oldest_snapshot_age_seconds(now=t0) is None
+
+    # After first refresh (FakeTickerClient has BTCUSDT and BTCUSDC, only USDT observed)
+    await cache.refresh_once()
+    assert cache.cached_symbol_count == 1
+    assert cache.total_snapshot_count == 1
+
+    # Check oldest snapshot age 60 seconds later
+    t1 = t0 + timedelta(seconds=60)
+    assert cache.oldest_snapshot_age_seconds(now=t1) == 60.0
+
+    # Test hit
+    hit_res = cache.snapshot("BTCUSDT", as_of=t0)
+    assert hit_res is not None
+    assert cache.lookup_hit_count == 1
+    assert cache.lookup_miss_count == 0
+
+    # Test miss by unknown symbol
+    miss_res = cache.snapshot("ETHUSDT", as_of=t0)
+    assert miss_res is None
+    assert cache.lookup_hit_count == 1
+    assert cache.lookup_miss_count == 1
+
+    # Test miss by as_of before earliest snapshot
+    before_t0 = t0 - timedelta(seconds=10)
+    miss_time_res = cache.snapshot("BTCUSDT", as_of=before_t0)
+    assert miss_time_res is None
+    assert cache.lookup_hit_count == 1
+    assert cache.lookup_miss_count == 2
+
+    # Verify metrics_snapshot dictionary
+    stats = cache.metrics_snapshot(now=t1)
+    assert stats == {
+        "cached_symbol_count": 1,
+        "total_snapshot_count": 1,
+        "oldest_snapshot_age_seconds": 60.0,
+        "lookup_hit_count": 1,
+        "lookup_miss_count": 2,
+    }
+
+

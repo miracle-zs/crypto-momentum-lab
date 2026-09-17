@@ -254,6 +254,11 @@ class LiveStrategyDaemon:
             strategy=self._strategy,
             telemetry=self._telemetry,
             pending_entry_symbols=self._pending_entries.pending_symbols,
+            volume_metrics_provider=(
+                (lambda: getattr(self._signal_recorder, "volume_metrics", {}))
+                if self._signal_recorder is not None
+                else None
+            ),
         )
         self._context_runtime = LiveContextRuntime(
             run_id=config.run_id,
