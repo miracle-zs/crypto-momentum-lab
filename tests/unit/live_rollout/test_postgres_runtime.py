@@ -759,6 +759,69 @@ def test_overdrawn_bound_exit_is_reassigned_before_reconciling_reopened_batch() 
     ] == [("BTCUSDT:LONG:reopened-entry", Decimal("386"), reopened_at)]
 
 
+def test_historical_exit_fill_is_not_rebound_to_current_episode() -> None:
+    """A five-day-old reduce-only fill cannot close today's lot.
+
+    Order loading keeps the latest 1000 rows per run+symbol with no time
+    window.  A fully closed historical episode (entry+exit) must not
+    contribute exit_filled_quantity to the current position, or live still
+    sees an open batch and keeps submitting reduce-only orders that the
+    exchange rejects.
+    """
+
+    old_at = NOW - timedelta(days=5)
+    current_at = NOW
+    orders = [
+        _order(
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("2228"),
+            executed_quantity=Decimal("2228"),
+            created_at=old_at,
+            updated_at=old_at,
+            client_order_id="old-entry-a",
+        ),
+        _order(
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("2314"),
+            executed_quantity=Decimal("2314"),
+            created_at=old_at + timedelta(hours=1),
+            updated_at=old_at + timedelta(hours=1),
+            client_order_id="old-entry-b",
+        ),
+        _order(
+            reduce_only=True,
+            side="SELL",
+            quantity=Decimal("4542"),
+            executed_quantity=Decimal("4542"),
+            created_at=old_at + timedelta(hours=2),
+            updated_at=old_at + timedelta(hours=2),
+            client_order_id="old-close-4542",
+        ),
+        _order(
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("266"),
+            executed_quantity=Decimal("266"),
+            created_at=current_at,
+            updated_at=current_at,
+            client_order_id="current-entry",
+        ),
+    ]
+    managed, unmanaged = _classify_live_positions(
+        [_position(position_amt=Decimal("266"))],
+        orders,
+        exit_batch_ids={"old-close-4542": "BTCUSDT:LONG:old-entry-a"},
+    )
+    assert unmanaged == frozenset()
+    assert len(managed[0].batches) == 1
+    batch = managed[0].batches[0]
+    assert batch.batch_id == "BTCUSDT:LONG:current-entry"
+    assert batch.quantity == Decimal("266")
+    assert batch.opened_at == current_at
+
+
 def test_reused_client_id_exit_attempts_are_kept_as_separate_batches() -> None:
     old_at = NOW
     first_exit_at = old_at + timedelta(minutes=10)

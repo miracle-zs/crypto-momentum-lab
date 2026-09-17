@@ -1910,6 +1910,10 @@ def _build_position_batches(
                 ),
                 None,
             )
+        if target is not None and target.opened_at > order.created_at:
+            # Named binding can point at a lot that did not exist when this
+            # fill landed; treat it as unbound rather than double-counting.
+            target = None
 
         filled_quantity = _exit_fill_quantity(order)
         remaining_fill = filled_quantity
@@ -1972,10 +1976,16 @@ def _build_position_batches(
         # allocate the filled overflow to the newest surviving batches instead
         # of leaving a phantom old batch that steals the next position's
         # quantity during snapshot reconciliation.
-        if remaining_fill > 0 or (filled_quantity <= 0 and target is None):
+        #
+        # A fill that predates a lot cannot belong to that lot.  Without this
+        # guard a five-day-old reduce-only fill (e.g. 4542 on 龙虾USDT) is
+        # rebound onto the current episode and inflates exit_filled_quantity.
+        if remaining_fill > 0:
             fallback_candidates = reversed(accumulators)
             for fallback in fallback_candidates:
                 if fallback is target:
+                    continue
+                if fallback.opened_at > order.created_at:
                     continue
                 available = max(
                     Decimal("0"),
@@ -1983,9 +1993,6 @@ def _build_position_batches(
                 )
                 if available <= 0:
                     continue
-                if filled_quantity <= 0:
-                    attach(fallback, Decimal("0"))
-                    break
                 allocated = min(available, remaining_fill)
                 attach(fallback, allocated)
                 if order.exit_batch_id is not None:
