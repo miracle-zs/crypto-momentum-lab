@@ -74,9 +74,9 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
             "/usr/local/bin/cml-local-healthcheck",
             "180",
         ]
-    assert services["paper-orderflow-gainer10-pair"].get("profiles") is None
     for service in (
         "paper-orderflow-pair",
+        "paper-orderflow-gainer10-pair",
         "paper-b1-gainer100",
         "paper-b1-gainer100-ema",
     ):

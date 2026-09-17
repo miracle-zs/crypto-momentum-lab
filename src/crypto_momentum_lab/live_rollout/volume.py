@@ -26,7 +26,7 @@ from crypto_momentum_lab.market_data.quote_volume import QuoteVolume24hSnapshot
 log = structlog.get_logger()
 
 _DEFAULT_REFRESH_INTERVAL_SECONDS = 60.0
-_DEFAULT_HISTORY_SIZE = 2_880
+_DEFAULT_HISTORY_SIZE = 128
 
 
 class Binance24hTickerClient(Protocol):

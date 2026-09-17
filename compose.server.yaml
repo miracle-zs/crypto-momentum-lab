@@ -24,6 +24,7 @@ x-app: &app
     # Opt-in memory attribution for a controlled diagnostic restart.
     CML_TRACEMALLOC: ${CML_TRACEMALLOC:-0}
     CML_TRACEMALLOC_FRAMES: ${CML_TRACEMALLOC_FRAMES:-1}
+    MALLOC_ARENA_MAX: ${MALLOC_ARENA_MAX:-2}
   restart: unless-stopped
   # Short-lived/stateless services can restart quickly. Services that flush
   # exchange or market state override this with an explicit 60-second grace.

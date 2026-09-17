@@ -27,6 +27,7 @@ x-live-account-app: &live-account-app
     CML_RISK_CONTROL_HUB_TOKEN: ${CML_RISK_CONTROL_HUB_TOKEN:-}
     CML_BINANCE_SHARED_REQUEST_PACER_PATH: /run/cml/binance-rest-pacer/private-read.lock
     CML_BINANCE_SHARED_COMMAND_REQUEST_PACER_PATH: /run/cml/binance-rest-pacer/private-command.lock
+    MALLOC_ARENA_MAX: ${MALLOC_ARENA_MAX:-2}
   restart: unless-stopped
   stop_grace_period: 90s
   logging: *default-logging

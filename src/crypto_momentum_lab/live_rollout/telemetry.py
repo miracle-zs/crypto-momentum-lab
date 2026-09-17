@@ -489,7 +489,7 @@ class LiveRuntimeTelemetry:
         persist_event_types: Collection[str] | None = None,
         persist_exchange_operations: Collection[str] | None = None,
         queue_size: int = 4096,
-        max_trace_count: int = 8192,
+        max_trace_count: int = 2048,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
