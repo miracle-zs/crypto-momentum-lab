@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
@@ -8,9 +9,10 @@ from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid5
 
 import structlog
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, event, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.pool import Pool
 
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.domain.strategy import (
@@ -85,9 +87,7 @@ def checkpoint_row_values(
         "last_processed_at_by_symbol": _jsonable(
             checkpoint.last_processed_at_by_symbol
         ),
-        "warmup_buckets_by_symbol": _jsonable(
-            checkpoint.warmup_buckets_by_symbol
-        ),
+        "warmup_buckets_by_symbol": _jsonable(checkpoint.warmup_buckets_by_symbol),
         "cooldown_buckets_remaining_by_symbol": _jsonable(
             checkpoint.cooldown_buckets_remaining_by_symbol
         ),
@@ -263,6 +263,20 @@ def paper_position_from_row(row: PaperPositionRow) -> PaperPosition:
     )
 
 
+def _extract_pool(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> Pool | None:
+    try:
+        bind = session_factory.kw.get("bind")
+        if bind is None:
+            bind = getattr(session_factory, "bind", None)
+        sync_engine = getattr(bind, "sync_engine", bind)
+        pool = getattr(sync_engine, "pool", None)
+        return pool if isinstance(pool, Pool) else None
+    except Exception:
+        return None
+
+
 class PostgresPaperDaemonRepository:
     def __init__(
         self,
@@ -270,6 +284,20 @@ class PostgresPaperDaemonRepository:
     ) -> None:
         self._session_factory = session_factory
         self._portfolio_stats: dict[str, _PortfolioStats] = {}
+        self._pool = _extract_pool(session_factory)
+        self._connect_count = 0
+        if self._pool is not None:
+            try:
+                event.listen(self._pool, "connect", self._on_pool_connect)
+            except Exception:
+                pass
+
+    def _on_pool_connect(
+        self,
+        _dbapi_connection: Any,
+        _connection_record: Any,
+    ) -> None:
+        self._connect_count += 1
 
     async def initialize_run(
         self,
@@ -291,9 +319,7 @@ class PostgresPaperDaemonRepository:
                 await session.execute(
                     insert(StrategyRunRow)
                     .values(values)
-                    .on_conflict_do_nothing(
-                        index_elements=[StrategyRunRow.run_id]
-                    )
+                    .on_conflict_do_nothing(index_elements=[StrategyRunRow.run_id])
                 )
                 existing = await session.scalar(
                     select(StrategyRunRow).where(
@@ -404,8 +430,7 @@ class PostgresPaperDaemonRepository:
                         .where(StrategyRunRow.run_id == run_id)
                         .values(
                             signal_count=(
-                                StrategyRunRow.signal_count
-                                + inserted_signal_count
+                                StrategyRunRow.signal_count + inserted_signal_count
                             ),
                             candidate_count=(
                                 StrategyRunRow.candidate_count
@@ -457,8 +482,7 @@ class PostgresPaperDaemonRepository:
                         update(StrategyRunRow)
                         .where(StrategyRunRow.run_id == run_id)
                         .values(
-                            fill_count=StrategyRunRow.fill_count
-                            + inserted_fill_count,
+                            fill_count=StrategyRunRow.fill_count + inserted_fill_count,
                             pending_candidate_count=func.greatest(
                                 StrategyRunRow.candidate_count
                                 - StrategyRunRow.fill_count
@@ -483,8 +507,7 @@ class PostgresPaperDaemonRepository:
                     select(PaperPositionRow)
                     .where(
                         PaperPositionRow.run_id == run_id,
-                        PaperPositionRow.status
-                        == PaperPositionStatus.OPEN.value,
+                        PaperPositionRow.status == PaperPositionStatus.OPEN.value,
                     )
                     .order_by(
                         PaperPositionRow.opened_at,
@@ -506,8 +529,7 @@ class PostgresPaperDaemonRepository:
                     select(PaperPositionRow.symbol)
                     .where(
                         PaperPositionRow.run_id.in_(run_ids),
-                        PaperPositionRow.status
-                        == PaperPositionStatus.OPEN.value,
+                        PaperPositionRow.status == PaperPositionStatus.OPEN.value,
                     )
                     .distinct()
                     .order_by(PaperPositionRow.symbol)
@@ -534,9 +556,7 @@ class PostgresPaperDaemonRepository:
                 if stats is None:
                     stats = await _load_portfolio_stats(session, run_id)
                 next_stats = replace(stats)
-                position_ids = tuple(
-                    position.position_id for position in positions
-                )
+                position_ids = tuple(position.position_id for position in positions)
                 rows_by_id = {
                     row.position_id: row
                     for row in (
@@ -591,6 +611,24 @@ class PostgresPaperDaemonRepository:
             saved_at=saved_at,
         )
         values_ready_at = perf_counter()
+
+        lag_start = perf_counter()
+        await asyncio.sleep(0)
+        event_loop_lag_ms = round((perf_counter() - lag_start) * 1000, 3)
+
+        pool = self._pool
+        pool_checked_in = (
+            pool.checkedin()
+            if pool is not None and hasattr(pool, "checkedin")
+            else None
+        )
+        pool_checked_out = (
+            pool.checkedout()
+            if pool is not None and hasattr(pool, "checkedout")
+            else None
+        )
+        connects_before = self._connect_count
+
         async with self._session_factory() as session:
             async with session.begin():
                 pool_acquire_started = perf_counter()
@@ -600,6 +638,7 @@ class PostgresPaperDaemonRepository:
                 # reported separately.
                 await session.connection()
                 pool_acquired_at = perf_counter()
+                is_new_connection = bool(self._connect_count > connects_before)
                 statement = insert(StrategyRuntimeCheckpointRow).values(values)
                 execute_started = perf_counter()
                 await session.execute(
@@ -622,10 +661,14 @@ class PostgresPaperDaemonRepository:
             "strategy_checkpoint_persisted",
             run_id=run_id,
             prepare_ms=round((values_ready_at - started) * 1000, 3),
+            event_loop_lag_ms=event_loop_lag_ms,
             pool_acquire_ms=round(
                 (pool_acquired_at - pool_acquire_started) * 1000,
                 3,
             ),
+            is_new_connection=is_new_connection,
+            pool_checked_in=pool_checked_in,
+            pool_checked_out=pool_checked_out,
             sql_execute_ms=round(
                 (execute_finished_at - execute_started) * 1000,
                 3,
@@ -639,9 +682,7 @@ class PostgresPaperDaemonRepository:
 
     async def save_checkpoints(
         self,
-        checkpoints: Sequence[
-            tuple[str, StrategyCheckpoint, datetime]
-        ],
+        checkpoints: Sequence[tuple[str, StrategyCheckpoint, datetime]],
     ) -> None:
         """Persist several independent run checkpoints in one transaction."""
         if not checkpoints:
@@ -656,11 +697,30 @@ class PostgresPaperDaemonRepository:
             for run_id, checkpoint, saved_at in checkpoints
         )
         values_ready_at = perf_counter()
+
+        lag_start = perf_counter()
+        await asyncio.sleep(0)
+        event_loop_lag_ms = round((perf_counter() - lag_start) * 1000, 3)
+
+        pool = self._pool
+        pool_checked_in = (
+            pool.checkedin()
+            if pool is not None and hasattr(pool, "checkedin")
+            else None
+        )
+        pool_checked_out = (
+            pool.checkedout()
+            if pool is not None and hasattr(pool, "checkedout")
+            else None
+        )
+        connects_before = self._connect_count
+
         async with self._session_factory() as session:
             async with session.begin():
                 pool_acquire_started = perf_counter()
                 await session.connection()
                 pool_acquired_at = perf_counter()
+                is_new_connection = bool(self._connect_count > connects_before)
                 statement = insert(StrategyRuntimeCheckpointRow).values(values)
                 execute_started = perf_counter()
                 await session.execute(
@@ -683,10 +743,14 @@ class PostgresPaperDaemonRepository:
             "strategy_checkpoints_persisted",
             run_count=len(values),
             prepare_ms=round((values_ready_at - started) * 1000, 3),
+            event_loop_lag_ms=event_loop_lag_ms,
             pool_acquire_ms=round(
                 (pool_acquired_at - pool_acquire_started) * 1000,
                 3,
             ),
+            is_new_connection=is_new_connection,
+            pool_checked_in=pool_checked_in,
+            pool_checked_out=pool_checked_out,
             sql_execute_ms=round(
                 (execute_finished_at - execute_started) * 1000,
                 3,
@@ -721,9 +785,7 @@ class PostgresPaperDaemonRepository:
                 await session.execute(
                     insert(StrategyRuntimeEventRow)
                     .values(values)
-                    .on_conflict_do_nothing(
-                        index_elements=["event_id", "occurred_at"]
-                    )
+                    .on_conflict_do_nothing(index_elements=["event_id", "occurred_at"])
                 )
 
     async def load_checkpoint(self, run_id: str) -> StrategyCheckpoint | None:
@@ -775,9 +837,7 @@ async def _insert_idempotent(
             insert(model)
             .values(values)
             .on_conflict_do_nothing()
-            .returning(
-                *tuple(getattr(model_any, key) for key in primary_key)
-            )
+            .returning(*tuple(getattr(model_any, key) for key in primary_key))
         )
     ).first()
     if inserted is not None:
@@ -842,8 +902,7 @@ async def _load_portfolio_stats(
             func.sum(
                 case(
                     (
-                        PaperPositionRow.status
-                        == PaperPositionStatus.CLOSED.value,
+                        PaperPositionRow.status == PaperPositionStatus.CLOSED.value,
                         PaperPositionRow.realized_pnl,
                     ),
                     else_=Decimal("0"),
@@ -855,8 +914,7 @@ async def _load_portfolio_stats(
             func.sum(
                 case(
                     (
-                        PaperPositionRow.status
-                        == PaperPositionStatus.OPEN.value,
+                        PaperPositionRow.status == PaperPositionStatus.OPEN.value,
                         PaperPositionRow.unrealized_pnl,
                     ),
                     else_=Decimal("0"),
@@ -870,8 +928,7 @@ async def _load_portfolio_stats(
             func.sum(
                 case(
                     (
-                        PaperPositionRow.status
-                        == PaperPositionStatus.OPEN.value,
+                        PaperPositionRow.status == PaperPositionStatus.OPEN.value,
                         1,
                     ),
                     else_=0,
@@ -988,22 +1045,16 @@ def _legacy_paper_run_upgrade_values(
     """Return safe in-place upgrades for compatible paper runs."""
     normalized_actual = _normalize_paper_run_for_compare(actual)
     normalized_expected = _normalize_paper_run_for_compare(expected)
-    if normalized_actual.get("config_hash") != normalized_expected.get(
-        "config_hash"
-    ):
+    if normalized_actual.get("config_hash") != normalized_expected.get("config_hash"):
         if normalized_actual.get("config_hash") not in compatible_config_hashes:
             return None
         normalized_actual = dict(normalized_actual)
         normalized_actual["config_hash"] = normalized_expected.get("config_hash")
     actual_without_commit = {
-        key: value
-        for key, value in normalized_actual.items()
-        if key != "code_commit"
+        key: value for key, value in normalized_actual.items() if key != "code_commit"
     }
     expected_without_commit = {
-        key: value
-        for key, value in normalized_expected.items()
-        if key != "code_commit"
+        key: value for key, value in normalized_expected.items() if key != "code_commit"
     }
     if actual_without_commit == expected_without_commit:
         return {
@@ -1026,9 +1077,7 @@ def _legacy_paper_run_upgrade_values(
             return None
         if actual_section is not None and not isinstance(actual_section, dict):
             return None
-        upgraded_section = (
-            {} if actual_section is None else dict(actual_section)
-        )
+        upgraded_section = {} if actual_section is None else dict(actual_section)
         for field_name in field_names:
             if field_name in upgraded_section:
                 continue
