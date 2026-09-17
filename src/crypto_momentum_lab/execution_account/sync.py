@@ -36,6 +36,10 @@ _DEFAULT_HISTORICAL_FILL_RECONCILIATION_BATCH_SIZE = 10
 # well below that threshold -- 5 minutes raced the alert and flapped
 # critical every cycle.
 _PROCESS_STATE_REFRESH = timedelta(minutes=2)
+# A fill burst can emit many ACCOUNT_UPDATE events with the same position
+# view.  Collapse identical (amount, entry) observations that land within
+# this window so one close does not stamp dozens of duplicate snapshots.
+_POSITION_SNAPSHOT_COALESCE = timedelta(seconds=2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,6 +457,9 @@ class ExecutionAccountSyncService:
             seconds=config.historical_fill_reconciliation_interval_seconds
         )
         self._last_balance_values: dict[str, BalanceValue] = {}
+        self._last_position_signatures: dict[
+            tuple[str, str], tuple[Decimal, Decimal, datetime]
+        ] = {}
         self._known_fill_keys: set[FillKey] = set()
         self._known_fill_key_order: deque[FillKey] = deque(
             maxlen=_FILL_KEY_CACHE_SIZE
@@ -503,14 +510,23 @@ class ExecutionAccountSyncService:
             for balance in balances
         )
         persisted_balances = self._balances_to_persist(normalized_balances)
+        normalized_positions = tuple(
+            replace(position, observed_at=resolved_observed_at)
+            for position in positions_to_save
+        )
+        persisted_positions = self._positions_to_persist(
+            normalized_positions,
+            observed_at=resolved_observed_at,
+        )
         await self._repository.save_balance_position_snapshot(
             balances=persisted_balances,
-            positions=tuple(
-                replace(position, observed_at=resolved_observed_at)
-                for position in positions_to_save
-            ),
+            positions=persisted_positions,
         )
         self._remember_balance_values(normalized_balances)
+        self._remember_position_signatures(
+            persisted_positions,
+            observed_at=resolved_observed_at,
+        )
         self._active_position_keys = active_position_keys
 
     async def sync_once(
@@ -802,10 +818,14 @@ class ExecutionAccountSyncService:
         # persist_reconciliation_result is the daemon's main write path and had
         # been inserting the full multi-asset zero set every cycle.
         persisted_balances = self._balances_to_persist(snapshot.balances)
+        persisted_positions = self._positions_to_persist(
+            snapshot.positions,
+            observed_at=snapshot.config.observed_at,
+        )
         await self._repository.save_reconciliation_snapshot(
             config=snapshot.config,
             balances=persisted_balances,
-            positions=snapshot.positions,
+            positions=persisted_positions,
             open_orders=snapshot.open_orders,
             fills=result.fills,
             run=_reconciliation_run(
@@ -815,10 +835,14 @@ class ExecutionAccountSyncService:
                 mismatch_count=result.mismatch_count,
                 details=details,
                 balance_count=len(persisted_balances),
-                position_count=len(snapshot.positions),
+                position_count=len(persisted_positions),
                 open_order_count=len(snapshot.open_orders),
                 fill_count=result.fill_count,
             ),
+        )
+        self._remember_position_signatures(
+            persisted_positions,
+            observed_at=snapshot.config.observed_at,
         )
         if result.fill_cursor_updates:
             await self._repository.save_fill_reconciliation_cursors(
@@ -873,6 +897,10 @@ class ExecutionAccountSyncService:
             event.event_id,
         )
         persisted_balances = self._balances_to_persist(snapshot.balances)
+        persisted_positions = self._positions_to_persist(
+            snapshot.positions,
+            observed_at=event.received_at,
+        )
         account_config = self._latest_rest_account_config or snapshot.config
         await self._repository.save_reconciliation_snapshot(
             # Keep the last REST account-config observation as the identity of
@@ -881,7 +909,7 @@ class ExecutionAccountSyncService:
             # the event time would make it look like a fresh margin reading.
             config=account_config,
             balances=persisted_balances,
-            positions=snapshot.positions,
+            positions=persisted_positions,
             open_orders=snapshot.open_orders,
             fills=fills,
             run=_reconciliation_run(
@@ -895,13 +923,17 @@ class ExecutionAccountSyncService:
                     "event_type": event.event_type,
                     "event_at": event.event_at.isoformat(),
                 },
-                balance_count=len(snapshot.balances),
+                balance_count=len(persisted_balances),
                 position_count=len(active_positions),
                 open_order_count=len(snapshot.open_orders),
                 fill_count=len(fills),
             ),
         )
         self._remember_balance_values(snapshot.balances)
+        self._remember_position_signatures(
+            persisted_positions,
+            observed_at=event.received_at,
+        )
         await self._save_state(
             ExecutionAccountStatus.READY_READONLY,
             config=config,
@@ -967,6 +999,63 @@ class ExecutionAccountSyncService:
                 self._last_balance_values.get(balance.asset)
             )
         )
+
+    def _positions_to_persist(
+        self,
+        positions: tuple[AccountPositionSnapshot, ...],
+        *,
+        observed_at: datetime,
+    ) -> tuple[AccountPositionSnapshot, ...]:
+        """Drop zero rows and collapse identical short-window observations.
+
+        A single close can fan out into many ACCOUNT_UPDATE events.  Keeping
+        every intermediate view stamped the same symbol with 266 / 240 / 17 /
+        0 rows microseconds apart and made the latest-position view ambiguous.
+        """
+
+        persisted: list[AccountPositionSnapshot] = []
+        for position in positions:
+            key = (position.symbol, position.position_side)
+            last = self._last_position_signatures.get(key)
+            if position.position_amt == 0:
+                # Durable zero only when the previous observation was open.
+                if last is None:
+                    continue
+                persisted.append(position)
+                self._last_position_signatures[key] = (
+                    position.position_amt,
+                    position.entry_price,
+                    observed_at,
+                )
+                continue
+            if (
+                last is not None
+                and last[0] == position.position_amt
+                and last[1] == position.entry_price
+                and observed_at - last[2] < _POSITION_SNAPSHOT_COALESCE
+            ):
+                continue
+            persisted.append(position)
+            self._last_position_signatures[key] = (
+                position.position_amt,
+                position.entry_price,
+                observed_at,
+            )
+        return tuple(persisted)
+
+    def _remember_position_signatures(
+        self,
+        positions: tuple[AccountPositionSnapshot, ...],
+        *,
+        observed_at: datetime,
+    ) -> None:
+        for position in positions:
+            key = (position.symbol, position.position_side)
+            self._last_position_signatures[key] = (
+                position.position_amt,
+                position.entry_price,
+                observed_at,
+            )
 
     def _remember_balance_values(
         self,
