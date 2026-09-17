@@ -39,6 +39,49 @@ def test_checked_in_live_runtime_manifest_resolves_account_identity() -> None:
         "cancel,submit"
     )
 
+    expected_profiles = {
+        "primary": {
+            "impulse_window_buckets": 2,
+            "confirmation_buckets": 1,
+            "min_return_pct": "0.005",
+            "min_aggressive_imbalance": "0.30",
+            "min_notional_intensity": "4.0",
+            "min_notional_5m_vs_30m": "1.50",
+            "cooldown_buckets": 0,
+        },
+        "account-2": {
+            "impulse_window_buckets": 2,
+            "confirmation_buckets": 1,
+            "min_return_pct": "0.005",
+            "min_aggressive_imbalance": "0.30",
+            "min_notional_intensity": "4.0",
+            "min_notional_5m_vs_30m": "1.50",
+            "cooldown_buckets": 0,
+        },
+        "account-3": {
+            "impulse_window_buckets": 3,
+            "confirmation_buckets": 1,
+            "min_return_pct": "0.015",
+            "min_aggressive_imbalance": "0.30",
+            "min_notional_intensity": "1.5",
+            "min_notional_5m_vs_30m": "0.00",
+            "cooldown_buckets": 0,
+        },
+        "account-4": {
+            "impulse_window_buckets": 3,
+            "confirmation_buckets": 1,
+            "min_return_pct": "0.015",
+            "min_aggressive_imbalance": "0.30",
+            "min_notional_intensity": "1.5",
+            "min_notional_5m_vs_30m": "0.00",
+            "cooldown_buckets": 0,
+        },
+    }
+    assert {
+        label: manifest.account(label).strategy_inputs.profile.as_dict()
+        for label in expected_profiles
+    } == expected_profiles
+
 
 def test_runtime_manifest_expands_override_and_rejects_missing_required_value(
     tmp_path: Path,

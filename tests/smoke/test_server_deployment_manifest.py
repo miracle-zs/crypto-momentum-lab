@@ -250,7 +250,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
     ] == "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-10}"
     assert services["live-strategy"]["environment"][
         "CML_LIVE_IMPULSE_WINDOW_BUCKETS"
-    ] == "${CML_LIVE_IMPULSE_WINDOW_BUCKETS:-4}"
+    ] == "${CML_LIVE_IMPULSE_WINDOW_BUCKETS:-2}"
     assert services["live-strategy"]["environment"]["CML_LIVE_SESSION_ID"] == (
         "${CML_LIVE_SESSION_ID:-live-primary-v1}"
     )
@@ -409,7 +409,7 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
     assert account_two_environment["CML_LOCAL_HEALTH_DIR"] == "/run/cml/health"
     assert (
         account_two_environment["CML_LIVE_IMPULSE_WINDOW_BUCKETS"]
-        == "${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_2:-4}"
+        == "${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_2:-2}"
     )
     assert (
         account_two_environment["CML_LIVE_MIN_RETURN_PCT"]
@@ -421,7 +421,7 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
     )
     assert (
         account_two_environment["CML_LIVE_MIN_INTENSITY"]
-        == "${CML_LIVE_MIN_INTENSITY_ACCOUNT_2:-1.5}"
+        == "${CML_LIVE_MIN_INTENSITY_ACCOUNT_2:-4.0}"
     )
     assert (
         account_two_environment["CML_LIVE_MIN_NOTIONAL_5M_VS_30M"]
@@ -442,11 +442,11 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
         ]["environment"]
         assert (
             account_environment["CML_LIVE_IMPULSE_WINDOW_BUCKETS"]
-            == f"${{CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_{account_number}:-2}}"
+            == f"${{CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_{account_number}:-3}}"
         )
         assert (
             account_environment["CML_LIVE_MIN_RETURN_PCT"]
-            == f"${{CML_LIVE_MIN_RETURN_PCT_ACCOUNT_{account_number}:-0.005}}"
+            == f"${{CML_LIVE_MIN_RETURN_PCT_ACCOUNT_{account_number}:-0.015}}"
         )
         assert (
             account_environment["CML_LIVE_MIN_IMBALANCE"]
@@ -454,11 +454,11 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
         )
         assert (
             account_environment["CML_LIVE_MIN_INTENSITY"]
-            == f"${{CML_LIVE_MIN_INTENSITY_ACCOUNT_{account_number}:-4.0}}"
+            == f"${{CML_LIVE_MIN_INTENSITY_ACCOUNT_{account_number}:-1.5}}"
         )
         assert (
             account_environment["CML_LIVE_MIN_NOTIONAL_5M_VS_30M"]
-            == f"${{CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_{account_number}:-1.50}}"
+            == f"${{CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_{account_number}:-0.00}}"
         )
 
 

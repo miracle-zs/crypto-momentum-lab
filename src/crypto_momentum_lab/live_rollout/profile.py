@@ -18,11 +18,11 @@ from decimal import Decimal, InvalidOperation
 class LiveOrderFlowImpulseProfile:
     """Validated per-account parameters for ``orderflow_impulse``."""
 
-    impulse_window_buckets: int = 4
+    impulse_window_buckets: int = 2
     confirmation_buckets: int = 1
     min_return_pct: Decimal = Decimal("0.005")
     min_aggressive_imbalance: Decimal = Decimal("0.30")
-    min_notional_intensity: Decimal = Decimal("1.5")
+    min_notional_intensity: Decimal = Decimal("4.0")
     min_notional_5m_vs_30m: Decimal = Decimal("1.50")
     cooldown_buckets: int = 0
 
