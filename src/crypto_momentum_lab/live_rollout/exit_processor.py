@@ -239,11 +239,20 @@ class LiveExitProcessor:
                 positions=context.managed_positions,
                 latest_quote=latest_quote,
             )
-            approved, submitted, failure = await self._process_requests(
-                requests,
-                state=state,
-                context=context,
-            )
+            try:
+                approved, submitted, failure = await self._process_requests(
+                    requests,
+                    state=state,
+                    context=context,
+                )
+            except ValueError as error:
+                if (
+                    self._exit_manager is not None
+                    and str(error)
+                    == "client order ID is already bound to a different order"
+                ):
+                    self._exit_manager.note_order_identity_conflict(state.symbol)
+                raise
         return ExitLaneOutcome(
             approved_intent_count=approved,
             submitted_order_count=submitted,

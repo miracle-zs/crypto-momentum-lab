@@ -261,6 +261,22 @@ class LiveExitManager:
         self._config = config
         self._candles = candle_loader
         self._checked_until: dict[tuple[str, FuturesPositionSide, str], datetime] = {}
+        # Bumped when a durable client-order-id is already bound to a terminal
+        # reduce-only row.  The recovery episode stays the same, but the next
+        # fallback must mint a new intent/client id or prepare() loops forever
+        # on "already bound to a different order".
+        self._grace_identity_epoch: dict[str, int] = {}
+
+    def note_order_identity_conflict(self, symbol: str) -> None:
+        """Force the next grace fallback for ``symbol`` onto a new client id."""
+
+        if not symbol.strip():
+            raise ValueError("symbol must not be empty")
+        key = symbol.strip().upper()
+        self._grace_identity_epoch[key] = self._grace_identity_epoch.get(key, 0) + 1
+
+    def _grace_identity_epoch_for(self, symbol: str) -> int:
+        return self._grace_identity_epoch.get(symbol.strip().upper(), 0)
 
     @property
     def uses_market_state_exit(self) -> bool:
@@ -831,6 +847,9 @@ class LiveExitManager:
             f"{reason}:{identity_trigger_at.isoformat()}"
             f":quantity:{order_quantity}"
         )
+        epoch = self._grace_identity_epoch_for(position.symbol)
+        if epoch:
+            identity = f"{identity}:epoch:{epoch}"
         signal_id = f"live-exit-signal-{uuid5(NAMESPACE_URL, identity)}"
         candidate_id = f"live-exit-{uuid5(NAMESPACE_URL, signal_id)}"
         if created_at is None:
