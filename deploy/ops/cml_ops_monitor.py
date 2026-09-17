@@ -1506,6 +1506,15 @@ class OpsMonitor:
             )
             combined_signals = _merge_log_signals(combined_signals, signals)
         alerts.extend(evaluate_log_signals(combined_signals))
+        market_snapshot = next(
+            (snapshot for snapshot in containers if snapshot.service == "market-data"),
+            None,
+        )
+        market_limit = (
+            market_snapshot.memory_limit_bytes
+            if market_snapshot is not None
+            else None
+        )
         if combined_signals.latest_rss_bytes is not None:
             alerts.extend(
                 self._memory_growth_alerts(
@@ -1514,6 +1523,7 @@ class OpsMonitor:
                     now,
                     container_id=market_id,
                     metric_source="process_rss_log",
+                    memory_limit_bytes=market_limit,
                 )
             )
 
@@ -2275,15 +2285,17 @@ SELECT 'market_delay_ms' || E'\\t' || COALESCE(
     -- Only buckets a real event advanced carry a meaningful delay.  The
     -- market layer materializes zero-event buckets for quiet symbols so
     -- consumers see a dense 15-second clock, and every one of those sits at a
-    -- past bucket_end by construction.  Measuring received_at - bucket_end on
-    -- such a bucket reports how old it is, not how late data arrived, which is
-    -- how an 18-minute and a 65-minute "delay" appeared while healthy buckets
-    -- sat at 1.3 seconds.  A feed that genuinely stops is covered by
-    -- market_task_not_alive and the market-data gap counters.
+    -- past bucket_end by construction.  Promotion backfill also produces
+    -- historical buckets with events from up to 35 minutes ago, but with
+    -- data_complete=false.  Furthermore, live receive latency must only judge
+    -- buckets whose bucket_end is close to occurred_at (within 5 minutes),
+    -- never historical backfill/catchup data.
     SELECT details->>'market_delay_ms'
     FROM strategy_runtime_events
     WHERE run_id = {run_id} AND event_type = 'market_state_progress'
       AND COALESCE((details->>'source_event_count')::int, 0) > 0
+      AND COALESCE((details->>'data_complete')::boolean, false) = true
+      AND (details->>'bucket_end')::timestamptz >= occurred_at - interval '5 minutes'
     ORDER BY occurred_at DESC
     LIMIT 1
   ), '-1'

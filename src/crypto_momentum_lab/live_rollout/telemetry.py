@@ -687,6 +687,11 @@ class LiveRuntimeTelemetry:
         _require_aware(occurred_at, "occurred_at")
         _require_aware(received_at, "received_at")
         if (
+            not state.data_complete
+            or (occurred_at - state.bucket_end) > timedelta(minutes=5)
+        ):
+            return
+        if (
             self._last_market_progress_at is not None
             and occurred_at - self._last_market_progress_at
             < timedelta(seconds=60)

@@ -291,6 +291,64 @@ async def test_market_progress_persists_sampled_delay_and_account_identity() -> 
     assert event["details"]["market_delay_ms"] == 30_000.0
 
 
+async def test_market_state_progress_ignores_backfilled_and_historical_states() -> None:
+    batches: list[tuple[dict[str, object], ...]] = []
+
+    async def persist(events) -> None:
+        batches.append(tuple(dict(event) for event in events))
+
+    telemetry = LiveRuntimeTelemetry(
+        run_id="run-1",
+        account_label="primary",
+        strategy_config_hash="config-1",
+        persist=persist,
+        persist_event_types=frozenset({MARKET_STATE_PROGRESS}),
+    )
+    await telemetry.start()
+
+    # 1. Backfilled state (data_complete=False) should be ignored
+    backfilled_state = replace(_state(), data_complete=False)
+    telemetry.market_state_progress(
+        backfilled_state,
+        occurred_at=datetime(2026, 7, 4, 0, 1, 0, tzinfo=UTC),
+        received_at=datetime(2026, 7, 4, 0, 1, 0, tzinfo=UTC),
+    )
+    assert len(batches) == 0
+
+    # 2. Stale historical state (bucket_end older than 5 minutes) should be ignored
+    stale_state = replace(
+        _state(),
+        data_complete=True,
+        bucket_start=datetime(2026, 7, 4, 0, 0, 0, tzinfo=UTC),
+        bucket_end=datetime(2026, 7, 4, 0, 0, 15, tzinfo=UTC),
+    )
+    telemetry.market_state_progress(
+        stale_state,
+        occurred_at=datetime(2026, 7, 4, 0, 10, 0, tzinfo=UTC),
+        received_at=datetime(2026, 7, 4, 0, 10, 0, tzinfo=UTC),
+    )
+    assert len(batches) == 0
+
+    # 3. Fresh live state (data_complete=True and bucket_end within 5 minutes) is accepted
+    live_state = replace(
+        _state(),
+        data_complete=True,
+        bucket_start=datetime(2026, 7, 4, 0, 9, 45, tzinfo=UTC),
+        bucket_end=datetime(2026, 7, 4, 0, 10, 0, tzinfo=UTC),
+    )
+    telemetry.market_state_progress(
+        live_state,
+        occurred_at=datetime(2026, 7, 4, 0, 10, 2, tzinfo=UTC),
+        received_at=datetime(2026, 7, 4, 0, 10, 2, tzinfo=UTC),
+    )
+    await telemetry.stop()
+
+    assert len(batches) == 1
+    assert batches[0][0]["event_type"] == MARKET_STATE_PROGRESS
+    assert batches[0][0]["details"]["market_delay_ms"] == 2000.0
+
+
+
 async def test_strategy_output_observation_is_durable_as_a_sampled_heartbeat() -> None:
     batches: list[tuple[dict[str, object], ...]] = []
 

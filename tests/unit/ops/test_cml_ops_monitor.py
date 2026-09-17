@@ -1020,6 +1020,8 @@ def test_database_state_uses_live_checkpoint_and_lease_not_order_events(
     assert "live_session_transitions" in sql
     assert "strategy_runtime_events" in sql
     assert "market_state_progress" in sql
+    assert "data_complete" in sql
+    assert "interval '5 minutes'" in sql
     assert "execution_account_process_states" in sql
     assert "account_reconciliation_runs" in sql
 
