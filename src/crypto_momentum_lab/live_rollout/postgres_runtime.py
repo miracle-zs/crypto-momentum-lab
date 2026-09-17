@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.account import (
@@ -73,6 +73,183 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
 )
 
 log = structlog.get_logger(__name__)
+
+# Phase-1 scans only this far back when hunting for still-open lot anchors.
+# Live timeout exits should close far sooner; a longer hold falls back to this
+# bound rather than an unbounded order history.
+_ORDER_ANCHOR_LOOKBACK = timedelta(days=7)
+# Keep a short cushion before the earliest open lot so entry metadata written
+# slightly before the fill timestamp is still visible to batch rebuild.
+_ORDER_ANCHOR_BUFFER = timedelta(minutes=5)
+
+
+@dataclass(frozen=True, slots=True)
+class _OrderAnchorEvent:
+    symbol: str
+    kind: str
+    occurred_at: datetime
+    quantity: Decimal
+
+
+def _opening_anchors_from_events(
+    events: Sequence[_OrderAnchorEvent],
+    symbols: Sequence[str],
+) -> dict[str, datetime]:
+    """Return the earliest still-open lot time per symbol via a FIFO walk.
+
+    Batch attribution can differ from pure FIFO under named bindings, so this
+    window errs toward keeping more history rather than dropping a live lot.
+    Callers still rely on the fill-vs-opened_at invariant for correctness.
+    """
+    by_symbol: dict[str, list[_OrderAnchorEvent]] = {
+        symbol.strip().upper(): [] for symbol in symbols
+    }
+    for event in events:
+        key = event.symbol.strip().upper()
+        by_symbol.setdefault(key, []).append(event)
+
+    anchors: dict[str, datetime] = {}
+    for symbol, symbol_events in by_symbol.items():
+        ordered = sorted(symbol_events, key=lambda item: item.occurred_at)
+        open_lots: list[list[object]] = []
+        for event in ordered:
+            if event.quantity <= 0:
+                continue
+            if event.kind == "entry":
+                open_lots.append([event.occurred_at, event.quantity])
+                continue
+            remaining = event.quantity
+            for lot in open_lots:
+                if remaining <= 0:
+                    break
+                lot_remaining = lot[1]
+                if not isinstance(lot_remaining, Decimal) or lot_remaining <= 0:
+                    continue
+                take = min(lot_remaining, remaining)
+                lot[1] = lot_remaining - take
+                remaining -= take
+            open_lots = [
+                lot
+                for lot in open_lots
+                if isinstance(lot[1], Decimal) and lot[1] > 0
+            ]
+        if open_lots:
+            opened_times = [
+                lot[0]
+                for lot in open_lots
+                if isinstance(lot[0], datetime)
+            ]
+            if opened_times:
+                anchors[symbol] = min(opened_times)
+    return anchors
+
+
+async def _load_order_anchor_events(
+    session: AsyncSession,
+    *,
+    run_id: str,
+    active_symbols: Sequence[str],
+    lookback_start: datetime,
+) -> tuple[_OrderAnchorEvent, ...]:
+    rows = (
+        await session.scalars(
+            select(ExchangeOrderRow)
+            .where(
+                ExchangeOrderRow.run_id == run_id,
+                ExchangeOrderRow.symbol.in_(active_symbols),
+                ExchangeOrderRow.created_at >= lookback_start,
+            )
+            .order_by(ExchangeOrderRow.created_at.asc())
+        )
+    ).all()
+    events: list[_OrderAnchorEvent] = []
+    for row in rows:
+        executed = row.executed_quantity or Decimal("0")
+        if row.reduce_only:
+            quantity = executed
+            if quantity <= 0 and row.state == ExchangeOrderState.FILLED.value:
+                quantity = row.quantity
+            if quantity > 0:
+                events.append(
+                    _OrderAnchorEvent(
+                        symbol=row.symbol,
+                        kind="exit",
+                        occurred_at=row.created_at,
+                        quantity=quantity,
+                    )
+                )
+            continue
+        quantity = executed
+        if quantity <= 0 and row.state == ExchangeOrderState.FILLED.value:
+            quantity = row.quantity
+        if quantity > 0:
+            events.append(
+                _OrderAnchorEvent(
+                    symbol=row.symbol,
+                    kind="entry",
+                    occurred_at=row.created_at,
+                    quantity=quantity,
+                )
+            )
+    return tuple(events)
+
+
+async def _load_position_orders_bounded(
+    session: AsyncSession,
+    *,
+    run_id: str,
+    active_symbols: Sequence[str],
+    now: datetime | None = None,
+) -> list[ExchangeOrderRow]:
+    """Two-phase order load: anchors first, then a per-symbol time window."""
+    if not active_symbols:
+        return []
+    observed_at = now or datetime.now(tz=UTC)
+    lookback_start = observed_at - _ORDER_ANCHOR_LOOKBACK
+    symbols = tuple(sorted({symbol.strip().upper() for symbol in active_symbols}))
+    events = await _load_order_anchor_events(
+        session,
+        run_id=run_id,
+        active_symbols=symbols,
+        lookback_start=lookback_start,
+    )
+    anchors = _opening_anchors_from_events(events, symbols)
+    window_conditions = []
+    for symbol in symbols:
+        anchor = anchors.get(symbol)
+        window_start = (
+            anchor - _ORDER_ANCHOR_BUFFER
+            if anchor is not None
+            else lookback_start
+        )
+        window_conditions.append(
+            and_(
+                ExchangeOrderRow.symbol == symbol,
+                ExchangeOrderRow.created_at >= window_start,
+            )
+        )
+    if not window_conditions:
+        return []
+    rows = (
+        await session.scalars(
+            select(ExchangeOrderRow)
+            .where(
+                ExchangeOrderRow.run_id == run_id,
+                or_(*window_conditions),
+            )
+            .order_by(ExchangeOrderRow.updated_at.desc())
+            .limit(1000)
+        )
+    ).all()
+    for symbol, anchor in anchors.items():
+        log.debug(
+            "position_order_window_bounded",
+            symbol=symbol,
+            opened_at=anchor.isoformat(),
+            window_start=(anchor - _ORDER_ANCHOR_BUFFER).isoformat(),
+            row_count=len(rows),
+        )
+    return list(rows)
 
 
 @dataclass(frozen=True, slots=True)
@@ -680,18 +857,10 @@ class PostgresLiveContextProvider:
             ] = {}
             if active:
                 active_symbols = tuple(sorted({row.symbol for row in active}))
-                orders = list(
-                    (
-                        await session.scalars(
-                            select(ExchangeOrderRow)
-                            .where(
-                                ExchangeOrderRow.run_id == self._run_id,
-                                ExchangeOrderRow.symbol.in_(active_symbols),
-                            )
-                            .order_by(ExchangeOrderRow.updated_at.desc())
-                            .limit(1000)
-                        )
-                    ).all()
+                orders = await _load_position_orders_bounded(
+                    session,
+                    run_id=self._run_id,
+                    active_symbols=active_symbols,
                 )
                 entry_client_order_ids = tuple(
                     sorted(
@@ -807,18 +976,10 @@ class PostgresLiveContextProvider:
         if active:
             async with self._sessions() as session:
                 active_symbols = tuple(sorted({row.symbol for row in active}))
-                orders = list(
-                    (
-                        await session.scalars(
-                            select(ExchangeOrderRow)
-                            .where(
-                                ExchangeOrderRow.run_id == self._run_id,
-                                ExchangeOrderRow.symbol.in_(active_symbols),
-                            )
-                            .order_by(ExchangeOrderRow.updated_at.desc())
-                            .limit(1000)
-                        )
-                    ).all()
+                orders = await _load_position_orders_bounded(
+                    session,
+                    run_id=self._run_id,
+                    active_symbols=active_symbols,
                 )
                 entry_client_order_ids = tuple(
                     sorted(

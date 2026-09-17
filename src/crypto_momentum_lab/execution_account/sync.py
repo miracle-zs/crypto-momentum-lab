@@ -28,6 +28,10 @@ type BalanceValue = tuple[Decimal, Decimal, Decimal]
 _FILL_KEY_CACHE_SIZE = 8192
 _FILL_FETCH_OVERLAP_MS = 60_000
 _NEW_POSITION_FILL_LOOKBACK = timedelta(minutes=30)
+# Never issue an unbounded userTrades pull.  Symbols without a fromId cursor
+# and without a prior startTime are historical; scanning a week is enough to
+# catch a still-open lot without replaying every prior episode on the symbol.
+_HISTORICAL_FILL_LOOKBACK = timedelta(days=7)
 _DEFAULT_HISTORICAL_FILL_RECONCILIATION_BATCH_SIZE = 10
 # Dashboard and ops-monitor only need a fresh enough "still ready" sample.
 # Writing every ~30s heartbeat produced ~12k identical ready_readonly rows
@@ -672,6 +676,14 @@ class ExecutionAccountSyncService:
                     and cursor.start_time_ms is not None
                 )
             }
+            from_id_by_symbol = {
+                symbol: cursor.from_id
+                for symbol, cursor in previous_fill_cursors.items()
+                if (
+                    cursor.from_id is not None
+                    and symbol in tracked_fill_symbols
+                )
+            }
             new_position_start_at = int(
                 (
                     config.observed_at - _NEW_POSITION_FILL_LOOKBACK
@@ -681,17 +693,24 @@ class ExecutionAccountSyncService:
             for symbol in newly_active_symbols:
                 if symbol not in previous_fill_cursors:
                     start_time_by_symbol[symbol] = max(0, new_position_start_at)
+            # Any remaining tracked symbol still has no positional cursor.
+            # Bound it explicitly so userTrades never falls back to "latest
+            # 1000 fills of every prior episode" for that symbol.
+            historical_start_at = int(
+                (
+                    config.observed_at - _HISTORICAL_FILL_LOOKBACK
+                ).timestamp()
+                * 1000
+            )
+            for symbol in tracked_fill_symbols:
+                if symbol in from_id_by_symbol:
+                    continue
+                if symbol not in start_time_by_symbol:
+                    start_time_by_symbol[symbol] = historical_start_at
             fills = (
                 await self._client.fetch_recent_fills(
                     tracked_fill_symbols,
-                    from_id_by_symbol={
-                        symbol: cursor.from_id
-                        for symbol, cursor in previous_fill_cursors.items()
-                        if (
-                            cursor.from_id is not None
-                            and symbol in tracked_fill_symbols
-                        )
-                    },
+                    from_id_by_symbol=from_id_by_symbol,
                     start_time_by_symbol=start_time_by_symbol,
                 )
                 if include_fills and tracked_fill_symbols

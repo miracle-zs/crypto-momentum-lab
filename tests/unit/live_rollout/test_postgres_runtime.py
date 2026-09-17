@@ -27,6 +27,8 @@ from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,
     _classify_live_positions,
     _classify_live_positions_detailed,
+    _opening_anchors_from_events,
+    _OrderAnchorEvent,
     _resolve_strategy_live_state,
     live_limits_from_approval,
     poll_live_market_states,
@@ -1778,3 +1780,50 @@ def _order(
         quantity=quantity,
         executed_quantity=executed_quantity,
     )
+
+
+def test_opening_anchor_skips_fully_exited_historical_episode() -> None:
+    """LOBUSDT-style case: old 4542 exit must not keep the 9/11 lot open."""
+    day1_entry = NOW - timedelta(days=5)
+    day1_exit = NOW - timedelta(days=4)
+    day2_entry = NOW - timedelta(hours=6)
+    anchors = _opening_anchors_from_events(
+        (
+            _OrderAnchorEvent("LOBUSDT", "entry", day1_entry, Decimal("4542")),
+            _OrderAnchorEvent("LOBUSDT", "exit", day1_exit, Decimal("4542")),
+            _OrderAnchorEvent("LOBUSDT", "entry", day2_entry, Decimal("2228")),
+        ),
+        ("LOBUSDT",),
+    )
+
+    assert anchors == {"LOBUSDT": day2_entry}
+
+
+def test_opening_anchor_keeps_earliest_lot_when_addon_is_partial() -> None:
+    first = NOW - timedelta(hours=10)
+    addon = NOW - timedelta(hours=2)
+    partial_exit = NOW - timedelta(hours=1)
+    anchors = _opening_anchors_from_events(
+        (
+            _OrderAnchorEvent("BTCUSDT", "entry", first, Decimal("1")),
+            _OrderAnchorEvent("BTCUSDT", "entry", addon, Decimal("1")),
+            _OrderAnchorEvent("BTCUSDT", "exit", partial_exit, Decimal("0.4")),
+        ),
+        ("BTCUSDT",),
+    )
+
+    assert anchors == {"BTCUSDT": first}
+
+
+def test_opening_anchor_absent_when_symbol_is_flat_in_lookback() -> None:
+    entry = NOW - timedelta(days=3)
+    exit_at = NOW - timedelta(days=2)
+    anchors = _opening_anchors_from_events(
+        (
+            _OrderAnchorEvent("ETHUSDT", "entry", entry, Decimal("2")),
+            _OrderAnchorEvent("ETHUSDT", "exit", exit_at, Decimal("2")),
+        ),
+        ("ETHUSDT", "SOLUSDT"),
+    )
+
+    assert anchors == {}

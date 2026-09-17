@@ -235,15 +235,25 @@ async def test_sync_tracks_incremental_fill_keys_and_baselines_new_symbols() -> 
         observed_at=datetime(2026, 7, 4, 6, 0, tzinfo=UTC)
     )
 
+    # Uncursored symbols are bounded by the historical lookback instead of
+    # falling through to an unbounded "latest 1000" pull.
+    first_window = int(
+        (datetime(2026, 7, 4, 0, 0, tzinfo=UTC) - timedelta(days=7)).timestamp()
+        * 1000
+    )
+    second_window = int(
+        (datetime(2026, 7, 4, 6, 0, tzinfo=UTC) - timedelta(days=7)).timestamp()
+        * 1000
+    )
     assert client.calls[0] == (
         ("BTCUSDT",),
         {},
-        {},
+        {"BTCUSDT": first_window},
     )
     assert client.calls[1] == (
         ("BTCUSDT", "ETHUSDT"),
         {"BTCUSDT": 43},
-        {},
+        {"ETHUSDT": second_window},
     )
     assert first.new_fill_keys == frozenset()
     assert second.new_fill_keys == frozenset({("BTCUSDT", "43")})
@@ -468,6 +478,69 @@ async def test_sync_always_includes_active_symbols_with_historical_batching() ->
     await service.sync_once(observed_at=observed_at + timedelta(minutes=1))
 
     assert client.calls[1][0] == ("ETHUSDT", "SOLUSDT")
+
+
+async def test_sync_bounds_uncursored_historical_symbols_with_start_time() -> None:
+    """A tracked symbol with no cursor must never be pulled unbounded."""
+    observed_at = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+    client = CursorClient(responses=[()])
+    service = ExecutionAccountSyncService(
+        client=client,
+        repository=FakeRepository(),
+        config=ExecutionAccountSyncConfig(
+            environment="live",
+            account_label="primary",
+            expected_multi_assets_mode=False,
+            expected_hedge_mode=False,
+            observed_at=observed_at,
+            recent_fill_symbols=("LOBUSDT",),
+            historical_fill_reconciliation_interval_seconds=3600,
+        ),
+    )
+
+    await service.sync_once()
+
+    assert len(client.calls) == 1
+    symbols, from_ids, start_times = client.calls[0]
+    assert symbols == ("LOBUSDT",)
+    assert from_ids == {}
+    assert "LOBUSDT" in start_times
+    expected_start = int((observed_at - timedelta(days=7)).timestamp() * 1000)
+    assert start_times["LOBUSDT"] == expected_start
+
+
+async def test_sync_keeps_from_id_cursors_out_of_start_time_window() -> None:
+    observed_at = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+    client = CursorClient(responses=[()])
+    service = ExecutionAccountSyncService(
+        client=client,
+        repository=FakeRepository(),
+        config=ExecutionAccountSyncConfig(
+            environment="live",
+            account_label="primary",
+            expected_multi_assets_mode=False,
+            expected_hedge_mode=False,
+            observed_at=observed_at,
+            recent_fill_cursors={
+                "BTCUSDT": AccountFillReconciliationCursor(
+                    environment="live",
+                    account_label="primary",
+                    symbol="BTCUSDT",
+                    from_id=101,
+                    start_time_ms=None,
+                    last_checked_at=observed_at - timedelta(hours=2),
+                ),
+            },
+            historical_fill_reconciliation_interval_seconds=3600,
+        ),
+    )
+
+    await service.sync_once()
+
+    symbols, from_ids, start_times = client.calls[0]
+    assert symbols == ("BTCUSDT",)
+    assert from_ids == {"BTCUSDT": 101}
+    assert "BTCUSDT" not in start_times
 
 
 async def test_sync_once_halts_on_hedge_mode_mismatch() -> None:
