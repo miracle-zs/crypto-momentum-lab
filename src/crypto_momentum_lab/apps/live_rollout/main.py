@@ -1259,6 +1259,12 @@ def run_command(
     checkpoint_every_states: Annotated[
         int, typer.Option("--checkpoint-every-states", min=1)
     ] = 100,
+    checkpoint_every_seconds: Annotated[
+        float, typer.Option("--checkpoint-every-seconds", min=1.0)
+    ] = 60.0,
+    checkpoint_phase_seconds: Annotated[
+        float, typer.Option("--checkpoint-phase-seconds", min=0.0)
+    ] = 0.0,
     hedge_mode: Annotated[
         bool | None,
         typer.Option("--hedge-mode/--one-way-mode"),
@@ -1437,6 +1443,8 @@ def run_command(
                 max_runtime_seconds=max_runtime_seconds,
                 poll_interval_seconds=poll_interval_seconds,
                 checkpoint_every_states=checkpoint_every_states,
+                checkpoint_every_seconds=checkpoint_every_seconds,
+                checkpoint_phase_seconds=checkpoint_phase_seconds,
                 hedge_mode=hedge_mode,
                 exit_mode=exit_mode,
                 take_profit_pct=take_profit_pct,

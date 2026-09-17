@@ -210,6 +210,9 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         ),
     ]
     live_command = services["live-strategy"]["command"]
+    assert _option_value(live_command, "--checkpoint-every-states") == "1000"
+    assert _option_value(live_command, "--checkpoint-every-seconds") == "60"
+    assert _option_value(live_command, "--checkpoint-phase-seconds") == "0"
     assert _option_value(
         live_command,
         "--persist-exchange-operations",
@@ -400,6 +403,19 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
         ) == (
             "${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS_ACCOUNT_"
             f"{account_number}:-submit,cancel}}"
+        )
+        expected_phases = {"2": "15", "3": "30", "4": "45"}
+        assert (
+            _option_value(strategy["command"], "--checkpoint-phase-seconds")
+            == expected_phases[account_number]
+        )
+        assert (
+            _option_value(strategy["command"], "--checkpoint-every-seconds")
+            == "60"
+        )
+        assert (
+            _option_value(strategy["command"], "--checkpoint-every-states")
+            == "1000"
         )
         assert strategy["depends_on"][
             f"execution-account-live-account-{account_number}"

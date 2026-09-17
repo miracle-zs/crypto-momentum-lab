@@ -186,6 +186,236 @@ async def test_coordinator_advances_watermark_for_recovered_market_state() -> No
     }
 
 
+async def test_coordinator_periodic_phase_alignment_and_deduplication() -> None:
+    persisted: list[tuple[str, StrategyCheckpoint, datetime]] = []
+    strategy = _Strategy()
+    writer = CheckpointWriter(
+        run_id="run-phase-1",
+        persist=lambda run_id, checkpoint, saved_at: _persist(
+            persisted,
+            run_id,
+            checkpoint,
+            saved_at,
+        ),
+    )
+    # Configure 60s period with 15s phase, high state threshold
+    coordinator = LiveCheckpointCoordinator(
+        writer=writer,
+        strategy=strategy,
+        checkpoint_every_states=1000,
+        checkpoint_every_seconds=60.0,
+        checkpoint_phase_seconds=15.0,
+    )
+    await coordinator.start()
+
+    # Base time: 2026-07-03 23:59:00 (second 00)
+    base = datetime(2026, 7, 3, 23, 59, 0, tzinfo=UTC)
+
+    # 1. Bucket ending at :00 (phase mismatch, should NOT submit)
+    state_00 = MarketState15s(
+        schema_version=1,
+        exchange="binance-usdm",
+        environment="live",
+        symbol="BTCUSDT",
+        bucket_start=base - timedelta(seconds=15),
+        bucket_end=base,
+        open_price=Decimal("100"),
+        high_price=Decimal("101"),
+        low_price=Decimal("99"),
+        close_price=Decimal("100"),
+        trade_count=1,
+        trade_notional=Decimal("100"),
+        aggressive_buy_notional=Decimal("50"),
+        aggressive_sell_notional=Decimal("50"),
+        last_bid_price=Decimal("99.9"),
+        last_ask_price=Decimal("100.1"),
+        spread=Decimal("0.2"),
+        midpoint=Decimal("100"),
+        liquidation_count=0,
+        liquidation_notional=Decimal("0"),
+        mark_price=Decimal("100"),
+        closed_kline_count=0,
+        source_event_count=1,
+        first_received_at=base,
+        last_received_at=base,
+    )
+    coordinator.record_processed_state(state_00, saved_at=base)
+    await writer.flush()
+    assert len(persisted) == 0
+
+    # 2. Bucket ending at :15 (phase MATCH, SHOULD submit)
+    t_15 = base + timedelta(seconds=15)
+    state_15_btc = MarketState15s(
+        schema_version=1,
+        exchange="binance-usdm",
+        environment="live",
+        symbol="BTCUSDT",
+        bucket_start=base,
+        bucket_end=t_15,
+        open_price=Decimal("100"),
+        high_price=Decimal("101"),
+        low_price=Decimal("99"),
+        close_price=Decimal("100"),
+        trade_count=1,
+        trade_notional=Decimal("100"),
+        aggressive_buy_notional=Decimal("50"),
+        aggressive_sell_notional=Decimal("50"),
+        last_bid_price=Decimal("99.9"),
+        last_ask_price=Decimal("100.1"),
+        spread=Decimal("0.2"),
+        midpoint=Decimal("100"),
+        liquidation_count=0,
+        liquidation_notional=Decimal("0"),
+        mark_price=Decimal("100"),
+        closed_kline_count=0,
+        source_event_count=1,
+        first_received_at=t_15,
+        last_received_at=t_15,
+    )
+    coordinator.record_processed_state(state_15_btc, saved_at=t_15)
+    await writer.flush()
+    assert len(persisted) == 1
+    assert persisted[0][2] == t_15
+
+    # 3. Second symbol (ETHUSDT) in same :15 bucket -> deduplicated, does NOT double-submit
+    state_15_eth = MarketState15s(
+        schema_version=1,
+        exchange="binance-usdm",
+        environment="live",
+        symbol="ETHUSDT",
+        bucket_start=base,
+        bucket_end=t_15,
+        open_price=Decimal("2000"),
+        high_price=Decimal("2001"),
+        low_price=Decimal("1999"),
+        close_price=Decimal("2000"),
+        trade_count=1,
+        trade_notional=Decimal("200"),
+        aggressive_buy_notional=Decimal("100"),
+        aggressive_sell_notional=Decimal("100"),
+        last_bid_price=Decimal("1999.9"),
+        last_ask_price=Decimal("2000.1"),
+        spread=Decimal("0.2"),
+        midpoint=Decimal("2000"),
+        liquidation_count=0,
+        liquidation_notional=Decimal("0"),
+        mark_price=Decimal("2000"),
+        closed_kline_count=0,
+        source_event_count=1,
+        first_received_at=t_15,
+        last_received_at=t_15,
+    )
+    coordinator.record_processed_state(state_15_eth, saved_at=t_15)
+    await writer.flush()
+    assert len(persisted) == 1
+
+    # 4. Buckets at :30 and :45 -> should NOT submit
+    t_30 = base + timedelta(seconds=30)
+    coordinator.record_processed_state(
+        MarketState15s(
+            schema_version=1,
+            exchange="binance-usdm",
+            environment="live",
+            symbol="BTCUSDT",
+            bucket_start=t_15,
+            bucket_end=t_30,
+            open_price=Decimal("100"),
+            high_price=Decimal("101"),
+            low_price=Decimal("99"),
+            close_price=Decimal("100"),
+            trade_count=1,
+            trade_notional=Decimal("100"),
+            aggressive_buy_notional=Decimal("50"),
+            aggressive_sell_notional=Decimal("50"),
+            last_bid_price=Decimal("99.9"),
+            last_ask_price=Decimal("100.1"),
+            spread=Decimal("0.2"),
+            midpoint=Decimal("100"),
+            liquidation_count=0,
+            liquidation_notional=Decimal("0"),
+            mark_price=Decimal("100"),
+            closed_kline_count=0,
+            source_event_count=1,
+            first_received_at=t_30,
+            last_received_at=t_30,
+        ),
+        saved_at=t_30,
+    )
+    await writer.flush()
+    assert len(persisted) == 1
+
+    # 5. Next cycle at :15 (second 75 = 1 min 15s) -> SHOULD submit again
+    t_next_15 = base + timedelta(seconds=75)
+    coordinator.record_processed_state(
+        MarketState15s(
+            schema_version=1,
+            exchange="binance-usdm",
+            environment="live",
+            symbol="BTCUSDT",
+            bucket_start=t_next_15 - timedelta(seconds=15),
+            bucket_end=t_next_15,
+            open_price=Decimal("100"),
+            high_price=Decimal("101"),
+            low_price=Decimal("99"),
+            close_price=Decimal("100"),
+            trade_count=1,
+            trade_notional=Decimal("100"),
+            aggressive_buy_notional=Decimal("50"),
+            aggressive_sell_notional=Decimal("50"),
+            last_bid_price=Decimal("99.9"),
+            last_ask_price=Decimal("100.1"),
+            spread=Decimal("0.2"),
+            midpoint=Decimal("100"),
+            liquidation_count=0,
+            liquidation_notional=Decimal("0"),
+            mark_price=Decimal("100"),
+            closed_kline_count=0,
+            source_event_count=1,
+            first_received_at=t_next_15,
+            last_received_at=t_next_15,
+        ),
+        saved_at=t_next_15,
+    )
+    await writer.flush()
+    assert len(persisted) == 2
+    assert persisted[1][2] == t_next_15
+
+    await coordinator.stop()
+
+
+def test_coordinator_phase_validation() -> None:
+    import pytest
+
+    writer = CheckpointWriter(
+        run_id="run-val",
+        persist=lambda *args: None,  # type: ignore[arg-type]
+    )
+    strategy = _Strategy()
+
+    with pytest.raises(ValueError, match="checkpoint_every_seconds must be positive"):
+        LiveCheckpointCoordinator(
+            writer=writer,
+            strategy=strategy,
+            checkpoint_every_seconds=0.0,
+        )
+
+    with pytest.raises(ValueError, match="checkpoint_phase_seconds must be in"):
+        LiveCheckpointCoordinator(
+            writer=writer,
+            strategy=strategy,
+            checkpoint_every_seconds=60.0,
+            checkpoint_phase_seconds=-1.0,
+        )
+
+    with pytest.raises(ValueError, match="checkpoint_phase_seconds must be in"):
+        LiveCheckpointCoordinator(
+            writer=writer,
+            strategy=strategy,
+            checkpoint_every_seconds=60.0,
+            checkpoint_phase_seconds=60.0,
+        )
+
+
 async def _persist(
     persisted: list[tuple[str, StrategyCheckpoint, datetime]],
     run_id: str,

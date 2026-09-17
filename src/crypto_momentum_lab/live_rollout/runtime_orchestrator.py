@@ -305,6 +305,8 @@ async def run_live_daemon(
     max_runtime_seconds = config.lifecycle.max_runtime_seconds
     poll_interval_seconds = config.lifecycle.poll_interval_seconds
     checkpoint_every_states = config.lifecycle.checkpoint_every_states
+    checkpoint_every_seconds = config.lifecycle.checkpoint_every_seconds
+    checkpoint_phase_seconds = config.lifecycle.checkpoint_phase_seconds
     persist_exchange_operations = config.lifecycle.persist_exchange_operations
     acknowledge_missing_shadow_preflight = (
         config.lifecycle.acknowledge_missing_shadow_preflight
@@ -908,6 +910,8 @@ async def run_live_daemon(
                 run_id=session_id,
                 resize_tolerance=Decimal("0.10"),
                 checkpoint_every_states=checkpoint_every_states,
+                checkpoint_every_seconds=checkpoint_every_seconds,
+                checkpoint_phase_seconds=checkpoint_phase_seconds,
                 hedge_mode=hedge_mode,
                 entry_long_only=entry_long_only,
                 entry_symbol_loader=daemon_entry_symbol_loader,

@@ -84,6 +84,8 @@ class LiveRunOptions:
     max_runtime_seconds: int
     poll_interval_seconds: float
     checkpoint_every_states: int
+    checkpoint_every_seconds: float
+    checkpoint_phase_seconds: float
     hedge_mode: bool | None
     exit_mode: PositionExitMode | None
     take_profit_pct: str | None
@@ -651,6 +653,8 @@ def resolve_live_runtime_config(
             max_runtime_seconds=options.max_runtime_seconds,
             poll_interval_seconds=options.poll_interval_seconds,
             checkpoint_every_states=options.checkpoint_every_states,
+            checkpoint_every_seconds=options.checkpoint_every_seconds,
+            checkpoint_phase_seconds=options.checkpoint_phase_seconds,
             persist_exchange_operations=parse_exchange_operations(
                 persist_exchange_operations
             ),

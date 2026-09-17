@@ -175,6 +175,8 @@ class LiveRuntimeLifecycle:
     checkpoint_every_states: int
     persist_exchange_operations: Collection[str] | None
     acknowledge_missing_shadow_preflight: bool
+    checkpoint_every_seconds: float = 60.0
+    checkpoint_phase_seconds: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

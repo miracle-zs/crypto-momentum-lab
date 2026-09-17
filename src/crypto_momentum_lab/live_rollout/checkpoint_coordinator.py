@@ -41,21 +41,32 @@ class LiveCheckpointCoordinator:
         *,
         writer: CheckpointWriter,
         strategy: CheckpointableStrategy,
-        checkpoint_every_states: int,
+        checkpoint_every_states: int = 1000,
+        checkpoint_every_seconds: float = 60.0,
+        checkpoint_phase_seconds: float = 0.0,
         hub_cursor_provider: Callable[
             [], Mapping[str, str | int] | None
         ] | None = None,
     ) -> None:
         if checkpoint_every_states <= 0:
             raise ValueError("checkpoint_every_states must be positive")
+        if checkpoint_every_seconds <= 0:
+            raise ValueError("checkpoint_every_seconds must be positive")
+        if not 0 <= checkpoint_phase_seconds < checkpoint_every_seconds:
+            raise ValueError(
+                "checkpoint_phase_seconds must be in [0, checkpoint_every_seconds)"
+            )
         self._writer = writer
         self._strategy = strategy
         self._checkpoint_every_states = checkpoint_every_states
+        self._checkpoint_every_seconds = checkpoint_every_seconds
+        self._checkpoint_phase_seconds = checkpoint_phase_seconds
         self._hub_cursor_provider = hub_cursor_provider
         self._last_processed_at_by_symbol: dict[str, datetime] = {}
         self._processed_state_count = 0
         self._dirty = False
         self._last_saved_at: datetime | None = None
+        self._last_checkpoint_cycle: int | None = None
         self._started = False
 
     async def start(self) -> None:
@@ -71,6 +82,7 @@ class LiveCheckpointCoordinator:
         self._processed_state_count = 0
         self._dirty = False
         self._last_saved_at = None
+        self._last_checkpoint_cycle = None
         await self._writer.start()
         self._started = True
 
@@ -79,6 +91,18 @@ class LiveCheckpointCoordinator:
             return
         await self._writer.stop()
         self._started = False
+
+    @property
+    def checkpoint_every_states(self) -> int:
+        return self._checkpoint_every_states
+
+    @property
+    def checkpoint_every_seconds(self) -> float:
+        return self._checkpoint_every_seconds
+
+    @property
+    def checkpoint_phase_seconds(self) -> float:
+        return self._checkpoint_phase_seconds
 
     def last_processed_at(self, symbol: str) -> datetime | None:
         return self._last_processed_at_by_symbol.get(symbol)
@@ -98,8 +122,25 @@ class LiveCheckpointCoordinator:
         self._last_processed_at_by_symbol[state.symbol] = state.bucket_start
         self._dirty = True
         self._last_saved_at = saved_at
-        if self._processed_state_count % self._checkpoint_every_states != 0:
+
+        should_checkpoint = False
+        if self._processed_state_count % self._checkpoint_every_states == 0:
+            should_checkpoint = True
+
+        if not should_checkpoint and self._checkpoint_every_seconds > 0:
+            ref_dt = state.bucket_end if state.bucket_end is not None else saved_at
+            ts = int(round(ref_dt.timestamp()))
+            interval = int(round(self._checkpoint_every_seconds))
+            phase = int(round(self._checkpoint_phase_seconds))
+            current_cycle = ts // interval
+            phase_matches = (ts - phase) % interval == 0
+            if phase_matches and self._last_checkpoint_cycle != current_cycle:
+                self._last_checkpoint_cycle = current_cycle
+                should_checkpoint = True
+
+        if not should_checkpoint:
             return
+
         self._writer.submit(
             _checkpoint_for_persistence(
                 self._strategy,

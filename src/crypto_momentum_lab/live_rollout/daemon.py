@@ -134,6 +134,8 @@ class LiveDaemonConfig:
     run_id: str
     resize_tolerance: Decimal
     checkpoint_every_states: int
+    checkpoint_every_seconds: float = 60.0
+    checkpoint_phase_seconds: float = 0.0
     reconcile_once_per_bucket: bool = True
     hedge_mode: bool = False
     entry_long_only: bool = False
@@ -163,6 +165,12 @@ class LiveDaemonConfig:
             raise ValueError("resize_tolerance must be in [0, 1)")
         if self.checkpoint_every_states <= 0:
             raise ValueError("checkpoint_every_states must be positive")
+        if self.checkpoint_every_seconds <= 0:
+            raise ValueError("checkpoint_every_seconds must be positive")
+        if not 0 <= self.checkpoint_phase_seconds < self.checkpoint_every_seconds:
+            raise ValueError(
+                "checkpoint_phase_seconds must be in [0, checkpoint_every_seconds)"
+            )
         if not isinstance(self.reconcile_once_per_bucket, bool):
             raise TypeError("reconcile_once_per_bucket must be a bool")
         if not isinstance(self.entry_policy_compare_only, bool):
@@ -238,6 +246,8 @@ class LiveStrategyDaemon:
             ),
             strategy=self._strategy,
             checkpoint_every_states=config.checkpoint_every_states,
+            checkpoint_every_seconds=config.checkpoint_every_seconds,
+            checkpoint_phase_seconds=config.checkpoint_phase_seconds,
             hub_cursor_provider=hub_cursor_provider,
         )
         self._telemetry = telemetry

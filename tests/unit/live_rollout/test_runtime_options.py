@@ -52,6 +52,8 @@ def _options(**overrides: object) -> LiveRunOptions:
         "max_runtime_seconds": 3600,
         "poll_interval_seconds": 0.25,
         "checkpoint_every_states": 100,
+        "checkpoint_every_seconds": 60.0,
+        "checkpoint_phase_seconds": 0.0,
         "hedge_mode": None,
         "exit_mode": None,
         "take_profit_pct": None,
@@ -87,6 +89,8 @@ def test_manual_options_resolve_to_grouped_runtime_config() -> None:
     assert config.identity.lease_owner == "live-worker"
     assert config.strategy.entry_positive_gainer_top_count == 100
     assert config.execution.exit_mode is PositionExitMode.CANDLE_15M
+    assert config.lifecycle.checkpoint_every_seconds == 60.0
+    assert config.lifecycle.checkpoint_phase_seconds == 0.0
     assert config.lifecycle.persist_exchange_operations == frozenset(
         {"submit", "cancel"}
     )

@@ -242,7 +242,11 @@ services:
       - --poll-interval-seconds
       - "0.25"
       - --checkpoint-every-states
-      - "100"
+      - "1000"
+      - --checkpoint-every-seconds
+      - "60"
+      - --checkpoint-phase-seconds
+      - "15"
       - --hedge-mode
       - --entry-long-only
       - --no-entry-price-above-ema5
@@ -372,7 +376,11 @@ services:
       - --poll-interval-seconds
       - "0.25"
       - --checkpoint-every-states
-      - "100"
+      - "1000"
+      - --checkpoint-every-seconds
+      - "60"
+      - --checkpoint-phase-seconds
+      - "30"
       - --hedge-mode
       - --entry-long-only
       - --no-entry-price-above-ema5
@@ -502,7 +510,11 @@ services:
       - --poll-interval-seconds
       - "0.25"
       - --checkpoint-every-states
-      - "100"
+      - "1000"
+      - --checkpoint-every-seconds
+      - "60"
+      - --checkpoint-phase-seconds
+      - "45"
       - --hedge-mode
       - --entry-long-only
       - --no-entry-price-above-ema5
