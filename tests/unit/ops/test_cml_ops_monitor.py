@@ -1707,7 +1707,11 @@ def test_resolution_payload_preserves_alert_context_and_duration(
         capture,
     )
     monitor = OpsMonitor(
-        MonitorConfig(state_path=tmp_path / "state.json"),
+        MonitorConfig(
+            state_path=tmp_path / "state.json",
+            consecutive_alerts_required=1,
+            consecutive_resolutions_required=1,
+        ),
     )
 
     monitor._emit(
@@ -1724,6 +1728,170 @@ def test_resolution_payload_preserves_alert_context_and_duration(
     assert delivered[1]["event"] == "ops_alert_resolved"
     assert delivered[1]["duration_seconds"] == 60.0
     assert delivered[1]["details"] == {"service": "live-strategy-account-2"}
+
+
+def test_alert_debounce_requires_consecutive_failures(monkeypatch, tmp_path) -> None:
+    delivered: list[dict[str, object]] = []
+
+    def capture(_webhook, _sendkey, payload) -> None:
+        delivered.append(dict(payload))
+
+    monkeypatch.setattr(
+        "deploy.ops.cml_ops_monitor._deliver_notification",
+        capture,
+    )
+    monitor = OpsMonitor(
+        MonitorConfig(
+            state_path=tmp_path / "state.json",
+            consecutive_alerts_required=3,
+            consecutive_resolutions_required=3,
+        ),
+    )
+    alert = Alert(
+        "live_market_state_delay:live-strategy-account-2",
+        "critical",
+        "Market state delay exceeded",
+        {"delay_ms": 150000},
+    )
+
+    # 1st sample: pending (1 of 3), no alert emitted
+    monitor._emit(alert, now=100.0)
+    assert len(delivered) == 0
+
+    # 2nd sample: pending (2 of 3), no alert emitted
+    monitor._emit(alert, now=115.0)
+    assert len(delivered) == 0
+
+    # 3rd sample: reached 3 of 3, alert emitted!
+    monitor._emit(alert, now=130.0)
+    assert len(delivered) == 1
+    assert delivered[0]["event"] == "ops_alert"
+    assert delivered[0]["alert_name"] == "live_market_state_delay:live-strategy-account-2"
+
+
+def test_resolution_debounce_requires_consecutive_passes(monkeypatch, tmp_path) -> None:
+    delivered: list[dict[str, object]] = []
+
+    def capture(_webhook, _sendkey, payload) -> None:
+        delivered.append(dict(payload))
+
+    monkeypatch.setattr(
+        "deploy.ops.cml_ops_monitor._deliver_notification",
+        capture,
+    )
+    monitor = OpsMonitor(
+        MonitorConfig(
+            state_path=tmp_path / "state.json",
+            consecutive_alerts_required=1,
+            consecutive_resolutions_required=3,
+        ),
+    )
+    alert = Alert(
+        "container_unhealthy",
+        "critical",
+        "service health failed",
+        {"service": "postgres"},
+    )
+
+    # Fire alert
+    monitor._emit(alert, now=100.0)
+    assert len(delivered) == 1
+    assert delivered[0]["event"] == "ops_alert"
+
+    # 1st pass: healthy, but not yet 3 consecutive passes
+    monitor._emit_resolutions(set(), now=115.0)
+    assert len(delivered) == 1
+
+    # 2nd pass: healthy
+    monitor._emit_resolutions(set(), now=130.0)
+    assert len(delivered) == 1
+
+    # 3rd pass: reached 3, resolution emitted!
+    monitor._emit_resolutions(set(), now=145.0)
+    assert len(delivered) == 2
+    assert delivered[1]["event"] == "ops_alert_resolved"
+    assert delivered[1]["alert_name"] == "container_unhealthy"
+
+
+def test_cooldown_persists_across_resolutions(monkeypatch, tmp_path) -> None:
+    delivered: list[dict[str, object]] = []
+
+    def capture(_webhook, _sendkey, payload) -> None:
+        delivered.append(dict(payload))
+
+    monkeypatch.setattr(
+        "deploy.ops.cml_ops_monitor._deliver_notification",
+        capture,
+    )
+    monitor = OpsMonitor(
+        MonitorConfig(
+            state_path=tmp_path / "state.json",
+            consecutive_alerts_required=1,
+            consecutive_resolutions_required=1,
+            alert_cooldown_seconds=900.0,
+        ),
+    )
+    alert = Alert(
+        "live_market_state_delay:live-strategy-account-2",
+        "critical",
+        "Market state delay exceeded",
+        {"delay_ms": 150000},
+    )
+
+    # Fire at t=100s
+    monitor._emit(alert, now=100.0)
+    assert len(delivered) == 1
+
+    # Resolves at t=160s
+    monitor._emit_resolutions(set(), now=160.0)
+    assert len(delivered) == 2
+    assert delivered[1]["event"] == "ops_alert_resolved"
+
+    # Re-occurs at t=200s (only 100s after previous emit, cooldown is 900s)
+    monitor._emit(alert, now=200.0)
+    # Must NOT send another ops_alert notification!
+    assert len(delivered) == 2
+
+
+def test_flapping_detection_flags_frequent_state_changes(monkeypatch, tmp_path) -> None:
+    delivered: list[dict[str, object]] = []
+
+    def capture(_webhook, _sendkey, payload) -> None:
+        delivered.append(dict(payload))
+
+    monkeypatch.setattr(
+        "deploy.ops.cml_ops_monitor._deliver_notification",
+        capture,
+    )
+    monitor = OpsMonitor(
+        MonitorConfig(
+            state_path=tmp_path / "state.json",
+            consecutive_alerts_required=1,
+            consecutive_resolutions_required=1,
+            alert_cooldown_seconds=10.0,
+            flapping_window_seconds=600.0,
+        ),
+    )
+    alert = Alert(
+        "flapping_service",
+        "critical",
+        "Flapping service failed",
+        {"service": "flapping"},
+    )
+
+    # 1st fire at t=100
+    monitor._emit(alert, now=100.0)
+    assert "[FLAPPING]" not in delivered[0]["summary"]
+
+    # Resolves at t=115
+    monitor._emit_resolutions(set(), now=115.0)
+
+    # 2nd fire at t=130 (15s after resolution, within 600s flapping window)
+    monitor._emit(alert, now=130.0)
+    assert len(delivered) == 3
+    assert "[FLAPPING]" in delivered[2]["summary"]
+    assert delivered[2]["details"].get("flapping") is True
+    assert delivered[2]["details"].get("flap_count") == 1
 
 
 def test_unhealthy_live_account_is_restarted_with_cooldown_and_cap(

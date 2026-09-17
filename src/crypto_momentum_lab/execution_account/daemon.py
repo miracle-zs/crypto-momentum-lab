@@ -225,7 +225,7 @@ class UserDataAccountEventStream(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class UserDataAccountSyncConfig:
-    rest_reconciliation_interval_seconds: float = 300.0
+    rest_reconciliation_interval_seconds: float = 120.0
     snapshot_interval_seconds: float = 15.0
     heartbeat_interval_seconds: float = 30.0
     failure_backoff_initial_seconds: float = 10.0

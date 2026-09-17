@@ -201,6 +201,14 @@ class LiveMarketLoop:
         state_interval_seconds = _strategy_state_interval_seconds(self._strategy)
         async for prefetched in self._context_prefetcher.stream(states):
             state = prefetched.state
+            if state.is_backfill:
+                warm = getattr(self._strategy, "warm_market_state", None)
+                if callable(warm):
+                    warm(state)
+                self._record_processed_state(state, saved_at=state.bucket_end)
+                processed += 1
+                final_state_at = state.bucket_start
+                continue
             last_processed_at = self._checkpoint_coordinator.last_processed_at(
                 state.symbol
             )

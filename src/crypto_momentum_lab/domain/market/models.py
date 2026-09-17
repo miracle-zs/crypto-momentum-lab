@@ -373,6 +373,7 @@ class MarketState15s:
     closed_kline_1m_close_price: Decimal | None = None
     data_complete: bool = True
     missing_agg_trade_count: int = 0
+    is_backfill: bool = False
 
     @property
     def effective_price(self) -> Decimal | None:

@@ -281,7 +281,7 @@ def sync_command(
     rest_reconciliation_interval_seconds: Annotated[
         float,
         typer.Option("--rest-reconciliation-interval-seconds", min=30),
-    ] = 300.0,
+    ] = 120.0,
     historical_fill_reconciliation_interval_seconds: Annotated[
         float,
         typer.Option(

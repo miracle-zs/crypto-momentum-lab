@@ -687,7 +687,8 @@ class LiveRuntimeTelemetry:
         _require_aware(occurred_at, "occurred_at")
         _require_aware(received_at, "received_at")
         if (
-            not state.data_complete
+            state.is_backfill
+            or not state.data_complete
             or (occurred_at - state.bucket_end) > timedelta(minutes=5)
         ):
             return

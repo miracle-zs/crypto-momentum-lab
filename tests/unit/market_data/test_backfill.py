@@ -38,10 +38,12 @@ def test_synthesize_states_buckets_trades_into_15s() -> None:
     assert states[0].bucket_start == t0
     assert states[0].trade_count == 2
     assert states[0].data_complete is False
+    assert states[0].is_backfill is True
     assert states[0].aggressive_buy_notional > 0
     assert states[0].aggressive_sell_notional > 0
     assert states[1].bucket_start == t0 + timedelta(seconds=15)
     assert states[1].trade_count == 1
+    assert states[1].is_backfill is True
 
 
 class _Client:

@@ -115,6 +115,24 @@ def test_market_state_batch_decoder_defaults_legacy_completeness_fields() -> Non
     assert decoded == (state,)
 
 
+def test_market_state_batch_decoder_handles_is_backfill() -> None:
+    from dataclasses import replace
+    state = replace(fixture_state("BTCUSDT", 0), is_backfill=True)
+    encoded = encode_market_state_batch(
+        (state,),
+        sequence=1,
+        published_at=state.bucket_end,
+    )
+    decoded = decode_market_state_batch(encoded)
+    assert decoded[0].is_backfill is True
+
+    # Legacy payload without is_backfill defaults to False
+    payload = json.loads(encoded)
+    del payload["states"][0]["is_backfill"]
+    legacy_decoded = decode_market_state_batch(json.dumps(payload))
+    assert legacy_decoded[0].is_backfill is False
+
+
 def test_market_state_batch_decoder_preserves_sequence_metadata() -> None:
     state = fixture_state("BTCUSDT", 0)
     encoded = encode_market_state_batch(

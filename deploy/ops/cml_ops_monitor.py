@@ -68,6 +68,9 @@ _DEFAULT_SWAP_GROWTH_BYTES = 32 * 1024 * 1024
 _DEFAULT_RSS_GROWTH_WINDOW_SECONDS = 1_800.0
 _DEFAULT_MEMORY_GROWTH_REQUIRED_SAMPLES = 3
 _DEFAULT_ALERT_COOLDOWN_SECONDS = 900.0
+_DEFAULT_CONSECUTIVE_ALERTS_REQUIRED = 3
+_DEFAULT_CONSECUTIVE_RESOLUTIONS_REQUIRED = 3
+_DEFAULT_FLAPPING_WINDOW_SECONDS = 600.0
 _DEFAULT_COMMAND_TIMEOUT_SECONDS = 15.0
 _DEFAULT_LIVE_RESTART_COOLDOWN_SECONDS = 900.0
 _DEFAULT_LIVE_RESTART_MAX_ATTEMPTS = 3
@@ -1328,6 +1331,9 @@ class MonitorConfig:
     rss_growth_window_seconds: float = _DEFAULT_RSS_GROWTH_WINDOW_SECONDS
     memory_growth_required_samples: int = _DEFAULT_MEMORY_GROWTH_REQUIRED_SAMPLES
     alert_cooldown_seconds: float = _DEFAULT_ALERT_COOLDOWN_SECONDS
+    consecutive_alerts_required: int = _DEFAULT_CONSECUTIVE_ALERTS_REQUIRED
+    consecutive_resolutions_required: int = _DEFAULT_CONSECUTIVE_RESOLUTIONS_REQUIRED
+    flapping_window_seconds: float = _DEFAULT_FLAPPING_WINDOW_SECONDS
     command_timeout_seconds: float = _DEFAULT_COMMAND_TIMEOUT_SECONDS
     state_path: Path = Path("/var/lib/crypto-momentum-lab/ops-monitor.json")
     # ``None`` means a persistent sibling of state_path.  This keeps the
@@ -1401,6 +1407,12 @@ class OpsMonitor:
             raise ValueError("position_quantity_tolerance must not be negative")
         if config.consistency_window_seconds <= 0:
             raise ValueError("consistency_window_seconds must be positive")
+        if config.consecutive_alerts_required <= 0:
+            raise ValueError("consecutive_alerts_required must be positive")
+        if config.consecutive_resolutions_required <= 0:
+            raise ValueError("consecutive_resolutions_required must be positive")
+        if config.flapping_window_seconds <= 0:
+            raise ValueError("flapping_window_seconds must be positive")
         self._config = config
         self._runner = runner or SubprocessRunner()
         self._clock = clock
@@ -2927,12 +2939,50 @@ LEFT JOIN (
 
     def _emit(self, alert: Alert, *, now: float) -> None:
         active = self._state.setdefault("active_alerts", {})
-        previous = active.get(alert.name)
-        if isinstance(previous, (int, float)) and (
-            now - previous < self._config.alert_cooldown_seconds
+        cooldowns = self._state.setdefault("alert_cooldowns", {})
+        pending_alerts = self._state.setdefault("pending_alerts", {})
+        pending_resolutions = self._state.setdefault("pending_resolutions", {})
+        resolved_alerts = self._state.setdefault("resolved_alerts", {})
+        flap_counts = self._state.setdefault("flap_counts", {})
+
+        if isinstance(pending_resolutions, dict):
+            pending_resolutions.pop(alert.name, None)
+
+        current_count = 1
+        if isinstance(pending_alerts, dict):
+            current_count = int(pending_alerts.get(alert.name, 0)) + 1
+            pending_alerts[alert.name] = current_count
+
+        if current_count < self._config.consecutive_alerts_required:
+            return
+
+        if alert.name not in active:
+            active[alert.name] = now
+
+        previous_emitted = (
+            cooldowns.get(alert.name) if isinstance(cooldowns, dict) else None
+        )
+        if isinstance(previous_emitted, (int, float)) and (
+            now - previous_emitted < self._config.alert_cooldown_seconds
         ):
             return
-        active[alert.name] = now
+
+        last_resolved = (
+            resolved_alerts.get(alert.name)
+            if isinstance(resolved_alerts, dict)
+            else None
+        )
+        is_flapping = False
+        if isinstance(last_resolved, (int, float)) and (
+            now - last_resolved < self._config.flapping_window_seconds
+        ):
+            is_flapping = True
+            if isinstance(flap_counts, dict):
+                flap_counts[alert.name] = int(flap_counts.get(alert.name, 0)) + 1
+
+        if isinstance(cooldowns, dict):
+            cooldowns[alert.name] = now
+
         contexts = self._state.setdefault("active_alert_context", {})
         if isinstance(contexts, dict):
             contexts[alert.name] = {
@@ -2940,13 +2990,23 @@ LEFT JOIN (
                 "summary": alert.summary,
                 "details": dict(alert.details),
             }
+        details = dict(alert.details)
+        summary = alert.summary
+        if is_flapping:
+            flaps = (
+                flap_counts.get(alert.name, 1) if isinstance(flap_counts, dict) else 1
+            )
+            details["flapping"] = True
+            details["flap_count"] = flaps
+            summary = f"[FLAPPING] {alert.summary} (flapped {flaps}x)"
+
         payload = {
             "event": "ops_alert",
             "observed_at": datetime.fromtimestamp(now, UTC).isoformat(),
             "alert_name": alert.name,
             "severity": alert.severity,
-            "summary": alert.summary,
-            "details": dict(alert.details),
+            "summary": summary,
+            "details": details,
         }
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
         _deliver_notification(
@@ -2958,9 +3018,34 @@ LEFT JOIN (
     def _emit_resolutions(self, active_keys: set[str], *, now: float) -> None:
         active = self._state.setdefault("active_alerts", {})
         contexts = self._state.setdefault("active_alert_context", {})
+        pending_alerts = self._state.setdefault("pending_alerts", {})
+        pending_resolutions = self._state.setdefault("pending_resolutions", {})
+        resolved_alerts = self._state.setdefault("resolved_alerts", {})
+
+        if isinstance(pending_alerts, dict):
+            for name in list(pending_alerts):
+                if name not in active_keys and name not in active:
+                    pending_alerts.pop(name, None)
+
         for name in tuple(active):
             if name in active_keys:
+                if isinstance(pending_resolutions, dict):
+                    pending_resolutions.pop(name, None)
                 continue
+
+            res_count = 1
+            if isinstance(pending_resolutions, dict):
+                res_count = int(pending_resolutions.get(name, 0)) + 1
+                pending_resolutions[name] = res_count
+
+            if res_count < self._config.consecutive_resolutions_required:
+                continue
+
+            if isinstance(pending_resolutions, dict):
+                pending_resolutions.pop(name, None)
+            if isinstance(pending_alerts, dict):
+                pending_alerts.pop(name, None)
+
             previous = active.get(name)
             duration_seconds = (
                 round(now - previous, 3)
@@ -2987,6 +3072,8 @@ LEFT JOIN (
             active.pop(name, None)
             if isinstance(contexts, dict):
                 contexts.pop(name, None)
+            if isinstance(resolved_alerts, dict):
+                resolved_alerts[name] = now
 
 
 # structlog's console renderer -- what the containers actually emit -- looks like
@@ -4441,6 +4528,36 @@ def build_config(args: argparse.Namespace) -> MonitorConfig:
             _DEFAULT_MEMORY_GROWTH_REQUIRED_SAMPLES,
         ),
         alert_cooldown_seconds=args.alert_cooldown_seconds,
+        consecutive_alerts_required=int(
+            getattr(
+                args,
+                "consecutive_alerts_required",
+                os.environ.get(
+                    "CML_CONSECUTIVE_ALERTS_REQUIRED",
+                    _DEFAULT_CONSECUTIVE_ALERTS_REQUIRED,
+                ),
+            )
+        ),
+        consecutive_resolutions_required=int(
+            getattr(
+                args,
+                "consecutive_resolutions_required",
+                os.environ.get(
+                    "CML_CONSECUTIVE_RESOLUTIONS_REQUIRED",
+                    _DEFAULT_CONSECUTIVE_RESOLUTIONS_REQUIRED,
+                ),
+            )
+        ),
+        flapping_window_seconds=float(
+            getattr(
+                args,
+                "flapping_window_seconds",
+                os.environ.get(
+                    "CML_FLAPPING_WINDOW_SECONDS",
+                    _DEFAULT_FLAPPING_WINDOW_SECONDS,
+                ),
+            )
+        ),
         command_timeout_seconds=args.command_timeout_seconds,
         auto_restart_stale_live_services=_parse_env_bool(
             os.environ.get("CML_AUTO_RESTART_STALE_LIVE_SERVICES"),
@@ -4702,6 +4819,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             os.environ.get(
                 "CML_ALERT_COOLDOWN_SECONDS",
                 _DEFAULT_ALERT_COOLDOWN_SECONDS,
+            )
+        ),
+    )
+    parser.add_argument(
+        "--consecutive-alerts-required",
+        type=int,
+        default=int(
+            os.environ.get(
+                "CML_CONSECUTIVE_ALERTS_REQUIRED",
+                _DEFAULT_CONSECUTIVE_ALERTS_REQUIRED,
+            )
+        ),
+    )
+    parser.add_argument(
+        "--consecutive-resolutions-required",
+        type=int,
+        default=int(
+            os.environ.get(
+                "CML_CONSECUTIVE_RESOLUTIONS_REQUIRED",
+                _DEFAULT_CONSECUTIVE_RESOLUTIONS_REQUIRED,
+            )
+        ),
+    )
+    parser.add_argument(
+        "--flapping-window-seconds",
+        type=float,
+        default=float(
+            os.environ.get(
+                "CML_FLAPPING_WINDOW_SECONDS",
+                _DEFAULT_FLAPPING_WINDOW_SECONDS,
             )
         ),
     )

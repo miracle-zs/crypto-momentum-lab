@@ -99,6 +99,23 @@ async def test_live_daemon_submits_strategy_candidate_after_all_gates() -> None:
     assert exchange.calls == ["submit"]
 
 
+async def test_live_daemon_bypasses_backfill_states_without_submitting_orders() -> None:
+    from dataclasses import replace
+
+    exchange = PlanAwareExchange()
+    daemon = _daemon(exchange=exchange)
+
+    async def _backfill_states():
+        yield replace(_state(), is_backfill=True)
+
+    result = await daemon.run(_backfill_states())
+
+    assert result.processed_state_count == 1
+    assert result.submitted_order_count == 0
+    assert result.approved_intent_count == 0
+    assert exchange.calls == []
+
+
 async def test_live_daemon_uses_lower_of_ask_and_close_gtd_limit_for_entries() -> None:
     exchange = PlanAwareExchange()
     daemon = _daemon(exchange=exchange, entry_order_type=EntryType.LIMIT)

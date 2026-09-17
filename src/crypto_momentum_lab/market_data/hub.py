@@ -1120,6 +1120,11 @@ def market_state_from_payload(payload: dict[str, object]) -> MarketState15s:
         missing_agg_trade_count=(
             _optional_int(payload, "missing_agg_trade_count") or 0
         ),
+        is_backfill=_optional_bool_default(
+            payload,
+            "is_backfill",
+            default=False,
+        ),
     )
 
 

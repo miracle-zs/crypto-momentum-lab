@@ -144,6 +144,7 @@ def synthesize_states_from_trades(
                 last_received_at=acc["last_received_at"],  # type: ignore[arg-type]
                 data_complete=False,
                 missing_agg_trade_count=0,
+                is_backfill=True,
             )
         )
     return tuple(states)
