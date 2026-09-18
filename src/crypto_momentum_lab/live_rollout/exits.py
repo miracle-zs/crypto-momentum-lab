@@ -8,7 +8,11 @@ from decimal import Decimal
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
-from crypto_momentum_lab.domain.execution import FuturesPositionSide, OrderExecutionPlan
+from crypto_momentum_lab.domain.execution import (
+    FuturesPositionSide,
+    ManagedLivePositionBatch,
+    OrderExecutionPlan,
+)
 from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
     RealtimeMarketQuote,
@@ -59,46 +63,6 @@ class ThreadedClosedCandle15mLoader:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class ManagedLivePositionBatch:
-    """One live position batch separated by a reduce-only order boundary."""
-
-    batch_id: str
-    quantity: Decimal
-    entry_price: Decimal
-    opened_at: datetime
-    exit_order_submitted_at: datetime | None = None
-    recovery_order_client_id: str | None = None
-    recovery_order_plan: OrderExecutionPlan | None = None
-    recovery_order_remaining_quantity: Decimal | None = None
-    closing_order_filled: bool = False
-    # Historical exit rows created before durable batch bindings are not
-    # reliable lifecycle boundaries.  The runtime may use them while
-    # reconstructing quantity, but must never let them win an active timeout.
-    legacy_attribution: bool = False
-
-    def __post_init__(self) -> None:
-        if not self.batch_id.strip():
-            raise ValueError("batch_id must not be empty")
-        if self.quantity <= 0:
-            raise ValueError("quantity must be positive")
-        if self.entry_price <= 0:
-            raise ValueError("entry_price must be positive")
-        if self.opened_at.tzinfo is None or self.opened_at.utcoffset() is None:
-            raise ValueError("opened_at must be timezone-aware")
-        if (
-            self.exit_order_submitted_at is not None
-            and (
-                self.exit_order_submitted_at.tzinfo is None
-                or self.exit_order_submitted_at.utcoffset() is None
-            )
-        ):
-            raise ValueError("exit_order_submitted_at must be timezone-aware")
-        if (
-            self.recovery_order_remaining_quantity is not None
-            and self.recovery_order_remaining_quantity < 0
-        ):
-            raise ValueError("recovery_order_remaining_quantity must not be negative")
 @dataclass(frozen=True, slots=True)
 class ManagedLivePosition:
     symbol: str

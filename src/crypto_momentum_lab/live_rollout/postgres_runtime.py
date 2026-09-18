@@ -1,7 +1,7 @@
 import asyncio
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -17,6 +17,10 @@ from crypto_momentum_lab.domain.execution import (
     ExchangeOrderState,
     FuturesPositionSide,
     OrderExecutionPlan,
+    PositionHistory,
+    PositionObservation,
+    PositionOrderFact,
+    rebuild_position_batches,
 )
 from crypto_momentum_lab.domain.live_rollout import LiveOperatorApproval
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -1179,36 +1183,7 @@ async def _load_order_identity_metadata(
     )
 
 
-@dataclass(frozen=True, slots=True)
-class _PositionOrder:
-    symbol: str
-    position_side: FuturesPositionSide
-    side: str
-    reduce_only: bool
-    order_type: str
-    quantity: Decimal
-    executed_quantity: Decimal
-    state: ExchangeOrderState
-    client_order_id: str | None
-    exchange_order_id: str | None
-    created_at: datetime
-    updated_at: datetime
-    price: Decimal | None
-    plan: OrderExecutionPlan | None = None
-    exit_batch_id: str | None = None
-    legacy_exit_attribution: bool = False
-
-
-@dataclass(slots=True)
-class _PositionBatchAccumulator:
-    batch_id: str
-    opened_at: datetime
-    entry_quantity: Decimal
-    entry_notional: Decimal
-    exit_order_submitted_at: datetime | None = None
-    exit_orders: list[_PositionOrder] = field(default_factory=list)
-    exit_filled_quantity: Decimal = Decimal("0")
-    legacy_exit_attribution: bool = False
+_PositionOrder = PositionOrderFact
 
 
 _EXIT_SUBMITTED_STATES = frozenset(
@@ -2029,289 +2004,31 @@ def _build_position_batches(
     fill_times: Mapping[str, datetime],
     fill_prices: Mapping[str, Decimal],
 ) -> tuple[ManagedLivePositionBatch, ...]:
-    events: list[tuple[datetime, int, int, str, _PositionOrder]] = []
-    for index, order in enumerate(matching_orders):
-        if not order.reduce_only and _opening_order_matches_side(order.side, side):
-            if _is_entry_fill_observed(order, fill_times):
-                events.append(
-                    (
-                        _order_entry_time(order, fill_times),
-                        0,
-                        index,
-                        "entry",
-                        order,
-                    )
-                )
-        elif (
-            order.reduce_only
-            and not _opening_order_matches_side(order.side, side)
-            and order.state in _EXIT_SUBMITTED_STATES
-        ):
-            events.append(
-                (order.created_at, 1, index, "exit", order)
-            )
-    events.sort(key=lambda event: event[:3])
-    accumulators: list[_PositionBatchAccumulator] = []
-    current: _PositionBatchAccumulator | None = None
-    for event_at, _event_priority, _index, event_kind, order in events:
-        if event_kind == "entry":
-            entry_quantity = _entry_fill_quantity(order, fill_times)
-            if entry_quantity <= 0:
-                continue
-            entry_price = _entry_price(order, fill_prices, position.entry_price)
-            if current is None or current.exit_order_submitted_at is not None:
-                current = _PositionBatchAccumulator(
-                    batch_id=_batch_id_for_entry(order),
-                    opened_at=event_at,
-                    entry_quantity=entry_quantity,
-                    entry_notional=entry_quantity * entry_price,
-                )
-                accumulators.append(current)
-            else:
-                current.entry_quantity += entry_quantity
-                current.entry_notional += entry_quantity * entry_price
-                current.opened_at = max(current.opened_at, event_at)
-            continue
-        target = current
-        if order.exit_batch_id is not None:
-            target = next(
-                (
-                    batch for batch in accumulators
-                    if batch.batch_id == order.exit_batch_id
-                ),
-                None,
-            )
-        if target is not None and target.opened_at > order.created_at:
-            # Named binding can point at a lot that did not exist when this
-            # fill landed; treat it as unbound rather than double-counting.
-            target = None
-
-        filled_quantity = _exit_fill_quantity(order)
-        remaining_fill = filled_quantity
-
-        def attach(
-            batch: _PositionBatchAccumulator,
-            quantity: Decimal,
-            *,
-            exit_order: _PositionOrder = order,
-            submitted_at: datetime = event_at,
-            legacy_attribution: bool = order.legacy_exit_attribution,
-        ) -> None:
-            if legacy_attribution:
-                batch.legacy_exit_attribution = True
-            if batch.exit_order_submitted_at is None:
-                batch.exit_order_submitted_at = submitted_at
-            batch.exit_orders.append(exit_order)
-            batch.exit_filled_quantity += quantity
-
-        if target is not None:
-            available = max(
-                Decimal("0"),
-                target.entry_quantity - target.exit_filled_quantity,
-            )
-            if filled_quantity <= 0:
-                # An active/canceled historical order still creates a batch
-                # boundary, but only while that named batch has remaining
-                # capacity.  A stale order for a closed batch must not become
-                # a recovery boundary for a newer position.
-                if available > 0:
-                    attach(target, Decimal("0"))
-                else:
-                    target = None
-            elif available > 0:
-                allocated = min(available, remaining_fill)
-                attach(target, allocated)
-                remaining_fill -= allocated
-            else:
-                target = None
-
-        # Reduce-only orders are executed against the aggregate exchange
-        # position.  A historical batch binding can therefore be wrong after
-        # an old stale-exit bug or full position flatten.  When the named batch
-        # is already exhausted, allocate the filled overflow to the newest surviving
-        # batches instead of leaving a phantom old batch that steals the next
-        # position's quantity during snapshot reconciliation.
-        #
-        # A fill that predates a lot cannot belong to that lot.  Without this
-        # guard a five-day-old reduce-only fill (e.g. 4542 on 龙虾USDT) is
-        # rebound onto the current episode and inflates exit_filled_quantity.
-        if remaining_fill > 0:
-            fallback_candidates = reversed(accumulators)
-            for fallback in fallback_candidates:
-                if fallback is target:
-                    continue
-                if fallback.opened_at > order.created_at:
-                    continue
-                available = max(
-                    Decimal("0"),
-                    fallback.entry_quantity - fallback.exit_filled_quantity,
-                )
-                if available <= 0:
-                    continue
-                allocated = min(available, remaining_fill)
-                attach(fallback, allocated)
-                if order.exit_batch_id is not None:
-                    log.warning(
-                        "live_exit_batch_binding_reassigned",
-                        symbol=order.symbol,
-                        client_order_id=order.client_order_id,
-                        bound_batch_id=order.exit_batch_id,
-                        fallback_batch_id=fallback.batch_id,
-                        filled_quantity=str(filled_quantity),
-                        reassigned_quantity=str(allocated),
-                    )
-                remaining_fill -= allocated
-                if remaining_fill <= 0:
-                    break
-
-        # Zero-crossing clean episode boundary: when net remaining quantity
-        # across all accumulators reaches 0, the position on exchange was flat.
-        total_open = sum(
-            (
-                max(Decimal("0"), acc.entry_quantity - acc.exit_filled_quantity)
-                for acc in accumulators
-            ),
-            start=Decimal("0"),
-        )
-        if total_open == 0:
-            current = None
-
-    if not accumulators:
-        return ()
-    batches: list[ManagedLivePositionBatch] = []
-    for accumulator in accumulators:
-        remaining_quantity = max(
-            Decimal("0"),
-            accumulator.entry_quantity - accumulator.exit_filled_quantity,
-        )
-        if remaining_quantity <= 0:
-            continue
-        entry_price = (
-            accumulator.entry_notional / accumulator.entry_quantity
-            if accumulator.entry_quantity > 0
-            else position.entry_price
-        )
-        active_limit_orders = [
-            order
-            for order in accumulator.exit_orders
-            if order.plan is not None
-            and order.plan.reduce_only
-            and order.order_type == "LIMIT"
-            and not order.state.terminal
-        ]
-        active_market_order = any(
-            order.plan is not None
-            and order.plan.reduce_only
-            and order.order_type == "MARKET"
-            and not order.state.terminal
-            for order in accumulator.exit_orders
-        )
-        recovery_order = max(
-            active_limit_orders,
-            key=lambda order: (order.created_at, order.updated_at),
-            default=None,
-        )
-        recovery_remaining = None
-        if recovery_order is not None and recovery_order.plan is not None:
-            recovery_remaining = max(
-                Decimal("0"),
-                recovery_order.plan.quantity - recovery_order.executed_quantity,
-            )
-        batches.append(
-            ManagedLivePositionBatch(
-                batch_id=accumulator.batch_id,
-                quantity=remaining_quantity,
-                entry_price=entry_price,
-                opened_at=accumulator.opened_at,
-                exit_order_submitted_at=accumulator.exit_order_submitted_at,
-                recovery_order_client_id=(
-                    None
-                    if recovery_order is None or recovery_order.plan is None
-                    else recovery_order.plan.client_order_id
-                ),
-                recovery_order_plan=(
-                    None
-                    if recovery_order is None
-                    else recovery_order.plan
-                ),
-                recovery_order_remaining_quantity=recovery_remaining,
-                closing_order_filled=active_market_order,
-                legacy_attribution=accumulator.legacy_exit_attribution,
-            )
-        )
-    return _reconcile_batch_quantities(
-        batches,
-        target_quantity=abs(position.position_amt),
+    observation = PositionObservation(
+        symbol=position.symbol,
+        side=side,
+        position_side=position_side,
+        position_amt=position.position_amt,
+        entry_price=position.entry_price,
     )
-
-
-def _reconcile_batch_quantities(
-    batches: list[ManagedLivePositionBatch],
-    *,
-    target_quantity: Decimal,
-) -> tuple[ManagedLivePositionBatch, ...]:
-    if target_quantity <= 0:
-        return ()
-    if not batches:
-        # There is no surviving confirmed batch to which the snapshot can be
-        # attributed.  Reusing the last closed accumulator would turn a
-        # snapshot/order synchronization gap into an old exit deadline.
-        return ()
-    has_legacy_attribution = any(
-        batch.legacy_attribution for batch in batches
+    history = PositionHistory(
+        orders=matching_orders,
+        fill_times=fill_times,
+        fill_prices=fill_prices,
     )
-    if has_legacy_attribution:
-        # Pre-binding exit rows cannot identify which lot they consumed.  Do
-        # not let their old recovery boundary remain executable.  Keep only
-        # batches with durable bindings; if they cannot explain the whole
-        # exchange snapshot, fail closed until a later account refresh sees a
-        # complete current episode.
-        batches = [
-            batch for batch in batches if not batch.legacy_attribution
-        ]
-        if not batches:
-            return ()
-        clean_quantity = sum(
-            (batch.quantity for batch in batches),
-            start=Decimal("0"),
-        )
-        if clean_quantity < target_quantity:
-            return ()
-        if clean_quantity == target_quantity:
-            return tuple(batches)
-
-        # With legacy history present, prefer the newest durably-bound
-        # batches.  This is the opposite of the normal lag reconciliation,
-        # which preserves older boundaries when all exits are explicit.
-        excess = clean_quantity - target_quantity
-        legacy_reconciled: list[ManagedLivePositionBatch] = []
-        for batch in batches:
-            remove = min(excess, batch.quantity)
-            remaining = batch.quantity - remove
-            excess -= remove
-            if remaining > 0:
-                legacy_reconciled.append(replace(batch, quantity=remaining))
-        return tuple(legacy_reconciled)
-    total_quantity = sum((batch.quantity for batch in batches), start=Decimal("0"))
-    if total_quantity < target_quantity:
-        # Known entry/exit fills are more precise than an account snapshot
-        # that may lag those fills.  Never inflate a surviving older batch to
-        # the aggregate snapshot quantity; that would duplicate a newer batch
-        # already known to have been closed.
-        return tuple(batches)
-    if total_quantity == target_quantity:
-        return tuple(batches)
-
-    excess = total_quantity - target_quantity
-    reconciled: list[ManagedLivePositionBatch] = []
-    for batch in reversed(batches):
-        remove = min(excess, batch.quantity)
-        remaining = batch.quantity - remove
-        excess -= remove
-        if remaining > 0:
-            reconciled.append(replace(batch, quantity=remaining))
-    reconciled.reverse()
-    return tuple(reconciled)
+    result = rebuild_position_batches(observation, history)
+    for diag in result.diagnostics:
+        if diag.kind == "reassigned":
+            log.warning(
+                "live_exit_batch_binding_reassigned",
+                symbol=diag.symbol,
+                client_order_id=diag.client_order_id,
+                bound_batch_id=diag.bound_batch_id,
+                fallback_batch_id=diag.target_batch_id,
+                filled_quantity=str(diag.filled_quantity),
+                reassigned_quantity=str(diag.reassigned_quantity),
+            )
+    return result.batches
 
 
 def _is_entry_fill_observed(
