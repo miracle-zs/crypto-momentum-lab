@@ -684,7 +684,7 @@ class PostgresPaperDaemonRepository:
                     insert(StrategyRuntimeEventRow)
                     .values(checkpoint_event)
                     .on_conflict_do_nothing(
-                        index_elements=["event_id"]
+                        index_elements=["event_id", "occurred_at"]
                     )
                 )
             committed_at = perf_counter()
@@ -791,7 +791,9 @@ class PostgresPaperDaemonRepository:
                                 (execute_finished_at - execute_started) * 1000,
                                 3,
                             ),
-                            "total_ms": round((execute_finished_at - started) * 1000, 3),
+                            "total_ms": round(
+                                (execute_finished_at - started) * 1000, 3
+                            ),
                         },
                     }
                     for run_id, _checkpoint, saved_at in checkpoints
@@ -800,7 +802,7 @@ class PostgresPaperDaemonRepository:
                     insert(StrategyRuntimeEventRow)
                     .values(checkpoint_events)
                     .on_conflict_do_nothing(
-                        index_elements=["event_id"]
+                        index_elements=["event_id", "occurred_at"]
                     )
                 )
             committed_at = perf_counter()
