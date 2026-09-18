@@ -52,10 +52,9 @@ def require_utc(value: datetime, name: str) -> datetime:
 class CollectorCheckpoint:
     """The last live batch known to be durably covered by Parquet.
 
-    ``last_sequence`` is a Hub cursor, while the bucket/symbol cursor is the
-    durable market-state cursor used when PostgreSQL backfill is required.
-    The two cursors intentionally remain separate because backfill rows do not
-    have a Hub sequence.
+    ``last_sequence`` is a Hub cursor (matching ``materialized_sequence`` for
+    backward compatibility), while ``accepted_sequence`` tracks the latest
+    contiguous journal-fsynced batch.
     """
 
     environment: str
@@ -65,16 +64,48 @@ class CollectorCheckpoint:
     last_symbol: str | None = None
     schema_version: int = 1
     updated_at: datetime | None = None
+    accepted_sequence: int | None = None
+    materialized_sequence: int | None = None
 
     def __post_init__(self) -> None:
         if not self.environment.strip():
             raise ValueError("environment must not be empty")
         if self.stream_id is not None and not self.stream_id.strip():
             raise ValueError("stream_id must not be empty when present")
-        if self.last_sequence is not None and self.last_sequence < 0:
-            raise ValueError("last_sequence must not be negative")
         if self.schema_version <= 0:
             raise ValueError("schema_version must be positive")
+
+        mat_seq = self.materialized_sequence
+        last_seq = self.last_sequence
+        if mat_seq is None and last_seq is not None:
+            mat_seq = last_seq
+            object.__setattr__(self, "materialized_sequence", mat_seq)
+        elif mat_seq is not None and last_seq is None:
+            last_seq = mat_seq
+            object.__setattr__(self, "last_sequence", last_seq)
+
+        acc_seq = self.accepted_sequence
+        if acc_seq is None and mat_seq is not None:
+            acc_seq = mat_seq
+            object.__setattr__(self, "accepted_sequence", acc_seq)
+
+        if self.last_sequence is not None and self.last_sequence < 0:
+            raise ValueError("last_sequence must not be negative")
+        if self.materialized_sequence is not None and self.materialized_sequence < 0:
+            raise ValueError("materialized_sequence must not be negative")
+        if self.accepted_sequence is not None and self.accepted_sequence < 0:
+            raise ValueError("accepted_sequence must not be negative")
+
+        if (
+            self.accepted_sequence is not None
+            and self.materialized_sequence is not None
+            and self.materialized_sequence > self.accepted_sequence
+        ):
+            raise ValueError(
+                f"materialized_sequence ({self.materialized_sequence}) cannot exceed "
+                f"accepted_sequence ({self.accepted_sequence})"
+            )
+
         if self.last_bucket_start is not None:
             object.__setattr__(
                 self,
@@ -87,6 +118,55 @@ class CollectorCheckpoint:
                 "updated_at",
                 require_utc(self.updated_at, "updated_at"),
             )
+
+
+@dataclass(frozen=True, slots=True)
+class DurableReceipt:
+    """Receipt for a journal record that has been accepted and fsynced to disk."""
+
+    sequence: int
+    stream_id: str | None
+    source_kind: SourceKind
+    state_keys: tuple[tuple[str, str, datetime], ...]
+    accepted_at: datetime
+    is_empty: bool = False
+    record_bytes: int = 0
+
+    def __post_init__(self) -> None:
+        if self.sequence < 0:
+            raise ValueError("sequence must not be negative")
+        if self.record_bytes < 0:
+            raise ValueError("record_bytes must not be negative")
+        object.__setattr__(
+            self,
+            "accepted_at",
+            require_utc(self.accepted_at, "accepted_at"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class JournalRecord:
+    """In-memory or recovered record read from the journal."""
+
+    receipt: DurableReceipt
+    collection_batch: CollectionBatch
+    selection: SelectionSnapshot
+    path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class ArchiveProgress:
+    """Point-in-time three-stage progress of the durable archive pipeline."""
+
+    environment: str
+    stream_id: str | None
+    received_sequence: int | None
+    accepted_sequence: int | None
+    materialized_sequence: int | None
+    last_materialized_bucket: datetime | None
+    last_materialized_symbol: str | None
+    pending_records: int
+    pending_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +276,8 @@ class CollectorHealth:
     last_market_state_gap_start: datetime | None = None
     last_market_state_gap_end: datetime | None = None
     last_market_state_gap_buckets: int = 0
+    accepted_sequence: int | None = None
+    materialized_sequence: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +294,8 @@ class CollectorConfig:
     late_tolerance_seconds: int = 30
     max_spool_bytes: int = 1024**3
     capacity_check_interval_seconds: float = 30.0
+    max_queue_bytes: int = 24 * 1024 * 1024
+    max_queue_batches: int = 128
 
     def __post_init__(self) -> None:
         if not self.environment.strip():
@@ -220,10 +304,7 @@ class CollectorConfig:
             raise ValueError("soft_limit_bytes must be positive")
         if self.hard_limit_bytes <= self.soft_limit_bytes:
             raise ValueError("hard_limit_bytes must exceed soft_limit_bytes")
-        if (
-            self.global_warning_free_bytes <= 0
-            or self.global_pause_free_bytes <= 0
-        ):
+        if self.global_warning_free_bytes <= 0 or self.global_pause_free_bytes <= 0:
             raise ValueError("global free-space limits must be positive")
         if self.global_warning_free_bytes <= self.global_pause_free_bytes:
             raise ValueError(
@@ -237,6 +318,10 @@ class CollectorConfig:
             raise ValueError("max_spool_bytes must be positive")
         if self.capacity_check_interval_seconds <= 0:
             raise ValueError("capacity_check_interval_seconds must be positive")
+        if self.max_queue_bytes <= 0:
+            raise ValueError("max_queue_bytes must be positive")
+        if self.max_queue_batches <= 0:
+            raise ValueError("max_queue_batches must be positive")
 
 
 class SymbolSelector(Protocol):

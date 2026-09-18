@@ -547,6 +547,8 @@ class CheckpointStore:
                 "schema_version",
             ),
             updated_at=_optional_datetime(payload.get("updated_at")),
+            accepted_sequence=_optional_int(payload.get("accepted_sequence")),
+            materialized_sequence=_optional_int(payload.get("materialized_sequence")),
         )
 
     def save(self, checkpoint: CollectorCheckpoint) -> None:
@@ -555,6 +557,8 @@ class CheckpointStore:
             "environment": checkpoint.environment,
             "stream_id": checkpoint.stream_id,
             "last_sequence": checkpoint.last_sequence,
+            "accepted_sequence": checkpoint.accepted_sequence,
+            "materialized_sequence": checkpoint.materialized_sequence,
             "last_bucket_start": (
                 None
                 if checkpoint.last_bucket_start is None

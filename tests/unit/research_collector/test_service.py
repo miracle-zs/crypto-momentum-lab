@@ -277,3 +277,70 @@ async def test_health_marker_tracks_durable_progress_pause_and_stop(tmp_path):
     assert check_health(tmp_path, "research")[0]
     await collector.stop()
     assert not check_health(tmp_path, "research")[0]
+
+
+async def test_dual_progress_crash_recovery_and_journal_backpressure(
+    tmp_path: Path,
+) -> None:
+    import pytest
+
+    from crypto_momentum_lab.research_collector.models import CollectorPaused
+
+    # Set a small journal max_bytes to test backpressure
+    config = CollectorConfig(
+        environment="research",
+        root=tmp_path,
+        soft_limit_bytes=10 * 1024**2,
+        hard_limit_bytes=20 * 1024**2,
+        global_warning_free_bytes=2,
+        global_pause_free_bytes=1,
+        window_seconds=15,
+        late_tolerance_seconds=100,  # Ensure no automatic window flush
+        max_spool_bytes=3500,  # Fits 2 records (2652 bytes) before backpressure
+    )
+    collector = ResearchStateCollector(
+        config=config,
+        source=_IdleSource(),
+        selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
+    )
+    s1 = fixture_state("BTCUSDT", 0)
+    s2 = fixture_state("BTCUSDT", 1)
+    s3 = fixture_state("BTCUSDT", 2)
+
+    await collector.ingest(_batch(s1, 1))
+    await collector.ingest(_batch(s2, 2))
+
+    health = await collector.health()
+    # At this point, batches are in journal but unmaterialized due to late tolerance
+    assert health.accepted_sequence == 2
+    assert health.materialized_sequence is None
+    assert health.pending_spool_files == 2
+    assert health.pending_spool_bytes > 0
+
+    # Ingesting s3 triggers journal byte limit (2000 bytes)
+    with pytest.raises(CollectorPaused):
+        await collector.ingest(_batch(s3, 3))
+
+    # Simulate crash by dropping collector without calling stop()!
+    # A fresh collector restarts against the same root directory.
+    restarted = ResearchStateCollector(
+        config=config,
+        source=_IdleSource(),
+        selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
+    )
+    # On initialize, recovered records should be staged and flushed durably!
+    await restarted.initialize()
+
+    restarted_health = await restarted.health()
+    # Checkpoint has advanced to include recovered sequences
+    assert restarted_health.accepted_sequence == 2
+    assert restarted_health.materialized_sequence == 2
+    assert restarted_health.last_sequence == 2
+    assert restarted_health.pending_spool_files == 0
+    assert restarted_health.pending_spool_bytes == 0
+
+    # Backpressure is now relieved because pending bytes dropped to 0!
+    # Ingesting s3 now succeeds!
+    r3 = await restarted.ingest(_batch(s3, 3))
+    assert r3.selected_rows == 1
+    assert (await restarted.health()).accepted_sequence == 3

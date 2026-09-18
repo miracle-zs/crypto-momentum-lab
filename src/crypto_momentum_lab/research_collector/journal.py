@@ -1,0 +1,475 @@
+"""Durable journal for accepted market batches and recovery manifests.
+
+ArchiveJournal provides a strict, two-stage write-ahead log:
+1. ``accept()``: Ingress validates sequence and fsyncs the batch to the journal.
+   Empty-selection batches write a lightweight durable receipt so continuous
+   sequences are verifiable upon crash recovery.
+   Incrementally tracks pending bytes and updates ``accepted_sequence``.
+2. ``pending()``: Returns uncommitted journal records sorted by sequence/time.
+3. ``commit_materialization()``: Materializer commits Parquet windows
+   and safely removes covered journal files, decrements pending bytes,
+   and advances ``materialized_sequence``.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Iterable
+from datetime import UTC, datetime
+from pathlib import Path
+
+import structlog
+
+from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.market_data.hub import (
+    MarketStateBatch,
+    market_state_from_payload,
+    market_state_to_payload,
+)
+from crypto_momentum_lab.research_collector.models import (
+    CollectionBatch,
+    CollectorPaused,
+    CollectorStateConflict,
+    DurableReceipt,
+    JournalRecord,
+    SelectionSnapshot,
+    SourceKind,
+)
+from crypto_momentum_lab.research_collector.storage import (
+    _atomic_write_bytes,
+    _fsync_directory,
+    _parse_datetime,
+    _require_int,
+    _require_string,
+    _safe_component,
+    _selection_from_payload,
+    _selection_to_payload,
+)
+
+log = structlog.get_logger()
+
+_STATE_KEY = tuple[str, str, datetime]
+
+
+def _clean_temporary_files(root: Path) -> None:
+    if not root.exists():
+        return
+    for item in root.rglob(".*.tmp"):
+        try:
+            item.unlink()
+        except OSError:
+            pass
+
+
+class ArchiveJournal:
+    """A bounded, atomic JSON write-ahead journal for accepted batches."""
+
+    def __init__(
+        self,
+        root: Path,
+        *,
+        environment: str,
+        max_bytes: int,
+    ) -> None:
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        if not environment.strip():
+            raise ValueError("environment must not be empty")
+        self._root = root
+        self._pending_root = root / "pending"
+        self._manifest_path = root / "manifest.json"
+        self._environment = environment
+        self._max_bytes = max_bytes
+        self._pending_bytes = 0
+        self._pending_records: dict[Path, JournalRecord] = {}
+        self._active_stream_id: str | None = None
+        self._accepted_sequence: int | None = None
+        self._materialized_sequence: int | None = None
+        self._last_materialized_bucket: datetime | None = None
+        self._last_materialized_symbol: str | None = None
+
+        self._pending_root.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
+    @property
+    def pending_bytes(self) -> int:
+        return self._pending_bytes
+
+    @property
+    def accepted_sequence(self) -> int | None:
+        return self._accepted_sequence
+
+    @property
+    def materialized_sequence(self) -> int | None:
+        return self._materialized_sequence
+
+    @property
+    def last_materialized_bucket(self) -> datetime | None:
+        return self._last_materialized_bucket
+
+    @property
+    def last_materialized_symbol(self) -> str | None:
+        return self._last_materialized_symbol
+
+    @property
+    def active_stream_id(self) -> str | None:
+        return self._active_stream_id
+
+    def set_active_stream_id(self, stream_id: str | None) -> None:
+        self._active_stream_id = stream_id
+
+    def set_cursors(
+        self,
+        *,
+        accepted_sequence: int | None,
+        materialized_sequence: int | None,
+        last_materialized_bucket: datetime | None = None,
+        last_materialized_symbol: str | None = None,
+    ) -> None:
+        self._accepted_sequence = accepted_sequence
+        self._materialized_sequence = materialized_sequence
+        self._last_materialized_bucket = last_materialized_bucket
+        self._last_materialized_symbol = last_materialized_symbol
+
+    def accept(
+        self,
+        collection_batch: CollectionBatch,
+        selection: SelectionSnapshot,
+        selected_states: tuple[MarketState15s, ...],
+    ) -> DurableReceipt:
+        """Accept one batch and solidifies it into the write-ahead journal."""
+        is_empty = len(selected_states) == 0
+        now = datetime.now(tz=UTC)
+        payload: dict[str, object] = {
+            "schema_version": 2,
+            "source_kind": collection_batch.source_kind.value,
+            "sequence": collection_batch.sequence,
+            "stream_id": collection_batch.stream_id,
+            "published_at": collection_batch.batch.published_at.isoformat(),
+            "accepted_at": now.isoformat(),
+            "environment": collection_batch.environment,
+            "is_empty": is_empty,
+            "states": [market_state_to_payload(state) for state in selected_states],
+            "selection": (
+                _selection_to_payload(selection, selected_states)
+                if not is_empty
+                else None
+            ),
+        }
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        record_bytes = len(encoded)
+
+        directory = self._pending_root / collection_batch.source_kind.value
+        if collection_batch.stream_id:
+            directory /= _safe_component(collection_batch.stream_id)
+        directory.mkdir(parents=True, exist_ok=True)
+
+        digest = hashlib.sha256(encoded).hexdigest()
+        path = directory / f"{digest}.json"
+
+        if not path.exists():
+            if self._pending_bytes + record_bytes > self._max_bytes:
+                raise CollectorPaused(
+                    "research collector journal limit reached: "
+                    f"{self._pending_bytes} + {record_bytes} > {self._max_bytes}"
+                )
+            _atomic_write_bytes(path, encoded)
+            self._pending_bytes += record_bytes
+
+        state_keys = tuple(
+            (state.environment, state.symbol, state.bucket_start)
+            for state in selected_states
+        )
+        receipt = DurableReceipt(
+            sequence=collection_batch.sequence,
+            stream_id=collection_batch.stream_id,
+            source_kind=collection_batch.source_kind,
+            state_keys=state_keys,
+            accepted_at=now,
+            is_empty=is_empty,
+            record_bytes=record_bytes,
+        )
+        record = JournalRecord(
+            receipt=receipt,
+            collection_batch=CollectionBatch(
+                batch=MarketStateBatch(
+                    sequence=collection_batch.sequence,
+                    published_at=collection_batch.batch.published_at,
+                    environment=collection_batch.environment,
+                    states=selected_states,
+                    stream_id=collection_batch.stream_id,
+                ),
+                source_kind=collection_batch.source_kind,
+            ),
+            selection=selection,
+            path=path,
+        )
+        self._pending_records[path] = record
+
+        if collection_batch.source_kind is SourceKind.HUB:
+            if self._accepted_sequence is None:
+                self._accepted_sequence = collection_batch.sequence
+            else:
+                self._accepted_sequence = max(
+                    self._accepted_sequence, collection_batch.sequence
+                )
+            if self._active_stream_id is None:
+                self._active_stream_id = collection_batch.stream_id
+
+        return receipt
+
+    def get_record(self, receipt: DurableReceipt) -> JournalRecord | None:
+        """Find the JournalRecord corresponding to a DurableReceipt."""
+        for record in self._pending_records.values():
+            if record.receipt == receipt:
+                return record
+        return None
+
+    def pending_records(self) -> tuple[JournalRecord, ...]:
+        """Return all pending uncommitted journal records in order."""
+        return tuple(
+            sorted(
+                self._pending_records.values(),
+                key=lambda r: (
+                    r.collection_batch.batch.published_at,
+                    r.collection_batch.sequence,
+                ),
+            )
+        )
+
+    def commit_materialization(
+        self,
+        receipts: Iterable[DurableReceipt],
+        *,
+        last_bucket_start: datetime | None = None,
+        last_symbol: str | None = None,
+    ) -> None:
+        """Acknowledge completed Parquet materialization.
+
+        Cleans up committed journal records and advances materialized_sequence.
+        """
+        committed_receipts = tuple(receipts)
+        if not committed_receipts:
+            return
+
+        receipt_keys = {
+            (r.source_kind, r.stream_id, r.sequence) for r in committed_receipts
+        }
+
+        paths_to_remove: list[Path] = []
+        for path, record in self._pending_records.items():
+            r = record.receipt
+            if (r.source_kind, r.stream_id, r.sequence) in receipt_keys:
+                paths_to_remove.append(path)
+
+        for path in paths_to_remove:
+            record = self._pending_records.pop(path, None)
+            if record is not None:
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    size = record.receipt.record_bytes
+                try:
+                    path.unlink()
+                    _fsync_directory(path.parent)
+                except FileNotFoundError:
+                    pass
+                self._pending_bytes = max(0, self._pending_bytes - size)
+
+        # Recalculate materialized_sequence as the contiguous covered prefix
+        hub_committed = [
+            r.sequence
+            for r in committed_receipts
+            if r.source_kind is SourceKind.HUB
+            and (
+                self._active_stream_id is None or r.stream_id == self._active_stream_id
+            )
+        ]
+        if hub_committed:
+            highest_committed = max(hub_committed)
+            if self._materialized_sequence is None:
+                self._materialized_sequence = highest_committed
+            else:
+                self._materialized_sequence = max(
+                    self._materialized_sequence, highest_committed
+                )
+
+        if last_bucket_start is not None:
+            if (
+                self._last_materialized_bucket is None
+                or last_bucket_start > self._last_materialized_bucket
+            ):
+                self._last_materialized_bucket = last_bucket_start
+                self._last_materialized_symbol = last_symbol
+            elif last_bucket_start == self._last_materialized_bucket:
+                self._last_materialized_symbol = (
+                    max(
+                        self._last_materialized_symbol or "",
+                        last_symbol or "",
+                    )
+                    or None
+                )
+
+    def recover(
+        self,
+        *,
+        legacy_spool_root: Path | None = None,
+    ) -> tuple[JournalRecord, ...]:
+        """Recover uncommitted journal records from disk and rebuild byte accounting."""
+        _clean_temporary_files(self._pending_root)
+        self._pending_records.clear()
+        self._pending_bytes = 0
+
+        paths: list[Path] = []
+        if self._pending_root.exists():
+            paths.extend(self._pending_root.rglob("*.json"))
+
+        # Backward compatibility: include any pending records from
+        # legacy spool directory
+        if legacy_spool_root is not None and legacy_spool_root.exists():
+            _clean_temporary_files(legacy_spool_root)
+            paths.extend(legacy_spool_root.rglob("*.json"))
+
+        total_bytes = 0
+        for path in sorted(set(paths)):
+            record = self._read_record(path)
+            self._pending_records[path] = record
+            try:
+                total_bytes += path.stat().st_size
+            except OSError:
+                total_bytes += record.receipt.record_bytes
+
+        self._pending_bytes = total_bytes
+
+        hub_records = [
+            r
+            for r in self._pending_records.values()
+            if r.collection_batch.source_kind is SourceKind.HUB
+        ]
+        if hub_records:
+            if self._active_stream_id is None:
+                self._active_stream_id = hub_records[0].collection_batch.stream_id
+            active_seqs = [
+                r.collection_batch.sequence
+                for r in hub_records
+                if r.collection_batch.stream_id == self._active_stream_id
+            ]
+            if active_seqs:
+                max_pending = max(active_seqs)
+                if self._accepted_sequence is None:
+                    self._accepted_sequence = max_pending
+                else:
+                    self._accepted_sequence = max(self._accepted_sequence, max_pending)
+
+        return self.pending_records()
+
+    def _read_record(self, path: Path) -> JournalRecord:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise CollectorStateConflict(
+                f"cannot read collector journal record {path}: {error}"
+            ) from error
+
+        if not isinstance(payload, dict):
+            raise CollectorStateConflict(
+                f"unsupported collector journal record: {path}"
+            )
+
+        schema_version = payload.get("schema_version")
+        if schema_version not in (1, 2):
+            raise CollectorStateConflict(
+                f"unsupported collector journal record version {schema_version}: {path}"
+            )
+
+        is_empty = bool(payload.get("is_empty", False))
+        raw_states = payload.get("states", [])
+        if not isinstance(raw_states, list):
+            raise CollectorStateConflict(f"journal states are invalid: {path}")
+
+        if not is_empty and not raw_states:
+            raise CollectorStateConflict(
+                f"non-empty journal record has no states: {path}"
+            )
+
+        states = tuple(
+            market_state_from_payload(item)
+            for item in raw_states
+            if isinstance(item, dict)
+        )
+        if len(states) != len(raw_states):
+            raise CollectorStateConflict(f"journal states are invalid: {path}")
+
+        raw_selection = payload.get("selection")
+        if is_empty or raw_selection is None:
+            selection = SelectionSnapshot(
+                observed_at=datetime.now(tz=UTC),
+                symbols=(),
+            )
+        else:
+            selection = _selection_from_payload(raw_selection)
+
+        raw_source_kind = payload.get("source_kind")
+        if not isinstance(raw_source_kind, str):
+            raise CollectorStateConflict(f"journal source_kind is invalid: {path}")
+        try:
+            source_kind = SourceKind(raw_source_kind)
+        except ValueError as error:
+            raise CollectorStateConflict(
+                f"journal source_kind is invalid: {path}"
+            ) from error
+
+        sequence = _require_int(payload.get("sequence"), "sequence")
+        published_at = _parse_datetime(payload.get("published_at"), "published_at")
+        environment = _require_string(payload.get("environment"), "environment")
+        stream_id = payload.get("stream_id")
+        if stream_id is not None and not isinstance(stream_id, str):
+            raise CollectorStateConflict(f"journal stream_id is invalid: {path}")
+
+        accepted_at_raw = payload.get("accepted_at")
+        accepted_at = (
+            _parse_datetime(accepted_at_raw, "accepted_at")
+            if accepted_at_raw is not None
+            else published_at
+        )
+
+        try:
+            record_bytes = path.stat().st_size
+        except OSError:
+            record_bytes = 0
+
+        state_keys = tuple(
+            (state.environment, state.symbol, state.bucket_start) for state in states
+        )
+        receipt = DurableReceipt(
+            sequence=sequence,
+            stream_id=stream_id,
+            source_kind=source_kind,
+            state_keys=state_keys,
+            accepted_at=accepted_at,
+            is_empty=is_empty,
+            record_bytes=record_bytes,
+        )
+        return JournalRecord(
+            receipt=receipt,
+            collection_batch=CollectionBatch(
+                batch=MarketStateBatch(
+                    sequence=sequence,
+                    published_at=published_at,
+                    environment=environment,
+                    states=states,
+                    stream_id=stream_id,
+                ),
+                source_kind=source_kind,
+            ),
+            selection=selection,
+            path=path,
+        )

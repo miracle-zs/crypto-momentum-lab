@@ -13,7 +13,6 @@ import asyncio
 import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import structlog
 
@@ -26,6 +25,11 @@ from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     RuntimeStateCursor,
 )
 from crypto_momentum_lab.research_collector.health import CollectorHealthStore
+from crypto_momentum_lab.research_collector.journal import ArchiveJournal
+from crypto_momentum_lab.research_collector.materializer import (
+    MaterializerFlushResult,
+    WindowMaterializer,
+)
 from crypto_momentum_lab.research_collector.models import (
     CollectionBatch,
     CollectionReceipt,
@@ -53,7 +57,6 @@ from crypto_momentum_lab.research_collector.storage import (
     LocalBatchSpool,
     ParquetWindowSink,
     SinkFlushResult,
-    SpoolRecord,
 )
 
 log = structlog.get_logger()
@@ -73,6 +76,8 @@ class ResearchStateCollector:
         selector: SymbolSelector,
         spool: LocalBatchSpool | None = None,
         sink: ParquetWindowSink | None = None,
+        journal: ArchiveJournal | None = None,
+        materializer: WindowMaterializer | None = None,
         checkpoint_store: CheckpointStore | None = None,
         backfill_source: PostgresMarketStateBackfillSource | None = None,
         startup_timer: StartupPhaseTimer | None = None,
@@ -81,8 +86,9 @@ class ResearchStateCollector:
         self._config = config
         self._source = source
         self._selector = selector
-        self._spool = spool or LocalBatchSpool(
-            config.root / "spool",
+        self._journal = journal or ArchiveJournal(
+            config.root / "journal",
+            environment=config.environment,
             max_bytes=config.max_spool_bytes,
         )
         self._sink = sink or ParquetWindowSink(
@@ -90,6 +96,11 @@ class ResearchStateCollector:
             window_seconds=config.window_seconds,
             late_tolerance_seconds=config.late_tolerance_seconds,
         )
+        self._materializer = materializer or WindowMaterializer(
+            sink=self._sink,
+            journal=self._journal,
+        )
+        self._spool = spool
         self._checkpoint_store = checkpoint_store or CheckpointStore(
             config.root / "checkpoints" / f"{config.environment}.json"
         )
@@ -106,9 +117,6 @@ class ResearchStateCollector:
         self._startup_durable_rows_logged = False
         self._startup_health_ready_logged = False
         self._checkpoint: CollectorCheckpoint | None = None
-        self._pending_records: dict[Path, SpoolRecord] = {}
-        self._record_committed_keys: dict[Path, set[_STATE_KEY]] = {}
-        self._staged_paths: set[Path] = set()
         self._active_stream_id: str | None = None
         self._sequence_baseline: int | None = None
         self._last_seen_sequence: int | None = None
@@ -116,7 +124,6 @@ class ResearchStateCollector:
         self._last_persisted_bucket: datetime | None = None
         self._last_persisted_symbol: str | None = None
         self._selected_rows = 0
-        self._persisted_rows = 0
         self._duplicate_rows = 0
         self._gap_count = 0
         self._market_state_gap_count = 0
@@ -137,7 +144,7 @@ class ResearchStateCollector:
         return self._config
 
     async def initialize(self) -> None:
-        """Load the checkpoint and make every pending spool row durable."""
+        """Load the checkpoint and make every pending journal/spool row durable."""
 
         if self._initialized:
             return
@@ -151,28 +158,53 @@ class ResearchStateCollector:
             )
         self._checkpoint = checkpoint
         self._active_stream_id = checkpoint.stream_id
-        self._last_seen_sequence = checkpoint.last_sequence
+        self._last_seen_sequence = (
+            checkpoint.accepted_sequence
+            if checkpoint.accepted_sequence is not None
+            else checkpoint.last_sequence
+        )
         self._last_persisted_bucket = checkpoint.last_bucket_start
         self._last_persisted_symbol = checkpoint.last_symbol
-
-        pending = await asyncio.to_thread(self._spool.pending_records)
-        pending = tuple(sorted(pending, key=_spool_sort_key))
-        pending_hub_records = tuple(
-            record
-            for record in pending
-            if record.collection_batch.source_kind is SourceKind.HUB
+        self._journal.set_active_stream_id(self._active_stream_id)
+        self._journal.set_cursors(
+            accepted_sequence=checkpoint.accepted_sequence
+            if checkpoint.accepted_sequence is not None
+            else checkpoint.last_sequence,
+            materialized_sequence=checkpoint.materialized_sequence
+            if checkpoint.materialized_sequence is not None
+            else checkpoint.last_sequence,
+            last_materialized_bucket=checkpoint.last_bucket_start,
+            last_materialized_symbol=checkpoint.last_symbol,
         )
+
+        legacy_spool = (
+            self._spool.root / "pending"
+            if self._spool is not None
+            else self._config.root / "spool" / "pending"
+        )
+        recovered = await asyncio.to_thread(
+            self._journal.recover,
+            legacy_spool_root=legacy_spool,
+        )
+        self._materializer.stage_records(recovered)
+
+        hub_records = [
+            record
+            for record in recovered
+            if record.collection_batch.source_kind is SourceKind.HUB
+        ]
         if (
             self._active_stream_id is None
-            and pending_hub_records
-            and pending_hub_records[0].collection_batch.stream_id is not None
+            and hub_records
+            and hub_records[0].collection_batch.stream_id is not None
         ):
-            self._active_stream_id = pending_hub_records[0].collection_batch.stream_id
-        pending_sequences = tuple(
+            self._active_stream_id = hub_records[0].collection_batch.stream_id
+
+        pending_sequences = [
             record.collection_batch.sequence
-            for record in pending_hub_records
+            for record in hub_records
             if record.collection_batch.stream_id == self._active_stream_id
-        )
+        ]
         if pending_sequences:
             if self._last_seen_sequence is None:
                 self._sequence_baseline = min(pending_sequences) - 1
@@ -182,21 +214,15 @@ class ResearchStateCollector:
                     self._last_seen_sequence,
                     max(pending_sequences),
                 )
-        for record in pending:
+
+        for record in recovered:
             self._validate_collection_batch(record.collection_batch)
-            self._pending_records[record.path] = record
-            self._record_committed_keys[record.path] = set()
             self._observe_received_states(
                 record.collection_batch.states,
                 source_kind=record.collection_batch.source_kind,
             )
-            await asyncio.to_thread(
-                self._sink.append,
-                record.collection_batch,
-                record.selection,
-            )
-            self._staged_paths.add(record.path)
-        if pending:
+
+        if recovered:
             await self._flush_all_buffers()
         else:
             await self._save_checkpoint()
@@ -205,18 +231,18 @@ class ResearchStateCollector:
         log.info(
             "research_collector_initialized",
             environment=self._config.environment,
-            pending_records=len(pending),
+            pending_records=len(recovered),
             last_sequence=self._checkpoint.last_sequence,
         )
         if self._startup_timer is not None:
             self._startup_timer.mark(
                 "collector_initialized",
-                pending_record_count=len(pending),
+                pending_record_count=len(recovered),
                 last_sequence=self._checkpoint.last_sequence,
             )
 
     async def ingest(self, collection_batch: CollectionBatch) -> CollectionReceipt:
-        """Validate, select, spool, and durably stage one canonical batch."""
+        """Validate, select, journal, and durably stage one canonical batch."""
 
         await self.initialize()
         self._validate_collection_batch(collection_batch)
@@ -246,37 +272,41 @@ class ResearchStateCollector:
             for state in collection_batch.states
             if state.symbol in selection.by_symbol
         )
+
+        self._ensure_capacity()
+        receipt = await asyncio.to_thread(
+            self._journal.accept,
+            collection_batch,
+            selection,
+            selected_states,
+        )
+        if collection_batch.source_kind is SourceKind.HUB:
+            self._last_seen_sequence = collection_batch.sequence
+
         if not selected_states:
-            flush_result = await self._flush_ready(
-                max(state.bucket_start for state in collection_batch.states)
-            )
-            if collection_batch.source_kind is SourceKind.HUB:
-                self._last_seen_sequence = collection_batch.sequence
-                await self._save_checkpoint()
+            record = self._journal.get_record(receipt)
+            if record is not None:
+                await asyncio.to_thread(self._materializer.stage_record, record)
+            latest_bucket = max(state.bucket_start for state in collection_batch.states)
+            flush_result = await self._flush_ready(latest_bucket)
+            await self._save_checkpoint()
             return _receipt_for_empty_selection(
                 collection_batch,
                 flush_result=flush_result,
             )
 
-        self._ensure_capacity()
-        record = await asyncio.to_thread(
-            self._spool.write,
-            collection_batch,
-            selection,
-            selected_states,
-        )
-        self._pending_records[record.path] = record
-        self._record_committed_keys.setdefault(record.path, set())
-        append_result = await asyncio.to_thread(
-            self._sink.append,
-            record.collection_batch,
-            selection,
-        )
-        self._staged_paths.add(record.path)
+        record = self._journal.get_record(receipt)
+        duplicate_rows = 0
+        if record is not None:
+            append_result = await asyncio.to_thread(
+                self._materializer.stage_record,
+                record,
+            )
+            if append_result is not None:
+                duplicate_rows = append_result.duplicate_rows
+
         self._selected_rows += len(selected_states)
-        self._duplicate_rows += append_result.duplicate_rows
-        if collection_batch.source_kind is SourceKind.HUB:
-            self._last_seen_sequence = collection_batch.sequence
+        self._duplicate_rows += duplicate_rows
 
         latest_bucket = max(state.bucket_start for state in selected_states)
         flush_result = await self._flush_ready(latest_bucket)
@@ -284,7 +314,7 @@ class ResearchStateCollector:
         return _receipt_for_ingested_batch(
             collection_batch,
             selected_rows=len(selected_states),
-            duplicate_rows=append_result.duplicate_rows,
+            duplicate_rows=duplicate_rows,
             flush_result=flush_result,
         )
 
@@ -327,7 +357,7 @@ class ResearchStateCollector:
             log.error(
                 "research_collector_stop_flush_paused",
                 environment=self._config.environment,
-                pending_records=len(self._pending_records),
+                pending_records=len(self._journal.pending_records()),
             )
         await self._save_checkpoint()
 
@@ -336,7 +366,8 @@ class ResearchStateCollector:
         snapshot = await asyncio.to_thread(self._capacity.snapshot)
         self._capacity_snapshot = snapshot
         self._last_capacity_refresh = time.monotonic()
-        pending_bytes = await asyncio.to_thread(self._spool.pending_bytes)
+        pending_bytes = self._journal.pending_bytes
+        pending_records = self._journal.pending_records()
         checkpoint = self._require_checkpoint()
         return CollectorHealth(
             environment=self._config.environment,
@@ -344,11 +375,13 @@ class ResearchStateCollector:
             last_received_bucket=self._last_received_bucket,
             last_persisted_bucket=self._last_persisted_bucket,
             last_sequence=checkpoint.last_sequence,
+            accepted_sequence=self._journal.accepted_sequence,
+            materialized_sequence=self._journal.materialized_sequence,
             selected_rows=self._selected_rows,
-            persisted_rows=self._persisted_rows,
+            persisted_rows=self._materializer.persisted_rows,
             duplicate_rows=self._duplicate_rows,
             gap_count=self._gap_count,
-            pending_spool_files=len(self._pending_records),
+            pending_spool_files=len(pending_records),
             pending_spool_bytes=pending_bytes,
             collector_bytes=snapshot.collector_bytes,
             disk_free_bytes=snapshot.disk_free_bytes,
@@ -362,10 +395,7 @@ class ResearchStateCollector:
 
     async def _consume_source_once(self) -> None:
         iterator = self._source.batches()
-        if (
-            self._startup_timer is not None
-            and not self._startup_source_consumer_logged
-        ):
+        if self._startup_timer is not None and not self._startup_source_consumer_logged:
             self._startup_timer.mark("source_consumer_started")
             self._startup_source_consumer_logged = True
         self._connected = True
@@ -418,16 +448,26 @@ class ResearchStateCollector:
             raise CollectorStateConflict(
                 "Hub replay error did not contain a resumable stream cursor"
             ) from error
-        if self._pending_records:
+        if self._journal.pending_records():
             raise CollectorStateConflict(
                 "replay recovery completed with pending spool records"
             )
         self._active_stream_id = stream_id
         self._last_seen_sequence = latest_sequence
+        self._journal.set_active_stream_id(stream_id)
+        self._journal.set_cursors(
+            accepted_sequence=latest_sequence,
+            materialized_sequence=latest_sequence,
+            last_materialized_bucket=self._last_persisted_bucket,
+            last_materialized_symbol=self._last_persisted_symbol,
+        )
         self._checkpoint = replace(
             checkpoint,
             stream_id=stream_id,
             last_sequence=latest_sequence,
+            accepted_sequence=latest_sequence,
+            materialized_sequence=latest_sequence,
+            schema_version=2,
             updated_at=datetime.now(UTC),
         )
         await asyncio.to_thread(self._checkpoint_store.save, self._checkpoint)
@@ -471,25 +511,23 @@ class ResearchStateCollector:
                 return
             await asyncio.sleep(min(30.0, self._config.capacity_check_interval_seconds))
 
-    async def _flush_ready(self, latest_bucket: datetime) -> SinkFlushResult:
+    async def _flush_ready(self, latest_bucket: datetime) -> MaterializerFlushResult:
         self._ensure_capacity()
         result = await asyncio.to_thread(
-            self._sink.flush_ready,
+            self._materializer.flush_ready,
             latest_bucket,
         )
         await self._apply_flush_result(result)
         return result
 
-    async def _flush_all_buffers(self) -> SinkFlushResult:
-        await self._restage_pending_records()
+    async def _flush_all_buffers(self) -> MaterializerFlushResult:
         self._ensure_capacity()
-        result = await asyncio.to_thread(self._sink.flush_all)
+        result = await asyncio.to_thread(self._materializer.flush_all)
         await self._apply_flush_result(result)
         await self._save_checkpoint()
         return result
 
-    async def _apply_flush_result(self, result: SinkFlushResult) -> None:
-        self._persisted_rows += result.committed_rows
+    async def _apply_flush_result(self, result: MaterializerFlushResult) -> None:
         if (
             result.committed_rows > 0
             and self._startup_timer is not None
@@ -520,36 +558,17 @@ class ResearchStateCollector:
                     )
                     or None
                 )
-        committed = result.committed_state_keys
-        for path, record in tuple(self._pending_records.items()):
-            state_keys = {_state_key(state) for state in record.collection_batch.states}
-            covered = self._record_committed_keys.setdefault(path, set())
-            covered.update(committed.intersection(state_keys))
-            if not state_keys.issubset(covered):
-                continue
-            await asyncio.to_thread(self._spool.remove, record)
-            self._pending_records.pop(path, None)
-            self._record_committed_keys.pop(path, None)
-            self._staged_paths.discard(path)
-
-    async def _restage_pending_records(self) -> None:
-        for path, record in tuple(self._pending_records.items()):
-            if path in self._staged_paths:
-                continue
-            await asyncio.to_thread(
-                self._sink.append,
-                record.collection_batch,
-                record.selection,
-            )
-            self._staged_paths.add(path)
 
     async def _save_checkpoint(self) -> None:
         checkpoint = self._require_checkpoint()
-        durable_sequence = self._durable_sequence()
+        durable_sequence = self._journal.materialized_sequence
+        accepted_sequence = self._journal.accepted_sequence
         self._checkpoint = replace(
             checkpoint,
             stream_id=self._active_stream_id,
             last_sequence=durable_sequence,
+            accepted_sequence=accepted_sequence,
+            materialized_sequence=durable_sequence,
             last_bucket_start=self._last_persisted_bucket
             if self._last_persisted_bucket is not None
             else checkpoint.last_bucket_start,
@@ -558,6 +577,7 @@ class ResearchStateCollector:
                 if self._last_persisted_bucket is None
                 else self._last_persisted_symbol
             ),
+            schema_version=2,
             updated_at=datetime.now(UTC),
         )
         await asyncio.to_thread(self._checkpoint_store.save, self._checkpoint)
@@ -611,9 +631,7 @@ class ResearchStateCollector:
                     if self._last_market_state_gap_end is None
                     else self._last_market_state_gap_end.isoformat()
                 ),
-                "last_market_state_gap_buckets": (
-                    self._last_market_state_gap_buckets
-                ),
+                "last_market_state_gap_buckets": (self._last_market_state_gap_buckets),
                 "collector_bytes": None
                 if snapshot is None
                 else snapshot.collector_bytes,
@@ -624,31 +642,7 @@ class ResearchStateCollector:
         )
 
     def _durable_sequence(self) -> int | None:
-        checkpoint = self._require_checkpoint()
-        if self._last_seen_sequence is None:
-            return checkpoint.last_sequence
-        if checkpoint.stream_id != self._active_stream_id:
-            base: int | None = self._sequence_baseline
-        else:
-            base = (
-                checkpoint.last_sequence
-                if checkpoint.last_sequence is not None
-                else self._sequence_baseline
-            )
-        pending = {
-            record.collection_batch.sequence
-            for record in self._pending_records.values()
-            if (
-                record.collection_batch.source_kind is SourceKind.HUB
-                and record.collection_batch.stream_id == self._active_stream_id
-            )
-        }
-        if base is None:
-            return self._last_seen_sequence if not pending else None
-        sequence = base
-        while sequence < self._last_seen_sequence and sequence + 1 not in pending:
-            sequence += 1
-        return sequence
+        return self._journal.materialized_sequence
 
     async def _prepare_hub_stream(
         self,
@@ -659,17 +653,27 @@ class ResearchStateCollector:
             return
         if self._active_stream_id is None:
             self._active_stream_id = stream_id
+            self._journal.set_active_stream_id(stream_id)
             return
         if stream_id == self._active_stream_id:
             return
         await self._flush_all_buffers()
         self._active_stream_id = stream_id
+        self._journal.set_active_stream_id(stream_id)
         self._sequence_baseline = None
         self._last_seen_sequence = None
         self._checkpoint = replace(
             self._require_checkpoint(),
             stream_id=stream_id,
             last_sequence=None,
+            accepted_sequence=None,
+            materialized_sequence=None,
+        )
+        self._journal.set_cursors(
+            accepted_sequence=None,
+            materialized_sequence=None,
+            last_materialized_bucket=self._last_persisted_bucket,
+            last_materialized_symbol=self._last_persisted_symbol,
         )
         log.warning(
             "research_collector_hub_stream_changed",
@@ -680,6 +684,7 @@ class ResearchStateCollector:
     def _accept_hub_cursor(self, collection_batch: CollectionBatch) -> bool:
         if self._active_stream_id is None and collection_batch.stream_id is not None:
             self._active_stream_id = collection_batch.stream_id
+            self._journal.set_active_stream_id(collection_batch.stream_id)
         if self._last_seen_sequence is None:
             if self._sequence_baseline is None:
                 self._sequence_baseline = collection_batch.sequence - 1
@@ -729,18 +734,18 @@ class ResearchStateCollector:
         source_kind: SourceKind,
     ) -> None:
         buckets = sorted(
-            {
-                require_utc(state.bucket_start, "bucket_start")
-                for state in states
-            }
+            {require_utc(state.bucket_start, "bucket_start") for state in states}
         )
         previous = self._last_received_bucket
         for bucket in buckets:
             if previous is not None and bucket > previous + _MARKET_STATE_BUCKET:
-                missing_buckets = int(
-                    (bucket - previous).total_seconds()
-                    // _MARKET_STATE_BUCKET.total_seconds()
-                ) - 1
+                missing_buckets = (
+                    int(
+                        (bucket - previous).total_seconds()
+                        // _MARKET_STATE_BUCKET.total_seconds()
+                    )
+                    - 1
+                )
                 gap_start = previous + _MARKET_STATE_BUCKET
                 gap_end = bucket - _MARKET_STATE_BUCKET
                 self._market_state_gap_count += 1
@@ -846,20 +851,6 @@ def _state_key(state: MarketState15s) -> _STATE_KEY:
     )
 
 
-def _spool_sort_key(record: SpoolRecord) -> tuple[str, str, int, datetime, str]:
-    first_state = min(
-        record.collection_batch.states,
-        key=lambda state: (state.bucket_start, state.symbol),
-    )
-    return (
-        record.collection_batch.source_kind.value,
-        record.collection_batch.stream_id or "",
-        record.collection_batch.sequence,
-        first_state.bucket_start,
-        first_state.symbol,
-    )
-
-
 def _receipt_for_skipped_batch(
     collection_batch: CollectionBatch,
 ) -> CollectionReceipt:
@@ -878,7 +869,7 @@ def _receipt_for_skipped_batch(
 def _receipt_for_empty_selection(
     collection_batch: CollectionBatch,
     *,
-    flush_result: SinkFlushResult,
+    flush_result: SinkFlushResult | MaterializerFlushResult,
 ) -> CollectionReceipt:
     return CollectionReceipt(
         source_kind=collection_batch.source_kind,
@@ -898,7 +889,7 @@ def _receipt_for_ingested_batch(
     *,
     selected_rows: int,
     duplicate_rows: int,
-    flush_result: SinkFlushResult,
+    flush_result: SinkFlushResult | MaterializerFlushResult,
 ) -> CollectionReceipt:
     return CollectionReceipt(
         source_kind=collection_batch.source_kind,
