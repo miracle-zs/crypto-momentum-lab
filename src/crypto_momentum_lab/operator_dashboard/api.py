@@ -50,6 +50,11 @@ _PAPER_EQUITY_STALE_GRACE_SECONDS = 60.0
 _DEFAULT_STALE_GRACE_SECONDS = 60.0
 _OVERVIEW_CACHE_TTL_SECONDS = 15.0
 _OVERVIEW_QUERY_TIMEOUT_SECONDS = 10.0
+# Performance aggregates decision SLO + checkpoint + market + host reads.
+# A cold 24h SLO scan can exceed a browser poll interval; keep a longer TTL
+# and fail the request instead of leaving the UI on an infinite spinner.
+_PERFORMANCE_CACHE_TTL_SECONDS = 30.0
+_PERFORMANCE_QUERY_TIMEOUT_SECONDS = 10.0
 _T = TypeVar("_T")
 
 
@@ -202,7 +207,7 @@ class DashboardQueryProtocol(Protocol):
 
     async def performance(
         self,
-        window: str = "24h",
+        window: str = "6h",
     ) -> SystemPerformanceResponse: ...
 
 
@@ -357,14 +362,23 @@ def create_dashboard_app(
         dependencies=[Depends(require_dashboard_auth)],
     )
     async def performance(
-        window: Literal["1h", "6h", "24h", "7d"] = "24h",
+        window: Literal["1h", "6h", "24h", "7d"] = "6h",
     ) -> SystemPerformanceResponse:
-        return await response_cache.get(
-            f"performance:{window}",
-            lambda: query_service().performance(window),
-            ttl_seconds=15.0,
-            stale_while_revalidate_seconds=default_stale_grace_seconds,
-        )
+        try:
+            return await asyncio.wait_for(
+                response_cache.get(
+                    f"performance:{window}",
+                    lambda: query_service().performance(window),
+                    ttl_seconds=_PERFORMANCE_CACHE_TTL_SECONDS,
+                    stale_while_revalidate_seconds=default_stale_grace_seconds,
+                ),
+                timeout=_PERFORMANCE_QUERY_TIMEOUT_SECONDS,
+            )
+        except (TimeoutError, SQLAlchemyTimeoutError) as exc:
+            raise HTTPException(
+                status_code=504,
+                detail="dashboard performance query timed out",
+            ) from exc
 
     @dashboard.get(
         "/api/overview",

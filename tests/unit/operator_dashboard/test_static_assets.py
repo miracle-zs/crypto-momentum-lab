@@ -78,7 +78,8 @@ def test_dashboard_loads_stable_frontend_modules() -> None:
         'from "./sections/reports.js"',
         'from "./sections/strategy.js"',
         'from "./sections/collector.js"',
-        'from "./sections/performance.js"',
+        # Cache-busted import may append ?v= before the closing quote.
+        'from "./sections/performance.js',
     ):
         assert module in javascript
     assert (STATIC / "dashboard-config.js").exists()

@@ -98,7 +98,7 @@ class PerformanceQueries:
 
     async def performance(
         self,
-        window: str = "24h",
+        window: str = "6h",
     ) -> SystemPerformanceResponse:
         now = self._clock()
         if now.tzinfo is None:

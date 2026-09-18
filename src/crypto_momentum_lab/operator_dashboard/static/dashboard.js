@@ -28,7 +28,7 @@ import {
   wireLiveAccounts,
 } from "./sections/account.js?v=20260906-live-metric-fleet-v1";
 import { renderReports } from "./sections/reports.js";
-import { renderPerformance } from "./sections/performance.js";
+import { renderPerformance } from "./sections/performance.js?v=20260918-perf-timeout-v1";
 import { createStrategySection } from "./sections/strategy.js?v=20260906-live-account-labels-v1";
 
 // Legacy import markers retained for static asset manifests: from "./sections/account.js"
@@ -36,7 +36,8 @@ import { createStrategySection } from "./sections/strategy.js?v=20260906-live-ac
 // from "./sections/risk.js" from "./sections/reports.js"
 // Legacy detail endpoint marker retained for account range clients: api/account?equity_range=
 
-let pollInFlight = false;
+const SECTION_FETCH_TIMEOUT_MS = 12 * 1000;
+const sectionInFlight = new Set();
 const lastSectionPollAt = new Map();
 let latestLiveService = null;
 let latestLiveMode = "UNKNOWN";
@@ -310,10 +311,15 @@ function wireMarketViews(root, selectedView = null) {
 }
 
 async function refreshSection(id) {
+  if (sectionInFlight.has(id)) return;
+  sectionInFlight.add(id);
   const section = document.getElementById(id);
   const endpoint = section.dataset.endpoint;
   try {
-    const response = await fetch(endpoint, { headers: { "Accept": "application/json" } });
+    const response = await fetch(endpoint, {
+      headers: { "Accept": "application/json" },
+      signal: AbortSignal.timeout(SECTION_FETCH_TIMEOUT_MS),
+    });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
     if (endpoint !== section.dataset.endpoint) return;
@@ -344,42 +350,41 @@ async function refreshSection(id) {
     setSectionStatus(id, "UNKNOWN");
     const body = section.querySelector(".panel-body");
     if (endpoint !== section.dataset.endpoint) return;
-    const errorHtml = emptyBox("接口不可达", `${endpoint} · ${error.message}`);
-    const errorKey = `error:${endpoint}:${error.message}`;
+    const timedOut = error?.name === "TimeoutError" || error?.name === "AbortError";
+    const reason = timedOut ? `请求超时（>${SECTION_FETCH_TIMEOUT_MS / 1000}s）` : error.message;
+    const errorHtml = emptyBox("接口不可达", `${endpoint} · ${reason}`);
+    const errorKey = `error:${endpoint}:${reason}`;
     if (sectionRenderKeys.get(id) !== errorKey) {
       replaceChildrenFromHtml(body, errorHtml);
       sectionRenderKeys.set(id, errorKey);
     }
     body.classList.remove("loading");
     updateGlobalState(id, { status: "UNKNOWN", error: true });
+  } finally {
+    sectionInFlight.delete(id);
   }
 }
 
 async function poll() {
   if (document.hidden) return;
-  if (pollInFlight) return;
   const now = Date.now();
   const activeView = document.body.dataset.activeView || "overview";
   const visibleSections = new Set(["overview", activeView]);
   const dueSections = SECTIONS.filter((id) => {
     if (!visibleSections.has(id)) return false;
+    if (sectionInFlight.has(id)) return false;
     const lastPolledAt = lastSectionPollAt.get(id);
     const interval = SECTION_POLL_MS[id] || POLL_MS;
     return lastPolledAt == null || now - lastPolledAt >= interval;
   });
   if (!dueSections.length) return;
   dueSections.forEach((id) => lastSectionPollAt.set(id, now));
-  pollInFlight = true;
-  try {
-    await Promise.allSettled(dueSections.map(refreshSection));
-    const pollbar = document.getElementById("pollbar");
-    pollbar.classList.remove("run");
-    void pollbar.offsetWidth;
-    pollbar.classList.add("run");
-    renderPollState();
-  } finally {
-    pollInFlight = false;
-  }
+  const pollbar = document.getElementById("pollbar");
+  pollbar.classList.remove("run");
+  void pollbar.offsetWidth;
+  pollbar.classList.add("run");
+  await Promise.allSettled(dueSections.map(refreshSection));
+  renderPollState();
 }
 
 function renderPollState() {
