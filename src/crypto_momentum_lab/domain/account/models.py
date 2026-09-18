@@ -212,6 +212,42 @@ class AccountReconciliationRun:
 
 
 @dataclass(frozen=True, slots=True)
+class AccountReconciliationHead:
+    environment: str
+    account_label: str
+    reconciliation_id: str
+    status: str
+    observed_at: datetime
+    balance_count: int
+    position_count: int
+    open_order_count: int
+    fill_count: int
+    mismatch_count: int
+    details: dict[str, JsonValue]
+    projection_schema_version: int = 1
+    projected_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        _require_common(self.environment, self.account_label)
+        _require_non_empty(self.reconciliation_id, "reconciliation_id")
+        _require_non_empty(self.status, "status")
+        _require_aware(self.observed_at, "observed_at")
+        if self.projected_at is not None:
+            _require_aware(self.projected_at, "projected_at")
+        for field_name in (
+            "balance_count",
+            "position_count",
+            "open_order_count",
+            "fill_count",
+            "mismatch_count",
+            "projection_schema_version",
+        ):
+            value = getattr(self, field_name)
+            if value < 0:
+                raise ValueError(f"{field_name} must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionAccountProcessState:
     environment: str
     account_label: str

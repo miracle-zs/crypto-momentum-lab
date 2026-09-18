@@ -17,6 +17,7 @@ from crypto_momentum_lab.persistence.postgres.account_repository import (
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountFillReconciliationCursorRow,
     AccountPositionSnapshotRow,
+    AccountReconciliationHeadRow,
     AccountReconciliationRunRow,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
@@ -46,6 +47,11 @@ async def account_repository(
                 )
             )
             await session.execute(
+                delete(AccountReconciliationHeadRow).where(
+                    AccountReconciliationHeadRow.environment == ENVIRONMENT
+                )
+            )
+            await session.execute(
                 delete(AccountReconciliationRunRow).where(
                     AccountReconciliationRunRow.environment == ENVIRONMENT
                 )
@@ -61,6 +67,11 @@ async def account_repository(
             await session.execute(
                 delete(AccountPositionSnapshotRow).where(
                     AccountPositionSnapshotRow.environment == ENVIRONMENT
+                )
+            )
+            await session.execute(
+                delete(AccountReconciliationHeadRow).where(
+                    AccountReconciliationHeadRow.environment == ENVIRONMENT
                 )
             )
             await session.execute(
@@ -231,3 +242,99 @@ async def test_fill_cursor_upsert_is_monotonic_and_switches_modes(
     assert loaded["BTCUSDT"].from_id is None
     assert loaded["BTCUSDT"].start_time_ms == 100
     assert loaded["BTCUSDT"].last_checked_at == NOW + timedelta(minutes=2)
+
+
+async def test_reconciliation_head_upsert_is_monotonic_and_ignores_non_ready(
+    account_repository: PostgresAccountRepository,
+) -> None:
+    t1 = NOW
+    t2 = NOW + timedelta(minutes=5)
+    t3 = NOW + timedelta(minutes=10)
+    t4 = NOW + timedelta(minutes=15)
+
+    # 1. Persist ready run at t2 with position_count=0 (flattened)
+    run_t2 = _run("acc_test", t2, position_count=0)
+    await account_repository.save_reconciliation_run(run_t2)
+
+    heads = await account_repository.load_reconciliation_heads(
+        environment=ENVIRONMENT
+    )
+    assert "acc_test" in heads
+    assert heads["acc_test"].observed_at == t2
+    assert heads["acc_test"].position_count == 0
+    assert (
+        await account_repository.load_active_position_account_labels(
+            environment=ENVIRONMENT
+        )
+        == frozenset()
+    )
+
+    # 2. Out-of-order stale run at t1 with position_count=2 arrives late:
+    # Must NOT overwrite newer t2 state.
+    run_t1 = _run("acc_test", t1, position_count=2)
+    await account_repository.save_reconciliation_run(run_t1)
+
+    heads = await account_repository.load_reconciliation_heads(
+        environment=ENVIRONMENT
+    )
+    assert heads["acc_test"].observed_at == t2
+    assert heads["acc_test"].position_count == 0
+    assert (
+        await account_repository.load_active_position_account_labels(
+            environment=ENVIRONMENT
+        )
+        == frozenset()
+    )
+
+    # 3. Newer non-ready run at t3:
+    # Must NOT overwrite valid ready head.
+    run_t3 = _run("acc_test", t3, position_count=5, status="failed")
+    await account_repository.save_reconciliation_run(run_t3)
+
+    heads = await account_repository.load_reconciliation_heads(
+        environment=ENVIRONMENT
+    )
+    assert heads["acc_test"].observed_at == t2
+    assert heads["acc_test"].position_count == 0
+
+    # 4. Strictly newer ready run at t4 with position_count=3:
+    # Must advance the head projection.
+    run_t4 = _run("acc_test", t4, position_count=3)
+    await account_repository.save_reconciliation_run(run_t4)
+
+    heads = await account_repository.load_reconciliation_heads(
+        environment=ENVIRONMENT
+    )
+    assert heads["acc_test"].observed_at == t4
+    assert heads["acc_test"].position_count == 3
+    assert await account_repository.load_active_position_account_labels(
+        environment=ENVIRONMENT
+    ) == frozenset({"acc_test"})
+
+
+async def test_reconciliation_heads_survive_service_stop_and_empty_positions(
+    account_repository: PostgresAccountRepository,
+) -> None:
+    # Account "stopped_with_pos" ceased publishing, last run has position_count=1
+    await account_repository.save_reconciliation_run(
+        _run("stopped_with_pos", NOW, position_count=1)
+    )
+    # Account "flat_account" has position_count=0 (legitimate empty state)
+    await account_repository.save_reconciliation_run(
+        _run("flat_account", NOW, position_count=0)
+    )
+
+    heads = await account_repository.load_reconciliation_heads(
+        environment=ENVIRONMENT
+    )
+    assert len(heads) == 2
+    assert heads["stopped_with_pos"].position_count == 1
+    assert heads["flat_account"].position_count == 0
+
+    active_labels = (
+        await account_repository.load_active_position_account_labels(
+            environment=ENVIRONMENT
+        )
+    )
+    # The stopped account MUST still be discovered for market risk protection
+    assert active_labels == frozenset({"stopped_with_pos"})

@@ -1,8 +1,9 @@
 from dataclasses import asdict
+from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from sqlalchemy import and_, case, delete, func, select, text
+from sqlalchemy import and_, case, delete, func, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -13,6 +14,7 @@ from crypto_momentum_lab.domain.account import (
     AccountFillReconciliationCursor,
     AccountOpenOrderSnapshot,
     AccountPositionSnapshot,
+    AccountReconciliationHead,
     AccountReconciliationRun,
     ExecutionAccountProcessState,
 )
@@ -23,6 +25,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     AccountFillReconciliationCursorRow,
     AccountOpenOrderRow,
     AccountPositionSnapshotRow,
+    AccountReconciliationHeadRow,
     AccountReconciliationRunRow,
     ExecutionAccountProcessStateRow,
 )
@@ -113,10 +116,14 @@ class PostgresAccountRepository:
         await self._insert(AccountConfigSnapshotRow, config_snapshot_row(snapshot))
 
     async def save_reconciliation_run(self, run: AccountReconciliationRun) -> None:
-        await self._insert(
-            AccountReconciliationRunRow,
-            reconciliation_run_row(run),
-        )
+        async with self._session_factory() as session:
+            async with session.begin():
+                await self._insert_in_session(
+                    session,
+                    AccountReconciliationRunRow,
+                    reconciliation_run_row(run),
+                )
+                await self._upsert_reconciliation_head_in_session(session, run)
 
     async def save_reconciliation_snapshot(
         self,
@@ -193,6 +200,7 @@ class PostgresAccountRepository:
                     AccountReconciliationRunRow,
                     reconciliation_run_row(run),
                 )
+                await self._upsert_reconciliation_head_in_session(session, run)
 
     async def save_process_state(self, state: ExecutionAccountProcessState) -> None:
         await self._insert(ExecutionAccountProcessStateRow, process_state_row(state))
@@ -392,14 +400,29 @@ class PostgresAccountRepository:
     ) -> frozenset[str]:
         """Return live account labels whose latest ready run has positions.
 
-        The latest run is selected per account so a stopped account remains
-        discoverable while its last durable snapshot is still open, but an
-        older open-position run does not keep protecting an account after a
-        newer ready run reports zero positions.
+        Queries the single-row-per-account `account_reconciliation_heads` projection
+        table. If the projection has not been populated yet for the given environment,
+        it defensively falls back to the historical reconciliation runs query.
         """
         if not environment.strip():
             raise ValueError("environment must not be empty")
         async with self._session_factory() as session:
+            heads = (
+                await session.execute(
+                    select(
+                        AccountReconciliationHeadRow.account_label,
+                        AccountReconciliationHeadRow.position_count,
+                    ).where(
+                        AccountReconciliationHeadRow.environment == environment,
+                        AccountReconciliationHeadRow.status == "ready",
+                    )
+                )
+            ).all()
+            if heads:
+                return frozenset(
+                    row.account_label for row in heads if row.position_count > 0
+                )
+
             latest_runs = (
                 select(
                     AccountReconciliationRunRow.account_label.label("account_label"),
@@ -423,6 +446,94 @@ class PostgresAccountRepository:
                 )
             )
             return frozenset(labels.all())
+
+    async def load_reconciliation_heads(
+        self,
+        *,
+        environment: str,
+    ) -> dict[str, AccountReconciliationHead]:
+        """Return a mapping of account_label to its latest ready reconciliation head."""
+        if not environment.strip():
+            raise ValueError("environment must not be empty")
+        async with self._session_factory() as session:
+            rows = (
+                await session.scalars(
+                    select(AccountReconciliationHeadRow).where(
+                        AccountReconciliationHeadRow.environment == environment,
+                    )
+                )
+            ).all()
+            return {
+                row.account_label: AccountReconciliationHead(
+                    environment=row.environment,
+                    account_label=row.account_label,
+                    reconciliation_id=row.reconciliation_id,
+                    status=row.status,
+                    observed_at=row.observed_at,
+                    balance_count=row.balance_count,
+                    position_count=row.position_count,
+                    open_order_count=row.open_order_count,
+                    fill_count=row.fill_count,
+                    mismatch_count=row.mismatch_count,
+                    details=row.details,
+                    projection_schema_version=row.projection_schema_version,
+                    projected_at=row.projected_at,
+                )
+                for row in rows
+            }
+
+    @staticmethod
+    async def _upsert_reconciliation_head_in_session(
+        session: AsyncSession,
+        run: AccountReconciliationRun,
+        *,
+        projected_at: datetime | None = None,
+    ) -> None:
+        if run.status != "ready":
+            return
+        now = projected_at or datetime.now(UTC)
+        values = {
+            "environment": run.environment,
+            "account_label": run.account_label,
+            "reconciliation_id": run.reconciliation_id,
+            "status": run.status,
+            "observed_at": run.observed_at,
+            "balance_count": run.balance_count,
+            "position_count": run.position_count,
+            "open_order_count": run.open_order_count,
+            "fill_count": run.fill_count,
+            "mismatch_count": run.mismatch_count,
+            "details": jsonable(run.details),
+            "projection_schema_version": 1,
+            "projected_at": now,
+        }
+        stmt = insert(AccountReconciliationHeadRow).values(values)
+        update_dict = {
+            "reconciliation_id": stmt.excluded.reconciliation_id,
+            "status": stmt.excluded.status,
+            "observed_at": stmt.excluded.observed_at,
+            "balance_count": stmt.excluded.balance_count,
+            "position_count": stmt.excluded.position_count,
+            "open_order_count": stmt.excluded.open_order_count,
+            "fill_count": stmt.excluded.fill_count,
+            "mismatch_count": stmt.excluded.mismatch_count,
+            "details": stmt.excluded.details,
+            "projection_schema_version": stmt.excluded.projection_schema_version,
+            "projected_at": stmt.excluded.projected_at,
+        }
+        where_cond = tuple_(
+            stmt.excluded.observed_at,
+            stmt.excluded.reconciliation_id,
+        ) >= tuple_(
+            AccountReconciliationHeadRow.observed_at,
+            AccountReconciliationHeadRow.reconciliation_id,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["environment", "account_label"],
+            set_=update_dict,
+            where=where_cond,
+        )
+        await session.execute(stmt)
 
     async def _insert(self, model: Any, values: dict[str, object]) -> None:
         async with self._session_factory() as session:

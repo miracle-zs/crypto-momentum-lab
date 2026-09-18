@@ -47,3 +47,24 @@ def test_process_state_row_uses_state_value() -> None:
 
     assert row["state"] == "ready_readonly"
     assert row["reason"] is None
+
+
+def test_account_reconciliation_head_validates_fields() -> None:
+    from crypto_momentum_lab.domain.account import AccountReconciliationHead
+
+    head = AccountReconciliationHead(
+        environment="live",
+        account_label="primary",
+        reconciliation_id="test:1",
+        status="ready",
+        observed_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+        balance_count=1,
+        position_count=2,
+        open_order_count=0,
+        fill_count=5,
+        mismatch_count=0,
+        details={"ok": True},
+    )
+    assert head.environment == "live"
+    assert head.position_count == 2
+    assert head.projection_schema_version == 1
