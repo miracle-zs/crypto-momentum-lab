@@ -628,3 +628,107 @@ def test_release_identity_does_not_precede_dependency_layer() -> None:
     )
 
     assert release_arg > dependency_install
+
+
+def test_sync_dashboard_option_and_ancestor_resolution(tmp_path: Path) -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    assert "--sync-dashboard" in script
+    assert "CML_SYNC_DASHBOARD" in script
+    assert "git merge-base --is-ancestor" in script
+
+    # Test ancestor resolution behavior with a git repo
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(
+            ["git", "-C", str(tmp_path), *args], text=True
+        ).strip()
+
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    git("commit", "--allow-empty", "-qm", "ancestor")
+    ancestor_commit = git("rev-parse", "HEAD")
+    git("commit", "--allow-empty", "-qm", "target")
+    target_commit = git("rev-parse", "HEAD")
+
+    # Extract dashboard resolution block from update_server.sh
+    start = script.index('current_dashboard_image="$(sed -n')
+    end = script.index('export CML_CODE_COMMIT="$runtime_commit"', start)
+    dashboard_block = script[start:end]
+
+    # Test 1: ancestor image is automatically advanced
+    env_file = tmp_path / ".env.server"
+    env_file.write_text(
+        f"CML_DASHBOARD_IMAGE=crypto-momentum-lab-app:{ancestor_commit}\n",
+        encoding="utf-8",
+    )
+    cmd1 = (
+        "set -eu\n"
+        f"runtime_commit='{target_commit}'\n"
+        f"target_commit='{target_commit}'\n"
+        "previous_env_runtime_commit=''\n"
+        "previous_runtime_commit=''\n"
+        "sync_dashboard=0\n"
+        f"{dashboard_block}\n"
+        'printf "%s" "$dashboard_image"'
+    )
+    res1 = subprocess.check_output(["bash", "-c", cmd1], cwd=tmp_path, text=True)
+    assert res1.strip() == f"crypto-momentum-lab-app:{target_commit}"
+
+    # Test 2: custom non-repo image is preserved when sync_dashboard=0
+    env_file.write_text(
+        "CML_DASHBOARD_IMAGE=custom-dashboard:latest\n",
+        encoding="utf-8",
+    )
+    cmd2 = (
+        "set -eu\n"
+        f"runtime_commit='{target_commit}'\n"
+        f"target_commit='{target_commit}'\n"
+        "previous_env_runtime_commit=''\n"
+        "previous_runtime_commit=''\n"
+        "sync_dashboard=0\n"
+        f"{dashboard_block}\n"
+        'printf "%s" "$dashboard_image"'
+    )
+    res2 = subprocess.check_output(["bash", "-c", cmd2], cwd=tmp_path, text=True)
+    assert res2.strip().splitlines()[-1] == "custom-dashboard:latest"
+
+    # Test 3: custom image is overwritten when sync_dashboard=1
+    cmd3 = (
+        "set -eu\n"
+        f"runtime_commit='{target_commit}'\n"
+        f"target_commit='{target_commit}'\n"
+        "previous_env_runtime_commit=''\n"
+        "previous_runtime_commit=''\n"
+        "sync_dashboard=1\n"
+        f"{dashboard_block}\n"
+        'printf "%s" "$dashboard_image"'
+    )
+    res3 = subprocess.check_output(["bash", "-c", cmd3], cwd=tmp_path, text=True)
+    assert res3.strip().splitlines()[-1] == f"crypto-momentum-lab-app:{target_commit}"
+
+
+def test_refresh_approval_includes_verify_preflight_and_streamlines_preflight() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    refresh_start = script.index("refresh_approval_for_pair()")
+    refresh_end = script.index("renew_lease_for_pair()", refresh_start)
+    refresh_block = script[refresh_start:refresh_end]
+
+    assert "--verify-preflight" in refresh_block
+
+    preflight_phase = script.index("deploy_phase=live-preflight")
+    live_restart = script.index("deploy_phase=live-restart")
+    preflight_block = script[preflight_phase:live_restart]
+
+    assert 'if [[ "$refresh_approvals" == 1 ]]' in preflight_block
+    assert "run_parallel_pairs refresh" in preflight_block
+    assert "run_parallel_pairs preflight" in preflight_block
+
+
+def test_post_deploy_image_prune_is_configured() -> None:
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    prune_idx = script.index("docker image prune -f")
+    total_idx = script.index('echo "phase=total')
+    deploy_commit_idx = script.index('echo "deployed_commit=')
+
+    assert total_idx < prune_idx < deploy_commit_idx

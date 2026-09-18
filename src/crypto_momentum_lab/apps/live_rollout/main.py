@@ -781,6 +781,13 @@ def refresh_approval_runtime_command(
     strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
     git_commit_hash: Annotated[str, typer.Option("--git-commit-hash")] = "",
     migration_revision: Annotated[str, typer.Option("--migration-revision")] = "",
+    verify_preflight: Annotated[
+        bool,
+        typer.Option(
+            "--verify-preflight",
+            help="Immediately verify preflight status in the same execution.",
+        ),
+    ] = False,
 ) -> None:
     """Refresh an active approval while preserving its operator limits."""
 
@@ -866,6 +873,19 @@ def refresh_approval_runtime_command(
             sort_keys=True,
         )
     )
+    if verify_preflight:
+        payload = asyncio.run(
+            _preflight_summary(
+                resolved_database_url,
+                account_label,
+                strategy,
+                expected_git_commit=git_commit_hash,
+                expected_migration_revision=migration_revision,
+            )
+        )
+        typer.echo(json.dumps(payload, sort_keys=True))
+        if payload.get("preflight_ok") is not True:
+            raise typer.Exit(code=1)
 
 
 def _runtime_manifest_account_for_cli(
@@ -1009,9 +1029,7 @@ def approval_precheck_command(
     database_url: Annotated[str | None, typer.Option("--database-url")] = None,
     account_label: Annotated[str, typer.Option("--account-label")] = "primary",
     strategy: Annotated[str, typer.Option("--strategy")] = "orderflow_impulse",
-    expected_git_commit: Annotated[
-        str, typer.Option("--expected-git-commit")
-    ] = "",
+    expected_git_commit: Annotated[str, typer.Option("--expected-git-commit")] = "",
     expected_migration_revision: Annotated[
         str, typer.Option("--expected-migration-revision")
     ] = "",
@@ -1694,8 +1712,6 @@ def _validate_missing_order_resolution(
     )
 
 
-
-
 def _load_plan(path: Path) -> OrderExecutionPlan:
     payload = json.loads(path.read_text(encoding="utf-8"))
     plan = OrderExecutionPlan(
@@ -1727,8 +1743,6 @@ def _load_plan(path: Path) -> OrderExecutionPlan:
     if not plan.quantized:
         raise typer.BadParameter("order plan must be quantized")
     return plan
-
-
 
 
 def _validate_hex_hash(
@@ -1818,9 +1832,7 @@ async def _approval_binding_summary(
     )
     normalized_git_commit = expected_git_commit.strip().lower()
     normalized_migration_revision = expected_migration_revision.strip()
-    approved_git_commit_hash = (
-        None if approval is None else approval.git_commit_hash
-    )
+    approved_git_commit_hash = None if approval is None else approval.git_commit_hash
     approved_migration_revision = (
         None if approval is None else approval.database_migration_revision
     )

@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: update_server.sh <server-host> [git-ref] [--live] [--refresh-approvals]
+Usage: update_server.sh <server-host> [git-ref] [--live] [--refresh-approvals] [--sync-dashboard]
 
 Environment:
   CML_SERVER_USER  SSH user (default: root)
@@ -21,6 +21,7 @@ Environment:
   CML_DASHBOARD_REQUIRED  require the dashboard endpoint (default: 1)
   CML_DASHBOARD_PROXY_URL  local reverse-proxy health URL (default: http://127.0.0.1/momentum/api/health)
   CML_CRASH_LOG_DIRECTORY  persistent pre-restart log archive (default: /var/lib/crypto-momentum-lab/crash-logs)
+  CML_SYNC_DASHBOARD  force sync dashboard image to runtime commit (default: 0)
   CML_SSH_PASSWORD  optional password for sshpass; prefer an SSH key
 
 The live profile is never touched unless --live is supplied. Live updates run
@@ -33,8 +34,11 @@ The default paper rollout keeps only paper-orderflow-gainer10-pair active;
 retired paper containers are archived, stopped, and removed during the update.
 --refresh-approvals is an explicit opt-in that refreshes active approvals from
 the target runtime while preserving their existing limits and operator fields;
-it requires --live and an explicit git-ref. The SSH connection uses an
-agent/key by default. When
+it requires --live and an explicit git-ref.
+--sync-dashboard forces updating CML_DASHBOARD_IMAGE to the target commit image;
+by default, dashboard images referencing an ancestor repository commit are also
+automatically advanced, while custom non-repo images remain preserved.
+The SSH connection uses an agent/key by default. When
 CML_SSH_PASSWORD is set, sshpass reads it from the environment; the password
 is never a command-line argument, remote argument, or repository value.
 USAGE
@@ -56,6 +60,7 @@ target_ref="origin/main"
 target_ref_set=0
 live_update=0
 refresh_approvals=0
+sync_dashboard="${CML_SYNC_DASHBOARD:-0}"
 while (( $# > 0 )); do
   case "$1" in
     --live)
@@ -63,6 +68,9 @@ while (( $# > 0 )); do
       ;;
     --refresh-approvals)
       refresh_approvals=1
+      ;;
+    --sync-dashboard)
+      sync_dashboard=1
       ;;
     --help|-h)
       usage
@@ -83,6 +91,11 @@ while (( $# > 0 )); do
   esac
   shift
 done
+
+if [[ "$sync_dashboard" != 0 && "$sync_dashboard" != 1 ]]; then
+  echo "Invalid CML_SYNC_DASHBOARD: $sync_dashboard" >&2
+  exit 64
+fi
 
 if [[ "$refresh_approvals" == 1 && "$live_update" != 1 ]]; then
   echo "--refresh-approvals requires --live" >&2
@@ -160,7 +173,7 @@ if "${ssh_command[@]}" "${ssh_opts[@]}" "${server_user}@${server_host}" bash -s 
   "$live_stop_timeout" \
   "$deploy_operation_timeout" "$deploy_build_timeout" \
   "$refresh_approvals" "$dashboard_required" "$dashboard_proxy_url" \
-  "$crash_log_directory" \
+  "$crash_log_directory" "$sync_dashboard" \
   <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
@@ -180,6 +193,7 @@ refresh_approvals="${13}"
 dashboard_required="${14}"
 dashboard_proxy_url="${15}"
 crash_log_directory="${16}"
+sync_dashboard="${17:-0}"
 for timeout_name in \
   CML_DEPLOY_WAIT_TIMEOUT_SECONDS \
   CML_MARKET_DATA_WAIT_TIMEOUT_SECONDS \
@@ -204,6 +218,10 @@ for timeout_name in \
 done
 if [[ "$refresh_approvals" != 0 && "$refresh_approvals" != 1 ]]; then
   echo "Invalid refresh approvals flag: $refresh_approvals" >&2
+  exit 64
+fi
+if [[ "$sync_dashboard" != 0 && "$sync_dashboard" != 1 ]]; then
+  echo "Invalid sync dashboard flag: $sync_dashboard" >&2
   exit 64
 fi
 if [[ "$dashboard_required" != 0 && "$dashboard_required" != 1 ]]; then
@@ -533,9 +551,19 @@ set_env_value() {
 }
 
 current_dashboard_image="$(sed -n 's/^CML_DASHBOARD_IMAGE=//p' .env.server | tail -n 1)"
-if [[ -z "$current_dashboard_image" \
+if [[ "$sync_dashboard" == 1 ]]; then
+  dashboard_image="crypto-momentum-lab-app:${runtime_commit}"
+elif [[ -z "$current_dashboard_image" \
   || "$current_dashboard_image" == "crypto-momentum-lab-app:${previous_env_runtime_commit:-$previous_runtime_commit}" ]]; then
   dashboard_image="crypto-momentum-lab-app:${runtime_commit}"
+elif [[ "$current_dashboard_image" == crypto-momentum-lab-app:* ]]; then
+  dashboard_img_commit="${current_dashboard_image#crypto-momentum-lab-app:}"
+  if git merge-base --is-ancestor "$dashboard_img_commit" "$target_commit" 2>/dev/null; then
+    dashboard_image="crypto-momentum-lab-app:${runtime_commit}"
+  else
+    dashboard_image="$current_dashboard_image"
+    echo "dashboard_image_preserved=1"
+  fi
 else
   dashboard_image="$current_dashboard_image"
   echo "dashboard_image_preserved=1"
@@ -1188,6 +1216,7 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
         --strategy orderflow_impulse \
         --git-commit-hash "$runtime_commit" \
         --migration-revision "$(migration_revision_for_account "$account")" \
+        --verify-preflight \
         </dev/null
   }
 
@@ -1774,6 +1803,7 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   collect_active_live_pairs
   deploy_phase=live-preflight
   write_deploy_state running "$deploy_phase"
+  preflight_started_at="$(date +%s)"
   if [[ "$refresh_approvals" == 1 ]]; then
     approval_refresh_started_at="$(date +%s)"
     if ! run_parallel_pairs refresh "${active_pairs[@]}"; then
@@ -1781,16 +1811,16 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
       exit 1
     fi
     echo "phase=approval-refresh elapsed_seconds=$(( $(date +%s) - approval_refresh_started_at ))"
+    echo "phase=preflight elapsed_seconds=$(( $(date +%s) - preflight_started_at ))"
+  else
+    # Preflight is read-only. Run it before lease renewal so an approval or
+    # migration mismatch cannot leave a new lease attached to old containers.
+    if ! run_parallel_pairs preflight "${active_pairs[@]}"; then
+      echo "preflight failed; Live services were not restarted" >&2
+      exit 1
+    fi
+    echo "phase=preflight elapsed_seconds=$(( $(date +%s) - preflight_started_at ))"
   fi
-
-  # Preflight is read-only. Run it before lease renewal so an approval or
-  # migration mismatch cannot leave a new lease attached to old containers.
-  preflight_started_at="$(date +%s)"
-  if ! run_parallel_pairs preflight "${active_pairs[@]}"; then
-    echo "preflight failed; Live services were not restarted" >&2
-    exit 1
-  fi
-  echo "phase=preflight elapsed_seconds=$(( $(date +%s) - preflight_started_at ))"
 
   lease_started_at="$(date +%s)"
   if ! run_parallel_pairs renew "${active_pairs[@]}"; then
@@ -1888,6 +1918,9 @@ set_env_value CML_DASHBOARD_IMAGE "$dashboard_image"
 chmod 600 .env.server
 write_deploy_state success complete
 echo "phase=total elapsed_seconds=$(( $(date +%s) - deploy_started_at ))"
+
+run_with_timeout --quiet "docker-image-prune" 30 \
+  docker image prune -f </dev/null || true
 
 echo "deployed_commit=$target_commit"
 echo "deployed_checkout=$target_commit"

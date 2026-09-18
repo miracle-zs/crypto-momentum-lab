@@ -520,9 +520,7 @@ def test_live_run_passes_exchange_operation_allowlist_to_daemon(
         "postgresql+asyncpg://unused",
     ]
     if option_value is not None:
-        arguments.extend(
-            ["--persist-exchange-operations", option_value]
-        )
+        arguments.extend(["--persist-exchange-operations", option_value])
     arguments.extend(
         [
             "--entry-policy-compare-only",
@@ -728,8 +726,9 @@ def test_resolve_missing_order_requires_exact_confirmation() -> None:
     assert "RESOLVE MISSING LIVE ORDER" in result.output
 
 
-def test_missing_order_resolution_guard_accepts_confirmed_absent_reduce_only_order(
-) -> None:
+def test_missing_order_resolution_guard_accepts_confirmed_absent_reduce_only_order() -> (
+    None
+):
     main._validate_missing_order_resolution(
         state="unknown_pending_reconciliation",
         reduce_only=True,
@@ -889,13 +888,96 @@ def test_refresh_approval_runtime_preserves_existing_limits(monkeypatch) -> None
     assert refreshed.risk_config_hash == "d" * 64
     assert refreshed.git_commit_hash == "f" * 40
     assert refreshed.approved_notional_cap == current.approved_notional_cap
-    assert (
-        refreshed.approved_max_open_positions
-        == current.approved_max_open_positions
-    )
+    assert refreshed.approved_max_open_positions == current.approved_max_open_positions
     assert refreshed.approved_max_daily_loss == current.approved_max_daily_loss
     assert refreshed.approver_name == current.approver_name
     assert refreshed.approval_text == current.approval_text
+
+
+def test_refresh_approval_runtime_verify_preflight(monkeypatch) -> None:
+    now = datetime.now(tz=UTC)
+    current = main.LiveOperatorApproval(
+        approval_id="approval-old",
+        account_label="account-2",
+        strategy_name="orderflow_impulse",
+        strategy_config_hash="a" * 64,
+        risk_config_hash="b" * 64,
+        git_commit_hash="c" * 40,
+        database_migration_revision="20260906_0030",
+        approved_notional_cap=Decimal("10000"),
+        approved_max_open_positions=500,
+        approved_max_daily_loss=Decimal("10000"),
+        approver_name="operator",
+        approval_text="ENABLE SMALL LIVE TRADING",
+        expires_at=None,
+        created_at=now - timedelta(minutes=1),
+    )
+
+    async def fake_load(*args):
+        del args
+        return current
+
+    async def fake_risk_hash(*args):
+        del args
+        return "d" * 64
+
+    async def fake_save(_database_url, approval):
+        del _database_url, approval
+
+    monkeypatch.setattr(main, "_load_active_approval", fake_load)
+    monkeypatch.setattr(main, "_latest_risk_config_hash", fake_risk_hash)
+    monkeypatch.setattr(main, "_runtime_strategy_config_hash", lambda _: "e" * 64)
+    monkeypatch.setattr(main, "_save_approval", fake_save)
+
+    # Success case
+    async def fake_preflight_ok(*args, **kwargs):
+        del args, kwargs
+        return {"preflight_ok": True, "preflight_errors": []}
+
+    monkeypatch.setattr(main, "_preflight_summary", fake_preflight_ok)
+
+    result_ok = runner.invoke(
+        app,
+        [
+            "refresh-approval-runtime",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--account-label",
+            "account-2",
+            "--git-commit-hash",
+            "f" * 40,
+            "--migration-revision",
+            "20260906_0030",
+            "--verify-preflight",
+        ],
+    )
+    assert result_ok.exit_code == 0
+    assert '"preflight_ok": true' in result_ok.stdout
+
+    # Failure case
+    async def fake_preflight_fail(*args, **kwargs):
+        del args, kwargs
+        return {"preflight_ok": False, "preflight_errors": ["mismatch"]}
+
+    monkeypatch.setattr(main, "_preflight_summary", fake_preflight_fail)
+
+    result_fail = runner.invoke(
+        app,
+        [
+            "refresh-approval-runtime",
+            "--database-url",
+            "postgresql+asyncpg://unused",
+            "--account-label",
+            "account-2",
+            "--git-commit-hash",
+            "f" * 40,
+            "--migration-revision",
+            "20260906_0030",
+            "--verify-preflight",
+        ],
+    )
+    assert result_fail.exit_code == 1
+    assert '"preflight_ok": false' in result_fail.stdout
 
 
 def test_strict_preflight_returns_failure_exit_code(monkeypatch) -> None:
@@ -1707,8 +1789,9 @@ async def test_resilient_market_state_stream_retries_after_hub_failure() -> None
 
 
 @pytest.mark.asyncio
-async def test_resilient_market_state_stream_propagates_durable_recovery_failure(
-) -> None:
+async def test_resilient_market_state_stream_propagates_durable_recovery_failure() -> (
+    None
+):
     error = MarketStateHubReplayUnavailable(
         "market-state replay is unavailable: Hub stream reset"
     )
@@ -1853,16 +1936,12 @@ async def test_account_event_retries_pending_position_sync(
     await runtime_orchestrator._run_account_event_channel(
         source=Source(),
         daemon=daemon,
-        latest_market_states=SimpleNamespace(
-            for_symbols=lambda _symbols: (state,)
-        ),
+        latest_market_states=SimpleNamespace(for_symbols=lambda _symbols: (state,)),
         latest_market_quotes=SimpleNamespace(for_symbols=lambda _symbols: ()),
         order_repository=None,
         state_machine=None,
         run_id="run-1",
-        on_exit_failure=lambda symbol, failure: failures.append(
-            (symbol, failure)
-        ),
+        on_exit_failure=lambda symbol, failure: failures.append((symbol, failure)),
     )
 
     assert daemon.calls == 2
@@ -1906,16 +1985,12 @@ async def test_account_event_does_not_retry_confirmed_unmanaged_position(
     await runtime_orchestrator._run_account_event_channel(
         source=Source(),
         daemon=Daemon(),
-        latest_market_states=SimpleNamespace(
-            for_symbols=lambda _symbols: (state,)
-        ),
+        latest_market_states=SimpleNamespace(for_symbols=lambda _symbols: (state,)),
         latest_market_quotes=SimpleNamespace(for_symbols=lambda _symbols: ()),
         order_repository=None,
         state_machine=None,
         run_id="run-1",
-        on_exit_failure=lambda symbol, failure: failures.append(
-            (symbol, failure)
-        ),
+        on_exit_failure=lambda symbol, failure: failures.append((symbol, failure)),
     )
 
     assert sleep_calls == []
@@ -1939,9 +2014,7 @@ async def test_grace_timeout_channel_degrades_on_order_identity_conflict(
 
         async def process_grace_timeout(self, _state, *, now, latest_quote):
             del now, latest_quote
-            raise ValueError(
-                "client order ID is already bound to a different order"
-            )
+            raise ValueError("client order ID is already bound to a different order")
 
     with pytest.raises(asyncio.CancelledError):
         await runtime_orchestrator._run_grace_timeout_channel(
@@ -1952,9 +2025,7 @@ async def test_grace_timeout_channel_degrades_on_order_identity_conflict(
             latest_market_quotes=SimpleNamespace(
                 for_symbols=lambda _symbols: (),
             ),
-            on_exit_failure=lambda symbol, failure: failures.append(
-                (symbol, failure)
-            ),
+            on_exit_failure=lambda symbol, failure: failures.append((symbol, failure)),
         )
 
     assert failures == [("BTCUSDT", "order_identity_conflict")]
