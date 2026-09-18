@@ -149,6 +149,7 @@ class MarketDataCaptureService:
         self._oldest_pending_manifest_seconds: float | None = None
         self._disk_free_bytes = 0
         self._halted_by_disk = False
+        self._halted_by_queue_overflow = False
 
     @property
     def state(self) -> MarketDataState:
@@ -181,16 +182,30 @@ class MarketDataCaptureService:
         await self._transition(MarketDataState.STOPPED, reason=None)
 
     async def submit(self, envelope: RawEnvelope) -> None:
-        if self._state is MarketDataState.HALTED and not self._halted_by_disk:
-            raise CaptureQueueFull("capture is halted")
+        if self._state is MarketDataState.HALTED:
+            if (
+                self._halted_by_queue_overflow
+                and not self._halted_by_disk
+                and self._queue.size < max(1, self._queue.max_events // 2)
+            ):
+                self._halted_by_queue_overflow = False
+                await self._transition(MarketDataState.READY, reason="queue drained")
+            else:
+                raise CaptureQueueFull("capture is halted")
         await self.ensure_disk_space()
         try:
             if self._coordinator is None:
                 await self._queue.put(envelope)
             else:
                 await self._coordinator.submit(envelope)
-        except CaptureQueueFull:
+        except CaptureQueueFull as exc:
             self._halted_by_disk = False
+            self._halted_by_queue_overflow = (
+                "backpressure" in str(exc)
+                or "saturated" in str(exc)
+                or "queue event limit" in str(exc)
+                or "queue byte limit" in str(exc)
+            )
             await self._transition(
                 MarketDataState.HALTED,
                 reason="capture queue overflow",

@@ -84,11 +84,14 @@ class CaptureCoordinator:
         archive_streams: frozenset[CaptureStream] | None = None,
         max_archive_batch_size: int = _DEFAULT_MAX_ARCHIVE_BATCH_SIZE,
         cooperative_yield_every: int = _DEFAULT_COOPERATIVE_YIELD_EVERY,
+        recovery_bypass_queue_threshold: int = 1000,
     ) -> None:
         if max_archive_batch_size <= 0:
             raise ValueError("max_archive_batch_size must be positive")
         if cooperative_yield_every <= 0:
             raise ValueError("cooperative_yield_every must be positive")
+        if recovery_bypass_queue_threshold <= 0:
+            raise ValueError("recovery_bypass_queue_threshold must be positive")
         self._queue = queue
         self._archive = archive
         self._quality = quality
@@ -101,6 +104,7 @@ class CaptureCoordinator:
         self._archive_streams = archive_streams
         self._max_archive_batch_size = max_archive_batch_size
         self._cooperative_yield_every = cooperative_yield_every
+        self._recovery_bypass_queue_threshold = recovery_bypass_queue_threshold
         self._stopping = False
         self._monitored_symbols: frozenset[str] | None = None
         self._filtered_book_ticker_events = 0
@@ -161,7 +165,14 @@ class CaptureCoordinator:
         try:
             processing_batch = batch
             if self._envelope_recovery is not None:
-                recovery = await self._envelope_recovery.expand(batch)
+                bypass = self._queue.size > self._recovery_bypass_queue_threshold
+                try:
+                    recovery = await self._envelope_recovery.expand(
+                        batch,
+                        bypass_network=bypass,
+                    )
+                except TypeError:
+                    recovery = await self._envelope_recovery.expand(batch)
                 processing_batch = recovery.envelopes
                 await self._publish_gaps(recovery.unrecovered_gaps)
 

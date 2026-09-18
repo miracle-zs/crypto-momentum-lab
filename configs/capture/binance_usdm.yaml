@@ -10,7 +10,7 @@ max_subscriptions_per_connection: 100
 ingress_queue_max_events: 4096
 book_ticker_coalescing_interval_seconds: 1.0
 control_messages_per_second: 5
-control_ack_timeout_seconds: 10
+control_ack_timeout_seconds: 30
 connection_lifetime_seconds: 82800
 open_timeout_seconds: 10
 ping_interval_seconds: 30
@@ -20,7 +20,7 @@ realtime_closure_delay_seconds: 3
 durable_closure_delay_seconds: 3
 queue_max_events: 100000
 queue_max_bytes: 268435456
-backpressure_timeout_seconds: 30
+backpressure_timeout_seconds: 60
 shutdown_timeout_seconds: 30
 archive:
   root: data/raw

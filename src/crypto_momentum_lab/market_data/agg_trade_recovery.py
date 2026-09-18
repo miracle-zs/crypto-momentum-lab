@@ -90,6 +90,7 @@ class AggTradeGapRecoverer:
         max_concurrency: int = 8,
         recovery_timeout_seconds: float = 1.0,
         max_requests_per_minute: int = 100,
+        max_batch_recovery_seconds: float = 1.5,
     ) -> None:
         if max_gap_trades <= 0:
             raise ValueError("max_gap_trades must be positive")
@@ -99,11 +100,14 @@ class AggTradeGapRecoverer:
             raise ValueError("recovery_timeout_seconds must be positive")
         if max_requests_per_minute <= 0:
             raise ValueError("max_requests_per_minute must be positive")
+        if max_batch_recovery_seconds <= 0:
+            raise ValueError("max_batch_recovery_seconds must be positive")
         self._history = history
         self._max_gap_trades = max_gap_trades
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self._recovery_timeout_seconds = recovery_timeout_seconds
         self._max_requests_per_minute = max_requests_per_minute
+        self._max_batch_recovery_seconds = max_batch_recovery_seconds
         self._request_timestamps: deque[float] = deque()
         self._request_budget_lock = asyncio.Lock()
         self._last_seen: dict[tuple[str, str], _SeenTrade] = {}
@@ -140,6 +144,8 @@ class AggTradeGapRecoverer:
     async def expand(
         self,
         batch: Sequence[RawEnvelope],
+        *,
+        bypass_network: bool = False,
     ) -> AggTradeRecoveryBatch:
         accepted_indices: set[int] = set()
         requests: list[_GapRequest] = []
@@ -187,7 +193,10 @@ class AggTradeGapRecoverer:
 
         async def _timed_recover(request: _GapRequest) -> _RecoveryResult:
             started_at = time.monotonic()
-            result = await self._recover(request)
+            try:
+                result = await self._recover(request)
+            except (TimeoutError, asyncio.CancelledError):
+                result = _RecoveryResult(request, (), "history_timeout")
             elapsed = time.monotonic() - started_at
             if result.failure_reason is not None or elapsed >= _SLOW_RECOVERY_SECONDS:
                 log.warning(
@@ -201,9 +210,41 @@ class AggTradeGapRecoverer:
                 )
             return result
 
-        results = await asyncio.gather(
-            *(_timed_recover(request) for request in requests)
-        )
+        results: list[_RecoveryResult] = []
+        if requests:
+            if bypass_network:
+                results = [
+                    _RecoveryResult(request, (), "congestion_bypass")
+                    for request in requests
+                ]
+            else:
+                task_map = {
+                    asyncio.create_task(_timed_recover(request)): request
+                    for request in requests
+                }
+            done, pending = await asyncio.wait(
+                task_map.keys(),
+                timeout=self._max_batch_recovery_seconds,
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+            for task, request in task_map.items():
+                if task in done and not task.cancelled():
+                    try:
+                        results.append(task.result())
+                    except Exception as exc:
+                        results.append(
+                            _RecoveryResult(
+                                request,
+                                (),
+                                f"history_error:{exc.__class__.__name__}",
+                            )
+                        )
+                else:
+                    results.append(_RecoveryResult(request, (), "history_timeout"))
         recovered_before: dict[int, tuple[RawEnvelope, ...]] = {}
         gaps: list[AggTradeGap] = []
         for result in results:
@@ -266,8 +307,8 @@ class AggTradeGapRecoverer:
         next_id = request.previous.aggregate_trade_id + 1
         trades: list[BinanceAggTrade] = []
         try:
-            async with self._semaphore:
-                async with asyncio.timeout(self._recovery_timeout_seconds):
+            async with asyncio.timeout(self._recovery_timeout_seconds):
+                async with self._semaphore:
                     while next_id < request.current_id:
                         limit = min(1000, request.current_id - next_id)
                         if not await self._reserve_request_budget():

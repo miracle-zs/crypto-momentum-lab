@@ -177,6 +177,22 @@ async def test_recoverer_stops_before_exceeding_rest_request_budget() -> None:
     assert history.calls == [("BTCUSDT", 11, 1)]
 
 
+async def test_recoverer_bounds_overall_batch_recovery_latency() -> None:
+    recoverer = AggTradeGapRecoverer(
+        SlowAggTradeHistory(),
+        recovery_timeout_seconds=5.0,
+        max_batch_recovery_seconds=0.05,
+    )
+    # Baseline for symbol A
+    await recoverer.expand((_envelope(10),))
+
+    # A batch with a gap for symbol A
+    result = await recoverer.expand((_envelope(13),))
+
+    assert len(result.unrecovered_gaps) == 1
+    assert result.unrecovered_gaps[0].reason == "history_timeout"
+
+
 def _trade(aggregate_trade_id: int) -> BinanceAggTrade:
     event_at = datetime(2026, 8, 23, 14, 43, tzinfo=UTC) + timedelta(
         milliseconds=aggregate_trade_id

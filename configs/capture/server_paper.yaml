@@ -10,7 +10,7 @@ book_ticker_max_subscriptions_per_connection: 25
 book_ticker_use_all_stream: true
 book_ticker_coalescing_interval_seconds: 1.0
 control_messages_per_second: 5
-control_ack_timeout_seconds: 10
+control_ack_timeout_seconds: 30
 connection_lifetime_seconds: 82800
 open_timeout_seconds: 10
 ping_interval_seconds: 30
@@ -18,9 +18,9 @@ ping_timeout_seconds: 10
 silence_timeout_seconds: 30
 realtime_closure_delay_seconds: 0.4
 durable_closure_delay_seconds: 3
-queue_max_events: 25000
-queue_max_bytes: 67108864
-backpressure_timeout_seconds: 30
+queue_max_events: 100000
+queue_max_bytes: 134217728
+backpressure_timeout_seconds: 60
 shutdown_timeout_seconds: 30
 archive:
   root: data/raw

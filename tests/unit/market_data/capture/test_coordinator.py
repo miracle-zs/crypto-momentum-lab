@@ -114,6 +114,7 @@ class FakeEnvelopeRecovery:
     ) -> None:
         self.result = result
         self.monitored_symbol_sets: list[frozenset[str]] = []
+        self.bypass_calls: list[bool] = []
 
     def set_monitored_symbols(self, symbols: frozenset[str]) -> None:
         self.monitored_symbol_sets.append(symbols)
@@ -121,7 +122,10 @@ class FakeEnvelopeRecovery:
     async def expand(
         self,
         batch: tuple[RawEnvelope, ...],
+        *,
+        bypass_network: bool = False,
     ) -> AggTradeRecoveryBatch:
+        self.bypass_calls.append(bypass_network)
         return self.result
 
 
@@ -459,3 +463,36 @@ async def test_coordinator_publishes_recovered_events_and_unrecovered_gaps(
 
     assert published == [recovered, raw_envelope]
     assert gaps == [gap]
+
+
+async def test_coordinator_bypasses_gap_recovery_under_queue_congestion(
+    raw_envelope: RawEnvelope,
+) -> None:
+    queue = BoundedEnvelopeQueue(max_events=10, max_bytes=100000)
+    fake_recovery = FakeEnvelopeRecovery(
+        AggTradeRecoveryBatch(
+            envelopes=(raw_envelope,),
+            unrecovered_gaps=(),
+        )
+    )
+    coordinator = CaptureCoordinator(
+        queue=queue,
+        archive=ControlledArchive(),
+        quality=FakeQualityTracker(),
+        repository=FakeCaptureRepository(),
+        envelope_recovery=fake_recovery,
+        max_archive_batch_size=1,
+        recovery_bypass_queue_threshold=1,
+        archive_streams=frozenset({CaptureStream.FORCE_ORDER}),
+    )
+
+    # Preload queue with 3 envelopes so queue.size (2) > threshold (1)
+    await queue.put(raw_envelope)
+    await queue.put(raw_envelope)
+    await queue.put(raw_envelope)
+
+    task = asyncio.create_task(coordinator.run())
+    await coordinator.stop()
+    await task
+
+    assert True in fake_recovery.bypass_calls

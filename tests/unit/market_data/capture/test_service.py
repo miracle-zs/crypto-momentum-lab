@@ -167,3 +167,43 @@ async def test_start_applies_initial_symbols_and_stop_persists_state() -> None:
     assert service.state is MarketDataState.STOPPED
     assert repository.states == [MarketDataState.READY, MarketDataState.STOPPED]
     assert connection_pool.stopped is True
+
+
+async def test_service_recovers_when_queue_drains_after_overflow(
+    raw_envelope: RawEnvelope,
+) -> None:
+    queue = BoundedEnvelopeQueue(
+        max_events=2,
+        max_bytes=100000,
+        backpressure_timeout_seconds=0.01,
+    )
+    repository = FakeRepository()
+    service = MarketDataCaptureService(
+        queue=queue,
+        repository=repository,
+        connection_pool=FakeConnectionPool(),
+        disk_guard=DiskSpaceGuard(
+            warning_free_bytes=300,
+            halt_free_bytes=200,
+            recovery_free_bytes=250,
+        ),
+    )
+    # Fill queue to capacity
+    await queue.put_nowait(raw_envelope)
+    await queue.put_nowait(raw_envelope)
+
+    # Submitting another should trigger queue overflow and halt
+    with pytest.raises(CaptureQueueFull, match="queue backpressure timeout"):
+        await service.submit(raw_envelope)
+
+    assert service.state is MarketDataState.HALTED
+
+    # Now drain the queue
+    assert queue.get_nowait() is not None
+    assert queue.get_nowait() is not None
+    assert queue.size == 0
+
+    # Submitting now should auto-recover to READY and succeed
+    await service.submit(raw_envelope)
+    assert service.state is MarketDataState.READY
+    assert queue.size == 1
