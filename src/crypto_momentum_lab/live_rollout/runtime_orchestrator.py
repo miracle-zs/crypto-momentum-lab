@@ -14,7 +14,7 @@ from collections.abc import (
     Mapping,
 )
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from decimal import Decimal
 from time import perf_counter
 
@@ -250,6 +250,20 @@ from crypto_momentum_lab.strategy_runner.position_exit import (
 from crypto_momentum_lab.strategy_runner.registry import build_runtime_strategy
 
 log = structlog.get_logger()
+
+
+def _resolve_scheduled_risk_window() -> ScheduledRiskWindowConfig:
+    reopen_val = os.environ.get("CML_SCHEDULED_REOPEN_AT", "").strip()
+    if reopen_val:
+        try:
+            parts = reopen_val.split(":")
+            return ScheduledRiskWindowConfig(
+                reopen_at=time(int(parts[0]), int(parts[1]))
+            )
+        except Exception:
+            pass
+    return ScheduledRiskWindowConfig()
+
 
 async def run_live_daemon(
     config: LiveRuntimeConfig,
@@ -924,7 +938,7 @@ async def run_live_daemon(
                 entry_policy_enforce=entry_policy_enforce,
                 entry_order_type=entry_order_type,
                 entry_limit_ttl_seconds=entry_limit_ttl_seconds,
-                scheduled_risk_window=ScheduledRiskWindowConfig(),
+                scheduled_risk_window=_resolve_scheduled_risk_window(),
             ),
             exit_manager=LiveExitManager(
                 config=LiveExitConfig(

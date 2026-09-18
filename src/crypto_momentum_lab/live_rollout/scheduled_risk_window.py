@@ -19,7 +19,7 @@ class ScheduledRiskWindowConfig:
     """Daily schedule for the live account's pre-volatility controls.
 
     The defaults intentionally encode the agreed Asia/Shanghai operating
-    times.  ``reopen_at`` is set to 10:00 so the account remains closed for
+    times.  ``reopen_at`` is set to 09:00 so the account remains closed for
     the morning session after the 08:00 event.
     """
 
@@ -28,7 +28,7 @@ class ScheduledRiskWindowConfig:
     flatten_start_at: time = time(7, 45)
     flatten_deadline_at: time = time(7, 55)
     verify_at: time = time(7, 58)
-    reopen_at: time = time(10, 0)
+    reopen_at: time = time(9, 0)
     poll_interval_seconds: float = 1.0
     retry_interval_seconds: float = 2.0
     verify_retry_interval_seconds: float = 5.0

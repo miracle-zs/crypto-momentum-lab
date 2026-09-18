@@ -185,7 +185,7 @@ class ScheduledRiskWindowController:
         *,
         now: datetime | None = None,
     ) -> str | None:
-        """Apply the daily 07:45--10:00 entry and flattening controls.
+        """Apply the daily 07:45--09:00 entry and flattening controls.
 
         This method is public so a supervisor can invoke it independently in
         tests or during a controlled recovery.  The normal live run starts a
