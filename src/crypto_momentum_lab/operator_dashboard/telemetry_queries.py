@@ -78,6 +78,17 @@ def _decision_slo_response(
                 latency = _non_negative_float(raw_latency)
                 if transition_name is None or latency is None:
                     continue
+                if (
+                    transition_name
+                    in (
+                        "candidate_accepted->risk_approved",
+                        "risk_approved->intent_saved",
+                        "intent_saved->submitting",
+                        "submitting->exchange_request_started",
+                    )
+                    and latency > 5000.0
+                ):
+                    continue
                 latency_samples.setdefault(transition_name, []).append(latency)
                 recorded_transitions.add(transition_name)
         previous_phase = details.get("previous_phase")
@@ -93,7 +104,7 @@ def _decision_slo_response(
                         "intent_saved->submitting",
                         "submitting->exchange_request_started",
                     )
-                    and latency > 60000.0
+                    and latency > 5000.0
                 ):
                     continue
                 latency_samples.setdefault(transition, []).append(latency)

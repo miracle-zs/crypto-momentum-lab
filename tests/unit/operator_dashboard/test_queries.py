@@ -272,9 +272,7 @@ async def test_recent_paper_history_keeps_open_rows_and_caps_closed_query() -> N
             self.scalars_statements.append(statement)
             return SimpleNamespace(
                 all=lambda: (
-                    (open_row,)
-                    if len(self.scalars_statements) == 1
-                    else (closed_row,)
+                    (open_row,) if len(self.scalars_statements) == 1 else (closed_row,)
                 )
             )
 
@@ -467,20 +465,51 @@ def test_decision_slo_response_aggregates_latency_health_and_reasons() -> None:
 
     assert response.status is OperationalStatus.READY
     assert response.persisted_event_count == len(rows)
-    assert response.phase_latency[
-        "market_state_received->context_ready"
-    ].p95_ms == 100.0
-    assert response.phase_latency[
-        "intent_saved->exchange_request_started"
-    ].max_ms == 200.0
-    assert response.terminal_reasons == {
-        "entry": {"market": {"risk_block": 1}}
-    }
+    assert (
+        response.phase_latency["market_state_received->context_ready"].p95_ms == 100.0
+    )
+    assert (
+        response.phase_latency["intent_saved->exchange_request_started"].max_ms == 200.0
+    )
+    assert response.terminal_reasons == {"entry": {"market": {"risk_block": 1}}}
     assert response.consumers[0].consumer == "market_state_hub"
     assert response.consumers[0].recovery_count == 1
     assert response.consumers[0].unavailable_event_count == 1
     assert response.consumers[0].lag_event_count == 1
     assert response.consumers[0].last_available is True
+
+
+def test_decision_slo_response_filters_stale_in_memory_latencies() -> None:
+    start = datetime(2026, 9, 11, tzinfo=UTC)
+    rows = [
+        SimpleNamespace(
+            event_type="risk_approved",
+            occurred_at=start + timedelta(milliseconds=10),
+            details={
+                "previous_phase": "candidate_accepted",
+                "latency_ms_from_previous": 0.5,
+            },
+        ),
+        SimpleNamespace(
+            event_type="risk_approved",
+            occurred_at=start + timedelta(seconds=54),
+            details={
+                "previous_phase": "candidate_accepted",
+                "latency_ms_from_previous": 54000.0,
+            },
+        ),
+    ]
+
+    response = _decision_slo_response(
+        rows,
+        window="24h",
+        window_start=start,
+        window_end=start + timedelta(days=1),
+        truncated=False,
+    )
+    samples = response.phase_latency["candidate_accepted->risk_approved"]
+    assert samples.sample_count == 1
+    assert samples.max_ms == 0.5
 
 
 async def test_decision_slo_query_uses_bounded_historical_window() -> None:
@@ -767,40 +796,52 @@ def test_candle_exit_label_includes_entry_filter_variants() -> None:
         "candle_minimum_holding_buckets": 0,
     }
 
-    assert _paper_exit_label(
-        "candle_15m",
-        portfolio,
-        {"allow_long": True, "allow_short": False},
-    ) == "15M 收线退出 · 仅多头"
-    assert _paper_exit_label(
-        "candle_15m",
-        portfolio,
-        {
-            "allow_long": True,
-            "allow_short": False,
-            "max_abs_aggressive_imbalance": "0.7113",
-        },
-    ) == "15M 收线退出 · 仅多头 · 主动不平衡 ≤ 71.13%"
-    assert _paper_exit_label(
-        "candle_15m",
-        portfolio,
-        {
-            "allow_long": True,
-            "allow_short": False,
-            "require_price_above_ema5": True,
-            "require_price_above_ema10": True,
-        },
-    ) == "15M 收线退出 · 仅多头 · 价格 > 15M EMA5 · 价格 > 15M EMA10"
+    assert (
+        _paper_exit_label(
+            "candle_15m",
+            portfolio,
+            {"allow_long": True, "allow_short": False},
+        )
+        == "15M 收线退出 · 仅多头"
+    )
+    assert (
+        _paper_exit_label(
+            "candle_15m",
+            portfolio,
+            {
+                "allow_long": True,
+                "allow_short": False,
+                "max_abs_aggressive_imbalance": "0.7113",
+            },
+        )
+        == "15M 收线退出 · 仅多头 · 主动不平衡 ≤ 71.13%"
+    )
+    assert (
+        _paper_exit_label(
+            "candle_15m",
+            portfolio,
+            {
+                "allow_long": True,
+                "allow_short": False,
+                "require_price_above_ema5": True,
+                "require_price_above_ema10": True,
+            },
+        )
+        == "15M 收线退出 · 仅多头 · 价格 > 15M EMA5 · 价格 > 15M EMA10"
+    )
 
 
 def test_candle_exit_label_includes_grace_recovery_threshold() -> None:
-    assert _paper_exit_label(
-        "candle_15m",
-        {
-            "candle_grace_bars": 8,
-            "candle_grace_profit_pct": "0.0058",
-        },
-    ) == "反向后宽限 8 根 15M · 回收 +0.58%"
+    assert (
+        _paper_exit_label(
+            "candle_15m",
+            {
+                "candle_grace_bars": 8,
+                "candle_grace_profit_pct": "0.0058",
+            },
+        )
+        == "反向后宽限 8 根 15M · 回收 +0.58%"
+    )
 
 
 def test_dashboard_excludes_fixed_exit_paper_accounts() -> None:
@@ -1057,9 +1098,8 @@ def test_account_fills_are_aggregated_to_one_row_per_order() -> None:
     assert aggregated[0]["strategy_name"] == "orderflow_impulse"
     assert aggregated[0]["reduce_only"] is False
     assert aggregated[0]["close_reason"] is None
-    assert (
-        Decimal(str(aggregated[0]["price"])).quantize(Decimal("0.00001"))
-        == Decimal("0.03158")
+    assert Decimal(str(aggregated[0]["price"])).quantize(Decimal("0.00001")) == Decimal(
+        "0.03158"
     )
 
 
