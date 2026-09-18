@@ -837,7 +837,7 @@ async def run_live_daemon(
         ema_provider: ClosedCandleEmaProvider | None = None
         if exit_mode is PositionExitMode.CANDLE_15M:
             candle_source = BinanceRestClosedCandle15mSource(base_url)
-            ownership_registry.register("candle_source", candle_source.aclose)
+            ownership_registry.register("candle_source", candle_source.close)
             closed_candle_feed = BinanceClosedCandle15mFeed(
                 config=ClosedCandle15mFeedConfig(
                     websocket_url=market_websocket_url,
@@ -853,7 +853,7 @@ async def run_live_daemon(
             if candle_source is None:
                 candle_source = BinanceRestClosedCandle15mSource(base_url)
                 ownership_registry.register(
-                    "candle_source", candle_source.aclose
+                    "candle_source", candle_source.close
                 )
             ema_provider = ClosedCandleEmaProvider(candle_source)
 
