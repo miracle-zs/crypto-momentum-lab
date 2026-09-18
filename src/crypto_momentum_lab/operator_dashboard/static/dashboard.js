@@ -28,6 +28,7 @@ import {
   wireLiveAccounts,
 } from "./sections/account.js?v=20260906-live-metric-fleet-v1";
 import { renderReports } from "./sections/reports.js";
+import { renderPerformance } from "./sections/performance.js";
 import { createStrategySection } from "./sections/strategy.js?v=20260906-live-account-labels-v1";
 
 // Legacy import markers retained for static asset manifests: from "./sections/account.js"
@@ -218,6 +219,7 @@ const renderers = {
   risk: renderRisk,
   account: renderLiveAccounts,
   reports: renderReports,
+  performance: renderPerformance,
 };
 
 function setSectionStatus(id, status) {
@@ -415,6 +417,7 @@ const VIEW_PURPOSES = Object.freeze({
   risk: "风控闸门与待核订单",
   account: "资金权益与持仓对账",
   reports: "运行会话与状态迁移",
+  performance: "链路时延与系统性能监控",
   actions: "受控命令操作",
   strategy: "策略对比与收益走势",
   universe: "UTC 动量排名与监控池",

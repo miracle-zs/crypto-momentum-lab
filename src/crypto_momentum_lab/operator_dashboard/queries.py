@@ -38,6 +38,9 @@ from crypto_momentum_lab.operator_dashboard import (
 from crypto_momentum_lab.operator_dashboard.collector_status import (
     DEFAULT_RESEARCH_COLLECTOR_ROOT,
 )
+from crypto_momentum_lab.operator_dashboard.performance_queries import (
+    PerformanceQueries,
+)
 from crypto_momentum_lab.operator_dashboard.schemas import (
     AccountOverviewResponse,
     DecisionSLOResponse,
@@ -51,6 +54,7 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     RunReportSummaryResponse,
     StrategyRunResponse,
     SystemOverviewResponse,
+    SystemPerformanceResponse,
     UniverseStatusResponse,
 )
 from crypto_momentum_lab.operator_dashboard.status import (
@@ -330,6 +334,11 @@ class DashboardQueries:
             session_factory,
             clock=self._clock,
         )
+        self._performance_queries = PerformanceQueries(
+            session_factory,
+            clock=self._clock,
+            decision_slo_queries=self._telemetry_queries,
+        )
 
     async def health(self) -> dict[str, str]:
         return await self._overview_queries.health()
@@ -339,6 +348,12 @@ class DashboardQueries:
         window: str = "24h",
     ) -> DecisionSLOResponse:
         return await self._telemetry_queries.decision_slo(window)
+
+    async def performance(
+        self,
+        window: str = "24h",
+    ) -> SystemPerformanceResponse:
+        return await self._performance_queries.performance(window)
 
     async def research_collector(self) -> ResearchCollectorResponse:
         return await self._overview_queries.research_collector()

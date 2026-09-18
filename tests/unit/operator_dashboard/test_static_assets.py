@@ -31,6 +31,7 @@ def test_static_index_contains_dashboard_mount() -> None:
         "risk",
         "reports",
         "collector",
+        "performance",
     ):
         assert f'id="{section_id}"' in text
 
@@ -77,6 +78,7 @@ def test_dashboard_loads_stable_frontend_modules() -> None:
         'from "./sections/reports.js"',
         'from "./sections/strategy.js"',
         'from "./sections/collector.js"',
+        'from "./sections/performance.js"',
     ):
         assert module in javascript
     assert (STATIC / "dashboard-config.js").exists()
@@ -96,6 +98,7 @@ def test_dashboard_loads_stable_frontend_modules() -> None:
         "reports",
         "strategy",
         "collector",
+        "performance",
     ):
         assert (STATIC / "sections" / f"{section}.js").exists()
 
@@ -531,6 +534,7 @@ def test_dashboard_loads_stable_css_modules() -> None:
         "./styles/sections/strategy.css",
         "./styles/sections/reports.css",
         "./styles/sections/collector.css",
+        "./styles/sections/performance.css",
     ):
         assert module in stylesheet
     for mod_path in (
@@ -546,6 +550,7 @@ def test_dashboard_loads_stable_css_modules() -> None:
         STATIC / "styles/sections/strategy.css",
         STATIC / "styles/sections/reports.css",
         STATIC / "styles/sections/collector.css",
+        STATIC / "styles/sections/performance.css",
     ):
         assert mod_path.exists()
 

@@ -29,6 +29,7 @@ import { renderAccount } from "../../src/crypto_momentum_lab/operator_dashboard/
 import { renderCollector } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/collector.js";
 import { createStrategySection } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/strategy.js";
 import { renderUniverse } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/universe.js";
+import { renderPerformance } from "../../src/crypto_momentum_lab/operator_dashboard/static/sections/performance.js";
 import {
   POLL_MS,
   SECTION_POLL_MS,
@@ -41,6 +42,7 @@ test("dashboard polling keeps safety sections fresh and backs off cold sections"
     overview: 15000,
     risk: 15000,
     account: 15000,
+    performance: 15000,
     strategy: 30000,
     universe: 30000,
     collector: 30000,
@@ -762,3 +764,86 @@ test("live account renderer separates sync service from account configuration", 
   assert.match(html, /数据新鲜度/);
   assert.doesNotMatch(html, /READ-ONLY ACCOUNT SYNC/);
 });
+
+test("performance renderer exposes decision SLO, checkpoint phase, and host metrics", () => {
+  const [status, html] = renderPerformance({
+    status: "READY",
+    decision_slo: {
+      persisted_event_count: 142,
+      window: "24h",
+      phase_latency: {
+        "candidate_accepted->risk_approved": {
+          sample_count: 142,
+          p50_ms: 1.2,
+          p95_ms: 3.4,
+          max_ms: 5.0,
+        },
+      },
+    },
+    persistence: {
+      status: "READY",
+      p50_total_ms: 4.2,
+      p95_total_ms: 11.8,
+      max_total_ms: 18.0,
+      sample_count: 40,
+      stagger_slots: [
+        {
+          account_id: "primary",
+          phase_seconds: 0,
+          target_second: ":00",
+          status: "READY",
+          last_checkpoint_at: "2026-09-18T00:00:00Z",
+          avg_total_ms: 4.2,
+          p95_total_ms: 12.0,
+        },
+      ],
+      recent_checkpoints: [
+        {
+          account_id: "primary",
+          run_id: "primary",
+          phase_seconds: 0,
+          occurred_at: "2026-09-18T00:00:00Z",
+          prepare_ms: 0.1,
+          event_loop_lag_ms: 0.2,
+          pool_acquire_ms: 0.8,
+          sql_execute_ms: 3.5,
+          total_ms: 4.5,
+          is_new_connection: false,
+        },
+      ],
+    },
+    market_data: {
+      status: "READY",
+      market_delay_ms: 45.0,
+      realtime_closure_delay_seconds: 0.4,
+      last_bucket_end: "2026-09-18T00:00:00Z",
+      dropped_batches_1h: 0,
+      missing_rows_1h: 0,
+    },
+    host_resources: {
+      status: "READY",
+      cpu_load_1m: 0.45,
+      cpu_load_5m: 0.52,
+      cpu_load_15m: 0.48,
+      mem_total_bytes: 8589934592,
+      mem_used_bytes: 4294967296,
+      mem_available_bytes: 4294967296,
+      mem_usage_percent: 50.0,
+      swap_total_bytes: 2147483648,
+      swap_used_bytes: 0,
+      swap_usage_percent: 0.0,
+      postgres_active_connections: 5,
+      postgres_idle_connections: 12,
+      postgres_database_size_bytes: 159383552,
+    },
+  });
+
+  assert.equal(status, "READY");
+  assert.match(html, /决策链路最高 P95/);
+  assert.match(html, /Checkpoint P95 耗时/);
+  assert.match(html, /多账户 Checkpoint 物理时钟相位错峰/);
+  assert.match(html, /闭桶水位 400ms/);
+  assert.match(html, /primary/);
+  assert.match(html, /152.0 MiB/);
+});
+

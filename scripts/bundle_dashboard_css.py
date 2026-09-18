@@ -19,6 +19,7 @@ MODULES = [
     "sections/strategy.css",
     "sections/reports.css",
     "sections/collector.css",
+    "sections/performance.css",
 ]
 
 def bundle_css() -> str:

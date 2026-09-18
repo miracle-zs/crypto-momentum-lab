@@ -19,6 +19,10 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     RunReportSummaryResponse,
     StrategyRunResponse,
     SystemOverviewResponse,
+    SystemPerformanceResponse,
+    PersistencePerformanceResponse,
+    MarketDataPerformanceResponse,
+    HostResourcesResponse,
     UniverseStatusResponse,
 )
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
@@ -237,4 +241,22 @@ class FakeQueries:
             status=OperationalStatus.NO_DATA,
             shadow_sessions=[],
             live_sessions=[],
+        )
+
+    async def performance(
+        self,
+        window: str = "24h",
+    ) -> SystemPerformanceResponse:
+        return SystemPerformanceResponse(
+            status=OperationalStatus.READY,
+            generated_at=NOW,
+            decision_slo=await self.decision_slo(window),
+            persistence=PersistencePerformanceResponse(
+                status=OperationalStatus.READY,
+                sample_count=0,
+            ),
+            market_data=MarketDataPerformanceResponse(
+                status=OperationalStatus.READY,
+            ),
+            host_resources=HostResourcesResponse(),
         )

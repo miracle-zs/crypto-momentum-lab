@@ -60,7 +60,7 @@ async def paper_artifact_repositories(
                 StrategyRuntimeCheckpointRow,
                 StrategyRunRow,
             ):
-                await session.execute(delete(model).where(model.run_id == TEST_RUN_ID))
+                await session.execute(delete(model).where(model.run_id.in_((TEST_RUN_ID, "paper-test-run"))))
     yield (
         PostgresPaperDaemonRepository(factory),
         PostgresStrategyRunRepository(factory),
@@ -76,7 +76,7 @@ async def paper_artifact_repositories(
                 StrategyRuntimeCheckpointRow,
                 StrategyRunRow,
             ):
-                await session.execute(delete(model).where(model.run_id == TEST_RUN_ID))
+                await session.execute(delete(model).where(model.run_id.in_((TEST_RUN_ID, "paper-test-run"))))
     await engine.dispose()
 
 

@@ -39,7 +39,8 @@
           <a href="#risk" data-nav="risk" data-label="执行"><i>02</i><span>执行风控</span><em class="nav-dot status-UNKNOWN" data-nav-dot="risk"></em></a>
           <a href="#account" data-nav="account" data-label="账户"><i>03</i><span>实盘账户</span><em class="nav-dot status-UNKNOWN" data-nav-dot="account"></em></a>
           <a href="#reports" data-nav="reports" data-label="台账"><i>04</i><span>运行台账</span><em class="nav-dot status-UNKNOWN" data-nav-dot="reports"></em></a>
-          <a href="#actions" data-nav="actions" data-label="操作"><i>05</i><span>受控操作</span><em class="nav-dot is-locked"></em></a>
+          <a href="#performance" data-nav="performance" data-label="性能"><i>05</i><span>系统性能</span><em class="nav-dot status-UNKNOWN" data-nav-dot="performance"></em></a>
+          <a href="#actions" data-nav="actions" data-label="操作"><i>06</i><span>受控操作</span><em class="nav-dot is-locked"></em></a>
         </div>
         <div class="nav-workspace" data-workspace-nav="data" hidden>
           <span class="nav-group-label">STRATEGY &amp; DATA</span>
@@ -167,9 +168,19 @@
           </div>
         </section>
 
+        <section id="performance" class="card card-performance" data-workspace="ops" data-view-title="性能" data-endpoint="api/performance" aria-labelledby="performance-title" hidden>
+          <header class="card-head">
+            <div class="card-title"><i>05</i><div><h2 id="performance-title">系统性能</h2><small>DECISION SLO · CHECKPOINT CADENCE · HOST STEADY-STATE</small></div></div>
+            <span class="section-state status-UNKNOWN">UNKNOWN</span>
+          </header>
+          <div class="panel-body loading" aria-busy="true">
+            <div class="skeleton"><s style="width:36%"></s><s style="width:85%"></s><s style="width:72%"></s><s style="width:90%"></s></div>
+          </div>
+        </section>
+
         <section id="actions" class="card card-actions" data-workspace="ops" data-view-title="操作" aria-labelledby="actions-title" hidden>
           <header class="card-head">
-            <div class="card-title"><i>05</i><div><h2 id="actions-title">受控操作</h2><small>需签名审计通道就绪</small></div></div>
+            <div class="card-title"><i>06</i><div><h2 id="actions-title">受控操作</h2><small>需签名审计通道就绪</small></div></div>
             <span class="lock-badge">READ ONLY</span>
           </header>
           <div class="action-grid">

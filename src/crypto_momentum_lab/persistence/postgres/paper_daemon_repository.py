@@ -6,7 +6,7 @@ from decimal import Decimal
 from enum import StrEnum
 from time import perf_counter
 from typing import Any, cast
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import structlog
 from sqlalchemy import case, event, func, select, update
@@ -656,6 +656,37 @@ class PostgresPaperDaemonRepository:
                     )
                 )
                 execute_finished_at = perf_counter()
+                checkpoint_event = {
+                    "event_id": f"ckpt-{uuid4()}",
+                    "run_id": run_id,
+                    "event_type": "strategy_checkpoint_persisted",
+                    "occurred_at": saved_at,
+                    "symbol": None,
+                    "bucket_start": None,
+                    "details": {
+                        "prepare_ms": round((values_ready_at - started) * 1000, 3),
+                        "event_loop_lag_ms": event_loop_lag_ms,
+                        "pool_acquire_ms": round(
+                            (pool_acquired_at - pool_acquire_started) * 1000,
+                            3,
+                        ),
+                        "is_new_connection": is_new_connection,
+                        "pool_checked_in": pool_checked_in,
+                        "pool_checked_out": pool_checked_out,
+                        "sql_execute_ms": round(
+                            (execute_finished_at - execute_started) * 1000,
+                            3,
+                        ),
+                        "total_ms": round((execute_finished_at - started) * 1000, 3),
+                    },
+                }
+                await session.execute(
+                    insert(StrategyRuntimeEventRow)
+                    .values(checkpoint_event)
+                    .on_conflict_do_nothing(
+                        index_elements=["event_id"]
+                    )
+                )
             committed_at = perf_counter()
         log.info(
             "strategy_checkpoint_persisted",
@@ -738,6 +769,40 @@ class PostgresPaperDaemonRepository:
                     )
                 )
                 execute_finished_at = perf_counter()
+                checkpoint_events = [
+                    {
+                        "event_id": f"ckpt-{uuid4()}",
+                        "run_id": run_id,
+                        "event_type": "strategy_checkpoint_persisted",
+                        "occurred_at": saved_at,
+                        "symbol": None,
+                        "bucket_start": None,
+                        "details": {
+                            "prepare_ms": round((values_ready_at - started) * 1000, 3),
+                            "event_loop_lag_ms": event_loop_lag_ms,
+                            "pool_acquire_ms": round(
+                                (pool_acquired_at - pool_acquire_started) * 1000,
+                                3,
+                            ),
+                            "is_new_connection": is_new_connection,
+                            "pool_checked_in": pool_checked_in,
+                            "pool_checked_out": pool_checked_out,
+                            "sql_execute_ms": round(
+                                (execute_finished_at - execute_started) * 1000,
+                                3,
+                            ),
+                            "total_ms": round((execute_finished_at - started) * 1000, 3),
+                        },
+                    }
+                    for run_id, _checkpoint, saved_at in checkpoints
+                ]
+                await session.execute(
+                    insert(StrategyRuntimeEventRow)
+                    .values(checkpoint_events)
+                    .on_conflict_do_nothing(
+                        index_elements=["event_id"]
+                    )
+                )
             committed_at = perf_counter()
         log.info(
             "strategy_checkpoints_persisted",

@@ -35,6 +35,7 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     RunReportSummaryResponse,
     StrategyRunResponse,
     SystemOverviewResponse,
+    SystemPerformanceResponse,
     UniverseStatusResponse,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
@@ -199,6 +200,11 @@ class DashboardQueryProtocol(Protocol):
 
     async def reports(self) -> RunReportSummaryResponse: ...
 
+    async def performance(
+        self,
+        window: str = "24h",
+    ) -> SystemPerformanceResponse: ...
+
 
 def create_dashboard_app(
     *,
@@ -341,6 +347,21 @@ def create_dashboard_app(
         return await response_cache.get(
             f"decision-slo:{window}",
             lambda: query_service().decision_slo(window),
+            ttl_seconds=15.0,
+            stale_while_revalidate_seconds=default_stale_grace_seconds,
+        )
+
+    @dashboard.get(
+        "/api/performance",
+        response_model=SystemPerformanceResponse,
+        dependencies=[Depends(require_dashboard_auth)],
+    )
+    async def performance(
+        window: Literal["1h", "6h", "24h", "7d"] = "24h",
+    ) -> SystemPerformanceResponse:
+        return await response_cache.get(
+            f"performance:{window}",
+            lambda: query_service().performance(window),
             ttl_seconds=15.0,
             stale_while_revalidate_seconds=default_stale_grace_seconds,
         )

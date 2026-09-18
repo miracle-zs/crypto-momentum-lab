@@ -1,0 +1,157 @@
+/* ============ system performance & observability ============ */
+
+.performance-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.performance-stagger-card {
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  gap: 8px;
+}
+
+.performance-stagger-card.active-phase {
+  border-color: color-mix(in srgb, var(--brand) 40%, var(--line));
+  background: radial-gradient(400px 100px at 0% 0%, color-mix(in srgb, var(--brand) 10%, transparent), transparent 75%), var(--surface-2);
+}
+
+.performance-stagger-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.performance-phase-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font: 700 11px var(--mono);
+  background: var(--surface-3);
+  color: var(--brand);
+}
+
+.performance-phase-pill.phase-0 { color: var(--series-fixed); border: 1px solid color-mix(in srgb, var(--series-fixed) 40%, transparent); }
+.performance-phase-pill.phase-15 { color: var(--series-candle); border: 1px solid color-mix(in srgb, var(--series-candle) 40%, transparent); }
+.performance-phase-pill.phase-30 { color: var(--series-amber); border: 1px solid color-mix(in srgb, var(--series-amber) 40%, transparent); }
+.performance-phase-pill.phase-45 { color: var(--series-violet); border: 1px solid color-mix(in srgb, var(--series-violet) 40%, transparent); }
+
+.performance-stagger-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.performance-stage-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+}
+
+.performance-stage-label {
+  width: 170px;
+  flex: none;
+  color: var(--muted);
+}
+
+.performance-stage-bar-wrap {
+  flex: 1;
+  height: 6px;
+  background: var(--surface-3);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.performance-stage-bar {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--brand);
+}
+
+.performance-stage-val {
+  width: 70px;
+  flex: none;
+  text-align: right;
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.performance-meter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.performance-meter-card {
+  padding: 13px 15px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface-2);
+}
+
+.performance-meter-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.performance-meter-head span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.performance-meter-head b {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.performance-progress {
+  height: 7px;
+  margin: 11px 0 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-3);
+}
+
+.performance-progress i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--brand);
+  transition: width .35s ease;
+}
+
+.performance-progress.good i { background: var(--up); }
+.performance-progress.warning i { background: var(--warn); }
+.performance-progress.danger i { background: var(--down); }
+
+.performance-meter-card small {
+  color: var(--faint);
+  font-size: 10px;
+}
+
+@media (max-width: 1200px) {
+  .performance-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .performance-stagger-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 700px) {
+  .performance-kpi-grid { grid-template-columns: 1fr; }
+  .performance-stagger-grid { grid-template-columns: 1fr; }
+  .performance-meter-grid { grid-template-columns: 1fr; }
+}

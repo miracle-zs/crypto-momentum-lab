@@ -277,3 +277,64 @@ class RunReportSummaryResponse(DashboardSchema):
     status: OperationalStatus
     shadow_sessions: list[dict[str, JsonValue]]
     live_sessions: list[dict[str, JsonValue]]
+
+
+class CheckpointMetricItem(DashboardSchema):
+    run_id: str
+    account_label: str
+    occurred_at: datetime
+    prepare_ms: float | None = None
+    event_loop_lag_ms: float | None = None
+    pool_acquire_ms: float | None = None
+    is_new_connection: bool | None = None
+    pool_checked_in: int | None = None
+    pool_checked_out: int | None = None
+    sql_execute_ms: float | None = None
+    total_ms: float | None = None
+    phase_seconds: float | None = None
+
+
+class PersistencePerformanceResponse(DashboardSchema):
+    status: OperationalStatus
+    sample_count: int
+    p50_total_ms: float | None = None
+    p95_total_ms: float | None = None
+    max_total_ms: float | None = None
+    recent_checkpoints: list[CheckpointMetricItem] = Field(default_factory=list)
+    account_latest_checkpoints: dict[str, CheckpointMetricItem] = Field(default_factory=dict)
+
+
+class MarketDataPerformanceResponse(DashboardSchema):
+    status: OperationalStatus
+    observed_at: datetime | None = None
+    market_delay_ms: float | None = None
+    realtime_closure_delay_seconds: float | None = None
+    simulated_close_drop_count: int = 0
+    missing_agg_trade_count: int = 0
+    quality_events_count_1h: int = 0
+
+
+class HostResourcesResponse(DashboardSchema):
+    cpu_load_1m: float | None = None
+    cpu_load_5m: float | None = None
+    cpu_load_15m: float | None = None
+    mem_total_bytes: int | None = None
+    mem_available_bytes: int | None = None
+    mem_used_bytes: int | None = None
+    mem_usage_percent: float | None = None
+    swap_total_bytes: int | None = None
+    swap_used_bytes: int | None = None
+    swap_usage_percent: float | None = None
+    postgres_active_connections: int | None = None
+    postgres_idle_connections: int | None = None
+    postgres_database_size_bytes: int | None = None
+
+
+class SystemPerformanceResponse(DashboardSchema):
+    status: OperationalStatus
+    generated_at: datetime
+    decision_slo: DecisionSLOResponse
+    persistence: PersistencePerformanceResponse
+    market_data: MarketDataPerformanceResponse
+    host_resources: HostResourcesResponse
+
