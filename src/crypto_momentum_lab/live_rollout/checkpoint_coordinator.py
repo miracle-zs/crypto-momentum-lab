@@ -72,6 +72,7 @@ class LiveCheckpointCoordinator:
         self._last_checkpoint_cycle: int | None = None
         self._last_persisted_monotonic: float = perf_counter()
         self._dirty_since_monotonic: float | None = None
+        self._last_submitted_token: int = 0
         self._started = False
 
     async def start(self) -> None:
@@ -89,6 +90,7 @@ class LiveCheckpointCoordinator:
         self._last_checkpoint_cycle = None
         self._last_persisted_monotonic = perf_counter()
         self._dirty_since_monotonic = None
+        self._last_submitted_token = 0
         await self._writer.start()
         self._started = True
 
@@ -168,16 +170,16 @@ class LiveCheckpointCoordinator:
         if not should_checkpoint:
             return
 
-        self._writer.submit(
+        token = self._writer.submit(
             _checkpoint_for_persistence(
                 self._strategy,
                 hub_cursor_provider=self._hub_cursor_provider,
             ),
             saved_at,
         )
+        self._last_submitted_token = token
         self._dirty = False
         self._dirty_since_monotonic = None
-        self._last_persisted_monotonic = now_mono
         self._last_saved_at = None
 
     def check_dirty_age(self, now_monotonic: float | None = None) -> bool:
@@ -187,50 +189,73 @@ class LiveCheckpointCoordinator:
         now_mono = perf_counter() if now_monotonic is None else now_monotonic
         if now_mono - self._last_persisted_monotonic < self._max_dirty_age_seconds:
             return False
-        self._writer.submit(
+        token = self._writer.submit(
             _checkpoint_for_persistence(
                 self._strategy,
                 hub_cursor_provider=self._hub_cursor_provider,
             ),
             self._last_saved_at,
         )
+        self._last_submitted_token = token
         self._dirty = False
         self._dirty_since_monotonic = None
-        self._last_persisted_monotonic = now_mono
         self._last_saved_at = None
         return True
 
     async def save_final(self, timeout_seconds: float | None = None) -> bool:
-        if not self._dirty or self._last_saved_at is None:
-            return True
-        checkpoint = _checkpoint_for_persistence(
-            self._strategy,
-            hub_cursor_provider=self._hub_cursor_provider,
-        )
-        if timeout_seconds is not None:
-            try:
-                async with asyncio.timeout(timeout_seconds):
-                    saved = await self._writer.save_now(
-                        checkpoint,
-                        self._last_saved_at,
-                    )
-            except TimeoutError:
-                log.warning(
-                    "live_checkpoint_final_flush_timed_out",
-                    timeout_seconds=timeout_seconds,
-                )
-                return False
-        else:
-            saved = await self._writer.save_now(
-                checkpoint,
-                self._last_saved_at,
+        if self._dirty and self._last_saved_at is not None:
+            checkpoint = _checkpoint_for_persistence(
+                self._strategy,
+                hub_cursor_provider=self._hub_cursor_provider,
             )
-        if saved:
-            self._dirty = False
-            self._dirty_since_monotonic = None
-            self._last_persisted_monotonic = perf_counter()
-            self._last_saved_at = None
-        return saved
+            if timeout_seconds is not None:
+                try:
+                    async with asyncio.timeout(timeout_seconds):
+                        saved = await self._writer.save_now(
+                            checkpoint,
+                            self._last_saved_at,
+                        )
+                except TimeoutError:
+                    log.warning(
+                        "live_checkpoint_final_flush_timed_out",
+                        timeout_seconds=timeout_seconds,
+                    )
+                    return False
+            else:
+                saved = await self._writer.save_now(
+                    checkpoint,
+                    self._last_saved_at,
+                )
+            if saved:
+                self._dirty = False
+                self._dirty_since_monotonic = None
+                self._last_persisted_monotonic = perf_counter()
+                self._last_saved_at = None
+            return saved
+
+        # If not dirty, but there is an unpersisted submitted checkpoint:
+        if self._last_submitted_token > self._writer.last_persisted_token:
+            if timeout_seconds is not None:
+                try:
+                    async with asyncio.timeout(timeout_seconds):
+                        saved = await self._writer.flush()
+                except TimeoutError:
+                    log.warning(
+                        "live_checkpoint_final_flush_timed_out",
+                        timeout_seconds=timeout_seconds,
+                    )
+                    return False
+            else:
+                saved = await self._writer.flush()
+            if (
+                saved
+                and self._writer.last_persisted_token >= self._last_submitted_token
+            ):
+                self._last_persisted_monotonic = perf_counter()
+                return True
+            return False
+
+        return True
 
     def record_recovered_state(
         self,

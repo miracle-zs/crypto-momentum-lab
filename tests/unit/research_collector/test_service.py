@@ -344,3 +344,195 @@ async def test_dual_progress_crash_recovery_and_journal_backpressure(
     r3 = await restarted.ingest(_batch(s3, 3))
     assert r3.selected_rows == 1
     assert (await restarted.health()).accepted_sequence == 3
+
+
+async def test_empty_selection_receipt_survives_restart_recovery(
+    tmp_path: Path,
+) -> None:
+    config = CollectorConfig(
+        environment="research",
+        root=tmp_path,
+        soft_limit_bytes=10 * 1024**2,
+        hard_limit_bytes=20 * 1024**2,
+        global_warning_free_bytes=2,
+        global_pause_free_bytes=1,
+        window_seconds=15,
+        late_tolerance_seconds=100,  # Ensure no automatic window flush before crash
+    )
+    # Only select BTCUSDT
+    collector = ResearchStateCollector(
+        config=config,
+        source=_IdleSource(),
+        selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
+    )
+    s_btc = fixture_state("BTCUSDT", 0)
+    s_eth = fixture_state("ETHUSDT", 0)
+
+    # 1. Ingest BTC batch -> selected
+    r1 = await collector.ingest(_batch(s_btc, 1))
+    assert r1.selected_rows == 1
+
+    # 2. Ingest ETH batch -> empty selection, writes empty receipt to journal
+    r2 = await collector.ingest(_batch(s_eth, 2))
+    assert r2.selected_rows == 0
+
+    health = await collector.health()
+    assert health.pending_spool_files == 2
+
+    # 3. Simulate crash before materialization: create fresh collector
+    restarted = ResearchStateCollector(
+        config=config,
+        source=_IdleSource(),
+        selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
+    )
+    # On initialize, recovery must not fail with empty batch error
+    await restarted.initialize()
+
+    restarted_health = await restarted.health()
+    assert restarted_health.accepted_sequence == 2
+    assert restarted_health.materialized_sequence == 2
+    assert restarted_health.pending_spool_files == 0
+
+    # Ingest sequence 3 after recovery
+    s_btc2 = fixture_state("BTCUSDT", 1)
+    r3 = await restarted.ingest(_batch(s_btc2, 3))
+    assert r3.selected_rows == 1
+    assert (await restarted.health()).accepted_sequence == 3
+
+
+async def test_recovered_journal_sequence_gap_raises(tmp_path: Path) -> None:
+    import pytest
+
+    from crypto_momentum_lab.research_collector.models import CollectorSequenceGap
+
+    config = CollectorConfig(
+        environment="research",
+        root=tmp_path,
+        soft_limit_bytes=10 * 1024**2,
+        hard_limit_bytes=20 * 1024**2,
+        global_warning_free_bytes=2,
+        global_pause_free_bytes=1,
+        window_seconds=15,
+        late_tolerance_seconds=100,
+    )
+    collector = ResearchStateCollector(
+        config=config,
+        source=_IdleSource(),
+        selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
+    )
+    s1 = fixture_state("BTCUSDT", 0)
+    s2 = fixture_state("BTCUSDT", 1)
+    s3 = fixture_state("BTCUSDT", 2)
+
+    await collector.ingest(_batch(s1, 1))
+    await collector.ingest(_batch(s2, 2))
+    await collector.ingest(_batch(s3, 3))
+
+    # Artificially remove sequence 2 from the pending journal on disk
+    pending_files = list((tmp_path / "journal" / "pending" / "hub").glob("**/*.json"))
+    deleted = False
+    for f in pending_files:
+        import json
+
+        data = json.loads(f.read_text())
+        if data.get("sequence") == 2:
+            f.unlink()
+            deleted = True
+            break
+    assert deleted
+
+    # Restart: initialize should detect gap 1 -> 3 in pending journal
+    restarted = ResearchStateCollector(
+        config=config,
+        source=_IdleSource(),
+        selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
+    )
+    with pytest.raises(
+        CollectorSequenceGap, match="recovered journal has sequence gap"
+    ):
+        await restarted.initialize()
+
+
+async def test_collector_pipeline_decoupled_ingress_and_queue_backpressure(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+    import time
+
+    import pytest
+
+    from crypto_momentum_lab.research_collector.models import CollectorPaused
+
+
+    config = CollectorConfig(
+        environment="research",
+        root=tmp_path,
+        soft_limit_bytes=10 * 1024**2,
+        hard_limit_bytes=20 * 1024**2,
+        global_warning_free_bytes=2,
+        global_pause_free_bytes=1,
+        window_seconds=15,
+        late_tolerance_seconds=1,  # Short backpressure timeout
+        max_queue_batches=2,       # Small queue capacity to test backpressure
+    )
+    collector = ResearchStateCollector(
+        config=config,
+        source=_IdleSource(),
+        selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
+    )
+    await collector.initialize()
+
+    # Block the materializer from consuming by intercepting stage_record
+    stage_hold = asyncio.Event()
+    real_stage = collector._materializer.stage_record
+
+    def holding_stage(record):
+        # Synchronously block until released
+        while not stage_hold.is_set():
+            time.sleep(0.01)
+        return real_stage(record)
+
+    collector._materializer.stage_record = holding_stage  # type: ignore[assignment]
+
+    s1 = fixture_state("BTCUSDT", 0)
+    s2 = fixture_state("BTCUSDT", 1)
+    s3 = fixture_state("BTCUSDT", 2)
+
+    # 1. Ingest batch 1: accepted to journal, worker gets it and blocks in stage_record
+    r1 = await collector.ingest(_batch(s1, 1))
+    assert r1.durable_receipt is not None
+    assert r1.durable_receipt.sequence == 1
+    assert r1.durable_receipt.record_id != ""
+
+    # Ingest batch 2 and 3: fill the queue of maxsize=2
+    r2 = await collector.ingest(_batch(s2, 2))
+    assert r2.durable_receipt is not None
+
+    # Wait for queue to have pending batch
+    await asyncio.sleep(0.05)
+
+    # Ingest batch 3: should fill the queue (since worker is busy with batch 1)
+    # The queue now holds batch 2 and batch 3. Attempting to ingest batch 4
+    # times out and raises CollectorPaused!
+    s4 = fixture_state("BTCUSDT", 3)
+    await collector.ingest(_batch(s3, 3))
+
+    with pytest.raises(CollectorPaused, match="Materializer queue backpressure"):
+        await collector.ingest(_batch(s4, 4))
+
+    # Release materializer hold
+    stage_hold.set()
+
+    # Drain queue
+    await collector.drain_queue(timeout_seconds=5.0)
+    health = await collector.health()
+    assert health.queued_batches == 0
+    assert health.accepted_sequence == 3
+
+    # Now that queue is drained, batch 4 can be ingested without backpressure
+    r4 = await collector.ingest(_batch(s4, 4))
+    assert r4.durable_receipt is not None
+    assert r4.durable_receipt.sequence == 4
+
+    await collector.stop()
+

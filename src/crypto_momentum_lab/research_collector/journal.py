@@ -86,6 +86,7 @@ class ArchiveJournal:
         self._active_stream_id: str | None = None
         self._accepted_sequence: int | None = None
         self._materialized_sequence: int | None = None
+        self._highest_committed_sequence: int | None = None
         self._last_materialized_bucket: datetime | None = None
         self._last_materialized_symbol: str | None = None
 
@@ -132,6 +133,7 @@ class ArchiveJournal:
     ) -> None:
         self._accepted_sequence = accepted_sequence
         self._materialized_sequence = materialized_sequence
+        self._highest_committed_sequence = materialized_sequence
         self._last_materialized_bucket = last_materialized_bucket
         self._last_materialized_symbol = last_materialized_symbol
 
@@ -144,8 +146,29 @@ class ArchiveJournal:
         """Accept one batch and solidifies it into the write-ahead journal."""
         is_empty = len(selected_states) == 0
         now = datetime.now(tz=UTC)
+        state_keys = tuple(
+            (state.environment, state.symbol, state.bucket_start)
+            for state in selected_states
+        )
+        content_identity: dict[str, object] = {
+            "source_kind": collection_batch.source_kind.value,
+            "sequence": collection_batch.sequence,
+            "stream_id": collection_batch.stream_id,
+            "published_at": collection_batch.batch.published_at.isoformat(),
+            "environment": collection_batch.environment,
+            "is_empty": is_empty,
+            "state_keys": [
+                f"{env}:{sym}:{dt.isoformat()}" for env, sym, dt in state_keys
+            ],
+        }
+        identity_bytes = json.dumps(
+            content_identity, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        record_id = hashlib.sha256(identity_bytes).hexdigest()
+
         payload: dict[str, object] = {
             "schema_version": 2,
+            "record_id": record_id,
             "source_kind": collection_batch.source_kind.value,
             "sequence": collection_batch.sequence,
             "stream_id": collection_batch.stream_id,
@@ -172,8 +195,7 @@ class ArchiveJournal:
             directory /= _safe_component(collection_batch.stream_id)
         directory.mkdir(parents=True, exist_ok=True)
 
-        digest = hashlib.sha256(encoded).hexdigest()
-        path = directory / f"{digest}.json"
+        path = directory / f"{record_id}.json"
 
         if not path.exists():
             if self._pending_bytes + record_bytes > self._max_bytes:
@@ -184,10 +206,6 @@ class ArchiveJournal:
             _atomic_write_bytes(path, encoded)
             self._pending_bytes += record_bytes
 
-        state_keys = tuple(
-            (state.environment, state.symbol, state.bucket_start)
-            for state in selected_states
-        )
         receipt = DurableReceipt(
             sequence=collection_batch.sequence,
             stream_id=collection_batch.stream_id,
@@ -196,6 +214,7 @@ class ArchiveJournal:
             accepted_at=now,
             is_empty=is_empty,
             record_bytes=record_bytes,
+            record_id=record_id,
         )
         record = JournalRecord(
             receipt=receipt,
@@ -228,6 +247,10 @@ class ArchiveJournal:
 
     def get_record(self, receipt: DurableReceipt) -> JournalRecord | None:
         """Find the JournalRecord corresponding to a DurableReceipt."""
+        if receipt.record_id:
+            for record in self._pending_records.values():
+                if record.receipt.record_id == receipt.record_id:
+                    return record
         for record in self._pending_records.values():
             if record.receipt == receipt:
                 return record
@@ -260,14 +283,24 @@ class ArchiveJournal:
         if not committed_receipts:
             return
 
-        receipt_keys = {
-            (r.source_kind, r.stream_id, r.sequence) for r in committed_receipts
+        committed_record_ids = {
+            r.record_id for r in committed_receipts if r.record_id
+        }
+        legacy_receipt_keys = {
+            (r.source_kind, r.stream_id, r.sequence)
+            for r in committed_receipts
+            if not r.record_id
         }
 
         paths_to_remove: list[Path] = []
         for path, record in self._pending_records.items():
             r = record.receipt
-            if (r.source_kind, r.stream_id, r.sequence) in receipt_keys:
+            if r.record_id and r.record_id in committed_record_ids:
+                paths_to_remove.append(path)
+            elif (
+                not r.record_id
+                and (r.source_kind, r.stream_id, r.sequence) in legacy_receipt_keys
+            ):
                 paths_to_remove.append(path)
 
         for path in paths_to_remove:
@@ -295,12 +328,39 @@ class ArchiveJournal:
         ]
         if hub_committed:
             highest_committed = max(hub_committed)
-            if self._materialized_sequence is None:
-                self._materialized_sequence = highest_committed
+            if self._highest_committed_sequence is None:
+                self._highest_committed_sequence = highest_committed
             else:
-                self._materialized_sequence = max(
-                    self._materialized_sequence, highest_committed
+                self._highest_committed_sequence = max(
+                    self._highest_committed_sequence, highest_committed
                 )
+
+            active_pending_sequences = [
+                rec.receipt.sequence
+                for rec in self._pending_records.values()
+                if rec.receipt.source_kind is SourceKind.HUB
+                and (
+                    self._active_stream_id is None
+                    or rec.receipt.stream_id == self._active_stream_id
+                )
+                and rec.receipt.sequence is not None
+            ]
+            if active_pending_sequences:
+                min_pending = min(active_pending_sequences)
+                covered_prefix = min_pending - 1
+                if self._materialized_sequence is None:
+                    self._materialized_sequence = covered_prefix
+                else:
+                    self._materialized_sequence = max(
+                        self._materialized_sequence, covered_prefix
+                    )
+            else:
+                if self._materialized_sequence is None:
+                    self._materialized_sequence = self._highest_committed_sequence
+                else:
+                    self._materialized_sequence = max(
+                        self._materialized_sequence, self._highest_committed_sequence
+                    )
 
         if last_bucket_start is not None:
             if (
@@ -449,6 +509,10 @@ class ArchiveJournal:
         state_keys = tuple(
             (state.environment, state.symbol, state.bucket_start) for state in states
         )
+        record_id = payload.get("record_id")
+        if not record_id or not isinstance(record_id, str):
+            record_id = path.stem
+
         receipt = DurableReceipt(
             sequence=sequence,
             stream_id=stream_id,
@@ -457,6 +521,7 @@ class ArchiveJournal:
             accepted_at=accepted_at,
             is_empty=is_empty,
             record_bytes=record_bytes,
+            record_id=record_id,
         )
         return JournalRecord(
             receipt=receipt,

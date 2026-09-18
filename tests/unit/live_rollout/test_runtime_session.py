@@ -318,3 +318,72 @@ async def test_runtime_session_shared_shutdown_budget_bounds_total_time() -> Non
 
     assert session.state == SessionLifecycleState.STOPPED
     assert elapsed < 1.0  # Finished within budget
+
+
+async def test_runtime_session_persisting_timeout_bounds_callback() -> None:
+    """Regression test for P1-D: hanging transition must not defeat budget."""
+    supervisor = FakeSupervisor()
+    lifecycle = FakeResourceLifecycle()
+    hanging_event = asyncio.Event()
+
+    async def hanging_transition(reason: str | None) -> None:
+        await hanging_event.wait()
+
+    session = RuntimeSession(
+        run_id="session-hanging-persist",
+        supervisor=cast(LiveRuntimeSupervisor, supervisor),
+        lifecycle=cast(LiveResourceLifecycle, lifecycle),
+        transition_terminal_state=hanging_transition,
+        shutdown_budget_seconds=0.1,
+    )
+
+    start = perf_counter()
+    await session.close(deadline=start + 0.1)
+    elapsed = perf_counter() - start
+
+    assert elapsed < 0.5  # Did not hang forever!
+    assert lifecycle.close_called is True  # Phase 3 CLOSING was still reached!
+    assert session.state == SessionLifecycleState.STOPPED
+
+
+async def test_runtime_session_cooperative_stop_stops_supervisor_cleanly() -> None:
+    """Verify external request_stop cooperatively stops supervisor and runs."""
+    supervisor = FakeSupervisor()
+    lifecycle = FakeResourceLifecycle()
+
+    # Supervisor runs until stopped
+    supervisor_stopped = asyncio.Event()
+
+    async def slow_run() -> LiveDaemonResult:
+        await supervisor_stopped.wait()
+        return LiveDaemonResult(
+            processed_state_count=5,
+            approved_intent_count=0,
+            submitted_order_count=0,
+            halt_reason="operator_requested",
+            final_state_at=None,
+        )
+
+    async def cooperative_stop() -> None:
+        supervisor.stop_called = True
+        supervisor_stopped.set()
+
+    supervisor.run = slow_run  # type: ignore
+    supervisor.stop = cooperative_stop  # type: ignore
+
+    session = RuntimeSession(
+        run_id="session-cooperative-stop",
+        supervisor=cast(LiveRuntimeSupervisor, supervisor),
+        lifecycle=cast(LiveResourceLifecycle, lifecycle),
+    )
+
+    run_task = asyncio.create_task(session.run())
+    await asyncio.sleep(0.01)
+
+    # Request cooperative stop
+    session.request_stop("operator_requested")
+
+    result = await run_task
+    assert result.halt_reason == "operator_requested"
+    assert supervisor.stop_called is True
+    assert session.state == SessionLifecycleState.STOPPED

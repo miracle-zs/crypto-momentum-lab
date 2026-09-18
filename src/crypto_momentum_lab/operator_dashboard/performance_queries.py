@@ -26,6 +26,7 @@ from crypto_momentum_lab.operator_dashboard.status import (
     OperationalStatus,
 )
 from crypto_momentum_lab.operator_dashboard.telemetry_queries import (
+    _DECISION_SLO_WINDOWS,
     DecisionSLOQueries,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
@@ -106,6 +107,8 @@ class PerformanceQueries:
         decision_slo = await self._decision_slo_queries.decision_slo(window=window)
 
         # 2. Persistence & Checkpoint metrics
+        window_delta = _DECISION_SLO_WINDOWS.get(window, timedelta(hours=6))
+        since = now - window_delta
         async with self._session_factory() as session:
             checkpoint_rows = list(
                 (
@@ -113,13 +116,15 @@ class PerformanceQueries:
                         select(StrategyRuntimeEventRow)
                         .where(
                             StrategyRuntimeEventRow.event_type
-                            == _CHECKPOINT_PERSISTED_EVENT
+                            == _CHECKPOINT_PERSISTED_EVENT,
+                            StrategyRuntimeEventRow.occurred_at >= since,
                         )
                         .order_by(StrategyRuntimeEventRow.occurred_at.desc())
                         .limit(_MAX_CHECKPOINT_SAMPLES)
                     )
                 ).all()
             )
+
 
             # 3. Market data status
             latest_market_state = await session.scalar(

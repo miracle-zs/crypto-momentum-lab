@@ -34,6 +34,7 @@ class CheckpointWriterMetrics:
 class _PendingCheckpoint:
     checkpoint: StrategyCheckpoint
     saved_at: datetime
+    token: int = 0
 
 
 class CheckpointWriter:
@@ -74,6 +75,7 @@ class CheckpointWriter:
         self._submitted_count = 0
         self._coalesced_count = 0
         self._persisted_count = 0
+        self._last_persisted_token = 0
         self._failure_count = 0
         self._last_duration_ms: float | None = None
 
@@ -87,6 +89,14 @@ class CheckpointWriter:
             last_duration_ms=self._last_duration_ms,
         )
 
+    @property
+    def last_persisted_token(self) -> int:
+        return self._last_persisted_token
+
+    @property
+    def last_submitted_token(self) -> int:
+        return self._submitted_count
+
     async def start(self) -> None:
         if self._task is not None:
             return
@@ -96,16 +106,18 @@ class CheckpointWriter:
             name=f"live-checkpoint-writer:{self._run_id}",
         )
 
-    def submit(self, checkpoint: StrategyCheckpoint, saved_at: datetime) -> None:
-        """Publish a snapshot without waiting for database work."""
+    def submit(self, checkpoint: StrategyCheckpoint, saved_at: datetime) -> int:
+        """Publish a snapshot without waiting for database work. Returns token."""
         if self._task is None:
             raise RuntimeError("checkpoint writer is not started")
         if self._pending is not None:
             self._coalesced_count += 1
-        self._pending = _PendingCheckpoint(checkpoint, saved_at)
         self._submitted_count += 1
+        token = self._submitted_count
+        self._pending = _PendingCheckpoint(checkpoint, saved_at, token=token)
         self._idle.clear()
         self._wake.set()
+        return token
 
     async def flush(self) -> bool:
         """Wait for queued periodic writes, returning whether they became idle."""
@@ -133,13 +145,18 @@ class CheckpointWriter:
         """Persist a final snapshot on an explicit, bounded critical path."""
         if self._task is None:
             await self._persist(self._run_id, checkpoint, saved_at)
+            self._persisted_count += 1
+            self._last_persisted_token = max(
+                self._last_persisted_token, self._submitted_count
+            )
             return True
         self._pending = None
         self._wake.set()
         try:
+            token = max(self._last_persisted_token + 1, self._submitted_count)
             await asyncio.wait_for(
                 self._persist_one(
-                    _PendingCheckpoint(checkpoint, saved_at),
+                    _PendingCheckpoint(checkpoint, saved_at, token=token),
                 ),
                 timeout=self._flush_timeout_seconds,
             )
@@ -227,11 +244,14 @@ class CheckpointWriter:
         duration_ms = (perf_counter() - started) * 1000
         self._last_duration_ms = duration_ms
         self._persisted_count += 1
+        if pending.token > self._last_persisted_token:
+            self._last_persisted_token = pending.token
         log.info(
             "live_checkpoint_persisted",
             run_id=self._run_id,
             duration_ms=round(duration_ms, 3),
             payload_bytes=_payload_size_bytes(pending.checkpoint),
+            token=pending.token,
         )
 
 

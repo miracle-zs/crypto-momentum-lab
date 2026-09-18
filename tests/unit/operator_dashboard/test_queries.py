@@ -479,7 +479,7 @@ def test_decision_slo_response_aggregates_latency_health_and_reasons() -> None:
     assert response.consumers[0].last_available is True
 
 
-def test_decision_slo_response_filters_stale_in_memory_latencies() -> None:
+def test_decision_slo_response_preserves_true_unfiltered_latencies() -> None:
     start = datetime(2026, 9, 11, tzinfo=UTC)
     rows = [
         SimpleNamespace(
@@ -508,8 +508,9 @@ def test_decision_slo_response_filters_stale_in_memory_latencies() -> None:
         truncated=False,
     )
     samples = response.phase_latency["candidate_accepted->risk_approved"]
-    assert samples.sample_count == 1
-    assert samples.max_ms == 0.5
+    assert samples.sample_count == 2
+    assert samples.max_ms == 54000.0
+
 
 
 async def test_decision_slo_query_uses_bounded_historical_window() -> None:

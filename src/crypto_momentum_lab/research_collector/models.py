@@ -131,6 +131,7 @@ class DurableReceipt:
     accepted_at: datetime
     is_empty: bool = False
     record_bytes: int = 0
+    record_id: str = ""
 
     def __post_init__(self) -> None:
         if self.sequence < 0:
@@ -253,6 +254,7 @@ class CollectionReceipt:
     committed_rows: int = 0
     committed_sequence: int | None = None
     skipped_rows: int = 0
+    durable_receipt: DurableReceipt | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,6 +280,7 @@ class CollectorHealth:
     last_market_state_gap_buckets: int = 0
     accepted_sequence: int | None = None
     materialized_sequence: int | None = None
+    queued_batches: int = 0
 
 
 @dataclass(frozen=True, slots=True)

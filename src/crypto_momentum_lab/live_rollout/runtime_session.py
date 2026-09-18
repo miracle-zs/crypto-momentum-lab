@@ -126,6 +126,7 @@ class RuntimeSession:
         run_id: str,
         supervisor: LiveRuntimeSupervisor,
         lifecycle: LiveResourceLifecycle,
+        ownership_registry: ResourceOwnershipRegistry | None = None,
         save_final_checkpoint: (
             Callable[[float | None], Awaitable[bool]] | None
         ) = None,
@@ -142,6 +143,7 @@ class RuntimeSession:
         self._run_id = run_id
         self._supervisor = supervisor
         self._lifecycle = lifecycle
+        self._ownership_registry = ownership_registry
         self._save_final_checkpoint = save_final_checkpoint
         self._transition_terminal_state = transition_terminal_state
         self._health = health
@@ -151,6 +153,7 @@ class RuntimeSession:
         self._stop_requested = asyncio.Event()
         self._stop_reason: str | None = None
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
         self._last_result: LiveDaemonResult | None = None
 
     @property
@@ -179,12 +182,35 @@ class RuntimeSession:
     async def run(self) -> LiveDaemonResult:
         """Run the live runtime supervisor until completion, halt, or stop request."""
         self._state = SessionLifecycleState.READY
+        supervisor_task = asyncio.create_task(
+            self._supervisor.run(),
+            name=f"live-supervisor:{self._run_id}",
+        )
+        stop_waiter = asyncio.create_task(
+            self._stop_requested.wait(),
+            name=f"live-session-stop-waiter:{self._run_id}",
+        )
         try:
-            result = await self._supervisor.run()
+            done, pending = await asyncio.wait(
+                {supervisor_task, stop_waiter},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_waiter in done:
+                log.info(
+                    "session_cooperative_stop_triggered",
+                    run_id=self._run_id,
+                    reason=self._stop_reason,
+                )
+                await self._supervisor.stop()
+                result = await supervisor_task
+            else:
+                result = supervisor_task.result()
             self._last_result = result
             return result
         except asyncio.CancelledError:
             log.info("session_run_cancelled", run_id=self._run_id)
+            if not supervisor_task.done():
+                supervisor_task.cancel()
             raise
         except Exception as exc:
             log.exception(
@@ -194,6 +220,8 @@ class RuntimeSession:
             )
             raise
         finally:
+            if not stop_waiter.done():
+                stop_waiter.cancel()
             await self.close()
 
     async def close(self, deadline: float | None = None) -> None:
@@ -201,14 +229,25 @@ class RuntimeSession:
         async with self._state_lock:
             if self._closed:
                 return
-            self._closed = True
+            if self._close_task is None:
+                self._close_task = asyncio.create_task(
+                    self._execute_close(deadline),
+                    name=f"live-session-close:{self._run_id}",
+                )
+            task = self._close_task
 
+        try:
+            await asyncio.shield(task)
+        except Exception:
+            raise
+
+    async def _execute_close(self, deadline: float | None) -> None:
         budget = (
             deadline - perf_counter()
             if deadline is not None
             else self._shutdown_budget_seconds
         )
-        total_deadline = perf_counter() + max(1.0, budget)
+        total_deadline = perf_counter() + max(0.01, budget)
         started_at = perf_counter()
 
         halt_reason = (
@@ -219,98 +258,111 @@ class RuntimeSession:
             )
         )
 
-        # Phase 1: DRAINING
-        self._state = SessionLifecycleState.DRAINING
-        log.info(
-            "session_shutdown_phase_started",
-            run_id=self._run_id,
-            phase=self._state.value,
-        )
         try:
-            drain_timeout = min(
-                _DRAIN_PHASE_MAX_SECONDS,
-                max(0.5, total_deadline - perf_counter()),
-            )
-            async with asyncio.timeout(drain_timeout):
-                # Supervisor blocks entry submissions, stops sources,
-                # and drains in-flight submissions
-                await self._supervisor.stop()
-        except TimeoutError:
-            log.warning(
-                "session_shutdown_phase_timed_out",
+            # Phase 1: DRAINING
+            self._state = SessionLifecycleState.DRAINING
+            log.info(
+                "session_shutdown_phase_started",
                 run_id=self._run_id,
-                phase=SessionLifecycleState.DRAINING.value,
+                phase=self._state.value,
             )
-        except Exception:
-            log.exception(
-                "session_shutdown_phase_failed",
-                run_id=self._run_id,
-                phase=SessionLifecycleState.DRAINING.value,
-            )
-
-        # Phase 2: PERSISTING
-        self._state = SessionLifecycleState.PERSISTING
-        log.info(
-            "session_shutdown_phase_started",
-            run_id=self._run_id,
-            phase=self._state.value,
-        )
-        try:
-            persist_timeout = min(
-                _PERSIST_PHASE_MAX_SECONDS,
-                max(0.5, total_deadline - perf_counter()),
-            )
-            if self._save_final_checkpoint is not None:
-                await self._save_final_checkpoint(persist_timeout)
-            if self._transition_terminal_state is not None:
-                await self._transition_terminal_state(halt_reason)
-        except Exception:
-            log.exception(
-                "session_shutdown_phase_failed",
-                run_id=self._run_id,
-                phase=SessionLifecycleState.PERSISTING.value,
-            )
-
-        # Phase 3: CLOSING
-        self._state = SessionLifecycleState.CLOSING
-        log.info(
-            "session_shutdown_phase_started",
-            run_id=self._run_id,
-            phase=self._state.value,
-        )
-        try:
-            close_timeout = min(
-                _CLOSE_PHASE_MAX_SECONDS,
-                max(0.5, total_deadline - perf_counter()),
-            )
-            async with asyncio.timeout(close_timeout):
-                await self._lifecycle.close()
-        except TimeoutError:
-            log.warning(
-                "session_shutdown_phase_timed_out",
-                run_id=self._run_id,
-                phase=SessionLifecycleState.CLOSING.value,
-            )
-        except Exception:
-            log.exception(
-                "session_shutdown_phase_failed",
-                run_id=self._run_id,
-                phase=SessionLifecycleState.CLOSING.value,
-            )
-
-        # Phase 4: STOPPED
-        self._state = SessionLifecycleState.STOPPED
-        if self._health is not None:
             try:
-                self._health.stopped()
+                drain_timeout = min(
+                    _DRAIN_PHASE_MAX_SECONDS,
+                    max(0.01, total_deadline - perf_counter()),
+                )
+                async with asyncio.timeout(drain_timeout):
+                    await self._supervisor.stop()
+            except TimeoutError:
+                log.warning(
+                    "session_shutdown_phase_timed_out",
+                    run_id=self._run_id,
+                    phase=SessionLifecycleState.DRAINING.value,
+                )
             except Exception:
-                log.exception("session_health_stopped_marker_failed")
+                log.exception(
+                    "session_shutdown_phase_failed",
+                    run_id=self._run_id,
+                    phase=SessionLifecycleState.DRAINING.value,
+                )
 
-        log.info(
-            "session_shutdown_completed",
-            run_id=self._run_id,
-            duration_seconds=round(perf_counter() - started_at, 3),
-        )
+            # Phase 2: PERSISTING
+            self._state = SessionLifecycleState.PERSISTING
+            log.info(
+                "session_shutdown_phase_started",
+                run_id=self._run_id,
+                phase=self._state.value,
+            )
+            try:
+                persist_timeout = min(
+                    _PERSIST_PHASE_MAX_SECONDS,
+                    max(0.01, total_deadline - perf_counter()),
+                )
+                async with asyncio.timeout(persist_timeout):
+                    if self._save_final_checkpoint is not None:
+                        await self._save_final_checkpoint(persist_timeout)
+                    if self._transition_terminal_state is not None:
+                        await self._transition_terminal_state(halt_reason)
+            except TimeoutError:
+                log.warning(
+                    "session_shutdown_phase_timed_out",
+                    run_id=self._run_id,
+                    phase=SessionLifecycleState.PERSISTING.value,
+                )
+            except Exception:
+                log.exception(
+                    "session_shutdown_phase_failed",
+                    run_id=self._run_id,
+                    phase=SessionLifecycleState.PERSISTING.value,
+                )
+
+            # Phase 3: CLOSING
+            self._state = SessionLifecycleState.CLOSING
+            log.info(
+                "session_shutdown_phase_started",
+                run_id=self._run_id,
+                phase=self._state.value,
+            )
+            try:
+                close_timeout = min(
+                    _CLOSE_PHASE_MAX_SECONDS,
+                    max(0.01, total_deadline - perf_counter()),
+                )
+                async with asyncio.timeout(close_timeout):
+                    await self._lifecycle.close()
+                    if self._ownership_registry is not None:
+                        await self._ownership_registry.teardown_all(
+                            deadline=total_deadline
+                        )
+            except TimeoutError:
+                log.warning(
+                    "session_shutdown_phase_timed_out",
+                    run_id=self._run_id,
+                    phase=SessionLifecycleState.CLOSING.value,
+                )
+            except Exception:
+                log.exception(
+                    "session_shutdown_phase_failed",
+                    run_id=self._run_id,
+                    phase=SessionLifecycleState.CLOSING.value,
+                )
+        finally:
+            # Phase 4: STOPPED
+            self._state = SessionLifecycleState.STOPPED
+            if self._health is not None:
+                try:
+                    self._health.stopped()
+                except Exception:
+                    log.exception("session_health_stopped_marker_failed")
+
+            async with self._state_lock:
+                self._closed = True
+
+            log.info(
+                "session_shutdown_completed",
+                run_id=self._run_id,
+                duration_seconds=round(perf_counter() - started_at, 3),
+            )
 
 
 __all__ = [

@@ -132,6 +132,7 @@ from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
 from crypto_momentum_lab.live_rollout.session import (
     LiveSessionConfig,
     LiveSessionLifecycle,
+    ResourceOwnershipRegistry,
     RuntimeSession,
 )
 from crypto_momentum_lab.live_rollout.signal_recorder import (
@@ -363,12 +364,19 @@ async def run_live_daemon(
             log.exception("live_health_marker_failed")
 
     now = datetime.now(tz=UTC)
+    ownership_registry = ResourceOwnershipRegistry(run_id=session_id)
     execution_engine = create_execution_database_engine(execution_database_url)
+    ownership_registry.register("execution_engine", execution_engine.dispose)
     market_engine = create_market_database_engine(market_database_url)
+    ownership_registry.register("market_engine", market_engine.dispose)
     observability_engine = create_observability_database_engine(
         observability_database_url
     )
+    ownership_registry.register(
+        "observability_engine", observability_engine.dispose
+    )
     checkpoint_engine = create_checkpoint_database_engine(observability_database_url)
+    ownership_registry.register("checkpoint_engine", checkpoint_engine.dispose)
     heartbeat_engine: AsyncEngine | None = None
     client: BinanceUsdMTradeClient | None = None
     execution_coordinator: OrderExecutionCoordinator | None = None
@@ -439,6 +447,9 @@ async def run_live_daemon(
             pool_timeout_seconds=3,
             command_timeout_seconds=5,
         )
+        ownership_registry.register(
+            "heartbeat_engine", heartbeat_engine.dispose
+        )
         heartbeat_factory = async_sessionmaker(
             heartbeat_engine,
             expire_on_commit=False,
@@ -458,6 +469,7 @@ async def run_live_daemon(
             ),
             persist_exchange_operations=persist_exchange_operations,
         )
+        ownership_registry.register("telemetry", telemetry.stop)
         await telemetry.start()
         volume_source = WebSocketMarketQuoteVolumeSource(
             url=market_quote_volume_hub_url,
@@ -465,6 +477,7 @@ async def run_live_daemon(
             consumer_id=f"live-volume:{session_id}",
         )
         volume_cache = WebSocketQuoteVolumeProvider(volume_source)
+        ownership_registry.register("volume_cache", volume_cache.stop)
         await volume_cache.start()
         signal_repository = PostgresLiveSignalRepository(observability_factory)
         signal_recorder = LiveStrategySignalRecorder(
@@ -477,6 +490,7 @@ async def run_live_daemon(
             quote_volume_provider=volume_cache,
             persist=signal_repository.save_signals,
         )
+        ownership_registry.register("signal_recorder", signal_recorder.stop)
         await signal_recorder.start()
         risk_config = await _latest_risk_config(execution_factory, account_label)
         log_startup_phase("risk_config_loaded")
@@ -513,6 +527,7 @@ async def run_live_daemon(
             entry_leverage=entry_leverage,
             margin_type=margin_type,
         )
+        ownership_registry.register("trade_client", client.aclose)
         account_config = await client.fetch_account_config()
         log_startup_phase("exchange_account_config_loaded")
         if account_config.hedge_mode != hedge_mode:
@@ -555,6 +570,9 @@ async def run_live_daemon(
             backend=state_machine,
             account_label=account_label,
         )
+        ownership_registry.register(
+            "execution_coordinator", execution_coordinator.aclose
+        )
 
         assert execution_coordinator is not None
         assert client is not None
@@ -583,6 +601,9 @@ async def run_live_daemon(
         unresolved = await order_repository.load_unresolved_orders(session_id)
         entry_order_lifecycle = LiveLimitOrderLifecycle(
             cancel_order=execution_coordinator.cancel_order,
+        )
+        ownership_registry.register(
+            "entry_order_lifecycle", entry_order_lifecycle.stop
         )
         order_event_runtime.set_entry_order_lifecycle(entry_order_lifecycle)
         await entry_order_lifecycle.restore(unresolved)
@@ -816,6 +837,7 @@ async def run_live_daemon(
         ema_provider: ClosedCandleEmaProvider | None = None
         if exit_mode is PositionExitMode.CANDLE_15M:
             candle_source = BinanceRestClosedCandle15mSource(base_url)
+            ownership_registry.register("candle_source", candle_source.aclose)
             closed_candle_feed = BinanceClosedCandle15mFeed(
                 config=ClosedCandle15mFeedConfig(
                     websocket_url=market_websocket_url,
@@ -824,9 +846,15 @@ async def run_live_daemon(
                 ),
                 backfill_source=candle_source,
             )
+            ownership_registry.register(
+                "closed_candle_feed", closed_candle_feed.stop
+            )
         if require_price_above_ema5 or require_price_above_ema10:
             if candle_source is None:
                 candle_source = BinanceRestClosedCandle15mSource(base_url)
+                ownership_registry.register(
+                    "candle_source", candle_source.aclose
+                )
             ema_provider = ClosedCandleEmaProvider(candle_source)
 
         assert client is not None
@@ -838,6 +866,7 @@ async def run_live_daemon(
             entry_leverage=entry_leverage,
             margin_type=margin_type,
         )
+        ownership_registry.register("entry_runtime", entry_runtime.stop)
         await entry_runtime.warm_exchange(now)
         log_startup_phase("entry_exchange_warmup_completed")
         live_readiness.update_entry_gate(
@@ -1338,6 +1367,7 @@ async def run_live_daemon(
             run_id=session_id,
             supervisor=runtime_supervisor,
             lifecycle=resource_lifecycle,
+            ownership_registry=ownership_registry,
             save_final_checkpoint=_save_final_checkpoint,
             transition_terminal_state=_transition_terminal_state,
             health=health,
@@ -1383,6 +1413,7 @@ async def run_live_daemon(
                 shutdown_task.cancel()
             if shutdown_task is not None:
                 await asyncio.gather(shutdown_task, return_exceptions=True)
+            await ownership_registry.teardown_all()
             await LiveResourceLifecycle(
                 entry_runtime=entry_runtime,
                 entry_order_lifecycle=entry_order_lifecycle,

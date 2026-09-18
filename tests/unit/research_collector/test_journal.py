@@ -172,3 +172,102 @@ def test_journal_recovery_cleans_tmp_and_reads_legacy_spool(
     assert recovered[0].receipt.stream_id == "legacy-stream"
     assert journal.accepted_sequence == 5
     assert journal.pending_bytes > 0
+
+
+def test_postgres_backfill_batches_have_unique_record_ids_and_selective_commit(
+    tmp_path: Path,
+) -> None:
+    journal_dir = tmp_path / "journal"
+    journal = ArchiveJournal(
+        journal_dir,
+        environment="research",
+        max_bytes=1024 * 1024,
+    )
+    s1 = fixture_state("BTCUSDT", 0)
+    s2 = fixture_state("ETHUSDT", 0)
+
+    # Two PostgreSQL backfill batches have sequence=0, stream_id=None
+    b1 = CollectionBatch(
+        batch=MarketStateBatch(
+            sequence=0,
+            published_at=s1.bucket_end,
+            environment="research",
+            states=(s1,),
+            stream_id=None,
+        ),
+        source_kind=SourceKind.POSTGRES_BACKFILL,
+    )
+    b2 = CollectionBatch(
+        batch=MarketStateBatch(
+            sequence=0,
+            published_at=s2.bucket_end,
+            environment="research",
+            states=(s2,),
+            stream_id=None,
+        ),
+        source_kind=SourceKind.POSTGRES_BACKFILL,
+    )
+    sel = SelectionSnapshot(observed_at=s1.bucket_start, symbols=())
+
+    r1 = journal.accept(b1, sel, (s1,))
+    r2 = journal.accept(b2, sel, (s2,))
+
+    assert r1.record_id != ""
+    assert r2.record_id != ""
+    assert r1.record_id != r2.record_id
+    assert len(journal.pending_records()) == 2
+
+    # Commit only the first backfill receipt
+    journal.commit_materialization([r1])
+
+    # The second backfill receipt must NOT have been deleted! (P1-A fix)
+    pending = journal.pending_records()
+    assert len(pending) == 1
+    assert pending[0].receipt.record_id == r2.record_id
+
+    # Restart / recover journal from disk
+    new_journal = ArchiveJournal(
+        journal_dir,
+        environment="research",
+        max_bytes=1024 * 1024,
+    )
+    recovered = new_journal.recover()
+    assert len(recovered) == 1
+    assert recovered[0].receipt.record_id == r2.record_id
+
+
+def test_out_of_order_commit_advances_only_contiguous_materialized_sequence(
+    tmp_path: Path,
+) -> None:
+    journal = ArchiveJournal(
+        tmp_path / "journal",
+        environment="research",
+        max_bytes=1024 * 1024,
+    )
+    s1 = fixture_state("BTCUSDT", 0)
+    s2 = fixture_state("BTCUSDT", 1)
+    s3 = fixture_state("BTCUSDT", 2)
+    b1 = _batch(s1, 1)
+    b2 = _batch(s2, 2)
+    b3 = _batch(s3, 3)
+    sel = SelectionSnapshot(observed_at=s1.bucket_start, symbols=())
+
+    r1 = journal.accept(b1, sel, (s1,))
+    r2 = journal.accept(b2, sel, (s2,))
+    r3 = journal.accept(b3, sel, (s3,))
+
+    assert journal.accepted_sequence == 3
+    assert journal.materialized_sequence is None
+
+    # 1. Commit batch 1 -> materialized_sequence advances to 1
+    journal.commit_materialization([r1])
+    assert journal.materialized_sequence == 1
+
+    # 2. Commit batch 3 while batch 2 is still pending!
+    # Contiguous prefix must remain 1 because batch 2 has not materialized!
+    journal.commit_materialization([r3])
+    assert journal.materialized_sequence == 1
+
+    # 3. Commit batch 2 -> contiguous prefix now covers all up to 3!
+    journal.commit_materialization([r2])
+    assert journal.materialized_sequence == 3

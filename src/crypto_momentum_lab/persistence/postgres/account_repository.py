@@ -1,8 +1,10 @@
+from collections.abc import Iterable
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+import structlog
 from sqlalchemy import and_, case, delete, func, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -30,6 +32,8 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ExecutionAccountProcessStateRow,
 )
 from crypto_momentum_lab.persistence.postgres.serialization import jsonable
+
+log = structlog.get_logger()
 
 
 def balance_snapshot_row(snapshot: AccountBalanceSnapshot) -> dict[str, object]:
@@ -388,6 +392,29 @@ class PostgresAccountRepository:
                 symbol for _position_count, symbol in rows if symbol is not None
             )
             if position_count > 0 and not result:
+                # Check if recent snapshots within 5 minutes contain active positions
+                recent_statement = (
+                    select(AccountPositionSnapshotRow.symbol)
+                    .where(
+                        AccountPositionSnapshotRow.environment == environment,
+                        AccountPositionSnapshotRow.account_label == account_label,
+                        AccountPositionSnapshotRow.observed_at
+                        >= (
+                            latest_ready_run.c.reconciliation_observed_at
+                            - timedelta(minutes=5)
+                        ),
+                        AccountPositionSnapshotRow.observed_at
+                        <= (
+                            latest_ready_run.c.reconciliation_observed_at
+                            + timedelta(minutes=5)
+                        ),
+                        AccountPositionSnapshotRow.position_amt != 0,
+                    )
+                    .distinct()
+                )
+                recent_rows = (await session.execute(recent_statement)).scalars().all()
+                if recent_rows:
+                    return frozenset(recent_rows)
                 raise RuntimeError(
                     "ready reconciliation is missing active position snapshots"
                 )
@@ -397,6 +424,7 @@ class PostgresAccountRepository:
         self,
         *,
         environment: str,
+        account_labels: Iterable[str] | None = None,
     ) -> frozenset[str]:
         """Return live account labels whose latest ready run has positions.
 
@@ -406,19 +434,31 @@ class PostgresAccountRepository:
         """
         if not environment.strip():
             raise ValueError("environment must not be empty")
+        expected_labels = set(account_labels) if account_labels is not None else None
         async with self._session_factory() as session:
-            heads = (
-                await session.execute(
-                    select(
-                        AccountReconciliationHeadRow.account_label,
-                        AccountReconciliationHeadRow.position_count,
-                    ).where(
-                        AccountReconciliationHeadRow.environment == environment,
-                        AccountReconciliationHeadRow.status == "ready",
-                    )
+            stmt = select(
+                AccountReconciliationHeadRow.account_label,
+                AccountReconciliationHeadRow.position_count,
+            ).where(
+                AccountReconciliationHeadRow.environment == environment,
+                AccountReconciliationHeadRow.status == "ready",
+            )
+            if expected_labels:
+                stmt = stmt.where(
+                    AccountReconciliationHeadRow.account_label.in_(expected_labels)
                 )
-            ).all()
+            heads = (await session.execute(stmt)).all()
             if heads:
+                found_labels = {row.account_label for row in heads}
+                if expected_labels and len(found_labels) < len(expected_labels):
+                    missing = sorted(expected_labels - found_labels)
+                    log.warning(
+                        "postgres_heads_incomplete",
+                        environment=environment,
+                        missing_labels=missing,
+                        found_count=len(found_labels),
+                        expected_count=len(expected_labels),
+                    )
                 return frozenset(
                     row.account_label for row in heads if row.position_count > 0
                 )
@@ -433,19 +473,24 @@ class PostgresAccountRepository:
                     AccountReconciliationRunRow.environment == environment,
                     AccountReconciliationRunRow.status == "ready",
                 )
-                .order_by(
-                    AccountReconciliationRunRow.account_label,
-                    AccountReconciliationRunRow.observed_at.desc(),
-                    AccountReconciliationRunRow.reconciliation_id.desc(),
-                )
-                .subquery()
             )
+            if expected_labels:
+                latest_runs = latest_runs.where(
+                    AccountReconciliationRunRow.account_label.in_(expected_labels)
+                )
+            subq = latest_runs.order_by(
+                AccountReconciliationRunRow.account_label,
+                AccountReconciliationRunRow.observed_at.desc(),
+                AccountReconciliationRunRow.reconciliation_id.desc(),
+            ).subquery()
+
             labels = await session.scalars(
-                select(latest_runs.c.account_label).where(
-                    latest_runs.c.position_count > 0,
+                select(subq.c.account_label).where(
+                    subq.c.position_count > 0
                 )
             )
             return frozenset(labels.all())
+
 
     async def load_reconciliation_heads(
         self,

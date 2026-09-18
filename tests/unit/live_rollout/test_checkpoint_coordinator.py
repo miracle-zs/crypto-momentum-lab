@@ -532,3 +532,56 @@ async def test_coordinator_save_final_timeout() -> None:
     assert coordinator.dirty is True
 
     await coordinator.stop()
+
+
+async def test_coordinator_save_final_waits_for_unpersisted_token() -> None:
+    import asyncio
+
+    persist_started = asyncio.Event()
+    persist_allow = asyncio.Event()
+    persisted_tokens: list[int] = []
+
+    async def _gated_persist(
+        run_id: str, checkpoint: StrategyCheckpoint, saved_at: datetime
+    ) -> None:
+        persist_started.set()
+        await persist_allow.wait()
+        persisted_tokens.append(1)
+
+    strategy = _Strategy()
+    writer = CheckpointWriter(
+        run_id="run-token-gate",
+        persist=_gated_persist,
+    )
+    coordinator = LiveCheckpointCoordinator(
+        writer=writer,
+        strategy=strategy,
+        checkpoint_every_states=1,  # triggers submit on first state
+    )
+    await coordinator.start()
+
+    # 1. State triggers submit: dirty becomes False, but writer is paused in persist
+    coordinator.record_processed_state(_state(), saved_at=NOW)
+    await persist_started.wait()
+
+    assert coordinator.dirty is False
+    assert coordinator._last_submitted_token == 1
+    assert writer.last_persisted_token == 0
+    # Durable age should still reflect unpersisted age even though dirty is False
+    coordinator._last_persisted_monotonic -= 20.0
+    assert coordinator.durable_age_seconds >= 20.0
+
+    # 2. save_final() called while dirty is False: must NOT return True prematurely!
+    save_final_task = asyncio.create_task(coordinator.save_final(timeout_seconds=1.0))
+    await asyncio.sleep(0.02)
+    assert not save_final_task.done()
+
+    # 3. Allow persist to finish
+    persist_allow.set()
+    result = await save_final_task
+    assert result is True
+    assert writer.last_persisted_token == 1
+    assert len(persisted_tokens) == 1
+
+    await coordinator.stop()
+

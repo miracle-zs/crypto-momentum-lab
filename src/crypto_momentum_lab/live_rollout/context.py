@@ -150,7 +150,8 @@ class LiveContextRuntime:
         self,
         *,
         run_id: str,
-        context_provider: LiveContextProvider | LiveContextReader,
+        context_reader: LiveContextReader | None = None,
+        context_provider: LiveContextReader | LiveContextProvider | None = None,
         set_pending_position_symbols: Callable[[Collection[str]], None],
         update_managed_symbols: Callable[
             [Collection[str], Collection[str]], None
@@ -161,8 +162,12 @@ class LiveContextRuntime:
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
+        resolved = context_reader if context_reader is not None else context_provider
+        if resolved is None:
+            raise ValueError("context_reader or context_provider must be provided")
         self._run_id = run_id
-        self._context_provider = context_provider
+        self._context_reader = resolved
+        self._context_provider = resolved
         self._set_pending_position_symbols = set_pending_position_symbols
         self._update_managed_symbols = update_managed_symbols
         self._on_managed_position_symbols = on_managed_position_symbols
@@ -178,45 +183,38 @@ class LiveContextRuntime:
         return self._managed_position_symbols
 
     def is_current(self, context: LiveDaemonRuntimeContext) -> bool:
-        checker = getattr(self._context_provider, "is_context_current", None)
-        if callable(checker):
-            try:
-                return bool(checker(context))
-            except Exception as error:
-                _log.warning(
-                    "live_context_currentness_check_failed",
-                    run_id=self._run_id,
-                    error_type=type(error).__name__,
-                )
-                return False
-        reader_checker = getattr(self._context_provider, "is_current", None)
-        if callable(reader_checker):
-            try:
-                return bool(reader_checker(context))
-            except Exception as error:
-                _log.warning(
-                    "live_context_currentness_check_failed",
-                    run_id=self._run_id,
-                    error_type=type(error).__name__,
-                )
-                return False
-        return True
+        reader = self._context_reader
+        try:
+            if hasattr(reader, "is_current"):
+                return bool(reader.is_current(context))
+            if hasattr(reader, "is_context_current"):
+                return bool(reader.is_context_current(context))
+            return True
+        except Exception as error:
+            _log.warning(
+                "live_context_currentness_check_failed",
+                run_id=self._run_id,
+                error_type=type(error).__name__,
+            )
+            return False
 
     def invalidate(self, event: ContextInvalidation | None = None) -> None:
         self._generation += 1
-        invalidate_fn = getattr(self._context_provider, "invalidate_cache", None)
-        if callable(invalidate_fn):
-            try:
-                invalidate_fn(event)
-            except TypeError:
-                invalidate_fn()
-            return
-        reader_invalidate = getattr(self._context_provider, "invalidate", None)
-        if callable(reader_invalidate):
-            try:
-                reader_invalidate(event)
-            except TypeError:
-                reader_invalidate()
+        reader = self._context_reader
+        try:
+            if hasattr(reader, "invalidate"):
+                reader.invalidate(event)
+            elif hasattr(reader, "invalidate_cache"):
+                try:
+                    reader.invalidate_cache(event)
+                except TypeError:
+                    reader.invalidate_cache()
+        except Exception as error:
+            _log.warning(
+                "live_context_invalidation_failed",
+                run_id=self._run_id,
+                error_type=type(error).__name__,
+            )
 
     async def publish_managed_position_symbols(
         self,

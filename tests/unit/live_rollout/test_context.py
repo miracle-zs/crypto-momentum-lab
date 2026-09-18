@@ -8,7 +8,6 @@ from crypto_momentum_lab.live_rollout.context import (
     ContextInvalidation,
     ContextInvalidationReason,
     ContextToken,
-    LiveContextProvider,
     LiveContextReader,
     LiveContextRuntime,
     LiveDaemonRuntimeContext,
@@ -20,13 +19,13 @@ class _Provider:
         self.current = True
         self.invalidations = 0
 
-    async def __call__(self, _state: object) -> LiveDaemonRuntimeContext:
+    async def for_state(self, _state: object) -> LiveDaemonRuntimeContext:
         raise AssertionError("context loading is outside this unit")
 
-    def is_context_current(self, _context: object) -> bool:
+    def is_current(self, _context: object) -> bool:
         return self.current
 
-    def invalidate_cache(self) -> None:
+    def invalidate(self, _event: ContextInvalidation | None = None) -> None:
         self.invalidations += 1
 
 
@@ -43,7 +42,7 @@ async def test_context_runtime_publishes_managed_symbols_through_narrow_callback
 
     runtime = LiveContextRuntime(
         run_id="run-1",
-        context_provider=cast(LiveContextProvider, provider),
+        context_reader=cast(LiveContextReader, provider),
         set_pending_position_symbols=lambda symbols: pending_updates.append(
             frozenset(symbols)
         ),
@@ -82,7 +81,7 @@ async def test_context_runtime_ignores_stale_publication_and_invalidates_provide
     cache_updates: list[tuple[frozenset[str], frozenset[str]]] = []
     runtime = LiveContextRuntime(
         run_id="run-1",
-        context_provider=cast(LiveContextProvider, provider),
+        context_reader=cast(LiveContextReader, provider),
         set_pending_position_symbols=lambda _symbols: None,
         update_managed_symbols=lambda positions, orders: cache_updates.append(
             (frozenset(positions), frozenset(orders))

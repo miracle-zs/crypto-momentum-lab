@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+import structlog
+
 from crypto_momentum_lab.domain.universe.models import (
     MembershipStatus,
     UniverseSnapshot,
@@ -20,6 +22,8 @@ from crypto_momentum_lab.research_collector.models import (
     SelectionSnapshot,
     require_utc,
 )
+
+log = structlog.get_logger()
 
 
 class AllSymbolsSelector:
@@ -105,6 +109,7 @@ class PostgresTop30Selector:
         self._refresh_interval = timedelta(seconds=refresh_interval_seconds)
         self._cached_selection: SelectionSnapshot | None = None
         self._next_refresh_at: datetime | None = None
+        self._last_known_position_symbols: frozenset[str] | None = None
 
     async def selection_at(self, observed_at: datetime) -> SelectionSnapshot:
         timestamp = require_utc(observed_at, "observed_at")
@@ -121,7 +126,7 @@ class PostgresTop30Selector:
             raise RuntimeError(
                 f"no activated universe snapshot available at {timestamp.isoformat()}"
             )
-        position_symbols = await self._load_position_symbols()
+        position_symbols, degraded = await self._load_position_symbols()
         selection = _build_selection(
             universe,
             top_count=self._top_count,
@@ -129,16 +134,41 @@ class PostgresTop30Selector:
             observed_at=timestamp,
         )
         self._cached_selection = selection
-        self._next_refresh_at = timestamp + self._refresh_interval
+        refresh_delay = (
+            timedelta(seconds=15)
+            if degraded
+            else self._refresh_interval
+        )
+        self._next_refresh_at = timestamp + refresh_delay
         return selection
 
-    async def _load_position_symbols(self) -> frozenset[str]:
+    async def _load_position_symbols(self) -> tuple[frozenset[str], bool]:
         if self._account_repository is None or self._account_label is None:
-            return frozenset()
-        return await self._account_repository.load_active_position_symbols(
-            environment=self._position_environment,
-            account_label=self._account_label,
-        )
+            return frozenset(), False
+        try:
+            symbols = await self._account_repository.load_active_position_symbols(
+                environment=self._position_environment,
+                account_label=self._account_label,
+            )
+            self._last_known_position_symbols = symbols
+            return symbols, False
+        except Exception as error:
+            if self._last_known_position_symbols is not None:
+                log.warning(
+                    "collector_position_selection_degraded_using_cached",
+                    account_label=self._account_label,
+                    error_type=type(error).__name__,
+                    error=str(error),
+                    cached_symbols_count=len(self._last_known_position_symbols),
+                )
+                return self._last_known_position_symbols, True
+            log.exception(
+                "collector_position_selection_failed_no_cache",
+                account_label=self._account_label,
+                error_type=type(error).__name__,
+                error=str(error),
+            )
+            raise
 
 
 def _build_selection(

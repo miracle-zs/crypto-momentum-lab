@@ -40,6 +40,7 @@ from crypto_momentum_lab.research_collector.models import (
     CollectorPaused,
     CollectorSequenceGap,
     CollectorStateConflict,
+    JournalRecord,
     SelectedSymbol,
     SelectionSnapshot,
     SourceKind,
@@ -138,15 +139,135 @@ class ResearchStateCollector:
         self._last_capacity_refresh = 0.0
         self._health_store = CollectorHealthStore(config.root, config.environment)
         self._health_store.reset()
+        self._queue: asyncio.Queue[JournalRecord | None] = asyncio.Queue(
+            maxsize=config.max_queue_batches
+        )
+        self._materializer_task: asyncio.Task[None] | None = None
+        self._materializer_error: BaseException | None = None
 
     @property
     def config(self) -> CollectorConfig:
         return self._config
 
+    def __del__(self) -> None:
+        try:
+            task = getattr(self, "_materializer_task", None)
+            if task is not None and not task.done():
+                task.cancel()
+        except Exception:
+            pass
+
+
+    def _ensure_materializer_task(self) -> None:
+        if not self._stopping and (
+            self._materializer_task is None or self._materializer_task.done()
+        ):
+            self._materializer_task = asyncio.create_task(self._materializer_worker())
+
+    async def _materializer_worker(self) -> None:
+        try:
+            while not self._stopping:
+                try:
+                    record = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                except (asyncio.CancelledError, GeneratorExit):
+                    break
+
+                if record is None:
+                    self._queue.task_done()
+                    break
+
+                records = [record]
+                while not self._queue.empty():
+                    try:
+                        rec = self._queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if rec is None:
+                        self._queue.task_done()
+                        break
+                    records.append(rec)
+
+                try:
+                    await self._process_materializer_batch(records)
+                except (asyncio.CancelledError, GeneratorExit):
+                    break
+                except Exception as exc:
+                    self._materializer_error = exc
+                    log.exception(
+                        "research_collector_materializer_worker_failed",
+                        environment=self._config.environment,
+                        error=str(exc),
+                    )
+                    break
+                finally:
+                    for _ in records:
+                        self._queue.task_done()
+        finally:
+            if not self._stopping and not self._queue.empty():
+                self._materializer_task = asyncio.create_task(
+                    self._materializer_worker()
+                )
+
+
+
+
+    async def _process_materializer_batch(
+        self,
+        records: list[JournalRecord],
+    ) -> None:
+        latest_bucket: datetime | None = None
+        for record in records:
+            if record.receipt.is_empty or not record.collection_batch.states:
+                await asyncio.to_thread(self._materializer.stage_record, record)
+                if record.collection_batch.states:
+                    bucket = max(
+                        state.bucket_start for state in record.collection_batch.states
+                    )
+                    if latest_bucket is None or bucket > latest_bucket:
+                        latest_bucket = bucket
+            else:
+                append_result = await asyncio.to_thread(
+                    self._materializer.stage_record,
+                    record,
+                )
+                if append_result is not None:
+                    self._duplicate_rows += append_result.duplicate_rows
+                bucket = max(
+                    state.bucket_start for state in record.collection_batch.states
+                )
+                if latest_bucket is None or bucket > latest_bucket:
+                    latest_bucket = bucket
+
+        if latest_bucket is not None:
+            await self._flush_ready(latest_bucket)
+        await self._save_checkpoint()
+
+    async def drain_queue(self, timeout_seconds: float | None = 10.0) -> None:
+        """Wait until all currently queued journal records have been staged."""
+        if self._materializer_error is not None:
+            raise RuntimeError(
+                f"Materializer worker failed: {self._materializer_error}"
+            ) from self._materializer_error
+        if self._queue._unfinished_tasks == 0:
+            return
+        self._ensure_materializer_task()
+        if timeout_seconds is not None:
+            async with asyncio.timeout(timeout_seconds):
+                await self._queue.join()
+        else:
+            await self._queue.join()
+        if self._materializer_error is not None:
+            raise RuntimeError(
+                f"Materializer worker failed: {self._materializer_error}"
+            ) from self._materializer_error
+
     async def initialize(self) -> None:
         """Load the checkpoint and make every pending journal/spool row durable."""
 
         if self._initialized:
+            self._ensure_materializer_task()
             return
         checkpoint = await asyncio.to_thread(
             self._checkpoint_store.load,
@@ -200,34 +321,53 @@ class ResearchStateCollector:
         ):
             self._active_stream_id = hub_records[0].collection_batch.stream_id
 
-        pending_sequences = [
-            record.collection_batch.sequence
-            for record in hub_records
-            if record.collection_batch.stream_id == self._active_stream_id
-        ]
+        pending_sequences = sorted(
+            set(
+                record.collection_batch.sequence
+                for record in hub_records
+                if record.collection_batch.stream_id == self._active_stream_id
+            )
+        )
         if pending_sequences:
+            for i in range(len(pending_sequences) - 1):
+                if pending_sequences[i + 1] != pending_sequences[i] + 1:
+                    raise CollectorSequenceGap(
+                        "recovered journal has sequence gap: "
+                        f"{pending_sequences[i]} -> {pending_sequences[i + 1]}"
+                    )
             if self._last_seen_sequence is None:
-                self._sequence_baseline = min(pending_sequences) - 1
-                self._last_seen_sequence = max(pending_sequences)
+                self._sequence_baseline = pending_sequences[0] - 1
+                self._last_seen_sequence = pending_sequences[-1]
             else:
                 self._last_seen_sequence = max(
                     self._last_seen_sequence,
-                    max(pending_sequences),
+                    pending_sequences[-1],
                 )
 
         for record in recovered:
-            self._validate_collection_batch(record.collection_batch)
-            self._observe_received_states(
-                record.collection_batch.states,
-                source_kind=record.collection_batch.source_kind,
-            )
+            if record.receipt.is_empty or not record.collection_batch.states:
+                if record.collection_batch.environment != self._config.environment:
+                    raise CollectorStateConflict(
+                        "collector environment mismatch: "
+                        f"{record.collection_batch.environment} != "
+                        f"{self._config.environment}"
+                    )
+            else:
+                self._validate_collection_batch(record.collection_batch)
+                self._observe_received_states(
+                    record.collection_batch.states,
+                    source_kind=record.collection_batch.source_kind,
+                )
 
+        self._ensure_capacity()
         if recovered:
             await self._flush_all_buffers()
         else:
             await self._save_checkpoint()
+
         self._set_source_cursor_from_checkpoint()
         self._initialized = True
+        self._ensure_materializer_task()
         log.info(
             "research_collector_initialized",
             environment=self._config.environment,
@@ -241,10 +381,18 @@ class ResearchStateCollector:
                 last_sequence=self._checkpoint.last_sequence,
             )
 
+
     async def ingest(self, collection_batch: CollectionBatch) -> CollectionReceipt:
-        """Validate, select, journal, and durably stage one canonical batch."""
+        """Validate, select, journal, and enqueue batch for materialization."""
 
         await self.initialize()
+        if self._materializer_error is not None:
+            raise RuntimeError(
+                f"Materializer worker failed: {self._materializer_error}"
+            ) from self._materializer_error
+        if self._stopping:
+            raise CollectorPaused("Collector is stopping")
+
         self._validate_collection_batch(collection_batch)
         if collection_batch.source_kind is SourceKind.HUB:
             if collection_batch.sequence <= 0:
@@ -273,6 +421,18 @@ class ResearchStateCollector:
             if state.symbol in selection.by_symbol
         )
 
+        # Check queue backpressure before accepting batch into journal
+        if self._queue.full():
+            start_wait = time.monotonic()
+            timeout = float(self._config.late_tolerance_seconds or 10.0)
+            while self._queue.full():
+                if time.monotonic() - start_wait >= timeout:
+                    raise CollectorPaused(
+                        "Materializer queue backpressure: queue reached "
+                        f"maxsize={self._queue.maxsize}"
+                    )
+                await asyncio.sleep(0.02)
+
         self._ensure_capacity()
         receipt = await asyncio.to_thread(
             self._journal.accept,
@@ -283,40 +443,31 @@ class ResearchStateCollector:
         if collection_batch.source_kind is SourceKind.HUB:
             self._last_seen_sequence = collection_batch.sequence
 
-        if not selected_states:
-            record = self._journal.get_record(receipt)
-            if record is not None:
-                await asyncio.to_thread(self._materializer.stage_record, record)
-            latest_bucket = max(state.bucket_start for state in collection_batch.states)
-            flush_result = await self._flush_ready(latest_bucket)
-            await self._save_checkpoint()
-            return _receipt_for_empty_selection(
-                collection_batch,
-                flush_result=flush_result,
-            )
-
-        record = self._journal.get_record(receipt)
-        duplicate_rows = 0
-        if record is not None:
-            append_result = await asyncio.to_thread(
-                self._materializer.stage_record,
-                record,
-            )
-            if append_result is not None:
-                duplicate_rows = append_result.duplicate_rows
-
         self._selected_rows += len(selected_states)
-        self._duplicate_rows += duplicate_rows
+        record = self._journal.get_record(receipt)
+        if record is not None:
+            try:
+                self._queue.put_nowait(record)
+            except asyncio.QueueFull as exc:
+                raise CollectorPaused(
+                    "Materializer queue backpressure: queue reached "
+                    f"maxsize={self._queue.maxsize}"
+                ) from exc
+            self._ensure_materializer_task()
 
-        latest_bucket = max(state.bucket_start for state in selected_states)
-        flush_result = await self._flush_ready(latest_bucket)
-        await self._save_checkpoint()
-        return _receipt_for_ingested_batch(
-            collection_batch,
+        self._publish_health()
+        return CollectionReceipt(
+            source_kind=collection_batch.source_kind,
+            sequence=(
+                collection_batch.sequence
+                if collection_batch.source_kind is SourceKind.HUB
+                else None
+            ),
             selected_rows=len(selected_states),
-            duplicate_rows=duplicate_rows,
-            flush_result=flush_result,
+            skipped_rows=len(collection_batch.states) - len(selected_states),
+            durable_receipt=receipt,
         )
+
 
     async def run(self) -> None:
         """Run until stopped, recovering replay gaps from PostgreSQL."""
@@ -351,6 +502,18 @@ class ResearchStateCollector:
             stop()
         if not self._initialized:
             return
+        if self._materializer_task is not None and not self._materializer_task.done():
+            await self._queue.put(None)
+            try:
+                async with asyncio.timeout(10.0):
+                    await self._materializer_task
+            except (TimeoutError, asyncio.CancelledError, Exception):
+                self._materializer_task.cancel()
+                try:
+                    await self._materializer_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
         try:
             await self._flush_all_buffers()
         except CollectorPaused:
@@ -363,6 +526,11 @@ class ResearchStateCollector:
 
     async def health(self) -> CollectorHealth:
         await self.initialize()
+        if self._queue._unfinished_tasks > 0:
+            try:
+                await self.drain_queue(timeout_seconds=2.0)
+            except (TimeoutError, RuntimeError):
+                pass
         snapshot = await asyncio.to_thread(self._capacity.snapshot)
         self._capacity_snapshot = snapshot
         self._last_capacity_refresh = time.monotonic()
@@ -391,7 +559,9 @@ class ResearchStateCollector:
             last_market_state_gap_start=self._last_market_state_gap_start,
             last_market_state_gap_end=self._last_market_state_gap_end,
             last_market_state_gap_buckets=self._last_market_state_gap_buckets,
+            queued_batches=self._queue.qsize(),
         )
+
 
     async def _consume_source_once(self) -> None:
         iterator = self._source.batches()
@@ -522,10 +692,14 @@ class ResearchStateCollector:
 
     async def _flush_all_buffers(self) -> MaterializerFlushResult:
         self._ensure_capacity()
+        if self._materializer_task is not None and not self._materializer_task.done():
+            if self._queue._unfinished_tasks > 0:
+                await self.drain_queue(timeout_seconds=10.0)
         result = await asyncio.to_thread(self._materializer.flush_all)
         await self._apply_flush_result(result)
         await self._save_checkpoint()
         return result
+
 
     async def _apply_flush_result(self, result: MaterializerFlushResult) -> None:
         if (
@@ -604,6 +778,17 @@ class ResearchStateCollector:
                 "last_sequence": None
                 if checkpoint is None
                 else checkpoint.last_sequence,
+                "accepted_sequence": (
+                    self._journal.accepted_sequence
+                    if self._journal is not None
+                    else None
+                ),
+                "materialized_sequence": (
+                    self._journal.materialized_sequence
+                    if self._journal is not None
+                    else None
+                ),
+                "queued_batches": self._queue.qsize(),
                 "updated_at": (
                     None
                     if checkpoint is None or checkpoint.updated_at is None
@@ -657,6 +842,8 @@ class ResearchStateCollector:
             return
         if stream_id == self._active_stream_id:
             return
+        if self._queue._unfinished_tasks > 0:
+            await self.drain_queue(timeout_seconds=10.0)
         await self._flush_all_buffers()
         self._active_stream_id = stream_id
         self._journal.set_active_stream_id(stream_id)
@@ -669,6 +856,7 @@ class ResearchStateCollector:
             accepted_sequence=None,
             materialized_sequence=None,
         )
+
         self._journal.set_cursors(
             accepted_sequence=None,
             materialized_sequence=None,
