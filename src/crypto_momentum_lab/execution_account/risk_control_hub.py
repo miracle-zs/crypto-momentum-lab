@@ -594,7 +594,7 @@ class WebSocketRiskControlSource:
                     if ready.get("stream_reset") is True:
                         self._prepare_recovery("risk_control_stream_reset")
                     self._notify_connection_change(True, None)
-                    unavailable_since = time.monotonic()
+                    unavailable_since = None
                     reconnect_attempt = 0
                     receive_queue: asyncio.Queue[_QueueItem] = asyncio.Queue(
                         maxsize=_CLIENT_RECEIVE_QUEUE_SIZE
@@ -620,6 +620,7 @@ class WebSocketRiskControlSource:
                                 strategy_name=self._strategy_name,
                                 session_id=self._session_id,
                             ):
+                                unavailable_since = None
                                 yield event
                     finally:
                         if not reader_task.done():
@@ -637,7 +638,10 @@ class WebSocketRiskControlSource:
                 RiskControlHubError,
             ) as error:
                 self._notify_connection_change(False, type(error).__name__)
-                if time.monotonic() - unavailable_since >= (
+                now = time.monotonic()
+                if unavailable_since is None:
+                    unavailable_since = now
+                if now - unavailable_since >= (
                     self._config.unavailable_timeout_seconds
                 ):
                     raise RiskControlHubError(

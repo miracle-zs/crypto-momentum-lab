@@ -1,9 +1,11 @@
 import asyncio
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
 
+import crypto_momentum_lab.execution_account.risk_control_hub as risk_control_hub_module
 from crypto_momentum_lab.execution_account.risk_control_hub import (
     RiskControlAction,
     RiskControlEvent,
@@ -184,3 +186,133 @@ def test_source_recovers_after_sequence_gap() -> None:
         source._materialize(gap)
     assert source.metrics.recovery_count == 1
     assert source.metrics.last_recovery_reason == "risk_control_sequence_gap"
+
+
+async def test_risk_control_source_reconnects_after_long_healthy_run(
+    monkeypatch,
+) -> None:
+    current_time = 1000.0
+
+    def fake_monotonic() -> float:
+        return current_time
+
+    monkeypatch.setattr(risk_control_hub_module.time, "monotonic", fake_monotonic)
+
+    first = replace(_event(event_id="cmd-1"), sequence=1, stream_epoch="epoch-1")
+    second = replace(_event(event_id="cmd-2"), sequence=2, stream_epoch="epoch-1")
+
+    connections = 0
+
+    class FakeFlappingConnection:
+        def __init__(self) -> None:
+            nonlocal connections
+            connections += 1
+            self._conn_id = connections
+            self._messages = [
+                json.dumps(
+                    {
+                        "type": "risk_control_hub_ready",
+                        "schema_version": 1,
+                        "environment": "live",
+                        "account_label": "primary",
+                        "replay_available": True,
+                        "stream_epoch": "epoch-1",
+                    }
+                )
+            ]
+            if self._conn_id == 1:
+                self._messages.append(encode_risk_control_event(first))
+            else:
+                self._messages.append(encode_risk_control_event(second))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, _message):
+            return None
+
+        async def recv(self):
+            if self._messages:
+                return self._messages.pop(0)
+            if self._conn_id == 1:
+                raise OSError("simulated short network flap")
+            await asyncio.sleep(3600)
+
+    monkeypatch.setattr(
+        risk_control_hub_module,
+        "connect",
+        lambda *_args, **_kwargs: FakeFlappingConnection(),
+    )
+
+    source = WebSocketRiskControlSource(
+        url="ws://unused",
+        environment="live",
+        account_label="primary",
+        consumer_id="test",
+        strategy_name="orderflow_impulse",
+        session_id="live-primary-v1",
+        config=RiskControlHubConfig(
+            reconnect_delays=(0,),
+            unavailable_timeout_seconds=60,
+        ),
+    )
+
+    events = source.__aiter__()
+    event1 = await anext(events)
+    assert event1.event_id == "cmd-1"
+
+    current_time += 300.0
+
+    event2 = await anext(events)
+    assert event2.event_id == "cmd-2"
+    assert connections == 2
+
+    source.stop()
+    await events.aclose()
+
+
+async def test_risk_control_source_raises_after_continuous_unavailable_timeout(
+    monkeypatch,
+) -> None:
+    current_time = 1000.0
+
+    def fake_monotonic() -> float:
+        return current_time
+
+    monkeypatch.setattr(risk_control_hub_module.time, "monotonic", fake_monotonic)
+
+    class FailingConnection:
+        async def __aenter__(self):
+            nonlocal current_time
+            current_time += 20.0
+            raise ConnectionRefusedError("Hub down")
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(
+        risk_control_hub_module,
+        "connect",
+        lambda *_args, **_kwargs: FailingConnection(),
+    )
+
+    source = WebSocketRiskControlSource(
+        url="ws://unused",
+        environment="live",
+        account_label="primary",
+        consumer_id="test",
+        config=RiskControlHubConfig(
+            reconnect_delays=(0,),
+            unavailable_timeout_seconds=60,
+        ),
+    )
+
+    with pytest.raises(
+        risk_control_hub_module.RiskControlHubError,
+        match="risk-control hub unavailable beyond timeout",
+    ):
+        await anext(source.__aiter__())
+

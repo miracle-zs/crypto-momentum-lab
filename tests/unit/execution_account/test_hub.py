@@ -703,3 +703,128 @@ async def test_account_event_source_reader_prefetches_while_consumer_is_busy(
     finally:
         source.stop()
         await iterator.aclose()
+
+
+async def test_account_event_source_reconnects_after_long_healthy_run(
+    monkeypatch,
+) -> None:
+    current_time = 1000.0
+
+    def fake_monotonic() -> float:
+        return current_time
+
+    monkeypatch.setattr(hub_module.time, "monotonic", fake_monotonic)
+
+    first = _event()
+    second = replace(first, event_id="event-2", client_order_id="live-entry-2")
+
+    connections = 0
+
+    class FakeFlappingConnection:
+        def __init__(self) -> None:
+            nonlocal connections
+            connections += 1
+            self._conn_id = connections
+            self._messages = [
+                json.dumps(
+                    {
+                        "type": "account_event_hub_ready",
+                        "schema_version": 1,
+                        "environment": "live",
+                        "account_label": "primary",
+                    }
+                )
+            ]
+            if self._conn_id == 1:
+                self._messages.append(encode_account_event(first, sequence=1))
+            else:
+                self._messages.append(encode_account_event(second, sequence=2))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, _message):
+            return None
+
+        async def recv(self):
+            if self._messages:
+                return self._messages.pop(0)
+            if self._conn_id == 1:
+                raise OSError("simulated short network flap")
+            await asyncio.sleep(3600)
+
+    monkeypatch.setattr(
+        hub_module,
+        "connect",
+        lambda *_args, **_kwargs: FakeFlappingConnection(),
+    )
+
+    source = WebSocketAccountEventSource(
+        url="ws://unused",
+        environment="live",
+        account_label="primary",
+        consumer_id="test",
+        config=AccountEventHubConfig(
+            reconnect_delays=(0,),
+            unavailable_timeout_seconds=120,
+        ),
+    )
+
+    events = source.__aiter__()
+    event1 = await anext(events)
+    assert event1.event_id == "event-1"
+
+    current_time += 300.0
+
+    event2 = await anext(events)
+    assert event2.event_id == "event-2"
+    assert connections == 2
+
+    source.stop()
+    await events.aclose()
+
+
+async def test_account_event_source_raises_after_continuous_unavailable_timeout(
+    monkeypatch,
+) -> None:
+    current_time = 1000.0
+
+    def fake_monotonic() -> float:
+        return current_time
+
+    monkeypatch.setattr(hub_module.time, "monotonic", fake_monotonic)
+
+    class FailingConnection:
+        async def __aenter__(self):
+            nonlocal current_time
+            current_time += 20.0
+            raise ConnectionRefusedError("Hub down")
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(
+        hub_module,
+        "connect",
+        lambda *_args, **_kwargs: FailingConnection(),
+    )
+
+    source = WebSocketAccountEventSource(
+        url="ws://unused",
+        environment="live",
+        account_label="primary",
+        consumer_id="test",
+        config=AccountEventHubConfig(
+            reconnect_delays=(0,),
+            unavailable_timeout_seconds=60,
+        ),
+    )
+
+    with pytest.raises(
+        hub_module.AccountEventHubError,
+        match="account-event hub unavailable beyond timeout",
+    ):
+        await anext(source.__aiter__())

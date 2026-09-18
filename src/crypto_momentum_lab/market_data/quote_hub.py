@@ -404,7 +404,7 @@ class WebSocketMarketQuoteSource:
                             "market quote hub environment mismatch"
                         )
                     self._notify_connection_change(True, None)
-                    unavailable_since = time.monotonic()
+                    unavailable_since = None
                     reconnect_attempt = 0
                     latest_quotes: dict[str, RealtimeMarketQuote] = {}
                     quote_available = asyncio.Event()
@@ -423,6 +423,7 @@ class WebSocketMarketQuoteSource:
                         while not self._stopping:
                             while latest_quotes:
                                 symbol = next(iter(latest_quotes))
+                                unavailable_since = None
                                 yield latest_quotes.pop(symbol)
                             if reader_error[0] is not None:
                                 raise reader_error[0]
@@ -447,8 +448,11 @@ class WebSocketMarketQuoteSource:
                     False,
                     f"{type(error).__name__}: {error}",
                 )
+                now = time.monotonic()
+                if unavailable_since is None:
+                    unavailable_since = now
                 if (
-                    time.monotonic() - unavailable_since
+                    now - unavailable_since
                     >= self._config.unavailable_timeout_seconds
                 ):
                     raise MarketQuoteHubError(
@@ -584,7 +588,7 @@ class WebSocketMarketQuoteVolumeSource:
                         raise MarketQuoteHubProtocolError(
                             "market quote volume environment mismatch"
                         )
-                    unavailable_since = time.monotonic()
+                    unavailable_since = None
                     reconnect_attempt = 0
                     latest: dict[str, QuoteVolume24hSnapshot] = {}
                     available = asyncio.Event()
@@ -602,6 +606,7 @@ class WebSocketMarketQuoteVolumeSource:
                         while not self._stopping:
                             while latest:
                                 symbol = next(iter(latest))
+                                unavailable_since = None
                                 yield latest.pop(symbol)
                             if reader_error[0] is not None:
                                 raise reader_error[0]
@@ -622,8 +627,11 @@ class WebSocketMarketQuoteVolumeSource:
                 TimeoutError,
                 MarketQuoteHubError,
             ) as error:
+                now = time.monotonic()
+                if unavailable_since is None:
+                    unavailable_since = now
                 if (
-                    time.monotonic() - unavailable_since
+                    now - unavailable_since
                     >= self._config.unavailable_timeout_seconds
                 ):
                     raise MarketQuoteHubError(

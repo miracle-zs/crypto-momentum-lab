@@ -203,3 +203,136 @@ def _trade(offset_seconds: int, *, sequence: int, price: str) -> RawEnvelope:
             "m": False,
         },
     )
+
+
+async def test_price_stream_source_reconnects_after_long_healthy_run(
+    monkeypatch,
+) -> None:
+    current_time = 1000.0
+
+    def fake_monotonic() -> float:
+        return current_time
+
+    monkeypatch.setattr(quote_hub_module.time, "monotonic", fake_monotonic)
+
+    first = RealtimeMarketQuote(
+        exchange="binance-usdm",
+        environment="research",
+        symbol="BTCUSDT",
+        event_at=datetime(2026, 8, 23, 0, 0, tzinfo=UTC),
+        received_at=datetime(2026, 8, 23, 0, 0, tzinfo=UTC),
+        bid_price=Decimal("100"),
+        ask_price=Decimal("101"),
+    )
+    second = replace_quote(first, bid_price=Decimal("102"), ask_price=Decimal("103"))
+
+    connections = 0
+
+    class FakeFlappingConnection:
+        def __init__(self) -> None:
+            nonlocal connections
+            connections += 1
+            self._conn_id = connections
+            self._messages = [
+                json.dumps(
+                    {
+                        "type": "market_quote_hub_ready",
+                        "schema_version": 1,
+                        "environment": "research",
+                    }
+                )
+            ]
+            if self._conn_id == 1:
+                self._messages.append(encode_market_quote(first))
+            else:
+                self._messages.append(encode_market_quote(second))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, _message):
+            return None
+
+        async def recv(self):
+            if self._messages:
+                return self._messages.pop(0)
+            if self._conn_id == 1:
+                raise OSError("simulated short network flap")
+            await asyncio.sleep(3600)
+
+    monkeypatch.setattr(
+        quote_hub_module,
+        "connect",
+        lambda *_args, **_kwargs: FakeFlappingConnection(),
+    )
+
+    source = WebSocketMarketQuoteSource(
+        url="ws://unused",
+        environment="research",
+        consumer_id="test",
+        config=MarketQuoteHubConfig(
+            reconnect_delays=(0,),
+            unavailable_timeout_seconds=60,
+        ),
+    )
+
+    quotes = source.__aiter__()
+    quote1 = await anext(quotes)
+    assert quote1.bid_price == Decimal("100")
+
+    current_time += 300.0
+
+    quote2 = await anext(quotes)
+    assert quote2.bid_price == Decimal("102")
+    assert connections == 2
+
+    source.stop()
+    await quotes.aclose()
+
+
+async def test_price_stream_source_raises_after_continuous_unavailable_timeout(
+    monkeypatch,
+) -> None:
+    import pytest
+
+    current_time = 1000.0
+
+    def fake_monotonic() -> float:
+        return current_time
+
+    monkeypatch.setattr(quote_hub_module.time, "monotonic", fake_monotonic)
+
+    class FailingConnection:
+        async def __aenter__(self):
+            nonlocal current_time
+            current_time += 20.0
+            raise ConnectionRefusedError("Hub down")
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(
+        quote_hub_module,
+        "connect",
+        lambda *_args, **_kwargs: FailingConnection(),
+    )
+
+    source = WebSocketMarketQuoteSource(
+        url="ws://unused",
+        environment="research",
+        consumer_id="test",
+        config=MarketQuoteHubConfig(
+            reconnect_delays=(0,),
+            unavailable_timeout_seconds=60,
+        ),
+    )
+
+    with pytest.raises(
+        quote_hub_module.MarketQuoteHubError,
+        match="market quote hub unavailable for 60.0 seconds",
+    ):
+        await anext(source.__aiter__())
+

@@ -788,7 +788,7 @@ class WebSocketAccountEventSource:
         return self._iterate()
 
     async def _iterate(self) -> AsyncIterator[AccountEvent]:
-        unavailable_since = time.monotonic()
+        unavailable_since: float | None = time.monotonic()
         reconnect_attempt = 0
         while not self._stopping:
             try:
@@ -850,7 +850,7 @@ class WebSocketAccountEventSource:
                             self._prepare_full_snapshot_recovery(
                                 "account_event_full_snapshot_recovery"
                             )
-                    unavailable_since = time.monotonic()
+                    unavailable_since = None
                     reconnect_attempt = 0
                     receive_queue: asyncio.Queue[_AccountEventQueueItem] = (
                         asyncio.Queue(maxsize=_CLIENT_RECEIVE_QUEUE_SIZE)
@@ -876,6 +876,7 @@ class WebSocketAccountEventSource:
                                 )
                             materialized = self._materialize_event(item)
                             if materialized is not None:
+                                unavailable_since = None
                                 yield materialized
                     finally:
                         if not reader_task.done():
@@ -884,13 +885,18 @@ class WebSocketAccountEventSource:
                             reader_task,
                             return_exceptions=True,
                         )
+            except asyncio.CancelledError:
+                raise
             except (
                 ConnectionClosed,
                 OSError,
                 TimeoutError,
                 AccountEventHubError,
             ) as error:
-                if time.monotonic() - unavailable_since >= (
+                now = time.monotonic()
+                if unavailable_since is None:
+                    unavailable_since = now
+                if now - unavailable_since >= (
                     self._config.unavailable_timeout_seconds
                 ):
                     raise AccountEventHubError(
