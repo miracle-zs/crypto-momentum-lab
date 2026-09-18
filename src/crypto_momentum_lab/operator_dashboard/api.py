@@ -328,7 +328,14 @@ def create_dashboard_app(
 
     @dashboard.get("/", include_in_schema=False)
     async def index() -> FileResponse:
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(
+            STATIC_DIR / "index.html",
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
 
     @dashboard.get("/api/health", dependencies=[Depends(require_dashboard_auth)])
     async def health() -> dict[str, str]:

@@ -1,4 +1,4 @@
-import { DISPLAY_TIME_ZONE_LABEL } from "../dashboard-config.js";
+import { DISPLAY_TIME_ZONE_LABEL } from "../dashboard-config.js?v=20260918-perf-v3";
 import {
   dayTime,
   esc,
@@ -85,10 +85,19 @@ export function renderPerformance(data) {
 
   // Decision SLO summary
   let maxDecisionP95 = null;
-  const phaseLatencies = Object.entries(decisionSlo.phase_latency || {});
+  const rawPhaseLatencies = decisionSlo.phase_latency && typeof decisionSlo.phase_latency === "object"
+    ? decisionSlo.phase_latency
+    : {};
+  const phaseLatencies = Object.entries(rawPhaseLatencies).filter(
+    ([_, v]) => v != null && typeof v === "object",
+  );
   if (phaseLatencies.length) {
-    const p95s = phaseLatencies.map(([_, v]) => Number(v.p95_ms) || 0);
-    maxDecisionP95 = Math.max(...p95s);
+    const p95s = phaseLatencies
+      .map(([_, v]) => Number(v.p95_ms))
+      .filter((n) => Number.isFinite(n));
+    if (p95s.length) {
+      maxDecisionP95 = Math.max(...p95s);
+    }
   }
   const decisionP95Text = maxDecisionP95 != null
     ? `${maxDecisionP95.toFixed(1)} ms`
@@ -116,11 +125,12 @@ export function renderPerformance(data) {
         <div class="empty" style="padding: 12px 0;"><span>等待周期触发</span><small>分配在 ${meta.targetSec} 秒批次落盘</small></div>
       </div>`;
     }
-    const age = (Date.now() - new Date(latest.occurred_at).getTime()) / 1000;
-    const totalMs = latest.total_ms != null ? `${Number(latest.total_ms).toFixed(1)} ms` : "—";
-    const loopLag = latest.event_loop_lag_ms != null ? `${Number(latest.event_loop_lag_ms).toFixed(1)}ms` : "—";
-    const acquireMs = latest.pool_acquire_ms != null ? `${Number(latest.pool_acquire_ms).toFixed(1)}ms` : "—";
-    const sqlMs = latest.sql_execute_ms != null ? `${Number(latest.sql_execute_ms).toFixed(1)}ms` : "—";
+    const occurredTime = latest.occurred_at ? new Date(latest.occurred_at).getTime() : NaN;
+    const age = Number.isFinite(occurredTime) ? (Date.now() - occurredTime) / 1000 : null;
+    const totalMs = Number.isFinite(Number(latest.total_ms)) ? `${Number(latest.total_ms).toFixed(1)} ms` : "—";
+    const loopLag = Number.isFinite(Number(latest.event_loop_lag_ms)) ? `${Number(latest.event_loop_lag_ms).toFixed(1)}ms` : "—";
+    const acquireMs = Number.isFinite(Number(latest.pool_acquire_ms)) ? `${Number(latest.pool_acquire_ms).toFixed(1)}ms` : "—";
+    const sqlMs = Number.isFinite(Number(latest.sql_execute_ms)) ? `${Number(latest.sql_execute_ms).toFixed(1)}ms` : "—";
     const connType = latest.is_new_connection ? "新建物理连接" : "复用连接池";
 
     return `<div class="performance-stagger-card active-phase">
@@ -152,19 +162,19 @@ export function renderPerformance(data) {
     return {
       transition,
       stageTitle,
-      sample_count: item.sample_count,
-      p50_ms: item.p50_ms,
-      p95_ms: item.p95_ms,
-      max_ms: item.max_ms,
+      sample_count: item?.sample_count ?? 0,
+      p50_ms: item?.p50_ms,
+      p95_ms: item?.p95_ms,
+      max_ms: item?.max_ms,
     };
   });
 
   const sloTable = dataTable([
     { label: "决策与执行阶段", key: "stageTitle" },
     { label: "样本数", value: (row) => num(row.sample_count, 0), align: "right", cls: "num" },
-    { label: "P50 时延", value: (row) => `${Number(row.p50_ms).toFixed(2)} ms`, align: "right", cls: "num" },
-    { label: "P95 时延", value: (row) => `${Number(row.p95_ms).toFixed(2)} ms`, align: "right", cls: "num pos" },
-    { label: "Max 峰值", value: (row) => `${Number(row.max_ms).toFixed(2)} ms`, align: "right", cls: "num muted" },
+    { label: "P50 时延", value: (row) => Number.isFinite(Number(row.p50_ms)) ? `${Number(row.p50_ms).toFixed(2)} ms` : "—", align: "right", cls: "num" },
+    { label: "P95 时延", value: (row) => Number.isFinite(Number(row.p95_ms)) ? `${Number(row.p95_ms).toFixed(2)} ms` : "—", align: "right", cls: "num pos" },
+    { label: "Max 峰值", value: (row) => Number.isFinite(Number(row.max_ms)) ? `${Number(row.max_ms).toFixed(2)} ms` : "—", align: "right", cls: "num muted" },
   ], sloRows, { emptyText: "暂无决策时延样本 (窗口内无触发订单或全流程处于冷态)" });
 
   // 4. Checkpoint Recent History Table

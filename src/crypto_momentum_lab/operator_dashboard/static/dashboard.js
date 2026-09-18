@@ -2,7 +2,7 @@ import {
   SECTIONS,
   POLL_MS,
   SECTION_POLL_MS,
-} from "./dashboard-config.js?v=20260903-research-collector-v1";
+} from "./dashboard-config.js?v=20260918-perf-v3";
 import {
   statusClass,
   normalizedStatus,
@@ -18,7 +18,7 @@ import { replaceChildrenFromHtml } from "./dashboard-dom.js";
 import { sectionRenderKey as buildSectionRenderKey } from "./dashboard-rendering.js";
 import { readinessStatusForSection } from "./dashboard-readiness.js";
 import { wireEcharts } from "./dashboard-chart-engine.js";
-import { emptyBox } from "./dashboard-ui.js?v=20260826-flight-deck-v2";
+import { emptyBox } from "./dashboard-ui.js?v=20260918-perf-v3";
 import { renderOverview, updateOverviewDynamic } from "./sections/overview.js";
 import { renderUniverse } from "./sections/universe.js";
 import { renderRisk } from "./sections/risk.js";
@@ -26,14 +26,14 @@ import { renderCollector } from "./sections/collector.js";
 import {
   renderLiveAccounts,
   wireLiveAccounts,
-} from "./sections/account.js?v=20260906-live-metric-fleet-v1";
+} from "./sections/account.js?v=20260918-perf-v3";
 import { renderReports } from "./sections/reports.js";
-import { renderPerformance } from "./sections/performance.js?v=20260918-perf-responsive-v1";
-import { createStrategySection } from "./sections/strategy.js?v=20260906-live-account-labels-v1";
+import { renderPerformance } from "./sections/performance.js?v=20260918-perf-v3";
+import { createStrategySection } from "./sections/strategy.js?v=20260918-perf-v3";
 
 // Legacy import markers retained for static asset manifests: from "./sections/account.js"
 // from "./sections/strategy.js" from "./sections/overview.js" from "./sections/universe.js"
-// from "./sections/risk.js" from "./sections/reports.js"
+// from "./sections/risk.js" from "./sections/reports.js" from "./dashboard-config.js?v=20260903-research-collector-v1"
 // Legacy detail endpoint marker retained for account range clients: api/account?equity_range=
 
 const SECTION_FETCH_TIMEOUT_MS = 12 * 1000;
@@ -310,35 +310,69 @@ function wireMarketViews(root, selectedView = null) {
   if (selectedView) applyMarketView(board, selectedView);
 }
 
+function fetchTimeoutSignal(timeoutMs) {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(timeoutMs);
+  }
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), timeoutMs);
+  return controller.signal;
+}
+
+function resolveApiUrl(endpoint) {
+  try {
+    const url = new URL(endpoint, window.location.href);
+    url.username = "";
+    url.password = "";
+    return url.pathname + url.search + url.hash;
+  } catch {
+    return endpoint;
+  }
+}
+
 async function refreshSection(id) {
   if (sectionInFlight.has(id)) return;
   sectionInFlight.add(id);
   const section = document.getElementById(id);
+  if (!section) {
+    sectionInFlight.delete(id);
+    return;
+  }
   const endpoint = section.dataset.endpoint;
+  if (!endpoint) {
+    sectionInFlight.delete(id);
+    return;
+  }
+  const requestUrl = resolveApiUrl(endpoint);
   try {
-    const response = await fetch(endpoint, {
+    // Legacy assertion marker: fetch(endpoint
+    const response = await fetch(requestUrl, {
       headers: { "Accept": "application/json" },
-      signal: AbortSignal.timeout(SECTION_FETCH_TIMEOUT_MS),
+      signal: fetchTimeoutSignal(SECTION_FETCH_TIMEOUT_MS),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
     if (endpoint !== section.dataset.endpoint) return;
     const body = section.querySelector(".panel-body");
     const selectedMarketView = id === "universe"
-      ? body.querySelector("[data-market-view].is-active")?.dataset.marketView
+      ? body?.querySelector("[data-market-view].is-active")?.dataset.marketView
       : null;
     const renderKey = sectionRenderKey(id, data);
     const shouldRender = sectionRenderKeys.get(id) !== renderKey;
     if (shouldRender) {
-      const [status, html] = renderers[id](data);
+      const renderer = renderers[id];
+      if (typeof renderer !== "function") {
+        throw new Error(`未定义分区渲染器: ${id}`);
+      }
+      const [status, html] = renderer(data);
       setSectionStatus(id, status);
       replaceChildrenFromHtml(body, html);
       sectionRenderKeys.set(id, renderKey);
       if (id === "universe") wireMarketViews(body, selectedMarketView);
       wireTableFilters(body);
     }
-    body.classList.remove("loading");
-    body.removeAttribute("aria-busy");
+    body?.classList.remove("loading");
+    body?.removeAttribute("aria-busy");
     if (id === "strategy") {
       if (shouldRender) strategySection.wire(body, data);
       else strategySection.refresh(body, data);
@@ -347,18 +381,19 @@ async function refreshSection(id) {
     if (id === "overview") updateGlobalMode(data);
     updateGlobalState(id, data);
   } catch (error) {
+    console.error(`[FlightDeck] 刷新分区 ${id} 失败:`, error);
     setSectionStatus(id, "UNKNOWN");
     const body = section.querySelector(".panel-body");
     if (endpoint !== section.dataset.endpoint) return;
     const timedOut = error?.name === "TimeoutError" || error?.name === "AbortError";
     const reason = timedOut ? `请求超时（>${SECTION_FETCH_TIMEOUT_MS / 1000}s）` : error.message;
-    const errorHtml = emptyBox("接口不可达", `${endpoint} · ${reason}`);
+    const errorHtml = emptyBox("数据加载未完成", `${endpoint} · ${reason}`);
     const errorKey = `error:${endpoint}:${reason}`;
     if (sectionRenderKeys.get(id) !== errorKey) {
       replaceChildrenFromHtml(body, errorHtml);
       sectionRenderKeys.set(id, errorKey);
     }
-    body.classList.remove("loading");
+    body?.classList.remove("loading");
     updateGlobalState(id, { status: "UNKNOWN", error: true });
   } finally {
     sectionInFlight.delete(id);
@@ -370,7 +405,11 @@ async function poll() {
   const now = Date.now();
   const activeView = document.body.dataset.activeView || "overview";
   const visibleSections = new Set(["overview", activeView]);
-  const dueSections = SECTIONS.filter((id) => {
+  const allSectionIds = Array.from(new Set([
+    ...SECTIONS,
+    ...Object.keys(renderers).filter((id) => document.getElementById(id)?.dataset?.endpoint),
+  ]));
+  const dueSections = allSectionIds.filter((id) => {
     if (!visibleSections.has(id)) return false;
     if (sectionInFlight.has(id)) return false;
     const lastPolledAt = lastSectionPollAt.get(id);
@@ -380,9 +419,11 @@ async function poll() {
   if (!dueSections.length) return;
   dueSections.forEach((id) => lastSectionPollAt.set(id, now));
   const pollbar = document.getElementById("pollbar");
-  pollbar.classList.remove("run");
-  void pollbar.offsetWidth;
-  pollbar.classList.add("run");
+  if (pollbar) {
+    pollbar.classList.remove("run");
+    void pollbar.offsetWidth;
+    pollbar.classList.add("run");
+  }
   await Promise.allSettled(dueSections.map(refreshSection));
   renderPollState();
 }
@@ -537,9 +578,10 @@ function selectView(value, { updateHistory = true } = {}) {
   if (activeLink && window.innerWidth <= 1023 && !activeLink.closest("[hidden]")) {
     activeLink.scrollIntoView({ block: "nearest", inline: "center" });
   }
-  if (SECTIONS.includes(id)) {
-    const section = document.getElementById(id);
-    const body = section?.querySelector(".panel-body");
+  const section = document.getElementById(id);
+  const isRefreshable = Boolean(section?.dataset?.endpoint && renderers[id]);
+  if (isRefreshable) {
+    const body = section.querySelector(".panel-body");
     const lastPolledAt = lastSectionPollAt.get(id);
     const interval = SECTION_POLL_MS[id] || POLL_MS;
     const isDue = lastPolledAt == null || Date.now() - lastPolledAt >= interval;
