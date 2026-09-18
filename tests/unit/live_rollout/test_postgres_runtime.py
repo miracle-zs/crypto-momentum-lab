@@ -27,6 +27,7 @@ from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,
     _classify_live_positions,
     _classify_live_positions_detailed,
+    _load_order_anchor_events,
     _opening_anchors_from_events,
     _OrderAnchorEvent,
     _resolve_strategy_live_state,
@@ -1206,7 +1207,7 @@ def test_legacy_exit_history_does_not_keep_an_old_batch_active() -> None:
     assert unmanaged == frozenset()
     assert len(managed) == 1
     assert [batch.batch_id for batch in managed[0].batches] == [
-        "BTCUSDT:LONG:new-entry"
+        "BTCUSDT:LONG:current-entry"
     ]
     assert managed[0].batches[0].quantity == Decimal("386")
 
@@ -1827,3 +1828,134 @@ def test_opening_anchor_absent_when_symbol_is_flat_in_lookback() -> None:
     )
 
     assert anchors == {}
+
+
+def test_legacy_full_exit_cascades_and_closes_prior_lots_without_ghosts() -> None:
+    """MARSCOIN scenario: a legacy full exit (1674) must close both 839 and 835.
+
+    When a new position (1077) opens 5 days later, the old 835 batch must not
+    reappear as a zombie lot and trigger premature candle timeout exit.
+    """
+    day1 = NOW - timedelta(days=6)
+    day6 = NOW
+
+    orders = [
+        _order(
+            symbol="MARSCOINUSDT",
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("835"),
+            executed_quantity=Decimal("835"),
+            created_at=day1,
+            updated_at=day1,
+            client_order_id="marscoin-entry-1",
+        ),
+        _order(
+            symbol="MARSCOINUSDT",
+            reduce_only=True,
+            side="SELL",
+            quantity=Decimal("835"),
+            executed_quantity=Decimal("0"),
+            state=ExchangeOrderState.CANCELED.value,
+            created_at=day1 + timedelta(minutes=24),
+            updated_at=day1 + timedelta(minutes=24),
+            client_order_id="marscoin-canceled-exit",
+        ),
+        _order(
+            symbol="MARSCOINUSDT",
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("839"),
+            executed_quantity=Decimal("839"),
+            created_at=day1 + timedelta(hours=1),
+            updated_at=day1 + timedelta(hours=1),
+            client_order_id="marscoin-entry-2",
+        ),
+        _order(
+            symbol="MARSCOINUSDT",
+            reduce_only=True,
+            side="SELL",
+            quantity=Decimal("1674"),
+            executed_quantity=Decimal("1674"),
+            created_at=day1 + timedelta(hours=1, minutes=19),
+            updated_at=day1 + timedelta(hours=1, minutes=19),
+            client_order_id="marscoin-full-flatten",
+        ),
+        _order(
+            symbol="MARSCOINUSDT",
+            reduce_only=False,
+            side="BUY",
+            quantity=Decimal("1077"),
+            executed_quantity=Decimal("1077"),
+            created_at=day6,
+            updated_at=day6,
+            client_order_id="marscoin-new-entry",
+        ),
+    ]
+
+    managed, unmanaged = _classify_live_positions(
+        [_position(symbol="MARSCOINUSDT", position_amt=Decimal("1077"))],
+        orders,
+        exit_batch_ids={},
+        legacy_exit_order_ids=frozenset({"marscoin-canceled-exit", "marscoin-full-flatten"}),
+    )
+
+    assert unmanaged == frozenset()
+    assert len(managed) == 1
+    assert managed[0].symbol == "MARSCOINUSDT"
+    assert len(managed[0].batches) == 1
+    assert managed[0].batches[0].batch_id == "MARSCOINUSDT:LONG:marscoin-new-entry"
+    assert managed[0].batches[0].quantity == Decimal("1077")
+    assert managed[0].batches[0].opened_at == day6
+
+
+async def test_load_order_anchor_events_tracks_latest_entry_times() -> None:
+    class DummyScalars:
+        def __init__(self, items):
+            self.items = items
+
+        def all(self):
+            return self.items
+
+    class DummySession:
+        def __init__(self, rows):
+            self.rows = rows
+
+        async def scalars(self, _query):
+            return DummyScalars(self.rows)
+
+    rows = [
+        _order(
+            symbol="BTCUSDT",
+            reduce_only=False,
+            side="BUY",
+            created_at=NOW - timedelta(days=2),
+            executed_quantity=Decimal("1"),
+        ),
+        _order(
+            symbol="BTCUSDT",
+            reduce_only=True,
+            side="SELL",
+            created_at=NOW - timedelta(days=1),
+            executed_quantity=Decimal("1"),
+        ),
+        _order(
+            symbol="BTCUSDT",
+            reduce_only=False,
+            side="BUY",
+            state=ExchangeOrderState.ACKNOWLEDGED.value,
+            created_at=NOW - timedelta(minutes=1),
+            executed_quantity=Decimal("0"),
+        ),
+    ]
+    session = DummySession(rows)
+    events, latest_entry_times = await _load_order_anchor_events(
+        session,  # type: ignore[arg-type]
+        run_id="run-1",
+        active_symbols=("BTCUSDT",),
+        lookback_start=NOW - timedelta(days=7),
+    )
+    assert latest_entry_times == {"BTCUSDT": NOW - timedelta(minutes=1)}
+    assert _opening_anchors_from_events(events, ("BTCUSDT",)) == {}
+
+

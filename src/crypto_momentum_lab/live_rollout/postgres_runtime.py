@@ -150,7 +150,7 @@ async def _load_order_anchor_events(
     run_id: str,
     active_symbols: Sequence[str],
     lookback_start: datetime,
-) -> tuple[_OrderAnchorEvent, ...]:
+) -> tuple[tuple[_OrderAnchorEvent, ...], Mapping[str, datetime]]:
     rows = (
         await session.scalars(
             select(ExchangeOrderRow)
@@ -163,7 +163,9 @@ async def _load_order_anchor_events(
         )
     ).all()
     events: list[_OrderAnchorEvent] = []
+    latest_entry_times: dict[str, datetime] = {}
     for row in rows:
+        symbol_key = row.symbol.strip().upper()
         executed = row.executed_quantity or Decimal("0")
         if row.reduce_only:
             quantity = executed
@@ -179,6 +181,11 @@ async def _load_order_anchor_events(
                     )
                 )
             continue
+        if (
+            symbol_key not in latest_entry_times
+            or row.created_at > latest_entry_times[symbol_key]
+        ):
+            latest_entry_times[symbol_key] = row.created_at
         quantity = executed
         if quantity <= 0 and row.state == ExchangeOrderState.FILLED.value:
             quantity = row.quantity
@@ -191,7 +198,7 @@ async def _load_order_anchor_events(
                     quantity=quantity,
                 )
             )
-    return tuple(events)
+    return tuple(events), latest_entry_times
 
 
 async def _load_position_orders_bounded(
@@ -207,7 +214,7 @@ async def _load_position_orders_bounded(
     observed_at = now or datetime.now(tz=UTC)
     lookback_start = observed_at - _ORDER_ANCHOR_LOOKBACK
     symbols = tuple(sorted({symbol.strip().upper() for symbol in active_symbols}))
-    events = await _load_order_anchor_events(
+    events, latest_entry_times = await _load_order_anchor_events(
         session,
         run_id=run_id,
         active_symbols=symbols,
@@ -217,11 +224,14 @@ async def _load_position_orders_bounded(
     window_conditions = []
     for symbol in symbols:
         anchor = anchors.get(symbol)
-        window_start = (
-            anchor - _ORDER_ANCHOR_BUFFER
-            if anchor is not None
-            else lookback_start
-        )
+        if anchor is not None:
+            window_start = anchor - _ORDER_ANCHOR_BUFFER
+        elif symbol in latest_entry_times:
+            # All historical lots in events are fully exited.
+            # Anchor to the current episode's entry instead of 7 days ago.
+            window_start = latest_entry_times[symbol] - _ORDER_ANCHOR_BUFFER
+        else:
+            window_start = lookback_start
         window_conditions.append(
             and_(
                 ExchangeOrderRow.symbol == symbol,
@@ -2094,22 +2104,6 @@ def _build_position_batches(
             batch.exit_orders.append(exit_order)
             batch.exit_filled_quantity += quantity
 
-        if order.legacy_exit_attribution:
-            # Legacy rows intentionally keep the old fail-closed semantics:
-            # they may describe a historical boundary for the latest
-            # accumulator, but their fill must not be redistributed across
-            # other batches because the exchange-side lot is unknowable.
-            if target is not None:
-                available = max(
-                    Decimal("0"),
-                    target.entry_quantity - target.exit_filled_quantity,
-                )
-                if filled_quantity <= 0 and available > 0:
-                    attach(target, Decimal("0"))
-                elif available > 0 and filled_quantity > 0:
-                    attach(target, min(available, filled_quantity))
-            continue
-
         if target is not None:
             available = max(
                 Decimal("0"),
@@ -2133,10 +2127,10 @@ def _build_position_batches(
 
         # Reduce-only orders are executed against the aggregate exchange
         # position.  A historical batch binding can therefore be wrong after
-        # an old stale-exit bug.  When the named batch is already exhausted,
-        # allocate the filled overflow to the newest surviving batches instead
-        # of leaving a phantom old batch that steals the next position's
-        # quantity during snapshot reconciliation.
+        # an old stale-exit bug or full position flatten.  When the named batch
+        # is already exhausted, allocate the filled overflow to the newest surviving
+        # batches instead of leaving a phantom old batch that steals the next
+        # position's quantity during snapshot reconciliation.
         #
         # A fill that predates a lot cannot belong to that lot.  Without this
         # guard a five-day-old reduce-only fill (e.g. 4542 on 龙虾USDT) is
@@ -2169,6 +2163,18 @@ def _build_position_batches(
                 remaining_fill -= allocated
                 if remaining_fill <= 0:
                     break
+
+        # Zero-crossing clean episode boundary: when net remaining quantity
+        # across all accumulators reaches 0, the position on exchange was flat.
+        total_open = sum(
+            (
+                max(Decimal("0"), acc.entry_quantity - acc.exit_filled_quantity)
+                for acc in accumulators
+            ),
+            start=Decimal("0"),
+        )
+        if total_open == 0:
+            current = None
 
     if not accumulators:
         return ()
