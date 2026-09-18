@@ -291,7 +291,14 @@ class LiveEntryFilterCache:
         task = self._run_task
         current = asyncio.current_task()
         if task is not None and task is not current:
-            await task
+            try:
+                await task
+            except asyncio.CancelledError:
+                if (
+                    current is not None
+                    and getattr(current, "cancelling", lambda: 0)() > 0
+                ):
+                    raise
 
     async def _refresh(self, observed_at: datetime) -> None:
         started = time.monotonic()
@@ -533,7 +540,14 @@ class LiveEntrySymbolCache:
         task = self._run_task
         current = asyncio.current_task()
         if task is not None and task is not current:
-            await task
+            try:
+                await task
+            except asyncio.CancelledError:
+                if (
+                    current is not None
+                    and getattr(current, "cancelling", lambda: 0)() > 0
+                ):
+                    raise
 
     async def _refresh(self, observed_at: datetime) -> None:
         self._refresh_count += 1

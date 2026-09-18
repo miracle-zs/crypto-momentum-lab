@@ -101,6 +101,7 @@ class ScheduledRiskWindowController:
             Callable[[], Awaitable[tuple[AccountPositionSnapshot, ...]]] | None
         ),
         clock: Callable[[], datetime],
+        startup_market_timeout_seconds: float = 30.0,
     ) -> None:
         self._config = config
         self._exit_manager = exit_manager
@@ -115,6 +116,9 @@ class ScheduledRiskWindowController:
         self._cancel_unfilled_entry_orders = cancel_unfilled_entry_orders
         self._fetch_exchange_positions = fetch_exchange_positions
         self._clock = clock
+        self._started_at = clock()
+        self._startup_market_timeout_seconds = startup_market_timeout_seconds
+        self._market_state_observed = False
         self._latest_market_states: dict[str, MarketState15s] = {}
         self._latest_exchange_positions: dict[
             tuple[str, str],
@@ -150,6 +154,7 @@ class ScheduledRiskWindowController:
         return self._scheduled_submitted_order_count
 
     def observe_state(self, state: MarketState15s) -> None:
+        self._market_state_observed = True
         previous_state = self._latest_market_states.get(state.symbol)
         if previous_state is None or state.bucket_end >= previous_state.bucket_end:
             self._latest_market_states[state.symbol] = state
@@ -322,11 +327,18 @@ class ScheduledRiskWindowController:
                 )
             else:
                 if failure is not None:
-                    log.error(
-                        "live_scheduled_risk_window_action_failed",
-                        run_id=self._config.run_id,
-                        reason=failure,
-                    )
+                    if failure.endswith("_pending") or ":pending" in failure:
+                        log.info(
+                            "live_scheduled_risk_window_action_pending",
+                            run_id=self._config.run_id,
+                            reason=failure,
+                        )
+                    else:
+                        log.error(
+                            "live_scheduled_risk_window_action_failed",
+                            run_id=self._config.run_id,
+                            reason=failure,
+                        )
             await asyncio.sleep(schedule.poll_interval_seconds)
 
     def _reset_scheduled_window_day(self, local_day: date) -> None:
@@ -466,6 +478,20 @@ class ScheduledRiskWindowController:
             return None
         states, state_failure = await self._scheduled_flatten_states(now)
         if not states:
+            if (
+                state_failure is None
+                and not self._market_state_observed
+                and (now - self._started_at).total_seconds()
+                < self._startup_market_timeout_seconds
+            ):
+                log.info(
+                    "live_scheduled_flatten_market_state_pending",
+                    run_id=self._config.run_id,
+                    elapsed_seconds=round(
+                        (now - self._started_at).total_seconds(), 2
+                    ),
+                )
+                return "scheduled_flatten_market_state_pending"
             log.error(
                 "live_scheduled_flatten_market_state_unavailable",
                 run_id=self._config.run_id,
@@ -717,9 +743,7 @@ class ScheduledRiskWindowController:
         cached_states = self._latest_scheduled_states()
         self._latest_exchange_positions = {}
         if self._fetch_exchange_positions is None:
-            return cached_states, None if cached_states else (
-                "scheduled_flatten_market_state_unavailable"
-            )
+            return cached_states, None
         try:
             exchange_positions = tuple(await self._fetch_exchange_positions())
         except asyncio.CancelledError:

@@ -1,7 +1,9 @@
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 
+from crypto_momentum_lab.live_rollout.entry_cache import LiveEntrySymbolCache
 from crypto_momentum_lab.live_rollout.market_loop import LiveDaemonResult
 from crypto_momentum_lab.live_rollout.runtime_supervisor import (
     LiveRuntimeSupervisor,
@@ -36,6 +38,7 @@ def _runtime_tasks(
     startup_market: asyncio.Task[None] | None = None,
     local_health: asyncio.Task[None] | None = None,
     shutdown: asyncio.Task[bool] | None = None,
+    entry_symbol_cache: asyncio.Task[None] | None = None,
 ) -> LiveRuntimeTasks:
     return LiveRuntimeTasks(
         market=asyncio.create_task(_wait_for_market_result()),
@@ -45,6 +48,7 @@ def _runtime_tasks(
         startup_market=startup_market,
         local_health=local_health,
         shutdown=shutdown,
+        entry_symbol_cache=entry_symbol_cache,
     )
 
 
@@ -159,3 +163,62 @@ async def test_supervisor_bounds_shutdown_phases_and_joins_tasks() -> None:
     await supervisor.stop()
 
     assert all(task.done() for task in tasks.all_tasks())
+
+
+async def test_supervisor_stop_tolerates_cancelled_entry_caches() -> None:
+    now = datetime(2026, 8, 22, 1, 2, 3, tzinfo=UTC)
+    ready = asyncio.Event()
+
+    async def load_symbols(_: datetime) -> frozenset[str]:
+        return frozenset({"BTCUSDT"})
+
+    cache = LiveEntrySymbolCache(
+        symbol_loader=load_symbols,
+        clock=lambda: now,
+        on_ready=lambda _: ready.set(),
+    )
+    cache_task = asyncio.create_task(cache.run())
+    await asyncio.wait_for(ready.wait(), timeout=1)
+
+    tasks = _runtime_tasks(
+        account=asyncio.create_task(_wait_forever()),
+        entry_symbol_cache=cache_task,
+    )
+
+    supervisor = LiveRuntimeSupervisor(
+        tasks=tasks,
+        block_entry_submissions=lambda: None,
+        stop_sources=lambda: None,
+        close_risk_control=_close_nothing,
+        stop_entry_caches=cache.stop,
+    )
+
+    # Calling stop() will cancel entry_symbol_cache first, then invoke
+    # stop_entry_caches(). This must NOT raise CancelledError (account-3 issue).
+    await supervisor.stop()
+
+    assert all(task.done() for task in tasks.all_tasks())
+    assert cache_task.done()
+
+
+async def test_supervisor_stop_propagates_external_cancellation() -> None:
+    tasks = _runtime_tasks(account=asyncio.create_task(_wait_forever()))
+
+    async def hang_forever() -> None:
+        await asyncio.Event().wait()
+
+    supervisor = LiveRuntimeSupervisor(
+        tasks=tasks,
+        block_entry_submissions=lambda: None,
+        stop_sources=lambda: None,
+        close_risk_control=hang_forever,
+        stop_entry_caches=_close_nothing,
+    )
+
+    stop_task = asyncio.create_task(supervisor.stop())
+    await asyncio.sleep(0.01)
+    stop_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await stop_task
+

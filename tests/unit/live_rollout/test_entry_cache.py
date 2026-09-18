@@ -184,3 +184,128 @@ async def test_entry_symbol_cache_keeps_universe_context_in_memory() -> None:
     finally:
         await cache.stop()
         await task
+
+
+@pytest.mark.asyncio
+async def test_entry_symbol_cache_stop_tolerates_pre_cancelled_task() -> None:
+    now = datetime(2026, 8, 22, 1, 2, 3, tzinfo=UTC)
+    ready = asyncio.Event()
+
+    async def load_symbols(observed_at: datetime) -> frozenset[str]:
+        return frozenset({"BTCUSDT"})
+
+    cache = LiveEntrySymbolCache(
+        symbol_loader=load_symbols,
+        clock=lambda: now,
+        on_ready=lambda _: ready.set(),
+    )
+    task = asyncio.create_task(cache.run())
+    await asyncio.wait_for(ready.wait(), timeout=1)
+
+    task.cancel()
+
+    # Calling stop must finish without raising CancelledError
+    await cache.stop()
+    assert task.done()
+
+
+@pytest.mark.asyncio
+async def test_entry_symbol_cache_stop_propagates_external_cancellation() -> None:
+    now = datetime(2026, 8, 22, 1, 2, 3, tzinfo=UTC)
+
+    async def slow_load(observed_at: datetime) -> frozenset[str]:
+        await asyncio.sleep(10)
+        return frozenset({"BTCUSDT"})
+
+    cache = LiveEntrySymbolCache(
+        symbol_loader=slow_load,
+        clock=lambda: now,
+    )
+    task = asyncio.create_task(cache.run())
+    await asyncio.sleep(0.01)
+
+    stop_task = asyncio.create_task(cache.stop())
+    await asyncio.sleep(0.01)
+    stop_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await stop_task
+
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_entry_filter_cache_stop_tolerates_pre_cancelled_task() -> None:
+    now = datetime(2026, 8, 22, 1, 2, 3, tzinfo=UTC)
+    ready = asyncio.Event()
+
+    class Provider:
+        def load(
+            self,
+            *,
+            symbol: str,
+            observed_at: datetime,
+        ) -> ClosedCandleEmaSnapshot:
+            return ClosedCandleEmaSnapshot(
+                ema5=Decimal("100"),
+                ema10=Decimal("99"),
+            )
+
+    async def load_symbols(_: datetime) -> frozenset[str]:
+        return frozenset({"BTCUSDT"})
+
+    cache = LiveEntryFilterCache(
+        ema_provider=Provider(),  # type: ignore[arg-type]
+        symbol_loader=load_symbols,
+        clock=lambda: now,
+        on_ready=lambda _: ready.set(),
+    )
+    task = asyncio.create_task(cache.run())
+    await asyncio.wait_for(ready.wait(), timeout=1)
+
+    task.cancel()
+
+    # Calling stop must finish without raising CancelledError
+    await cache.stop()
+    assert task.done()
+
+
+@pytest.mark.asyncio
+async def test_entry_filter_cache_stop_propagates_external_cancellation() -> None:
+    now = datetime(2026, 8, 22, 1, 2, 3, tzinfo=UTC)
+
+    class SlowProvider:
+        def load(
+            self,
+            *,
+            symbol: str,
+            observed_at: datetime,
+        ) -> ClosedCandleEmaSnapshot:
+            return ClosedCandleEmaSnapshot(
+                ema5=Decimal("100"),
+                ema10=Decimal("99"),
+            )
+
+    async def slow_symbols(_: datetime) -> frozenset[str]:
+        await asyncio.sleep(10)
+        return frozenset({"BTCUSDT"})
+
+    cache = LiveEntryFilterCache(
+        ema_provider=SlowProvider(),  # type: ignore[arg-type]
+        symbol_loader=slow_symbols,
+        clock=lambda: now,
+    )
+    task = asyncio.create_task(cache.run())
+    await asyncio.sleep(0.01)
+
+    stop_task = asyncio.create_task(cache.stop())
+    await asyncio.sleep(0.01)
+    stop_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await stop_task
+
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
