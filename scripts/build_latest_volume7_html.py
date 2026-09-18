@@ -793,10 +793,7 @@ def build_html(args: argparse.Namespace) -> str:
     except ValueError as exc:
         raise SystemExit("--report-date must use YYYY-MM-DD") from exc
     previous_date = (parsed_report_date - timedelta(days=1)).isoformat()
-    two_back_date = (parsed_report_date - timedelta(days=2)).isoformat()
     current_compact = report_date.replace("-", "")
-    previous_compact = previous_date.replace("-", "")
-    two_back_compact = two_back_date.replace("-", "")
     exclusion = payload["meta"].get("exclusion") or {}
     exclusion_window = str(exclusion.get("window", ""))
     exclusion_timezone = str(exclusion.get("timezone", "Asia/Shanghai"))
@@ -804,6 +801,10 @@ def build_html(args: argparse.Namespace) -> str:
     exclusion_slug = exclusion_window.replace(":", "").replace("–", "-")
     current_filename = (
         f"optimization-comparison-{current_compact}-exclude-"
+        f"{exclusion_slug}-volume7.html"
+    )
+    previous_filename = (
+        f"optimization-comparison-{previous_date.replace('-', '')}-exclude-"
         f"{exclusion_slug}-volume7.html"
     )
     head = template.split("<body>", 1)[0]
@@ -827,21 +828,16 @@ def build_html(args: argparse.Namespace) -> str:
         )
     head = head.replace("</head>", CUSTOM_STYLE + "</head>", 1)
     body_template = BODY_TEMPLATE.replace(
-        f'<a href="optimization-comparison-{two_back_compact}-exclude-0800-1000-volume7.html">上一轮 · {two_back_date}</a>',
-        f'<a href="optimization-comparison-{previous_compact}-exclude-0800-1000-volume7.html">上一轮 · {previous_date}</a>',
+        '<a href="optimization-comparison-20260909-exclude-0800-1000-volume7.html">上一轮 · 2026-09-09</a>',
+        f'<a href="{previous_filename}">上一轮 · {previous_date}</a>',
         1,
     ).replace(
         '<a href="optimization-comparison-20260910-exclude-0800-1000-volume7.html" aria-current="page">本轮 · 2026-09-10</a>',
-        f'<a href="optimization-comparison-{current_compact}-exclude-0800-1000-volume7.html" aria-current="page">本轮 · {report_date}</a>',
+        f'<a href="{current_filename}" aria-current="page">本轮 · {report_date}</a>',
         1,
     ).replace(
         "LOCAL RESEARCH REPLAY / 2026-09-10 · 七维联合",
         f"LOCAL RESEARCH REPLAY / {report_date} · 七维联合",
-        1,
-    )
-    body_template = body_template.replace(
-        '<a href="optimization-comparison-20260910-exclude-0800-1000-volume7.html" aria-current="page">本轮 · 2026-09-10</a>',
-        f'<a href="{current_filename}" aria-current="page">本轮 · {report_date}</a>',
         1,
     ).replace(
         "开仓过滤：<span class=\"mono\">08:00–10:00 Asia/Shanghai</span>",

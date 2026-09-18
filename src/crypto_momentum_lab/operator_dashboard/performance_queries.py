@@ -43,7 +43,7 @@ _MAX_CHECKPOINT_SAMPLES = 100
 
 def _account_label_and_phase(run_id: str) -> tuple[str, float]:
     """Map live run identifiers to user-facing account labels and expected phase."""
-    if "primary" in run_id:
+    if "primary" in run_id or "b1-long" in run_id:
         return "primary", 0.0
     if "account-2" in run_id:
         return "account-2", 15.0

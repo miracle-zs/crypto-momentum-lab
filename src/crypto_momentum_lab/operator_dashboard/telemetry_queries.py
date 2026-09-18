@@ -28,7 +28,7 @@ _DECISION_SLO_WINDOWS = {
     "24h": timedelta(hours=24),
     "7d": timedelta(days=7),
 }
-_DECISION_SLO_MAX_EVENTS = 50_000
+_DECISION_SLO_MAX_EVENTS = 10_000
 _DECISION_SLO_LATENCY_KEY = "decision_slo_latency_ms"
 _CONSUMER_HEALTH_EVENT = "consumer_health"
 _TERMINAL_REASON_EVENTS = frozenset(
@@ -227,8 +227,12 @@ class DecisionSLOQueries:
         async with self._session_factory() as session:
             rows = list(
                 (
-                    await session.scalars(
-                        select(StrategyRuntimeEventRow)
+                    await session.execute(
+                        select(
+                            StrategyRuntimeEventRow.event_type,
+                            StrategyRuntimeEventRow.occurred_at,
+                            StrategyRuntimeEventRow.details,
+                        )
                         .where(
                             StrategyRuntimeEventRow.occurred_at >= window_start,
                             StrategyRuntimeEventRow.occurred_at <= window_end,

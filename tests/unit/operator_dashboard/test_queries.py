@@ -503,6 +503,10 @@ async def test_decision_slo_query_uses_bounded_historical_window() -> None:
             self.statement = statement
             return SimpleNamespace(all=lambda: (event,))
 
+        async def execute(self, statement):
+            self.statement = statement
+            return SimpleNamespace(all=lambda: (event,))
+
     class SessionContext:
         def __init__(self, session: Session) -> None:
             self.session = session
@@ -533,7 +537,7 @@ async def test_decision_slo_query_uses_bounded_historical_window() -> None:
     assert response.window_end == window_end
     assert response.persisted_event_count == 1
     assert session.statement is not None
-    assert session.statement._limit_clause.value == 50_001
+    assert session.statement._limit_clause.value == 10_001
 
 
 def test_latest_checkpoint_query_selects_only_timestamp() -> None:

@@ -707,7 +707,7 @@ services:
     # The dashboard process regularly uses over 200 MiB with all sections
     # loaded, so keep headroom without reserving the old live-strategy budget.
     # 192m: peak measured at 109 MiB.
-    mem_limit: 192m
+    mem_limit: 384m
     memswap_limit: 512m
 
 volumes:

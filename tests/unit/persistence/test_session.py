@@ -17,9 +17,9 @@ def test_dashboard_engine_bounds_query_memory_risk(monkeypatch) -> None:
 
     assert result is not None
     assert captured["database_url"] == "postgresql+asyncpg://dashboard"
-    assert captured["pool_size"] == 2
-    assert captured["max_overflow"] == 0
-    assert captured["pool_timeout"] == 3
+    assert captured["pool_size"] == 4
+    assert captured["max_overflow"] == 2
+    assert captured["pool_timeout"] == 5.0
     assert captured["pool_recycle"] == 900
     assert captured["connect_args"] == {"command_timeout": 10}
 
