@@ -35,7 +35,12 @@ from crypto_momentum_lab.execution_account.orders.quantization import (
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import SubmitPolicy
 from crypto_momentum_lab.execution_account.sync import AccountSnapshot
-from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
+from crypto_momentum_lab.live_rollout.context import (
+    ContextInvalidation,
+    ContextInvalidationReason,
+    LiveContextReader,
+    LiveDaemonRuntimeContext,
+)
 from crypto_momentum_lab.live_rollout.exits import (
     ManagedLivePosition,
     ManagedLivePositionBatch,
@@ -275,7 +280,7 @@ class _OrderIdentityMetadata:
     account_fills: tuple[AccountFillEventRow, ...]
 
 
-class PostgresLiveContextProvider:
+class PostgresLiveContextProvider(LiveContextReader):
     _TRADING_RULE_CACHE_SECONDS = 300
     # Account events invalidate this snapshot immediately. A short positive
     # TTL lets consecutive market buckets reuse the same account/risk view
@@ -612,6 +617,21 @@ class PostgresLiveContextProvider:
             self._cached_loaded_at = now
         return context
 
+    async def for_state(
+        self,
+        state: MarketState15s,
+    ) -> LiveDaemonRuntimeContext:
+        """Alias for __call__ satisfying the LiveContextReader interface."""
+        return await self(state)
+
+    def is_current(self, context: LiveDaemonRuntimeContext) -> bool:
+        """Alias for is_context_current satisfying the LiveContextReader interface."""
+        return self.is_context_current(context)
+
+    def invalidate(self, event: ContextInvalidation | None = None) -> None:
+        """Alias for invalidate_cache satisfying the LiveContextReader interface."""
+        self.invalidate_cache(event)
+
     def is_context_current(self, context: LiveDaemonRuntimeContext) -> bool:
         """Return whether a context still matches the live provider inputs."""
         context_epoch = context.context_epoch
@@ -656,14 +676,25 @@ class PostgresLiveContextProvider:
         self._realtime_account_snapshot = snapshot
         self._realtime_account_state = account_state
         self._realtime_account_sequence = sequence
-        self.invalidate_cache()
+        self.invalidate_cache(
+            ContextInvalidation(
+                reason=ContextInvalidationReason.ACCOUNT_UPDATE,
+                occurred_at=datetime.now(tz=UTC),
+                details={"sequence": sequence},
+            )
+        )
 
     def invalidate_account_snapshot(self) -> None:
         """Drop a stale Hub projection while a full recovery is in flight."""
         self._realtime_account_snapshot = None
         self._realtime_account_state = None
         self._realtime_account_sequence = 0
-        self.invalidate_cache()
+        self.invalidate_cache(
+            ContextInvalidation(
+                reason=ContextInvalidationReason.RECOVERY,
+                occurred_at=datetime.now(tz=UTC),
+            )
+        )
 
     def update_lease(self, lease: TradingLease) -> None:
         """Publish a heartbeat renewal into the cached runtime context.
@@ -678,9 +709,15 @@ class PostgresLiveContextProvider:
         # Invalidate in-flight loads as well as the cached object.  Updating
         # only ``_cached_context`` allows a load that captured an older lease
         # to repopulate the cache after this callback returns.
-        self.invalidate_cache()
+        self.invalidate_cache(
+            ContextInvalidation(
+                reason=ContextInvalidationReason.LEASE_CHANGE,
+                occurred_at=datetime.now(tz=UTC),
+                details={"owner": lease.owner},
+            )
+        )
 
-    def invalidate_cache(self) -> None:
+    def invalidate_cache(self, event: ContextInvalidation | None = None) -> None:
         """Force the next state to reload account and risk state.
 
         Trading rules are market metadata, not account/risk state.  Keeping
@@ -692,6 +729,14 @@ class PostgresLiveContextProvider:
         self._cached_bucket_start = None
         self._cached_context = None
         self._cached_loaded_at = None
+        if event is not None:
+            log.info(
+                "live_context_cache_invalidated",
+                account_label=self._account_label,
+                run_id=self._run_id,
+                reason=event.reason.value,
+                epoch=self._cache_epoch,
+            )
 
     def invalidate_trading_rules(self) -> None:
         """Force the next symbol-rule lookup to reload market metadata."""

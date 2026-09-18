@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -22,7 +23,12 @@ from crypto_momentum_lab.execution_account.orders.quantization import (
     SymbolTradingRules,
 )
 from crypto_momentum_lab.execution_account.sync import AccountSnapshot
-from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
+from crypto_momentum_lab.live_rollout.context import (
+    ContextInvalidation,
+    ContextInvalidationReason,
+    LiveContextReader,
+    LiveDaemonRuntimeContext,
+)
 from crypto_momentum_lab.live_rollout.postgres_runtime import (
     PostgresLiveContextProvider,
     _classify_live_positions,
@@ -1434,6 +1440,41 @@ def test_context_invalidation_preserves_symbol_rules() -> None:
     assert provider._cached_rules_at == {"BTCUSDT": NOW}
 
 
+def test_postgres_live_context_provider_implements_live_context_reader() -> None:
+    provider = object.__new__(PostgresLiveContextProvider)
+    assert isinstance(provider, LiveContextReader)
+
+    provider._cache_epoch = 10
+    provider._cached_bucket_start = NOW
+    provider._cached_context = _runtime_context()
+    provider._cached_rules = {}
+    provider._cached_rules_at = {}
+    provider._account_label = "primary"
+    provider._run_id = "run-1"
+    provider._realtime_account_sequence = 5
+
+    ctx_matching = replace(
+        _runtime_context(), context_epoch=10, account_snapshot_version=5
+    )
+    assert provider.is_current(ctx_matching) is True
+
+    ctx_stale = replace(
+        _runtime_context(), context_epoch=9, account_snapshot_version=5
+    )
+    assert provider.is_current(ctx_stale) is False
+
+    event = ContextInvalidation(
+        reason=ContextInvalidationReason.ACCOUNT_UPDATE,
+        occurred_at=datetime.now(tz=UTC),
+        details={"sequence": 101},
+    )
+    provider.invalidate(event)
+    assert provider._cache_epoch == 11
+    assert provider._cached_context is None
+
+
+
+
 async def test_delayed_state_reuses_newer_cached_context(monkeypatch) -> None:
     state = SimpleNamespace(
         symbol="BTCUSDT",
@@ -1897,7 +1938,9 @@ def test_legacy_full_exit_cascades_and_closes_prior_lots_without_ghosts() -> Non
         [_position(symbol="MARSCOINUSDT", position_amt=Decimal("1077"))],
         orders,
         exit_batch_ids={},
-        legacy_exit_order_ids=frozenset({"marscoin-canceled-exit", "marscoin-full-flatten"}),
+        legacy_exit_order_ids=frozenset(
+            {"marscoin-canceled-exit", "marscoin-full-flatten"}
+        ),
     )
 
     assert unmanaged == frozenset()

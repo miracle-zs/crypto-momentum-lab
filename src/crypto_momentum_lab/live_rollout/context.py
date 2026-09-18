@@ -12,7 +12,8 @@ from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Protocol
+from enum import StrEnum
+from typing import Protocol, runtime_checkable
 
 import structlog
 
@@ -88,6 +89,34 @@ class LiveDaemonRuntimeContext:
     context_epoch: int | None = None
 
 
+class ContextInvalidationReason(StrEnum):
+    ACCOUNT_UPDATE = "account_update"
+    LEASE_CHANGE = "lease_change"
+    CONTROL_CHANGE = "control_change"
+    RULES_CHANGE = "rules_change"
+    RECOVERY = "recovery"
+    MANUAL = "manual"
+
+
+@dataclass(frozen=True, slots=True)
+class ContextInvalidation:
+    reason: ContextInvalidationReason
+    occurred_at: datetime
+    details: dict[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        if self.occurred_at.tzinfo is None or self.occurred_at.utcoffset() is None:
+            raise ValueError("occurred_at must be timezone-aware")
+
+
+@dataclass(frozen=True, slots=True)
+class ContextToken:
+    generation: int
+    context_epoch: int | None = None
+    account_snapshot_version: int | None = None
+    created_at: datetime | None = None
+
+
 class LiveContextProvider(Protocol):
     """Load the runtime context required by a live decision lane."""
 
@@ -97,6 +126,23 @@ class LiveContextProvider(Protocol):
     ) -> Awaitable[LiveDaemonRuntimeContext]: ...
 
 
+@runtime_checkable
+class LiveContextReader(Protocol):
+    """Explicit interface for reading live runtime context."""
+
+    def for_state(
+        self,
+        state: MarketState15s,
+    ) -> Awaitable[LiveDaemonRuntimeContext]: ...
+
+    def is_current(self, context: LiveDaemonRuntimeContext) -> bool: ...
+
+    def invalidate(
+        self,
+        event: ContextInvalidation | None = None,
+    ) -> None: ...
+
+
 class LiveContextRuntime:
     """Own context freshness fencing and managed-symbol publication."""
 
@@ -104,7 +150,7 @@ class LiveContextRuntime:
         self,
         *,
         run_id: str,
-        context_provider: LiveContextProvider,
+        context_provider: LiveContextProvider | LiveContextReader,
         set_pending_position_symbols: Callable[[Collection[str]], None],
         update_managed_symbols: Callable[
             [Collection[str], Collection[str]], None
@@ -133,23 +179,44 @@ class LiveContextRuntime:
 
     def is_current(self, context: LiveDaemonRuntimeContext) -> bool:
         checker = getattr(self._context_provider, "is_context_current", None)
-        if not callable(checker):
-            return True
-        try:
-            return bool(checker(context))
-        except Exception as error:
-            _log.warning(
-                "live_context_currentness_check_failed",
-                run_id=self._run_id,
-                error_type=type(error).__name__,
-            )
-            return False
+        if callable(checker):
+            try:
+                return bool(checker(context))
+            except Exception as error:
+                _log.warning(
+                    "live_context_currentness_check_failed",
+                    run_id=self._run_id,
+                    error_type=type(error).__name__,
+                )
+                return False
+        reader_checker = getattr(self._context_provider, "is_current", None)
+        if callable(reader_checker):
+            try:
+                return bool(reader_checker(context))
+            except Exception as error:
+                _log.warning(
+                    "live_context_currentness_check_failed",
+                    run_id=self._run_id,
+                    error_type=type(error).__name__,
+                )
+                return False
+        return True
 
-    def invalidate(self) -> None:
+    def invalidate(self, event: ContextInvalidation | None = None) -> None:
         self._generation += 1
-        invalidate = getattr(self._context_provider, "invalidate_cache", None)
-        if callable(invalidate):
-            invalidate()
+        invalidate_fn = getattr(self._context_provider, "invalidate_cache", None)
+        if callable(invalidate_fn):
+            try:
+                invalidate_fn(event)
+            except TypeError:
+                invalidate_fn()
+            return
+        reader_invalidate = getattr(self._context_provider, "invalidate", None)
+        if callable(reader_invalidate):
+            try:
+                reader_invalidate(event)
+            except TypeError:
+                reader_invalidate()
 
     async def publish_managed_position_symbols(
         self,
