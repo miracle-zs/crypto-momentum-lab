@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -129,8 +130,9 @@ async def test_live_telemetry_rolls_up_phase_latency_by_symbol_and_lane() -> Non
     )
 
 
-async def test_live_telemetry_persists_events_in_batches_without_blocking_records(
-) -> None:
+async def test_live_telemetry_persists_events_in_batches_without_blocking_records() -> (
+    None
+):
     batches: list[tuple[dict[str, object], ...]] = []
 
     async def persist(events) -> None:
@@ -156,12 +158,8 @@ async def test_live_telemetry_persists_events_in_batches_without_blocking_record
 async def test_transient_persist_timeout_is_retried_before_dropping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        telemetry_module, "_PERSIST_BATCH_TIMEOUT_SECONDS", 0.05
-    )
-    monkeypatch.setattr(
-        telemetry_module, "_PERSIST_BATCH_RETRY_DELAY_SECONDS", 0.01
-    )
+    monkeypatch.setattr(telemetry_module, "_PERSIST_BATCH_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(telemetry_module, "_PERSIST_BATCH_RETRY_DELAY_SECONDS", 0.01)
     attempts: list[int] = []
 
     async def persist(events) -> None:
@@ -189,12 +187,8 @@ async def test_exhausted_persist_attempts_are_counted_as_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(telemetry_module, "_PERSIST_BATCH_ATTEMPTS", 3)
-    monkeypatch.setattr(
-        telemetry_module, "_PERSIST_BATCH_TIMEOUT_SECONDS", 0.05
-    )
-    monkeypatch.setattr(
-        telemetry_module, "_PERSIST_BATCH_RETRY_DELAY_SECONDS", 0.01
-    )
+    monkeypatch.setattr(telemetry_module, "_PERSIST_BATCH_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(telemetry_module, "_PERSIST_BATCH_RETRY_DELAY_SECONDS", 0.01)
     attempts = 0
 
     async def persist(events) -> None:
@@ -329,7 +323,8 @@ async def test_market_state_progress_ignores_backfilled_and_historical_states() 
     )
     assert len(batches) == 0
 
-    # 3. Fresh live state (data_complete=True and bucket_end within 5 minutes) is accepted
+    # 3. Fresh live state (data_complete=True and bucket_end within 5 minutes)
+    # is accepted
     live_state = replace(
         _state(),
         data_complete=True,
@@ -346,7 +341,6 @@ async def test_market_state_progress_ignores_backfilled_and_historical_states() 
     assert len(batches) == 1
     assert batches[0][0]["event_type"] == MARKET_STATE_PROGRESS
     assert batches[0][0]["details"]["market_delay_ms"] == 2000.0
-
 
 
 async def test_strategy_output_observation_is_durable_as_a_sampled_heartbeat() -> None:
@@ -425,7 +419,9 @@ async def test_empty_strategy_heartbeat_skipped_when_symbol_not_eligible() -> No
     )
 
 
-async def test_non_empty_strategy_output_persisted_even_when_not_heartbeat_eligible() -> None:
+async def test_non_empty_strategy_output_persisted_even_when_not_heartbeat_eligible() -> (  # noqa: E501
+    None
+):
     batches: list[tuple[dict[str, object], ...]] = []
 
     async def persist(events) -> None:
@@ -455,9 +451,7 @@ async def test_non_empty_strategy_output_persisted_even_when_not_heartbeat_eligi
 
     events = [event for batch in batches for event in batch]
     observed = [
-        event
-        for event in events
-        if event["event_type"] == STRATEGY_OUTPUT_OBSERVED
+        event for event in events if event["event_type"] == STRATEGY_OUTPUT_OBSERVED
     ]
     assert len(observed) == 1
     assert observed[0]["details"]["signal_count"] == 1
@@ -582,9 +576,7 @@ async def test_persisted_order_events_carry_decision_slo_transition_samples() ->
     assert events["intent_saved"].details["decision_slo_latency_ms"] == {
         "candidate_accepted->intent_saved": 200.0,
     }
-    assert events[EXCHANGE_REQUEST_STARTED].details[
-        "decision_slo_latency_ms"
-    ] == {
+    assert events[EXCHANGE_REQUEST_STARTED].details["decision_slo_latency_ms"] == {
         "intent_saved->exchange_request_started": 200.0,
     }
 
@@ -641,8 +633,7 @@ async def test_exchange_latency_pairs_each_operation_attempt() -> None:
     assert "latency_ms_from_previous" not in cancel_response.details
 
 
-async def test_exchange_persistence_allowlist_keeps_submit_and_cancel_audit(
-) -> None:
+async def test_exchange_persistence_allowlist_keeps_submit_and_cancel_audit() -> None:
     batches: list[tuple[dict[str, object], ...]] = []
 
     async def persist(events) -> None:
@@ -685,9 +676,7 @@ async def test_exchange_persistence_allowlist_keeps_submit_and_cancel_audit(
     await telemetry.stop()
 
     persisted_operations = [
-        event["details"]["operation"]
-        for batch in batches
-        for event in batch
+        event["details"]["operation"] for batch in batches for event in batch
     ]
     assert persisted_operations == ["submit", "submit", "cancel", "cancel"]
     assert telemetry.recorded_event_count == 6
@@ -733,9 +722,7 @@ async def test_exchange_persistence_defaults_to_all_operations() -> None:
     await telemetry.stop()
 
     persisted_operations = [
-        event["details"]["operation"]
-        for batch in batches
-        for event in batch
+        event["details"]["operation"] for batch in batches for event in batch
     ]
     assert persisted_operations == ["query", "query"]
 
@@ -795,3 +782,62 @@ def test_live_database_plane_urls_prefer_explicit_plane_environment(
         "postgresql+asyncpg://observability"
     )
     assert main._market_database_url(None) == "postgresql+asyncpg://data"
+
+
+async def test_repeated_candidate_evaluations_refresh_phase_timestamps() -> None:
+    telemetry = LiveRuntimeTelemetry(run_id="run-1")
+    candidate = SimpleNamespace(
+        candidate_id="cand-exit-1",
+        signal_id="sig-exit-1",
+        reduce_only=True,
+    )
+    state1 = _state()
+    start = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+
+    # Cycle 1: candidate accepted at T=0, risk approved at T=10ms
+    await telemetry.market_state_received(state1, occurred_at=start, lane="exit")
+    await telemetry.candidate_accepted(
+        candidate,
+        state=state1,
+        occurred_at=start,
+        lane="exit",
+    )
+    await telemetry.risk_approved(
+        candidate,
+        state=state1,
+        occurred_at=start + timedelta(milliseconds=10),
+        lane="exit",
+        evaluation_id="eval-1",
+    )
+
+    # Cycle 2: same candidate re-evaluated 60 seconds later!
+    later = start + timedelta(seconds=60)
+    state2 = replace(
+        _state(),
+        bucket_start=later,
+        bucket_end=later + timedelta(seconds=15),
+    )
+    await telemetry.market_state_received(state2, occurred_at=later, lane="exit")
+    await telemetry.candidate_accepted(
+        candidate,
+        state=state2,
+        occurred_at=later,
+        lane="exit",
+    )
+    await telemetry.risk_approved(
+        candidate,
+        state=state2,
+        occurred_at=later + timedelta(milliseconds=15),
+        lane="exit",
+        evaluation_id="eval-2",
+    )
+
+    risk_events = [
+        e for e in telemetry.recent_events if e.event_type == "risk_approved"
+    ]
+    assert len(risk_events) == 2
+    # Cycle 1 latency: 10ms
+    assert risk_events[0].details["latency_ms_from_previous"] == 10.0
+    # Cycle 2 latency: MUST be 15ms, NOT 60015ms!
+    assert risk_events[1].details["latency_ms_from_previous"] == 15.0
+    assert risk_events[1].details["latency_ms_from_market_state"] == 15.0

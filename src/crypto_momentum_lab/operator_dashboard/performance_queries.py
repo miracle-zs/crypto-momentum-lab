@@ -1,17 +1,16 @@
 """System performance and observability read model for the operator dashboard.
 
 This module aggregates performance telemetry across four domains:
-1. Decision path SLO (latencies, transition phases, terminal reasons, consumers)
-2. Database persistence & checkpoint staggering (prepare, event_loop_lag, pool_acquire, sql_execute, commit, total_ms)
-3. Market data ingestion freshness & quality events (market_delay_ms, drop counts, missing trades)
-4. Host & PostgreSQL resources (load average, memory, swap, active/idle connections, database size)
+1. Decision path SLO (latencies, transition phases, terminal reasons)
+2. Database persistence & checkpoint staggering (prepare, lag, sql_execute, total_ms)
+3. Market data ingestion freshness & quality events (market_delay_ms, drops)
+4. Host & PostgreSQL resources (load average, memory, swap, connections, size)
 """
 
 import math
 import os
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,7 +24,6 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
 )
 from crypto_momentum_lab.operator_dashboard.status import (
     OperationalStatus,
-    freshness_status,
 )
 from crypto_momentum_lab.operator_dashboard.telemetry_queries import (
     DecisionSLOQueries,
@@ -132,6 +130,12 @@ class PerformanceQueries:
             market_process_state = await session.scalar(
                 select(MarketDataProcessStateRow)
                 .order_by(MarketDataProcessStateRow.occurred_at.desc())
+                .limit(1)
+            )
+            latest_market_progress = await session.scalar(
+                select(StrategyRuntimeEventRow)
+                .where(StrategyRuntimeEventRow.event_type == "market_state_progress")
+                .order_by(StrategyRuntimeEventRow.occurred_at.desc())
                 .limit(1)
             )
 
@@ -260,13 +264,39 @@ class PerformanceQueries:
             latest_market_state.bucket_end
             if latest_market_state is not None
             else (
-                market_process_state.occurred_at
-                if market_process_state is not None
-                else None
+                latest_market_progress.occurred_at
+                if latest_market_progress is not None
+                else (
+                    market_process_state.occurred_at
+                    if market_process_state is not None
+                    else None
+                )
             )
         )
         market_delay_ms = None
-        if observed_at is not None:
+        if (
+            latest_market_progress is not None
+            and isinstance(latest_market_progress.details, Mapping)
+            and latest_market_progress.details.get("market_delay_ms") is not None
+        ):
+            market_delay_ms = round(
+                float(latest_market_progress.details["market_delay_ms"]), 1
+            )
+        elif (
+            latest_market_state is not None
+            and latest_market_state.created_at is not None
+        ):
+            market_delay_ms = round(
+                max(
+                    0.0,
+                    (
+                        latest_market_state.created_at - latest_market_state.bucket_end
+                    ).total_seconds()
+                    * 1000,
+                ),
+                1,
+            )
+        elif observed_at is not None:
             market_delay_ms = round(
                 max(0.0, (now - observed_at).total_seconds() * 1000), 1
             )
@@ -277,13 +307,24 @@ class PerformanceQueries:
         elif (now - observed_at).total_seconds() > 120:
             market_status = OperationalStatus.STALE
 
+        realtime_closure_delay_seconds = 0.4
+        if market_delay_ms is not None:
+            realtime_closure_delay_seconds = round(market_delay_ms / 1000.0, 3)
+
+        missing_agg_trade_count = (
+            latest_market_state.missing_agg_trade_count
+            if latest_market_state is not None
+            and latest_market_state.missing_agg_trade_count is not None
+            else 0
+        )
+
         market_resp = MarketDataPerformanceResponse(
             status=market_status,
             observed_at=observed_at,
             market_delay_ms=market_delay_ms,
-            realtime_closure_delay_seconds=0.4,
+            realtime_closure_delay_seconds=realtime_closure_delay_seconds,
             simulated_close_drop_count=0,
-            missing_agg_trade_count=0,
+            missing_agg_trade_count=missing_agg_trade_count,
             quality_events_count_1h=quality_events_count,
         )
 

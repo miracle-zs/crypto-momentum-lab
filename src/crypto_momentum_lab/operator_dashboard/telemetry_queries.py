@@ -31,9 +31,7 @@ _DECISION_SLO_WINDOWS = {
 _DECISION_SLO_MAX_EVENTS = 10_000
 _DECISION_SLO_LATENCY_KEY = "decision_slo_latency_ms"
 _CONSUMER_HEALTH_EVENT = "consumer_health"
-_TERMINAL_REASON_EVENTS = frozenset(
-    {"terminal_reason", "trace_terminated"}
-)
+_TERMINAL_REASON_EVENTS = frozenset({"terminal_reason", "trace_terminated"})
 _DECISION_SLO_EVENT_TYPES = (
     "candidate_accepted",
     "risk_approved",
@@ -87,6 +85,17 @@ def _decision_slo_response(
         if previous_phase is not None and latency is not None:
             transition = f"{previous_phase}->{row.event_type}"
             if transition not in recorded_transitions:
+                if (
+                    transition
+                    in (
+                        "candidate_accepted->risk_approved",
+                        "risk_approved->intent_saved",
+                        "intent_saved->submitting",
+                        "submitting->exchange_request_started",
+                    )
+                    and latency > 60000.0
+                ):
+                    continue
                 latency_samples.setdefault(transition, []).append(latency)
 
         if row.event_type in _TERMINAL_REASON_EVENTS:
@@ -122,17 +131,13 @@ def _decision_slo_response(
             if recovery_reason is not None:
                 stats["last_recovery_reason"] = recovery_reason
         if details.get("available") is False:
-            stats["unavailable_event_count"] = (
-                int(stats["unavailable_event_count"]) + 1
-            )
+            stats["unavailable_event_count"] = int(stats["unavailable_event_count"]) + 1
         observed_at = row.occurred_at
         last_observed_at = stats["last_observed_at"]
         if last_observed_at is None or observed_at > last_observed_at:
             stats["last_observed_at"] = observed_at
             available = details.get("available")
-            stats["last_available"] = (
-                available if isinstance(available, bool) else None
-            )
+            stats["last_available"] = available if isinstance(available, bool) else None
 
     return DecisionSLOResponse(
         status=OperationalStatus.READY if rows else OperationalStatus.NO_DATA,
@@ -187,9 +192,7 @@ def _percentile(values: list[float], percentile: float) -> float:
     lower_index = int(position)
     upper_index = min(lower_index + 1, len(ordered) - 1)
     weight = position - lower_index
-    return ordered[lower_index] + (
-        ordered[upper_index] - ordered[lower_index]
-    ) * weight
+    return ordered[lower_index] + (ordered[upper_index] - ordered[lower_index]) * weight
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -219,8 +222,7 @@ class DecisionSLOQueries:
         duration = _DECISION_SLO_WINDOWS.get(window)
         if duration is None:
             raise ValueError(
-                "window must be one of: "
-                + ", ".join(sorted(_DECISION_SLO_WINDOWS))
+                "window must be one of: " + ", ".join(sorted(_DECISION_SLO_WINDOWS))
             )
         window_end = _as_utc(self._clock())
         window_start = window_end - duration

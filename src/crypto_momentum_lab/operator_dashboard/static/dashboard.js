@@ -28,7 +28,7 @@ import {
   wireLiveAccounts,
 } from "./sections/account.js?v=20260918-perf-v3";
 import { renderReports } from "./sections/reports.js";
-import { renderPerformance } from "./sections/performance.js?v=20260918-perf-v3";
+import { renderPerformance } from "./sections/performance.js?v=20260918-perf-v4";
 import { createStrategySection } from "./sections/strategy.js?v=20260918-perf-v3";
 
 // Legacy import markers retained for static asset manifests: from "./sections/account.js"

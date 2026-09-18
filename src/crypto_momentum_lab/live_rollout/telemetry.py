@@ -30,9 +30,7 @@ from crypto_momentum_lab.execution_account.hub import AccountEvent
 log = structlog.get_logger()
 
 type LiveLane = Literal["entry", "exit", "unknown"]
-type LiveTriggerSource = Literal[
-    "account", "quote", "market", "candle", "grace"
-]
+type LiveTriggerSource = Literal["account", "quote", "market", "candle", "grace"]
 type TerminalReasonSummary = dict[str, dict[str, dict[str, int]]]
 
 LIVE_LANE_ENTRY: LiveLane = "entry"
@@ -94,7 +92,15 @@ _PHASE_ORDER = (
     ACCOUNT_FILL,
     TRACE_TERMINATED,
 )
-_REPEATABLE_PHASES = frozenset({ACCOUNT_FILL})
+_REPEATABLE_PHASES = frozenset(
+    {
+        ACCOUNT_FILL,
+        CANDIDATE_ACCEPTED,
+        RISK_APPROVED,
+        GATE_EVALUATED,
+        STRATEGY_DECISION,
+    }
+)
 _EXCHANGE_BOUNDARY_EVENTS = frozenset(
     {EXCHANGE_REQUEST_STARTED, EXCHANGE_RESPONSE_RECEIVED}
 )
@@ -108,6 +114,21 @@ _PERSIST_BATCH_ATTEMPTS = 3
 _PERSIST_BATCH_RETRY_DELAY_SECONDS = 0.25
 _MAX_PENDING_EXCHANGE_REQUESTS = 32
 _MAX_STRATEGY_OUTPUT_SAMPLES = 8192
+_MAX_TRACES = 2048
+
+_DECISION_SLO_LATENCY_KEY = "decision_slo_latency_ms"
+_DECISION_SLO_TRANSITIONS: dict[str, tuple[tuple[str, str], ...]] = {
+    CANDIDATE_ACCEPTED: (
+        (MARKET_STATE_RECEIVED, CONTEXT_READY),
+        (CONTEXT_READY, CANDIDATE_ACCEPTED),
+    ),
+    RISK_APPROVED: ((CANDIDATE_ACCEPTED, RISK_APPROVED),),
+    INTENT_SAVED: (
+        (RISK_APPROVED, INTENT_SAVED),
+        (CANDIDATE_ACCEPTED, INTENT_SAVED),
+    ),
+    EXCHANGE_REQUEST_STARTED: ((INTENT_SAVED, EXCHANGE_REQUEST_STARTED),),
+}
 
 # Market-state and strategy-decision events remain available in the in-memory
 # trace, but are intentionally not durable by default.  Persisting those
@@ -374,9 +395,7 @@ class SourceIngress:
             self.trigger_source is not None
             and self.trigger_source not in LIVE_TRIGGER_SOURCES
         ):
-            raise ValueError(
-                f"unsupported trigger source: {self.trigger_source!r}"
-            )
+            raise ValueError(f"unsupported trigger source: {self.trigger_source!r}")
         if self.lane == LIVE_LANE_EXIT and self.trigger_source is None:
             raise ValueError("exit ingress requires a trigger_source")
         _require_aware(self.received_at, "received_at")
@@ -452,8 +471,7 @@ def market_state_input_fingerprint(state: MarketState15s) -> str:
     """Hash the canonical market-state fields used as a strategy input."""
 
     payload = {
-        field.name: _json_value(getattr(state, field.name))
-        for field in fields(state)
+        field.name: _json_value(getattr(state, field.name)) for field in fields(state)
     }
     encoded = json.dumps(
         payload,
@@ -500,17 +518,13 @@ class LiveRuntimeTelemetry:
         if account_label is not None and not account_label.strip():
             raise ValueError("account_label must not be empty when present")
         if strategy_config_hash is not None and not strategy_config_hash.strip():
-            raise ValueError(
-                "strategy_config_hash must not be empty when present"
-            )
+            raise ValueError("strategy_config_hash must not be empty when present")
         self._run_id = run_id
         self._account_label = account_label
         self._strategy_config_hash = strategy_config_hash
         self._persist = persist
         self._persist_event_types = (
-            None
-            if persist_event_types is None
-            else frozenset(persist_event_types)
+            None if persist_event_types is None else frozenset(persist_event_types)
         )
         self._persist_exchange_operations = (
             None
@@ -564,13 +578,9 @@ class LiveRuntimeTelemetry:
         if ingress is None:
             return None
         if ingress.run_id != self._run_id:
-            raise ValueError(
-                "source ingress run_id does not match telemetry run_id"
-            )
+            raise ValueError("source ingress run_id does not match telemetry run_id")
         if ingress.lane != lane:
-            raise ValueError(
-                "source ingress lane does not match telemetry lane"
-            )
+            raise ValueError("source ingress lane does not match telemetry lane")
         return ingress.trace_id
 
     async def start(self) -> None:
@@ -618,9 +628,7 @@ class LiveRuntimeTelemetry:
         """Record the first normalized observation of a source event."""
 
         if ingress.run_id != self._run_id:
-            raise ValueError(
-                "source ingress run_id does not match telemetry run_id"
-            )
+            raise ValueError("source ingress run_id does not match telemetry run_id")
         await self._record_phase(
             phase=SOURCE_RECEIVED,
             trace_id=ingress.trace_id,
@@ -694,8 +702,7 @@ class LiveRuntimeTelemetry:
             return
         if (
             self._last_market_progress_at is not None
-            and occurred_at - self._last_market_progress_at
-            < timedelta(seconds=60)
+            and occurred_at - self._last_market_progress_at < timedelta(seconds=60)
         ):
             return
         self._last_market_progress_at = occurred_at
@@ -713,9 +720,7 @@ class LiveRuntimeTelemetry:
                     0.0,
                     (received_at - state.bucket_end).total_seconds() * 1000,
                 ),
-                "source_last_received_at": _optional_iso(
-                    state.last_received_at
-                ),
+                "source_last_received_at": _optional_iso(state.last_received_at),
                 "source_event_count": state.source_event_count,
                 "data_complete": state.data_complete,
                 "missing_agg_trade_count": state.missing_agg_trade_count,
@@ -1116,17 +1121,13 @@ class LiveRuntimeTelemetry:
                 if not pending:
                     trace.exchange_requests.pop(operation, None)
         canonical_phase = (
-            EXCHANGE_REQUEST_STARTED
-            if is_request
-            else EXCHANGE_RESPONSE_RECEIVED
+            EXCHANGE_REQUEST_STARTED if is_request else EXCHANGE_RESPONSE_RECEIVED
         )
         # Keep the original lifecycle phases for the first submit operation so
         # existing end-to-end summaries remain compatible. Subsequent exchange
         # operations use their own request/response pairing and must not reuse
         # the first request timestamp stored on the order trace.
-        preserve_lifecycle_phase = (
-            operation == "submit" and request_attempt == 1
-        )
+        preserve_lifecycle_phase = operation == "submit" and request_attempt == 1
         event_details: dict[str, JsonValue] = {
             "client_order_id": plan.client_order_id,
             "intent_id": plan.intent_id,
@@ -1137,13 +1138,9 @@ class LiveRuntimeTelemetry:
         }
         if not is_request:
             event_details["request_paired"] = request_started_at is not None
-            event_details["request_started_at"] = _optional_iso(
-                request_started_at
-            )
+            event_details["request_started_at"] = _optional_iso(request_started_at)
             if request_started_at is not None:
-                latency_ms = (
-                    occurred_at - request_started_at
-                ).total_seconds() * 1000
+                latency_ms = (occurred_at - request_started_at).total_seconds() * 1000
                 event_details["latency_ms_from_request"] = latency_ms
         await self._record_phase(
             phase=canonical_phase,
@@ -1353,6 +1350,12 @@ class LiveRuntimeTelemetry:
             )
             self._traces[trace_id] = trace
             self._trim_traces()
+        elif parent_trace_id:
+            parent = self._traces.get(parent_trace_id)
+            if parent is not None:
+                for p in (MARKET_STATE_RECEIVED, CONTEXT_READY, GATE_EVALUATED):
+                    if p in parent.phase_at:
+                        trace.phase_at[p] = parent.phase_at[p]
         return trace
 
     def _remember_source_ingress(
@@ -1495,9 +1498,7 @@ def _normalize_exchange_operations(
     normalized: set[str] = set()
     for operation in operations:
         if not isinstance(operation, str) or not operation.strip():
-            raise ValueError(
-                "persist_exchange_operations must contain non-empty names"
-            )
+            raise ValueError("persist_exchange_operations must contain non-empty names")
         normalized.add(operation.strip())
     return frozenset(normalized)
 
@@ -1549,8 +1550,7 @@ def _decision_slo_latencies(
     if not transitions:
         return {}
     if phase == EXCHANGE_REQUEST_STARTED and (
-        details.get("operation") != "submit"
-        or details.get("request_attempt") != 1
+        details.get("operation") != "submit" or details.get("request_attempt") != 1
     ):
         return {}
     phase_at = dict(trace.phase_at)

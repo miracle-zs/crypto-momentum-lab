@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,6 +16,10 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     SystemPerformanceResponse,
 )
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
+from crypto_momentum_lab.persistence.postgres.models import (
+    RuntimeMarketState15sRow,
+    StrategyRuntimeEventRow,
+)
 from tests.unit.apps.operator_dashboard.test_main import (
     DASHBOARD_AUTH_KWARGS,
     DASHBOARD_BASIC_AUTH,
@@ -136,3 +140,47 @@ def test_dashboard_js_uses_fetch_timeout_and_section_inflight() -> None:
     assert "AbortSignal.timeout" in javascript
     assert "sectionInFlight" in javascript
     assert "pollInFlight" not in javascript
+
+
+@pytest.mark.asyncio
+async def test_performance_queries_uses_market_state_progress_delay() -> None:
+    mock_session = AsyncMock()
+    mock_scalars_result = MagicMock()
+    mock_scalars_result.all.return_value = []
+    mock_session.scalars.return_value = mock_scalars_result
+
+    market_state = MagicMock(spec=RuntimeMarketState15sRow)
+    market_state.bucket_end = NOW - timedelta(seconds=12)
+    market_state.created_at = NOW - timedelta(seconds=11, milliseconds=450)
+    market_state.missing_agg_trade_count = 0
+
+    market_progress = MagicMock(spec=StrategyRuntimeEventRow)
+    market_progress.occurred_at = NOW - timedelta(seconds=11, milliseconds=450)
+    market_progress.details = {"market_delay_ms": 550.0}
+
+    mock_session.scalar.side_effect = [
+        market_state,
+        None,
+        market_progress,
+        0,
+    ]
+    mock_session.execute.return_value = MagicMock(
+        first=lambda: (2, 45),
+        scalar=lambda: 1024 * 1024 * 50,
+    )
+
+    class MockSessionFactory:
+        def __call__(self) -> Any:
+            cm = MagicMock()
+            cm.__aenter__ = AsyncMock(return_value=mock_session)
+            cm.__aexit__ = AsyncMock(return_value=None)
+            return cm
+
+    queries = PerformanceQueries(
+        MockSessionFactory(),
+        clock=lambda: NOW,
+    )
+    result = await queries.performance()
+    assert result.market_data.status == OperationalStatus.READY
+    assert result.market_data.market_delay_ms == 550.0
+    assert result.market_data.realtime_closure_delay_seconds == 0.55

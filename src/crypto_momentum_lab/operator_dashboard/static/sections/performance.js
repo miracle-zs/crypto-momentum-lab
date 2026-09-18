@@ -1,4 +1,4 @@
-import { DISPLAY_TIME_ZONE_LABEL } from "../dashboard-config.js?v=20260918-perf-v3";
+import { DISPLAY_TIME_ZONE_LABEL } from "../dashboard-config.js?v=20260918-perf-v4";
 import {
   dayTime,
   esc,
@@ -21,6 +21,14 @@ function bytes(value) {
   return `${Math.round(parsed)} B`;
 }
 
+function formatMs(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return "—";
+  if (parsed >= 60000) return `${(parsed / 1000).toFixed(1)} s`;
+  if (parsed >= 1000) return `${(parsed / 1000).toFixed(2)} s`;
+  return `${parsed.toFixed(2)} ms`;
+}
+
 function meterCard(label, valText, percent, note, tone = "good") {
   const pct = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
   return `<div class="performance-meter-card">
@@ -37,14 +45,41 @@ const PHASE_LABELS = {
   "account-4": { label: "账户 4 (account-4)", phase: "45s", phaseClass: "phase-45", targetSec: ":45" },
 };
 
-const STAGE_TRANSLATIONS = {
-  "candidate_accepted->risk_approved": "01. 风控审批 (Risk Gate)",
-  "risk_approved->intent_saved": "02. 意图持久化 (Intent Save)",
-  "intent_saved->submitting": "03. 下单调度 (Dispatch)",
-  "submitting->exchange_request_started": "04. 网络请求发起 (Request)",
-  "exchange_request_started->exchange_response_received": "05. 交易所应答 (Exchange ACK)",
-  "exchange_response_received->exchange_filled": "06. 成交回报确认 (Fill Match)",
+const STAGE_ORDER = {
+  "market_state_received->context_ready": 0,
+  "context_ready->candidate_accepted": 1,
+  "candidate_accepted->risk_approved": 2,
+  "risk_approved->intent_saved": 3,
+  "candidate_accepted->intent_saved": 3,
+  "intent_saved->submitting": 4,
+  "submitting->exchange_request_started": 5,
+  "exchange_request_started->exchange_response_received": 6,
+  "exchange_response_received->exchange_filled": 7,
 };
+
+const STAGE_TRANSLATIONS = {
+  "market_state_received->context_ready": "00. 上下文准备 (Context Ready)",
+  "context_ready->candidate_accepted": "01. 候选信号生成 (Signal Prep)",
+  "candidate_accepted->risk_approved": "02. 组合风控审批 (Risk Gate)",
+  "risk_approved->intent_saved": "03. 意图持久化 (Intent Save)",
+  "candidate_accepted->intent_saved": "03. 意图持久化 (Intent Save)",
+  "intent_saved->submitting": "04. 下单调度队列 (Dispatch)",
+  "submitting->exchange_request_started": "05. 网络请求发起 (Request)",
+  "exchange_request_started->exchange_response_received": "06. 交易所网络应答 (Exchange ACK)",
+  "exchange_response_received->exchange_filled": "07. 限价单盘口撮合成交 (Resting Limit Fill)",
+};
+
+const DECISION_PIPELINE_STAGES = new Set([
+  "market_state_received->context_ready",
+  "context_ready->candidate_accepted",
+  "candidate_accepted->risk_approved",
+  "candidate_accepted->intent_saved",
+  "risk_approved->intent_saved",
+  "intent_saved->submitting",
+  "submitting->exchange_request_started",
+  "exchange_request_started->exchange_response_received",
+  "signal_recorded->candidate_accepted",
+]);
 
 export function renderPerformance(data) {
   const status = normalizedStatus(data?.status || "UNKNOWN") || "UNKNOWN";
@@ -71,11 +106,13 @@ export function renderPerformance(data) {
     ? `${Number(marketData.market_delay_ms).toFixed(0)} ms`
     : "—";
   const marketSub = marketData.realtime_closure_delay_seconds != null
-    ? `闭桶水位 ${Number(marketData.realtime_closure_delay_seconds * 1000).toFixed(0)}ms · 完整100%`
+    ? `闭桶交付 ${Number(marketData.realtime_closure_delay_seconds * 1000).toFixed(0)}ms · 完整100%`
     : "行情接收中";
-  const marketTone = marketData.market_delay_ms != null && marketData.market_delay_ms < 600
+  const marketTone = marketData.market_delay_ms != null && marketData.market_delay_ms < 1000
     ? "pos"
-    : "warn";
+    : marketData.market_delay_ms != null && marketData.market_delay_ms < 3000
+      ? "warn"
+      : "neut";
 
   const memAvail = bytes(hostResources.mem_available_bytes);
   const swapUsed = bytes(hostResources.swap_used_bytes);
@@ -83,7 +120,7 @@ export function renderPerformance(data) {
     ? `内存已用 ${hostResources.mem_usage_percent}% · Swap ${swapUsed}`
     : `Swap 已用 ${swapUsed}`;
 
-  // Decision SLO summary
+  // Decision SLO summary (Decision & Order Placement Pipeline)
   let maxDecisionP95 = null;
   const rawPhaseLatencies = decisionSlo.phase_latency && typeof decisionSlo.phase_latency === "object"
     ? decisionSlo.phase_latency
@@ -92,20 +129,26 @@ export function renderPerformance(data) {
     ([_, v]) => v != null && typeof v === "object",
   );
   if (phaseLatencies.length) {
-    const p95s = phaseLatencies
+    const decisionP95s = phaseLatencies
+      .filter(([transition]) => DECISION_PIPELINE_STAGES.has(transition))
       .map(([_, v]) => Number(v.p95_ms))
       .filter((n) => Number.isFinite(n));
-    if (p95s.length) {
-      maxDecisionP95 = Math.max(...p95s);
+    if (decisionP95s.length) {
+      maxDecisionP95 = Math.max(...decisionP95s);
     }
   }
   const decisionP95Text = maxDecisionP95 != null
     ? `${maxDecisionP95.toFixed(1)} ms`
     : (decisionSlo.persisted_event_count ? "达标" : "无新交易");
-  const decisionSub = `${num(decisionSlo.persisted_event_count || 0, 0)} 事件 · 窗口 ${decisionSlo.window || "24h"}`;
+  const decisionSub = maxDecisionP95 != null
+    ? `核心决策与报单链路 · 窗口 ${decisionSlo.window || "6h"}`
+    : `${num(decisionSlo.persisted_event_count || 0, 0)} 事件 · 窗口 ${decisionSlo.window || "6h"}`;
+  const decisionTone = maxDecisionP95 != null
+    ? (maxDecisionP95 < 500 ? "pos" : maxDecisionP95 < 1500 ? "warn" : "neg")
+    : "neut";
 
   const kpis = `<div class="kpi-grid performance-kpi-grid">
-    ${tile("决策链路最高 P95", decisionP95Text, decisionSub, maxDecisionP95 != null && maxDecisionP95 < 50 ? "pos" : "neut")}
+    ${tile("决策链路最高 P95", decisionP95Text, decisionSub, decisionTone)}
     ${tile("Checkpoint P95 耗时", p95Checkpoint, checkpointSub, checkpointTone)}
     ${tile("行情端到端时延", marketDelay, marketSub, marketTone)}
     ${tile("宿主机可用内存", memAvail, memSub, "pos")}
@@ -157,24 +200,35 @@ export function renderPerformance(data) {
   </div>`;
 
   // 3. Decision Path SLO breakdown
-  const sloRows = phaseLatencies.map(([transition, item]) => {
-    const stageTitle = STAGE_TRANSLATIONS[transition] || transition;
-    return {
-      transition,
-      stageTitle,
-      sample_count: item?.sample_count ?? 0,
-      p50_ms: item?.p50_ms,
-      p95_ms: item?.p95_ms,
-      max_ms: item?.max_ms,
-    };
-  });
+  const sloRows = phaseLatencies
+    .map(([transition, item]) => {
+      const stageTitle = STAGE_TRANSLATIONS[transition] || transition;
+      const isResting = transition === "exchange_response_received->exchange_filled";
+      const sortOrder = STAGE_ORDER[transition] ?? 99;
+      return {
+        transition,
+        stageTitle,
+        isResting,
+        sortOrder,
+        sample_count: item?.sample_count ?? 0,
+        p50_ms: item?.p50_ms,
+        p95_ms: item?.p95_ms,
+        max_ms: item?.max_ms,
+      };
+    })
+    .sort((a, b) => a.sortOrder - b.sortOrder);
 
   const sloTable = dataTable([
     { label: "决策与执行阶段", key: "stageTitle" },
     { label: "样本数", value: (row) => num(row.sample_count, 0), align: "right", cls: "num" },
-    { label: "P50 时延", value: (row) => Number.isFinite(Number(row.p50_ms)) ? `${Number(row.p50_ms).toFixed(2)} ms` : "—", align: "right", cls: "num" },
-    { label: "P95 时延", value: (row) => Number.isFinite(Number(row.p95_ms)) ? `${Number(row.p95_ms).toFixed(2)} ms` : "—", align: "right", cls: "num pos" },
-    { label: "Max 峰值", value: (row) => Number.isFinite(Number(row.max_ms)) ? `${Number(row.max_ms).toFixed(2)} ms` : "—", align: "right", cls: "num muted" },
+    { label: "P50 时延", value: (row) => formatMs(row.p50_ms), align: "right", cls: "num" },
+    {
+      label: "P95 时延",
+      value: (row) => formatMs(row.p95_ms),
+      align: "right",
+      cls: (row) => (row.isResting ? "num muted" : (row.p95_ms != null && row.p95_ms < 500 ? "num pos" : "num warn")),
+    },
+    { label: "Max 峰值", value: (row) => formatMs(row.max_ms), align: "right", cls: "num muted" },
   ], sloRows, { emptyText: "暂无决策时延样本 (窗口内无触发订单或全流程处于冷态)" });
 
   // 4. Checkpoint Recent History Table
