@@ -120,6 +120,7 @@ log = structlog.get_logger()
 LiveDaemonResult = _LiveDaemonResult
 LiveRuntimeStrategy = _LiveRuntimeStrategy
 
+
 class LiveDaemonRepository(LiveSubmissionRepository, Protocol):
     async def save_checkpoint(
         self,
@@ -136,6 +137,7 @@ class LiveDaemonConfig:
     checkpoint_every_states: int
     checkpoint_every_seconds: float = 60.0
     checkpoint_phase_seconds: float = 0.0
+    max_dirty_age_seconds: float = 90.0
     reconcile_once_per_bucket: bool = True
     hedge_mode: bool = False
     entry_long_only: bool = False
@@ -171,6 +173,8 @@ class LiveDaemonConfig:
             raise ValueError(
                 "checkpoint_phase_seconds must be in [0, checkpoint_every_seconds)"
             )
+        if self.max_dirty_age_seconds <= 0:
+            raise ValueError("max_dirty_age_seconds must be positive")
         if not isinstance(self.reconcile_once_per_bucket, bool):
             raise TypeError("reconcile_once_per_bucket must be a bool")
         if not isinstance(self.entry_policy_compare_only, bool):
@@ -218,11 +222,8 @@ class LiveStrategyDaemon:
             Callable[[], Awaitable[tuple[AccountPositionSnapshot, ...]]] | None
         ) = None,
         recover_market_state_gap: MarketStateGapRecovery | None = None,
-        hub_cursor_provider: Callable[
-            [], Mapping[str, str | int] | None
-        ] | None = None,
-        commit_market_state_cursor: Callable[[MarketState15s], None]
-        | None = None,
+        hub_cursor_provider: Callable[[], Mapping[str, str | int] | None] | None = None,
+        commit_market_state_cursor: Callable[[MarketState15s], None] | None = None,
         entered_symbol_lookup: Callable[[str], bool] | None = None,
     ) -> None:
         self._strategy = strategy
@@ -248,6 +249,7 @@ class LiveStrategyDaemon:
             checkpoint_every_states=config.checkpoint_every_states,
             checkpoint_every_seconds=config.checkpoint_every_seconds,
             checkpoint_phase_seconds=config.checkpoint_phase_seconds,
+            max_dirty_age_seconds=config.max_dirty_age_seconds,
             hub_cursor_provider=hub_cursor_provider,
         )
         self._telemetry = telemetry
@@ -382,9 +384,7 @@ class LiveStrategyDaemon:
             config=EntryLaneConfig(
                 run_id=config.run_id,
                 entry_symbol_loader=config.entry_symbol_loader,
-                entry_symbol_refresh_seconds=(
-                    config.entry_symbol_refresh_seconds
-                ),
+                entry_symbol_refresh_seconds=(config.entry_symbol_refresh_seconds),
                 entry_filter_context_loader=config.entry_filter_context_loader,
                 entry_universe_context_provider=(
                     config.entry_universe_context_provider
@@ -414,9 +414,7 @@ class LiveStrategyDaemon:
             context_prefetcher=self._context_prefetcher,
             runtime_cache=self._runtime_cache,
             scheduled_controller=self._scheduled_controller,
-            scheduled_risk_window_enabled=(
-                config.scheduled_risk_window is not None
-            ),
+            scheduled_risk_window_enabled=(config.scheduled_risk_window is not None),
             telemetry=self._telemetry,
             exit_lane=self._exit_lane,
             exit_manager=self._exit_manager,
@@ -439,9 +437,7 @@ class LiveStrategyDaemon:
             exit_lane=self._exit_lane,
             exit_manager=self._exit_manager,
             scheduled_controller=self._scheduled_controller,
-            scheduled_risk_window_enabled=(
-                config.scheduled_risk_window is not None
-            ),
+            scheduled_risk_window_enabled=(config.scheduled_risk_window is not None),
             run_market_loop=self._run_market_loop,
             set_run_active=self._set_run_active,
         )
@@ -461,6 +457,10 @@ class LiveStrategyDaemon:
     @property
     def managed_position_symbols(self) -> frozenset[str]:
         return self._context_runtime.managed_position_symbols
+
+    @property
+    def checkpoint_coordinator(self) -> LiveCheckpointCoordinator:
+        return self._checkpoint_coordinator
 
     def set_entry_enabled(self, enabled: bool, *, reason: str) -> None:
         self._entry_control.set_entry_enabled(enabled, reason=reason)
@@ -641,6 +641,7 @@ class LiveStrategyDaemon:
                 candidate_id=candidate.candidate_id,
                 error_type=type(error).__name__,
             )
+
 
 def _is_transient_live_gate(reasons: tuple[str, ...]) -> bool:
     """Compatibility export for callers that used the old daemon helper."""

@@ -143,6 +143,13 @@ class LiveRolloutSession:
         return LiveSessionResult(gate, LiveSessionState.LIVE_ENABLED, order_result)
 
 
+from crypto_momentum_lab.live_rollout.runtime_session import (  # noqa: E402
+    RegisteredResource,
+    ResourceOwnershipRegistry,
+    RuntimeSession,
+    SessionLifecycleState,
+)
+
 __all__ = [
     "LivePlanExecutor",
     "LiveRolloutSession",
@@ -150,4 +157,8 @@ __all__ = [
     "LiveSessionLifecycle",
     "LiveSessionResult",
     "LiveTransitionRepository",
+    "RegisteredResource",
+    "ResourceOwnershipRegistry",
+    "RuntimeSession",
+    "SessionLifecycleState",
 ]

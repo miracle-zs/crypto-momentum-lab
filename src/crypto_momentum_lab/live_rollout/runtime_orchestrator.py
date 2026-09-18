@@ -132,6 +132,7 @@ from crypto_momentum_lab.live_rollout.scheduled_risk_window import (
 from crypto_momentum_lab.live_rollout.session import (
     LiveSessionConfig,
     LiveSessionLifecycle,
+    RuntimeSession,
 )
 from crypto_momentum_lab.live_rollout.signal_recorder import (
     LiveStrategySignalRecorder,
@@ -293,9 +294,7 @@ async def run_live_daemon(
     risk_control_hub_url = config.market.risk_control_hub_url
 
     profile = config.strategy.profile
-    entry_positive_gainer_top_count = (
-        config.strategy.entry_positive_gainer_top_count
-    )
+    entry_positive_gainer_top_count = config.strategy.entry_positive_gainer_top_count
     require_price_above_ema5 = config.strategy.require_price_above_ema5
     require_price_above_ema10 = config.strategy.require_price_above_ema10
     entry_order_type = config.strategy.entry_order_type
@@ -311,9 +310,7 @@ async def run_live_daemon(
     entry_leverage = config.execution.entry_leverage
     margin_type = config.execution.margin_type
     candle_grace_bars = config.execution.candle_grace_bars
-    candle_grace_decision_profit_pct = (
-        config.execution.candle_grace_decision_profit_pct
-    )
+    candle_grace_decision_profit_pct = config.execution.candle_grace_decision_profit_pct
     candle_grace_profit_pct = config.execution.candle_grace_profit_pct
 
     max_runtime_seconds = config.lifecycle.max_runtime_seconds
@@ -345,6 +342,7 @@ async def run_live_daemon(
         raise ValueError("account_event_hub_url must not be empty")
     health = LocalHealthWriter.from_environment()
     live_readiness: LiveReadinessPublisher | None = None
+    session: RuntimeSession | None = None
 
     def mark_live_database_ok() -> None:
         if health is None:
@@ -695,17 +693,16 @@ async def run_live_daemon(
             )
             if restored_hub_cursor is not None:
                 hub_cursor_state.restore(restored_hub_cursor)
-            elif requires_market_recovery and _hub_cursor_from_checkpoint_payload(
-                checkpoint
-            ) is not None:
+            elif (
+                requires_market_recovery
+                and _hub_cursor_from_checkpoint_payload(checkpoint) is not None
+            ):
                 log.info(
                     "live_hub_cursor_discarded_before_durable_rewarm",
                     reason="checkpoint_requires_market_recovery",
                 )
         state_repository = PostgresRuntimeMarketStateRepository(market_factory)
-        requested_startup_cutover = _live_market_state_cutover(
-            datetime.now(tz=UTC)
-        )
+        requested_startup_cutover = _live_market_state_cutover(datetime.now(tz=UTC))
         startup_cutover = await _wait_for_durable_market_state_cutover(
             repository=state_repository,
             environment=market_environment,
@@ -965,9 +962,7 @@ async def run_live_daemon(
                 None if closed_candle_feed is None else closed_candle_feed.set_symbols
             ),
             recover_market_state_gap=recover_market_state_gap,
-            hub_cursor_provider=(
-                hub_cursor_state.snapshot
-            ),
+            hub_cursor_provider=(hub_cursor_state.snapshot),
             commit_market_state_cursor=hub_cursor_state.acknowledge_state,
             entered_symbol_lookup=hub_cursor_state.consume_entered_symbol,
         )
@@ -1302,60 +1297,7 @@ async def run_live_daemon(
             run_id=session_id,
             shutdown_timeout_seconds=_LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS,
         )
-        try:
-            result = await runtime_supervisor.run()
-        finally:
-            await runtime_supervisor.stop()
-        assert session_lifecycle is not None
-        await session_lifecycle.transition(
-            LiveSessionState.HALTED
-            if result.halt_reason is not None
-            else LiveSessionState.COMPLETED,
-            reason=result.halt_reason,
-        )
-        return result
-    except Exception as exc:
-        log.exception(
-            "live_runtime_failed",
-            account_label=account_label,
-            session_id=session_id,
-            error_type=type(exc).__name__,
-        )
-        if startup_phase and _is_retryable_live_startup_error(exc):
-            raise _LiveStartupRetryableError(exc) from exc
-        if session_lifecycle is not None and risk_config_hash:
-            await session_lifecycle.transition(
-                LiveSessionState.HALTED,
-                reason=str(exc),
-            )
-        raise
-    finally:
-        if hub_source is not None:
-            hub_source.stop()
-        if (
-            startup_market_state_task is not None
-            and not startup_market_state_task.done()
-        ):
-            startup_market_state_task.cancel()
-        if startup_market_state_task is not None:
-            try:
-                async with asyncio.timeout(_LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS):
-                    await asyncio.gather(
-                        startup_market_state_task,
-                        return_exceptions=True,
-                    )
-            except TimeoutError:
-                log.warning(
-                    "live_startup_market_buffer_shutdown_timed_out",
-                    timeout_seconds=_LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS,
-                )
-            except asyncio.CancelledError:
-                raise
-        if shutdown_task is not None and not shutdown_task.done():
-            shutdown_task.cancel()
-        if shutdown_task is not None:
-            await asyncio.gather(shutdown_task, return_exceptions=True)
-        await LiveResourceLifecycle(
+        resource_lifecycle = LiveResourceLifecycle(
             entry_runtime=entry_runtime,
             entry_order_lifecycle=entry_order_lifecycle,
             execution_coordinator=execution_coordinator,
@@ -1374,7 +1316,94 @@ async def run_live_daemon(
             heartbeat_engine=heartbeat_engine,
             health=health,
             shutdown_timeout_seconds=_LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS,
-        ).close()
+        )
+
+        async def _save_final_checkpoint(timeout_seconds: float | None) -> bool:
+            if daemon is not None:
+                return await daemon.checkpoint_coordinator.save_final(
+                    timeout_seconds=timeout_seconds
+                )
+            return True
+
+        async def _transition_terminal_state(reason: str | None) -> None:
+            if session_lifecycle is not None:
+                await session_lifecycle.transition(
+                    LiveSessionState.HALTED
+                    if reason is not None
+                    else LiveSessionState.COMPLETED,
+                    reason=reason,
+                )
+
+        session = RuntimeSession(
+            run_id=session_id,
+            supervisor=runtime_supervisor,
+            lifecycle=resource_lifecycle,
+            save_final_checkpoint=_save_final_checkpoint,
+            transition_terminal_state=_transition_terminal_state,
+            health=health,
+            shutdown_budget_seconds=_LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS,
+        )
+        return await session.run()
+    except Exception as exc:
+        log.exception(
+            "live_runtime_failed",
+            account_label=account_label,
+            session_id=session_id,
+            error_type=type(exc).__name__,
+        )
+        if startup_phase and _is_retryable_live_startup_error(exc):
+            raise _LiveStartupRetryableError(exc) from exc
+        if session_lifecycle is not None and risk_config_hash:
+            await session_lifecycle.transition(
+                LiveSessionState.HALTED,
+                reason=str(exc),
+            )
+        raise
+    finally:
+        if session is not None:
+            await session.close()
+        else:
+            if hub_source is not None:
+                hub_source.stop()
+            if (
+                startup_market_state_task is not None
+                and not startup_market_state_task.done()
+            ):
+                startup_market_state_task.cancel()
+            if startup_market_state_task is not None:
+                try:
+                    async with asyncio.timeout(_LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS):
+                        await asyncio.gather(
+                            startup_market_state_task,
+                            return_exceptions=True,
+                        )
+                except (TimeoutError, asyncio.CancelledError):
+                    pass
+            if shutdown_task is not None and not shutdown_task.done():
+                shutdown_task.cancel()
+            if shutdown_task is not None:
+                await asyncio.gather(shutdown_task, return_exceptions=True)
+            await LiveResourceLifecycle(
+                entry_runtime=entry_runtime,
+                entry_order_lifecycle=entry_order_lifecycle,
+                execution_coordinator=execution_coordinator,
+                client=client,
+                closed_candle_feed=closed_candle_feed,
+                candle_source=candle_source,
+                ema_candle_source=ema_candle_source,
+                signal_recorder=signal_recorder,
+                telemetry=telemetry,
+                volume_cache=volume_cache,
+                volume_rest_client=None,
+                execution_engine=execution_engine,
+                market_engine=market_engine,
+                observability_engine=observability_engine,
+                checkpoint_engine=checkpoint_engine,
+                heartbeat_engine=heartbeat_engine,
+                health=health,
+                shutdown_timeout_seconds=_LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS,
+            ).close()
+
 
 async def _observe_market_states(
     states: AsyncIterable[MarketState15s],
@@ -1556,9 +1585,7 @@ class _LiveHubCursorState:
     def __init__(self) -> None:
         self.stream_id: str | None = None
         self.sequence: int | None = None
-        self._batch_by_state: dict[
-            tuple[str, datetime], tuple[str, int]
-        ] = {}
+        self._batch_by_state: dict[tuple[str, datetime], tuple[str, int]] = {}
         self._remaining_by_batch: dict[tuple[str, int], int] = {}
         # Symbols the publisher reported as newly entering the monitored pool.
         # Consumed on first report so one entry is announced exactly once.

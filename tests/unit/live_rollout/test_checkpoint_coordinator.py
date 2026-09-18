@@ -277,7 +277,8 @@ async def test_coordinator_periodic_phase_alignment_and_deduplication() -> None:
     assert len(persisted) == 1
     assert persisted[0][2] == t_15
 
-    # 3. Second symbol (ETHUSDT) in same :15 bucket -> deduplicated, does NOT double-submit
+    # 3. Second symbol (ETHUSDT) in same :15 bucket
+    # Deduplicated, does NOT double-submit
     state_15_eth = MarketState15s(
         schema_version=1,
         exchange="binance-usdm",
@@ -423,3 +424,111 @@ async def _persist(
     saved_at: datetime,
 ) -> None:
     persisted.append((run_id, checkpoint, saved_at))
+
+
+async def test_coordinator_triggers_on_max_dirty_age() -> None:
+    persisted: list[tuple[str, StrategyCheckpoint, datetime]] = []
+    strategy = _Strategy()
+    writer = CheckpointWriter(
+        run_id="run-dirty-age",
+        persist=lambda run_id, checkpoint, saved_at: _persist(
+            persisted,
+            run_id,
+            checkpoint,
+            saved_at,
+        ),
+    )
+    coordinator = LiveCheckpointCoordinator(
+        writer=writer,
+        strategy=strategy,
+        checkpoint_every_states=100,
+        checkpoint_every_seconds=3600.0,
+        max_dirty_age_seconds=10.0,
+    )
+
+    await coordinator.start()
+    t1 = datetime(2026, 7, 3, 12, 0, 5, tzinfo=UTC)
+    coordinator.record_processed_state(_state(), saved_at=t1)
+    assert coordinator.dirty is True
+    assert len(persisted) == 0
+
+    # Simulate elapsed physical time exceeding max_dirty_age_seconds
+    coordinator._last_persisted_monotonic -= 15.0
+
+    t2 = datetime(2026, 7, 3, 12, 0, 10, tzinfo=UTC)
+    coordinator.record_processed_state(_state(), saved_at=t2)
+    # Submission triggered due to max dirty age!
+    assert coordinator.dirty is False
+    await writer.flush()
+    assert len(persisted) == 1
+    assert persisted[0][0] == "run-dirty-age"
+
+    await coordinator.stop()
+
+
+async def test_coordinator_check_dirty_age_idle() -> None:
+    persisted: list[tuple[str, StrategyCheckpoint, datetime]] = []
+    strategy = _Strategy()
+    writer = CheckpointWriter(
+        run_id="run-idle-age",
+        persist=lambda run_id, checkpoint, saved_at: _persist(
+            persisted,
+            run_id,
+            checkpoint,
+            saved_at,
+        ),
+    )
+    coordinator = LiveCheckpointCoordinator(
+        writer=writer,
+        strategy=strategy,
+        checkpoint_every_states=100,
+        checkpoint_every_seconds=3600.0,
+        max_dirty_age_seconds=5.0,
+    )
+
+    await coordinator.start()
+    coordinator.record_processed_state(_state(), saved_at=NOW)
+    assert coordinator.dirty is True
+
+    # Not expired yet
+    assert coordinator.check_dirty_age() is False
+    assert len(persisted) == 0
+
+    # Expire dirty age
+    coordinator._last_persisted_monotonic -= 10.0
+    assert coordinator.check_dirty_age() is True
+    assert coordinator.dirty is False
+    await writer.flush()
+    assert len(persisted) == 1
+
+    await coordinator.stop()
+
+
+async def test_coordinator_save_final_timeout() -> None:
+    import asyncio
+
+    async def _slow_persist(*args):
+        await asyncio.sleep(1.0)
+
+    strategy = _Strategy()
+    writer = CheckpointWriter(
+        run_id="run-slow",
+        persist=_slow_persist,
+        flush_timeout_seconds=0.1,
+    )
+    coordinator = LiveCheckpointCoordinator(
+        writer=writer,
+        strategy=strategy,
+        checkpoint_every_states=100,
+    )
+    await coordinator.start()
+    coordinator.record_processed_state(_state(), saved_at=NOW)
+    assert coordinator.dirty is True
+
+    # save_final with tiny timeout should return False gracefully
+    saved = await coordinator.save_final(timeout_seconds=0.01)
+    assert saved is False
+    # Dirty state remains preserved for recovery
+    assert coordinator.dirty is True
+
+    await coordinator.stop()
