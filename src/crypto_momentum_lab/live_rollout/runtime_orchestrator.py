@@ -1118,8 +1118,8 @@ async def run_live_daemon(
         )
 
         def on_exit_failure(symbol: str, failure: str | None) -> None:
-            daemon.set_exit_failure(symbol, failure)
-            refresh_entry_enabled()
+            if daemon.set_exit_failure(symbol, failure):
+                refresh_entry_enabled()
 
         def on_entry_filter_cache_ready(ready: bool) -> None:
             daemon.set_entry_filter_cache_ready(ready)

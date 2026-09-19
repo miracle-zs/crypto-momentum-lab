@@ -167,6 +167,12 @@ class LiveReadinessPublisher:
                 for symbol in normalized_expected
                 if int(warmup_by_symbol.get(symbol, 0)) >= required_buckets
             )
+            if (
+                self._warmup_required_buckets == required_buckets
+                and self._warmup_expected_symbols == normalized_expected
+                and self._warmup_complete_symbols == complete
+            ):
+                return
             self._warmup_required_buckets = required_buckets
             self._warmup_expected_symbols = normalized_expected
             self._warmup_complete_symbols = complete
@@ -192,6 +198,12 @@ class LiveReadinessPublisher:
             raise TypeError("entry_enabled must be a bool")
         if not entry_enabled_reason.strip():
             raise ValueError("entry_enabled_reason must not be empty")
+        if (
+            self._entry_universe_count == entry_universe_count
+            and self._entry_enabled == entry_enabled
+            and self._entry_enabled_reason == entry_enabled_reason
+        ):
+            return
         self._entry_universe_count = entry_universe_count
         self._entry_enabled = entry_enabled
         self._entry_enabled_reason = entry_enabled_reason

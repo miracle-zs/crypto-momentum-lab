@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -113,14 +112,9 @@ class LocalHealthWriter:
     @staticmethod
     def _write_atomic(path: Path, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=f".{path.name}.",
-            dir=path.parent,
-            text=True,
-        )
-        temporary_path = Path(temporary_name)
+        temporary_path = path.parent / f".{path.name}.{os.getpid()}.tmp"
         try:
-            with os.fdopen(fd, "w", encoding="ascii") as temporary:
+            with open(temporary_path, "w", encoding="ascii") as temporary:
                 temporary.write(content)
             os.replace(temporary_path, path)
         finally:

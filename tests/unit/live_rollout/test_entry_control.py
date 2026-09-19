@@ -160,3 +160,25 @@ def test_entry_control_validates_external_prerequisites() -> None:
             market_state_unavailable_reason=" ",
             account_snapshot_available=True,
         )
+
+
+def test_entry_control_set_exit_failure_change_tracking() -> None:
+    gate = LiveEntryControlGate(run_id="run-1", state_machine=_StateMachine())
+
+    # Clearing a failure that wasn't present returns False
+    assert gate.set_exit_failure("BTCUSDT", None) is False
+
+    # Recording a new failure returns True
+    assert gate.set_exit_failure("BTCUSDT", "timeout") is True
+
+    # Recording identical failure returns False
+    assert gate.set_exit_failure("BTCUSDT", "timeout") is False
+
+    # Changing failure message returns True
+    assert gate.set_exit_failure("BTCUSDT", "api_error") is True
+
+    # Clearing an existing failure returns True
+    assert gate.set_exit_failure("BTCUSDT", None) is True
+
+    # Clearing again returns False
+    assert gate.set_exit_failure("BTCUSDT", None) is False

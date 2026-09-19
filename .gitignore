@@ -17,3 +17,4 @@ data/
 /reports/
 server_exports/
 runs/
+local_optimization/

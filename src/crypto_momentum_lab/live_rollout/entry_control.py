@@ -78,17 +78,26 @@ class LiveEntryControlGate:
         self,
         symbol: str,
         failure: str | None,
-    ) -> None:
-        """Remember an exit failure until that symbol recovers."""
+    ) -> bool:
+        """Remember an exit failure until that symbol recovers.
+
+        Returns True if the stored failure state for symbol changed, False otherwise.
+        """
 
         if not symbol.strip():
             raise ValueError("symbol must not be empty")
         if failure is None:
-            self._exit_failure_by_symbol.pop(symbol, None)
-            return
+            if symbol in self._exit_failure_by_symbol:
+                del self._exit_failure_by_symbol[symbol]
+                return True
+            return False
         if not failure.strip():
             raise ValueError("failure must not be empty when present")
+        previous = self._exit_failure_by_symbol.get(symbol)
+        if previous == failure:
+            return False
         self._exit_failure_by_symbol[symbol] = failure
+        return True
 
     def set_entry_filter_cache_ready(self, ready: bool) -> None:
         """Set whether the configured entry filter cache can admit entries."""

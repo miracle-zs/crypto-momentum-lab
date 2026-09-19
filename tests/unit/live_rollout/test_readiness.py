@@ -82,3 +82,40 @@ def test_readiness_refreshes_progress_and_market_age(tmp_path) -> None:
     assert payload["warmup_complete_symbols"] == 1
     assert payload["warmup_deferred_symbols"] == 1
     assert payload["latest_market_state_age_seconds"] >= 0
+
+
+def test_readiness_deduplicates_entry_gate_updates(tmp_path, monkeypatch) -> None:
+    health, publisher = _publisher(tmp_path)
+    call_count = 0
+    original_write = health.write_readiness
+
+    def counting_write(payload):
+        nonlocal call_count
+        call_count += 1
+        return original_write(payload)
+
+    monkeypatch.setattr(health, "write_readiness", counting_write)
+
+    # First update with different state triggers publish
+    publisher.update_entry_gate(
+        entry_universe_count=5,
+        entry_enabled=True,
+        entry_enabled_reason="live_entry_prerequisites_ready",
+    )
+    assert call_count == 1
+
+    # Identical update must NOT trigger publish
+    publisher.update_entry_gate(
+        entry_universe_count=5,
+        entry_enabled=True,
+        entry_enabled_reason="live_entry_prerequisites_ready",
+    )
+    assert call_count == 1
+
+    # Changed update triggers publish
+    publisher.update_entry_gate(
+        entry_universe_count=5,
+        entry_enabled=False,
+        entry_enabled_reason="lease_heartbeat_degraded",
+    )
+    assert call_count == 2

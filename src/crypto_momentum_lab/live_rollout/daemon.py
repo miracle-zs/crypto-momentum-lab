@@ -469,8 +469,8 @@ class LiveStrategyDaemon:
         self,
         symbol: str,
         failure: str | None,
-    ) -> None:
-        self._entry_control.set_exit_failure(symbol, failure)
+    ) -> bool:
+        return self._entry_control.set_exit_failure(symbol, failure)
 
     def set_entry_filter_cache_ready(self, ready: bool) -> None:
         self._entry_control.set_entry_filter_cache_ready(ready)
