@@ -1335,6 +1335,10 @@ def run_command(
         str | None,
         typer.Option("--candle-grace-profit-pct"),
     ] = None,
+    max_concurrency: Annotated[
+        int | None,
+        typer.Option("--max-concurrency", min=1, help="Max concurrent active positions per symbol."),
+    ] = None,
     base_url: Annotated[str, typer.Option("--base-url")] = "https://fapi.binance.com",
     api_key_env: Annotated[
         str | None,
@@ -1485,6 +1489,7 @@ def run_command(
                     acknowledge_missing_shadow_preflight
                 ),
                 persist_exchange_operations=persist_exchange_operations,
+                max_concurrency=max_concurrency,
             ),
             credentials=credentials,
         )

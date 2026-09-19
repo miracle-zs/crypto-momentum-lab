@@ -8,6 +8,7 @@ class FixedLiveLimits:
     max_open_positions: int | None
     max_daily_loss: Decimal | None
     max_gross_exposure: Decimal | None
+    max_concurrency_per_symbol: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +21,7 @@ class LiveLimitContext:
     gross_exposure: Decimal | None
     min_notional: Decimal | None
     has_unresolved_order: bool
+    symbol_concurrency: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +46,13 @@ def evaluate_fixed_live_limits(
     assert context.min_notional is not None
     if context.has_unresolved_order:
         return LiveLimitDecision(False, "unresolved_order_uncertainty", None)
+    if (
+        limits.max_concurrency_per_symbol is not None
+        and context.symbol_concurrency >= limits.max_concurrency_per_symbol
+    ):
+        return LiveLimitDecision(
+            False, "max_concurrency_per_symbol_exceeded", None
+        )
     if (
         limits.max_open_positions is not None
         and len(context.open_position_symbols) >= limits.max_open_positions

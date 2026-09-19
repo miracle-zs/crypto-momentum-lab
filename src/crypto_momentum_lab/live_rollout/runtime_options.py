@@ -106,6 +106,7 @@ class LiveRunOptions:
     entry_policy_enforce: bool | None
     acknowledge_missing_shadow_preflight: bool
     persist_exchange_operations: str | None
+    max_concurrency: int | None = None
 
 
 def runtime_manifest_account_for_cli(
@@ -648,6 +649,15 @@ def resolve_live_runtime_config(
             candle_grace_bars=candle_grace_bars,
             candle_grace_decision_profit_pct=candle_decision_profit,
             candle_grace_profit_pct=candle_profit,
+            max_concurrency=(
+                options.max_concurrency
+                if options.max_concurrency is not None
+                else (
+                    manifest_account.execution_inputs.max_concurrency
+                    if manifest_account is not None
+                    else None
+                )
+            ),
         ),
         lifecycle=LiveRuntimeLifecycle(
             max_runtime_seconds=options.max_runtime_seconds,

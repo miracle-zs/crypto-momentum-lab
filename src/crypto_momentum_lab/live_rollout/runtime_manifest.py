@@ -75,6 +75,7 @@ class LiveRuntimeExecutionInputs:
     candle_grace_decision_profit_pct: Decimal
     candle_grace_profit_pct: Decimal
     persist_exchange_operations: str
+    max_concurrency: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +111,7 @@ _DEFAULT_EXECUTION_INPUTS = LiveRuntimeExecutionInputs(
     candle_grace_decision_profit_pct=Decimal("0.001"),
     candle_grace_profit_pct=Decimal("0.0088"),
     persist_exchange_operations="submit,cancel",
+    max_concurrency=None,
 )
 
 
@@ -459,6 +461,15 @@ def _execution_inputs(
             config.get("persist_exchange_operations"),
             f"{field}.persist_exchange_operations",
         )
+        raw_concurrency = config.get("max_concurrency")
+        max_concurrency = (
+            None
+            if raw_concurrency is None
+            or (isinstance(raw_concurrency, str) and not raw_concurrency.strip())
+            else _integer(raw_concurrency, f"{field}.max_concurrency")
+        )
+        if max_concurrency is not None and max_concurrency <= 0:
+            raise RuntimeManifestError(f"{field}.max_concurrency must be positive")
         return LiveRuntimeExecutionInputs(
             hedge_mode=hedge_mode,
             entry_long_only=entry_long_only,
@@ -471,6 +482,7 @@ def _execution_inputs(
             candle_grace_decision_profit_pct=candle_grace_decision_profit_pct,
             candle_grace_profit_pct=candle_grace_profit_pct,
             persist_exchange_operations=persist_exchange_operations,
+            max_concurrency=max_concurrency,
         )
     except (InvalidOperation, ValueError) as error:
         if isinstance(error, RuntimeManifestError):

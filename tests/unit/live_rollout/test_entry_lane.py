@@ -122,3 +122,35 @@ async def test_entry_lane_stops_after_uncertain_submission() -> None:
     assert outcome.approved_intent_count == 1
     assert outcome.submitted_order_count == 1
     assert outcome.pending_reconciliation
+
+
+async def test_entry_lane_rejects_when_max_concurrency_exceeded() -> None:
+    executed: list[str] = []
+
+    class MockPosition:
+        symbol = "BTCUSDT"
+
+    class MockContext:
+        managed_positions = (MockPosition(), MockPosition())
+        unresolved_orders = ()
+
+    lane = EntryExecutionLane(
+        config=EntryLaneConfig(run_id="run-1", max_concurrency=2),
+        clock=lambda: NOW,
+        entry_enabled=lambda: True,
+        entry_enabled_reason=lambda: "ready",
+        execute_candidate=lambda *args, **kwargs: None,
+        invalidate_context=lambda: None,
+    )
+
+    outcome = await lane.process(
+        decision=_decision(_intent()),  # _intent().symbol is BTCUSDT
+        state=_state(),
+        context=cast(LiveDaemonRuntimeContext, MockContext()),
+        gate_reasons=(),
+        recorded_at=NOW,
+    )
+
+    assert executed == []
+    assert outcome.approved_intent_count == 0
+    assert outcome.submitted_order_count == 0

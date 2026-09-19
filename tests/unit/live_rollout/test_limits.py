@@ -68,6 +68,25 @@ def test_unbounded_daily_loss_does_not_reject_entry() -> None:
     assert decision.allowed is True
 
 
+def test_max_concurrency_per_symbol_blocks_entry() -> None:
+    decision = evaluate_fixed_live_limits(
+        replace(_limits(), max_concurrency_per_symbol=2),
+        replace(_context(), symbol_concurrency=2),
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "max_concurrency_per_symbol_exceeded"
+
+
+def test_max_concurrency_per_symbol_allows_under_limit() -> None:
+    decision = evaluate_fixed_live_limits(
+        replace(_limits(), max_concurrency_per_symbol=2),
+        replace(_context(), symbol_concurrency=1),
+    )
+
+    assert decision.allowed is True
+
+
 def _limits() -> FixedLiveLimits:
     return FixedLiveLimits(
         notional_cap=Decimal("25"),

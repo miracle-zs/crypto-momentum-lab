@@ -89,6 +89,7 @@ class EntryLaneConfig:
     entry_policy_enforce: bool = False
     entry_order_type: EntryType = EntryType.LIMIT
     entry_limit_ttl_seconds: int = 900
+    max_concurrency: int | None = None
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -99,6 +100,8 @@ class EntryLaneConfig:
             raise ValueError("entry_limit_ttl_seconds must be at least 601")
         if not isinstance(self.entry_order_type, EntryType):
             raise TypeError("entry_order_type must be an EntryType")
+        if self.max_concurrency is not None and self.max_concurrency <= 0:
+            raise ValueError("max_concurrency must be positive")
         if self.entry_policy_compare_only and self.entry_policy_enforce:
             raise ValueError(
                 "entry_policy_compare_only and entry_policy_enforce "
@@ -194,6 +197,9 @@ class EntryExecutionLane:
             return
         candidate_filter_results: dict[str, object] = {}
         for candidate in decision.candidates:
+            symbol_concurrency = _count_symbol_concurrency(
+                candidate.symbol, context
+            )
             rejection_reason = _live_entry_candidate_rejection_reason(
                 candidate,
                 entry_enabled=self._entry_enabled(),
@@ -202,6 +208,8 @@ class EntryExecutionLane:
                 context=entry_filter_context,
                 require_price_above_ema5=self._config.require_price_above_ema5,
                 require_price_above_ema10=self._config.require_price_above_ema10,
+                max_concurrency=self._config.max_concurrency,
+                symbol_concurrency=symbol_concurrency,
                 now=recorded_at,
             )
             candidate_filter_results[candidate.candidate_id] = {
@@ -481,6 +489,10 @@ class EntryExecutionLane:
                     require_price_above_ema10=(
                         self._config.require_price_above_ema10
                     ),
+                    max_concurrency=self._config.max_concurrency,
+                    symbol_concurrency=_count_symbol_concurrency(
+                        candidate.symbol, context
+                    ),
                     now=recorded_at,
                 )
                 is not None
@@ -650,6 +662,29 @@ def _live_entry_candidate_passes(
     return True
 
 
+def _count_symbol_concurrency(
+    symbol: str,
+    context: LiveDaemonRuntimeContext | None,
+) -> int:
+    if context is None:
+        return 0
+    managed_positions = getattr(context, "managed_positions", ()) or ()
+    matching_positions = [
+        p for p in managed_positions if getattr(p, "symbol", "") == symbol
+    ]
+    active_batch_count = sum(
+        len(getattr(p, "batches", ())) if getattr(p, "batches", ()) else 1
+        for p in matching_positions
+    )
+    unresolved_orders = getattr(context, "unresolved_orders", ()) or ()
+    pending_order_count = sum(
+        1
+        for o in unresolved_orders
+        if getattr(o, "symbol", "") == symbol and not getattr(o, "reduce_only", False)
+    )
+    return active_batch_count + pending_order_count
+
+
 def _live_entry_candidate_rejection_reason(
     candidate: OrderIntentCandidate,
     *,
@@ -659,6 +694,8 @@ def _live_entry_candidate_rejection_reason(
     context: LiveEntryFilterContext | None,
     require_price_above_ema5: bool,
     require_price_above_ema10: bool,
+    max_concurrency: int | None = None,
+    symbol_concurrency: int = 0,
     now: datetime | None = None,
 ) -> str | None:
     """Return the entry filter reason used by the execution lane."""
@@ -676,6 +713,8 @@ def _live_entry_candidate_rejection_reason(
         return "short_entries_disabled"
     if entry_symbols is not None and candidate.symbol not in entry_symbols:
         return "outside_entry_symbol_pool"
+    if max_concurrency is not None and symbol_concurrency >= max_concurrency:
+        return "max_concurrency_per_symbol_exceeded"
     if not _live_entry_candidate_passes(
         candidate,
         context=context,

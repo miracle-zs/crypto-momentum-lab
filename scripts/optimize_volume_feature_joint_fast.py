@@ -823,15 +823,15 @@ def main() -> None:
         raise SystemExit("--max-initial-margin-usdt must be positive")
 
     parsed_window = optimizer.parse_entry_time_window(args.exclude_entry_hours)
-    if parsed_window is None:
-        raise SystemExit("an entry-time exclusion window is required")
-    offsets = {"UTC": 0, "Asia/Shanghai": 8}
-    exclusion = optimizer.EntryTimeExclusion(
-        start_minute=parsed_window[0],
-        end_minute=parsed_window[1],
-        timezone_label=args.exclude_entry_timezone,
-        offset_hours=offsets[args.exclude_entry_timezone],
-    )
+    exclusion = None
+    if parsed_window is not None:
+        offsets = {"UTC": 0, "Asia/Shanghai": 8}
+        exclusion = optimizer.EntryTimeExclusion(
+            start_minute=parsed_window[0],
+            end_minute=parsed_window[1],
+            timezone_label=args.exclude_entry_timezone,
+            offset_hours=offsets[args.exclude_entry_timezone],
+        )
 
     recent_buckets, baseline_buckets = FEATURE_WINDOWS[args.volume_feature]
     print(
@@ -867,7 +867,13 @@ def main() -> None:
         raise SystemExit("no contiguous local research state segments found")
     full_start = min(segment[0].bucket_start for segment in segments)
     full_end = max(segment[-1].bucket_end for segment in segments)
-    proxy = optimizer.build_top10_proxy(states, top_count=args.top_count)
+    proxy = optimizer.build_true_top10_proxy_from_parquet(
+        args.input_root,
+        top_count=args.top_count,
+        environment=args.environment,
+    )
+    if proxy is None:
+        proxy = optimizer.build_top10_proxy(states, top_count=args.top_count)
     optimization_start = proxy.first_valid_at
     if optimization_start >= full_end:
         raise SystemExit("local data has no valid full UTC-day Top10 proxy window")
@@ -969,7 +975,9 @@ def main() -> None:
                     exit_config=exit_config,
                     data_end=full_end,
                 )
-                entry_excluded = exclusion.excludes(simulation)
+                entry_excluded = (
+                    False if exclusion is None else exclusion.excludes(simulation)
+                )
                 rows.append(
                     FastRow(
                         observation=observation,
@@ -1216,10 +1224,10 @@ def main() -> None:
         },
         "fixed_live_settings": optimizer.LIVE_FIXED_SETTINGS,
         "entry_time_exclusion": {
-            "window": exclusion.window_text,
-            "timezone": exclusion.timezone_label,
-            "offset_hours": exclusion.offset_hours,
-            "interval": "[start, end)",
+            "window": exclusion.window_text if exclusion else "none",
+            "timezone": exclusion.timezone_label if exclusion else "UTC",
+            "offset_hours": exclusion.offset_hours if exclusion else 0,
+            "interval": "[start, end)" if exclusion else "none",
             "applies_to": "filled entry_at",
         },
         "optimized_parameters": [
@@ -1282,7 +1290,11 @@ def main() -> None:
         "",
         f"- 模式：`{manifest['evaluation_mode']}`；完整搜索 7 个维度，共 `{len(grid_rows):,}` 组。",
         f"- 特征：最近 `{recent_buckets * 15 // 60:g}` 分钟平均成交额 / 前 `{baseline_buckets * 15 // 60:g}` 分钟平均成交额。",
-        f"- 过滤：实际成交 `entry_at` 的 `{exclusion.window_text}`（{exclusion.timezone_label}，左闭右开）。",
+        (
+            f"- 过滤：实际成交 `entry_at` 的 `{exclusion.window_text}`（{exclusion.timezone_label}，左闭右开）。"
+            if exclusion
+            else "- 过滤：无入场时间排除（全天 24 小时常驻运行）。"
+        ),
         f"- 数据窗口：`{full_start.isoformat()}` 至 `{full_end.isoformat()}`；有效寻优起点 `{optimization_start.isoformat()}`。",
         f"- 可用状态：`{len(states):,}` 条，币种 `{len({state.symbol for state in states})}` 个，连续片段 `{len(segments):,}` 个。",
         "",

@@ -139,8 +139,11 @@ def load_states(root: Path, *, environment: str) -> tuple[list[MarketState15s], 
     skipped_incomplete = 0
     for path in sorted(root.rglob("*.parquet")):
         file_count += 1
-        parquet_file = parquet.ParquetFile(path)
-        table = parquet_file.read(columns=list(STATE_COLUMNS))
+        try:
+            parquet_file = parquet.ParquetFile(path)
+            table = parquet_file.read(columns=list(STATE_COLUMNS))
+        except Exception:
+            continue
         for raw_row in table.to_pylist():
             source_rows += 1
             if str(raw_row["environment"]) != environment:

@@ -248,15 +248,16 @@ def main() -> None:
     if args.workers < 1:
         raise SystemExit("--workers must be positive")
     parsed_window = optimizer.parse_entry_time_window(args.exclude_entry_hours)
-    if parsed_window is None:
-        raise SystemExit("an entry-time exclusion window is required")
     offsets = {"UTC": 0, "Asia/Shanghai": 8}
-    entry_exclusion = optimizer.EntryTimeExclusion(
-        start_minute=parsed_window[0],
-        end_minute=parsed_window[1],
-        timezone_label=args.exclude_entry_timezone,
-        offset_hours=offsets[args.exclude_entry_timezone],
-    )
+    if parsed_window is None:
+        entry_exclusion = optimizer.NoEntryTimeExclusion()
+    else:
+        entry_exclusion = optimizer.EntryTimeExclusion(
+            start_minute=parsed_window[0],
+            end_minute=parsed_window[1],
+            timezone_label=args.exclude_entry_timezone,
+            offset_hours=offsets[args.exclude_entry_timezone],
+        )
 
     print(json.dumps({"phase": "load_start"}, ensure_ascii=False), flush=True)
     states, load_stats = load_states(args.input_root, environment=args.environment)
@@ -276,8 +277,14 @@ def main() -> None:
         raise SystemExit("no contiguous local research state segments found")
     full_start = min(segment[0].bucket_start for segment in segments)
     full_end = max(segment[-1].bucket_end for segment in segments)
-    proxy = optimizer.build_top10_proxy(states, top_count=args.top_count)
-    optimization_start = proxy.first_valid_at
+    proxy = optimizer.build_true_top10_proxy_from_parquet(
+        args.input_root,
+        top_count=args.top_count,
+        environment=args.environment,
+    )
+    if proxy is None:
+        proxy = optimizer.build_top10_proxy(states, top_count=args.top_count)
+    optimization_start = max(proxy.first_valid_at, full_start)
     if optimization_start >= full_end:
         raise SystemExit("local data has no valid Top10 proxy window")
     duration = full_end - optimization_start

@@ -313,6 +313,7 @@ async def run_live_daemon(
     candle_grace_bars = config.execution.candle_grace_bars
     candle_grace_decision_profit_pct = config.execution.candle_grace_decision_profit_pct
     candle_grace_profit_pct = config.execution.candle_grace_profit_pct
+    max_concurrency = config.execution.max_concurrency
 
     max_runtime_seconds = config.lifecycle.max_runtime_seconds
     poll_interval_seconds = config.lifecycle.poll_interval_seconds
@@ -935,6 +936,7 @@ async def run_live_daemon(
                 max_open_positions=max_positions,
                 max_daily_loss=max_loss,
                 max_gross_exposure=max_gross,
+                max_concurrency_per_symbol=max_concurrency,
             ),
             repository=_LiveDaemonRepositoryAdapter(
                 order_repository,
@@ -965,6 +967,7 @@ async def run_live_daemon(
                 entry_order_type=entry_order_type,
                 entry_limit_ttl_seconds=entry_limit_ttl_seconds,
                 scheduled_risk_window=_resolve_scheduled_risk_window(),
+                max_concurrency=max_concurrency,
             ),
             exit_manager=LiveExitManager(
                 config=LiveExitConfig(

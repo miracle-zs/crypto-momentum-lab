@@ -159,6 +159,7 @@ class LiveDaemonConfig:
     entry_order_type: EntryType = EntryType.LIMIT
     entry_limit_ttl_seconds: int = 900
     scheduled_risk_window: ScheduledRiskWindowConfig | None = None
+    max_concurrency: int | None = None
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -192,6 +193,8 @@ class LiveDaemonConfig:
             raise TypeError("entry_order_type must be an EntryType")
         if self.entry_limit_ttl_seconds < 601:
             raise ValueError("entry_limit_ttl_seconds must be at least 601")
+        if self.max_concurrency is not None and self.max_concurrency <= 0:
+            raise ValueError("max_concurrency must be positive")
 
 
 class LiveStrategyDaemon:
@@ -399,6 +402,7 @@ class LiveStrategyDaemon:
                 entry_policy_enforce=config.entry_policy_enforce,
                 entry_order_type=config.entry_order_type,
                 entry_limit_ttl_seconds=config.entry_limit_ttl_seconds,
+                max_concurrency=config.max_concurrency,
             ),
             clock=self._clock,
             entry_enabled=lambda: self.entry_enabled,

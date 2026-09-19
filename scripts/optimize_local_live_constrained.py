@@ -112,6 +112,9 @@ class ProxyTop10:
         index = bisect.bisect_right(self.times, observed_at) - 1
         if index < 0 or observed_at < self.first_valid_at:
             return False
+        # Do not use stale rankings older than 5 minutes
+        if (observed_at - self.times[index]) > timedelta(minutes=5):
+            return False
         return symbol in self.members[index]
 
 
@@ -156,12 +159,27 @@ class EntryTimeExclusion:
         return f"{clock(self.start_minute)}–{clock(self.end_minute)}"
 
 
+@dataclass(frozen=True, slots=True)
+class NoEntryTimeExclusion:
+    """Null exclusion policy when no entry time window is excluded."""
+
+    window_text: str = "none"
+    timezone_label: str = "UTC"
+    offset_hours: int = 0
+
+    def excludes(self, simulation: Any) -> bool:
+        return False
+
+
 def parse_entry_time_window(value: str | None) -> tuple[int, int] | None:
     if value is None:
         return None
-    parts = value.strip().split("-", 1)
+    raw = value.strip()
+    if not raw or raw.lower() in {"none", "off", "disable", "disabled", "false"}:
+        return None
+    parts = raw.split("-", 1)
     if len(parts) != 2:
-        raise SystemExit("--exclude-entry-hours must use HH:MM-HH:MM")
+        raise SystemExit("--exclude-entry-hours must use HH:MM-HH:MM or 'none'")
 
     def parse_clock(raw: str) -> int:
         clock_parts = raw.strip().split(":", 1)
@@ -321,6 +339,66 @@ def build_top10_proxy(
         source_symbol_count=len({state.symbol for state in states}),
         first_partial_utc_day=first_partial_day,
     )
+
+
+def build_true_top10_proxy_from_parquet(
+    parquet_root: Path,
+    *,
+    top_count: int = 10,
+    environment: str = "research",
+) -> ProxyTop10 | None:
+    """Build exact Top-N universe proxy from live-recorded gainer_rank in Parquet.
+
+    Returns None if no parquet files contain the gainer_rank column or
+    no valid ranks exist.
+    """
+    import pyarrow.parquet as pq
+
+    files = sorted(parquet_root.rglob("*.parquet"))
+    if not files:
+        return None
+
+    by_time: defaultdict[datetime, set[str]] = defaultdict(set)
+    found_any = False
+    for path in files:
+        try:
+            pf = pq.ParquetFile(path)
+            schema_names = set(pf.schema.names)
+            if "gainer_rank" not in schema_names or "bucket_start" not in schema_names:
+                continue
+            cols = ["symbol", "bucket_start", "gainer_rank", "environment"]
+            table = pf.read(columns=cols)
+            df = table.to_pandas()
+            if environment and "environment" in df.columns:
+                df = df[df["environment"].astype(str) == environment]
+            # Ensure every timestamp observed in parquet has an entry even if no symbol is in top_count
+            for t in df["bucket_start"].dropna().unique():
+                by_time.setdefault(t, set())
+
+            valid = df[df["gainer_rank"].notna() & (df["gainer_rank"] <= top_count)]
+            if len(valid) > 0:
+                found_any = True
+                s_list = list(valid["symbol"])
+                t_list = list(valid["bucket_start"])
+                for s, t in zip(s_list, t_list, strict=False):
+                    by_time[t].add(str(s))
+        except Exception:
+            continue
+
+    if not found_any or not by_time:
+        return None
+
+    times = sorted(by_time)
+    members = tuple(frozenset(by_time[t]) for t in times)
+    first_day = times[0].date()
+    return ProxyTop10(
+        times=tuple(times),
+        members=members,
+        first_valid_at=times[0],
+        source_symbol_count=len(set().union(*members)),
+        first_partial_utc_day=first_day,
+    )
+
 
 
 def confirmation_minimum(
