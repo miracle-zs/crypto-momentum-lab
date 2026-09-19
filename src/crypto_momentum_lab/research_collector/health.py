@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -23,13 +22,13 @@ class CollectorHealthStore:
 
     def save(self, payload: dict[str, object]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=".health-")
+        temporary_path = self.path.parent / f".{self.path.name}.{os.getpid()}.tmp"
         try:
-            with os.fdopen(fd, "w") as stream:
+            with open(temporary_path, "w", encoding="utf-8") as stream:
                 json.dump(payload, stream, sort_keys=True)
-            os.replace(name, self.path)
+            os.replace(temporary_path, self.path)
         finally:
-            Path(name).unlink(missing_ok=True)
+            temporary_path.unlink(missing_ok=True)
 
 
 def check_health(

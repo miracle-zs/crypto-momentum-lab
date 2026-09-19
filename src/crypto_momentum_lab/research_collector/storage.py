@@ -27,7 +27,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -487,7 +487,7 @@ class ParquetWindowSink:
     def _write_window(path: Path, rows: list[dict[str, object]]) -> int:
         path.parent.mkdir(parents=True, exist_ok=True)
         table = pa.Table.from_pylist(rows, schema=_PARQUET_SCHEMA)
-        temporary_path = path.parent / f".{path.name}.{uuid4().hex}.tmp"
+        temporary_path = path.parent / f".{path.name}.{os.getpid()}.tmp"
         try:
             pq.write_table(
                 table,
@@ -825,7 +825,7 @@ def _directory_size(path: Path) -> int:
 
 def _atomic_write_bytes(path: Path, encoded: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.parent / f".{path.name}.{uuid4().hex}.tmp"
+    temporary_path = path.parent / f".{path.name}.{os.getpid()}.tmp"
     try:
         with temporary_path.open("wb") as stream:
             stream.write(encoded)

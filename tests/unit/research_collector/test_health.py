@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -68,3 +69,24 @@ def test_missing_corrupt_and_previous_process_snapshots_fail(tmp_path):
     store.save(_snapshot())
     store.reset()
     assert not health.check_health(tmp_path, "research")[0]
+
+
+def test_collector_health_store_uses_deterministic_temporary_file(tmp_path, monkeypatch):
+    store = health.CollectorHealthStore(tmp_path, "research")
+    opened_paths: list[Path] = []
+    real_open = open
+
+    def tracking_open(path, *args, **kwargs):
+        if isinstance(path, Path) and path.name.endswith(".tmp"):
+            opened_paths.append(path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", tracking_open)
+    store.save(_snapshot())
+    store.save(_snapshot())
+
+    assert len(opened_paths) == 2
+    # Both saves must reuse the exact same deterministic temporary path (no mkstemp random suffix)
+    assert opened_paths[0] == opened_paths[1]
+    assert opened_paths[0].name == f".{store.path.name}.{os.getpid()}.tmp"
+    assert not opened_paths[0].exists()
