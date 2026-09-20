@@ -729,6 +729,11 @@ def test_refresh_approval_includes_verify_preflight_and_streamlines_preflight() 
     assert "run_parallel_pairs refresh" in preflight_block
     assert "run_parallel_pairs preflight" in preflight_block
 
+    restart_block = script[live_restart:]
+    assert restart_block.count('if [[ "$refresh_approvals" == 1 ]]') >= 2
+    assert 'execution_services+=("$execution_service")' in restart_block
+    assert 'strategy_services+=("$strategy_service")' in restart_block
+
 
 def test_post_deploy_image_prune_is_configured() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")

@@ -1851,7 +1851,12 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     IFS=: read -r account execution_service strategy_service <<<"$pair"
     if is_live_service_active "$strategy_service"; then
       execution_candidates+=("$execution_service")
-      if service_is_converged "$execution_service"; then
+      if [[ "$refresh_approvals" == 1 ]]; then
+        # Refreshing approvals can accompany a configuration-only change while
+        # the image commit stays the same. Recreate the execution worker so its
+        # environment and approval identity are applied together.
+        execution_services+=("$execution_service")
+      elif service_is_converged "$execution_service"; then
         echo "phase=execution service=$execution_service skipped converged=1"
       else
         execution_services+=("$execution_service")
@@ -1873,7 +1878,11 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
     IFS=: read -r account execution_service strategy_service <<<"$pair"
     if is_live_service_active "$strategy_service"; then
       strategy_candidates+=("$strategy_service")
-      if service_is_converged "$strategy_service"; then
+      if [[ "$refresh_approvals" == 1 ]]; then
+        # A same-commit approval refresh is also the explicit signal that the
+        # runtime environment changed; do not leave the old process running.
+        strategy_services+=("$strategy_service")
+      elif service_is_converged "$strategy_service"; then
         echo "phase=strategy service=$strategy_service skipped converged=1"
       else
         strategy_services+=("$strategy_service")
