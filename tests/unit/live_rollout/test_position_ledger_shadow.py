@@ -1,20 +1,17 @@
 """Unit tests for PositionLedger shadow comparator and legacy adapters."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.execution import (
     FuturesPositionSide,
-    ManagedLivePositionBatch,
     PositionHistory,
-    PositionObservation,
     rebuild_position_batches,
 )
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionKey,
 )
-from crypto_momentum_lab.domain.strategy import StrategySide
 from crypto_momentum_lab.live_rollout.position_ledger_shadow import (
     LegacyOrderIdentityAdapter,
     PositionLedgerShadowComparator,
@@ -57,7 +54,6 @@ def test_shadow_comparator_exact_match_scenario() -> None:
         symbol="BTCUSDT",
         position_side=FuturesPositionSide.BOTH,
     )
-    t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
 
     # Use first order from B2 (Buy 120)
     system_orders = get_b2_system_order_facts()[:1]
@@ -135,3 +131,73 @@ def test_shadow_comparator_detects_external_fill_divergence_safely() -> None:
     assert report.ledger_total_quantity == Decimal("172")
     # Comparator logs diagnostic without throwing
     assert report is not None
+
+
+def test_legacy_order_identity_adapter_isolates_hedge_mode_position_side() -> None:
+    """Verify that to_account_facts isolates fills by position_side in Hedge mode."""
+    from crypto_momentum_lab.domain.account import AccountFillEvent
+
+    now = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    long_key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.LONG,
+    )
+    short_key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.SHORT,
+    )
+
+    long_fill = AccountFillEvent(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        trade_id="t_long",
+        order_id="ord_long",
+        side="BUY",
+        price=Decimal("60000"),
+        quantity=Decimal("1.5"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0.01"),
+        fee_asset="USDT",
+        trade_at=now,
+        raw_payload={"positionSide": "LONG", "is_system": True},
+    )
+    short_fill = AccountFillEvent(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        trade_id="t_short",
+        order_id="ord_short",
+        side="SELL",
+        price=Decimal("60000"),
+        quantity=Decimal("2.0"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0.01"),
+        fee_asset="USDT",
+        trade_at=now,
+        raw_payload={"positionSide": "SHORT", "is_system": True},
+    )
+
+    all_fills = (long_fill, short_fill)
+
+    # Adapting for LONG must only pick long_fill
+    long_facts = LegacyOrderIdentityAdapter.to_account_facts(
+        position_key=long_key,
+        orders=(),
+        fills=all_fills,
+    )
+    assert len(long_facts.fills) == 1
+    assert long_facts.fills[0].trade_id == "t_long"
+
+    # Adapting for SHORT must only pick short_fill
+    short_facts = LegacyOrderIdentityAdapter.to_account_facts(
+        position_key=short_key,
+        orders=(),
+        fills=all_fills,
+    )
+    assert len(short_facts.fills) == 1
+    assert short_facts.fills[0].trade_id == "t_short"

@@ -1055,10 +1055,19 @@ class PostgresLiveContextProvider(LiveContextReader):
                         {row.client_order_id for row in orders if not row.reduce_only}
                     )
                 )
+                active_times = [
+                    row.observed_at
+                    for row in active
+                    if getattr(row, "observed_at", None)
+                ]
+                since_time = (
+                    (min(active_times) - timedelta(hours=24)) if active_times else None
+                )
                 order_identity_metadata = await _load_order_identity_metadata(
                     session,
                     orders,
                     account_label=self._account_label,
+                    since=since_time,
                 )
                 domain_account_fills = order_identity_metadata.domain_account_fills
                 order_identity_events = (
@@ -1174,10 +1183,19 @@ class PostgresLiveContextProvider(LiveContextReader):
                         {row.client_order_id for row in orders if not row.reduce_only}
                     )
                 )
+                active_times = [
+                    row.observed_at
+                    for row in active
+                    if getattr(row, "observed_at", None)
+                ]
+                since_time = (
+                    (min(active_times) - timedelta(hours=24)) if active_times else None
+                )
                 order_identity_metadata = await _load_order_identity_metadata(
                     session,
                     orders,
                     account_label=self._account_label,
+                    since=since_time,
                 )
                 domain_account_fills = order_identity_metadata.domain_account_fills
                 order_identity_events = (
@@ -1289,6 +1307,7 @@ async def _load_order_identity_metadata(
     orders: Sequence[ExchangeOrderRow],
     *,
     account_label: str,
+    since: datetime | None = None,
 ) -> _OrderIdentityMetadata:
     """Load the event/fill evidence needed to split legacy order attempts.
 
@@ -1302,28 +1321,34 @@ async def _load_order_identity_metadata(
     client_order_ids = tuple(
         sorted({order.client_order_id for order in orders if order.client_order_id})
     )
-    if not client_order_ids:
-        return _OrderIdentityMetadata({}, ())
-    event_rows = tuple(
-        (
-            await session.scalars(
-                select(ExchangeOrderEventRow).where(
-                    ExchangeOrderEventRow.client_order_id.in_(client_order_ids)
-                )
-            )
-        ).all()
-    )
     events_by_client: dict[str, list[ExchangeOrderEventRow]] = {}
     exchange_order_ids: set[str] = set()
-    for event in event_rows:
-        events_by_client.setdefault(event.client_order_id, []).append(event)
-        if event.exchange_order_id:
-            exchange_order_ids.add(event.exchange_order_id)
+    if client_order_ids:
+        event_rows = tuple(
+            (
+                await session.scalars(
+                    select(ExchangeOrderEventRow).where(
+                        ExchangeOrderEventRow.client_order_id.in_(client_order_ids)
+                    )
+                )
+            ).all()
+        )
+        for event in event_rows:
+            events_by_client.setdefault(event.client_order_id, []).append(event)
+            if event.exchange_order_id:
+                exchange_order_ids.add(event.exchange_order_id)
     row_exchange_order_ids = {
         order.exchange_order_id for order in orders if order.exchange_order_id
     }
     exchange_order_ids.update(row_exchange_order_ids)
     active_symbols = tuple(sorted({order.symbol for order in orders if order.symbol}))
+    if not exchange_order_ids and not active_symbols:
+        return _OrderIdentityMetadata(
+            {key: tuple(value) for key, value in events_by_client.items()},
+            (),
+            (),
+        )
+
     predicates = [
         AccountFillEventRow.environment == "live",
         AccountFillEventRow.account_label == account_label,
@@ -1339,12 +1364,22 @@ async def _load_order_identity_metadata(
         predicates.append(AccountFillEventRow.order_id.in_(tuple(exchange_order_ids)))
     elif active_symbols:
         predicates.append(AccountFillEventRow.symbol.in_(active_symbols))
+
+    # Bound fill queries to avoid hot-path full table scans
+    if since is not None:
+        predicates.append(AccountFillEventRow.trade_at >= since)
     else:
-        return _OrderIdentityMetadata(
-            {key: tuple(value) for key, value in events_by_client.items()},
-            (),
-            (),
-        )
+        order_times = [
+            order.created_at for order in orders if getattr(order, "created_at", None)
+        ]
+        if order_times:
+            predicates.append(
+                AccountFillEventRow.trade_at >= min(order_times) - timedelta(hours=24)
+            )
+        else:
+            predicates.append(
+                AccountFillEventRow.trade_at >= datetime.now(UTC) - timedelta(days=30)
+            )
 
     account_fills = tuple(
         (
@@ -1371,6 +1406,7 @@ async def _load_order_identity_metadata(
             fee_asset=row.fee_asset,
             trade_at=row.trade_at,
             raw_payload={
+                **(row.raw_payload if isinstance(row.raw_payload, dict) else {}),
                 "is_system": str(row.order_id) in system_order_id_set,
             },
         )
@@ -2197,7 +2233,8 @@ def _build_position_batches(
                 reassigned_quantity=str(diag.reassigned_quantity),
             )
 
-    # Read-only shadow comparison: run PositionLedger in parallel without affecting execution
+    # Read-only shadow comparison: run PositionLedger in parallel
+    # without affecting execution
     try:
         position_key = PositionKey(
             environment=getattr(position, "environment", "live"),
@@ -2205,8 +2242,21 @@ def _build_position_batches(
             symbol=position.symbol,
             position_side=position_side,
         )
+
+        def _fill_matches_position(fill: AccountFillEvent) -> bool:
+            if fill.symbol != position.symbol:
+                return False
+            payload = fill.raw_payload or {}
+            fill_ps = payload.get("positionSide") or payload.get("ps")
+            if fill_ps:
+                fill_ps_str = str(fill_ps).upper()
+                pos_ps_str = position_side.value.upper()
+                if fill_ps_str != "BOTH" and fill_ps_str != pos_ps_str:
+                    return False
+            return True
+
         matching_fills = tuple(
-            fill for fill in account_fills if fill.symbol == position.symbol
+            fill for fill in account_fills if _fill_matches_position(fill)
         )
         facts = LegacyOrderIdentityAdapter.to_account_facts(
             position_key=position_key,

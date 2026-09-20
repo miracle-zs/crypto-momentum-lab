@@ -15,16 +15,6 @@ from crypto_momentum_lab.domain.execution import (
     ManagedLivePositionBatch,
     OrderExecutionPlan,
 )
-from crypto_momentum_lab.domain.execution.position_ledger_models import (
-    PositionEpisode,
-    PositionKey,
-    PositionLedgerBatch,
-    PositionLedgerProjection,
-)
-from crypto_momentum_lab.domain.execution.trade_command import (
-    ExitAllocator,
-    ExitPolicyMode,
-)
 from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
     RealtimeMarketQuote,
@@ -33,6 +23,9 @@ from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
     StrategySide,
+)
+from crypto_momentum_lab.live_rollout.shadow_auditor import (
+    LiveExecutionShadowAuditor,
 )
 from crypto_momentum_lab.strategy_runner.position_exit import (
     ClosedCandle15m,
@@ -872,79 +865,12 @@ class LiveExitManager:
         reference_price: Decimal,
         reason: str,
     ) -> None:
-        try:
-            position_key = PositionKey(
-                environment="live",
-                account_label="primary",
-                symbol=position.symbol,
-                position_side=position.position_side,
-            )
-            batches = (
-                tuple(
-                    PositionLedgerBatch(
-                        batch_id=b.batch_id or f"batch_{idx}",
-                        episode_id="shadow_ep",
-                        quantity=b.quantity,
-                        original_quantity=b.quantity,
-                        entry_price=b.entry_price,
-                        opened_at=b.opened_at,
-                    )
-                    for idx, b in enumerate(position.batches)
-                )
-                if position.batches
-                else (
-                    PositionLedgerBatch(
-                        batch_id=position.batch_id or "batch_default",
-                        episode_id="shadow_ep",
-                        quantity=order_quantity,
-                        original_quantity=order_quantity,
-                        entry_price=position.entry_price,
-                        opened_at=position.opened_at,
-                    ),
-                )
-            )
-            episode = PositionEpisode(
-                episode_id="shadow_ep",
-                position_key=position_key,
-                side=position.side,
-                opened_at=position.opened_at,
-                batches=batches,
-            )
-            projection = PositionLedgerProjection(
-                position_key=position_key,
-                active_episode=episode,
-                active_batches=batches,
-                total_active_quantity=sum(
-                    (b.quantity for b in batches), start=Decimal("0")
-                ),
-                unallocated_quantity=Decimal("0"),
-                reconciliation_gap=Decimal("0"),
-                high_watermark_trade_at=position.opened_at,
-            )
-            shadow_cmd = ExitAllocator.create_exit_command(
-                projection,
-                requested_quantity=order_quantity,
-                target_batch_ids=(position.batch_id,) if position.batch_id else None,
-                policy=(
-                    ExitPolicyMode.TARGET_BATCHES_ONLY
-                    if position.batch_id
-                    else ExitPolicyMode.FULL_POSITION_CLOSE
-                ),
-                reference_price=reference_price,
-                reason=reason,
-            )
-            if (
-                shadow_cmd is not None
-                and shadow_cmd.requested_quantity != order_quantity
-            ):
-                log.info(
-                    "shadow_exit_allocation_divergence",
-                    symbol=position.symbol,
-                    order_quantity=str(order_quantity),
-                    shadow_quantity=str(shadow_cmd.requested_quantity),
-                )
-        except Exception as exc:
-            log.debug("shadow_exit_allocation_failed", error=str(exc))
+        LiveExecutionShadowAuditor.audit_exit_allocation(
+            position=position,
+            order_quantity=order_quantity,
+            reference_price=reference_price,
+            reason=reason,
+        )
 
     def _build_request(
         self,

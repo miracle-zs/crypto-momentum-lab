@@ -5,6 +5,7 @@ import pytest
 from crypto_momentum_lab.execution_account.retention import (
     AccountSnapshotRetentionConfig,
     prune_account_snapshots_once,
+    run_account_snapshot_retention,
 )
 
 
@@ -82,3 +83,53 @@ async def test_prune_once_passes_the_configured_horizon() -> None:
         "max_rows_per_table": 2_000,
         "consumer_requirements": (),
     }
+
+
+@pytest.mark.asyncio
+async def test_retention_loop_fails_closed_when_provider_raises() -> None:
+    repository = FakeRetentionRepository()
+    config = AccountSnapshotRetentionConfig(
+        interval_seconds=300,
+    )
+    errors: list[Exception] = []
+
+    async def _failing_provider():
+        raise RuntimeError("database connection down")
+
+    call_count = 0
+
+    async def _fake_sleep(_seconds: float) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count > 1:
+            await asyncio.sleep(100)
+        else:
+            await asyncio.sleep(0)
+
+    import asyncio
+
+    task = asyncio.create_task(
+        run_account_snapshot_retention(
+            repository=repository,
+            environment="live",
+            account_label="primary",
+            config=config,
+            consumer_requirements_provider=_failing_provider,
+            on_error=lambda err: errors.append(err),
+            sleep=_fake_sleep,
+        )
+    )
+
+    # Let the loop execute 1 iteration
+    await asyncio.sleep(0.01)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    # The failing provider was called and logged
+    assert len(errors) > 0
+    assert isinstance(errors[0], RuntimeError)
+    # CRITICAL: Fail-closed verification! Repository prune was NEVER called!
+    assert repository.call is None

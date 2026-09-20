@@ -26,20 +26,13 @@ from typing import Protocol, cast
 import structlog
 
 from crypto_momentum_lab.domain.execution import (
-    FuturesPositionSide,
     OrderExecutionPlan,
-)
-from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
-from crypto_momentum_lab.domain.execution.trade_command import (
-    TradeCommand,
-    TradeCommandType,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
 from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
-    StrategySide,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
@@ -47,15 +40,11 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
 from crypto_momentum_lab.execution_account.orders.quantization import (
     QuantizationRejection,
     SymbolTradingRules,
-    _quantized_price,
     quantize_order_plan,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
     PreparedOrderSubmission,
-)
-from crypto_momentum_lab.execution_account.orders.trade_command_executor import (
-    TradeCommandExecutor,
 )
 from crypto_momentum_lab.live_rollout.context import LiveDaemonRuntimeContext
 from crypto_momentum_lab.live_rollout.entry_lane import (
@@ -66,6 +55,9 @@ from crypto_momentum_lab.live_rollout.limits import (
     FixedLiveLimits,
     LiveLimitContext,
     evaluate_fixed_live_limits,
+)
+from crypto_momentum_lab.live_rollout.shadow_auditor import (
+    LiveExecutionShadowAuditor,
 )
 from crypto_momentum_lab.live_rollout.telemetry import (
     LIVE_LANE_ENTRY,
@@ -578,121 +570,15 @@ class LiveCandidateSubmission:
         legacy_plan: OrderExecutionPlan | QuantizationRejection,
         context: LiveDaemonRuntimeContext,
     ) -> None:
-        try:
-            raw_position_side = candidate.features.get("position_side")
-            if isinstance(raw_position_side, str) and raw_position_side.strip():
-                position_side = FuturesPositionSide(raw_position_side.strip().upper())
-            elif self._config.hedge_mode:
-                position_side = (
-                    FuturesPositionSide.LONG
-                    if candidate.side is StrategySide.LONG
-                    else FuturesPositionSide.SHORT
-                )
-            else:
-                position_side = FuturesPositionSide.BOTH
-
-            environment = "live"
-            account_label = "primary"
-            if hasattr(context, "gate_context") and context.gate_context is not None:
-                environment = getattr(context.gate_context, "environment", "live")
-                account_label = getattr(
-                    context.gate_context, "account_label", "primary"
-                )
-
-            position_key = PositionKey(
-                environment=environment,
-                account_label=account_label,
-                symbol=candidate.symbol,
-                position_side=position_side,
-            )
-
-            price = (
-                _quantized_price(candidate, rules, reference_price)
-                if candidate.entry_type is EntryType.LIMIT
-                else None
-            )
-            sizing_price = reference_price if price is None else price
-            if requested_quantity is None:
-                if candidate.desired_notional is None:
-                    return
-                req_qty = candidate.desired_notional / sizing_price
-            else:
-                req_qty = requested_quantity
-
-            raw_idempotency = candidate.features.get("idempotency_key")
-            idempotency_key = (
-                str(raw_idempotency)
-                if isinstance(raw_idempotency, str) and raw_idempotency.strip()
-                else None
-            )
-
-            cmd = TradeCommand(
-                command_id=candidate.candidate_id,
-                position_key=position_key,
-                command_type=(
-                    TradeCommandType.EXIT
-                    if candidate.reduce_only
-                    else TradeCommandType.ENTRY
-                ),
-                side=candidate.side,
-                order_type=candidate.entry_type,
-                requested_quantity=req_qty,
-                limit_price=candidate.limit_price,
-                reduce_only=candidate.reduce_only,
-                idempotency_key=idempotency_key,
-                created_at=candidate.created_at,
-            )
-            shadow_result = TradeCommandExecutor.plan_execution(
-                cmd,
-                rules,
-                run_id=self._config.run_id,
-                reference_price=reference_price,
-                hedge_mode=self._config.hedge_mode,
-            )
-            if isinstance(legacy_plan, QuantizationRejection):
-                if shadow_result.plan is not None:
-                    log.info(
-                        "shadow_execution_divergence",
-                        category="rejection_mismatch",
-                        candidate_id=candidate.candidate_id,
-                        symbol=candidate.symbol,
-                        legacy_rejection=legacy_plan.reason,
-                        shadow_status="planned",
-                    )
-            elif shadow_result.plan is None:
-                log.info(
-                    "shadow_execution_divergence",
-                    category="rejection_mismatch",
-                    candidate_id=candidate.candidate_id,
-                    symbol=candidate.symbol,
-                    legacy_status="planned",
-                    shadow_rejection=(
-                        shadow_result.rejection.reason
-                        if shadow_result.rejection
-                        else "none"
-                    ),
-                )
-            else:
-                if (
-                    shadow_result.plan.quantity != legacy_plan.quantity
-                    or shadow_result.plan.side != legacy_plan.side
-                ):
-                    log.info(
-                        "shadow_execution_divergence",
-                        category="attribute_mismatch",
-                        candidate_id=candidate.candidate_id,
-                        symbol=candidate.symbol,
-                        legacy_quantity=str(legacy_plan.quantity),
-                        shadow_quantity=str(shadow_result.plan.quantity),
-                        legacy_side=legacy_plan.side,
-                        shadow_side=shadow_result.plan.side,
-                    )
-        except Exception as exc:
-            log.debug(
-                "shadow_execution_evaluation_failed",
-                candidate_id=candidate.candidate_id,
-                error=str(exc),
-            )
+        LiveExecutionShadowAuditor.audit_submission(
+            candidate=candidate,
+            rules=rules,
+            reference_price=reference_price,
+            legacy_plan=legacy_plan,
+            run_id=self._config.run_id,
+            hedge_mode=self._config.hedge_mode,
+            requested_quantity=requested_quantity,
+        )
 
 
 def _min_notional(rules: SymbolTradingRules | None) -> Decimal | None:

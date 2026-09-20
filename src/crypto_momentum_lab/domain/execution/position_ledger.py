@@ -110,7 +110,8 @@ class PositionLedger:
             )
             fill_side = fill.side.upper()
 
-            # Advance and apply boundaries that occurred before this fill (or at the same time if exit fill)
+            # Advance and apply boundaries that occurred before this fill
+            # (or at the same time if exit fill)
             while boundary_idx < len(sorted_boundaries):
                 b = sorted_boundaries[boundary_idx]
                 if b.submitted_at < fill.trade_at:
@@ -244,7 +245,7 @@ class PositionLedger:
                                     quantity=deduct,
                                 )
                             )
-                            exit_sub_at = b.exit_order_submitted_at or fill.trade_at
+                            exit_sub_at = b.exit_order_submitted_at
                             new_batches.append(
                                 replace(
                                     b,
@@ -383,7 +384,7 @@ class PositionLedger:
                                     quantity=deduct,
                                 )
                             )
-                            exit_sub_at = b.exit_order_submitted_at or fill.trade_at
+                            exit_sub_at = b.exit_order_submitted_at
                             new_batches.append(
                                 replace(
                                     b,

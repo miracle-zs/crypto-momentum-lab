@@ -677,28 +677,22 @@ async def sync_continuously(
             async def _resolve_active_position_retention_requirements() -> tuple[
                 RetentionConsumerRequirement, ...
             ]:
-                try:
-                    async with factory() as session:
-                        earliest = await session.scalar(
-                            select(
-                                func.min(AccountPositionSnapshotRow.observed_at)
-                            ).where(
-                                AccountPositionSnapshotRow.environment == environment,
-                                AccountPositionSnapshotRow.account_label
-                                == account_label,
-                                AccountPositionSnapshotRow.position_amt != 0,
-                            )
+                async with factory() as session:
+                    earliest = await session.scalar(
+                        select(func.min(AccountPositionSnapshotRow.observed_at)).where(
+                            AccountPositionSnapshotRow.environment == environment,
+                            AccountPositionSnapshotRow.account_label == account_label,
+                            AccountPositionSnapshotRow.position_amt != 0,
                         )
-                        if earliest is not None:
-                            return (
-                                RetentionConsumerRequirement(
-                                    consumer_id="active_position_snapshots",
-                                    min_required_watermark=earliest,
-                                    reason="protect active position history",
-                                ),
-                            )
-                except Exception:
-                    pass
+                    )
+                    if earliest is not None:
+                        return (
+                            RetentionConsumerRequirement(
+                                consumer_id="active_position_snapshots",
+                                min_required_watermark=earliest,
+                                reason="protect active position history",
+                            ),
+                        )
                 return ()
 
             retention_task = asyncio.create_task(

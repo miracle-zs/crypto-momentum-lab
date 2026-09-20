@@ -26,6 +26,9 @@ from crypto_momentum_lab.domain.market.models import (
     CaptureStream,
     RawEnvelope,
 )
+from crypto_momentum_lab.domain.operational.retention_contract import (
+    RetentionConsumerRequirement,
+)
 from crypto_momentum_lab.domain.universe.models import (
     MembershipStatus,
     UniverseSnapshot,
@@ -467,9 +470,7 @@ class CaptureUniverseObserver:
         snapshot: UniverseSnapshot,
     ) -> None:
         async with self._lock:
-            universe_symbols = frozenset(
-                item.symbol for item in snapshot.memberships
-            )
+            universe_symbols = frozenset(item.symbol for item in snapshot.memberships)
             self._universe_forced_symbols = frozenset(
                 item.symbol
                 for item in snapshot.memberships
@@ -564,9 +565,7 @@ class CaptureUniverseObserver:
         needing: set[str] = set(added_symbols & trade_symbols)
         if self._must_warm_max_gainer_rank <= 0 or lookback <= timedelta(0):
             return frozenset(needing)
-        current_must_warm = self._compute_must_warm_symbols(
-            trade_symbols=trade_symbols
-        )
+        current_must_warm = self._compute_must_warm_symbols(trade_symbols=trade_symbols)
         newly_must_warm = current_must_warm - previous_must_warm
         for symbol in newly_must_warm:
             if symbol in needing:
@@ -610,10 +609,7 @@ class CaptureUniverseObserver:
         if not symbols or self._on_trade_symbols_promoted is None:
             return
         callback = self._on_trade_symbols_promoted
-        if (
-            self._backfill_task is not None
-            and not self._backfill_task.done()
-        ):
+        if self._backfill_task is not None and not self._backfill_task.done():
             log.warning(
                 "promotion_backfill_still_running",
                 pending_symbols=sorted(symbols)[:_SYMBOL_LOG_LIMIT],
@@ -667,9 +663,7 @@ class CaptureUniverseObserver:
             now=observed_at,
             lookback=lookback,
         )
-        current_must_warm = self._compute_must_warm_symbols(
-            trade_symbols=symbols
-        )
+        current_must_warm = self._compute_must_warm_symbols(trade_symbols=symbols)
         # Optimistically mark membership before the async task finishes so a
         # concurrent refresh does not enqueue the same symbols twice.
         self._remember_trade_tier_membership(
@@ -724,7 +718,6 @@ class CaptureUniverseObserver:
         # universe refreshes represent a real promotion into the trade tier.
         if previous_symbols is not None and needing_backfill:
             self._schedule_history_backfill(needing_backfill)
-
 
     def _update_prewarm_symbols(
         self,
@@ -843,6 +836,7 @@ async def prune_operational_database_once(
     runtime_state_retention_hours: float = _RUNTIME_STATE_RETENTION_HOURS,
     contract_metadata_batch_size: int = (_CONTRACT_METADATA_RETENTION_BATCH_SIZE),
     runtime_state_batch_size: int = _RUNTIME_STATE_RETENTION_BATCH_SIZE,
+    consumer_requirements: tuple[RetentionConsumerRequirement, ...] = (),
     now: datetime | None = None,
 ) -> None:
     if contract_metadata_retention_hours <= 0:
@@ -856,17 +850,26 @@ async def prune_operational_database_once(
     observed_at = datetime.now(UTC) if now is None else now
     contract_cutoff = observed_at - timedelta(hours=contract_metadata_retention_hours)
     runtime_cutoff = observed_at - timedelta(hours=runtime_state_retention_hours)
+    req_kwargs = (
+        {"consumer_requirements": consumer_requirements}
+        if consumer_requirements
+        else {}
+    )
     deleted_contracts = await repository.prune_contract_metadata(
         before=contract_cutoff,
         batch_size=contract_metadata_batch_size,
+        **req_kwargs,
     )
     deleted_states = await repository.prune_runtime_market_states(
         before=runtime_cutoff,
         batch_size=runtime_state_batch_size,
+        **req_kwargs,
     )
     # Keep tomorrow's event partitions present so live-strategy writers never
     # miss a day boundary.  Deletion stays on the daily archive-and-trim job.
-    event_partitions_ensured = await repository.ensure_strategy_runtime_event_partitions()
+    event_partitions_ensured = (
+        await repository.ensure_strategy_runtime_event_partitions()
+    )
     if deleted_contracts or deleted_states or event_partitions_ensured:
         log.info(
             "operational_database_retention_pruned",
@@ -886,6 +889,9 @@ async def run_operational_database_retention_loop(
     runtime_state_retention_hours: float = _RUNTIME_STATE_RETENTION_HOURS,
     contract_metadata_batch_size: int = (_CONTRACT_METADATA_RETENTION_BATCH_SIZE),
     runtime_state_batch_size: int = _RUNTIME_STATE_RETENTION_BATCH_SIZE,
+    consumer_requirements_provider: (
+        Callable[[], Awaitable[tuple[RetentionConsumerRequirement, ...]]] | None
+    ) = None,
     sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     if interval_seconds <= 0:
@@ -894,6 +900,16 @@ async def run_operational_database_retention_loop(
         await sleeper(interval_seconds)
         try:
             async with asyncio.timeout(_DATABASE_RETENTION_MAX_RUNTIME_SECONDS):
+                reqs: tuple[RetentionConsumerRequirement, ...] = ()
+                if consumer_requirements_provider is not None:
+                    try:
+                        reqs = await consumer_requirements_provider()
+                    except Exception as req_err:
+                        log.warning(
+                            "operational_retention_consumer_requirements_failed_aborting_prune",
+                            error=str(req_err),
+                        )
+                        continue  # Fail-closed!
                 await prune_operational_database_once(
                     repository,
                     contract_metadata_retention_hours=(
@@ -902,6 +918,7 @@ async def run_operational_database_retention_loop(
                     runtime_state_retention_hours=runtime_state_retention_hours,
                     contract_metadata_batch_size=contract_metadata_batch_size,
                     runtime_state_batch_size=runtime_state_batch_size,
+                    consumer_requirements=reqs,
                 )
         except asyncio.CancelledError:
             raise
@@ -1251,9 +1268,7 @@ async def build_market_data_runtime(
         streams=enabled_streams,
         initial_generation=1,
         prewarm_retention_minutes=runtime.universe.prewarm_retention_minutes,
-        full_stream_max_gainer_rank=(
-            runtime.universe.full_stream_max_gainer_rank
-        ),
+        full_stream_max_gainer_rank=(runtime.universe.full_stream_max_gainer_rank),
         # TARGET / entry-adjacent band: T1→T0 must already have a full local
         # 15s window, not merely be subscribed.
         must_warm_max_gainer_rank=runtime.universe.top_count,

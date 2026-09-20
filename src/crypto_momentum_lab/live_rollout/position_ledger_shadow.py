@@ -21,7 +21,6 @@ from crypto_momentum_lab.domain.account import (
     AccountPositionSnapshot,
 )
 from crypto_momentum_lab.domain.execution import (
-    FuturesPositionSide,
     ManagedLivePositionBatch,
     PositionObservation,
     PositionOrderFact,
@@ -35,7 +34,6 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionKey,
     PositionLedgerProjection,
 )
-from crypto_momentum_lab.domain.strategy import StrategySide
 
 log = structlog.get_logger()
 
@@ -82,18 +80,38 @@ class LegacyOrderIdentityAdapter:
         If explicit fills are not available, synthetic fills are synthesized
         from filled PositionOrderFact entries to allow backward compatibility.
         """
-        fill_list: list[AccountFillEvent] = list(fills)
+
+        def _fill_matches_side(fill: AccountFillEvent) -> bool:
+            if fill.symbol != position_key.symbol:
+                return False
+            payload = fill.raw_payload or {}
+            ps = payload.get("positionSide") or payload.get("ps")
+            if ps:
+                ps_str = str(ps).upper()
+                if (
+                    ps_str != "BOTH"
+                    and ps_str != position_key.position_side.value.upper()
+                ):
+                    return False
+            return True
+
+        fill_list: list[AccountFillEvent] = [f for f in fills if _fill_matches_side(f)]
 
         if not fill_list and orders:
             for ord_idx, order in enumerate(orders):
                 if order.executed_quantity > 0:
+                    oid = (
+                        order.exchange_order_id
+                        or order.client_order_id
+                        or "unknown"
+                    )
                     fill_list.append(
                         AccountFillEvent(
                             environment=position_key.environment,
                             account_label=position_key.account_label,
                             symbol=position_key.symbol,
-                            trade_id=f"syn_t_{ord_idx}_{order.exchange_order_id or order.client_order_id or 'unknown'}",
-                            order_id=order.exchange_order_id or order.client_order_id or f"ord_{ord_idx}",
+                            trade_id=f"syn_t_{ord_idx}_{oid}",
+                            order_id=oid if oid != "unknown" else f"ord_{ord_idx}",
                             side=order.side,
                             price=order.price or Decimal("1.0"),
                             quantity=order.executed_quantity,
@@ -101,7 +119,10 @@ class LegacyOrderIdentityAdapter:
                             fee=Decimal("0.0"),
                             fee_asset="USDT",
                             trade_at=order.created_at,
-                            raw_payload={"synthetic_from_order": True, "is_system": True},
+                            raw_payload={
+                                "synthetic_from_order": True,
+                                "is_system": True,
+                            },
                         )
                     )
 
@@ -110,7 +131,9 @@ class LegacyOrderIdentityAdapter:
             if order.reduce_only and order.state in _EXIT_SUBMITTED_STATES:
                 exit_boundaries.append(
                     ExitOrderSubmissionFact(
-                        order_id=order.exchange_order_id or order.client_order_id or f"exit_{order.created_at.timestamp()}",
+                        order_id=order.exchange_order_id
+                        or order.client_order_id
+                        or f"exit_{order.created_at.timestamp()}",
                         submitted_at=order.created_at,
                         symbol=position_key.symbol,
                         position_side=position_key.position_side,

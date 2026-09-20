@@ -102,6 +102,7 @@ async def run_account_snapshot_retention(
                     except Exception as req_err:
                         if on_error is not None:
                             on_error(req_err)
+                        continue
                 deleted = await prune_account_snapshots_once(
                     repository=repository,
                     environment=environment,

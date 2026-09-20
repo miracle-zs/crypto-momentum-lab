@@ -111,7 +111,9 @@ def test_position_ledger_consecutive_adds_without_exit_boundary_aggregate_batch(
 
 
 def test_position_ledger_scaling_adds_and_fifo_reduction() -> None:
-    """Consecutive entries without exit boundary merge into one batch; reduction deducts from it."""
+    """Consecutive entries without exit boundary merge into one batch;
+    reduction deducts from it.
+    """
     key = _key()
     ledger = PositionLedger(key)
     t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
@@ -165,7 +167,8 @@ def test_position_ledger_exit_boundary_separates_batches_and_fifo_deduction() ->
         "t2", "BUY", "15", "61000", t0 + timedelta(minutes=5), order_id="ord_entry_2"
     )
 
-    # Sell 12 at t0 + 10m -> FIFO deducts 10 from batch 1, 2 from batch 2 -> remaining 13 in batch 2
+    # Sell 12 at t0 + 10m -> FIFO deducts 10 from batch 1, 2 from batch 2
+    # -> remaining 13 in batch 2
     f3 = _fill(
         "t3", "SELL", "12", "62000", t0 + timedelta(minutes=10), order_id="ord_exit_1"
     )
@@ -272,8 +275,10 @@ def test_position_ledger_b2_timeline_full_replay() -> None:
     assert proj.active_episode is None
 
     # Episodes created:
-    # Episode 1: Initial entries (120+127+127) -> partial system sell (120) -> external manual sell (254) -> Closed!
-    # Episode 2: Post-zero buy (172) -> system sells (112+22) -> add (174) -> system sells (167+38) -> external sell (7) -> Closed!
+    # Episode 1: Initial entries (120+127+127) -> partial system sell (120)
+    #            -> external manual sell (254) -> Closed!
+    # Episode 2: Post-zero buy (172) -> system sells (112+22) -> add (174)
+    #            -> system sells (167+38) -> external sell (7) -> Closed!
     assert len(proj.archived_episodes) == 2
 
     ep1 = proj.archived_episodes[0]
@@ -322,7 +327,8 @@ def test_position_ledger_idempotency_and_out_of_order_resilience() -> None:
 
 def test_position_ledger_interleaved_exit_fill_does_not_split_new_batch() -> None:
     """Astra S1 reproduction:
-    BUY 10 -> Submit Exit Order for batch 1 (boundary) -> BUY 5 -> Exit fill SELL 3 (old order) -> BUY 5.
+    BUY 10 -> Submit Exit Order for batch 1 (boundary) -> BUY 5
+    -> Exit fill SELL 3 (old order) -> BUY 5.
     Must produce 2 batches with quantities [7, 10], NOT 3 batches [7, 5, 5].
     """
     key = PositionKey(
@@ -376,3 +382,35 @@ def test_position_ledger_interleaved_exit_fill_does_not_split_new_batch() -> Non
     assert proj.active_batches[1].opened_at == t_buy2
     assert proj.active_batches[1].exit_order_submitted_at is None
     assert proj.total_active_quantity == Decimal("17")
+
+
+def test_position_ledger_external_reduction_does_not_fabricate_exit_boundary() -> None:
+    """Astra S1 critique: BUY 10 -> BUY 10 -> external SELL 15 -> BUY 5.
+
+    Without ExitOrderSubmissionFact, the external reduction must NOT fabricate
+    an exit_order_submitted_at on the remaining batch. Subsequent add (BUY 5)
+    must aggregate with the remaining 5 to form a single batch of quantity 10.
+    """
+    key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side="BOTH",
+    )
+    t0 = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
+    fills = [
+        _fill("t1", "BUY", "10", "50000", t0, is_system=True),
+        _fill("t2", "BUY", "10", "51000", t0 + timedelta(minutes=1), is_system=True),
+        _fill("t3", "SELL", "15", "52000", t0 + timedelta(minutes=2), is_system=False),
+        _fill("t4", "BUY", "5", "51500", t0 + timedelta(minutes=3), is_system=True),
+    ]
+    facts = AccountFacts(position_key=key, fills=tuple(fills))
+    proj = PositionLedger(key).project(facts)
+
+    assert len(proj.active_batches) == 1, (
+        f"Expected 1 batch, got {[b.quantity for b in proj.active_batches]}"
+    )
+    batch = proj.active_batches[0]
+    assert batch.quantity == Decimal("10")
+    assert batch.exit_order_submitted_at is None
+    assert proj.total_active_quantity == Decimal("10")
