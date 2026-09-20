@@ -88,7 +88,12 @@ def test_paper_rollout_removes_retired_services() -> None:
     cleanup_phase = script.index("deploy_phase=paper-retired-cleanup")
     consumers_phase = script.index("consumer_candidates=()")
     assert cleanup_phase < consumers_phase
-    assert 'consumer_candidates+=("${active_paper_services[@]}")' in script
+    assert 'for paper_svc in "${active_paper_services[@]}"; do' in script
+    assert (
+        'if [[ "$paper_changed" == 1 ]] || ! service_is_converged "$paper_svc"; then'
+        in script
+    )
+    assert 'consumer_candidates+=("$paper_svc")' in script
 
 
 def test_live_control_plane_concurrency_is_separate_from_restart_concurrency() -> None:
