@@ -6,9 +6,10 @@ from typing import Any, cast
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderEvent,
     ExchangeOrderState,
+    FuturesPositionSide,
     OrderExecutionPlan,
 )
-from crypto_momentum_lab.domain.strategy import EntryType
+from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
 )
@@ -16,6 +17,7 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
     PreparedOrderSubmission,
 )
+from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
 from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
 from crypto_momentum_lab.live_rollout.submission import (
     LiveCandidateSubmission,
@@ -174,3 +176,58 @@ async def test_submission_keeps_legacy_save_then_exchange_fallback() -> None:
     assert result is not None
     assert repository.events == ["save"]
     assert state_machine.events == ["exchange"]
+
+
+async def test_submission_absorbs_dust_remainder_on_exit() -> None:
+    repository = RecordingPreparedRepository()
+    coordinator = RecordingCoordinator()
+    submission = _submission(
+        repository=repository,
+        state_machine=coordinator,
+    )
+    # Total position on BTCUSDT is 0.0007 BTC.
+    # At price $10,000, notional is $7.00 (> $5 min_notional).
+    # Exit batch tries to close 0.0004 BTC ($4.00).
+    # Leaving 0.0003 BTC ($3.00 < $5 min_notional).
+    # The remainder ($3.00) cannot be closed on Binance as a standalone order.
+    # Dust absorption must absorb it into the order, closing the full 0.0007 BTC.
+    pos = ManagedLivePosition(
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        position_side=FuturesPositionSide.BOTH,
+        quantity=Decimal("0.0007"),
+        entry_price=Decimal("10000"),
+        opened_at=NOW,
+    )
+    candidate = replace(
+        _intent(),
+        reduce_only=True,
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        entry_type=EntryType.MARKET,
+        features={"position_side": "BOTH"},
+    )
+    context = replace(
+        _runtime_context(),
+        managed_positions=(pos,),
+        open_position_symbols=frozenset({"BTCUSDT"}),
+    )
+    state = replace(
+        _state(),
+        symbol="BTCUSDT",
+        mark_price=Decimal("10000"),
+        close_price=Decimal("10000"),
+    )
+
+    result = await submission.execute(
+        candidate,
+        requested_quantity=Decimal("0.0004"),
+        state=state,
+        context=context,
+        reference_price=Decimal("10000"),
+    )
+
+    assert result is not None
+    assert result.plan is not None
+    assert result.plan.quantity == Decimal("0.0007")
+

@@ -159,6 +159,7 @@ async def _load_order_anchor_events(
     run_id: str,
     active_symbols: Sequence[str],
     lookback_start: datetime,
+    zero_crossing_times: Mapping[str, datetime] | None = None,
 ) -> tuple[tuple[_OrderAnchorEvent, ...], Mapping[str, datetime]]:
     rows = (
         await session.scalars(
@@ -175,6 +176,10 @@ async def _load_order_anchor_events(
     latest_entry_times: dict[str, datetime] = {}
     for row in rows:
         symbol_key = row.symbol.strip().upper()
+        if zero_crossing_times is not None:
+            zero_at = zero_crossing_times.get(symbol_key)
+            if zero_at is not None and row.created_at < zero_at:
+                continue
         executed = row.executed_quantity or Decimal("0")
         if row.reduce_only:
             quantity = executed
@@ -216,6 +221,7 @@ async def _load_position_orders_bounded(
     run_id: str,
     active_symbols: Sequence[str],
     now: datetime | None = None,
+    account_label: str | None = None,
 ) -> list[ExchangeOrderRow]:
     """Two-phase order load: anchors first, then a per-symbol time window."""
     if not active_symbols:
@@ -223,11 +229,35 @@ async def _load_position_orders_bounded(
     observed_at = now or datetime.now(tz=UTC)
     lookback_start = observed_at - _ORDER_ANCHOR_LOOKBACK
     symbols = tuple(sorted({symbol.strip().upper() for symbol in active_symbols}))
+
+    zero_crossing_times: dict[str, datetime] = {}
+    if account_label:
+        zero_rows = (
+            await session.execute(
+                select(
+                    AccountPositionSnapshotRow.symbol,
+                    func.max(AccountPositionSnapshotRow.observed_at),
+                )
+                .where(
+                    AccountPositionSnapshotRow.environment == "live",
+                    AccountPositionSnapshotRow.account_label == account_label,
+                    AccountPositionSnapshotRow.symbol.in_(symbols),
+                    AccountPositionSnapshotRow.position_amt == 0,
+                    AccountPositionSnapshotRow.observed_at <= observed_at,
+                )
+                .group_by(AccountPositionSnapshotRow.symbol)
+            )
+        ).all()
+        for sym, zero_at in zero_rows:
+            if zero_at is not None:
+                zero_crossing_times[sym.strip().upper()] = zero_at
+
     events, latest_entry_times = await _load_order_anchor_events(
         session,
         run_id=run_id,
         active_symbols=symbols,
         lookback_start=lookback_start,
+        zero_crossing_times=zero_crossing_times,
     )
     anchors = _opening_anchors_from_events(events, symbols)
     window_conditions = []
@@ -241,6 +271,11 @@ async def _load_position_orders_bounded(
             window_start = latest_entry_times[symbol] - _ORDER_ANCHOR_BUFFER
         else:
             window_start = lookback_start
+
+        zero_at = zero_crossing_times.get(symbol)
+        if zero_at is not None:
+            window_start = max(window_start, zero_at)
+
         window_conditions.append(
             and_(
                 ExchangeOrderRow.symbol == symbol,
@@ -260,15 +295,62 @@ async def _load_position_orders_bounded(
             .limit(1000)
         )
     ).all()
+
+    row_list = list(rows)
+    loaded_client_ids = {
+        row.client_order_id for row in row_list if row.client_order_id
+    }
+    exit_intent_ids = tuple(
+        row.intent_id for row in row_list if row.reduce_only and row.intent_id
+    )
+    if exit_intent_ids:
+        intent_rows = (
+            await session.execute(
+                select(
+                    OrderIntentExecutionRow.intent_id,
+                    OrderIntentExecutionRow.details,
+                ).where(OrderIntentExecutionRow.intent_id.in_(exit_intent_ids))
+            )
+        ).all()
+        missing_entry_client_ids: set[str] = set()
+        for _intent_id, details in intent_rows:
+            features = (
+                details.get("features", {}) if isinstance(details, dict) else {}
+            )
+            batch_id = (
+                features.get("batch_id") if isinstance(features, dict) else None
+            )
+            if isinstance(batch_id, str) and batch_id:
+                target_client_id = batch_id.split(":")[-1]
+                if target_client_id and target_client_id not in loaded_client_ids:
+                    missing_entry_client_ids.add(target_client_id)
+        if missing_entry_client_ids:
+            missing_entry_rows = (
+                await session.scalars(
+                    select(ExchangeOrderRow).where(
+                        ExchangeOrderRow.run_id == run_id,
+                        ExchangeOrderRow.client_order_id.in_(
+                            tuple(missing_entry_client_ids)
+                        ),
+                    )
+                )
+            ).all()
+            for extra_row in missing_entry_rows:
+                sym = extra_row.symbol.strip().upper()
+                zero_at = zero_crossing_times.get(sym)
+                if zero_at is None or extra_row.created_at >= zero_at:
+                    row_list.append(extra_row)
+                    loaded_client_ids.add(extra_row.client_order_id)
+
     for symbol, anchor in anchors.items():
         log.debug(
             "position_order_window_bounded",
             symbol=symbol,
             opened_at=anchor.isoformat(),
             window_start=(anchor - _ORDER_ANCHOR_BUFFER).isoformat(),
-            row_count=len(rows),
+            row_count=len(row_list),
         )
-    return list(rows)
+    return row_list
 
 
 @dataclass(frozen=True, slots=True)
@@ -920,6 +1002,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                     session,
                     run_id=self._run_id,
                     active_symbols=active_symbols,
+                    account_label=self._account_label,
                 )
                 entry_client_order_ids = tuple(
                     sorted(
@@ -1039,6 +1122,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                     session,
                     run_id=self._run_id,
                     active_symbols=active_symbols,
+                    account_label=self._account_label,
                 )
                 entry_client_order_ids = tuple(
                     sorted(

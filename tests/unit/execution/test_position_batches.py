@@ -262,3 +262,57 @@ def test_rebuild_position_batches_order_predating_lot_not_bound() -> None:
     assert len(result.batches) == 1
     assert result.batches[0].batch_id == "BTCUSDT:BOTH:e_future"
     assert result.batches[0].quantity == Decimal("1.0")
+
+
+def test_rebuild_position_batches_reconcile_fifo_preserves_newest() -> None:
+    t1 = NOW
+    t2 = NOW + timedelta(hours=3)
+    # Suppose old batch was 254 units, new batch was 172 units.
+    # Total recorded entries = 426 units.
+    # Actual position observed on exchange is only 172 units
+    # (old batch closed manually).
+    obs = PositionObservation(
+        symbol="B2USDT",
+        side=StrategySide.LONG,
+        position_side=FuturesPositionSide.BOTH,
+        position_amt=Decimal("172.0"),
+        entry_price=Decimal("0.54"),
+    )
+    # Entry 1 (old): 254 units
+    e1 = _order(
+        "B2USDT",
+        quantity=Decimal("254.0"),
+        price=Decimal("0.50"),
+        client_order_id="e1_old",
+        created_at=t1,
+    )
+    # We simulate exit on e1 with a partial fill or zero reduce_only order
+    # To split the boundary so they form 2 distinct batches, e1 has an exit attempt:
+    x1 = _order(
+        "B2USDT",
+        side="SELL",
+        reduce_only=True,
+        quantity=Decimal("1.0"),
+        executed_quantity=Decimal("0"),
+        state=ExchangeOrderState.CANCELED,
+        client_order_id="x1",
+        created_at=t1 + timedelta(hours=1),
+    )
+    # Entry 2 (new): 172 units
+    e2 = _order(
+        "B2USDT",
+        quantity=Decimal("172.0"),
+        price=Decimal("0.54"),
+        client_order_id="e2_new",
+        created_at=t2,
+    )
+
+    history = PositionHistory(orders=[e1, x1, e2])
+    result = rebuild_position_batches(obs, history)
+
+    # FIFO must remove the excess (254) from e1_old, leaving ONLY e2_new intact!
+    assert len(result.batches) == 1
+    assert result.batches[0].batch_id == "B2USDT:BOTH:e2_new"
+    assert result.batches[0].quantity == Decimal("172.0")
+    assert result.batches[0].opened_at == t2
+

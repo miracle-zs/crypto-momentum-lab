@@ -1213,7 +1213,7 @@ def test_legacy_exit_history_does_not_keep_an_old_batch_active() -> None:
     assert unmanaged == frozenset()
     assert len(managed) == 1
     assert [batch.batch_id for batch in managed[0].batches] == [
-        "BTCUSDT:LONG:current-entry"
+        "BTCUSDT:LONG:new-entry"
     ]
     assert managed[0].batches[0].quantity == Decimal("386")
 

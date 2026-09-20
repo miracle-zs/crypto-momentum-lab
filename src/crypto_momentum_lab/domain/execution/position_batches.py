@@ -392,13 +392,12 @@ def _reconcile_batch_quantities(
 
     excess = total_quantity - target_quantity
     reconciled: list[ManagedLivePositionBatch] = []
-    for batch in reversed(batches):
+    for batch in batches:
         remove = min(excess, batch.quantity)
         remaining = batch.quantity - remove
         excess -= remove
         if remaining > 0:
             reconciled.append(replace(batch, quantity=remaining))
-    reconciled.reverse()
     return tuple(reconciled)
 
 
