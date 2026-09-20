@@ -534,10 +534,14 @@ async def run_live_daemon(
             "runtime_metadata_snapshot_created",
             **snapshot_dict,
         )
-        await telemetry.record(
-            RUNTIME_METADATA_SNAPSHOT,
-            payload=snapshot_dict,
-        )
+        if hasattr(telemetry, "record"):
+            try:
+                await telemetry.record(
+                    RUNTIME_METADATA_SNAPSHOT,
+                    payload=snapshot_dict,
+                )
+            except Exception as tel_err:
+                log.warning("runtime_metadata_telemetry_failed", error=str(tel_err))
         def _write_metadata_disk() -> None:
             meta_dir = Path(os.environ.get("CML_RUNTIME_METADATA_DIR", "/tmp"))
             if meta_dir.exists():

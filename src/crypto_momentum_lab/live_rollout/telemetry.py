@@ -13,7 +13,7 @@ import json
 from collections import deque
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, fields
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
@@ -677,6 +677,22 @@ class LiveRuntimeTelemetry:
                 "reason": reason,
                 "sequence": sequence,
             },
+        )
+
+    async def record(
+        self,
+        event_type: str,
+        *,
+        payload: Mapping[str, JsonValue] | None = None,
+        occurred_at: datetime | None = None,
+        symbol: str | None = None,
+    ) -> None:
+        """Record an operational telemetry event."""
+        self._record_observation(
+            event_type=event_type,
+            occurred_at=occurred_at or datetime.now(tz=UTC),
+            symbol=symbol,
+            details=payload or {},
         )
 
     def market_state_progress(

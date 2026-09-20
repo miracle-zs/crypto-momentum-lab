@@ -19,6 +19,7 @@ from crypto_momentum_lab.live_rollout.telemetry import (
     EXCHANGE_RESPONSE_RECEIVED,
     MARKET_STATE_PROGRESS,
     MARKET_STATE_RECEIVED,
+    RUNTIME_METADATA_SNAPSHOT,
     STRATEGY_OUTPUT_OBSERVED,
     LiveRuntimeTelemetry,
 )
@@ -153,6 +154,30 @@ async def test_live_telemetry_persists_events_in_batches_without_blocking_record
     assert len(batches) == 1
     assert batches[0][0]["event_type"] == "market_state_received"
     assert batches[0][0]["details"]["lane"] == "entry"
+
+
+async def test_live_telemetry_record_operational_event() -> None:
+    batches: list[tuple[dict[str, object], ...]] = []
+
+    async def persist(events) -> None:
+        batches.append(tuple(dict(event) for event in events))
+
+    telemetry = LiveRuntimeTelemetry(
+        run_id="run-1",
+        persist=persist,
+        persist_event_types=frozenset({RUNTIME_METADATA_SNAPSHOT}),
+    )
+    await telemetry.start()
+    await telemetry.record(
+        RUNTIME_METADATA_SNAPSHOT,
+        payload={"environment": "live", "commit": "abc"},
+    )
+    await telemetry.stop()
+
+    assert len(batches) == 1
+    assert batches[0][0]["event_type"] == "runtime_metadata_snapshot"
+    assert batches[0][0]["details"]["commit"] == "abc"
+
 
 
 async def test_transient_persist_timeout_is_retried_before_dropping(
