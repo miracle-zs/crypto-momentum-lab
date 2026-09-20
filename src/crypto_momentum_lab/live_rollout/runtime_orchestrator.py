@@ -5,6 +5,7 @@ module owns the runtime assembly and lifecycle of one live daemon.
 """
 
 import asyncio
+import json
 import os
 from collections.abc import (
     AsyncIterable,
@@ -16,6 +17,7 @@ from collections.abc import (
 from dataclasses import replace
 from datetime import UTC, datetime, time
 from decimal import Decimal
+from pathlib import Path
 from time import perf_counter
 
 import structlog
@@ -29,6 +31,7 @@ from crypto_momentum_lab.domain.live_rollout import LiveSessionState
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.operational.runtime_metadata import (
     RuntimeMetadataSnapshot,
+    compute_trading_rules_hash,
 )
 from crypto_momentum_lab.domain.risk import RiskEvaluation, TradingLease
 from crypto_momentum_lab.domain.strategy import (
@@ -191,6 +194,7 @@ from crypto_momentum_lab.live_rollout.submission_fence import LiveSubmissionFenc
 from crypto_momentum_lab.live_rollout.telemetry import (
     PERSISTED_OPERATIONAL_TELEMETRY_EVENTS,
     PERSISTED_ORDER_TELEMETRY_EVENTS,
+    RUNTIME_METADATA_SNAPSHOT,
     LiveRuntimeTelemetry,
     LiveTelemetrySink,
 )
@@ -230,6 +234,9 @@ from crypto_momentum_lab.persistence.postgres.runtime_context import (
 )
 from crypto_momentum_lab.persistence.postgres.runtime_context import (
     load_latest_risk_config as _latest_risk_config,
+)
+from crypto_momentum_lab.persistence.postgres.runtime_context import (
+    load_trading_rules as _load_trading_rules,
 )
 from crypto_momentum_lab.persistence.postgres.runtime_state_repository import (
     PostgresRuntimeMarketStateRepository,
@@ -377,9 +384,7 @@ async def run_live_daemon(
     observability_engine = create_observability_database_engine(
         observability_database_url
     )
-    ownership_registry.register(
-        "observability_engine", observability_engine.dispose
-    )
+    ownership_registry.register("observability_engine", observability_engine.dispose)
     checkpoint_engine = create_checkpoint_database_engine(observability_database_url)
     ownership_registry.register("checkpoint_engine", checkpoint_engine.dispose)
     heartbeat_engine: AsyncEngine | None = None
@@ -452,9 +457,7 @@ async def run_live_daemon(
             pool_timeout_seconds=3,
             command_timeout_seconds=5,
         )
-        ownership_registry.register(
-            "heartbeat_engine", heartbeat_engine.dispose
-        )
+        ownership_registry.register("heartbeat_engine", heartbeat_engine.dispose)
         heartbeat_factory = async_sessionmaker(
             heartbeat_engine,
             expire_on_commit=False,
@@ -511,19 +514,42 @@ async def run_live_daemon(
             ),
             clock=lambda: datetime.now(tz=UTC),
         )
+        try:
+            loaded_trading_rules = await _load_trading_rules(market_factory, None)
+            trading_rules_hash = compute_trading_rules_hash(loaded_trading_rules)
+        except Exception as rules_err:
+            log.warning("trading_rules_hash_load_failed", error=str(rules_err))
+            trading_rules_hash = compute_trading_rules_hash({})
         metadata_snapshot = RuntimeMetadataSnapshot.create(
             environment=market_environment,
             account_label=account_label,
             git_commit=git_commit_hash,
             strategy_config_hash=strategy_config_hash,
             risk_config_hash=risk_config_hash,
-            trading_rules_hash="v1",
+            trading_rules_hash=trading_rules_hash,
             started_at=datetime.now(tz=UTC),
         )
+        snapshot_dict = metadata_snapshot.to_dict()
         log.info(
             "runtime_metadata_snapshot_created",
-            **metadata_snapshot.to_dict(),
+            **snapshot_dict,
         )
+        await telemetry.record(
+            RUNTIME_METADATA_SNAPSHOT,
+            payload=snapshot_dict,
+        )
+        def _write_metadata_disk() -> None:
+            meta_dir = Path(os.environ.get("CML_RUNTIME_METADATA_DIR", "/tmp"))
+            if meta_dir.exists():
+                meta_file = meta_dir / f"runtime_metadata_{session_id}.json"
+                meta_file.write_text(json.dumps(snapshot_dict, indent=2))
+
+        try:
+            await asyncio.to_thread(_write_metadata_disk)
+        except Exception as disk_err:
+            log.debug("runtime_metadata_disk_write_failed", error=str(disk_err))
+
+
         client = BinanceUsdMTradeClient(
             api_key=api_key,
             api_secret=api_secret,
@@ -620,9 +646,7 @@ async def run_live_daemon(
         entry_order_lifecycle = LiveLimitOrderLifecycle(
             cancel_order=execution_coordinator.cancel_order,
         )
-        ownership_registry.register(
-            "entry_order_lifecycle", entry_order_lifecycle.stop
-        )
+        ownership_registry.register("entry_order_lifecycle", entry_order_lifecycle.stop)
         order_event_runtime.set_entry_order_lifecycle(entry_order_lifecycle)
         await entry_order_lifecycle.restore(unresolved)
         active_lease = await risk_repository.load_active_lease(
@@ -864,15 +888,11 @@ async def run_live_daemon(
                 ),
                 backfill_source=candle_source,
             )
-            ownership_registry.register(
-                "closed_candle_feed", closed_candle_feed.stop
-            )
+            ownership_registry.register("closed_candle_feed", closed_candle_feed.stop)
         if require_price_above_ema5 or require_price_above_ema10:
             if candle_source is None:
                 candle_source = BinanceRestClosedCandle15mSource(base_url)
-                ownership_registry.register(
-                    "candle_source", candle_source.close
-                )
+                ownership_registry.register("candle_source", candle_source.close)
             ema_provider = ClosedCandleEmaProvider(candle_source)
 
         assert client is not None
@@ -985,7 +1005,11 @@ async def run_live_daemon(
                 entry_limit_ttl_seconds=entry_limit_ttl_seconds,
                 scheduled_risk_window=_resolve_scheduled_risk_window(),
                 max_concurrency=max_concurrency,
-                readiness_provider=lambda: daemon.evaluate_readiness() if daemon is not None else ExecutionReadiness.INDEPENDENT_EXECUTABLE,
+                readiness_provider=lambda: (
+                    daemon.evaluate_readiness()
+                    if daemon is not None
+                    else ExecutionReadiness.INDEPENDENT_EXECUTABLE
+                ),
             ),
             exit_manager=LiveExitManager(
                 config=LiveExitConfig(
@@ -1437,7 +1461,6 @@ async def run_live_daemon(
             if shutdown_task is not None:
                 await asyncio.gather(shutdown_task, return_exceptions=True)
             await ownership_registry.teardown_all()
-
 
 
 async def _observe_market_states(

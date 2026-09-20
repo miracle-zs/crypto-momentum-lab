@@ -82,7 +82,9 @@ def test_position_ledger_single_entry() -> None:
     assert len(proj.archived_episodes) == 0
 
 
-def test_position_ledger_consecutive_adds_without_exit_boundary_aggregate_batch() -> None:
+def test_position_ledger_consecutive_adds_without_exit_boundary_aggregate_batch() -> (
+    None
+):
     """Per CONTEXT.md and Astra critique S1: consecutive adds before exit boundary
 
     belong to the SAME batch with updated anchor and weighted-average entry price.
@@ -159,10 +161,14 @@ def test_position_ledger_exit_boundary_separates_batches_and_fifo_deduction() ->
     )
 
     # Entry 15 at t0 + 5m (after exit boundary -> MUST start batch 2!)
-    f2 = _fill("t2", "BUY", "15", "61000", t0 + timedelta(minutes=5), order_id="ord_entry_2")
+    f2 = _fill(
+        "t2", "BUY", "15", "61000", t0 + timedelta(minutes=5), order_id="ord_entry_2"
+    )
 
     # Sell 12 at t0 + 10m -> FIFO deducts 10 from batch 1, 2 from batch 2 -> remaining 13 in batch 2
-    f3 = _fill("t3", "SELL", "12", "62000", t0 + timedelta(minutes=10), order_id="ord_exit_1")
+    f3 = _fill(
+        "t3", "SELL", "12", "62000", t0 + timedelta(minutes=10), order_id="ord_exit_1"
+    )
 
     facts = AccountFacts(
         position_key=key,
@@ -277,7 +283,7 @@ def test_position_ledger_b2_timeline_full_replay() -> None:
 
     ep2 = proj.archived_episodes[1]
     assert ep2.cumulative_bought == Decimal("346")  # 172 + 174 = 346
-    assert ep2.cumulative_sold == Decimal("346")    # 134 + 167 + 38 + 7 = 346
+    assert ep2.cumulative_sold == Decimal("346")  # 134 + 167 + 38 + 7 = 346
     assert ep2.is_active is False
 
 
@@ -302,9 +308,71 @@ def test_position_ledger_idempotency_and_out_of_order_resilience() -> None:
     random.seed(42)
     random.shuffle(shuffled_with_dups)
 
-    proj = ledger.project(AccountFacts(position_key=key, fills=tuple(shuffled_with_dups)))
+    proj = ledger.project(
+        AccountFacts(position_key=key, fills=tuple(shuffled_with_dups))
+    )
 
     assert proj.total_active_quantity == baseline.total_active_quantity
     assert len(proj.active_batches) == len(baseline.active_batches)
-    assert [b.quantity for b in proj.active_batches] == [b.quantity for b in baseline.active_batches]
+    assert [b.quantity for b in proj.active_batches] == [
+        b.quantity for b in baseline.active_batches
+    ]
     assert proj.high_watermark_trade_at == baseline.high_watermark_trade_at
+
+
+def test_position_ledger_interleaved_exit_fill_does_not_split_new_batch() -> None:
+    """Astra S1 reproduction:
+    BUY 10 -> Submit Exit Order for batch 1 (boundary) -> BUY 5 -> Exit fill SELL 3 (old order) -> BUY 5.
+    Must produce 2 batches with quantities [7, 10], NOT 3 batches [7, 5, 5].
+    """
+    key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side="BOTH",
+    )
+    t0 = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
+    t_exit_sub = datetime(2026, 8, 1, 10, 5, tzinfo=UTC)
+    t_buy1 = datetime(2026, 8, 1, 10, 6, tzinfo=UTC)
+    t_exit_fill = datetime(2026, 8, 1, 10, 7, tzinfo=UTC)
+    t_buy2 = datetime(2026, 8, 1, 10, 8, tzinfo=UTC)
+
+    fills = [
+        # Step 1: BUY 10
+        _fill("t1", "BUY", "10", "50000", t0, order_id="ord_entry_1"),
+        # Step 3: BUY 5
+        _fill("t2", "BUY", "5", "51000", t_buy1, order_id="ord_entry_2"),
+        # Step 4: Old exit order fill SELL 3
+        _fill("t3", "SELL", "3", "52000", t_exit_fill, order_id="ord_exit_1"),
+        # Step 5: BUY 5
+        _fill("t4", "BUY", "5", "51500", t_buy2, order_id="ord_entry_3"),
+    ]
+
+    boundaries = [
+        # Step 2: Exit order submitted for batch 1
+        ExitOrderSubmissionFact(
+            order_id="ord_exit_1",
+            submitted_at=t_exit_sub,
+            symbol="BTCUSDT",
+            position_side="BOTH",
+        ),
+    ]
+
+    facts = AccountFacts(
+        position_key=key,
+        fills=tuple(fills),
+        exit_boundaries=tuple(boundaries),
+    )
+
+    ledger = PositionLedger(key)
+    proj = ledger.project(facts)
+
+    assert len(proj.active_batches) == 2, (
+        f"Expected 2 batches, got {[b.quantity for b in proj.active_batches]}"
+    )
+    assert proj.active_batches[0].quantity == Decimal("7")
+    assert proj.active_batches[0].exit_order_submitted_at == t_exit_sub
+    assert proj.active_batches[1].quantity == Decimal("10")
+    assert proj.active_batches[1].opened_at == t_buy2
+    assert proj.active_batches[1].exit_order_submitted_at is None
+    assert proj.total_active_quantity == Decimal("17")

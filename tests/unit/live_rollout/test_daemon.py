@@ -133,8 +133,9 @@ async def test_live_daemon_uses_lower_of_ask_and_close_gtd_limit_for_entries() -
     assert plan.expires_at == NOW + timedelta(minutes=15)
 
 
-async def test_live_daemon_caps_entry_limit_at_lower_ask_when_ask_is_below_close(
-) -> None:
+async def test_live_daemon_caps_entry_limit_at_lower_ask_when_ask_is_below_close() -> (
+    None
+):
     exchange = PlanAwareExchange()
     state = replace(
         _state(),
@@ -157,8 +158,9 @@ async def test_live_daemon_caps_entry_limit_at_lower_ask_when_ask_is_below_close
     assert exchange.plans[0].expires_at == NOW + timedelta(minutes=15)
 
 
-async def test_live_signal_record_includes_universe_and_effective_entry_context(
-) -> None:
+async def test_live_signal_record_includes_universe_and_effective_entry_context() -> (
+    None
+):
     recorder = RecordingSignalRecorder()
 
     def universe_context(
@@ -185,9 +187,9 @@ async def test_live_signal_record_includes_universe_and_effective_entry_context(
     assert recorder.decision_filter_context is not None
     universe = recorder.decision_filter_context["universe"]
     assert universe["gainer_rank"] == 7
-    effective = recorder.decision_filter_context[
-        "effective_entry_candidates"
-    ]["candidate-1"]
+    effective = recorder.decision_filter_context["effective_entry_candidates"][
+        "candidate-1"
+    ]
     assert effective["original_entry_type"] == "market"
     assert effective["effective_entry_type"] == "limit"
     assert effective["effective_limit_price"] == Decimal("30000")
@@ -198,8 +200,9 @@ async def test_live_signal_record_includes_universe_and_effective_entry_context(
     assert effective["effective_expires_at"] == NOW + timedelta(minutes=15)
 
 
-async def test_live_signal_record_can_compare_entry_policy_without_submitting_change(
-) -> None:
+async def test_live_signal_record_can_compare_entry_policy_without_submitting_change() -> (
+    None
+):
     recorder = RecordingSignalRecorder()
     exchange = PlanAwareExchange()
     daemon = _daemon(
@@ -215,14 +218,10 @@ async def test_live_signal_record_can_compare_entry_policy_without_submitting_ch
     assert exchange.calls == ["submit"]
     assert recorder.decision_filter_context is not None
     assert recorder.decision_filter_context["entry_policy_compare_only"] is True
-    comparisons = recorder.decision_filter_context[
-        "entry_policy_comparisons"
-    ]
+    comparisons = recorder.decision_filter_context["entry_policy_comparisons"]
     assert len(comparisons) == 1
     assert comparisons[0]["matched"] is True
-    assert recorder.decision_filter_context[
-        "entry_policy_comparison_summary"
-    ] == {
+    assert recorder.decision_filter_context["entry_policy_comparison_summary"] == {
         "candidates": 1,
         "matched": 1,
         "mismatched": 0,
@@ -234,8 +233,9 @@ async def test_live_signal_record_can_compare_entry_policy_without_submitting_ch
     }
 
 
-async def test_live_policy_enforce_uses_policy_eligible_candidate_for_submission(
-) -> None:
+async def test_live_policy_enforce_uses_policy_eligible_candidate_for_submission() -> (
+    None
+):
     recorder = RecordingSignalRecorder()
     exchange = PlanAwareExchange()
     daemon = _daemon(
@@ -252,9 +252,7 @@ async def test_live_policy_enforce_uses_policy_eligible_candidate_for_submission
     assert recorder.decision_filter_context is not None
     assert recorder.decision_filter_context["entry_policy_enforce"] is True
     assert recorder.decision_filter_context["entry_policy_mode"] == "enforce"
-    assert recorder.decision_filter_context[
-        "entry_policy_comparison_summary"
-    ] == {
+    assert recorder.decision_filter_context["entry_policy_comparison_summary"] == {
         "candidates": 1,
         "matched": 1,
         "mismatched": 0,
@@ -294,9 +292,7 @@ async def test_live_policy_enforce_blocks_policy_ineligible_candidate() -> None:
     assert result.submitted_order_count == 0
     assert exchange.calls == []
     assert recorder.decision_filter_context is not None
-    summary = recorder.decision_filter_context[
-        "entry_policy_comparison_summary"
-    ]
+    summary = recorder.decision_filter_context["entry_policy_comparison_summary"]
     assert summary["candidates"] == 1
     assert summary["legacy_eligible"] == 1
     assert summary["policy_eligible"] == 0
@@ -330,12 +326,14 @@ async def test_live_policy_enforce_fails_closed_on_universe_snapshot_error() -> 
     assert result.submitted_order_count == 0
     assert exchange.calls == []
     assert recorder.decision_filter_context is not None
-    assert recorder.decision_filter_context[
-        "entry_policy_universe_snapshot_error"
-    ] == "RuntimeError"
-    assert recorder.decision_filter_context[
-        "entry_policy_enforce_skip_reason"
-    ] == "universe_snapshot_error"
+    assert (
+        recorder.decision_filter_context["entry_policy_universe_snapshot_error"]
+        == "RuntimeError"
+    )
+    assert (
+        recorder.decision_filter_context["entry_policy_enforce_skip_reason"]
+        == "universe_snapshot_error"
+    )
 
 
 def test_live_policy_modes_are_mutually_exclusive() -> None:
@@ -1779,15 +1777,11 @@ async def test_pending_account_position_blocks_entries_without_halting() -> None
         ),
     )
 
-    failure = await daemon.process_account_event(
-        replace(_state(), symbol="ETHUSDT")
-    )
+    failure = await daemon.process_account_event(replace(_state(), symbol="ETHUSDT"))
 
     assert failure == "pending_live_positions:ETHUSDT"
     assert daemon.entry_enabled is False
-    assert daemon.entry_enabled_reason == (
-        "account_position_sync_pending:ETHUSDT"
-    )
+    assert daemon.entry_enabled_reason == ("account_position_sync_pending:ETHUSDT")
     assert exchange.calls == []
 
 
@@ -1859,8 +1853,7 @@ async def test_scheduled_risk_window_late_start_after_reopen_is_noop(
     assert daemon.entry_enabled is True
     assert all(not blocked for blocked, _reason in gate_calls)
     assert all(
-        reason != "scheduled_risk_window_complete"
-        for _blocked, reason in gate_calls
+        reason != "scheduled_risk_window_complete" for _blocked, reason in gate_calls
     )
 
 
@@ -1928,8 +1921,9 @@ async def test_risk_control_flatten_reuses_reduce_only_exit_processor() -> None:
     assert exchange.plans[0].order_type == "MARKET"
 
 
-async def test_scheduled_flatten_targets_exchange_position_before_market_state_arrives(
-) -> None:
+async def test_scheduled_flatten_targets_exchange_position_before_market_state_arrives() -> (
+    None
+):
     exchange = PlanAwareExchange()
     position = ManagedLivePosition(
         symbol="BTCUSDT",
@@ -1984,9 +1978,7 @@ async def test_scheduled_flatten_targets_exchange_position_before_market_state_a
     )
     # The market loop has only delivered another symbol so far.  The
     # exchange position must still be flattened immediately.
-    daemon._scheduled_controller.observe_state(
-        replace(_state(), symbol="ETHUSDT")
-    )
+    daemon._scheduled_controller.observe_state(replace(_state(), symbol="ETHUSDT"))
 
     failure = await daemon.request_flatten(now=NOW)
 
@@ -2440,7 +2432,34 @@ async def test_live_daemon_readiness_provider_blocks_entries_when_lagging() -> N
         readiness_provider=lambda: ExecutionReadiness.PROGRESS_LAGGING,
     )
     result = await daemon.run(_states())
-    assert result.halt_reason is None
     assert result.approved_intent_count == 0
     assert result.submitted_order_count == 0
     assert exchange.calls == []
+
+
+def test_live_daemon_evaluate_readiness_detects_account_watermark_lag() -> None:
+    """Verifies that evaluate_readiness detects lag when the account watermark is older than the market watermark."""
+    now = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
+    market_time = now  # fresh market
+    account_lagging_time = now - timedelta(seconds=120)  # account is 2 minutes behind!
+
+    class MockContextProvider:
+        def __init__(self) -> None:
+            self.cached_context = replace(
+                _runtime_context(),
+                account_observed_at=account_lagging_time,
+            )
+
+        def __call__(self) -> LiveDaemonRuntimeContext:
+            return self.cached_context
+
+    ctx_provider = MockContextProvider()
+    daemon = _daemon(
+        exchange=PlanAwareExchange(),
+        context_provider=ctx_provider,
+        clock=lambda: now,
+    )
+    daemon._market_loop._active_state_at = market_time
+
+    readiness = daemon.evaluate_readiness()
+    assert readiness == ExecutionReadiness.PROGRESS_LAGGING

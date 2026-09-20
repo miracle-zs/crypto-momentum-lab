@@ -43,6 +43,7 @@ CONSUMER_HEALTH = "consumer_health"
 TERMINAL_REASON = "terminal_reason"
 MARKET_STATE_PROGRESS = "market_state_progress"
 STRATEGY_OUTPUT_OBSERVED = "strategy_output_observed"
+RUNTIME_METADATA_SNAPSHOT = "runtime_metadata_snapshot"
 
 LIVE_TRIGGER_SOURCE_ACCOUNT: LiveTriggerSource = "account"
 LIVE_TRIGGER_SOURCE_QUOTE: LiveTriggerSource = "quote"
@@ -153,6 +154,7 @@ PERSISTED_OPERATIONAL_TELEMETRY_EVENTS = frozenset(
         MARKET_STATE_PROGRESS,
         STRATEGY_OUTPUT_OBSERVED,
         TERMINAL_REASON,
+        RUNTIME_METADATA_SNAPSHOT,
     }
 )
 
@@ -1613,6 +1615,7 @@ __all__ = [
     "PERSISTED_ORDER_TELEMETRY_EVENTS",
     "PERSISTED_OPERATIONAL_TELEMETRY_EVENTS",
     "RISK_APPROVED",
+    "RUNTIME_METADATA_SNAPSHOT",
     "SIGNAL_RECORDED",
     "SOURCE_RECEIVED",
     "SourceIngress",

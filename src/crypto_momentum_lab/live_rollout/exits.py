@@ -8,10 +8,22 @@ from decimal import Decimal
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
+import structlog
+
 from crypto_momentum_lab.domain.execution import (
     FuturesPositionSide,
     ManagedLivePositionBatch,
     OrderExecutionPlan,
+)
+from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    PositionEpisode,
+    PositionKey,
+    PositionLedgerBatch,
+    PositionLedgerProjection,
+)
+from crypto_momentum_lab.domain.execution.trade_command import (
+    ExitAllocator,
+    ExitPolicyMode,
 )
 from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
@@ -29,6 +41,8 @@ from crypto_momentum_lab.strategy_runner.position_exit import (
     first_candle_start_after_entry,
     position_exit_reason,
 )
+
+log = structlog.get_logger(__name__)
 
 
 class ClosedCandle15mLoader(Protocol):
@@ -184,9 +198,7 @@ class LiveExitConfig:
         if self.candle_grace_profit_pct < 0 or self.candle_grace_profit_pct >= 1:
             raise ValueError("candle_grace_profit_pct must be in [0, 1)")
         if decision_profit_pct < 0 or decision_profit_pct >= 1:
-            raise ValueError(
-                "candle_grace_decision_profit_pct must be in [0, 1)"
-            )
+            raise ValueError("candle_grace_decision_profit_pct must be in [0, 1)")
 
     @property
     def decision_profit_pct(self) -> Decimal:
@@ -325,9 +337,7 @@ class LiveExitManager:
             checked_until = self._checked_until.get(key)
             if checked_until is not None and candle.candle_end <= checked_until:
                 continue
-            first_eligible_start = first_candle_start_after_entry(
-                position.opened_at
-            )
+            first_eligible_start = first_candle_start_after_entry(position.opened_at)
             if candle.candle_start < first_eligible_start:
                 self._checked_until[key] = candle.candle_end
                 continue
@@ -435,8 +445,7 @@ class LiveExitManager:
                 continue
             reference_price = (
                 _quote_exit_mark_price(latest_quote, position.side)
-                if latest_quote is not None
-                and latest_quote.symbol == position.symbol
+                if latest_quote is not None and latest_quote.symbol == position.symbol
                 else _exit_mark_price(state, position.side)
             ) or position.entry_price
             timeout_quantity = position.quantity
@@ -499,9 +508,8 @@ class LiveExitManager:
                 quantity=position.quantity,
             )
             recovery_plan = position.recovery_order_plan
-            if (
-                recovery_plan is not None
-                and _recovery_order_blocks_current_episode(position)
+            if recovery_plan is not None and _recovery_order_blocks_current_episode(
+                position
             ):
                 requests.append(
                     LiveExitCancellationRequest(
@@ -789,9 +797,7 @@ class LiveExitManager:
     ) -> LiveExitOrderRequest:
         identity_trigger_at = identity_trigger_at or trigger_at
         order_quantity = (
-            _uncovered_position_quantity(position)
-            if quantity is None
-            else quantity
+            _uncovered_position_quantity(position) if quantity is None else quantity
         )
         if order_quantity <= 0:
             raise ValueError("exit order quantity must be positive")
@@ -820,6 +826,12 @@ class LiveExitManager:
             if state is None:
                 raise ValueError("state or created_at is required")
             created_at = state.bucket_end
+        self._shadow_evaluate_exit_allocation(
+            position=position,
+            order_quantity=order_quantity,
+            reference_price=reference_price,
+            reason=reason,
+        )
         return LiveExitOrderRequest(
             candidate=OrderIntentCandidate(
                 candidate_id=candidate_id,
@@ -851,6 +863,88 @@ class LiveExitManager:
             ),
             quantity=order_quantity,
         )
+
+    def _shadow_evaluate_exit_allocation(
+        self,
+        *,
+        position: ManagedLivePosition,
+        order_quantity: Decimal,
+        reference_price: Decimal,
+        reason: str,
+    ) -> None:
+        try:
+            position_key = PositionKey(
+                environment="live",
+                account_label="primary",
+                symbol=position.symbol,
+                position_side=position.position_side,
+            )
+            batches = (
+                tuple(
+                    PositionLedgerBatch(
+                        batch_id=b.batch_id or f"batch_{idx}",
+                        episode_id="shadow_ep",
+                        quantity=b.quantity,
+                        original_quantity=b.quantity,
+                        entry_price=b.entry_price,
+                        opened_at=b.opened_at,
+                    )
+                    for idx, b in enumerate(position.batches)
+                )
+                if position.batches
+                else (
+                    PositionLedgerBatch(
+                        batch_id=position.batch_id or "batch_default",
+                        episode_id="shadow_ep",
+                        quantity=order_quantity,
+                        original_quantity=order_quantity,
+                        entry_price=position.entry_price,
+                        opened_at=position.opened_at,
+                    ),
+                )
+            )
+            episode = PositionEpisode(
+                episode_id="shadow_ep",
+                position_key=position_key,
+                side=position.side,
+                opened_at=position.opened_at,
+                batches=batches,
+            )
+            projection = PositionLedgerProjection(
+                position_key=position_key,
+                active_episode=episode,
+                active_batches=batches,
+                total_active_quantity=sum(
+                    (b.quantity for b in batches), start=Decimal("0")
+                ),
+                unallocated_quantity=Decimal("0"),
+                reconciliation_gap=Decimal("0"),
+                high_watermark_trade_at=position.opened_at,
+            )
+            shadow_cmd = ExitAllocator.create_exit_command(
+                projection,
+                requested_quantity=order_quantity,
+                target_batch_ids=(position.batch_id,) if position.batch_id else None,
+                policy=(
+                    ExitPolicyMode.TARGET_BATCHES_ONLY
+                    if position.batch_id
+                    else ExitPolicyMode.FULL_POSITION_CLOSE
+                ),
+                reference_price=reference_price,
+                reason=reason,
+            )
+            if (
+                shadow_cmd is not None
+                and shadow_cmd.requested_quantity != order_quantity
+            ):
+                log.info(
+                    "shadow_exit_allocation_divergence",
+                    symbol=position.symbol,
+                    order_quantity=str(order_quantity),
+                    shadow_quantity=str(shadow_cmd.requested_quantity),
+                )
+        except Exception as exc:
+            log.debug("shadow_exit_allocation_failed", error=str(exc))
 
     def _build_request(
         self,
@@ -911,10 +1005,7 @@ def _recovery_order_blocks_current_episode(
     position: ManagedLivePosition,
 ) -> bool:
     recovery_created_at = _recovery_exit_started_at(position)
-    return (
-        recovery_created_at is not None
-        and recovery_created_at >= position.opened_at
-    )
+    return recovery_created_at is not None and recovery_created_at >= position.opened_at
 
 
 def _recovery_exit_started_at(
@@ -1007,11 +1098,7 @@ def _exit_mark_price(
     state: MarketState15s,
     side: StrategySide,
 ) -> Decimal | None:
-    quote = (
-        state.last_bid_price
-        if side is StrategySide.LONG
-        else state.last_ask_price
-    )
+    quote = state.last_bid_price if side is StrategySide.LONG else state.last_ask_price
     price = quote or state.mark_price or state.close_price
     return price if price is not None and price > 0 else None
 

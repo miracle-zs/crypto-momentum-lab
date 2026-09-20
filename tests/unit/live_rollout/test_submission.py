@@ -3,6 +3,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 
+import pytest
+
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderEvent,
     ExchangeOrderState,
@@ -181,7 +183,9 @@ async def test_submission_keeps_legacy_save_then_exchange_fallback() -> None:
     assert state_machine.events == ["exchange"]
 
 
-async def test_submission_strictly_obeys_requested_quantity_without_implicit_dust_expansion() -> None:
+async def test_submission_strictly_obeys_requested_quantity_without_implicit_dust_expansion() -> (
+    None
+):
     repository = RecordingPreparedRepository()
     coordinator = RecordingCoordinator()
     submission = _submission(
@@ -231,7 +235,6 @@ async def test_submission_strictly_obeys_requested_quantity_without_implicit_dus
     assert result is not None
     assert result.plan is not None
     assert result.plan.quantity == Decimal("0.0004")
-
 
 
 async def test_submission_does_not_absorb_dust_when_multiple_batches_exist() -> None:
@@ -303,3 +306,49 @@ async def test_submission_does_not_absorb_dust_when_multiple_batches_exist() -> 
     assert result.plan.quantity == Decimal("0.0004")
 
 
+async def test_submission_shadow_trade_command_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = RecordingPreparedRepository()
+    coordinator = RecordingCoordinator()
+    submission = _submission(
+        repository=repository,
+        state_machine=coordinator,
+    )
+    candidate = replace(
+        _intent(),
+        reduce_only=False,
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        entry_type=EntryType.MARKET,
+        features={"position_side": "BOTH"},
+    )
+    context = _runtime_context()
+    state = _state()
+
+    shadow_calls: list[object] = []
+    from crypto_momentum_lab.execution_account.orders.trade_command_executor import (
+        TradeCommandExecutor,
+    )
+
+    original_plan = TradeCommandExecutor.plan_execution
+
+    def fake_plan(*args: object, **kwargs: object) -> object:
+        res = original_plan(*args, **kwargs)
+        shadow_calls.append(res)
+        return res
+
+    monkeypatch.setattr(TradeCommandExecutor, "plan_execution", staticmethod(fake_plan))
+
+    result = await submission.execute(
+        candidate,
+        requested_quantity=Decimal("0.001"),
+        state=state,
+        context=context,
+        reference_price=Decimal("10000"),
+    )
+
+    assert result is not None
+    assert len(shadow_calls) == 1
+    assert shadow_calls[0].plan is not None
+    assert shadow_calls[0].plan.quantity == Decimal("0.001")

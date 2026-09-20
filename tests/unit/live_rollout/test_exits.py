@@ -2,6 +2,8 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from crypto_momentum_lab.domain.execution import (
     FuturesPositionSide,
     OrderExecutionPlan,
@@ -62,8 +64,9 @@ async def test_scheduled_flatten_targets_full_position_as_reduce_only_market() -
     assert request.candidate.reason == "scheduled_risk_window_flatten_attempt_1"
 
 
-async def test_scheduled_flatten_cancels_recovery_before_using_current_position(
-) -> None:
+async def test_scheduled_flatten_cancels_recovery_before_using_current_position() -> (
+    None
+):
     recovery_plan = OrderExecutionPlan(
         intent_id="recovery-intent",
         run_id="run-1",
@@ -313,7 +316,6 @@ async def test_b1_grace_timeout_cancels_limit_before_market_close() -> None:
     assert requests[0].fallback_candidate.reason == "candle_15m_grace_timeout_1"
 
 
-
 async def test_grace_timeout_timer_does_not_need_a_new_market_state() -> None:
     created_at = datetime(2026, 7, 4, 0, 15, 15, tzinfo=UTC)
     recovery_plan = OrderExecutionPlan(
@@ -405,9 +407,7 @@ async def test_closed_candle_path_does_not_require_a_rest_loader() -> None:
     assert len(requests) == 1
     assert requests[0].candidate.reason == "candle_15m_bearish"
     assert requests[0].candidate.created_at == quote.received_at
-    assert requests[0].candidate.features["trigger_at"] == (
-        "2026-07-04T00:30:00+00:00"
-    )
+    assert requests[0].candidate.features["trigger_at"] == ("2026-07-04T00:30:00+00:00")
 
 
 async def test_stale_recovery_limit_does_not_block_a_new_position_episode() -> None:
@@ -536,8 +536,9 @@ async def test_stale_recovery_rollover_splits_quantities() -> None:
     assert timeout_requests[0].fallback_candidate.features["quantity"] == "1.127"
 
 
-async def test_terminal_batch_keeps_its_own_grace_timeout_without_active_order(
-) -> None:
+async def test_terminal_batch_keeps_its_own_grace_timeout_without_active_order() -> (
+    None
+):
     first_exit_at = datetime(2026, 7, 4, 0, 30, tzinfo=UTC)
     second_exit_at = datetime(2026, 7, 4, 1, 45, tzinfo=UTC)
     position = replace(
@@ -693,3 +694,39 @@ def _long_position() -> ManagedLivePosition:
         entry_price=Decimal("100"),
         opened_at=datetime(2026, 7, 4, 0, 1, tzinfo=UTC),
     )
+
+
+async def test_live_exit_manager_runs_shadow_exit_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from crypto_momentum_lab.domain.execution.trade_command import ExitAllocator
+
+    shadow_allocations: list[object] = []
+    original_create = ExitAllocator.create_exit_command
+
+    def fake_create(*args: object, **kwargs: object) -> object:
+        cmd = original_create(*args, **kwargs)
+        shadow_allocations.append(cmd)
+        return cmd
+
+    monkeypatch.setattr(ExitAllocator, "create_exit_command", staticmethod(fake_create))
+
+    manager = LiveExitManager(
+        config=_config(
+            PositionExitMode.FIXED,
+            candle_grace_bars=0,
+        )
+    )
+    pos = _long_position()
+    state = replace(
+        _state(),
+        bucket_end=pos.opened_at + timedelta(seconds=86401),
+        mark_price=Decimal("100"),
+        close_price=Decimal("100"),
+    )
+
+    requests = await manager.requests_for_state(state, (pos,))
+    assert len(requests) == 1
+    assert len(shadow_allocations) == 1
+    assert shadow_allocations[0] is not None
+    assert shadow_allocations[0].requested_quantity == Decimal("1.25")

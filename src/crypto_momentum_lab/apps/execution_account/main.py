@@ -8,6 +8,7 @@ from typing import Annotated
 
 import structlog
 import typer
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.config import (
@@ -18,6 +19,9 @@ from crypto_momentum_lab.config import (
     resolve_role_credentials,
 )
 from crypto_momentum_lab.domain.account import AccountFillEvent
+from crypto_momentum_lab.domain.operational.retention_contract import (
+    RetentionConsumerRequirement,
+)
 from crypto_momentum_lab.execution_account.binance import (
     DEFAULT_BINANCE_USDM_USER_DATA_WEBSOCKET_URL,
     BinanceUsdMPrivateReadClient,
@@ -56,6 +60,7 @@ from crypto_momentum_lab.persistence.postgres import (
     create_account_database_engine,
     create_maintenance_database_engine,
 )
+from crypto_momentum_lab.persistence.postgres.models import AccountPositionSnapshotRow
 
 app = typer.Typer(no_args_is_help=True)
 log = structlog.get_logger()
@@ -387,6 +392,7 @@ def sync_command(
         account_label=resolved_account_label,
         **credentials.metadata(),
     )
+
     async def run_once(stop_requested: asyncio.Event) -> None:
         await sync_continuously(
             database_url=resolved_database_url,
@@ -667,6 +673,34 @@ async def sync_continuously(
                 expected_position_registry=expected_position_registry,
                 on_reconciled_fill=publish_reconciled_fill,
             )
+
+            async def _resolve_active_position_retention_requirements() -> tuple[
+                RetentionConsumerRequirement, ...
+            ]:
+                try:
+                    async with factory() as session:
+                        earliest = await session.scalar(
+                            select(
+                                func.min(AccountPositionSnapshotRow.observed_at)
+                            ).where(
+                                AccountPositionSnapshotRow.environment == environment,
+                                AccountPositionSnapshotRow.account_label
+                                == account_label,
+                                AccountPositionSnapshotRow.position_amt != 0,
+                            )
+                        )
+                        if earliest is not None:
+                            return (
+                                RetentionConsumerRequirement(
+                                    consumer_id="active_position_snapshots",
+                                    min_required_watermark=earliest,
+                                    reason="protect active position history",
+                                ),
+                            )
+                except Exception:
+                    pass
+                return ()
+
             retention_task = asyncio.create_task(
                 run_account_snapshot_retention(
                     repository=retention_repository,
@@ -680,6 +714,7 @@ async def sync_continuously(
                         max_rows_per_table=snapshot_retention_max_rows_per_table,
                         max_runtime_seconds=snapshot_retention_max_runtime_seconds,
                     ),
+                    consumer_requirements_provider=_resolve_active_position_retention_requirements,
                     on_error=lambda error: typer.echo(
                         f"Account snapshot retention failed: {type(error).__name__}",
                         err=True,

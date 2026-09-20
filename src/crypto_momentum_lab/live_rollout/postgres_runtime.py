@@ -10,6 +10,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.account import (
+    AccountFillEvent,
     AccountPositionSnapshot,
     ExecutionAccountStatus,
 )
@@ -24,10 +25,6 @@ from crypto_momentum_lab.domain.execution import (
 )
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
-from crypto_momentum_lab.live_rollout.position_ledger_shadow import (
-    LegacyOrderIdentityAdapter,
-    PositionLedgerShadowComparator,
-)
 from crypto_momentum_lab.domain.live_rollout import LiveOperatorApproval
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import (
@@ -52,6 +49,10 @@ from crypto_momentum_lab.live_rollout.exits import (
     ManagedLivePositionBatch,
 )
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext
+from crypto_momentum_lab.live_rollout.position_ledger_shadow import (
+    LegacyOrderIdentityAdapter,
+    PositionLedgerShadowComparator,
+)
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
 )
@@ -144,16 +145,10 @@ def _opening_anchors_from_events(
                 lot[1] = lot_remaining - take
                 remaining -= take
             open_lots = [
-                lot
-                for lot in open_lots
-                if isinstance(lot[1], Decimal) and lot[1] > 0
+                lot for lot in open_lots if isinstance(lot[1], Decimal) and lot[1] > 0
             ]
         if open_lots:
-            opened_times = [
-                lot[0]
-                for lot in open_lots
-                if isinstance(lot[0], datetime)
-            ]
+            opened_times = [lot[0] for lot in open_lots if isinstance(lot[0], datetime)]
             if opened_times:
                 anchors[symbol] = min(opened_times)
     return anchors
@@ -200,11 +195,7 @@ def _is_pre_zero_order(
     updated_at = getattr(row, "updated_at", created_at) or created_at
     if created_at is None:
         return False
-    return (
-        created_at < zero_at
-        and updated_at < zero_at
-        and is_terminal
-    )
+    return created_at < zero_at and updated_at < zero_at and is_terminal
 
 
 async def _load_order_anchor_events(
@@ -365,9 +356,7 @@ async def _load_position_orders_bounded(
             continue
         row_list.append(row)
 
-    loaded_client_ids = {
-        row.client_order_id for row in row_list if row.client_order_id
-    }
+    loaded_client_ids = {row.client_order_id for row in row_list if row.client_order_id}
     exit_intent_ids = tuple(
         row.intent_id for row in row_list if row.reduce_only and row.intent_id
     )
@@ -382,12 +371,8 @@ async def _load_position_orders_bounded(
         ).all()
         missing_entry_client_ids: set[str] = set()
         for _intent_id, details in intent_rows:
-            features = (
-                details.get("features", {}) if isinstance(details, dict) else {}
-            )
-            batch_id = (
-                features.get("batch_id") if isinstance(features, dict) else None
-            )
+            features = details.get("features", {}) if isinstance(details, dict) else {}
+            batch_id = features.get("batch_id") if isinstance(features, dict) else None
             if isinstance(batch_id, str) and batch_id:
                 target_client_id = batch_id.split(":")[-1]
                 if target_client_id and target_client_id not in loaded_client_ids:
@@ -429,6 +414,7 @@ class _OrderIdentityMetadata:
         tuple[ExchangeOrderEventRow, ...],
     ]
     account_fills: tuple[AccountFillEventRow, ...]
+    domain_account_fills: tuple[AccountFillEvent, ...] = ()
 
 
 class PostgresLiveContextProvider(LiveContextReader):
@@ -455,9 +441,7 @@ class PostgresLiveContextProvider(LiveContextReader):
     ) -> None:
         execution_sessions = execution_session_factory or session_factory
         if execution_sessions is None:
-            raise ValueError(
-                "session_factory or execution_session_factory is required"
-            )
+            raise ValueError("session_factory or execution_session_factory is required")
         self._sessions = execution_sessions
         self._market_sessions = market_session_factory or execution_sessions
         self._account_label = account_label
@@ -756,12 +740,9 @@ class PostgresLiveContextProvider(LiveContextReader):
             ),
             context_epoch=cache_epoch,
         )
-        if (
-            self._cache_epoch == cache_epoch
-            and (
-                self._cached_bucket_start is None
-                or state.bucket_start >= self._cached_bucket_start
-            )
+        if self._cache_epoch == cache_epoch and (
+            self._cached_bucket_start is None
+            or state.bucket_start >= self._cached_bucket_start
         ):
             self._cached_bucket_start = state.bucket_start
             self._cached_context = context
@@ -816,11 +797,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             raise ValueError(
                 "account snapshot account label does not match live context"
             )
-        if (
-            not isinstance(sequence, int)
-            or isinstance(sequence, bool)
-            or sequence <= 0
-        ):
+        if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence <= 0:
             raise ValueError("account snapshot sequence must be positive")
         if not isinstance(account_state, ExecutionAccountStatus):
             raise TypeError("account_state must be an ExecutionAccountStatus")
@@ -889,6 +866,11 @@ class PostgresLiveContextProvider(LiveContextReader):
                 epoch=self._cache_epoch,
             )
 
+    @property
+    def cached_context(self) -> LiveDaemonRuntimeContext | None:
+        """Return the latest cached runtime context if available."""
+        return getattr(self, "_cached_context", None)
+
     def invalidate_trading_rules(self) -> None:
         """Force the next symbol-rule lookup to reload market metadata."""
         self._cached_rules.clear()
@@ -911,8 +893,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         if (
             cached is not None
             and cached_at is not None
-            and (now - cached_at).total_seconds()
-            < self._TRADING_RULE_CACHE_SECONDS
+            and (now - cached_at).total_seconds() < self._TRADING_RULE_CACHE_SECONDS
         ):
             return cached
 
@@ -924,8 +905,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             if (
                 cached is not None
                 and cached_at is not None
-                and (now - cached_at).total_seconds()
-                < self._TRADING_RULE_CACHE_SECONDS
+                and (now - cached_at).total_seconds() < self._TRADING_RULE_CACHE_SECONDS
             ):
                 return cached
 
@@ -981,9 +961,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             frozenset[str],
         ],
     ]:
-        unresolved = await self._order_repository.load_unresolved_orders(
-            self._run_id
-        )
+        unresolved = await self._order_repository.load_unresolved_orders(self._run_id)
         return unresolved, await self._account_position_view(
             unresolved,
             account_snapshot=account_snapshot,
@@ -1023,8 +1001,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                 select(AccountReconciliationRunRow)
                 .where(
                     AccountReconciliationRunRow.environment == "live",
-                    AccountReconciliationRunRow.account_label
-                    == self._account_label,
+                    AccountReconciliationRunRow.account_label == self._account_label,
                     AccountReconciliationRunRow.status == "ready",
                 )
                 .order_by(AccountReconciliationRunRow.observed_at.desc())
@@ -1035,8 +1012,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                 latest_observed_at = await session.scalar(
                     select(func.max(AccountPositionSnapshotRow.observed_at)).where(
                         AccountPositionSnapshotRow.environment == "live",
-                        AccountPositionSnapshotRow.account_label
-                        == self._account_label,
+                        AccountPositionSnapshotRow.account_label == self._account_label,
                     )
                 )
                 if latest_observed_at is None:
@@ -1065,6 +1041,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                 str,
                 tuple[ExchangeOrderEventRow, ...],
             ] = {}
+            domain_account_fills: tuple[AccountFillEvent, ...] = ()
             if active:
                 active_symbols = tuple(sorted({row.symbol for row in active}))
                 orders = await _load_position_orders_bounded(
@@ -1075,11 +1052,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                 )
                 entry_client_order_ids = tuple(
                     sorted(
-                        {
-                            row.client_order_id
-                            for row in orders
-                            if not row.reduce_only
-                        }
+                        {row.client_order_id for row in orders if not row.reduce_only}
                     )
                 )
                 order_identity_metadata = await _load_order_identity_metadata(
@@ -1087,6 +1060,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                     orders,
                     account_label=self._account_label,
                 )
+                domain_account_fills = order_identity_metadata.domain_account_fills
                 order_identity_events = (
                     order_identity_metadata.events_by_client_order_id
                 )
@@ -1130,8 +1104,8 @@ class PostgresLiveContextProvider(LiveContextReader):
                             exchange_fill.price,
                         )
         active = [row for row in rows if row.position_amt != 0]
-        exit_batch_ids, legacy_exit_order_ids = (
-            await _load_exit_batch_bindings(self._sessions, orders)
+        exit_batch_ids, legacy_exit_order_ids = await _load_exit_batch_bindings(
+            self._sessions, orders
         )
         managed, pending, unmanaged = _classify_live_positions_detailed(
             active,
@@ -1143,6 +1117,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             legacy_exit_order_ids=legacy_exit_order_ids,
             order_identity_events=order_identity_events,
             account_fill_quantities=account_fill_quantities,
+            account_fills=domain_account_fills,
         )
         return (
             process_at,
@@ -1184,6 +1159,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             str,
             tuple[ExchangeOrderEventRow, ...],
         ] = {}
+        domain_account_fills: tuple[AccountFillEvent, ...] = ()
         if active:
             async with self._sessions() as session:
                 active_symbols = tuple(sorted({row.symbol for row in active}))
@@ -1195,11 +1171,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                 )
                 entry_client_order_ids = tuple(
                     sorted(
-                        {
-                            row.client_order_id
-                            for row in orders
-                            if not row.reduce_only
-                        }
+                        {row.client_order_id for row in orders if not row.reduce_only}
                     )
                 )
                 order_identity_metadata = await _load_order_identity_metadata(
@@ -1207,6 +1179,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                     orders,
                     account_label=self._account_label,
                 )
+                domain_account_fills = order_identity_metadata.domain_account_fills
                 order_identity_events = (
                     order_identity_metadata.events_by_client_order_id
                 )
@@ -1249,8 +1222,8 @@ class PostgresLiveContextProvider(LiveContextReader):
                             exchange_fill.quantity,
                             exchange_fill.price,
                         )
-        exit_batch_ids, legacy_exit_order_ids = (
-            await _load_exit_batch_bindings(self._sessions, orders)
+        exit_batch_ids, legacy_exit_order_ids = await _load_exit_batch_bindings(
+            self._sessions, orders
         )
         managed, pending, unmanaged = _classify_live_positions_detailed(
             active,
@@ -1262,6 +1235,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             legacy_exit_order_ids=legacy_exit_order_ids,
             order_identity_events=order_identity_events,
             account_fill_quantities=account_fill_quantities,
+            account_fills=domain_account_fills,
         )
         return (
             snapshot.config.observed_at,
@@ -1326,13 +1300,7 @@ async def _load_order_identity_metadata(
     """
 
     client_order_ids = tuple(
-        sorted(
-            {
-                order.client_order_id
-                for order in orders
-                if order.client_order_id
-            }
-        )
+        sorted({order.client_order_id for order in orders if order.client_order_id})
     )
     if not client_order_ids:
         return _OrderIdentityMetadata({}, ())
@@ -1340,9 +1308,7 @@ async def _load_order_identity_metadata(
         (
             await session.scalars(
                 select(ExchangeOrderEventRow).where(
-                    ExchangeOrderEventRow.client_order_id.in_(
-                        client_order_ids
-                    )
+                    ExchangeOrderEventRow.client_order_id.in_(client_order_ids)
                 )
             )
         ).all()
@@ -1354,30 +1320,66 @@ async def _load_order_identity_metadata(
         if event.exchange_order_id:
             exchange_order_ids.add(event.exchange_order_id)
     row_exchange_order_ids = {
-        order.exchange_order_id
-        for order in orders
-        if order.exchange_order_id
+        order.exchange_order_id for order in orders if order.exchange_order_id
     }
     exchange_order_ids.update(row_exchange_order_ids)
-    if not exchange_order_ids:
+    active_symbols = tuple(sorted({order.symbol for order in orders if order.symbol}))
+    predicates = [
+        AccountFillEventRow.environment == "live",
+        AccountFillEventRow.account_label == account_label,
+    ]
+    if exchange_order_ids and active_symbols:
+        predicates.append(
+            or_(
+                AccountFillEventRow.order_id.in_(tuple(exchange_order_ids)),
+                AccountFillEventRow.symbol.in_(active_symbols),
+            )
+        )
+    elif exchange_order_ids:
+        predicates.append(AccountFillEventRow.order_id.in_(tuple(exchange_order_ids)))
+    elif active_symbols:
+        predicates.append(AccountFillEventRow.symbol.in_(active_symbols))
+    else:
         return _OrderIdentityMetadata(
             {key: tuple(value) for key, value in events_by_client.items()},
             (),
+            (),
         )
+
     account_fills = tuple(
         (
             await session.scalars(
-                select(AccountFillEventRow).where(
-                    AccountFillEventRow.environment == "live",
-                    AccountFillEventRow.account_label == account_label,
-                    AccountFillEventRow.order_id.in_(tuple(exchange_order_ids)),
-                )
+                select(AccountFillEventRow)
+                .where(*predicates)
+                .order_by(AccountFillEventRow.trade_at.asc())
             )
         ).all()
+    )
+    system_order_id_set = {str(oid) for oid in exchange_order_ids}
+    domain_account_fills = tuple(
+        AccountFillEvent(
+            environment=row.environment,
+            account_label=row.account_label,
+            symbol=row.symbol,
+            trade_id=str(row.trade_id),
+            order_id=str(row.order_id),
+            side=row.side,
+            price=Decimal(str(row.price)),
+            quantity=Decimal(str(row.quantity)),
+            realized_pnl=Decimal(str(row.realized_pnl)),
+            fee=Decimal(str(row.fee)),
+            fee_asset=row.fee_asset,
+            trade_at=row.trade_at,
+            raw_payload={
+                "is_system": str(row.order_id) in system_order_id_set,
+            },
+        )
+        for row in account_fills
     )
     return _OrderIdentityMetadata(
         {key: tuple(value) for key, value in events_by_client.items()},
         account_fills,
+        domain_account_fills,
     )
 
 
@@ -1422,7 +1424,8 @@ def _classify_live_positions(
     order_identity_events: Mapping[
         str,
         Sequence[ExchangeOrderEventRow],
-    ] | None = None,
+    ]
+    | None = None,
     account_fill_quantities: Mapping[str, Decimal] | None = None,
 ) -> tuple[tuple[ManagedLivePosition, ...], frozenset[str]]:
     """Keep the historical two-value classification API for callers/tests."""
@@ -1452,8 +1455,10 @@ def _classify_live_positions_detailed(
     order_identity_events: Mapping[
         str,
         Sequence[ExchangeOrderEventRow],
-    ] | None = None,
+    ]
+    | None = None,
     account_fill_quantities: Mapping[str, Decimal] | None = None,
+    account_fills: Sequence[AccountFillEvent] = (),
 ) -> tuple[
     tuple[ManagedLivePosition, ...],
     frozenset[str],
@@ -1494,12 +1499,8 @@ def _classify_live_positions_detailed(
         log.warning(
             "live_legacy_order_identity_conflict",
             ambiguous_client_order_ids=sorted(ambiguous_identity_ids),
-            reconstructed_client_order_ids=sorted(
-                reconstructible_identity_ids
-            ),
-            zero_fill_terminal_client_order_ids=sorted(
-                zero_fill_terminal_identity_ids
-            ),
+            reconstructed_client_order_ids=sorted(reconstructible_identity_ids),
+            zero_fill_terminal_client_order_ids=sorted(zero_fill_terminal_identity_ids),
             unresolved_client_order_ids=sorted(unresolved_identity_ids),
         )
     position_orders = _normalise_position_orders(
@@ -1531,9 +1532,7 @@ def _classify_live_positions_detailed(
             fill_times=fill_times,
         )
     )
-    blocked_identity_ids = (
-        unresolved_identity_ids | binding_unresolved_identity_ids
-    )
+    blocked_identity_ids = unresolved_identity_ids | binding_unresolved_identity_ids
     managed: list[ManagedLivePosition] = []
     pending: set[str] = set()
     unmanaged: set[str] = set()
@@ -1547,12 +1546,10 @@ def _classify_live_positions_detailed(
         matching_orders = [
             order
             for order in position_orders
-            if order.symbol == position.symbol
-            and order.position_side is position_side
+            if order.symbol == position.symbol and order.position_side is position_side
         ]
         if any(
-            order.client_order_id in blocked_identity_ids
-            for order in matching_orders
+            order.client_order_id in blocked_identity_ids for order in matching_orders
         ):
             log.critical(
                 "live_position_batch_attribution_blocked",
@@ -1600,8 +1597,7 @@ def _classify_live_positions_detailed(
         reduce_only_orders = [
             order
             for order in matching_orders
-            if order.reduce_only
-            and not _opening_order_matches_side(order.side, side)
+            if order.reduce_only and not _opening_order_matches_side(order.side, side)
         ]
         closing_filled_quantity = sum(
             (
@@ -1622,6 +1618,7 @@ def _classify_live_positions_detailed(
             matching_orders=matching_orders,
             fill_times=fill_times,
             fill_prices=fill_prices,
+            account_fills=account_fills,
         )
         if not batches and not closing_filled:
             # The account snapshot can arrive before the new entry's order
@@ -1647,14 +1644,12 @@ def _classify_live_positions_detailed(
             default=opened_at,
         )
         latest_recovery = max(
-            (
-                batch
-                for batch in batches
+            (batch for batch in batches if batch.recovery_order_plan is not None),
+            key=lambda batch: (
+                batch.recovery_order_plan.created_at
                 if batch.recovery_order_plan is not None
+                else batch.opened_at
             ),
-            key=lambda batch: batch.recovery_order_plan.created_at
-            if batch.recovery_order_plan is not None
-            else batch.opened_at,
             default=None,
         )
         # Once multiple residual batches exist, the aggregate flag must stay
@@ -1758,17 +1753,19 @@ async def _load_exit_batch_bindings(
     orders: Sequence[ExchangeOrderRow],
 ) -> tuple[dict[str, str], frozenset[str]]:
     intent_clients = {
-        order.intent_id: order.client_order_id
-        for order in orders if order.reduce_only
+        order.intent_id: order.client_order_id for order in orders if order.reduce_only
     }
     if not intent_clients:
         return {}, frozenset()
     legacy_order_ids = set(intent_clients.values())
     async with sessions() as session:
-        rows = (await session.execute(
-            select(OrderIntentExecutionRow.intent_id, OrderIntentExecutionRow.details)
-            .where(OrderIntentExecutionRow.intent_id.in_(tuple(intent_clients)))
-        )).all()
+        rows = (
+            await session.execute(
+                select(
+                    OrderIntentExecutionRow.intent_id, OrderIntentExecutionRow.details
+                ).where(OrderIntentExecutionRow.intent_id.in_(tuple(intent_clients)))
+            )
+        ).all()
     result: dict[str, str] = {}
     for intent_id, details in rows:
         features = details.get("features", {}) if isinstance(details, dict) else {}
@@ -1787,12 +1784,11 @@ def _normalise_position_orders(
     order_identity_events: Mapping[
         str,
         Sequence[ExchangeOrderEventRow],
-    ] | None = None,
+    ]
+    | None = None,
     account_fill_quantities: Mapping[str, Decimal] | None = None,
 ) -> tuple[_PositionOrder, ...]:
-    unresolved_by_client_id = {
-        item.plan.client_order_id: item for item in unresolved
-    }
+    unresolved_by_client_id = {item.plan.client_order_id: item for item in unresolved}
     normalised: list[_PositionOrder] = []
     seen_keys: set[str] = set()
     for row in orders:
@@ -1884,24 +1880,16 @@ def _repair_legacy_exit_batch_bindings(
     entry_orders = tuple(
         order
         for order in orders
-        if not order.reduce_only
-        and _is_entry_fill_observed(order, fill_times)
+        if not order.reduce_only and _is_entry_fill_observed(order, fill_times)
     )
     repaired: list[_PositionOrder] = []
     unresolved: set[str] = set()
     for order in orders:
         client_order_id = order.client_order_id
-        if (
-            not order.reduce_only
-            or client_order_id not in reconstructible_ids
-        ):
+        if not order.reduce_only or client_order_id not in reconstructible_ids:
             repaired.append(order)
             continue
-        exit_side = (
-            StrategySide.LONG
-            if order.side == "SELL"
-            else StrategySide.SHORT
-        )
+        exit_side = StrategySide.LONG if order.side == "SELL" else StrategySide.SHORT
         candidates = [
             entry
             for entry in entry_orders
@@ -1936,9 +1924,7 @@ def _legacy_order_identity_is_ambiguous(
     events: Sequence[ExchangeOrderEventRow],
 ) -> bool:
     exchange_order_ids = {
-        event.exchange_order_id
-        for event in events
-        if event.exchange_order_id
+        event.exchange_order_id for event in events if event.exchange_order_id
     }
     return len(exchange_order_ids) > 1
 
@@ -1948,13 +1934,10 @@ def _legacy_order_identity_is_reconstructible(
     account_fill_quantities: Mapping[str, Decimal],
 ) -> bool:
     exchange_order_ids = {
-        event.exchange_order_id
-        for event in events
-        if event.exchange_order_id
+        event.exchange_order_id for event in events if event.exchange_order_id
     }
     by_exchange_order_id = {
-        exchange_order_id: Decimal("0")
-        for exchange_order_id in exchange_order_ids
+        exchange_order_id: Decimal("0") for exchange_order_id in exchange_order_ids
     }
     for event in events:
         exchange_order_id = event.exchange_order_id
@@ -2023,9 +2006,7 @@ def _legacy_order_identity_is_zero_fill_terminal(
             for event in order_events
         ):
             return False
-        if _decimal_or_zero(
-            account_fill_quantities.get(exchange_order_id)
-        ) > 0:
+        if _decimal_or_zero(account_fill_quantities.get(exchange_order_id)) > 0:
             return False
     return True
 
@@ -2055,18 +2036,12 @@ def _expand_legacy_order_row(
     if base is None:
         return None
     exchange_order_ids = sorted(
-        {
-            event.exchange_order_id
-            for event in events
-            if event.exchange_order_id
-        }
+        {event.exchange_order_id for event in events if event.exchange_order_id}
     )
     expanded: list[_PositionOrder] = []
     for exchange_order_id in exchange_order_ids:
         identity_events = [
-            event
-            for event in events
-            if event.exchange_order_id == exchange_order_id
+            event for event in events if event.exchange_order_id == exchange_order_id
         ]
         event_quantity = max(
             (
@@ -2076,9 +2051,7 @@ def _expand_legacy_order_row(
             ),
             default=Decimal("0"),
         )
-        fill_quantity = _decimal_or_zero(
-            account_fill_quantities.get(exchange_order_id)
-        )
+        fill_quantity = _decimal_or_zero(account_fill_quantities.get(exchange_order_id))
         quantity = max(event_quantity, fill_quantity)
         if quantity <= 0:
             return None
@@ -2127,9 +2100,7 @@ def _position_order_from_row(
         getattr(row, "state", None),
         fallback=fallback_state,
     )
-    executed_quantity = _decimal_or_zero(
-        getattr(row, "executed_quantity", None)
-    )
+    executed_quantity = _decimal_or_zero(getattr(row, "executed_quantity", None))
     if fallback_executed_quantity is not None:
         executed_quantity = max(
             executed_quantity,
@@ -2163,9 +2134,7 @@ def _position_order_from_row(
         client_order_id=_optional_text(
             getattr(row, "client_order_id", plan.client_order_id if plan else None)
         ),
-        exchange_order_id=_optional_text(
-            getattr(row, "exchange_order_id", None)
-        ),
+        exchange_order_id=_optional_text(getattr(row, "exchange_order_id", None)),
         created_at=created_at,
         updated_at=updated_at,
         price=price,
@@ -2201,6 +2170,7 @@ def _build_position_batches(
     matching_orders: Sequence[_PositionOrder],
     fill_times: Mapping[str, datetime],
     fill_prices: Mapping[str, Decimal],
+    account_fills: Sequence[AccountFillEvent] = (),
 ) -> tuple[ManagedLivePositionBatch, ...]:
     observation = PositionObservation(
         symbol=position.symbol,
@@ -2235,9 +2205,13 @@ def _build_position_batches(
             symbol=position.symbol,
             position_side=position_side,
         )
+        matching_fills = tuple(
+            fill for fill in account_fills if fill.symbol == position.symbol
+        )
         facts = LegacyOrderIdentityAdapter.to_account_facts(
             position_key=position_key,
             orders=matching_orders,
+            fills=matching_fills,
             observation=observation,
         )
         ledger = PositionLedger(position_key)
@@ -2271,7 +2245,8 @@ def _is_entry_fill_observed(
     fill_times: Mapping[str, datetime],
 ) -> bool:
     return (
-        order.state in {
+        order.state
+        in {
             ExchangeOrderState.PARTIALLY_FILLED,
             ExchangeOrderState.FILLED,
         }
@@ -2321,9 +2296,7 @@ def _entry_price(
 def _batch_id_for_entry(order: _PositionOrder) -> str:
     identifier = order.client_order_id or order.exchange_order_id
     if identifier is None:
-        identifier = (
-            f"{order.created_at.isoformat()}:{order.side}:{order.quantity}"
-        )
+        identifier = f"{order.created_at.isoformat()}:{order.side}:{order.quantity}"
     return f"{order.symbol}:{order.position_side.value}:{identifier}"
 
 
@@ -2550,15 +2523,11 @@ async def poll_live_market_states(
     while time.monotonic() < deadline:
         monotonic_now = time.monotonic()
         if monotonic_now >= next_lag_check_at:
-            latest_bucket = await repository.load_latest_bucket(
-                environment=environment
-            )
+            latest_bucket = await repository.load_latest_bucket(environment=environment)
             if (
                 latest_bucket is not None
                 and active_cursor.bucket_start is not None
-                and (
-                    latest_bucket - active_cursor.bucket_start
-                ).total_seconds()
+                and (latest_bucket - active_cursor.bucket_start).total_seconds()
                 > max_state_lag_seconds
             ):
                 # A live worker must never submit an entry for an old signal.

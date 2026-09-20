@@ -599,15 +599,33 @@ class LiveStrategyDaemon:
 
     @property
     def latest_watermark(self) -> datetime | None:
-        return (
+        market_wm = (
             self._checkpoint_coordinator.latest_watermark
             or self._market_loop.active_state_at
         )
+        account_wm: datetime | None = None
+        ctx = getattr(self._context_provider, "cached_context", None) or getattr(
+            self._context_provider, "_cached_context", None
+        )
+        if ctx is not None and ctx.account_observed_at is not None:
+            account_wm = ctx.account_observed_at
+
+        candidates = [wm for wm in (market_wm, account_wm) if wm is not None]
+        return min(candidates) if candidates else None
 
     def evaluate_readiness(self) -> ExecutionReadiness:
+        reconciliation_gap = Decimal("0")
+        ctx = getattr(self._context_provider, "cached_context", None) or getattr(
+            self._context_provider, "_cached_context", None
+        )
+        if ctx is not None:
+            gap_count = len(ctx.unmanaged_position_symbols) + len(ctx.unresolved_orders)
+            reconciliation_gap = Decimal(str(gap_count))
+
         assessment = ReadinessEvaluator.evaluate(
             current_time=self._clock(),
             watermark_time=self.latest_watermark,
+            reconciliation_gap=reconciliation_gap,
         )
         return assessment.readiness
 

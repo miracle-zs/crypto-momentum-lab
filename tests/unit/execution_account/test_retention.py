@@ -21,6 +21,7 @@ class FakeRetentionRepository:
         equity_before: datetime,
         batch_size: int,
         max_rows_per_table: int,
+        consumer_requirements: tuple[object, ...] = (),
     ) -> dict[str, int]:
         self.call = {
             "environment": environment,
@@ -29,6 +30,7 @@ class FakeRetentionRepository:
             "equity_before": equity_before,
             "batch_size": batch_size,
             "max_rows_per_table": max_rows_per_table,
+            "consumer_requirements": consumer_requirements,
         }
         return {"account_balance_snapshots": 3}
 
@@ -78,4 +80,5 @@ async def test_prune_once_passes_the_configured_horizon() -> None:
         "equity_before": datetime(2025, 8, 18, 12, 0, tzinfo=UTC),
         "batch_size": 250,
         "max_rows_per_table": 2_000,
+        "consumer_requirements": (),
     }

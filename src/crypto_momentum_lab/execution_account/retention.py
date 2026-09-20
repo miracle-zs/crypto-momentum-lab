@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+from crypto_momentum_lab.domain.operational.retention_contract import (
+    RetentionConsumerRequirement,
+)
+
 
 class AccountSnapshotRetentionRepository(Protocol):
     async def prune_account_snapshots(
@@ -17,6 +21,7 @@ class AccountSnapshotRetentionRepository(Protocol):
         equity_before: datetime,
         batch_size: int,
         max_rows_per_table: int,
+        consumer_requirements: tuple[RetentionConsumerRequirement, ...] = (),
     ) -> dict[str, int]: ...
 
 
@@ -56,6 +61,7 @@ async def prune_account_snapshots_once(
     account_label: str,
     config: AccountSnapshotRetentionConfig,
     now: datetime | None = None,
+    consumer_requirements: tuple[RetentionConsumerRequirement, ...] = (),
 ) -> dict[str, int]:
     observed_at = now or datetime.now(tz=UTC)
     if observed_at.tzinfo is None or observed_at.utcoffset() is None:
@@ -67,6 +73,7 @@ async def prune_account_snapshots_once(
         equity_before=observed_at - timedelta(days=config.equity_retention_days),
         batch_size=config.batch_size,
         max_rows_per_table=config.max_rows_per_table,
+        consumer_requirements=consumer_requirements,
     )
 
 
@@ -76,6 +83,9 @@ async def run_account_snapshot_retention(
     environment: str,
     account_label: str,
     config: AccountSnapshotRetentionConfig,
+    consumer_requirements_provider: (
+        Callable[[], Awaitable[tuple[RetentionConsumerRequirement, ...]]] | None
+    ) = None,
     on_error: Callable[[Exception], None] | None = None,
     on_pruned: Callable[[dict[str, int]], None] | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -85,11 +95,19 @@ async def run_account_snapshot_retention(
         await sleep(config.interval_seconds)
         try:
             async with asyncio.timeout(config.max_runtime_seconds):
+                reqs: tuple[RetentionConsumerRequirement, ...] = ()
+                if consumer_requirements_provider is not None:
+                    try:
+                        reqs = await consumer_requirements_provider()
+                    except Exception as req_err:
+                        if on_error is not None:
+                            on_error(req_err)
                 deleted = await prune_account_snapshots_once(
                     repository=repository,
                     environment=environment,
                     account_label=account_label,
                     config=config,
+                    consumer_requirements=reqs,
                 )
         except Exception as error:
             if on_error is not None:

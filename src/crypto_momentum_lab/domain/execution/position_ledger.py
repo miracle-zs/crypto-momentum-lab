@@ -11,14 +11,12 @@ Derives position batches and lifecycle episodes strictly from immutable facts
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
-    AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
     BatchReductionAttribution,
@@ -89,20 +87,26 @@ class PositionLedger:
                 return
             if boundary.target_batch_id is not None:
                 for i, b in enumerate(current_batches):
-                    if b.batch_id == boundary.target_batch_id and b.exit_order_submitted_at is None:
-                        current_batches[i] = replace(b, exit_order_submitted_at=boundary.submitted_at)
+                    if (
+                        b.batch_id == boundary.target_batch_id
+                        and b.exit_order_submitted_at is None
+                    ):
+                        current_batches[i] = replace(
+                            b, exit_order_submitted_at=boundary.submitted_at
+                        )
                         return
             for i in range(len(current_batches) - 1, -1, -1):
                 b = current_batches[i]
                 if b.quantity > 0 and b.exit_order_submitted_at is None:
-                    current_batches[i] = replace(b, exit_order_submitted_at=boundary.submitted_at)
+                    current_batches[i] = replace(
+                        b, exit_order_submitted_at=boundary.submitted_at
+                    )
                     return
 
         for fill in sorted_fills:
             high_watermark = fill.trade_at
-            is_system = (
-                fill.order_id in self._system_order_ids
-                or bool(fill.raw_payload.get("is_system", False))
+            is_system = fill.order_id in self._system_order_ids or bool(
+                fill.raw_payload.get("is_system", False)
             )
             fill_side = fill.side.upper()
 
@@ -113,11 +117,14 @@ class PositionLedger:
                     apply_exit_boundary(b)
                     boundary_idx += 1
                 elif b.submitted_at == fill.trade_at:
-                    is_exit_fill = (
-                        active_episode is not None
-                        and (
-                            (active_episode.side == StrategySide.LONG and fill_side == "SELL")
-                            or (active_episode.side == StrategySide.SHORT and fill_side == "BUY")
+                    is_exit_fill = active_episode is not None and (
+                        (
+                            active_episode.side == StrategySide.LONG
+                            and fill_side == "SELL"
+                        )
+                        or (
+                            active_episode.side == StrategySide.SHORT
+                            and fill_side == "BUY"
                         )
                     )
                     if is_exit_fill:
@@ -131,11 +138,7 @@ class PositionLedger:
             # If no active episode, this fill initiates a new episode
             if active_episode is None:
                 episode_counter += 1
-                side = (
-                    StrategySide.LONG
-                    if fill_side == "BUY"
-                    else StrategySide.SHORT
-                )
+                side = StrategySide.LONG if fill_side == "BUY" else StrategySide.SHORT
                 ep_id = (
                     f"ep_{self._position_key.symbol}_"
                     f"{fill.trade_at.strftime('%Y%m%d%H%M%S')}_{episode_counter}"
@@ -180,7 +183,10 @@ class PositionLedger:
                 if fill_side == "BUY":
                     # Entry / Scaling add
                     latest_batch = current_batches[-1] if current_batches else None
-                    if latest_batch is not None and latest_batch.exit_order_submitted_at is None:
+                    if (
+                        latest_batch is not None
+                        and latest_batch.exit_order_submitted_at is None
+                    ):
                         # Add-on entry before exit boundary: aggregate & update anchor
                         new_qty = latest_batch.quantity + fill.quantity
                         new_orig_qty = latest_batch.original_quantity + fill.quantity
@@ -222,12 +228,6 @@ class PositionLedger:
 
                 elif fill_side == "SELL":
                     # Exit / Reduction
-                    if current_batches and current_batches[-1].exit_order_submitted_at is None:
-                        current_batches[-1] = replace(
-                            current_batches[-1],
-                            exit_order_submitted_at=fill.trade_at,
-                        )
-
                     to_reduce = fill.quantity
                     attributions: list[BatchReductionAttribution] = []
 
@@ -244,8 +244,13 @@ class PositionLedger:
                                     quantity=deduct,
                                 )
                             )
+                            exit_sub_at = b.exit_order_submitted_at or fill.trade_at
                             new_batches.append(
-                                replace(b, quantity=remaining_b_qty)
+                                replace(
+                                    b,
+                                    quantity=remaining_b_qty,
+                                    exit_order_submitted_at=exit_sub_at,
+                                )
                             )
                         else:
                             new_batches.append(b)
@@ -321,7 +326,10 @@ class PositionLedger:
             elif active_episode.side == StrategySide.SHORT:
                 if fill_side == "SELL":
                     latest_batch = current_batches[-1] if current_batches else None
-                    if latest_batch is not None and latest_batch.exit_order_submitted_at is None:
+                    if (
+                        latest_batch is not None
+                        and latest_batch.exit_order_submitted_at is None
+                    ):
                         new_qty = latest_batch.quantity + fill.quantity
                         new_orig_qty = latest_batch.original_quantity + fill.quantity
                         new_entry_price = (
@@ -361,12 +369,6 @@ class PositionLedger:
                         peak_qty = current_net
 
                 elif fill_side == "BUY":
-                    if current_batches and current_batches[-1].exit_order_submitted_at is None:
-                        current_batches[-1] = replace(
-                            current_batches[-1],
-                            exit_order_submitted_at=fill.trade_at,
-                        )
-
                     to_reduce = fill.quantity
                     attributions = []
                     new_batches = []
@@ -381,8 +383,13 @@ class PositionLedger:
                                     quantity=deduct,
                                 )
                             )
+                            exit_sub_at = b.exit_order_submitted_at or fill.trade_at
                             new_batches.append(
-                                replace(b, quantity=remaining_b_qty)
+                                replace(
+                                    b,
+                                    quantity=remaining_b_qty,
+                                    exit_order_submitted_at=exit_sub_at,
+                                )
                             )
                         else:
                             new_batches.append(b)

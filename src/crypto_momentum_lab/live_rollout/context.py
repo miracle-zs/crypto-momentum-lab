@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
@@ -153,9 +153,7 @@ class LiveContextRuntime:
         context_reader: LiveContextReader | None = None,
         context_provider: LiveContextReader | LiveContextProvider | None = None,
         set_pending_position_symbols: Callable[[Collection[str]], None],
-        update_managed_symbols: Callable[
-            [Collection[str], Collection[str]], None
-        ],
+        update_managed_symbols: Callable[[Collection[str], Collection[str]], None],
         on_managed_position_symbols: (
             Callable[[frozenset[str]], Awaitable[None]] | None
         ) = None,
@@ -189,7 +187,11 @@ class LiveContextRuntime:
                 return bool(reader.is_current(context))
             if hasattr(reader, "is_context_current"):
                 return bool(reader.is_context_current(context))
-            return True
+            if context.account_observed_at is None:
+                return False
+            now = context.now or datetime.now(tz=UTC)
+            age = (now - context.account_observed_at).total_seconds()
+            return age <= 60.0
         except Exception as error:
             _log.warning(
                 "live_context_currentness_check_failed",

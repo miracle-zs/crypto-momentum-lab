@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import hashlib
 import json
 import sys
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 
 def compute_content_hash(content: str | bytes | dict[str, Any] | list[Any]) -> str:
     """Compute deterministic SHA-256 hex digest for arbitrary configuration content."""
     if isinstance(content, (dict, list)):
-        encoded = json.dumps(content, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        encoded = json.dumps(content, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
     elif isinstance(content, str):
         encoded = content.encode("utf-8")
     elif isinstance(content, bytes):
@@ -21,6 +23,27 @@ def compute_content_hash(content: str | bytes | dict[str, Any] | list[Any]) -> s
     else:
         raise TypeError(f"Unsupported content type for hashing: {type(content)!r}")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def compute_trading_rules_hash(rules: Any) -> str:
+    """Compute deterministic SHA-256 hash for symbol trading rules."""
+    if not isinstance(rules, dict):
+        return compute_content_hash(str(rules))
+    serialized: dict[str, Any] = {}
+    for symbol, rule in sorted(rules.items()):
+        if hasattr(rule, "tick_size"):
+            serialized[str(symbol)] = {
+                "tick_size": str(rule.tick_size),
+                "step_size": str(rule.step_size),
+                "min_quantity": str(rule.min_quantity),
+                "max_quantity": str(rule.max_quantity),
+                "min_notional": str(rule.min_notional),
+            }
+        elif isinstance(rule, dict):
+            serialized[str(symbol)] = {k: str(v) for k, v in sorted(rule.items())}
+        else:
+            serialized[str(symbol)] = str(rule)
+    return compute_content_hash(serialized)
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,21 +137,27 @@ class RuntimeMetadataSnapshot:
 
         if strategy_config_hash is None:
             if strategy_config is None:
-                raise ValueError("Either strategy_config or strategy_config_hash must be provided")
+                raise ValueError(
+                    "Either strategy_config or strategy_config_hash must be provided"
+                )
             strategy_config_hash = compute_content_hash(strategy_config)
 
         if risk_config_hash is None:
             if risk_config is None:
-                raise ValueError("Either risk_config or risk_config_hash must be provided")
+                raise ValueError(
+                    "Either risk_config or risk_config_hash must be provided"
+                )
             risk_config_hash = compute_content_hash(risk_config)
 
         if trading_rules_hash is None:
             if trading_rules is None:
-                raise ValueError("Either trading_rules or trading_rules_hash must be provided")
+                raise ValueError(
+                    "Either trading_rules or trading_rules_hash must be provided"
+                )
             trading_rules_hash = compute_content_hash(trading_rules)
 
         if started_at is None:
-            started_at = datetime.now(timezone.utc)
+            started_at = datetime.now(UTC)
 
         return cls(
             environment=environment,

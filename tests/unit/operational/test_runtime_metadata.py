@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -26,7 +26,7 @@ def test_compute_content_hash() -> None:
 
 
 def test_runtime_metadata_snapshot_validations() -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     valid_snapshot = RuntimeMetadataSnapshot(
         environment="live",
         account_label="binance-sub01",
@@ -74,7 +74,7 @@ def test_runtime_metadata_snapshot_validations() -> None:
 
 
 def test_runtime_metadata_snapshot_serialization_roundtrip() -> None:
-    now = datetime(2026, 9, 20, 12, 34, 56, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 20, 12, 34, 56, tzinfo=UTC)
     snapshot = RuntimeMetadataSnapshot(
         environment="paper",
         account_label="paper-01",
@@ -115,3 +115,34 @@ def test_runtime_metadata_snapshot_create_factory() -> None:
     assert snapshot.risk_config_hash == compute_content_hash(risk_cfg)
     assert snapshot.trading_rules_hash == compute_content_hash(trading_rules)
     assert snapshot.started_at.tzinfo is not None
+
+
+def test_compute_trading_rules_hash() -> None:
+    from decimal import Decimal
+
+    from crypto_momentum_lab.domain.operational.runtime_metadata import (
+        compute_trading_rules_hash,
+    )
+    from crypto_momentum_lab.execution_account.orders.quantization import (
+        SymbolTradingRules,
+    )
+
+    rules = {
+        "BTCUSDT": SymbolTradingRules(
+            symbol="BTCUSDT",
+            tick_size=Decimal("0.10"),
+            step_size=Decimal("0.001"),
+            min_quantity=Decimal("0.001"),
+            max_quantity=Decimal("100"),
+            min_notional=Decimal("5"),
+        )
+    }
+    rules_hash = compute_trading_rules_hash(rules)
+    assert isinstance(rules_hash, str)
+    assert len(rules_hash) == 64
+    # Deterministic
+    assert compute_trading_rules_hash(rules) == rules_hash
+    # Empty rules hash
+    empty_hash = compute_trading_rules_hash({})
+    assert len(empty_hash) == 64
+    assert empty_hash != rules_hash
