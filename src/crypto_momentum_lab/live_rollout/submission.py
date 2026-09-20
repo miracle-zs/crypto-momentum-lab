@@ -353,63 +353,6 @@ class LiveCandidateSubmission:
             execution_reference_price = state.mark_price or state.close_price
         if rules is None or execution_reference_price is None:
             return None
-        if executable_candidate.reduce_only and requested_quantity is not None:
-            managed_positions = getattr(context, "managed_positions", ()) or ()
-            target_pos_side = executable_candidate.features.get("position_side")
-            if target_pos_side is not None:
-                matching_positions = [
-                    p
-                    for p in managed_positions
-                    if getattr(p, "symbol", "") == candidate.symbol
-                    and getattr(
-                        getattr(p, "position_side", None), "value", None
-                    )
-                    == target_pos_side
-                ]
-            elif not self._config.hedge_mode:
-                matching_positions = [
-                    p
-                    for p in managed_positions
-                    if getattr(p, "symbol", "") == candidate.symbol
-                    and getattr(
-                        getattr(p, "position_side", None), "value", "BOTH"
-                    )
-                    == "BOTH"
-                ]
-            else:
-                matching_positions = []
-            has_multiple_batches = (
-                len(matching_positions) != 1
-                or len(getattr(matching_positions[0], "batches", ())) > 1
-            )
-            if not has_multiple_batches:
-                total_position_quantity = sum(
-                    (
-                        getattr(p, "quantity", Decimal("0"))
-                        for p in matching_positions
-                    ),
-                    start=Decimal("0"),
-                )
-                dust_remainder = total_position_quantity - requested_quantity
-                if (
-                    0 < dust_remainder
-                    and (dust_remainder * execution_reference_price)
-                    < rules.min_notional
-                ):
-                    log.info(
-                        "live_exit_dust_remainder_absorbed",
-                        run_id=self._config.run_id,
-                        symbol=candidate.symbol,
-                        original_requested_quantity=str(requested_quantity),
-                        absorbed_dust_remainder=str(dust_remainder),
-                        new_requested_quantity=str(total_position_quantity),
-                    )
-                    requested_quantity = total_position_quantity
-                    executable_candidate = replace(
-                        executable_candidate,
-                        desired_notional=requested_quantity
-                        * execution_reference_price,
-                    )
         plan = quantize_order_plan(
             executable_candidate,
             rules,

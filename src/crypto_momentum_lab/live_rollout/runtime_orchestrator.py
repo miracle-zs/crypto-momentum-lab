@@ -1376,7 +1376,9 @@ async def run_live_daemon(
             health=health,
             shutdown_budget_seconds=_LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS,
         )
+        ownership_registry.disarm()
         return await session.run()
+
     except Exception as exc:
         log.exception(
             "live_runtime_failed",
@@ -1417,26 +1419,7 @@ async def run_live_daemon(
             if shutdown_task is not None:
                 await asyncio.gather(shutdown_task, return_exceptions=True)
             await ownership_registry.teardown_all()
-            await LiveResourceLifecycle(
-                entry_runtime=entry_runtime,
-                entry_order_lifecycle=entry_order_lifecycle,
-                execution_coordinator=execution_coordinator,
-                client=client,
-                closed_candle_feed=closed_candle_feed,
-                candle_source=candle_source,
-                ema_candle_source=ema_candle_source,
-                signal_recorder=signal_recorder,
-                telemetry=telemetry,
-                volume_cache=volume_cache,
-                volume_rest_client=None,
-                execution_engine=execution_engine,
-                market_engine=market_engine,
-                observability_engine=observability_engine,
-                checkpoint_engine=checkpoint_engine,
-                heartbeat_engine=heartbeat_engine,
-                health=health,
-                shutdown_timeout_seconds=_LIVE_RUNTIME_SHUTDOWN_TIMEOUT_SECONDS,
-            ).close()
+
 
 
 async def _observe_market_states(

@@ -13,6 +13,7 @@ from crypto_momentum_lab.live_rollout.runtime_session import (
     ResourceOwnershipRegistry,
     RuntimeSession,
     SessionLifecycleState,
+    ShutdownResult,
 )
 from crypto_momentum_lab.live_rollout.runtime_supervisor import (
     LiveRuntimeSupervisor,
@@ -387,3 +388,100 @@ async def test_runtime_session_cooperative_stop_stops_supervisor_cleanly() -> No
     assert result.halt_reason == "operator_requested"
     assert supervisor.stop_called is True
     assert session.state == SessionLifecycleState.STOPPED
+
+
+async def test_runtime_session_checkpoint_false_prevents_completed_terminal_state() -> None:
+    """Verify that when save_final_checkpoint returns False, terminal state is not COMPLETED."""
+    supervisor = FakeSupervisor()  # halt_reason is None
+    lifecycle = FakeResourceLifecycle()
+    terminal_reasons: list[str | None] = []
+
+    async def fake_save_final(_timeout: float | None) -> bool:
+        return False
+
+    async def fake_terminal(reason: str | None) -> None:
+        terminal_reasons.append(reason)
+
+    session = RuntimeSession(
+        run_id="session-checkpoint-fail",
+        supervisor=cast(LiveRuntimeSupervisor, supervisor),
+        lifecycle=cast(LiveResourceLifecycle, lifecycle),
+        save_final_checkpoint=fake_save_final,
+        transition_terminal_state=fake_terminal,
+        shutdown_budget_seconds=5.0,
+    )
+
+    await session.close()
+
+    assert session.state == SessionLifecycleState.STOPPED
+    assert terminal_reasons == ["final_checkpoint_failed"]
+    assert session.shutdown_result is not None
+    assert session.shutdown_result.checkpoint_durable is False
+    assert "checkpoint_save_returned_false" in session.shutdown_result.failures
+    assert session.shutdown_result.halt_reason == "final_checkpoint_failed"
+
+
+async def test_runtime_session_checkpoint_exception_prevents_completed_state() -> None:
+    """Verify that when save_final_checkpoint raises, terminal state is not COMPLETED."""
+    supervisor = FakeSupervisor()
+    lifecycle = FakeResourceLifecycle()
+    terminal_reasons: list[str | None] = []
+
+    async def fake_save_final(_timeout: float | None) -> bool:
+        raise RuntimeError("checkpoint db connection dropped")
+
+    async def fake_terminal(reason: str | None) -> None:
+        terminal_reasons.append(reason)
+
+    session = RuntimeSession(
+        run_id="session-checkpoint-exc",
+        supervisor=cast(LiveRuntimeSupervisor, supervisor),
+        lifecycle=cast(LiveResourceLifecycle, lifecycle),
+        save_final_checkpoint=fake_save_final,
+        transition_terminal_state=fake_terminal,
+        shutdown_budget_seconds=5.0,
+    )
+
+    await session.close()
+
+    assert session.state == SessionLifecycleState.STOPPED
+    assert terminal_reasons == ["final_checkpoint_failed"]
+    assert session.shutdown_result is not None
+    assert session.shutdown_result.checkpoint_durable is False
+    assert any("checkpoint_error" in f for f in session.shutdown_result.failures)
+    assert session.shutdown_result.halt_reason == "final_checkpoint_failed"
+
+
+async def test_runtime_session_records_clean_shutdown_result() -> None:
+    """Verify clean shutdown creates structured ShutdownResult with no failures."""
+    supervisor = FakeSupervisor()
+    lifecycle = FakeResourceLifecycle()
+    terminal_reasons: list[str | None] = []
+
+    async def fake_save_final(_timeout: float | None) -> bool:
+        return True
+
+    async def fake_terminal(reason: str | None) -> None:
+        terminal_reasons.append(reason)
+
+    session = RuntimeSession(
+        run_id="session-clean-shutdown",
+        supervisor=cast(LiveRuntimeSupervisor, supervisor),
+        lifecycle=cast(LiveResourceLifecycle, lifecycle),
+        save_final_checkpoint=fake_save_final,
+        transition_terminal_state=fake_terminal,
+        shutdown_budget_seconds=5.0,
+    )
+
+    await session.close()
+
+    assert session.state == SessionLifecycleState.STOPPED
+    assert terminal_reasons == [None]
+    assert session.shutdown_result is not None
+    assert session.shutdown_result.drained is True
+    assert session.shutdown_result.checkpoint_durable is True
+    assert session.shutdown_result.terminal_recorded is True
+    assert session.shutdown_result.resources_closed is True
+    assert session.shutdown_result.failures == ()
+    assert session.shutdown_result.halt_reason is None
+    assert session.shutdown_result.duration_seconds >= 0.0

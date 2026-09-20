@@ -1,11 +1,31 @@
 import json
 import os
+import shutil
+from collections import namedtuple
 from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from crypto_momentum_lab.operator_dashboard.collector_status import (
     read_research_collector_status,
 )
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
+
+_Usage = namedtuple("usage", ["total", "used", "free"])
+_PLENTIFUL_FREE_BYTES = 100 * 1024 * 1024 * 1024  # 100 GiB
+
+
+@pytest.fixture(autouse=True)
+def _stub_disk_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        shutil,
+        "disk_usage",
+        lambda _path: _Usage(
+            _PLENTIFUL_FREE_BYTES * 2,
+            _PLENTIFUL_FREE_BYTES,
+            _PLENTIFUL_FREE_BYTES,
+        ),
+    )
 
 
 def _write_checkpoint(
@@ -163,3 +183,51 @@ def test_collector_status_distinguishes_missing_checkpoint(tmp_path) -> None:
     assert response.status is OperationalStatus.NO_DATA
     assert response.checkpoint_at is None
     assert response.alerts == ["checkpoint 不存在，尚未确认采集状态"]
+
+
+def test_collector_status_alerts_on_injected_disk_warning(tmp_path) -> None:
+    now = datetime(2026, 9, 3, 15, 17, tzinfo=UTC)
+    root = tmp_path / "research-data"
+    root.mkdir()
+    _write_checkpoint(
+        root,
+        updated_at=now - timedelta(seconds=8),
+        last_bucket_start=datetime(2026, 9, 3, 15, 14, 45, tzinfo=UTC),
+    )
+    _write_window(root, datetime(2026, 9, 3, 15, 0, tzinfo=UTC))
+
+    # Warning threshold is 15 GiB, Pause threshold is 10 GiB; inject 12 GiB free
+    warning_free = 12 * 1024 * 1024 * 1024
+    response = read_research_collector_status(
+        root,
+        now=now,
+        disk_usage_fn=lambda _path: _Usage(warning_free * 2, warning_free, warning_free),
+    )
+
+    assert response.status is OperationalStatus.DEGRADED
+    assert response.capacity_state == "warning"
+    assert any("剩余空间进入告警区" in alert for alert in response.alerts)
+
+
+def test_collector_status_alerts_on_injected_disk_paused(tmp_path) -> None:
+    now = datetime(2026, 9, 3, 15, 17, tzinfo=UTC)
+    root = tmp_path / "research-data"
+    root.mkdir()
+    _write_checkpoint(
+        root,
+        updated_at=now - timedelta(seconds=8),
+        last_bucket_start=datetime(2026, 9, 3, 15, 14, 45, tzinfo=UTC),
+    )
+    _write_window(root, datetime(2026, 9, 3, 15, 0, tzinfo=UTC))
+
+    # Pause threshold is 10 GiB; inject 8 GiB free
+    pause_free = 8 * 1024 * 1024 * 1024
+    response = read_research_collector_status(
+        root,
+        now=now,
+        disk_usage_fn=lambda _path: _Usage(pause_free * 2, pause_free, pause_free),
+    )
+
+    assert response.status is OperationalStatus.HALTED
+    assert response.capacity_state == "paused"
+    assert any("容量保护已暂停采集" in alert for alert in response.alerts)

@@ -2,7 +2,11 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
 
-from crypto_momentum_lab.domain.execution import ExchangeOrderState
+from crypto_momentum_lab.domain.execution import (
+    ExchangeOrderState,
+    ExecutionReadiness,
+)
+
 from crypto_momentum_lab.domain.strategy import StrategyDecision
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
@@ -154,3 +158,47 @@ async def test_entry_lane_rejects_when_max_concurrency_exceeded() -> None:
     assert executed == []
     assert outcome.approved_intent_count == 0
     assert outcome.submitted_order_count == 0
+
+
+async def test_entry_lane_rejects_when_progress_lagging() -> None:
+    executed: list[str] = []
+
+    async def execute(
+        candidate,
+        *,
+        requested_quantity,
+        state,
+        context: LiveDaemonRuntimeContext,
+    ) -> OrderExecutionResult:
+        executed.append(candidate.candidate_id)
+        return OrderExecutionResult(
+            client_order_id=candidate.candidate_id,
+            state=ExchangeOrderState.ACKNOWLEDGED,
+            exchange_order_id="exchange-1",
+        )
+
+    lane = EntryExecutionLane(
+        config=EntryLaneConfig(
+            run_id="run-1",
+            readiness_provider=lambda: ExecutionReadiness.PROGRESS_LAGGING,
+        ),
+        clock=lambda: NOW,
+        entry_enabled=lambda: True,
+        entry_enabled_reason=lambda: "ready",
+        execute_candidate=execute,
+        invalidate_context=lambda: None,
+    )
+
+    outcome = await lane.process(
+        decision=_decision(_intent()),
+        state=_state(),
+        context=cast(LiveDaemonRuntimeContext, object()),
+        gate_reasons=(),
+        recorded_at=NOW,
+    )
+
+    # Executed list must be empty because PROGRESS_LAGGING suppresses new entries
+    assert executed == []
+    assert outcome.approved_intent_count == 0
+    assert outcome.submitted_order_count == 0
+

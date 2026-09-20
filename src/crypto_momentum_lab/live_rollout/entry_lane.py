@@ -16,7 +16,11 @@ from typing import Protocol
 
 import structlog
 
-from crypto_momentum_lab.domain.execution import ExchangeOrderState
+from crypto_momentum_lab.domain.execution import (
+    ExchangeOrderState,
+    ExecutionReadiness,
+)
+
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import (
     EntryPolicyComparison,
@@ -90,6 +94,8 @@ class EntryLaneConfig:
     entry_order_type: EntryType = EntryType.LIMIT
     entry_limit_ttl_seconds: int = 900
     max_concurrency: int | None = None
+    readiness_provider: Callable[[], ExecutionReadiness] | None = None
+
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -179,6 +185,11 @@ class EntryExecutionLane:
         self._entry_symbols = None
         self._entry_symbols_loaded_at = None
 
+    def _current_readiness(self) -> ExecutionReadiness:
+        if self._config.readiness_provider is not None:
+            return self._config.readiness_provider()
+        return ExecutionReadiness.INDEPENDENT_EXECUTABLE
+
     def record_decision(
         self,
         *,
@@ -210,9 +221,11 @@ class EntryExecutionLane:
                 require_price_above_ema10=self._config.require_price_above_ema10,
                 max_concurrency=self._config.max_concurrency,
                 symbol_concurrency=symbol_concurrency,
+                readiness=self._current_readiness(),
                 now=recorded_at,
             )
             candidate_filter_results[candidate.candidate_id] = {
+
                 "symbol": candidate.symbol,
                 "side": _enum_text(candidate.side),
                 "reduce_only": candidate.reduce_only,
@@ -493,10 +506,12 @@ class EntryExecutionLane:
                     symbol_concurrency=_count_symbol_concurrency(
                         candidate.symbol, context
                     ),
+                    readiness=self._current_readiness(),
                     now=recorded_at,
                 )
                 is not None
             ):
+
                 continue
             result = await self._execute_candidate(
                 candidate,
@@ -591,8 +606,10 @@ class EntryExecutionLane:
                 context=entry_filter_context,
                 require_price_above_ema5=self._config.require_price_above_ema5,
                 require_price_above_ema10=self._config.require_price_above_ema10,
+                readiness=self._current_readiness(),
                 now=recorded_at,
             )
+
             comparisons.append(
                 compare_entry_policy_request(
                     EntryPolicyComparisonRequest(
@@ -696,14 +713,21 @@ def _live_entry_candidate_rejection_reason(
     require_price_above_ema10: bool,
     max_concurrency: int | None = None,
     symbol_concurrency: int = 0,
+    readiness: ExecutionReadiness | None = None,
     now: datetime | None = None,
 ) -> str | None:
     """Return the entry filter reason used by the execution lane."""
 
     if candidate.reduce_only:
         return None
+    if (
+        readiness is not None
+        and readiness != ExecutionReadiness.INDEPENDENT_EXECUTABLE
+    ):
+        return f"progress_not_ready:{readiness.value}"
     if not entry_enabled:
         return "entry_disabled"
+
     if now is not None and candidate.expires_at <= now:
         return "candidate_expired"
     if (

@@ -181,7 +181,7 @@ async def test_submission_keeps_legacy_save_then_exchange_fallback() -> None:
     assert state_machine.events == ["exchange"]
 
 
-async def test_submission_absorbs_dust_remainder_on_exit() -> None:
+async def test_submission_strictly_obeys_requested_quantity_without_implicit_dust_expansion() -> None:
     repository = RecordingPreparedRepository()
     coordinator = RecordingCoordinator()
     submission = _submission(
@@ -189,11 +189,9 @@ async def test_submission_absorbs_dust_remainder_on_exit() -> None:
         state_machine=coordinator,
     )
     # Total position on BTCUSDT is 0.0007 BTC.
-    # At price $10,000, notional is $7.00 (> $5 min_notional).
-    # Exit batch tries to close 0.0004 BTC ($4.00).
-    # Leaving 0.0003 BTC ($3.00 < $5 min_notional).
-    # The remainder ($3.00) cannot be closed on Binance as a standalone order.
-    # Dust absorption must absorb it into the order, closing the full 0.0007 BTC.
+    # Caller requests 0.0004 BTC.
+    # Submission layer must NEVER silently absorb dust or inflate requested quantities!
+    # Sizing/dust absorption decisions belong strictly to ExitAllocator at the decision layer.
     pos = ManagedLivePosition(
         symbol="BTCUSDT",
         side=StrategySide.LONG,
@@ -232,7 +230,8 @@ async def test_submission_absorbs_dust_remainder_on_exit() -> None:
 
     assert result is not None
     assert result.plan is not None
-    assert result.plan.quantity == Decimal("0.0007")
+    assert result.plan.quantity == Decimal("0.0004")
+
 
 
 async def test_submission_does_not_absorb_dust_when_multiple_batches_exist() -> None:

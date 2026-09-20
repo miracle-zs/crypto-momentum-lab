@@ -46,6 +46,20 @@ class SessionLifecycleState(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class ShutdownResult:
+    """Structured audit result of the ordered 4-phase shutdown protocol."""
+
+    run_id: str
+    drained: bool
+    checkpoint_durable: bool
+    terminal_recorded: bool
+    resources_closed: bool
+    failures: tuple[str, ...]
+    halt_reason: str | None
+    duration_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
 class RegisteredResource:
     """A resource registered with the session ownership registry."""
 
@@ -73,9 +87,14 @@ class ResourceOwnershipRegistry:
         """Register a resource cleanup handler."""
         self._resources.append(RegisteredResource(name=name, cleanup=cleanup))
 
+    def disarm(self) -> None:
+        """Disarm the construction registry once ownership transfers to session lifecycle."""
+        self._resources.clear()
+
     async def teardown_all(self, *, deadline: float | None = None) -> None:
         """Tear down all registered resources in reverse order."""
         for res in reversed(self._resources):
+
             started_at = perf_counter()
             try:
                 if deadline is not None and perf_counter() >= deadline:
@@ -155,6 +174,7 @@ class RuntimeSession:
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
         self._last_result: LiveDaemonResult | None = None
+        self._shutdown_result: ShutdownResult | None = None
 
     @property
     def run_id(self) -> str:
@@ -163,6 +183,10 @@ class RuntimeSession:
     @property
     def state(self) -> SessionLifecycleState:
         return self._state
+
+    @property
+    def shutdown_result(self) -> ShutdownResult | None:
+        return self._shutdown_result
 
     def set_recovering(self) -> None:
         """Mark session in recovery phase prior to entering READY."""
@@ -258,6 +282,12 @@ class RuntimeSession:
             )
         )
 
+        drained = False
+        checkpoint_durable = self._save_final_checkpoint is None
+        terminal_recorded = False
+        resources_closed = False
+        failures: list[str] = []
+
         try:
             # Phase 1: DRAINING
             self._state = SessionLifecycleState.DRAINING
@@ -273,13 +303,23 @@ class RuntimeSession:
                 )
                 async with asyncio.timeout(drain_timeout):
                     await self._supervisor.stop()
+                drained = True
             except TimeoutError:
+                failures.append("drain_timeout")
                 log.warning(
                     "session_shutdown_phase_timed_out",
                     run_id=self._run_id,
                     phase=SessionLifecycleState.DRAINING.value,
                 )
-            except Exception:
+            except asyncio.CancelledError:
+                failures.append("drain_cancelled")
+                log.warning(
+                    "session_shutdown_phase_cancelled",
+                    run_id=self._run_id,
+                    phase=SessionLifecycleState.DRAINING.value,
+                )
+            except Exception as exc:
+                failures.append(f"drain_error:{type(exc).__name__}")
                 log.exception(
                     "session_shutdown_phase_failed",
                     run_id=self._run_id,
@@ -300,16 +340,50 @@ class RuntimeSession:
                 )
                 async with asyncio.timeout(persist_timeout):
                     if self._save_final_checkpoint is not None:
-                        await self._save_final_checkpoint(persist_timeout)
+                        try:
+                            saved = await self._save_final_checkpoint(persist_timeout)
+                            if saved:
+                                checkpoint_durable = True
+                            else:
+                                checkpoint_durable = False
+                                failures.append("checkpoint_save_returned_false")
+                        except asyncio.CancelledError:
+                            checkpoint_durable = False
+                            failures.append("checkpoint_cancelled")
+                            raise
+                        except Exception as exc:
+                            checkpoint_durable = False
+                            failures.append(f"checkpoint_error:{type(exc).__name__}")
+                            log.exception(
+                                "session_checkpoint_save_failed",
+                                run_id=self._run_id,
+                            )
+
+                    if not checkpoint_durable and halt_reason is None:
+                        halt_reason = "final_checkpoint_failed"
+
                     if self._transition_terminal_state is not None:
                         await self._transition_terminal_state(halt_reason)
+                        terminal_recorded = True
             except TimeoutError:
+                failures.append("persist_timeout")
+                checkpoint_durable = False
                 log.warning(
                     "session_shutdown_phase_timed_out",
                     run_id=self._run_id,
                     phase=SessionLifecycleState.PERSISTING.value,
                 )
-            except Exception:
+            except asyncio.CancelledError:
+                failures.append("persist_cancelled")
+                checkpoint_durable = False
+                log.warning(
+                    "session_shutdown_phase_cancelled",
+                    run_id=self._run_id,
+                    phase=SessionLifecycleState.PERSISTING.value,
+                )
+            except Exception as exc:
+                if f"checkpoint_error:{type(exc).__name__}" not in failures:
+                    failures.append(f"persist_error:{type(exc).__name__}")
                 log.exception(
                     "session_shutdown_phase_failed",
                     run_id=self._run_id,
@@ -334,13 +408,23 @@ class RuntimeSession:
                         await self._ownership_registry.teardown_all(
                             deadline=total_deadline
                         )
+                resources_closed = True
             except TimeoutError:
+                failures.append("close_timeout")
                 log.warning(
                     "session_shutdown_phase_timed_out",
                     run_id=self._run_id,
                     phase=SessionLifecycleState.CLOSING.value,
                 )
-            except Exception:
+            except asyncio.CancelledError:
+                failures.append("close_cancelled")
+                log.warning(
+                    "session_shutdown_phase_cancelled",
+                    run_id=self._run_id,
+                    phase=SessionLifecycleState.CLOSING.value,
+                )
+            except Exception as exc:
+                failures.append(f"close_error:{type(exc).__name__}")
                 log.exception(
                     "session_shutdown_phase_failed",
                     run_id=self._run_id,
@@ -358,10 +442,31 @@ class RuntimeSession:
             async with self._state_lock:
                 self._closed = True
 
+            if not checkpoint_durable and halt_reason is None:
+                halt_reason = "final_checkpoint_failed"
+            elif halt_reason is None and failures:
+                halt_reason = failures[0]
+
+            duration = round(perf_counter() - started_at, 3)
+            self._shutdown_result = ShutdownResult(
+
+                run_id=self._run_id,
+                drained=drained,
+                checkpoint_durable=checkpoint_durable,
+                terminal_recorded=terminal_recorded,
+                resources_closed=resources_closed,
+                failures=tuple(failures),
+                halt_reason=halt_reason,
+                duration_seconds=duration,
+            )
+
             log.info(
                 "session_shutdown_completed",
                 run_id=self._run_id,
-                duration_seconds=round(perf_counter() - started_at, 3),
+                checkpoint_durable=checkpoint_durable,
+                halt_reason=halt_reason,
+                failures=failures,
+                duration_seconds=duration,
             )
 
 
@@ -370,4 +475,5 @@ __all__ = [
     "ResourceOwnershipRegistry",
     "RuntimeSession",
     "SessionLifecycleState",
+    "ShutdownResult",
 ]

@@ -21,8 +21,9 @@ import json
 import os
 import shutil
 import string
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import Any
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -603,6 +604,7 @@ class CapacityGuard:
         hard_limit_bytes: int,
         global_warning_free_bytes: int,
         global_pause_free_bytes: int,
+        disk_usage_fn: Callable[[Path], Any] | None = None,
     ) -> None:
         if soft_limit_bytes <= 0 or hard_limit_bytes <= soft_limit_bytes:
             raise ValueError("invalid collector capacity limits")
@@ -617,10 +619,16 @@ class CapacityGuard:
         self._hard_limit_bytes = hard_limit_bytes
         self._global_warning_free_bytes = global_warning_free_bytes
         self._global_pause_free_bytes = global_pause_free_bytes
+        self._disk_usage_fn = disk_usage_fn or shutil.disk_usage
 
     def snapshot(self) -> CapacitySnapshot:
         collector_bytes = _directory_size(self._root)
-        disk_free_bytes = shutil.disk_usage(self._root).free
+        usage = self._disk_usage_fn(self._root)
+        disk_free_bytes = (
+            getattr(usage, "free", usage)
+            if not isinstance(usage, int)
+            else usage
+        )
         if (
             collector_bytes >= self._hard_limit_bytes
             or disk_free_bytes <= self._global_pause_free_bytes
