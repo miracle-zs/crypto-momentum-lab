@@ -828,7 +828,7 @@ class LiveExitManager:
             reason=reason,
         )
         is_executor_primary = os.environ.get(
-            "CML_TRADE_COMMAND_EXECUTOR_PRIMARY_ENABLED", ""
+            "CML_TRADE_COMMAND_EXECUTOR_PRIMARY_ENABLED", "1"
         ).lower() in {"1", "true", "yes"}
         if (
             is_executor_primary

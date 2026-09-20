@@ -2285,19 +2285,26 @@ def _build_position_batches(
             )
 
         is_primary_enabled = os.environ.get(
-            "CML_POSITION_LEDGER_PRIMARY_ENABLED", ""
+            "CML_POSITION_LEDGER_PRIMARY_ENABLED", "1"
         ).lower() in {"1", "true", "yes"}
         if is_primary_enabled:
-            if shadow_projection.total_active_quantity == position.position_amt:
+            if (
+                diff_report.is_concordant
+                and shadow_projection.total_active_quantity == position.position_amt
+            ):
                 ledger_batches = tuple(
                     ManagedLivePositionBatch(
-                        batch_id=ab.batch_id,
+                        batch_id=(
+                            result.batches[idx].batch_id
+                            if (diff_report.is_concordant and idx < len(result.batches))
+                            else ab.batch_id
+                        ),
                         quantity=ab.quantity,
                         entry_price=ab.entry_price,
                         opened_at=ab.opened_at,
                         exit_order_submitted_at=ab.exit_order_submitted_at,
                     )
-                    for ab in shadow_projection.active_batches
+                    for idx, ab in enumerate(shadow_projection.active_batches)
                 )
                 log.info(
                     "position_ledger_primary_active",
