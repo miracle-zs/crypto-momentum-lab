@@ -81,6 +81,7 @@ def test_shadow_auditor_audit_submission_concordant() -> None:
     assert result.success is True
     assert result.is_concordant is True
     assert result.divergence_category is None
+    assert result.shadow_plan is not None
 
 
 def test_shadow_auditor_audit_exit_allocation_concordant() -> None:
@@ -104,3 +105,4 @@ def test_shadow_auditor_audit_exit_allocation_concordant() -> None:
     assert result.success is True
     assert result.is_concordant is True
     assert result.divergence_category is None
+    assert result.shadow_command is not None

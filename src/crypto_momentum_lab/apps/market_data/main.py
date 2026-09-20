@@ -11,8 +11,9 @@ from typing import Protocol
 
 import structlog
 import typer
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.config.database_url import resolve_database_url
 from crypto_momentum_lab.config.loader import (
@@ -82,6 +83,10 @@ from crypto_momentum_lab.persistence.postgres.account_repository import (
 )
 from crypto_momentum_lab.persistence.postgres.capture_repository import (
     PostgresCaptureRepository,
+)
+from crypto_momentum_lab.persistence.postgres.models import (
+    AccountPositionSnapshotRow,
+    StrategyRuntimeCheckpointRow,
 )
 from crypto_momentum_lab.persistence.postgres.operational_retention import (
     PostgresOperationalRetentionRepository,
@@ -929,6 +934,41 @@ async def run_operational_database_retention_loop(
             )
 
 
+async def _resolve_market_data_consumer_requirements(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> tuple[RetentionConsumerRequirement, ...]:
+    """Resolve consumer watermarks to protect downstream strategy replay
+    and positions.
+    """
+    requirements: list[RetentionConsumerRequirement] = []
+    async with session_factory() as session:
+        earliest_checkpoint = await session.scalar(
+            select(func.min(StrategyRuntimeCheckpointRow.saved_at))
+        )
+        if earliest_checkpoint is not None:
+            requirements.append(
+                RetentionConsumerRequirement(
+                    consumer_id="active_strategy_checkpoints",
+                    min_required_watermark=earliest_checkpoint,
+                    reason="protect active strategy replay and checkpoint baseline",
+                )
+            )
+        earliest_position = await session.scalar(
+            select(func.min(AccountPositionSnapshotRow.observed_at)).where(
+                AccountPositionSnapshotRow.position_amt != 0
+            )
+        )
+        if earliest_position is not None:
+            requirements.append(
+                RetentionConsumerRequirement(
+                    consumer_id="active_position_market_states",
+                    min_required_watermark=earliest_position,
+                    reason="protect market states for open positions",
+                )
+            )
+    return tuple(requirements)
+
+
 @dataclass(frozen=True, slots=True)
 class MarketDataRuntime:
     capture: MarketDataCaptureService
@@ -954,6 +994,7 @@ class MarketDataRuntime:
     database_retention_interval_seconds: float = _DATABASE_RETENTION_INTERVAL_SECONDS
     contract_metadata_retention_hours: float = _CONTRACT_METADATA_RETENTION_HOURS
     runtime_state_retention_hours: float = _RUNTIME_STATE_RETENTION_HOURS
+    maintenance_session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
 def _archive_retention_repository(
@@ -1312,6 +1353,7 @@ async def build_market_data_runtime(
             initial_symbols=initial_symbols,
             maintenance_capture_repository=maintenance_capture_repository,
             operational_retention=operational_retention,
+            maintenance_session_factory=maintenance_sessions,
         )
     finally:
         await rest_client.aclose()
@@ -1489,6 +1531,20 @@ async def run_market_data(
                 None,
             )
             if operational_retention is not None:
+                maintenance_sessions = getattr(
+                    runtime,
+                    "maintenance_session_factory",
+                    None,
+                )
+                consumer_req_provider = None
+                if maintenance_sessions is not None:
+
+                    async def consumer_req_provider() -> (
+                        tuple[RetentionConsumerRequirement, ...]
+                    ):
+                        return await _resolve_market_data_consumer_requirements(
+                            maintenance_sessions
+                        )
                 auxiliary_tasks += (
                     asyncio.create_task(
                         run_operational_database_retention_loop(
@@ -1502,6 +1558,7 @@ async def run_market_data(
                             runtime_state_retention_hours=(
                                 runtime.runtime_state_retention_hours
                             ),
+                            consumer_requirements_provider=consumer_req_provider,
                         )
                     ),
                 )

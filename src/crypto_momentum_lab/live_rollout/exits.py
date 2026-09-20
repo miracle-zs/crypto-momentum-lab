@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -26,6 +27,7 @@ from crypto_momentum_lab.domain.strategy import (
 )
 from crypto_momentum_lab.live_rollout.shadow_auditor import (
     LiveExecutionShadowAuditor,
+    ShadowAuditResult,
 )
 from crypto_momentum_lab.strategy_runner.position_exit import (
     ClosedCandle15m,
@@ -819,12 +821,21 @@ class LiveExitManager:
             if state is None:
                 raise ValueError("state or created_at is required")
             created_at = state.bucket_end
-        self._shadow_evaluate_exit_allocation(
+        shadow_audit = self._shadow_evaluate_exit_allocation(
             position=position,
             order_quantity=order_quantity,
             reference_price=reference_price,
             reason=reason,
         )
+        is_executor_primary = os.environ.get(
+            "CML_TRADE_COMMAND_EXECUTOR_PRIMARY_ENABLED", ""
+        ).lower() in {"1", "true", "yes"}
+        if (
+            is_executor_primary
+            and shadow_audit.is_concordant
+            and shadow_audit.shadow_command is not None
+        ):
+            order_quantity = shadow_audit.shadow_command.requested_quantity
         return LiveExitOrderRequest(
             candidate=OrderIntentCandidate(
                 candidate_id=candidate_id,
@@ -864,8 +875,8 @@ class LiveExitManager:
         order_quantity: Decimal,
         reference_price: Decimal,
         reason: str,
-    ) -> None:
-        LiveExecutionShadowAuditor.audit_exit_allocation(
+    ) -> ShadowAuditResult:
+        return LiveExecutionShadowAuditor.audit_exit_allocation(
             position=position,
             order_quantity=order_quantity,
             reference_price=reference_price,

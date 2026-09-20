@@ -60,6 +60,8 @@ class ShadowAuditResult:
     divergence_category: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    shadow_plan: OrderExecutionPlan | None = None
+    shadow_command: TradeCommand | None = None
 
 
 class LiveExecutionShadowAuditor:
@@ -223,6 +225,7 @@ class LiveExecutionShadowAuditor:
                 is_concordant=is_concordant,
                 divergence_category=category,
                 details=details,
+                shadow_plan=shadow_result.plan,
             )
         except Exception as exc:
             cls._failure_count += 1
@@ -362,6 +365,7 @@ class LiveExecutionShadowAuditor:
                 is_concordant=is_concordant,
                 divergence_category=category,
                 details=details,
+                shadow_command=shadow_cmd,
             )
         except Exception as exc:
             cls._failure_count += 1

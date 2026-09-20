@@ -17,6 +17,7 @@ implementation retains the ordering and fail-closed invariants.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -58,6 +59,7 @@ from crypto_momentum_lab.live_rollout.limits import (
 )
 from crypto_momentum_lab.live_rollout.shadow_auditor import (
     LiveExecutionShadowAuditor,
+    ShadowAuditResult,
 )
 from crypto_momentum_lab.live_rollout.telemetry import (
     LIVE_LANE_ENTRY,
@@ -364,7 +366,7 @@ class LiveCandidateSubmission:
             hedge_mode=self._config.hedge_mode,
             requested_quantity=requested_quantity,
         )
-        self._shadow_evaluate_trade_command(
+        shadow_audit = self._shadow_evaluate_trade_command(
             candidate=executable_candidate,
             rules=rules,
             reference_price=execution_reference_price,
@@ -372,6 +374,15 @@ class LiveCandidateSubmission:
             legacy_plan=plan,
             context=context,
         )
+        is_executor_primary = os.environ.get(
+            "CML_TRADE_COMMAND_EXECUTOR_PRIMARY_ENABLED", ""
+        ).lower() in {"1", "true", "yes"}
+        if (
+            is_executor_primary
+            and shadow_audit.is_concordant
+            and shadow_audit.shadow_plan is not None
+        ):
+            plan = shadow_audit.shadow_plan
         if isinstance(plan, QuantizationRejection):
             return None
         if (
@@ -569,8 +580,8 @@ class LiveCandidateSubmission:
         requested_quantity: Decimal | None,
         legacy_plan: OrderExecutionPlan | QuantizationRejection,
         context: LiveDaemonRuntimeContext,
-    ) -> None:
-        LiveExecutionShadowAuditor.audit_submission(
+    ) -> ShadowAuditResult:
+        return LiveExecutionShadowAuditor.audit_submission(
             candidate=candidate,
             rules=rules,
             reference_price=reference_price,

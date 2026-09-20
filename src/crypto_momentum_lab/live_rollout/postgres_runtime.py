@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -766,16 +767,18 @@ class PostgresLiveContextProvider(LiveContextReader):
 
     def is_context_current(self, context: LiveDaemonRuntimeContext) -> bool:
         """Return whether a context still matches the live provider inputs."""
-        context_epoch = context.context_epoch
+        context_epoch = getattr(context, "context_epoch", None)
         current_epoch = getattr(self, "_cache_epoch", 0)
         if context_epoch is not None and context_epoch != current_epoch:
             return False
-        if context.account_snapshot is not None:
-            return context.account_snapshot_version == getattr(
-                self,
-                "_realtime_account_sequence",
-                0,
-            )
+        realtime_seq = getattr(self, "_realtime_account_sequence", 0)
+        snapshot_version = getattr(context, "account_snapshot_version", None)
+        if snapshot_version is not None:
+            return snapshot_version == realtime_seq
+        if getattr(context, "account_snapshot", None) is not None:
+            return getattr(context.account_snapshot, "sequence", 0) == realtime_seq
+        if realtime_seq > 0:
+            return False
         return True
 
     def update_account_snapshot(
@@ -2279,6 +2282,36 @@ def _build_position_batches(
                 legacy_count=diff_report.legacy_batch_count,
                 ledger_count=diff_report.ledger_batch_count,
                 details=diff_report.details,
+            )
+
+        is_primary_enabled = os.environ.get(
+            "CML_POSITION_LEDGER_PRIMARY_ENABLED", ""
+        ).lower() in {"1", "true", "yes"}
+        if is_primary_enabled:
+            if shadow_projection.total_active_quantity == position.position_amt:
+                ledger_batches = tuple(
+                    ManagedLivePositionBatch(
+                        batch_id=ab.batch_id,
+                        quantity=ab.quantity,
+                        entry_price=ab.entry_price,
+                        opened_at=ab.opened_at,
+                        exit_order_submitted_at=ab.exit_order_submitted_at,
+                    )
+                    for ab in shadow_projection.active_batches
+                )
+                log.info(
+                    "position_ledger_primary_active",
+                    symbol=position.symbol,
+                    batch_count=len(ledger_batches),
+                    total_quantity=str(shadow_projection.total_active_quantity),
+                    concordant=diff_report.is_concordant,
+                )
+                return ledger_batches
+            log.warning(
+                "position_ledger_primary_quantity_mismatch_fallback",
+                symbol=position.symbol,
+                position_amt=str(position.position_amt),
+                ledger_total=str(shadow_projection.total_active_quantity),
             )
     except Exception as exc:
         log.warning(
