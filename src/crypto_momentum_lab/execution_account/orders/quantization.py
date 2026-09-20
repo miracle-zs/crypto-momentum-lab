@@ -95,7 +95,7 @@ def quantize_order_plan(
             quantity=quantity,
             limit=rules.max_quantity,
         )
-    if actual_notional < rules.min_notional:
+    if not intent.reduce_only and actual_notional < rules.min_notional:
         return _rejection(
             "below_min_notional",
             actual_notional=actual_notional,

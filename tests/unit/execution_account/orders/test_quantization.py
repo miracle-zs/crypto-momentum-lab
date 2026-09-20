@@ -47,6 +47,27 @@ def test_rejects_below_min_notional() -> None:
     assert result.reason == "below_min_notional"
 
 
+def test_quantize_allows_below_min_notional_for_reduce_only() -> None:
+    intent = replace(_intent(Decimal("3")), reduce_only=True)
+    result = quantize_order_plan(
+        intent,
+        replace(
+            _rules(),
+            step_size=Decimal("0.0001"),
+            min_quantity=Decimal("0.0001"),
+            min_notional=Decimal("5"),
+        ),
+        reference_price=Decimal("30000"),
+        resize_tolerance=Decimal("0.50"),
+        requested_quantity=Decimal("0.0001"),
+    )
+
+    assert isinstance(result, OrderExecutionPlan)
+    assert result.quantity == Decimal("0.0001")
+    assert result.reduce_only is True
+
+
+
 def test_rejects_resize_beyond_tolerance() -> None:
     result = quantize_order_plan(
         _intent(Decimal("100")),

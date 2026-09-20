@@ -2002,3 +2002,135 @@ async def test_load_order_anchor_events_tracks_latest_entry_times() -> None:
     assert _opening_anchors_from_events(events, ("BTCUSDT",)) == {}
 
 
+async def test_load_order_anchor_events_preserves_pre_zero_order_filled_post_zero() -> None:
+    class DummyScalars:
+        def __init__(self, items):
+            self.items = items
+
+        def all(self):
+            return self.items
+
+    class DummySession:
+        def __init__(self, rows):
+            self.rows = rows
+
+        async def scalars(self, _query):
+            return DummyScalars(self.rows)
+
+    # Order placed at 10:00 (created_at)
+    # Zero crossing occurred at 10:02
+    # Order filled at 10:03 (updated_at)
+    t_create = datetime(2026, 9, 20, 2, 0, 0, tzinfo=UTC)
+    t_zero = datetime(2026, 9, 20, 2, 2, 0, tzinfo=UTC)
+    t_fill = datetime(2026, 9, 20, 2, 3, 0, tzinfo=UTC)
+
+    order = _order(
+        symbol="BTCUSDT",
+        reduce_only=False,
+        side="BUY",
+        created_at=t_create,
+        updated_at=t_fill,
+        state=ExchangeOrderState.FILLED.value,
+        executed_quantity=Decimal("1"),
+    )
+    session = DummySession([order])
+    events, latest_entry_times = await _load_order_anchor_events(
+        session,  # type: ignore[arg-type]
+        run_id="run-1",
+        active_symbols=("BTCUSDT",),
+        lookback_start=t_create - timedelta(days=1),
+        zero_crossing_times={("BTCUSDT", "LONG"): t_zero},
+    )
+    # Order must NOT be dropped!
+    assert len(events) == 1
+    assert events[0].symbol == "BTCUSDT"
+    assert events[0].kind == "entry"
+    assert events[0].quantity == Decimal("1")
+    assert latest_entry_times == {"BTCUSDT": t_create}
+
+
+async def test_load_order_anchor_events_skips_pre_zero_terminal_order() -> None:
+    class DummyScalars:
+        def __init__(self, items):
+            self.items = items
+
+        def all(self):
+            return self.items
+
+    class DummySession:
+        def __init__(self, rows):
+            self.rows = rows
+
+        async def scalars(self, _query):
+            return DummyScalars(self.rows)
+
+    t_create = datetime(2026, 9, 20, 1, 50, 0, tzinfo=UTC)
+    t_fill = datetime(2026, 9, 20, 1, 55, 0, tzinfo=UTC)
+    t_zero = datetime(2026, 9, 20, 2, 0, 0, tzinfo=UTC)
+
+    order = _order(
+        symbol="BTCUSDT",
+        reduce_only=False,
+        side="BUY",
+        created_at=t_create,
+        updated_at=t_fill,
+        state=ExchangeOrderState.FILLED.value,
+        executed_quantity=Decimal("1"),
+    )
+    session = DummySession([order])
+    events, latest_entry_times = await _load_order_anchor_events(
+        session,  # type: ignore[arg-type]
+        run_id="run-1",
+        active_symbols=("BTCUSDT",),
+        lookback_start=t_create - timedelta(days=1),
+        zero_crossing_times={("BTCUSDT", "LONG"): t_zero},
+    )
+    # Old order terminal before zero must be dropped!
+    assert len(events) == 0
+    assert latest_entry_times == {}
+
+
+async def test_load_order_anchor_events_isolates_position_side_zero_crossing() -> None:
+    class DummyScalars:
+        def __init__(self, items):
+            self.items = items
+
+        def all(self):
+            return self.items
+
+    class DummySession:
+        def __init__(self, rows):
+            self.rows = rows
+
+        async def scalars(self, _query):
+            return DummyScalars(self.rows)
+
+    # BTCUSDT SHORT had a zero crossing at 10:00
+    # BTCUSDT LONG order was opened and filled at 09:00, still open position
+    t_long = datetime(2026, 9, 20, 1, 0, 0, tzinfo=UTC)
+    t_short_zero = datetime(2026, 9, 20, 2, 0, 0, tzinfo=UTC)
+
+    long_order = _order(
+        symbol="BTCUSDT",
+        reduce_only=False,
+        side="BUY",
+        created_at=t_long,
+        updated_at=t_long,
+        state=ExchangeOrderState.FILLED.value,
+        executed_quantity=Decimal("1"),
+    )
+    session = DummySession([long_order])
+    events, latest_entry_times = await _load_order_anchor_events(
+        session,  # type: ignore[arg-type]
+        run_id="run-1",
+        active_symbols=("BTCUSDT",),
+        lookback_start=t_long - timedelta(days=1),
+        zero_crossing_times={("BTCUSDT", "SHORT"): t_short_zero},
+    )
+    # SHORT zero crossing must NOT drop LONG order!
+    assert len(events) == 1
+    assert events[0].symbol == "BTCUSDT"
+    assert latest_entry_times == {"BTCUSDT": t_long}
+
+
+

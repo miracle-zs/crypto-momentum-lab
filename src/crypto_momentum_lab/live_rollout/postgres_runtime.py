@@ -153,13 +153,61 @@ def _opening_anchors_from_events(
     return anchors
 
 
+_TERMINAL_ORDER_STATES = frozenset(
+    {
+        ExchangeOrderState.FILLED.value,
+        ExchangeOrderState.CANCELED.value,
+        ExchangeOrderState.ABSENT_RECONCILED.value,
+        ExchangeOrderState.REJECTED.value,
+        ExchangeOrderState.EXPIRED.value,
+        ExchangeOrderState.SUPPRESSED.value,
+    }
+)
+
+
+def _lookup_zero_at(
+    zero_crossing_times: Mapping[object, datetime] | None,
+    symbol: str,
+    position_side: str | None = None,
+) -> datetime | None:
+    if not zero_crossing_times:
+        return None
+    sym = symbol.strip().upper()
+    pos_side = (position_side or "BOTH").strip().upper()
+    if (sym, pos_side) in zero_crossing_times:
+        return zero_crossing_times[(sym, pos_side)]
+    val = zero_crossing_times.get(sym)
+    if isinstance(val, datetime):
+        return val
+    return None
+
+
+def _is_pre_zero_order(
+    row: ExchangeOrderRow | object,
+    zero_at: datetime | None,
+) -> bool:
+    if zero_at is None:
+        return False
+    state = getattr(row, "state", None)
+    is_terminal = state in _TERMINAL_ORDER_STATES
+    created_at = getattr(row, "created_at", None)
+    updated_at = getattr(row, "updated_at", created_at) or created_at
+    if created_at is None:
+        return False
+    return (
+        created_at < zero_at
+        and updated_at < zero_at
+        and is_terminal
+    )
+
+
 async def _load_order_anchor_events(
     session: AsyncSession,
     *,
     run_id: str,
     active_symbols: Sequence[str],
     lookback_start: datetime,
-    zero_crossing_times: Mapping[str, datetime] | None = None,
+    zero_crossing_times: Mapping[object, datetime] | None = None,
 ) -> tuple[tuple[_OrderAnchorEvent, ...], Mapping[str, datetime]]:
     rows = (
         await session.scalars(
@@ -176,10 +224,10 @@ async def _load_order_anchor_events(
     latest_entry_times: dict[str, datetime] = {}
     for row in rows:
         symbol_key = row.symbol.strip().upper()
-        if zero_crossing_times is not None:
-            zero_at = zero_crossing_times.get(symbol_key)
-            if zero_at is not None and row.created_at < zero_at:
-                continue
+        pos_side = getattr(row, "position_side", None) or "BOTH"
+        zero_at = _lookup_zero_at(zero_crossing_times, symbol_key, pos_side)
+        if _is_pre_zero_order(row, zero_at):
+            continue
         executed = row.executed_quantity or Decimal("0")
         if row.reduce_only:
             quantity = executed
@@ -230,12 +278,13 @@ async def _load_position_orders_bounded(
     lookback_start = observed_at - _ORDER_ANCHOR_LOOKBACK
     symbols = tuple(sorted({symbol.strip().upper() for symbol in active_symbols}))
 
-    zero_crossing_times: dict[str, datetime] = {}
+    zero_crossing_times: dict[tuple[str, str], datetime] = {}
     if account_label:
         zero_rows = (
             await session.execute(
                 select(
                     AccountPositionSnapshotRow.symbol,
+                    AccountPositionSnapshotRow.position_side,
                     func.max(AccountPositionSnapshotRow.observed_at),
                 )
                 .where(
@@ -245,12 +294,17 @@ async def _load_position_orders_bounded(
                     AccountPositionSnapshotRow.position_amt == 0,
                     AccountPositionSnapshotRow.observed_at <= observed_at,
                 )
-                .group_by(AccountPositionSnapshotRow.symbol)
+                .group_by(
+                    AccountPositionSnapshotRow.symbol,
+                    AccountPositionSnapshotRow.position_side,
+                )
             )
         ).all()
-        for sym, zero_at in zero_rows:
+        for sym, pos_side, zero_at in zero_rows:
             if zero_at is not None:
-                zero_crossing_times[sym.strip().upper()] = zero_at
+                zero_crossing_times[
+                    (sym.strip().upper(), (pos_side or "BOTH").strip().upper())
+                ] = zero_at
 
     events, latest_entry_times = await _load_order_anchor_events(
         session,
@@ -272,14 +326,14 @@ async def _load_position_orders_bounded(
         else:
             window_start = lookback_start
 
-        zero_at = zero_crossing_times.get(symbol)
-        if zero_at is not None:
-            window_start = max(window_start, zero_at)
-
         window_conditions.append(
             and_(
                 ExchangeOrderRow.symbol == symbol,
-                ExchangeOrderRow.created_at >= window_start,
+                or_(
+                    ExchangeOrderRow.created_at >= window_start,
+                    ExchangeOrderRow.updated_at >= window_start,
+                    ExchangeOrderRow.state.not_in(_TERMINAL_ORDER_STATES),
+                ),
             )
         )
     if not window_conditions:
@@ -296,7 +350,15 @@ async def _load_position_orders_bounded(
         )
     ).all()
 
-    row_list = list(rows)
+    row_list: list[ExchangeOrderRow] = []
+    for row in rows:
+        sym = row.symbol.strip().upper()
+        pos_side = getattr(row, "position_side", None) or "BOTH"
+        zero_at = _lookup_zero_at(zero_crossing_times, sym, pos_side)
+        if _is_pre_zero_order(row, zero_at):
+            continue
+        row_list.append(row)
+
     loaded_client_ids = {
         row.client_order_id for row in row_list if row.client_order_id
     }
@@ -337,8 +399,9 @@ async def _load_position_orders_bounded(
             ).all()
             for extra_row in missing_entry_rows:
                 sym = extra_row.symbol.strip().upper()
-                zero_at = zero_crossing_times.get(sym)
-                if zero_at is None or extra_row.created_at >= zero_at:
+                pos_side = getattr(extra_row, "position_side", None) or "BOTH"
+                zero_at = _lookup_zero_at(zero_crossing_times, sym, pos_side)
+                if not _is_pre_zero_order(extra_row, zero_at):
                     row_list.append(extra_row)
                     loaded_client_ids.add(extra_row.client_order_id)
 

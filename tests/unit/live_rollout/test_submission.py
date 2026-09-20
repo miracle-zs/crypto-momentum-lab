@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 
@@ -17,7 +17,10 @@ from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
     PreparedOrderSubmission,
 )
-from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
+from crypto_momentum_lab.live_rollout.exits import (
+    ManagedLivePosition,
+    ManagedLivePositionBatch,
+)
 from crypto_momentum_lab.live_rollout.limits import FixedLiveLimits
 from crypto_momentum_lab.live_rollout.submission import (
     LiveCandidateSubmission,
@@ -230,4 +233,74 @@ async def test_submission_absorbs_dust_remainder_on_exit() -> None:
     assert result is not None
     assert result.plan is not None
     assert result.plan.quantity == Decimal("0.0007")
+
+
+async def test_submission_does_not_absorb_dust_when_multiple_batches_exist() -> None:
+    repository = RecordingPreparedRepository()
+    coordinator = RecordingCoordinator()
+    submission = _submission(
+        repository=repository,
+        state_machine=coordinator,
+    )
+    # Total position on BTCUSDT is 0.0007 BTC with two distinct batches:
+    # Batch A (older): 0.0004 BTC
+    # Batch B (newer): 0.0003 BTC
+    # Exit batch tries to close Batch A (0.0004 BTC).
+    # Dust remainder is 0.0003 BTC ($3.00 < $5 min_notional).
+    # Because Batch B exists and is active, dust absorption MUST NOT absorb Batch B!
+    # Plan quantity must strictly remain 0.0004 BTC.
+    batch_a = ManagedLivePositionBatch(
+        batch_id="batch-a",
+        quantity=Decimal("0.0004"),
+        entry_price=Decimal("10000"),
+        opened_at=NOW - timedelta(minutes=60),
+    )
+    batch_b = ManagedLivePositionBatch(
+        batch_id="batch-b",
+        quantity=Decimal("0.0003"),
+        entry_price=Decimal("10000"),
+        opened_at=NOW - timedelta(minutes=1),
+    )
+    pos = ManagedLivePosition(
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        position_side=FuturesPositionSide.BOTH,
+        quantity=Decimal("0.0007"),
+        entry_price=Decimal("10000"),
+        opened_at=NOW - timedelta(minutes=60),
+        batches=(batch_a, batch_b),
+    )
+    candidate = replace(
+        _intent(),
+        reduce_only=True,
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        entry_type=EntryType.MARKET,
+        features={"position_side": "BOTH", "batch_id": "batch-a"},
+    )
+    context = replace(
+        _runtime_context(),
+        managed_positions=(pos,),
+        open_position_symbols=frozenset({"BTCUSDT"}),
+    )
+    state = replace(
+        _state(),
+        symbol="BTCUSDT",
+        mark_price=Decimal("10000"),
+        close_price=Decimal("10000"),
+    )
+
+    result = await submission.execute(
+        candidate,
+        requested_quantity=Decimal("0.0004"),
+        state=state,
+        context=context,
+        reference_price=Decimal("10000"),
+    )
+
+    assert result is not None
+    assert result.plan is not None
+    # Must NOT absorb Batch B (0.0003) - plan quantity must strictly be 0.0004!
+    assert result.plan.quantity == Decimal("0.0004")
+
 
