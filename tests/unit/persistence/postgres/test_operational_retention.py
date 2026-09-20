@@ -55,3 +55,33 @@ def test_snapshot_history_delete_is_bounded_and_preserves_latest_rows() -> None:
     assert "newer.observed_at > candidate.observed_at" in sql
     assert "order by candidate.observed_at" in sql
     assert "limit :batch_size" in sql
+
+
+async def test_prune_account_snapshots_with_consumer_requirements_gates_cutoff() -> None:
+    from crypto_momentum_lab.domain.operational.retention_contract import (
+        RetentionConsumerRequirement,
+    )
+
+    repository = PostgresOperationalRetentionRepository(AsyncMock())
+    repository._prune_account_snapshot_table = AsyncMock(return_value=0)
+    repository._thin_account_balance_history = AsyncMock(return_value=0)
+
+    requested_before = datetime(2026, 8, 10, tzinfo=UTC)
+    consumer_watermark = datetime(2026, 8, 5, tzinfo=UTC)
+    requirement = RetentionConsumerRequirement(
+        consumer_id="audit_export",
+        min_required_watermark=consumer_watermark,
+        reason="audit pipeline catchup",
+    )
+
+    await repository.prune_account_snapshots(
+        environment="live",
+        account_label="primary",
+        before=requested_before,
+        consumer_requirements=(requirement,),
+    )
+
+    assert repository._prune_account_snapshot_table.await_count > 0
+    for call in repository._prune_account_snapshot_table.await_args_list:
+        assert call.kwargs["before"] == consumer_watermark
+

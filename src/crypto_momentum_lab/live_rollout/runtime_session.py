@@ -306,6 +306,7 @@ class RuntimeSession:
                 drained = True
             except TimeoutError:
                 failures.append("drain_timeout")
+                halt_reason = "drain_timeout"
                 log.warning(
                     "session_shutdown_phase_timed_out",
                     run_id=self._run_id,
@@ -313,13 +314,16 @@ class RuntimeSession:
                 )
             except asyncio.CancelledError:
                 failures.append("drain_cancelled")
+                halt_reason = "drain_cancelled"
                 log.warning(
                     "session_shutdown_phase_cancelled",
                     run_id=self._run_id,
                     phase=SessionLifecycleState.DRAINING.value,
                 )
             except Exception as exc:
-                failures.append(f"drain_error:{type(exc).__name__}")
+                err_msg = f"drain_error:{type(exc).__name__}"
+                failures.append(err_msg)
+                halt_reason = err_msg
                 log.exception(
                     "session_shutdown_phase_failed",
                     run_id=self._run_id,
@@ -368,6 +372,8 @@ class RuntimeSession:
             except TimeoutError:
                 failures.append("persist_timeout")
                 checkpoint_durable = False
+                if halt_reason is None:
+                    halt_reason = "final_checkpoint_failed"
                 log.warning(
                     "session_shutdown_phase_timed_out",
                     run_id=self._run_id,
@@ -376,14 +382,19 @@ class RuntimeSession:
             except asyncio.CancelledError:
                 failures.append("persist_cancelled")
                 checkpoint_durable = False
+                if halt_reason is None:
+                    halt_reason = "persist_cancelled"
                 log.warning(
                     "session_shutdown_phase_cancelled",
                     run_id=self._run_id,
                     phase=SessionLifecycleState.PERSISTING.value,
                 )
             except Exception as exc:
+                err_msg = f"persist_error:{type(exc).__name__}"
                 if f"checkpoint_error:{type(exc).__name__}" not in failures:
-                    failures.append(f"persist_error:{type(exc).__name__}")
+                    failures.append(err_msg)
+                if halt_reason is None:
+                    halt_reason = err_msg
                 log.exception(
                     "session_shutdown_phase_failed",
                     run_id=self._run_id,
@@ -403,14 +414,28 @@ class RuntimeSession:
                     max(0.01, total_deadline - perf_counter()),
                 )
                 async with asyncio.timeout(close_timeout):
-                    await self._lifecycle.close()
+                    close_res = await self._lifecycle.close()
+                    lifecycle_failures: tuple[str, ...] = ()
+                    if isinstance(close_res, (list, tuple)):
+                        lifecycle_failures = tuple(close_res)
+                    elif hasattr(self._lifecycle, "close_failures"):
+                        lifecycle_failures = tuple(self._lifecycle.close_failures)
+
+                    if lifecycle_failures:
+                        failures.extend(lifecycle_failures)
+                        resources_closed = False
+                        if halt_reason is None:
+                            halt_reason = f"close_error:{lifecycle_failures[0]}"
+                    else:
+                        resources_closed = True
+
                     if self._ownership_registry is not None:
                         await self._ownership_registry.teardown_all(
                             deadline=total_deadline
                         )
-                resources_closed = True
             except TimeoutError:
                 failures.append("close_timeout")
+                resources_closed = False
                 log.warning(
                     "session_shutdown_phase_timed_out",
                     run_id=self._run_id,
@@ -418,6 +443,7 @@ class RuntimeSession:
                 )
             except asyncio.CancelledError:
                 failures.append("close_cancelled")
+                resources_closed = False
                 log.warning(
                     "session_shutdown_phase_cancelled",
                     run_id=self._run_id,
@@ -425,6 +451,7 @@ class RuntimeSession:
                 )
             except Exception as exc:
                 failures.append(f"close_error:{type(exc).__name__}")
+                resources_closed = False
                 log.exception(
                     "session_shutdown_phase_failed",
                     run_id=self._run_id,

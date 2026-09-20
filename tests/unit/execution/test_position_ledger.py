@@ -11,6 +11,7 @@ from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
+    ExitOrderSubmissionFact,
     PositionKey,
 )
 from crypto_momentum_lab.domain.strategy import StrategySide
@@ -81,16 +82,43 @@ def test_position_ledger_single_entry() -> None:
     assert len(proj.archived_episodes) == 0
 
 
-def test_position_ledger_scaling_adds_and_fifo_reduction() -> None:
+def test_position_ledger_consecutive_adds_without_exit_boundary_aggregate_batch() -> None:
+    """Per CONTEXT.md and Astra critique S1: consecutive adds before exit boundary
+
+    belong to the SAME batch with updated anchor and weighted-average entry price.
+    """
     key = _key()
     ledger = PositionLedger(key)
     t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
 
-    # Entry 10, then add 15 -> total 25
     f1 = _fill("t1", "BUY", "10", "60000", t0)
     f2 = _fill("t2", "BUY", "15", "61000", t0 + timedelta(minutes=5))
 
-    # Sell 12 -> FIFO deducts 10 from batch 1, 2 from batch 2 -> remaining 13 in batch 2
+    facts = AccountFacts(position_key=key, fills=(f1, f2))
+    proj = ledger.project(facts)
+
+    assert proj.total_active_quantity == Decimal("25")
+    assert len(proj.active_batches) == 1
+    batch = proj.active_batches[0]
+    assert batch.quantity == Decimal("25")
+    assert batch.original_quantity == Decimal("25")
+    # Weighted average: (10 * 60000 + 15 * 61000) / 25 = 60600
+    assert batch.entry_price == Decimal("60600")
+    # Anchor updated to the latest add-on entry
+    assert batch.opened_at == t0 + timedelta(minutes=5)
+
+
+def test_position_ledger_scaling_adds_and_fifo_reduction() -> None:
+    """Consecutive entries without exit boundary merge into one batch; reduction deducts from it."""
+    key = _key()
+    ledger = PositionLedger(key)
+    t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+
+    # Entry 10, then add 15 -> merged total 25
+    f1 = _fill("t1", "BUY", "10", "60000", t0)
+    f2 = _fill("t2", "BUY", "15", "61000", t0 + timedelta(minutes=5))
+
+    # Sell 12 -> deducts 12 from merged batch 1 (was 25) -> remaining 13
     f3 = _fill("t3", "SELL", "12", "62000", t0 + timedelta(minutes=10))
 
     facts = AccountFacts(position_key=key, fills=(f1, f2, f3))
@@ -98,11 +126,59 @@ def test_position_ledger_scaling_adds_and_fifo_reduction() -> None:
 
     assert proj.total_active_quantity == Decimal("13")
     assert len(proj.active_batches) == 1
+    assert proj.active_batches[0].original_quantity == Decimal("25")
+    assert proj.active_batches[0].quantity == Decimal("13")
+    assert proj.active_batches[0].entry_price == Decimal("60600")
+    assert proj.active_batches[0].opened_at == t0 + timedelta(minutes=5)
+
+    # Check reduction record
+    assert proj.active_episode is not None
+    assert len(proj.active_episode.reductions) == 1
+    red = proj.active_episode.reductions[0]
+    assert red.quantity == Decimal("12")
+    assert len(red.attributions) == 1
+    assert red.attributions[0].quantity == Decimal("12")
+    assert red.is_system is True
+
+
+def test_position_ledger_exit_boundary_separates_batches_and_fifo_deduction() -> None:
+    """Exit boundary between entries creates separate batches; reduction uses FIFO."""
+    key = _key()
+    ledger = PositionLedger(key)
+    t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+
+    # Entry 10 at t0
+    f1 = _fill("t1", "BUY", "10", "60000", t0, order_id="ord_entry_1")
+
+    # Exit boundary submitted at t0 + 2m
+    sub1 = ExitOrderSubmissionFact(
+        order_id="ord_exit_1",
+        submitted_at=t0 + timedelta(minutes=2),
+        symbol=key.symbol,
+        position_side=key.position_side,
+    )
+
+    # Entry 15 at t0 + 5m (after exit boundary -> MUST start batch 2!)
+    f2 = _fill("t2", "BUY", "15", "61000", t0 + timedelta(minutes=5), order_id="ord_entry_2")
+
+    # Sell 12 at t0 + 10m -> FIFO deducts 10 from batch 1, 2 from batch 2 -> remaining 13 in batch 2
+    f3 = _fill("t3", "SELL", "12", "62000", t0 + timedelta(minutes=10), order_id="ord_exit_1")
+
+    facts = AccountFacts(
+        position_key=key,
+        fills=(f1, f2, f3),
+        exit_boundaries=(sub1,),
+    )
+    proj = ledger.project(facts)
+
+    assert proj.total_active_quantity == Decimal("13")
+    assert len(proj.active_batches) == 1
+    assert proj.active_batches[0].batch_id.endswith("_b2")
     assert proj.active_batches[0].original_quantity == Decimal("15")
     assert proj.active_batches[0].quantity == Decimal("13")
     assert proj.active_batches[0].entry_price == Decimal("61000")
 
-    # Check reduction record
+    # Check reduction record across both batches
     assert proj.active_episode is not None
     assert len(proj.active_episode.reductions) == 1
     red = proj.active_episode.reductions[0]
@@ -110,6 +186,7 @@ def test_position_ledger_scaling_adds_and_fifo_reduction() -> None:
     assert len(red.attributions) == 2
     assert red.attributions[0].quantity == Decimal("10")
     assert red.attributions[1].quantity == Decimal("2")
+    assert red.is_system is True
 
 
 def test_position_ledger_zero_crossing_isolates_new_episode() -> None:

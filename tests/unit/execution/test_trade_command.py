@@ -303,3 +303,73 @@ def test_exit_allocator_create_exit_command() -> None:
     assert cmd.idempotency_key == "idemp-xyz"
     assert cmd.allocation_plan is not None
     assert cmd.allocation_plan.total_allocated_quantity == Decimal("1.5")
+
+
+def test_exit_allocator_create_exit_command_both_mode_short() -> None:
+    """In one-way BOTH mode, exiting a SHORT position generates StrategySide.SHORT command and BUY execution."""
+    pos_key_both = PositionKey(
+        environment="production",
+        account_label="binance-prod",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    b1 = PositionLedgerBatch(
+        batch_id="b1",
+        episode_id="ep-short-1",
+        quantity=Decimal("1.5"),
+        original_quantity=Decimal("1.5"),
+        entry_price=Decimal("3000"),
+        opened_at=NOW,
+    )
+    episode = PositionEpisode(
+        episode_id="ep-short-1",
+        position_key=pos_key_both,
+        side=StrategySide.SHORT,
+        opened_at=NOW,
+        batches=(b1,),
+    )
+    proj = PositionLedgerProjection(
+        position_key=pos_key_both,
+        active_episode=episode,
+        active_batches=(b1,),
+        total_active_quantity=Decimal("1.5"),
+        unallocated_quantity=Decimal("0"),
+        reconciliation_gap=Decimal("0"),
+        high_watermark_trade_at=NOW,
+    )
+
+    cmd = ExitAllocator.create_exit_command(
+        proj,
+        requested_quantity=Decimal("1.5"),
+        policy=ExitPolicyMode.TARGET_BATCHES_ONLY,
+        order_type=EntryType.MARKET,
+        reason="stop_loss",
+    )
+    assert cmd is not None
+    assert cmd.position_key.position_side == FuturesPositionSide.BOTH
+    assert cmd.side == StrategySide.SHORT
+    assert cmd.reduce_only is True
+
+    from crypto_momentum_lab.execution_account.orders.trade_command_executor import (
+        TradeCommandExecutor,
+    )
+    from crypto_momentum_lab.execution_account.orders.quantization import SymbolTradingRules
+    rules = SymbolTradingRules(
+        symbol="BTCUSDT",
+        tick_size=Decimal("0.10"),
+        step_size=Decimal("0.1"),
+        min_quantity=Decimal("0.1"),
+        max_quantity=Decimal("100.0"),
+        min_notional=Decimal("5.0"),
+    )
+    exec_plan = TradeCommandExecutor.plan_execution(
+        cmd,
+        rules,
+        run_id="run-1",
+        reference_price=Decimal("3000"),
+        hedge_mode=False,
+    )
+    assert exec_plan.plan is not None
+    assert exec_plan.plan.side == "BUY"
+    assert exec_plan.plan.position_side == FuturesPositionSide.BOTH
+

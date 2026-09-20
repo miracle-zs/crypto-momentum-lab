@@ -45,23 +45,23 @@ class LiveResourceLifecycle:
     def __init__(
         self,
         *,
-        entry_runtime: LiveEntryRuntime | None,
-        entry_order_lifecycle: LiveLimitOrderLifecycle | None,
-        execution_coordinator: OrderExecutionCoordinator | None,
-        client: BinanceUsdMTradeClient | None,
-        closed_candle_feed: BinanceClosedCandle15mFeed | None,
-        candle_source: BinanceRestClosedCandle15mSource | None,
-        ema_candle_source: BinanceRestClosedCandle15mSource | None,
-        signal_recorder: LiveStrategySignalRecorder | None,
-        telemetry: LiveRuntimeTelemetry | None,
-        volume_cache: _StoppableVolumeCache | None,
-        volume_rest_client: BinanceUsdMRestClient | None,
-        execution_engine: AsyncEngine | None,
-        market_engine: AsyncEngine | None,
-        observability_engine: AsyncEngine | None,
-        checkpoint_engine: AsyncEngine | None,
-        heartbeat_engine: AsyncEngine | None,
-        health: LocalHealthWriter | None,
+        entry_runtime: LiveEntryRuntime | None = None,
+        entry_order_lifecycle: LiveLimitOrderLifecycle | None = None,
+        execution_coordinator: OrderExecutionCoordinator | None = None,
+        client: BinanceUsdMTradeClient | None = None,
+        closed_candle_feed: BinanceClosedCandle15mFeed | None = None,
+        candle_source: BinanceRestClosedCandle15mSource | None = None,
+        ema_candle_source: BinanceRestClosedCandle15mSource | None = None,
+        signal_recorder: LiveStrategySignalRecorder | None = None,
+        telemetry: LiveRuntimeTelemetry | None = None,
+        volume_cache: _StoppableVolumeCache | None = None,
+        volume_rest_client: BinanceUsdMRestClient | None = None,
+        execution_engine: AsyncEngine | None = None,
+        market_engine: AsyncEngine | None = None,
+        observability_engine: AsyncEngine | None = None,
+        checkpoint_engine: AsyncEngine | None = None,
+        heartbeat_engine: AsyncEngine | None = None,
+        health: LocalHealthWriter | None = None,
         shutdown_timeout_seconds: float = _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
     ) -> None:
         if shutdown_timeout_seconds <= 0:
@@ -84,14 +84,20 @@ class LiveResourceLifecycle:
         self._heartbeat_engine = heartbeat_engine
         self._health = health
         self._shutdown_timeout_seconds = shutdown_timeout_seconds
+        self._close_failures: list[str] = []
 
-    async def close(self) -> None:
+    @property
+    def close_failures(self) -> tuple[str, ...]:
+        return tuple(self._close_failures)
+
+    async def close(self) -> tuple[str, ...]:
         """Stop producers before transports, then dispose database engines."""
 
         try:
             async with asyncio.timeout(self._shutdown_timeout_seconds):
                 await self._close_impl()
         except TimeoutError:
+            self._close_failures.append("overall_shutdown_timeout")
             log.warning(
                 "live_resource_shutdown_timed_out",
                 timeout_seconds=self._shutdown_timeout_seconds,
@@ -100,8 +106,10 @@ class LiveResourceLifecycle:
             if self._health is not None:
                 try:
                     self._health.stopped()
-                except Exception:
+                except Exception as exc:
+                    self._close_failures.append(f"health_stop:{type(exc).__name__}")
                     log.exception("live_health_stop_marker_failed")
+        return tuple(self._close_failures)
 
     async def _close_impl(self) -> None:
         """Run safety-critical closes first, then independent cleanup together."""
@@ -194,14 +202,17 @@ class LiveResourceLifecycle:
             async with asyncio.timeout(_RESOURCE_CLOSE_TIMEOUT_SECONDS):
                 await operation()
         except TimeoutError:
+            self._close_failures.append(f"{label}:timeout")
             log.warning(
                 "live_resource_close_timed_out",
                 resource=label,
                 timeout_seconds=_RESOURCE_CLOSE_TIMEOUT_SECONDS,
             )
         except asyncio.CancelledError:
+            self._close_failures.append(f"{label}:cancelled")
             raise
-        except Exception:
+        except Exception as exc:
+            self._close_failures.append(f"{label}:{type(exc).__name__}")
             log.exception("live_resource_close_failed", resource=label)
         else:
             log.info(

@@ -13,6 +13,10 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.elements import TextClause
 
+from crypto_momentum_lab.domain.operational.retention_contract import (
+    RetentionConsumerRequirement,
+    RetentionWatermarkEvaluator,
+)
 from crypto_momentum_lab.persistence.postgres.runtime_state_partitions import (
     RUNTIME_STATE_PARTITION_LOOKAHEAD,
     drop_expired_runtime_state_partitions,
@@ -127,9 +131,18 @@ class PostgresOperationalRetentionRepository:
         *,
         before: datetime,
         batch_size: int = 1_000,
+        consumer_requirements: tuple[RetentionConsumerRequirement, ...] = (),
     ) -> int:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        effective_before = before
+        if consumer_requirements:
+            gating = RetentionWatermarkEvaluator.evaluate_cutoff(
+                requested_cutoff=before,
+                requirements=consumer_requirements,
+            )
+            effective_before = gating.effective_cutoff
+
         # Keep the newest snapshot for every symbol even when it is older than
         # the retention horizon.  The live runner needs one usable rule row;
         # deleting the only row makes an unchanged in-memory metadata cache
@@ -153,7 +166,7 @@ class PostgresOperationalRetentionRepository:
         )
         return await self._execute_delete(
             statement,
-            before=before,
+            before=effective_before,
             batch_size=batch_size,
         )
 
@@ -162,7 +175,16 @@ class PostgresOperationalRetentionRepository:
         *,
         before: datetime,
         batch_size: int = 1_000,
+        consumer_requirements: tuple[RetentionConsumerRequirement, ...] = (),
     ) -> int:
+        effective_before = before
+        if consumer_requirements:
+            gating = RetentionWatermarkEvaluator.evaluate_cutoff(
+                requested_cutoff=before,
+                requirements=consumer_requirements,
+            )
+            effective_before = gating.effective_cutoff
+
         if await runtime_state_table_is_partitioned(self._session_factory):
             observed_at = datetime.now(UTC)
             await ensure_runtime_state_partitions(
@@ -171,12 +193,12 @@ class PostgresOperationalRetentionRepository:
             )
             return await drop_expired_runtime_state_partitions(
                 self._session_factory,
-                before=before,
+                before=effective_before,
             )
         return await self._delete_batch(
             "runtime_market_states_15s",
             "bucket_start",
-            before=before,
+            before=effective_before,
             batch_size=batch_size,
         )
 
@@ -185,6 +207,7 @@ class PostgresOperationalRetentionRepository:
         *,
         before: datetime,
         batch_size: int = 1_000,
+        consumer_requirements: tuple[RetentionConsumerRequirement, ...] = (),
     ) -> int:
         """Drop or delete strategy runtime events outside the retention window.
 
@@ -192,6 +215,13 @@ class PostgresOperationalRetentionRepository:
         unpartitioned fallback is the small-batch delete used before the
         cutover; keep it so a rolled-back deployment still ages out history.
         """
+        effective_before = before
+        if consumer_requirements:
+            gating = RetentionWatermarkEvaluator.evaluate_cutoff(
+                requested_cutoff=before,
+                requirements=consumer_requirements,
+            )
+            effective_before = gating.effective_cutoff
 
         if await event_table_is_partitioned(self._session_factory):
             observed_at = datetime.now(UTC)
@@ -201,12 +231,12 @@ class PostgresOperationalRetentionRepository:
             )
             return await drop_expired_event_partitions(
                 self._session_factory,
-                before=before,
+                before=effective_before,
             )
         return await self._delete_batch(
             "strategy_runtime_events",
             "occurred_at",
-            before=before,
+            before=effective_before,
             batch_size=batch_size,
         )
 
@@ -230,6 +260,7 @@ class PostgresOperationalRetentionRepository:
         batch_size: int = 1_000,
         max_rows_per_table: int = 10_000,
         equity_before: datetime | None = None,
+        consumer_requirements: tuple[RetentionConsumerRequirement, ...] = (),
     ) -> dict[str, int]:
         """Delete old account snapshots without deleting each latest view.
 
@@ -250,6 +281,19 @@ class PostgresOperationalRetentionRepository:
         if max_rows_per_table <= 0:
             raise ValueError("max_rows_per_table must be positive")
         resolved_equity_before = before if equity_before is None else equity_before
+
+        if consumer_requirements:
+            gating_normal = RetentionWatermarkEvaluator.evaluate_cutoff(
+                requested_cutoff=before,
+                requirements=consumer_requirements,
+            )
+            before = gating_normal.effective_cutoff
+            gating_equity = RetentionWatermarkEvaluator.evaluate_cutoff(
+                requested_cutoff=resolved_equity_before,
+                requirements=consumer_requirements,
+            )
+            resolved_equity_before = gating_equity.effective_cutoff
+
         if resolved_equity_before > before:
             raise ValueError("equity_before must not be later than before")
 

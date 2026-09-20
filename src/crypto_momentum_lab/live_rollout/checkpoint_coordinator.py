@@ -127,6 +127,12 @@ class LiveCheckpointCoordinator:
     def last_processed_at(self, symbol: str) -> datetime | None:
         return self._last_processed_at_by_symbol.get(symbol)
 
+    @property
+    def latest_watermark(self) -> datetime | None:
+        if self._last_processed_at_by_symbol:
+            return max(self._last_processed_at_by_symbol.values())
+        return self._last_saved_at
+
     def forget_symbol(self, symbol: str) -> None:
         self._last_processed_at_by_symbol.pop(symbol, None)
 

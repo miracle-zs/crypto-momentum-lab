@@ -16,6 +16,7 @@ from crypto_momentum_lab.domain.execution import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.execution.progress_contract import ExecutionReadiness
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import RiskEvaluation
 from crypto_momentum_lab.domain.strategy import (
@@ -2155,6 +2156,7 @@ def _daemon(
     scheduled_risk_window: ScheduledRiskWindowConfig | None = None,
     cancel_unfilled_entry_orders=None,
     fetch_exchange_positions=None,
+    readiness_provider=None,
 ) -> LiveStrategyDaemon:
     order_repository = FakeOrderRepository()
     machine = OrderExecutionStateMachine(
@@ -2198,6 +2200,7 @@ def _daemon(
             entry_policy_enforce=entry_policy_enforce,
             entry_order_type=entry_order_type,
             scheduled_risk_window=scheduled_risk_window,
+            readiness_provider=readiness_provider,
         ),
         exit_manager=exit_manager,
         exit_recovery_client=exit_recovery_client,
@@ -2427,3 +2430,17 @@ def _halt():
 
 async def _states() -> AsyncIterator:
     yield _state()
+
+
+async def test_live_daemon_readiness_provider_blocks_entries_when_lagging() -> None:
+    """Verifies that an injected lagging readiness provider prevents entry order submission."""
+    exchange = PlanAwareExchange()
+    daemon = _daemon(
+        exchange=exchange,
+        readiness_provider=lambda: ExecutionReadiness.PROGRESS_LAGGING,
+    )
+    result = await daemon.run(_states())
+    assert result.halt_reason is None
+    assert result.approved_intent_count == 0
+    assert result.submitted_order_count == 0
+    assert exchange.calls == []

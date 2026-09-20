@@ -77,12 +77,31 @@ class FactCoverageInterval:
 
 
 @dataclass(frozen=True, slots=True)
+class ExitOrderSubmissionFact:
+    """The submission of an exit (reduce-only) order defining a batch boundary."""
+
+    order_id: str
+    submitted_at: datetime
+    symbol: str
+    position_side: FuturesPositionSide
+    client_order_id: str | None = None
+    target_batch_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.submitted_at.tzinfo is None:
+            raise ValueError("submitted_at must be timezone-aware")
+        if not self.order_id.strip():
+            raise ValueError("order_id must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
 class AccountFacts:
     """Normalized immutable account facts for a given position key."""
 
     position_key: PositionKey
     fills: tuple[AccountFillEvent, ...] = ()
     snapshots: tuple[AccountPositionSnapshot, ...] = ()
+    exit_boundaries: tuple[ExitOrderSubmissionFact, ...] = ()
     coverage: FactCoverageInterval | None = None
 
 
@@ -103,6 +122,7 @@ class ExternalReductionFact:
     quantity: Decimal
     price: Decimal
     reduced_at: datetime
+    is_system: bool = False
     attributions: tuple[BatchReductionAttribution, ...] = ()
 
     def __post_init__(self) -> None:
@@ -127,6 +147,7 @@ class PositionLedgerBatch:
     order_id: str | None = None
     client_order_id: str | None = None
     is_external: bool = False
+    exit_order_submitted_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not self.batch_id.strip():
@@ -143,6 +164,8 @@ class PositionLedgerBatch:
             raise ValueError("entry_price must be positive")
         if self.opened_at.tzinfo is None:
             raise ValueError("opened_at must be timezone-aware")
+        if self.exit_order_submitted_at is not None and self.exit_order_submitted_at.tzinfo is None:
+            raise ValueError("exit_order_submitted_at must be timezone-aware")
 
 
 @dataclass(frozen=True, slots=True)

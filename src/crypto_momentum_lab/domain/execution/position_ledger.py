@@ -22,6 +22,7 @@ from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
     BatchReductionAttribution,
+    ExitOrderSubmissionFact,
     ExternalReductionFact,
     PositionEpisode,
     PositionKey,
@@ -76,6 +77,27 @@ class PositionLedger:
         peak_qty = Decimal("0")
         batch_counter = 0
 
+        # Sort exit boundaries chronologically
+        sorted_boundaries = sorted(
+            facts.exit_boundaries,
+            key=lambda b: (b.submitted_at, b.order_id),
+        )
+        boundary_idx = 0
+
+        def apply_exit_boundary(boundary: ExitOrderSubmissionFact) -> None:
+            if not current_batches:
+                return
+            if boundary.target_batch_id is not None:
+                for i, b in enumerate(current_batches):
+                    if b.batch_id == boundary.target_batch_id and b.exit_order_submitted_at is None:
+                        current_batches[i] = replace(b, exit_order_submitted_at=boundary.submitted_at)
+                        return
+            for i in range(len(current_batches) - 1, -1, -1):
+                b = current_batches[i]
+                if b.quantity > 0 and b.exit_order_submitted_at is None:
+                    current_batches[i] = replace(b, exit_order_submitted_at=boundary.submitted_at)
+                    return
+
         for fill in sorted_fills:
             high_watermark = fill.trade_at
             is_system = (
@@ -83,6 +105,28 @@ class PositionLedger:
                 or bool(fill.raw_payload.get("is_system", False))
             )
             fill_side = fill.side.upper()
+
+            # Advance and apply boundaries that occurred before this fill (or at the same time if exit fill)
+            while boundary_idx < len(sorted_boundaries):
+                b = sorted_boundaries[boundary_idx]
+                if b.submitted_at < fill.trade_at:
+                    apply_exit_boundary(b)
+                    boundary_idx += 1
+                elif b.submitted_at == fill.trade_at:
+                    is_exit_fill = (
+                        active_episode is not None
+                        and (
+                            (active_episode.side == StrategySide.LONG and fill_side == "SELL")
+                            or (active_episode.side == StrategySide.SHORT and fill_side == "BUY")
+                        )
+                    )
+                    if is_exit_fill:
+                        apply_exit_boundary(b)
+                        boundary_idx += 1
+                    else:
+                        break
+                else:
+                    break
 
             # If no active episode, this fill initiates a new episode
             if active_episode is None:
@@ -108,26 +152,69 @@ class PositionLedger:
                 cum_bought = Decimal("0")
                 cum_sold = Decimal("0")
                 peak_qty = Decimal("0")
-                batch_counter = 0
+                batch_counter = 1
+                batch_id = f"{ep_id}_b{batch_counter}"
+                batch = PositionLedgerBatch(
+                    batch_id=batch_id,
+                    episode_id=ep_id,
+                    quantity=fill.quantity,
+                    original_quantity=fill.quantity,
+                    entry_price=fill.price,
+                    opened_at=fill.trade_at,
+                    order_id=fill.order_id,
+                    client_order_id=None,
+                    is_external=not is_system,
+                    exit_order_submitted_at=None,
+                )
+                current_batches.append(batch)
+                if side == StrategySide.LONG:
+                    cum_bought = fill.quantity
+                    peak_qty = fill.quantity
+                else:
+                    cum_sold = fill.quantity
+                    peak_qty = fill.quantity
+                continue
 
             # LONG Episode Processing
             if active_episode.side == StrategySide.LONG:
                 if fill_side == "BUY":
                     # Entry / Scaling add
-                    batch_counter += 1
-                    batch_id = f"{active_episode.episode_id}_b{batch_counter}"
-                    batch = PositionLedgerBatch(
-                        batch_id=batch_id,
-                        episode_id=active_episode.episode_id,
-                        quantity=fill.quantity,
-                        original_quantity=fill.quantity,
-                        entry_price=fill.price,
-                        opened_at=fill.trade_at,
-                        order_id=fill.order_id,
-                        client_order_id=None,
-                        is_external=not is_system,
-                    )
-                    current_batches.append(batch)
+                    latest_batch = current_batches[-1] if current_batches else None
+                    if latest_batch is not None and latest_batch.exit_order_submitted_at is None:
+                        # Add-on entry before exit boundary: aggregate & update anchor
+                        new_qty = latest_batch.quantity + fill.quantity
+                        new_orig_qty = latest_batch.original_quantity + fill.quantity
+                        new_entry_price = (
+                            latest_batch.quantity * latest_batch.entry_price
+                            + fill.quantity * fill.price
+                        ) / new_qty
+                        new_opened_at = max(latest_batch.opened_at, fill.trade_at)
+                        new_is_external = latest_batch.is_external or (not is_system)
+                        current_batches[-1] = replace(
+                            latest_batch,
+                            quantity=new_qty,
+                            original_quantity=new_orig_qty,
+                            entry_price=new_entry_price,
+                            opened_at=new_opened_at,
+                            is_external=new_is_external,
+                        )
+                    else:
+                        batch_counter += 1
+                        batch_id = f"{active_episode.episode_id}_b{batch_counter}"
+                        batch = PositionLedgerBatch(
+                            batch_id=batch_id,
+                            episode_id=active_episode.episode_id,
+                            quantity=fill.quantity,
+                            original_quantity=fill.quantity,
+                            entry_price=fill.price,
+                            opened_at=fill.trade_at,
+                            order_id=fill.order_id,
+                            client_order_id=None,
+                            is_external=not is_system,
+                            exit_order_submitted_at=None,
+                        )
+                        current_batches.append(batch)
+
                     cum_bought += fill.quantity
                     current_net = cum_bought - cum_sold
                     if current_net > peak_qty:
@@ -135,6 +222,12 @@ class PositionLedger:
 
                 elif fill_side == "SELL":
                     # Exit / Reduction
+                    if current_batches and current_batches[-1].exit_order_submitted_at is None:
+                        current_batches[-1] = replace(
+                            current_batches[-1],
+                            exit_order_submitted_at=fill.trade_at,
+                        )
+
                     to_reduce = fill.quantity
                     attributions: list[BatchReductionAttribution] = []
 
@@ -166,6 +259,7 @@ class PositionLedger:
                         quantity=fill.quantity,
                         price=fill.price,
                         reduced_at=fill.trade_at,
+                        is_system=is_system,
                         attributions=tuple(attributions),
                     )
                     current_reductions.append(reduction_fact)
@@ -219,32 +313,60 @@ class PositionLedger:
                                 opened_at=fill.trade_at,
                                 order_id=fill.order_id,
                                 is_external=not is_system,
+                                exit_order_submitted_at=None,
                             )
                             current_batches = [batch]
 
             # SHORT Episode Processing (Symmetric)
             elif active_episode.side == StrategySide.SHORT:
                 if fill_side == "SELL":
-                    batch_counter += 1
-                    batch_id = f"{active_episode.episode_id}_b{batch_counter}"
-                    batch = PositionLedgerBatch(
-                        batch_id=batch_id,
-                        episode_id=active_episode.episode_id,
-                        quantity=fill.quantity,
-                        original_quantity=fill.quantity,
-                        entry_price=fill.price,
-                        opened_at=fill.trade_at,
-                        order_id=fill.order_id,
-                        client_order_id=None,
-                        is_external=not is_system,
-                    )
-                    current_batches.append(batch)
+                    latest_batch = current_batches[-1] if current_batches else None
+                    if latest_batch is not None and latest_batch.exit_order_submitted_at is None:
+                        new_qty = latest_batch.quantity + fill.quantity
+                        new_orig_qty = latest_batch.original_quantity + fill.quantity
+                        new_entry_price = (
+                            latest_batch.quantity * latest_batch.entry_price
+                            + fill.quantity * fill.price
+                        ) / new_qty
+                        new_opened_at = max(latest_batch.opened_at, fill.trade_at)
+                        new_is_external = latest_batch.is_external or (not is_system)
+                        current_batches[-1] = replace(
+                            latest_batch,
+                            quantity=new_qty,
+                            original_quantity=new_orig_qty,
+                            entry_price=new_entry_price,
+                            opened_at=new_opened_at,
+                            is_external=new_is_external,
+                        )
+                    else:
+                        batch_counter += 1
+                        batch_id = f"{active_episode.episode_id}_b{batch_counter}"
+                        batch = PositionLedgerBatch(
+                            batch_id=batch_id,
+                            episode_id=active_episode.episode_id,
+                            quantity=fill.quantity,
+                            original_quantity=fill.quantity,
+                            entry_price=fill.price,
+                            opened_at=fill.trade_at,
+                            order_id=fill.order_id,
+                            client_order_id=None,
+                            is_external=not is_system,
+                            exit_order_submitted_at=None,
+                        )
+                        current_batches.append(batch)
+
                     cum_sold += fill.quantity
                     current_net = cum_sold - cum_bought
                     if current_net > peak_qty:
                         peak_qty = current_net
 
                 elif fill_side == "BUY":
+                    if current_batches and current_batches[-1].exit_order_submitted_at is None:
+                        current_batches[-1] = replace(
+                            current_batches[-1],
+                            exit_order_submitted_at=fill.trade_at,
+                        )
+
                     to_reduce = fill.quantity
                     attributions = []
                     new_batches = []
@@ -274,6 +396,7 @@ class PositionLedger:
                         quantity=fill.quantity,
                         price=fill.price,
                         reduced_at=fill.trade_at,
+                        is_system=is_system,
                         attributions=tuple(attributions),
                     )
                     current_reductions.append(reduction_fact)
@@ -323,8 +446,14 @@ class PositionLedger:
                                 opened_at=fill.trade_at,
                                 order_id=fill.order_id,
                                 is_external=not is_system,
+                                exit_order_submitted_at=None,
                             )
                             current_batches = [batch]
+
+        # Apply any trailing exit boundaries
+        while boundary_idx < len(sorted_boundaries):
+            apply_exit_boundary(sorted_boundaries[boundary_idx])
+            boundary_idx += 1
 
         # Finalize active episode state if open
         final_active_episode: PositionEpisode | None = None

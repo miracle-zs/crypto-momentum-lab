@@ -22,6 +22,12 @@ from crypto_momentum_lab.domain.execution import (
     PositionOrderFact,
     rebuild_position_batches,
 )
+from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
+from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+from crypto_momentum_lab.live_rollout.position_ledger_shadow import (
+    LegacyOrderIdentityAdapter,
+    PositionLedgerShadowComparator,
+)
 from crypto_momentum_lab.domain.live_rollout import LiveOperatorApproval
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import (
@@ -2220,6 +2226,43 @@ def _build_position_batches(
                 filled_quantity=str(diag.filled_quantity),
                 reassigned_quantity=str(diag.reassigned_quantity),
             )
+
+    # Read-only shadow comparison: run PositionLedger in parallel without affecting execution
+    try:
+        position_key = PositionKey(
+            environment=getattr(position, "environment", "live"),
+            account_label=getattr(position, "account_label", "primary"),
+            symbol=position.symbol,
+            position_side=position_side,
+        )
+        facts = LegacyOrderIdentityAdapter.to_account_facts(
+            position_key=position_key,
+            orders=matching_orders,
+            observation=observation,
+        )
+        ledger = PositionLedger(position_key)
+        shadow_projection = ledger.project(facts)
+        diff_report = PositionLedgerShadowComparator.compare(
+            position_key=position_key,
+            legacy_batches=result.batches,
+            ledger_projection=shadow_projection,
+        )
+        if not diff_report.is_concordant:
+            log.info(
+                "shadow_position_ledger_divergence",
+                symbol=position.symbol,
+                category=diff_report.category.value,
+                legacy_count=diff_report.legacy_batch_count,
+                ledger_count=diff_report.ledger_batch_count,
+                details=diff_report.details,
+            )
+    except Exception as exc:
+        log.warning(
+            "shadow_position_ledger_comparison_failed",
+            symbol=position.symbol,
+            error=str(exc),
+        )
+
     return result.batches
 
 

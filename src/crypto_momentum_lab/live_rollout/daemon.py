@@ -18,6 +18,10 @@ from crypto_momentum_lab.domain.execution import (
     ExchangeOrderEvent,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.execution.progress_contract import (
+    ExecutionReadiness,
+    ReadinessEvaluator,
+)
 from crypto_momentum_lab.domain.market.models import (
     MarketState15s,
     RealtimeMarketQuote,
@@ -160,6 +164,7 @@ class LiveDaemonConfig:
     entry_limit_ttl_seconds: int = 900
     scheduled_risk_window: ScheduledRiskWindowConfig | None = None
     max_concurrency: int | None = None
+    readiness_provider: Callable[[], ExecutionReadiness] | None = None
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -403,6 +408,7 @@ class LiveStrategyDaemon:
                 entry_order_type=config.entry_order_type,
                 entry_limit_ttl_seconds=config.entry_limit_ttl_seconds,
                 max_concurrency=config.max_concurrency,
+                readiness_provider=config.readiness_provider,
             ),
             clock=self._clock,
             entry_enabled=lambda: self.entry_enabled,
@@ -590,6 +596,20 @@ class LiveStrategyDaemon:
 
     def _set_run_active(self, active: bool) -> None:
         self._run_active = active
+
+    @property
+    def latest_watermark(self) -> datetime | None:
+        return (
+            self._checkpoint_coordinator.latest_watermark
+            or self._market_loop.active_state_at
+        )
+
+    def evaluate_readiness(self) -> ExecutionReadiness:
+        assessment = ReadinessEvaluator.evaluate(
+            current_time=self._clock(),
+            watermark_time=self.latest_watermark,
+        )
+        return assessment.readiness
 
     async def process_scheduled_risk_window(
         self,

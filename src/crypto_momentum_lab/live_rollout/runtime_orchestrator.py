@@ -24,8 +24,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.execution import OrderExecutionPlan
+from crypto_momentum_lab.domain.execution.progress_contract import ExecutionReadiness
 from crypto_momentum_lab.domain.live_rollout import LiveSessionState
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.operational.runtime_metadata import (
+    RuntimeMetadataSnapshot,
+)
 from crypto_momentum_lab.domain.risk import RiskEvaluation, TradingLease
 from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
@@ -507,6 +511,19 @@ async def run_live_daemon(
             ),
             clock=lambda: datetime.now(tz=UTC),
         )
+        metadata_snapshot = RuntimeMetadataSnapshot.create(
+            environment=market_environment,
+            account_label=account_label,
+            git_commit=git_commit_hash,
+            strategy_config_hash=strategy_config_hash,
+            risk_config_hash=risk_config_hash,
+            trading_rules_hash="v1",
+            started_at=datetime.now(tz=UTC),
+        )
+        log.info(
+            "runtime_metadata_snapshot_created",
+            **metadata_snapshot.to_dict(),
+        )
         client = BinanceUsdMTradeClient(
             api_key=api_key,
             api_secret=api_secret,
@@ -968,6 +985,7 @@ async def run_live_daemon(
                 entry_limit_ttl_seconds=entry_limit_ttl_seconds,
                 scheduled_risk_window=_resolve_scheduled_risk_window(),
                 max_concurrency=max_concurrency,
+                readiness_provider=lambda: daemon.evaluate_readiness() if daemon is not None else ExecutionReadiness.INDEPENDENT_EXECUTABLE,
             ),
             exit_manager=LiveExitManager(
                 config=LiveExitConfig(

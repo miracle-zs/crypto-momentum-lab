@@ -285,11 +285,12 @@ class ExitAllocator:
         if plan.total_allocated_quantity <= 0:
             return None
 
-        side = (
-            StrategySide.SHORT
-            if projection.position_key.position_side == FuturesPositionSide.SHORT
-            else StrategySide.LONG
-        )
+        if projection.active_episode is not None:
+            side = projection.active_episode.side
+        elif projection.position_key.position_side == FuturesPositionSide.SHORT:
+            side = StrategySide.SHORT
+        else:
+            side = StrategySide.LONG
 
         return TradeCommand(
             command_id=command_id or f"cmd-exit-{uuid4().hex[:12]}",

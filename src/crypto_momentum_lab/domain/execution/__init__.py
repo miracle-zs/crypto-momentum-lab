@@ -25,6 +25,7 @@ from crypto_momentum_lab.domain.execution.position_ledger import (
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
     BatchReductionAttribution,
+    ExitOrderSubmissionFact,
     ExternalReductionFact,
     FactCoverageInterval,
     PositionEpisode,
@@ -66,6 +67,7 @@ __all__ = [
     "PositionKey",
     "FactCoverageInterval",
     "AccountFacts",
+    "ExitOrderSubmissionFact",
     "BatchReductionAttribution",
     "ExternalReductionFact",
     "PositionLedgerBatch",

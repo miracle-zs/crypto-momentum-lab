@@ -26,8 +26,12 @@ from crypto_momentum_lab.domain.execution import (
     PositionObservation,
     PositionOrderFact,
 )
+from crypto_momentum_lab.domain.execution.position_batches import (
+    _EXIT_SUBMITTED_STATES,
+)
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
+    ExitOrderSubmissionFact,
     PositionKey,
     PositionLedgerProjection,
 )
@@ -101,6 +105,20 @@ class LegacyOrderIdentityAdapter:
                         )
                     )
 
+        exit_boundaries: list[ExitOrderSubmissionFact] = []
+        for order in orders:
+            if order.reduce_only and order.state in _EXIT_SUBMITTED_STATES:
+                exit_boundaries.append(
+                    ExitOrderSubmissionFact(
+                        order_id=order.exchange_order_id or order.client_order_id or f"exit_{order.created_at.timestamp()}",
+                        submitted_at=order.created_at,
+                        symbol=position_key.symbol,
+                        position_side=position_key.position_side,
+                        client_order_id=order.client_order_id,
+                        target_batch_id=order.exit_batch_id,
+                    )
+                )
+
         snapshots: list[AccountPositionSnapshot] = []
         if observation is not None:
             now_dt = datetime.now(UTC)
@@ -127,6 +145,7 @@ class LegacyOrderIdentityAdapter:
             position_key=position_key,
             fills=tuple(fill_list),
             snapshots=tuple(snapshots),
+            exit_boundaries=tuple(exit_boundaries),
         )
 
 
@@ -158,7 +177,7 @@ class PositionLedgerShadowComparator:
             age_diff_sec = abs((legacy_oldest - ledger_oldest).total_seconds())
 
         has_external_reduction = any(
-            bool(ep.reductions and any(r.order_id.startswith("b2_ext") or "external" in str(r.order_id) for r in ep.reductions))
+            bool(ep.reductions and any(not r.is_system for r in ep.reductions))
             for ep in (ledger_projection.active_episode,)
             if ep is not None
         )

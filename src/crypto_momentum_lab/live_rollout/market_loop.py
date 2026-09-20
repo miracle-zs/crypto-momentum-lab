@@ -173,6 +173,11 @@ class LiveMarketLoop:
         self._market_gap_generation = 0
         self._strategy_gap_reset_generation_by_symbol: dict[str, int] = {}
         self._last_transient_gate_reasons: tuple[str, ...] | None = None
+        self._active_state_at: datetime | None = None
+
+    @property
+    def active_state_at(self) -> datetime | None:
+        return self._active_state_at
 
     @property
     def market_gap_generation(self) -> int:
@@ -201,6 +206,7 @@ class LiveMarketLoop:
         state_interval_seconds = _strategy_state_interval_seconds(self._strategy)
         async for prefetched in self._context_prefetcher.stream(states):
             state = prefetched.state
+            self._active_state_at = state.bucket_start
             if state.is_backfill:
                 warm = getattr(self._strategy, "warm_market_state", None)
                 if callable(warm):

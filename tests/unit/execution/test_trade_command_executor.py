@@ -190,3 +190,29 @@ def test_trade_command_executor_limit_price_and_hedge_mode() -> None:
     )
     assert result_hedge.plan is not None
     assert result_hedge.plan.position_side == FuturesPositionSide.LONG
+
+
+def test_trade_command_executor_limit_sell_price_rounding_up() -> None:
+    """Sell limit order price is quantized using ROUND_UP to tick_size."""
+    cmd = TradeCommand(
+        command_id="cmd-limit-sell",
+        position_key=POS_KEY,
+        command_type=TradeCommandType.EXIT,
+        side=StrategySide.LONG,
+        order_type=EntryType.LIMIT,
+        requested_quantity=Decimal("0.01"),
+        limit_price=Decimal("50123.41"),
+        reduce_only=True,
+    )
+
+    result = TradeCommandExecutor.plan_execution(
+        cmd,
+        RULES,
+        run_id="run-1",
+        reference_price=Decimal("50000"),
+    )
+    assert result.plan is not None
+    assert result.plan.side == "SELL"
+    # tick_size 0.10: 50123.41 ROUND_UP -> 50123.50
+    assert result.plan.price == Decimal("50123.50")
+
