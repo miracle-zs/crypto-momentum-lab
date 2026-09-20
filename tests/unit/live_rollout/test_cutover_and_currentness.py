@@ -395,3 +395,91 @@ def test_position_ledger_shadow_comparator_detects_unallocated_qty() -> None:
     assert report.category == ShadowDiffCategory.UNALLOCATED_QUANTITY_DETECTED
     assert report.unallocated_quantity == Decimal("1.5")
     assert "unallocated quantity is non-zero" in report.details
+
+
+def test_build_position_batches_preserves_recovery_order_fields_under_cutover() -> None:
+    t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+    t1 = datetime(2026, 9, 20, 10, 5, tzinfo=UTC)
+    position = SimpleNamespace(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_amt=Decimal("10"),
+        entry_price=Decimal("60000"),
+    )
+
+    from crypto_momentum_lab.domain.execution import OrderExecutionPlan
+    from crypto_momentum_lab.domain.execution.order_state import (
+        ExchangeOrderState,
+    )
+    from crypto_momentum_lab.domain.execution.position_batches import (
+        PositionOrderFact,
+    )
+
+    entry_order = PositionOrderFact(
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+        side="BUY",
+        reduce_only=False,
+        order_type="MARKET",
+        quantity=Decimal("10"),
+        executed_quantity=Decimal("10"),
+        state=ExchangeOrderState.FILLED,
+        client_order_id="c_entry",
+        exchange_order_id="e_entry",
+        created_at=t0,
+        updated_at=t0,
+        price=Decimal("60000"),
+    )
+
+    recovery_plan = OrderExecutionPlan(
+        intent_id="intent-1",
+        run_id="run-1",
+        client_order_id="cml_recovery_123",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("10"),
+        price=Decimal("61000"),
+        reduce_only=True,
+        created_at=t1,
+        position_side=FuturesPositionSide.BOTH,
+    )
+
+    exit_limit_order = PositionOrderFact(
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+        side="SELL",
+        reduce_only=True,
+        order_type="LIMIT",
+        quantity=Decimal("10"),
+        executed_quantity=Decimal("0"),
+        state=ExchangeOrderState.ACKNOWLEDGED,
+        client_order_id="cml_recovery_123",
+        exchange_order_id="e_recovery",
+        created_at=t1,
+        updated_at=t1,
+        price=Decimal("61000"),
+        plan=recovery_plan,
+    )
+
+    with patch.dict(os.environ, {"CML_POSITION_LEDGER_PRIMARY_ENABLED": "1"}):
+        batches = _build_position_batches(
+            position=position,  # type: ignore[arg-type]
+            side=StrategySide.LONG,
+            position_side=FuturesPositionSide.BOTH,
+            matching_orders=[entry_order, exit_limit_order],  # type: ignore[arg-type]
+            fill_times={"e_entry": t0},
+            fill_prices={"e_entry": Decimal("60000")},
+        )
+        assert len(batches) == 1
+        batch = batches[0]
+        assert batch.quantity == Decimal("10")
+        assert batch.entry_price == Decimal("60000")
+        assert batch.opened_at == t0
+        assert batch.recovery_order_client_id == "cml_recovery_123"
+        assert batch.recovery_order_plan == recovery_plan
+        assert batch.recovery_order_remaining_quantity == Decimal("10")
+        assert batch.closing_order_filled is False
+        assert batch.exit_order_submitted_at == t1
+

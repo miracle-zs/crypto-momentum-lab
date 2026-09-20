@@ -2305,7 +2305,40 @@ def _build_position_batches(
                         quantity=ab.quantity,
                         entry_price=ab.entry_price,
                         opened_at=ab.opened_at,
-                        exit_order_submitted_at=ab.exit_order_submitted_at,
+                        exit_order_submitted_at=(
+                            ab.exit_order_submitted_at
+                            if ab.exit_order_submitted_at is not None
+                            else (
+                                result.batches[idx].exit_order_submitted_at
+                                if idx < len(result.batches)
+                                else None
+                            )
+                        ),
+                        recovery_order_client_id=(
+                            result.batches[idx].recovery_order_client_id
+                            if idx < len(result.batches)
+                            else None
+                        ),
+                        recovery_order_plan=(
+                            result.batches[idx].recovery_order_plan
+                            if idx < len(result.batches)
+                            else None
+                        ),
+                        recovery_order_remaining_quantity=(
+                            result.batches[idx].recovery_order_remaining_quantity
+                            if idx < len(result.batches)
+                            else None
+                        ),
+                        closing_order_filled=(
+                            result.batches[idx].closing_order_filled
+                            if idx < len(result.batches)
+                            else False
+                        ),
+                        legacy_attribution=(
+                            result.batches[idx].legacy_attribution
+                            if idx < len(result.batches)
+                            else False
+                        ),
                     )
                     for idx, ab in enumerate(shadow_projection.active_batches)
                 )
