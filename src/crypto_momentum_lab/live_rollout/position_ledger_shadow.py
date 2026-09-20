@@ -45,6 +45,8 @@ class ShadowDiffCategory(StrEnum):
     QUANTITY_MISMATCH = "quantity_mismatch"
     ZERO_CROSSING_DIVERGENCE = "zero_crossing_divergence"
     LOT_ATTRIBUTION_MISMATCH = "lot_attribution_mismatch"
+    RECONCILIATION_GAP_DETECTED = "reconciliation_gap_detected"
+    UNALLOCATED_QUANTITY_DETECTED = "unallocated_quantity_detected"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +61,8 @@ class ShadowDiffReport:
     ledger_total_quantity: Decimal
     oldest_batch_age_diff_seconds: float
     details: str
+    reconciliation_gap: Decimal = Decimal("0")
+    unallocated_quantity: Decimal = Decimal("0")
 
     @property
     def is_concordant(self) -> bool:
@@ -209,7 +213,19 @@ class PositionLedgerShadowComparator:
         category = ShadowDiffCategory.EXACT_MATCH
         details = "Exact match between legacy rebuild and PositionLedger v2"
 
-        if legacy_total_qty != ledger_total_qty:
+        if ledger_projection.reconciliation_gap != Decimal("0"):
+            category = ShadowDiffCategory.RECONCILIATION_GAP_DETECTED
+            details = (
+                f"Ledger reconciliation gap is non-zero: "
+                f"gap={ledger_projection.reconciliation_gap}"
+            )
+        elif ledger_projection.unallocated_quantity != Decimal("0"):
+            category = ShadowDiffCategory.UNALLOCATED_QUANTITY_DETECTED
+            details = (
+                f"Ledger unallocated quantity is non-zero: "
+                f"unallocated={ledger_projection.unallocated_quantity}"
+            )
+        elif legacy_total_qty != ledger_total_qty:
             category = ShadowDiffCategory.QUANTITY_MISMATCH
             details = (
                 f"Total quantity mismatch: legacy={legacy_total_qty}, "
@@ -297,6 +313,8 @@ class PositionLedgerShadowComparator:
             ledger_total_quantity=ledger_total_qty,
             oldest_batch_age_diff_seconds=age_diff_sec,
             details=details,
+            reconciliation_gap=ledger_projection.reconciliation_gap,
+            unallocated_quantity=ledger_projection.unallocated_quantity,
         )
 
         log.info(

@@ -249,10 +249,41 @@ class LiveExecutionShadowAuditor:
                         "legacy": legacy_plan.time_in_force,
                         "shadow": shadow_result.plan.time_in_force,
                     }
+                if shadow_result.plan.client_order_id != legacy_plan.client_order_id:
+                    mismatches["client_order_id"] = {
+                        "legacy": legacy_plan.client_order_id,
+                        "shadow": shadow_result.plan.client_order_id,
+                    }
+                if shadow_result.plan.intent_id != legacy_plan.intent_id:
+                    mismatches["intent_id"] = {
+                        "legacy": legacy_plan.intent_id,
+                        "shadow": shadow_result.plan.intent_id,
+                    }
+                if shadow_result.plan.run_id != legacy_plan.run_id:
+                    mismatches["run_id"] = {
+                        "legacy": legacy_plan.run_id,
+                        "shadow": shadow_result.plan.run_id,
+                    }
+                if shadow_result.plan.symbol != legacy_plan.symbol:
+                    mismatches["symbol"] = {
+                        "legacy": legacy_plan.symbol,
+                        "shadow": shadow_result.plan.symbol,
+                    }
 
                 if mismatches:
                     is_concordant = False
-                    category = "attribute_mismatch"
+                    if any(
+                        k in mismatches
+                        for k in (
+                            "client_order_id",
+                            "intent_id",
+                            "run_id",
+                            "symbol",
+                        )
+                    ):
+                        category = "identity_mismatch"
+                    else:
+                        category = "attribute_mismatch"
                     details = mismatches
 
             if not is_concordant:

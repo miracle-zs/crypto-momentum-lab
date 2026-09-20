@@ -2292,6 +2292,8 @@ def _build_position_batches(
                 diff_report.is_concordant
                 and shadow_projection.total_active_quantity
                 == abs(position.position_amt)
+                and shadow_projection.reconciliation_gap == Decimal("0")
+                and shadow_projection.unallocated_quantity == Decimal("0")
             ):
                 ledger_batches = tuple(
                     ManagedLivePositionBatch(
@@ -2321,6 +2323,10 @@ def _build_position_batches(
                 position_amt=str(position.position_amt),
                 abs_position_amt=str(abs(position.position_amt)),
                 ledger_total=str(shadow_projection.total_active_quantity),
+                reconciliation_gap=str(shadow_projection.reconciliation_gap),
+                unallocated_quantity=str(
+                    shadow_projection.unallocated_quantity
+                ),
             )
     except Exception as exc:
         log.warning(

@@ -10,8 +10,12 @@ from crypto_momentum_lab.domain.strategy import (
     EntryType,
     StrategySide,
 )
+from crypto_momentum_lab.execution_account.orders.ids import (
+    deterministic_client_order_id,
+)
 from crypto_momentum_lab.execution_account.orders.quantization import (
     SymbolTradingRules,
+    quantize_order_plan,
 )
 from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
 from crypto_momentum_lab.live_rollout.shadow_auditor import (
@@ -55,7 +59,7 @@ def test_shadow_auditor_audit_submission_concordant() -> None:
     legacy_plan = OrderExecutionPlan(
         intent_id="cand-1",
         run_id="test-run",
-        client_order_id="c-1",
+        client_order_id=deterministic_client_order_id("test-run", "cand-1"),
         symbol="BTCUSDT",
         side="BUY",
         order_type="MARKET",
@@ -125,7 +129,7 @@ def test_shadow_auditor_audit_submission_detects_type_price_mismatch() -> None:
     legacy_plan = OrderExecutionPlan(
         intent_id="cand-1",
         run_id="test-run",
-        client_order_id="c-1",
+        client_order_id=deterministic_client_order_id("test-run", "cand-1"),
         symbol="BTCUSDT",
         side="BUY",
         order_type="LIMIT",
@@ -176,3 +180,43 @@ def test_shadow_auditor_audit_exit_allocation_detects_over_exit_mismatch() -> No
     # Shadow will allocate at most 1.0, which mismatches requested order_quantity 2.0
     assert result.is_concordant is False
     assert result.divergence_category in {"quantity_mismatch", "attribute_mismatch"}
+
+
+def test_shadow_auditor_audit_submission_detects_identity_mismatch() -> None:
+    now = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    candidate = replace(
+        _intent(),
+        candidate_id="cand-1",
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        entry_type=EntryType.MARKET,
+        created_at=now,
+        expires_at=now + timedelta(minutes=1),
+        reduce_only=False,
+        features={"idempotency_key": "custom_client_id_456"},
+    )
+    rules = _rules()
+    legacy_plan = quantize_order_plan(
+        candidate,
+        rules,
+        reference_price=Decimal("50000"),
+        resize_tolerance=Decimal("0.05"),
+        requested_quantity=Decimal("0.01"),
+    )
+
+    result = LiveExecutionShadowAuditor.audit_submission(
+        candidate=candidate,
+        rules=rules,
+        reference_price=Decimal("50000"),
+        legacy_plan=legacy_plan,
+        run_id="test-run",
+        hedge_mode=False,
+        requested_quantity=Decimal("0.01"),
+    )
+
+    assert result.success is True
+    # When shadow uses custom idempotency_key but legacy uses deterministic ID,
+    # it must be flagged as identity_mismatch!
+    assert result.is_concordant is False
+    assert result.divergence_category == "identity_mismatch"
+    assert "client_order_id" in result.details

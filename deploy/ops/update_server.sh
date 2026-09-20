@@ -1680,13 +1680,13 @@ if should_run_phase dashboard-market-data; then
     dashboard_needs_start=1
   fi
   if [[ "$dashboard_changed" == 1 || "$dashboard_needs_start" == 1 ]] \
-    && ! service_is_converged dashboard; then
+    || ! service_is_converged dashboard; then
     dashboard_market_candidates+=(dashboard)
     dashboard_market_health_dashboard=1
   else
     echo "phase=dashboard skipped converged=1"
   fi
-  if [[ "$market_changed" == 1 ]] && ! service_is_converged market-data; then
+  if [[ "$market_changed" == 1 ]] || ! service_is_converged market-data; then
     dashboard_market_candidates+=(market-data)
     dashboard_market_health_market=1
   else
@@ -1762,12 +1762,14 @@ fi
 
 consumer_candidates=()
 verification_services=()
-if [[ "$research_changed" == 1 ]]; then
+if [[ "$research_changed" == 1 ]] || ! service_is_converged research-collector; then
   consumer_candidates+=(research-collector)
 fi
-if [[ "$paper_changed" == 1 ]]; then
-  consumer_candidates+=("${active_paper_services[@]}")
-fi
+for paper_svc in "${active_paper_services[@]}"; do
+  if [[ "$paper_changed" == 1 ]] || ! service_is_converged "$paper_svc"; then
+    consumer_candidates+=("$paper_svc")
+  fi
+done
 consumer_services=()
 for service in "${consumer_candidates[@]}"; do
   if service_is_converged "$service"; then

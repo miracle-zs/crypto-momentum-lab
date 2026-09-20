@@ -275,3 +275,123 @@ def test_build_position_batches_short_position_cutover() -> None:
         assert batches[0].entry_price == Decimal("60000")
         assert batches[0].opened_at == t0
         assert isinstance(batches[0], ManagedLivePositionBatch)
+
+
+def test_position_ledger_shadow_comparator_detects_reconciliation_gap() -> None:
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        PositionKey,
+        PositionLedgerBatch,
+        PositionLedgerProjection,
+    )
+    from crypto_momentum_lab.live_rollout.position_ledger_shadow import (
+        PositionLedgerShadowComparator,
+        ShadowDiffCategory,
+    )
+
+    t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+    position_key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+
+    batches = (
+        ManagedLivePositionBatch(
+            batch_id="b1",
+            quantity=Decimal("10"),
+            entry_price=Decimal("100"),
+            opened_at=t0,
+        ),
+    )
+    ledger_batches = (
+        PositionLedgerBatch(
+            batch_id="b1",
+            episode_id="ep1",
+            quantity=Decimal("10"),
+            original_quantity=Decimal("10"),
+            entry_price=Decimal("100"),
+            opened_at=t0,
+        ),
+    )
+
+    projection_with_gap = PositionLedgerProjection(
+        position_key=position_key,
+        active_episode=None,
+        active_batches=ledger_batches,
+        total_active_quantity=Decimal("10"),
+        unallocated_quantity=Decimal("0"),
+        reconciliation_gap=Decimal("2.0"),
+        high_watermark_trade_at=t0,
+    )
+
+    report = PositionLedgerShadowComparator.compare(
+        position_key=position_key,
+        legacy_batches=batches,
+        ledger_projection=projection_with_gap,
+    )
+
+    assert report.is_concordant is False
+    assert report.category == ShadowDiffCategory.RECONCILIATION_GAP_DETECTED
+    assert report.reconciliation_gap == Decimal("2.0")
+    assert "reconciliation gap is non-zero" in report.details
+
+
+def test_position_ledger_shadow_comparator_detects_unallocated_qty() -> None:
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        PositionKey,
+        PositionLedgerBatch,
+        PositionLedgerProjection,
+    )
+    from crypto_momentum_lab.live_rollout.position_ledger_shadow import (
+        PositionLedgerShadowComparator,
+        ShadowDiffCategory,
+    )
+
+    t0 = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+    position_key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+
+    batches = (
+        ManagedLivePositionBatch(
+            batch_id="b1",
+            quantity=Decimal("10"),
+            entry_price=Decimal("100"),
+            opened_at=t0,
+        ),
+    )
+    ledger_batches = (
+        PositionLedgerBatch(
+            batch_id="b1",
+            episode_id="ep1",
+            quantity=Decimal("10"),
+            original_quantity=Decimal("10"),
+            entry_price=Decimal("100"),
+            opened_at=t0,
+        ),
+    )
+
+    projection_with_unallocated = PositionLedgerProjection(
+        position_key=position_key,
+        active_episode=None,
+        active_batches=ledger_batches,
+        total_active_quantity=Decimal("10"),
+        unallocated_quantity=Decimal("1.5"),
+        reconciliation_gap=Decimal("0"),
+        high_watermark_trade_at=t0,
+    )
+
+    report = PositionLedgerShadowComparator.compare(
+        position_key=position_key,
+        legacy_batches=batches,
+        ledger_projection=projection_with_unallocated,
+    )
+
+    assert report.is_concordant is False
+    assert report.category == ShadowDiffCategory.UNALLOCATED_QUANTITY_DETECTED
+    assert report.unallocated_quantity == Decimal("1.5")
+    assert "unallocated quantity is non-zero" in report.details
