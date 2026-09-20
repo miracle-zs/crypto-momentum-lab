@@ -2290,7 +2290,8 @@ def _build_position_batches(
         if is_primary_enabled:
             if (
                 diff_report.is_concordant
-                and shadow_projection.total_active_quantity == position.position_amt
+                and shadow_projection.total_active_quantity
+                == abs(position.position_amt)
             ):
                 ledger_batches = tuple(
                     ManagedLivePositionBatch(
@@ -2318,6 +2319,7 @@ def _build_position_batches(
                 "position_ledger_primary_quantity_mismatch_fallback",
                 symbol=position.symbol,
                 position_amt=str(position.position_amt),
+                abs_position_amt=str(abs(position.position_amt)),
                 ledger_total=str(shadow_projection.total_active_quantity),
             )
     except Exception as exc:

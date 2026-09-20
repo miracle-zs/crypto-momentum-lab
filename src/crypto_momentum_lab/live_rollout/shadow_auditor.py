@@ -193,18 +193,67 @@ class LiveExecutionShadowAuditor:
                     ),
                 }
             else:
-                if (
-                    shadow_result.plan.quantity != legacy_plan.quantity
-                    or shadow_result.plan.side != legacy_plan.side
-                ):
+                mismatches: dict[str, Any] = {}
+                if shadow_result.plan.quantity != legacy_plan.quantity:
+                    mismatches["quantity"] = {
+                        "legacy": str(legacy_plan.quantity),
+                        "shadow": str(shadow_result.plan.quantity),
+                    }
+                leg_side = getattr(
+                    legacy_plan.side, "value", str(legacy_plan.side)
+                ).upper()
+                shd_side = getattr(
+                    shadow_result.plan.side, "value", str(shadow_result.plan.side)
+                ).upper()
+                if leg_side != shd_side:
+                    mismatches["side"] = {"legacy": leg_side, "shadow": shd_side}
+                leg_type = str(legacy_plan.order_type).upper()
+                shd_type = str(shadow_result.plan.order_type).upper()
+                if leg_type != shd_type:
+                    mismatches["order_type"] = {"legacy": leg_type, "shadow": shd_type}
+                if shadow_result.plan.price != legacy_plan.price:
+                    mismatches["price"] = {
+                        "legacy": (
+                            str(legacy_plan.price)
+                            if legacy_plan.price is not None
+                            else None
+                        ),
+                        "shadow": (
+                            str(shadow_result.plan.price)
+                            if shadow_result.plan.price is not None
+                            else None
+                        ),
+                    }
+                if shadow_result.plan.reduce_only != legacy_plan.reduce_only:
+                    mismatches["reduce_only"] = {
+                        "legacy": legacy_plan.reduce_only,
+                        "shadow": shadow_result.plan.reduce_only,
+                    }
+                leg_pos_side = getattr(
+                    legacy_plan.position_side,
+                    "value",
+                    str(legacy_plan.position_side),
+                ).upper()
+                shd_pos_side = getattr(
+                    shadow_result.plan.position_side,
+                    "value",
+                    str(shadow_result.plan.position_side),
+                ).upper()
+                if leg_pos_side != shd_pos_side:
+                    mismatches["position_side"] = {
+                        "legacy": leg_pos_side,
+                        "shadow": shd_pos_side,
+                    }
+                if shadow_result.plan.time_in_force != legacy_plan.time_in_force:
+                    mismatches["time_in_force"] = {
+                        "legacy": legacy_plan.time_in_force,
+                        "shadow": shadow_result.plan.time_in_force,
+                    }
+
+                if mismatches:
                     is_concordant = False
                     category = "attribute_mismatch"
-                    details = {
-                        "legacy_quantity": str(legacy_plan.quantity),
-                        "shadow_quantity": str(shadow_result.plan.quantity),
-                        "legacy_side": legacy_plan.side.value,
-                        "shadow_side": shadow_result.plan.side.value,
-                    }
+                    details = mismatches
 
             if not is_concordant:
                 cls._divergence_count += 1
@@ -296,8 +345,8 @@ class LiveExecutionShadowAuditor:
                     PositionLedgerBatch(
                         batch_id=position.batch_id or "batch_default",
                         episode_id="shadow_ep",
-                        quantity=order_quantity,
-                        original_quantity=order_quantity,
+                        quantity=position.quantity,
+                        original_quantity=position.quantity,
                         entry_price=position.entry_price,
                         opened_at=position.opened_at,
                     ),
@@ -339,16 +388,10 @@ class LiveExecutionShadowAuditor:
             category: str | None = None
             details: dict[str, Any] = {}
 
-            if (
-                shadow_cmd is not None
-                and shadow_cmd.requested_quantity != order_quantity
-            ):
+            if shadow_cmd is None:
                 is_concordant = False
-                category = "quantity_mismatch"
-                details = {
-                    "order_quantity": str(order_quantity),
-                    "shadow_quantity": str(shadow_cmd.requested_quantity),
-                }
+                category = "command_missing"
+                details = {"reason": "ExitAllocator produced no command"}
                 cls._divergence_count += 1
                 log.info(
                     "shadow_exit_allocation_divergence",
@@ -357,6 +400,40 @@ class LiveExecutionShadowAuditor:
                     symbol=position.symbol,
                     **details,
                 )
+            else:
+                mismatches: dict[str, Any] = {}
+                if shadow_cmd.requested_quantity != order_quantity:
+                    mismatches["quantity"] = {
+                        "expected": str(order_quantity),
+                        "shadow": str(shadow_cmd.requested_quantity),
+                    }
+                if shadow_cmd.side != position.side:
+                    mismatches["side"] = {
+                        "expected": position.side.value,
+                        "shadow": shadow_cmd.side.value,
+                    }
+                if not shadow_cmd.reduce_only:
+                    mismatches["reduce_only"] = {
+                        "expected": True,
+                        "shadow": shadow_cmd.reduce_only,
+                    }
+                if shadow_cmd.position_key.symbol != position.symbol:
+                    mismatches["symbol"] = {
+                        "expected": position.symbol,
+                        "shadow": shadow_cmd.position_key.symbol,
+                    }
+                if mismatches:
+                    is_concordant = False
+                    category = "attribute_mismatch"
+                    details = mismatches
+                    cls._divergence_count += 1
+                    log.info(
+                        "shadow_exit_allocation_divergence",
+                        audit_type="exit_allocation",
+                        revision=rev,
+                        symbol=position.symbol,
+                        **details,
+                    )
 
             return ShadowAuditResult(
                 audit_type="exit_allocation",
