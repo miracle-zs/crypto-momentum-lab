@@ -836,7 +836,7 @@ async def test_unknown_reduce_only_exit_submits_recovery_for_current_position() 
                 strategy_name="compression_breakout",
                 strategy_version="v0",
                 strategy_config_hash="a" * 64,
-                policy=PositionExitPolicy(),
+                policy=PositionExitPolicy(max_holding_seconds=30),
             )
         ),
     )
@@ -1198,7 +1198,7 @@ async def test_market_unavailable_blocks_entries_but_keeps_exit_lane_enabled() -
                 strategy_name="compression_breakout",
                 strategy_version="v0",
                 strategy_config_hash="a" * 64,
-                policy=PositionExitPolicy(),
+                policy=PositionExitPolicy(max_holding_seconds=30),
             )
         ),
     )
@@ -1472,7 +1472,7 @@ async def test_live_daemon_submits_hedge_mode_reduce_only_exit() -> None:
                 strategy_name="compression_breakout",
                 strategy_version="v0",
                 strategy_config_hash="a" * 64,
-                policy=PositionExitPolicy(),
+                policy=PositionExitPolicy(max_holding_seconds=30),
             )
         ),
         hedge_mode=True,
@@ -1516,7 +1516,7 @@ async def test_account_event_lane_submits_exit_without_entry_decision() -> None:
                 strategy_name="compression_breakout",
                 strategy_version="v0",
                 strategy_config_hash="a" * 64,
-                policy=PositionExitPolicy(),
+                policy=PositionExitPolicy(max_holding_seconds=30),
             )
         ),
     )

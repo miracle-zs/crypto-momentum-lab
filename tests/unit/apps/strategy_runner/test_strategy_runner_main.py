@@ -803,8 +803,6 @@ def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
             "0.40",
             "--database-url",
             "postgresql+asyncpg://cml:cml@localhost:54329/cml",
-            "--fixed-run-id",
-            "fixed-run",
             "--candle-run-id",
             "candle-run",
             "--candle-entry-long-only",
@@ -851,55 +849,53 @@ def test_paper_live_pair_builds_filtered_exit_accounts(monkeypatch) -> None:
     assert strategy_calls[0]["order_flow_min_aggressive_imbalance"] == Decimal(
         "0.40"
     )
-    assert len(identity_calls) == 7
+    assert len(identity_calls) == 6
     assert all(
         call["order_flow_min_aggressive_imbalance"] == Decimal("0.40")
         for call in identity_calls
     )
     accounts = calls[0]["accounts"]
     assert isinstance(accounts, tuple)
-    assert len(accounts) == 7
+    assert len(accounts) == 6
     assert accounts[0].repository is repository
     assert accounts[1].repository is repository
     assert accounts[2].repository is repository
-    assert accounts[0].config.run_id == "fixed-run"
-    assert accounts[1].config.run_id == "candle-run"
-    assert accounts[2].config.run_id == "third-run"
-    assert accounts[3].config.run_id == "b2-run"
-    assert accounts[4].config.run_id == "c1-run"
-    assert accounts[0].config.portfolio.exit_mode.value == "fixed"
-    assert accounts[1].config.portfolio.exit_mode.value == "candle_15m"
-    assert accounts[1].config.portfolio.candle_grace_bars == 8
-    assert accounts[1].config.portfolio.candle_grace_profit_pct == Decimal(
+    assert accounts[0].config.run_id == "candle-run"
+    assert accounts[1].config.run_id == "third-run"
+    assert accounts[2].config.run_id == "b2-run"
+    assert accounts[3].config.run_id == "c1-run"
+    assert accounts[0].config.portfolio.exit_mode.value == "candle_15m"
+    assert accounts[0].config.portfolio.candle_grace_bars == 8
+    assert accounts[0].config.portfolio.candle_grace_profit_pct == Decimal(
         "0.0088"
     )
-    assert accounts[1].config.entry_filter.allow_short is False
+    assert accounts[0].config.entry_filter.allow_short is False
+    assert accounts[1].config.portfolio.exit_mode.value == "candle_15m"
     assert accounts[2].config.portfolio.exit_mode.value == "candle_15m"
     assert accounts[3].config.portfolio.exit_mode.value == "candle_15m"
-    assert accounts[4].config.portfolio.exit_mode.value == "candle_15m"
-    assert accounts[2].config.portfolio.candle_minimum_holding_buckets == 180
+    assert accounts[1].config.portfolio.candle_minimum_holding_buckets == 180
     assert accounts[0].config.execution.latency_buckets == 0
     assert accounts[1].config.execution.latency_buckets == 0
     assert accounts[2].config.execution.latency_buckets == 0
-    assert accounts[3].config.entry_filter.allow_long is True
+    assert accounts[2].config.entry_filter.allow_long is True
+    assert accounts[2].config.entry_filter.allow_short is False
+    assert accounts[2].config.entry_filter.max_abs_aggressive_imbalance is None
     assert accounts[3].config.entry_filter.allow_short is False
-    assert accounts[3].config.entry_filter.max_abs_aggressive_imbalance is None
-    assert accounts[4].config.entry_filter.allow_short is False
-    assert accounts[4].config.entry_filter.max_abs_aggressive_imbalance == Decimal(
+    assert accounts[3].config.entry_filter.max_abs_aggressive_imbalance == Decimal(
         "0.7113"
     )
-    assert accounts[5].config.run_id == "b1-run"
-    assert accounts[5].config.portfolio.candle_grace_bars == 1
+    assert accounts[4].config.run_id == "b1-run"
+    assert accounts[4].config.portfolio.candle_grace_bars == 1
+    assert accounts[4].config.portfolio.candle_grace_profit_pct == Decimal(
+        "0.0058"
+    )
+    assert accounts[4].config.entry_filter.allow_short is False
+    assert accounts[5].config.run_id == "b8-run"
+    assert accounts[5].config.portfolio.candle_grace_bars == 8
     assert accounts[5].config.portfolio.candle_grace_profit_pct == Decimal(
         "0.0058"
     )
     assert accounts[5].config.entry_filter.allow_short is False
-    assert accounts[6].config.run_id == "b8-run"
-    assert accounts[6].config.portfolio.candle_grace_bars == 8
-    assert accounts[6].config.portfolio.candle_grace_profit_pct == Decimal(
-        "0.0058"
-    )
-    assert accounts[6].config.entry_filter.allow_short is False
     entry_symbols = calls[0]["entry_symbol_loader"]
     assert entry_symbols(datetime(2026, 7, 4, 0, 0, tzinfo=UTC)) == frozenset(
         {"BTCUSDT"}

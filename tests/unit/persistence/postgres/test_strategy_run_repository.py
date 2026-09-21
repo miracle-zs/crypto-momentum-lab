@@ -41,17 +41,15 @@ def test_report_rows_convert_decimals_and_enums_to_json_values() -> None:
         "state_interval_seconds": 15,
         "taker_fee_rate": "0.0004",
         "portfolio": {
-            "take_profit_pct": "0.02",
-            "stop_loss_pct": "0.01",
-            "max_holding_buckets": 80,
-            "state_interval_seconds": 15,
-            "initial_balance": "1000",
-            "exit_mode": "fixed",
-            "require_executable_quote": False,
-            "candle_minimum_holding_buckets": 0,
             "candle_confirmation_count": 1,
             "candle_grace_bars": 0,
             "candle_grace_profit_pct": "0",
+            "candle_minimum_holding_buckets": 0,
+            "exit_mode": "candle_15m",
+            "initial_balance": "1000",
+            "max_holding_buckets": 80,
+            "require_executable_quote": False,
+            "state_interval_seconds": 15,
         },
     }
     assert rows.signals[0]["side"] == "long"

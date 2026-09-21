@@ -56,8 +56,6 @@ def _options(**overrides: object) -> LiveRunOptions:
         "checkpoint_phase_seconds": 0.0,
         "hedge_mode": None,
         "exit_mode": None,
-        "take_profit_pct": None,
-        "stop_loss_pct": None,
         "entry_long_only": None,
         "entry_leverage": None,
         "margin_type": None,

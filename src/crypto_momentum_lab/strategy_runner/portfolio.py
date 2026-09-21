@@ -32,12 +32,10 @@ PaperExitMode = PositionExitMode
 
 @dataclass(frozen=True, slots=True)
 class PaperExitConfig:
-    take_profit_pct: Decimal = Decimal("0.02")
-    stop_loss_pct: Decimal = Decimal("0.01")
     max_holding_buckets: int = 80
     state_interval_seconds: int = 15
     initial_balance: Decimal = Decimal("1000")
-    exit_mode: PaperExitMode = PaperExitMode.FIXED
+    exit_mode: PaperExitMode = PaperExitMode.CANDLE_15M
     require_executable_quote: bool = False
     candle_minimum_holding_buckets: int = 0
     candle_confirmation_count: int = 1
@@ -47,10 +45,6 @@ class PaperExitConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.exit_mode, PaperExitMode):
             object.__setattr__(self, "exit_mode", PaperExitMode(self.exit_mode))
-        if self.take_profit_pct <= 0:
-            raise ValueError("take_profit_pct must be positive")
-        if self.stop_loss_pct <= 0:
-            raise ValueError("stop_loss_pct must be positive")
         if self.max_holding_buckets <= 0:
             raise ValueError("max_holding_buckets must be positive")
         if self.state_interval_seconds <= 0:
@@ -439,8 +433,6 @@ def _close_reason(
         symbol=position.symbol,
         side=position.side,
         policy=PositionExitPolicy(
-            take_profit_pct=config.take_profit_pct,
-            stop_loss_pct=config.stop_loss_pct,
             max_holding_seconds=(
                 config.max_holding_buckets * config.state_interval_seconds
             ),

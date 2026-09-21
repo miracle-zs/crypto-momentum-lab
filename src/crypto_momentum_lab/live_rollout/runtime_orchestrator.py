@@ -316,8 +316,6 @@ async def run_live_daemon(
 
     hedge_mode = config.execution.hedge_mode
     exit_mode = config.execution.exit_mode
-    take_profit_pct = config.execution.take_profit_pct
-    stop_loss_pct = config.execution.stop_loss_pct
     entry_long_only = config.execution.entry_long_only
     entry_leverage = config.execution.entry_leverage
     margin_type = config.execution.margin_type
@@ -1022,8 +1020,6 @@ async def run_live_daemon(
                     strategy_version="v0",
                     strategy_config_hash=strategy_config_hash,
                     policy=PositionExitPolicy(
-                        take_profit_pct=take_profit_pct,
-                        stop_loss_pct=stop_loss_pct,
                         max_holding_seconds=None,
                         mode=exit_mode,
                     ),

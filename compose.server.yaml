@@ -313,12 +313,6 @@ services:
       - "100"
       - --paper-initial-balance
       - "1000"
-      - --fixed-take-profit-pct
-      - "0.02"
-      - --fixed-stop-loss-pct
-      - "0.01"
-      - --fixed-max-holding-buckets
-      - "80"
       - --candle-max-holding-buckets
       - "5760"
       - --max-states
@@ -428,12 +422,6 @@ services:
       - "100"
       - --paper-initial-balance
       - "1000"
-      - --fixed-take-profit-pct
-      - "0.02"
-      - --fixed-stop-loss-pct
-      - "0.01"
-      - --fixed-max-holding-buckets
-      - "80"
       - --candle-max-holding-buckets
       - "5760"
       - --max-states
@@ -560,8 +548,6 @@ services:
       CML_LIVE_MARGIN_TYPE: ${CML_LIVE_MARGIN_TYPE:-CROSSED}
       CML_LIVE_PERSIST_EXCHANGE_OPERATIONS: ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-submit,cancel}
       CML_LIVE_EXIT_MODE: ${CML_LIVE_EXIT_MODE:-candle_15m}
-      CML_LIVE_TAKE_PROFIT_PCT: ${CML_LIVE_TAKE_PROFIT_PCT:-0.02}
-      CML_LIVE_STOP_LOSS_PCT: ${CML_LIVE_STOP_LOSS_PCT:-0.01}
       CML_LIVE_CANDLE_GRACE_BARS: ${CML_LIVE_CANDLE_GRACE_BARS:-8}
       CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT: ${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT:-0.001}
       CML_LIVE_CANDLE_GRACE_PROFIT_PCT: ${CML_LIVE_CANDLE_GRACE_PROFIT_PCT:-0.0088}
@@ -635,10 +621,6 @@ services:
       - ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-submit,cancel}
       - --exit-mode
       - ${CML_LIVE_EXIT_MODE:-candle_15m}
-      - --take-profit-pct
-      - ${CML_LIVE_TAKE_PROFIT_PCT:-0.02}
-      - --stop-loss-pct
-      - ${CML_LIVE_STOP_LOSS_PCT:-0.01}
       - --candle-grace-bars
       - ${CML_LIVE_CANDLE_GRACE_BARS:-8}
       - --candle-grace-decision-profit-pct

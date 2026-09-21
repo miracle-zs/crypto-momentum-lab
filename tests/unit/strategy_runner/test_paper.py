@@ -166,8 +166,6 @@ def test_run_paper_trading_marks_and_closes_filled_positions(monkeypatch) -> Non
         config=_paper_config(
             execution=ReplayExecutionConfig(latency_buckets=0),
             portfolio=PaperExitConfig(
-                take_profit_pct=Decimal("0.50"),
-                stop_loss_pct=Decimal("0.50"),
                 max_holding_buckets=1,
             ),
         ),

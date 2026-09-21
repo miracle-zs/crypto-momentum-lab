@@ -25,29 +25,8 @@ from crypto_momentum_lab.strategy_runner.position_exit import (
 from tests.unit.shadow_operation.test_service import _state
 
 
-async def test_fixed_exit_closes_exact_position_quantity() -> None:
-    state = replace(
-        _state(),
-        bucket_start=datetime(2026, 7, 4, 0, 5, tzinfo=UTC),
-        bucket_end=datetime(2026, 7, 4, 0, 5, 15, tzinfo=UTC),
-        last_bid_price=Decimal("98"),
-        mark_price=Decimal("98"),
-        close_price=Decimal("98"),
-    )
-    manager = LiveExitManager(config=_config(PositionExitMode.FIXED))
-
-    requests = await manager.requests_for_state(state, (_long_position(),))
-
-    assert len(requests) == 1
-    request = requests[0]
-    assert request.quantity == Decimal("1.25")
-    assert request.candidate.reduce_only is True
-    assert request.candidate.side is StrategySide.LONG
-    assert request.candidate.reason == "stop_loss"
-
-
 async def test_scheduled_flatten_targets_full_position_as_reduce_only_market() -> None:
-    manager = LiveExitManager(config=_config(PositionExitMode.FIXED))
+    manager = LiveExitManager(config=_config(PositionExitMode.CANDLE_15M))
     now = datetime(2026, 7, 3, 23, 45, tzinfo=UTC)
 
     requests = await manager.requests_for_scheduled_flatten(
@@ -89,7 +68,7 @@ async def test_scheduled_flatten_cancels_recovery_before_using_current_position(
         recovery_order_created_at=recovery_plan.created_at,
         recovery_order_plan=recovery_plan,
     )
-    manager = LiveExitManager(config=_config(PositionExitMode.FIXED))
+    manager = LiveExitManager(config=_config(PositionExitMode.CANDLE_15M))
 
     requests = await manager.requests_for_scheduled_flatten(
         (position,),
@@ -674,8 +653,6 @@ def _config(
         strategy_version="v1",
         strategy_config_hash="a" * 64,
         policy=PositionExitPolicy(
-            take_profit_pct=Decimal("0.02"),
-            stop_loss_pct=Decimal("0.01"),
             max_holding_seconds=86400,
             mode=mode,
         ),
@@ -713,19 +690,20 @@ async def test_live_exit_manager_runs_shadow_exit_allocation(
 
     manager = LiveExitManager(
         config=_config(
-            PositionExitMode.FIXED,
+            PositionExitMode.CANDLE_15M,
             candle_grace_bars=0,
         )
     )
     pos = _long_position()
-    state = replace(
-        _state(),
-        bucket_end=pos.opened_at + timedelta(seconds=86401),
-        mark_price=Decimal("100"),
-        close_price=Decimal("100"),
+    candle = ClosedCandle15m(
+        symbol="BTCUSDT",
+        candle_start=datetime(2026, 7, 4, 0, 15, tzinfo=UTC),
+        candle_end=datetime(2026, 7, 4, 0, 30, tzinfo=UTC),
+        open_price=Decimal("100"),
+        close_price=Decimal("99"),
     )
 
-    requests = await manager.requests_for_state(state, (pos,))
+    requests = await manager.requests_for_closed_candle(candle, (pos,))
     assert len(requests) == 1
     assert len(shadow_allocations) == 1
     assert shadow_allocations[0] is not None

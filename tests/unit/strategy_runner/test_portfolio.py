@@ -20,62 +20,25 @@ from crypto_momentum_lab.strategy_runner.portfolio import (
 )
 
 
-def test_long_position_closes_at_take_profit_with_net_pnl() -> None:
-    position = position_from_entry_fill("run-1", _fill())
-    assert position is not None
-
-    updates = mark_positions(
-        positions=(position,),
-        state=_state(close=Decimal("102")),
-        config=PaperExitConfig(
-            take_profit_pct=Decimal("0.02"),
-            stop_loss_pct=Decimal("0.01"),
-            max_holding_buckets=80,
-        ),
-        taker_fee_rate=Decimal("0.0004"),
-    )
-
-    closed = updates[0]
-    assert closed.status is PaperPositionStatus.CLOSED
-    assert closed.close_reason == "take_profit"
-    assert closed.exit_price == Decimal("102")
-    assert closed.realized_pnl == Decimal("1.9192")
-    assert closed.return_pct == Decimal("0.019192")
-
-
 def test_state_based_mark_and_exit_use_closed_state_end() -> None:
     position = position_from_entry_fill("run-1", _fill())
     assert position is not None
-    state = _state(close=Decimal("102"))
+    state = _state(
+        close=Decimal("102"),
+        bucket_start=position.opened_at + timedelta(minutes=20),
+    )
 
     closed = mark_positions(
         positions=(position,),
         state=state,
-        config=PaperExitConfig(),
-        taker_fee_rate=Decimal("0.0004"),
-    )[0]
-
-    assert closed.closed_at == state.bucket_end
-    assert closed.updated_at == state.bucket_end
-
-
-def test_short_position_closes_at_stop_loss() -> None:
-    position = position_from_entry_fill(
-        "run-1",
-        replace(_fill(), side=StrategySide.SHORT),
-    )
-    assert position is not None
-
-    closed = mark_positions(
-        positions=(position,),
-        state=_state(close=Decimal("101")),
-        config=PaperExitConfig(),
+        config=PaperExitConfig(max_holding_buckets=80),
         taker_fee_rate=Decimal("0.0004"),
     )[0]
 
     assert closed.status is PaperPositionStatus.CLOSED
-    assert closed.close_reason == "stop_loss"
-    assert closed.realized_pnl == Decimal("-1.0804")
+    assert closed.close_reason == "max_holding_period"
+    assert closed.closed_at == state.bucket_end
+    assert closed.updated_at == state.bucket_end
 
 
 def test_position_closes_after_maximum_holding_period() -> None:
@@ -94,6 +57,9 @@ def test_position_closes_after_maximum_holding_period() -> None:
 
     assert closed.status is PaperPositionStatus.CLOSED
     assert closed.close_reason == "max_holding_period"
+    assert closed.exit_price == Decimal("100.5")
+    assert closed.realized_pnl == Decimal("0.4198")
+    assert closed.return_pct == Decimal("0.004198")
 
 
 def test_open_position_updates_mark_and_unrealized_pnl() -> None:
@@ -758,7 +724,10 @@ def test_executable_exit_uses_the_side_of_the_book() -> None:
     position = position_from_entry_fill("run-1", _fill())
     assert position is not None
     state = replace(
-        _state(close=Decimal("103")),
+        _state(
+            close=Decimal("103"),
+            bucket_start=position.opened_at + timedelta(minutes=20),
+        ),
         last_bid_price=Decimal("102"),
         last_ask_price=Decimal("104"),
         spread=Decimal("2"),
@@ -768,11 +737,15 @@ def test_executable_exit_uses_the_side_of_the_book() -> None:
     closed = mark_positions(
         positions=(position,),
         state=state,
-        config=PaperExitConfig(require_executable_quote=True),
+        config=PaperExitConfig(
+            max_holding_buckets=80,
+            require_executable_quote=True,
+        ),
         taker_fee_rate=Decimal("0.0004"),
     )[0]
 
     assert closed.status is PaperPositionStatus.CLOSED
+    assert closed.close_reason == "max_holding_period"
     assert closed.exit_price == Decimal("102")
 
 

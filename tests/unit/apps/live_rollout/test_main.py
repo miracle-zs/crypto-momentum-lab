@@ -115,9 +115,7 @@ accounts:
       entry_long_only: true
       entry_leverage: 7
       margin_type: ISOLATED
-      exit_mode: fixed
-      take_profit_pct: 0.03
-      stop_loss_pct: 0.015
+      exit_mode: candle_15m
       candle_grace_bars: 0
       candle_grace_decision_profit_pct: 0.001
       candle_grace_profit_pct: 0
@@ -214,9 +212,7 @@ accounts:
     assert config.execution.entry_long_only is True
     assert config.execution.entry_leverage == 7
     assert config.execution.margin_type == "ISOLATED"
-    assert config.execution.exit_mode is main.PositionExitMode.FIXED
-    assert config.execution.take_profit_pct == Decimal("0.03")
-    assert config.execution.stop_loss_pct == Decimal("0.015")
+    assert config.execution.exit_mode is main.PositionExitMode.CANDLE_15M
     assert config.execution.candle_grace_bars == 0
     assert config.execution.candle_grace_decision_profit_pct == Decimal("0.001")
     assert config.execution.candle_grace_profit_pct == Decimal("0")

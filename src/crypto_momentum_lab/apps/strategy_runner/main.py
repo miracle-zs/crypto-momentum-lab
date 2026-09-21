@@ -773,17 +773,9 @@ def paper_live_daemon_command(
         str,
         typer.Option(
             "--exit-mode",
-            help="Exit mode: fixed or candle_15m.",
+            help="Exit mode: candle_15m.",
         ),
-    ] = PaperExitMode.FIXED.value,
-    take_profit_pct: Annotated[
-        str,
-        typer.Option("--take-profit-pct"),
-    ] = "0.02",
-    stop_loss_pct: Annotated[
-        str,
-        typer.Option("--stop-loss-pct"),
-    ] = "0.01",
+    ] = PaperExitMode.CANDLE_15M.value,
     max_holding_buckets: Annotated[
         int,
         typer.Option("--max-holding-buckets", min=1),
@@ -1109,8 +1101,6 @@ def paper_live_daemon_command(
                 portfolio=PaperExitConfig(
                     exit_mode=resolved_exit_mode,
                     initial_balance=Decimal(paper_initial_balance),
-                    take_profit_pct=Decimal(take_profit_pct),
-                    stop_loss_pct=Decimal(stop_loss_pct),
                     max_holding_buckets=max_holding_buckets,
                     require_executable_quote=require_market_quote,
                     candle_grace_bars=candle_grace_bars,
@@ -1159,13 +1149,6 @@ def paper_live_pair_command(
             "--entry-positive-gainer-top-count",
             min=1,
             help="Use only positive UTC-day gainers within this ranking depth.",
-        ),
-    ] = None,
-    fixed_run_id: Annotated[
-        str | None,
-        typer.Option(
-            "--fixed-run-id",
-            help="Optional run ID for the fixed-exit account.",
         ),
     ] = None,
     candle_run_id: Annotated[
@@ -1276,18 +1259,6 @@ def paper_live_pair_command(
         str,
         typer.Option("--paper-initial-balance"),
     ] = "1000",
-    fixed_take_profit_pct: Annotated[
-        str,
-        typer.Option("--fixed-take-profit-pct"),
-    ] = "0.02",
-    fixed_stop_loss_pct: Annotated[
-        str,
-        typer.Option("--fixed-stop-loss-pct"),
-    ] = "0.01",
-    fixed_max_holding_buckets: Annotated[
-        int,
-        typer.Option("--fixed-max-holding-buckets", min=1),
-    ] = 80,
     candle_max_holding_buckets: Annotated[
         int,
         typer.Option("--candle-max-holding-buckets", min=1),
@@ -1508,7 +1479,6 @@ def paper_live_pair_command(
             ),
         )
 
-    fixed_identity = identity_for(fixed_run_id)
     candle_identity = identity_for(candle_run_id)
     third_identity = identity_for(third_run_id)
     fourth_identity = identity_for(fourth_run_id)
@@ -1517,7 +1487,7 @@ def paper_live_pair_command(
     seventh_identity = identity_for(seventh_run_id)
     strategy = build_runtime_strategy_for_cli(
         strategy_name=strategy_name,
-        run_id=fixed_run_id or candle_run_id,
+        run_id=candle_run_id,
         generated_at=created_at,
         source_description=source.description,
         compression_breakout=compression_breakout,
@@ -1527,29 +1497,12 @@ def paper_live_pair_command(
         order_flow_min_aggressive_imbalance=(
             order_flow_min_aggressive_imbalance_decimal
         ),
-        identity=fixed_identity or candle_identity,
+        identity=candle_identity,
     )
     startup_timer.mark("strategy_constructed")
     repository = build_paper_daemon_repository(resolved_database_url)
     startup_timer.mark("artifact_repository_constructed")
     account_specs: list[_PairedAccountSpec] = []
-    if fixed_run_id is not None:
-        if fixed_identity is None:
-            raise AssertionError("fixed identity must be present")
-        account_specs.append(
-            _PairedAccountSpec(
-                run_id=fixed_run_id,
-                run_identity=fixed_identity,
-                portfolio=PaperExitConfig(
-                    exit_mode=PaperExitMode.FIXED,
-                    initial_balance=Decimal(paper_initial_balance),
-                    take_profit_pct=Decimal(fixed_take_profit_pct),
-                    stop_loss_pct=Decimal(fixed_stop_loss_pct),
-                    max_holding_buckets=fixed_max_holding_buckets,
-                    require_executable_quote=require_market_quote,
-                ),
-            )
-        )
     if candle_identity is None:
         raise AssertionError("candle identity must be present")
     account_specs.append(

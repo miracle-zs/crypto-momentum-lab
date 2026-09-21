@@ -1102,8 +1102,7 @@ def _normalize_paper_run_for_compare(
         return normalized
     portfolio = execution_config.get("portfolio")
     if isinstance(portfolio, dict):
-        # Runs created before candle exits were introduced imply fixed exits.
-        portfolio.setdefault("exit_mode", PaperExitMode.FIXED.value)
+        portfolio.setdefault("exit_mode", PaperExitMode.CANDLE_15M.value)
     return normalized
 
 

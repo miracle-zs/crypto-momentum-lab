@@ -71,8 +71,6 @@ LIVE_FIXED_SETTINGS: dict[str, object] = {
     "entry_notional_usdt": 100.0,
     "entry_leverage": 5,
     "exit_mode": "candle_15m",
-    "take_profit_pct": 0.02,
-    "stop_loss_pct": 0.01,
     "candle_confirmation_count": 1,
     "candle_grace_bars": 8,
     "candle_grace_decision_profit_pct": 0.001,

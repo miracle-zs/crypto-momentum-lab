@@ -158,8 +158,6 @@ class LiveRuntimeStrategy:
 class LiveRuntimeExecution:
     hedge_mode: bool
     exit_mode: PositionExitMode
-    take_profit_pct: Decimal
-    stop_loss_pct: Decimal
     entry_long_only: bool
     entry_leverage: int
     margin_type: str

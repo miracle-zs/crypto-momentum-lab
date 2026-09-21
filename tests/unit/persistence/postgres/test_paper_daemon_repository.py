@@ -88,24 +88,23 @@ def test_paper_live_run_row_initializes_zero_count_summary() -> None:
         "require_price_above_ema5": False,
         "require_price_above_ema10": False,
     }
-    assert row["execution_config"]["portfolio"]["take_profit_pct"] == "0.02"
+    assert row["execution_config"]["portfolio"]["exit_mode"] == "candle_15m"
+    assert row["execution_config"]["portfolio"]["max_holding_buckets"] == 80
 
 
-def test_legacy_paper_run_without_exit_mode_defaults_to_fixed_for_compare() -> None:
+def test_legacy_paper_run_without_exit_mode_defaults_to_candle_15m_for_compare() -> None:
     legacy = {
         "execution_config": {
             "portfolio": {
-                "take_profit_pct": "0.02",
-                "stop_loss_pct": "0.01",
+                "max_holding_buckets": 80,
             }
         }
     }
     current = {
         "execution_config": {
             "portfolio": {
-                "take_profit_pct": "0.02",
-                "stop_loss_pct": "0.01",
-                "exit_mode": "fixed",
+                "max_holding_buckets": 80,
+                "exit_mode": "candle_15m",
             }
         }
     }
@@ -131,9 +130,7 @@ def test_legacy_unknown_commit_run_can_upgrade_new_execution_flags() -> None:
                 "slippage_bps": "0",
             },
             "portfolio": {
-                "exit_mode": "fixed",
-                "take_profit_pct": "0.03",
-                "stop_loss_pct": "0.015",
+                "exit_mode": "candle_15m",
                 "max_holding_buckets": 480,
                 "state_interval_seconds": 15,
                 "initial_balance": "1000",

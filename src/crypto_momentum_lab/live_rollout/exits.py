@@ -259,7 +259,7 @@ class LiveExitManager:
         """
 
         return (
-            self._config.policy.mode is not PositionExitMode.CANDLE_15M
+            self._config.policy.max_holding_seconds is not None
             or self._candles is not None
         )
 
@@ -523,12 +523,13 @@ class LiveExitManager:
         quote: RealtimeMarketQuote,
         positions: tuple[ManagedLivePosition, ...],
     ) -> tuple[LiveExitRequest, ...]:
-        """Realtime quotes do not trigger immediate fixed TP/SL exits.
+        """Realtime quotes do not trigger direct strategy exits.
 
-        Intraday fixed TP/SL (+2.0% / -1.0%) has been removed. All strategy exits
-        are strictly evaluated on 15-minute candle closes (requests_for_state),
-        grace recovery limit fills (requests_for_grace_recovery), or grace timeouts
-        (requests_for_grace_timeout).
+        Strategy exits are evaluated strictly on 15-minute candle closes
+        (requests_for_closed_candle), grace recovery limit fills
+        (requests_for_grace_recovery), or grace timeouts
+        (requests_for_grace_timeout). Realtime quote channels are utilized
+        for market monitoring and unknown reduce-only order recovery.
         """
         del quote, positions
         return ()
@@ -544,15 +545,14 @@ class LiveExitManager:
         if mark_price is None:
             return None
         if self._config.policy.mode is PositionExitMode.CANDLE_15M:
-            if self._candles is None:
-                return None
-            candle_request = await self._candle_exit_request(
-                state,
-                position,
-                mark_price,
-            )
-            if candle_request is not None:
-                return candle_request
+            if self._candles is not None:
+                candle_request = await self._candle_exit_request(
+                    state,
+                    position,
+                    mark_price,
+                )
+                if candle_request is not None:
+                    return candle_request
         reason = position_exit_reason(
             gross_return=_gross_return(position, mark_price),
             held_until=state.bucket_end,

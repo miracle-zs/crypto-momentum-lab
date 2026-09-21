@@ -382,8 +382,6 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
             ("ENTRY_LEVERAGE", "5"),
             ("MARGIN_TYPE", "CROSSED"),
             ("EXIT_MODE", "candle_15m"),
-            ("TAKE_PROFIT_PCT", "0.02"),
-            ("STOP_LOSS_PCT", "0.01"),
             ("CANDLE_GRACE_BARS", "8"),
             ("CANDLE_GRACE_DECISION_PROFIT_PCT", "0.001"),
             ("CANDLE_GRACE_PROFIT_PCT", "0.0088"),

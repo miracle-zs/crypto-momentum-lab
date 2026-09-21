@@ -1291,14 +1291,6 @@ def run_command(
         PositionExitMode | None,
         typer.Option("--exit-mode"),
     ] = None,
-    take_profit_pct: Annotated[
-        str | None,
-        typer.Option("--take-profit-pct"),
-    ] = None,
-    stop_loss_pct: Annotated[
-        str | None,
-        typer.Option("--stop-loss-pct"),
-    ] = None,
     entry_long_only: Annotated[
         bool | None,
         typer.Option("--entry-long-only/--entry-all-sides"),
@@ -1469,8 +1461,6 @@ def run_command(
                 checkpoint_phase_seconds=checkpoint_phase_seconds,
                 hedge_mode=hedge_mode,
                 exit_mode=exit_mode,
-                take_profit_pct=take_profit_pct,
-                stop_loss_pct=stop_loss_pct,
                 entry_long_only=entry_long_only,
                 entry_leverage=entry_leverage,
                 margin_type=margin_type,

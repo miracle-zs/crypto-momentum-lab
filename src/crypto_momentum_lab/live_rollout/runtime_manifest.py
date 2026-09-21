@@ -69,8 +69,6 @@ class LiveRuntimeExecutionInputs:
     entry_leverage: int
     margin_type: str
     exit_mode: PositionExitMode
-    take_profit_pct: Decimal
-    stop_loss_pct: Decimal
     candle_grace_bars: int
     candle_grace_decision_profit_pct: Decimal
     candle_grace_profit_pct: Decimal
@@ -105,8 +103,6 @@ _DEFAULT_EXECUTION_INPUTS = LiveRuntimeExecutionInputs(
     entry_leverage=1,
     margin_type="CROSSED",
     exit_mode=PositionExitMode.CANDLE_15M,
-    take_profit_pct=Decimal("0.02"),
-    stop_loss_pct=Decimal("0.01"),
     candle_grace_bars=1,
     candle_grace_decision_profit_pct=Decimal("0.001"),
     candle_grace_profit_pct=Decimal("0.0088"),
@@ -420,14 +416,6 @@ def _execution_inputs(
         exit_mode = PositionExitMode(
             _text(config.get("exit_mode"), f"{field}.exit_mode").lower()
         )
-        take_profit_pct = _positive_decimal(
-            config.get("take_profit_pct"),
-            f"{field}.take_profit_pct",
-        )
-        stop_loss_pct = _positive_decimal(
-            config.get("stop_loss_pct"),
-            f"{field}.stop_loss_pct",
-        )
         candle_grace_bars = _integer(
             config.get("candle_grace_bars"),
             f"{field}.candle_grace_bars",
@@ -476,8 +464,6 @@ def _execution_inputs(
             entry_leverage=entry_leverage,
             margin_type=margin_type,
             exit_mode=exit_mode,
-            take_profit_pct=take_profit_pct,
-            stop_loss_pct=stop_loss_pct,
             candle_grace_bars=candle_grace_bars,
             candle_grace_decision_profit_pct=candle_grace_decision_profit_pct,
             candle_grace_profit_pct=candle_grace_profit_pct,

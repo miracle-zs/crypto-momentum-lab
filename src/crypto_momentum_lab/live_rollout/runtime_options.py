@@ -88,8 +88,6 @@ class LiveRunOptions:
     checkpoint_phase_seconds: float
     hedge_mode: bool | None
     exit_mode: PositionExitMode | None
-    take_profit_pct: str | None
-    stop_loss_pct: str | None
     entry_long_only: bool | None
     entry_leverage: int | None
     margin_type: str | None
@@ -353,8 +351,6 @@ def resolve_live_runtime_config(
     entry_policy_enforce = options.entry_policy_enforce
     hedge_mode = options.hedge_mode
     exit_mode = options.exit_mode
-    take_profit_pct = options.take_profit_pct
-    stop_loss_pct = options.stop_loss_pct
     entry_long_only = options.entry_long_only
     entry_leverage: int | None = None
     margin_type: str | None = None
@@ -402,8 +398,6 @@ def resolve_live_runtime_config(
         entry_leverage = 1 if options.entry_leverage is None else options.entry_leverage
         margin_type = "CROSSED" if options.margin_type is None else options.margin_type
         exit_mode = PositionExitMode.CANDLE_15M if exit_mode is None else exit_mode
-        take_profit_pct = "0.02" if take_profit_pct is None else take_profit_pct
-        stop_loss_pct = "0.01" if stop_loss_pct is None else stop_loss_pct
         candle_grace_bars = 1 if candle_grace_bars is None else candle_grace_bars
         candle_grace_decision_profit_pct = (
             "0.001"
@@ -483,16 +477,6 @@ def resolve_live_runtime_config(
             execution_inputs.exit_mode,
             "--exit-mode",
         )
-        take_profit_pct = resolve_manifest_decimal_option(
-            take_profit_pct,
-            execution_inputs.take_profit_pct,
-            "--take-profit-pct",
-        )
-        stop_loss_pct = resolve_manifest_decimal_option(
-            stop_loss_pct,
-            execution_inputs.stop_loss_pct,
-            "--stop-loss-pct",
-        )
         candle_grace_bars = resolve_manifest_option(
             candle_grace_bars,
             execution_inputs.candle_grace_bars,
@@ -569,8 +553,6 @@ def resolve_live_runtime_config(
         or entry_policy_enforce is None
         or hedge_mode is None
         or exit_mode is None
-        or take_profit_pct is None
-        or stop_loss_pct is None
         or entry_long_only is None
         or entry_leverage is None
         or margin_type is None
@@ -581,8 +563,6 @@ def resolve_live_runtime_config(
     ):
         raise LiveRuntimeOptionsError("live runtime options are incomplete")
     try:
-        take_profit = Decimal(take_profit_pct)
-        stop_loss = Decimal(stop_loss_pct)
         candle_decision_profit = Decimal(candle_grace_decision_profit_pct)
         candle_profit = Decimal(candle_grace_profit_pct)
     except (InvalidOperation, TypeError, ValueError) as error:
@@ -641,8 +621,6 @@ def resolve_live_runtime_config(
         execution=LiveRuntimeExecution(
             hedge_mode=hedge_mode,
             exit_mode=exit_mode,
-            take_profit_pct=take_profit,
-            stop_loss_pct=stop_loss,
             entry_long_only=entry_long_only,
             entry_leverage=entry_leverage,
             margin_type=margin_type,

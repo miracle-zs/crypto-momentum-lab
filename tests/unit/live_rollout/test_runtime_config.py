@@ -55,9 +55,7 @@ def test_live_runtime_config_keeps_composition_inputs_grouped() -> None:
         ),
         execution=LiveRuntimeExecution(
             hedge_mode=False,
-            exit_mode=PositionExitMode.FIXED,
-            take_profit_pct=Decimal("0.03"),
-            stop_loss_pct=Decimal("0.015"),
+            exit_mode=PositionExitMode.CANDLE_15M,
             entry_long_only=True,
             entry_leverage=7,
             margin_type="ISOLATED",
@@ -82,7 +80,6 @@ def test_live_runtime_config_keeps_composition_inputs_grouped() -> None:
     assert config.identity.session_id == "session-1"
     assert config.market.market_state_source == "hub"
     assert config.strategy.profile is profile
-    assert config.execution.take_profit_pct == Decimal("0.03")
     assert config.lifecycle.persist_exchange_operations == frozenset(
         {"submit", "cancel"}
     )
