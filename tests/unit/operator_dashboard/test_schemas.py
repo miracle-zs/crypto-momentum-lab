@@ -45,3 +45,23 @@ def test_account_schema_exposes_live_equity_curve() -> None:
     assert response.equity_sample_interval_seconds == 360
     assert response.equity_curve[0]["equity"] == "276.80"
     assert response.live_signals == []
+
+
+def test_checkpoint_metric_item_includes_commit_ms() -> None:
+    from crypto_momentum_lab.operator_dashboard.schemas import (
+        CheckpointMetricItem,
+    )
+
+    item = CheckpointMetricItem(
+        run_id="test-run",
+        account_label="primary",
+        occurred_at=datetime(2026, 9, 22, 0, 0, tzinfo=UTC),
+        pre_commit_ms=25.5,
+        commit_ms=12.3,
+        total_ms=37.8,
+    )
+
+    assert item.commit_ms == 12.3
+    assert item.pre_commit_ms == 25.5
+    assert item.total_ms == 37.8
+    assert "commit_ms" in item.model_dump()

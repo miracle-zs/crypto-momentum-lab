@@ -828,3 +828,200 @@ async def test_account_event_source_raises_after_continuous_unavailable_timeout(
         match="account-event hub unavailable beyond timeout",
     ):
         await anext(source.__aiter__())
+
+
+async def test_account_event_source_handshake_timeout_on_ready_recv(
+    monkeypatch,
+) -> None:
+    current_time = 1000.0
+
+    def fake_monotonic() -> float:
+        return current_time
+
+    monkeypatch.setattr(hub_module.time, "monotonic", fake_monotonic)
+
+    class HangingRecvConnection:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, _message):
+            return None
+
+        async def recv(self):
+            nonlocal current_time
+            current_time += 1.0
+            await asyncio.sleep(10.0)
+
+    monkeypatch.setattr(
+        hub_module,
+        "connect",
+        lambda *_args, **_kwargs: HangingRecvConnection(),
+    )
+
+    source = WebSocketAccountEventSource(
+        url="ws://unused",
+        environment="live",
+        account_label="primary",
+        consumer_id="test",
+        config=AccountEventHubConfig(
+            handshake_timeout_seconds=0.01,
+            reconnect_delays=(0,),
+            unavailable_timeout_seconds=2.0,
+        ),
+    )
+
+    with pytest.raises(
+        hub_module.AccountEventHubError,
+        match="account-event hub unavailable beyond timeout",
+    ):
+        await anext(source.__aiter__())
+
+
+async def test_account_event_source_repeated_ready_disconnect_triggers_unavailable_timeout(
+    monkeypatch,
+) -> None:
+    current_time = 1000.0
+
+    def fake_monotonic() -> float:
+        return current_time
+
+    monkeypatch.setattr(hub_module.time, "monotonic", fake_monotonic)
+    attempts = 0
+
+    class FlappingReadyConnection:
+        def __init__(self) -> None:
+            nonlocal attempts
+            attempts += 1
+            self._sent_ready = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, _message):
+            return None
+
+        async def recv(self):
+            nonlocal current_time
+            if not self._sent_ready:
+                self._sent_ready = True
+                current_time += 10.0
+                return json.dumps(
+                    {
+                        "type": "account_event_hub_ready",
+                        "schema_version": 1,
+                        "environment": "live",
+                        "account_label": "primary",
+                        "full_snapshot": True,
+                    }
+                )
+            raise ConnectionResetError("flapped after ready")
+
+    monkeypatch.setattr(
+        hub_module,
+        "connect",
+        lambda *_args, **_kwargs: FlappingReadyConnection(),
+    )
+
+    source = WebSocketAccountEventSource(
+        url="ws://unused",
+        environment="live",
+        account_label="primary",
+        consumer_id="test",
+        config=AccountEventHubConfig(
+            reconnect_delays=(0,),
+            unavailable_timeout_seconds=25.0,
+        ),
+    )
+
+    with pytest.raises(
+        hub_module.AccountEventHubError,
+        match="account-event hub unavailable beyond timeout",
+    ):
+        await anext(source.__aiter__())
+
+    assert attempts >= 2
+
+
+async def test_account_event_source_silent_account_with_existing_state_resets_unavailable(
+    monkeypatch,
+) -> None:
+    current_time = 1000.0
+
+    def fake_monotonic() -> float:
+        return current_time
+
+    monkeypatch.setattr(hub_module.time, "monotonic", fake_monotonic)
+    snapshot = _snapshot()
+    first_event = replace(
+        _event(),
+        sequence=1,
+        snapshot_kind="full",
+        account_snapshot=snapshot,
+    )
+    connections = 0
+
+    class SilentAccountConnection:
+        def __init__(self) -> None:
+            nonlocal connections
+            connections += 1
+            self._conn_id = connections
+            self._sent_ready = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, _message):
+            return None
+
+        async def recv(self):
+            nonlocal current_time
+            if not self._sent_ready:
+                self._sent_ready = True
+                return json.dumps(
+                    {
+                        "type": "account_event_hub_ready",
+                        "schema_version": 1,
+                        "environment": "live",
+                        "account_label": "primary",
+                        "full_snapshot": self._conn_id == 1,
+                        "stream_reset": False,
+                    }
+                )
+            if self._conn_id == 1:
+                return encode_account_event(first_event, sequence=1)
+            # Second connection: silent account, keeps waiting
+            await asyncio.sleep(3600)
+
+    monkeypatch.setattr(
+        hub_module,
+        "connect",
+        lambda *_args, **_kwargs: SilentAccountConnection(),
+    )
+
+    source = WebSocketAccountEventSource(
+        url="ws://unused",
+        environment="live",
+        account_label="primary",
+        consumer_id="test",
+        config=AccountEventHubConfig(
+            reconnect_delays=(0,),
+            unavailable_timeout_seconds=60.0,
+        ),
+    )
+
+    events = source.__aiter__()
+    received = await anext(events)
+    assert received.account_snapshot == snapshot
+    assert source._account_snapshot is not None
+
+    source.stop()
+    await events.aclose()

@@ -630,57 +630,63 @@ class PostgresPaperDaemonRepository:
         connects_before = self._connect_count
 
         async with self._session_factory() as session:
-            async with session.begin():
-                pool_acquire_started = perf_counter()
-                # AsyncSession construction is lazy; the pool checkout happens
-                # at the first connection/SQL use. Force that boundary before
-                # timing the UPSERT so pool wait and driver execution are
-                # reported separately.
-                await session.connection()
-                pool_acquired_at = perf_counter()
-                is_new_connection = bool(self._connect_count > connects_before)
-                statement = insert(StrategyRuntimeCheckpointRow).values(values)
-                execute_started = perf_counter()
-                await session.execute(
-                    statement.on_conflict_do_update(
-                        index_elements=["run_id"],
-                        set_={
-                            key: statement.excluded[key]
-                            for key in values
-                            if key != "run_id"
-                        },
-                        where=(
-                            StrategyRuntimeCheckpointRow.saved_at
-                            <= statement.excluded.saved_at
-                        ),
-                    )
-                )
-                execute_finished_at = perf_counter()
-                checkpoint_event = {
-                    "event_id": f"ckpt-{uuid4()}",
-                    "run_id": run_id,
-                    "event_type": "strategy_checkpoint_persisted",
-                    "occurred_at": saved_at,
-                    "symbol": None,
-                    "bucket_start": None,
-                    "details": {
-                        "prepare_ms": round((values_ready_at - started) * 1000, 3),
-                        "event_loop_lag_ms": event_loop_lag_ms,
-                        "pool_acquire_ms": round(
-                            (pool_acquired_at - pool_acquire_started) * 1000,
-                            3,
-                        ),
-                        "is_new_connection": is_new_connection,
-                        "pool_checked_in": pool_checked_in,
-                        "pool_checked_out": pool_checked_out,
-                        "sql_execute_ms": round(
-                            (execute_finished_at - execute_started) * 1000,
-                            3,
-                        ),
-                        "pre_commit_ms": round((execute_finished_at - started) * 1000, 3),
-                        "total_ms": round((execute_finished_at - started) * 1000, 3),
+            pool_acquire_started = perf_counter()
+            # AsyncSession construction is lazy; the pool checkout happens
+            # at the first connection/SQL use. Force that boundary before
+            # timing the UPSERT so pool wait and driver execution are
+            # reported separately.
+            await session.connection()
+            pool_acquired_at = perf_counter()
+            is_new_connection = bool(self._connect_count > connects_before)
+            statement = insert(StrategyRuntimeCheckpointRow).values(values)
+            execute_started = perf_counter()
+            await session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["run_id"],
+                    set_={
+                        key: statement.excluded[key]
+                        for key in values
+                        if key != "run_id"
                     },
-                }
+                    where=(
+                        StrategyRuntimeCheckpointRow.saved_at
+                        <= statement.excluded.saved_at
+                    ),
+                )
+            )
+            execute_finished_at = perf_counter()
+            await session.commit()
+            committed_at = perf_counter()
+            commit_ms = round((committed_at - execute_finished_at) * 1000, 3)
+            total_ms = round((committed_at - started) * 1000, 3)
+
+            checkpoint_event = {
+                "event_id": f"ckpt-{uuid4()}",
+                "run_id": run_id,
+                "event_type": "strategy_checkpoint_persisted",
+                "occurred_at": saved_at,
+                "symbol": None,
+                "bucket_start": None,
+                "details": {
+                    "prepare_ms": round((values_ready_at - started) * 1000, 3),
+                    "event_loop_lag_ms": event_loop_lag_ms,
+                    "pool_acquire_ms": round(
+                        (pool_acquired_at - pool_acquire_started) * 1000,
+                        3,
+                    ),
+                    "is_new_connection": is_new_connection,
+                    "pool_checked_in": pool_checked_in,
+                    "pool_checked_out": pool_checked_out,
+                    "sql_execute_ms": round(
+                        (execute_finished_at - execute_started) * 1000,
+                        3,
+                    ),
+                    "pre_commit_ms": round((execute_finished_at - started) * 1000, 3),
+                    "commit_ms": commit_ms,
+                    "total_ms": total_ms,
+                },
+            }
+            try:
                 await session.execute(
                     insert(StrategyRuntimeEventRow)
                     .values(checkpoint_event)
@@ -688,7 +694,13 @@ class PostgresPaperDaemonRepository:
                         index_elements=["event_id", "occurred_at"]
                     )
                 )
-            committed_at = perf_counter()
+                await session.commit()
+            except Exception:
+                log.warning(
+                    "strategy_checkpoint_event_persist_failed",
+                    run_id=run_id,
+                    exc_info=True,
+                )
         log.info(
             "strategy_checkpoint_persisted",
             run_id=run_id,
@@ -705,11 +717,8 @@ class PostgresPaperDaemonRepository:
                 (execute_finished_at - execute_started) * 1000,
                 3,
             ),
-            commit_ms=round(
-                (committed_at - execute_finished_at) * 1000,
-                3,
-            ),
-            total_ms=round((committed_at - started) * 1000, 3),
+            commit_ms=commit_ms,
+            total_ms=total_ms,
         )
 
     async def save_checkpoints(
@@ -748,60 +757,64 @@ class PostgresPaperDaemonRepository:
         connects_before = self._connect_count
 
         async with self._session_factory() as session:
-            async with session.begin():
-                pool_acquire_started = perf_counter()
-                await session.connection()
-                pool_acquired_at = perf_counter()
-                is_new_connection = bool(self._connect_count > connects_before)
-                statement = insert(StrategyRuntimeCheckpointRow).values(values)
-                execute_started = perf_counter()
-                await session.execute(
-                    statement.on_conflict_do_update(
-                        index_elements=["run_id"],
-                        set_={
-                            key: statement.excluded[key]
-                            for key in values[0]
-                            if key != "run_id"
-                        },
-                        where=(
-                            StrategyRuntimeCheckpointRow.saved_at
-                            <= statement.excluded.saved_at
-                        ),
-                    )
+            pool_acquire_started = perf_counter()
+            await session.connection()
+            pool_acquired_at = perf_counter()
+            is_new_connection = bool(self._connect_count > connects_before)
+            statement = insert(StrategyRuntimeCheckpointRow).values(values)
+            execute_started = perf_counter()
+            await session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["run_id"],
+                    set_={
+                        key: statement.excluded[key]
+                        for key in values[0]
+                        if key != "run_id"
+                    },
+                    where=(
+                        StrategyRuntimeCheckpointRow.saved_at
+                        <= statement.excluded.saved_at
+                    ),
                 )
-                execute_finished_at = perf_counter()
-                checkpoint_events = [
-                    {
-                        "event_id": f"ckpt-{uuid4()}",
-                        "run_id": run_id,
-                        "event_type": "strategy_checkpoint_persisted",
-                        "occurred_at": saved_at,
-                        "symbol": None,
-                        "bucket_start": None,
-                        "details": {
-                            "prepare_ms": round((values_ready_at - started) * 1000, 3),
-                            "event_loop_lag_ms": event_loop_lag_ms,
-                            "pool_acquire_ms": round(
-                                (pool_acquired_at - pool_acquire_started) * 1000,
-                                3,
-                            ),
-                            "is_new_connection": is_new_connection,
-                            "pool_checked_in": pool_checked_in,
-                            "pool_checked_out": pool_checked_out,
-                            "sql_execute_ms": round(
-                                (execute_finished_at - execute_started) * 1000,
-                                3,
-                            ),
-                            "pre_commit_ms": round(
-                                (execute_finished_at - started) * 1000, 3
-                            ),
-                            "total_ms": round(
-                                (execute_finished_at - started) * 1000, 3
-                            ),
-                        },
-                    }
-                    for run_id, _checkpoint, saved_at in checkpoints
-                ]
+            )
+            execute_finished_at = perf_counter()
+            await session.commit()
+            committed_at = perf_counter()
+            commit_ms = round((committed_at - execute_finished_at) * 1000, 3)
+            total_ms = round((committed_at - started) * 1000, 3)
+
+            checkpoint_events = [
+                {
+                    "event_id": f"ckpt-{uuid4()}",
+                    "run_id": run_id,
+                    "event_type": "strategy_checkpoint_persisted",
+                    "occurred_at": saved_at,
+                    "symbol": None,
+                    "bucket_start": None,
+                    "details": {
+                        "prepare_ms": round((values_ready_at - started) * 1000, 3),
+                        "event_loop_lag_ms": event_loop_lag_ms,
+                        "pool_acquire_ms": round(
+                            (pool_acquired_at - pool_acquire_started) * 1000,
+                            3,
+                        ),
+                        "is_new_connection": is_new_connection,
+                        "pool_checked_in": pool_checked_in,
+                        "pool_checked_out": pool_checked_out,
+                        "sql_execute_ms": round(
+                            (execute_finished_at - execute_started) * 1000,
+                            3,
+                        ),
+                        "pre_commit_ms": round(
+                            (execute_finished_at - started) * 1000, 3
+                        ),
+                        "commit_ms": commit_ms,
+                        "total_ms": total_ms,
+                    },
+                }
+                for run_id, _checkpoint, saved_at in checkpoints
+            ]
+            try:
                 await session.execute(
                     insert(StrategyRuntimeEventRow)
                     .values(checkpoint_events)
@@ -809,7 +822,13 @@ class PostgresPaperDaemonRepository:
                         index_elements=["event_id", "occurred_at"]
                     )
                 )
-            committed_at = perf_counter()
+                await session.commit()
+            except Exception:
+                log.warning(
+                    "strategy_checkpoints_event_persist_failed",
+                    run_count=len(values),
+                    exc_info=True,
+                )
         log.info(
             "strategy_checkpoints_persisted",
             run_count=len(values),
@@ -826,11 +845,8 @@ class PostgresPaperDaemonRepository:
                 (execute_finished_at - execute_started) * 1000,
                 3,
             ),
-            commit_ms=round(
-                (committed_at - execute_finished_at) * 1000,
-                3,
-            ),
-            total_ms=round((committed_at - started) * 1000, 3),
+            commit_ms=commit_ms,
+            total_ms=total_ms,
         )
 
     async def save_runtime_events(

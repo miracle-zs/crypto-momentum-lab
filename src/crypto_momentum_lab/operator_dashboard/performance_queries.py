@@ -201,6 +201,11 @@ class PerformanceQueries:
                 if details.get("pre_commit_ms") is not None
                 else total_ms
             )
+            commit_ms = (
+                float(details["commit_ms"])
+                if details.get("commit_ms") is not None
+                else None
+            )
             item = CheckpointMetricItem(
                 run_id=row.run_id,
                 account_label=label,
@@ -241,6 +246,7 @@ class PerformanceQueries:
                     else None
                 ),
                 pre_commit_ms=pre_commit_ms,
+                commit_ms=commit_ms,
                 total_ms=total_ms,
                 phase_seconds=phase,
             )

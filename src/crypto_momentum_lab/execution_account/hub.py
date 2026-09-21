@@ -817,7 +817,11 @@ class WebSocketAccountEventSource:
                     await connection.send(
                         json.dumps(subscription, separators=(",", ":"))
                     )
-                    ready = _decode_object(await connection.recv())
+                    ready_payload = await asyncio.wait_for(
+                        connection.recv(),
+                        timeout=self._config.handshake_timeout_seconds,
+                    )
+                    ready = _decode_object(ready_payload)
                     if ready.get("type") != _READY_MESSAGE:
                         raise AccountEventHubProtocolError(
                             "account-event hub did not acknowledge subscription"
@@ -850,8 +854,14 @@ class WebSocketAccountEventSource:
                             self._prepare_full_snapshot_recovery(
                                 "account_event_full_snapshot_recovery"
                             )
-                    unavailable_since = None
-                    reconnect_attempt = 0
+                    if (
+                        self._account_snapshot is not None
+                        and not self._require_full_snapshot
+                        and ready.get("stream_reset") is not True
+                        and ready.get("full_snapshot") is not True
+                    ):
+                        unavailable_since = None
+                        reconnect_attempt = 0
                     receive_queue: asyncio.Queue[_AccountEventQueueItem] = (
                         asyncio.Queue(maxsize=_CLIENT_RECEIVE_QUEUE_SIZE)
                     )
@@ -877,6 +887,7 @@ class WebSocketAccountEventSource:
                             materialized = self._materialize_event(item)
                             if materialized is not None:
                                 unavailable_since = None
+                                reconnect_attempt = 0
                                 yield materialized
                     finally:
                         if not reader_task.done():
@@ -1075,7 +1086,11 @@ class WebSocketAccountPositionExpectationPublisher:
             proxy=None,
         ) as connection:
             await connection.send(encode_account_position_expectation(expectation))
-            response = _decode_object(await connection.recv())
+            response_payload = await asyncio.wait_for(
+                connection.recv(),
+                timeout=self._config.handshake_timeout_seconds,
+            )
+            response = _decode_object(response_payload)
             if response.get("type") != _EXPECTED_POSITION_READY_MESSAGE:
                 raise AccountEventHubProtocolError(
                     "account-event hub did not acknowledge position expectation"
