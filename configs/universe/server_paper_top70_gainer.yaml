@@ -7,4 +7,4 @@ prewarm_retention_minutes: 40
 # Ranks 31–70 stay in the monitoring universe without per-symbol aggTrade.
 full_stream_max_gainer_rank: 30
 activation_minute: 1
-refresh_interval_minutes: 5
+refresh_interval_minutes: 1
