@@ -1,5 +1,7 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.strategy import StrategyCheckpoint
@@ -584,4 +586,124 @@ async def test_coordinator_save_final_waits_for_unpersisted_token() -> None:
     assert len(persisted_tokens) == 1
 
     await coordinator.stop()
+
+
+async def test_coordinator_advances_monotonic_clock_on_writer_success() -> None:
+    clock = [100.0]
+    persisted: list[int] = []
+
+    async def _persist(run_id: str, checkpoint: StrategyCheckpoint, saved_at: datetime) -> None:
+        clock[0] += 0.5
+        persisted.append(1)
+
+    with patch("crypto_momentum_lab.live_rollout.checkpoint_coordinator.perf_counter", side_effect=lambda: clock[0]):
+        writer = CheckpointWriter(run_id="run-clock-success", persist=_persist, clock=lambda: clock[0])
+        coordinator = LiveCheckpointCoordinator(
+            writer=writer,
+            strategy=_Strategy(),
+            checkpoint_every_states=1000,
+            checkpoint_every_seconds=3600,
+            max_dirty_age_seconds=90,
+        )
+        await coordinator.start()
+
+        # Fast forward clock past max_dirty_age_seconds
+        clock[0] = 200.0  # elapsed 100s >= 90s
+        coordinator.record_processed_state(_state(), saved_at=NOW)
+        assert writer.metrics.submitted_count == 1
+
+        # Writer flushes at clock 200.5
+        assert await writer.flush() is True
+        assert writer.last_persisted_token == 1
+        assert coordinator.last_persisted_token == 1
+        # durable_age_seconds should be 0 since clock is 200.5
+        assert coordinator.durable_age_seconds == 0.0
+
+        # Next state arrives 1 second later: should NOT submit again because durable age is 1.0 < 90s
+        clock[0] = 201.5
+        coordinator.record_processed_state(_state("ETHUSDT"), saved_at=NOW)
+        assert writer.metrics.submitted_count == 1
+        assert await writer.flush() is True
+        assert writer.metrics.submitted_count == 1
+
+        await coordinator.stop()
+
+
+async def test_coordinator_retains_dirty_clock_on_writer_failure() -> None:
+    clock = [100.0]
+    fail = True
+
+    async def _failing_persist(run_id: str, checkpoint: StrategyCheckpoint, saved_at: datetime) -> None:
+        if fail:
+            raise RuntimeError("disk failure")
+
+    with patch("crypto_momentum_lab.live_rollout.checkpoint_coordinator.perf_counter", side_effect=lambda: clock[0]):
+        writer = CheckpointWriter(
+            run_id="run-clock-fail",
+            persist=_failing_persist,
+            retry_delay_seconds=0.01,
+            clock=lambda: clock[0],
+        )
+        coordinator = LiveCheckpointCoordinator(
+            writer=writer,
+            strategy=_Strategy(),
+            checkpoint_every_states=1000,
+            checkpoint_every_seconds=3600,
+            max_dirty_age_seconds=90,
+        )
+        await coordinator.start()
+
+        clock[0] = 200.0
+        coordinator.record_processed_state(_state(), saved_at=NOW)
+        assert writer.metrics.submitted_count == 1
+
+        # Writer attempt fails
+        await asyncio.sleep(0.05)
+        assert writer.last_persisted_token == 0
+        assert coordinator.last_persisted_token == 0
+        # Durable age should still reflect elapsed time since 100.0
+        assert coordinator.durable_age_seconds >= 100.0
+
+        # Stop writer, allowing clean cleanup
+        fail = False
+        await coordinator.stop()
+
+
+async def test_coordinator_coalesced_writes_advance_to_latest_token() -> None:
+    clock = [100.0]
+    persisted_tokens: list[int] = []
+    persist_gate = asyncio.Event()
+
+    async def _gated_persist(run_id: str, checkpoint: StrategyCheckpoint, saved_at: datetime) -> None:
+        await persist_gate.wait()
+        clock[0] += 1.0
+        persisted_tokens.append(1)
+
+    with patch("crypto_momentum_lab.live_rollout.checkpoint_coordinator.perf_counter", side_effect=lambda: clock[0]):
+        writer = CheckpointWriter(run_id="run-coalesce", persist=_gated_persist, clock=lambda: clock[0])
+        coordinator = LiveCheckpointCoordinator(
+            writer=writer,
+            strategy=_Strategy(),
+            checkpoint_every_states=1,
+        )
+        await coordinator.start()
+
+        # Submit first
+        coordinator.record_processed_state(_state(), saved_at=NOW)
+        assert writer.metrics.submitted_count == 1
+
+        # Submit second and third while writer is blocked on persist_gate
+        coordinator.record_processed_state(_state("ETHUSDT"), saved_at=NOW)
+        coordinator.record_processed_state(_state("SOLUSDT"), saved_at=NOW)
+        assert writer.metrics.submitted_count == 3
+        assert writer.metrics.coalesced_count >= 1
+
+        # Release gate
+        persist_gate.set()
+        assert await writer.flush() is True
+        assert writer.last_persisted_token == 3
+        assert coordinator.last_persisted_token == 3
+        assert coordinator.durable_age_seconds == 0.0
+
+        await coordinator.stop()
 

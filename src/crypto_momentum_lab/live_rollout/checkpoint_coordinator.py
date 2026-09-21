@@ -70,7 +70,13 @@ class LiveCheckpointCoordinator:
         self._dirty = False
         self._last_saved_at: datetime | None = None
         self._last_checkpoint_cycle: int | None = None
-        self._last_persisted_monotonic: float = perf_counter()
+        if hasattr(writer, "attach_clock"):
+            writer.attach_clock(perf_counter)
+        self._last_persisted_token: int = getattr(writer, "last_persisted_token", 0)
+        writer_mono = getattr(writer, "last_persisted_monotonic", None)
+        self._last_persisted_monotonic: float = (
+            writer_mono if writer_mono is not None else perf_counter()
+        )
         self._dirty_since_monotonic: float | None = None
         self._last_submitted_token: int = 0
         self._started = False
@@ -88,7 +94,13 @@ class LiveCheckpointCoordinator:
         self._dirty = False
         self._last_saved_at = None
         self._last_checkpoint_cycle = None
-        self._last_persisted_monotonic = perf_counter()
+        if hasattr(self._writer, "attach_clock"):
+            self._writer.attach_clock(perf_counter)
+        self._last_persisted_token = getattr(self._writer, "last_persisted_token", 0)
+        writer_mono = getattr(self._writer, "last_persisted_monotonic", None)
+        self._last_persisted_monotonic = (
+            writer_mono if writer_mono is not None else perf_counter()
+        )
         self._dirty_since_monotonic = None
         self._last_submitted_token = 0
         await self._writer.start()
@@ -120,8 +132,22 @@ class LiveCheckpointCoordinator:
     def dirty(self) -> bool:
         return self._dirty
 
+    def _sync_persisted_progress(self) -> None:
+        token = getattr(self._writer, "last_persisted_token", 0)
+        if token > self._last_persisted_token:
+            self._last_persisted_token = token
+            writer_mono = getattr(self._writer, "last_persisted_monotonic", None)
+            if writer_mono is not None:
+                self._last_persisted_monotonic = writer_mono
+
+    @property
+    def last_persisted_token(self) -> int:
+        self._sync_persisted_progress()
+        return self._last_persisted_token
+
     @property
     def durable_age_seconds(self) -> float:
+        self._sync_persisted_progress()
         return perf_counter() - self._last_persisted_monotonic
 
     def last_processed_at(self, symbol: str) -> datetime | None:
@@ -144,6 +170,7 @@ class LiveCheckpointCoordinator:
     ) -> None:
         if not self._started:
             raise RuntimeError("checkpoint coordinator is not started")
+        self._sync_persisted_progress()
         now_mono = perf_counter()
         self._processed_state_count += 1
         self._last_processed_at_by_symbol[state.symbol] = state.bucket_start
@@ -192,6 +219,7 @@ class LiveCheckpointCoordinator:
         """Check if elapsed time since last save exceeds max_dirty_age_seconds."""
         if not self._started or not self._dirty or self._last_saved_at is None:
             return False
+        self._sync_persisted_progress()
         now_mono = perf_counter() if now_monotonic is None else now_monotonic
         if now_mono - self._last_persisted_monotonic < self._max_dirty_age_seconds:
             return False
@@ -233,9 +261,12 @@ class LiveCheckpointCoordinator:
                     self._last_saved_at,
                 )
             if saved:
+                self._sync_persisted_progress()
                 self._dirty = False
                 self._dirty_since_monotonic = None
-                self._last_persisted_monotonic = perf_counter()
+                self._last_persisted_monotonic = getattr(
+                    self._writer, "last_persisted_monotonic", perf_counter()
+                )
                 self._last_saved_at = None
             return saved
 
@@ -257,10 +288,11 @@ class LiveCheckpointCoordinator:
                 saved
                 and self._writer.last_persisted_token >= self._last_submitted_token
             ):
-                self._last_persisted_monotonic = perf_counter()
+                self._sync_persisted_progress()
                 return True
             return False
 
+        self._sync_persisted_progress()
         return True
 
     def record_recovered_state(

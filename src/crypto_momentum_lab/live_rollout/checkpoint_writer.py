@@ -53,6 +53,7 @@ class CheckpointWriter:
         persist: PersistCheckpoint,
         retry_delay_seconds: float = 1.0,
         flush_timeout_seconds: float = 10.0,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
@@ -64,6 +65,7 @@ class CheckpointWriter:
         self._persist = persist
         self._retry_delay_seconds = retry_delay_seconds
         self._flush_timeout_seconds = flush_timeout_seconds
+        self._clock: Callable[[], float] = clock or perf_counter
         self._pending: _PendingCheckpoint | None = None
         self._wake = asyncio.Event()
         self._idle = asyncio.Event()
@@ -76,8 +78,12 @@ class CheckpointWriter:
         self._coalesced_count = 0
         self._persisted_count = 0
         self._last_persisted_token = 0
+        self._last_persisted_monotonic: float | None = None
         self._failure_count = 0
         self._last_duration_ms: float | None = None
+
+    def attach_clock(self, clock: Callable[[], float]) -> None:
+        self._clock = clock
 
     @property
     def metrics(self) -> CheckpointWriterMetrics:
@@ -92,6 +98,10 @@ class CheckpointWriter:
     @property
     def last_persisted_token(self) -> int:
         return self._last_persisted_token
+
+    @property
+    def last_persisted_monotonic(self) -> float | None:
+        return self._last_persisted_monotonic
 
     @property
     def last_submitted_token(self) -> int:
@@ -146,6 +156,7 @@ class CheckpointWriter:
         if self._task is None:
             await self._persist(self._run_id, checkpoint, saved_at)
             self._persisted_count += 1
+            self._last_persisted_monotonic = self._clock()
             self._last_persisted_token = max(
                 self._last_persisted_token, self._submitted_count
             )
@@ -238,12 +249,14 @@ class CheckpointWriter:
                     continue
 
     async def _persist_one(self, pending: _PendingCheckpoint) -> None:
-        started = perf_counter()
+        started = self._clock()
         async with self._write_lock:
             await self._persist(self._run_id, pending.checkpoint, pending.saved_at)
-        duration_ms = (perf_counter() - started) * 1000
+        completed = self._clock()
+        duration_ms = (completed - started) * 1000
         self._last_duration_ms = duration_ms
         self._persisted_count += 1
+        self._last_persisted_monotonic = completed
         if pending.token > self._last_persisted_token:
             self._last_persisted_token = pending.token
         log.info(

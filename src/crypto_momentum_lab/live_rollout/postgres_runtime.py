@@ -2373,8 +2373,11 @@ def _build_position_batches(
                 )
                 return ledger_batches
             log.warning(
-                "position_ledger_primary_quantity_mismatch_fallback",
+                "position_ledger_primary_fallback",
                 symbol=position.symbol,
+                category=diff_report.category.value,
+                details=diff_report.details,
+                is_concordant=diff_report.is_concordant,
                 position_amt=str(position.position_amt),
                 abs_position_amt=str(abs(position.position_amt)),
                 ledger_total=str(shadow_projection.total_active_quantity),

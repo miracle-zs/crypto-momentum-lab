@@ -290,6 +290,7 @@ class CheckpointMetricItem(DashboardSchema):
     pool_checked_in: int | None = None
     pool_checked_out: int | None = None
     sql_execute_ms: float | None = None
+    pre_commit_ms: float | None = None
     total_ms: float | None = None
     phase_seconds: float | None = None
 

@@ -677,6 +677,7 @@ class PostgresPaperDaemonRepository:
                             (execute_finished_at - execute_started) * 1000,
                             3,
                         ),
+                        "pre_commit_ms": round((execute_finished_at - started) * 1000, 3),
                         "total_ms": round((execute_finished_at - started) * 1000, 3),
                     },
                 }
@@ -790,6 +791,9 @@ class PostgresPaperDaemonRepository:
                             "sql_execute_ms": round(
                                 (execute_finished_at - execute_started) * 1000,
                                 3,
+                            ),
+                            "pre_commit_ms": round(
+                                (execute_finished_at - started) * 1000, 3
                             ),
                             "total_ms": round(
                                 (execute_finished_at - started) * 1000, 3
