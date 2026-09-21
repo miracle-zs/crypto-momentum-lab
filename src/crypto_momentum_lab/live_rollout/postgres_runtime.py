@@ -2246,6 +2246,23 @@ def _build_position_batches(
             position_side=position_side,
         )
 
+        matching_order_ids = {
+            str(oid)
+            for order in matching_orders
+            for oid in (order.client_order_id, order.exchange_order_id)
+            if oid
+        }
+        order_times = [
+            order.created_at
+            for order in matching_orders
+            if getattr(order, "created_at", None)
+        ]
+        for order in matching_orders:
+            for oid in (order.client_order_id, order.exchange_order_id):
+                if oid and oid in fill_times:
+                    order_times.append(fill_times[oid])
+        earliest_order_time = min(order_times) if order_times else None
+
         def _fill_matches_position(fill: AccountFillEvent) -> bool:
             if fill.symbol != position.symbol:
                 return False
@@ -2255,6 +2272,11 @@ def _build_position_batches(
                 fill_ps_str = str(fill_ps).upper()
                 pos_ps_str = position_side.value.upper()
                 if fill_ps_str != "BOTH" and fill_ps_str != pos_ps_str:
+                    return False
+            if earliest_order_time is not None:
+                if str(fill.order_id) in matching_order_ids:
+                    return True
+                if fill.trade_at < earliest_order_time - timedelta(minutes=5):
                     return False
             return True
 

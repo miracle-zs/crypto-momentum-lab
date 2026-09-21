@@ -201,3 +201,81 @@ def test_legacy_order_identity_adapter_isolates_hedge_mode_position_side() -> No
     )
     assert len(short_facts.fills) == 1
     assert short_facts.fills[0].trade_id == "t_short"
+
+
+def test_to_account_facts_filters_stale_pre_episode_fills() -> None:
+    """Verify that fills from a prior closed episode (>5 min before earliest order) are discarded."""
+    from crypto_momentum_lab.domain.account import AccountFillEvent
+    from crypto_momentum_lab.domain.execution import (
+        ExchangeOrderState,
+        PositionOrderFact,
+    )
+
+    t_old = datetime(2026, 9, 19, 20, 0, tzinfo=UTC)
+    t_new_entry = datetime(2026, 9, 20, 14, 0, tzinfo=UTC)
+    t_new_fill = datetime(2026, 9, 20, 14, 0, 10, tzinfo=UTC)
+
+    key = PositionKey(
+        environment="live",
+        account_label="account-3",
+        symbol="CELRUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+
+    current_order = PositionOrderFact(
+        symbol="CELRUSDT",
+        position_side=FuturesPositionSide.BOTH,
+        side="BUY",
+        reduce_only=False,
+        order_type="LIMIT",
+        quantity=Decimal("22799"),
+        executed_quantity=Decimal("22799"),
+        state=ExchangeOrderState.FILLED,
+        client_order_id="c_celr_new",
+        exchange_order_id="e_celr_new",
+        created_at=t_new_entry,
+        updated_at=t_new_entry,
+        price=Decimal("0.004386"),
+    )
+
+    stale_fill = AccountFillEvent(
+        environment="live",
+        account_label="account-3",
+        symbol="CELRUSDT",
+        trade_id="t_stale_33388",
+        order_id="e_celr_old_sell",
+        side="SELL",
+        price=Decimal("0.003022"),
+        quantity=Decimal("33388"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0.01"),
+        fee_asset="USDT",
+        trade_at=t_old,
+        raw_payload={"positionSide": "BOTH", "is_system": True},
+    )
+
+    current_fill = AccountFillEvent(
+        environment="live",
+        account_label="account-3",
+        symbol="CELRUSDT",
+        trade_id="t_current_22799",
+        order_id="e_celr_new",
+        side="BUY",
+        price=Decimal("0.004386"),
+        quantity=Decimal("22799"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0.01"),
+        fee_asset="USDT",
+        trade_at=t_new_fill,
+        raw_payload={"positionSide": "BOTH", "is_system": True},
+    )
+
+    facts = LegacyOrderIdentityAdapter.to_account_facts(
+        position_key=key,
+        orders=[current_order],
+        fills=[stale_fill, current_fill],
+    )
+
+    assert len(facts.fills) == 1
+    assert facts.fills[0].trade_id == "t_current_22799"
+

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 
@@ -86,6 +86,17 @@ class LegacyOrderIdentityAdapter:
         from filled PositionOrderFact entries to allow backward compatibility.
         """
 
+        matching_order_ids = {
+            str(oid)
+            for order in orders
+            for oid in (order.client_order_id, order.exchange_order_id)
+            if oid
+        }
+        order_times = [
+            order.created_at for order in orders if getattr(order, "created_at", None)
+        ]
+        earliest_order_time = min(order_times) if order_times else None
+
         def _fill_matches_side(fill: AccountFillEvent) -> bool:
             if fill.symbol != position_key.symbol:
                 return False
@@ -97,6 +108,11 @@ class LegacyOrderIdentityAdapter:
                     ps_str != "BOTH"
                     and ps_str != position_key.position_side.value.upper()
                 ):
+                    return False
+            if earliest_order_time is not None:
+                if str(fill.order_id) in matching_order_ids:
+                    return True
+                if fill.trade_at < earliest_order_time - timedelta(minutes=5):
                     return False
             return True
 

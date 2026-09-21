@@ -483,3 +483,87 @@ def test_build_position_batches_preserves_recovery_order_fields_under_cutover() 
         assert batch.closing_order_filled is False
         assert batch.exit_order_submitted_at == t1
 
+
+def test_build_position_batches_discards_stale_fills_and_maintains_concordance() -> None:
+    """Verify that account_fills from a prior episode (>5 min before entry) do not cause false reconciliation gap."""
+    t_old = datetime(2026, 9, 19, 20, 0, tzinfo=UTC)
+    t_entry = datetime(2026, 9, 20, 14, 0, tzinfo=UTC)
+
+    from crypto_momentum_lab.domain.account import AccountFillEvent
+    from crypto_momentum_lab.domain.execution.order_state import ExchangeOrderState
+    from crypto_momentum_lab.domain.execution.position_batches import (
+        PositionOrderFact,
+    )
+
+    position = SimpleNamespace(
+        environment="live",
+        account_label="account-3",
+        symbol="CELRUSDT",
+        position_amt=Decimal("22799"),
+        entry_price=Decimal("0.004386"),
+    )
+
+    entry_order = PositionOrderFact(
+        symbol="CELRUSDT",
+        position_side=FuturesPositionSide.BOTH,
+        side="BUY",
+        reduce_only=False,
+        order_type="LIMIT",
+        quantity=Decimal("22799"),
+        executed_quantity=Decimal("22799"),
+        state=ExchangeOrderState.FILLED,
+        client_order_id="c_celr_entry",
+        exchange_order_id="e_celr_entry",
+        created_at=t_entry,
+        updated_at=t_entry,
+        price=Decimal("0.004386"),
+    )
+
+    stale_fill = AccountFillEvent(
+        environment="live",
+        account_label="account-3",
+        symbol="CELRUSDT",
+        trade_id="t_stale_33388",
+        order_id="e_old_sell",
+        side="SELL",
+        price=Decimal("0.003022"),
+        quantity=Decimal("33388"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0.01"),
+        fee_asset="USDT",
+        trade_at=t_old,
+        raw_payload={"positionSide": "BOTH", "is_system": True},
+    )
+
+    current_fill = AccountFillEvent(
+        environment="live",
+        account_label="account-3",
+        symbol="CELRUSDT",
+        trade_id="t_current",
+        order_id="e_celr_entry",
+        side="BUY",
+        price=Decimal("0.004386"),
+        quantity=Decimal("22799"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0.01"),
+        fee_asset="USDT",
+        trade_at=t_entry,
+        raw_payload={"positionSide": "BOTH", "is_system": True},
+    )
+
+    with patch.dict(os.environ, {"CML_POSITION_LEDGER_PRIMARY_ENABLED": "1"}):
+        batches = _build_position_batches(
+            position=position,  # type: ignore[arg-type]
+            side=StrategySide.LONG,
+            position_side=FuturesPositionSide.BOTH,
+            matching_orders=[entry_order],  # type: ignore[arg-type]
+            fill_times={"e_celr_entry": t_entry},
+            fill_prices={"e_celr_entry": Decimal("0.004386")},
+            account_fills=[stale_fill, current_fill],
+        )
+        assert len(batches) == 1
+        assert batches[0].quantity == Decimal("22799")
+        assert batches[0].entry_price == Decimal("0.004386")
+        assert batches[0].opened_at == t_entry
+
+
