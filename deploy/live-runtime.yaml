@@ -19,10 +19,10 @@ accounts:
     strategy_config:
       impulse_window_buckets: "${CML_LIVE_IMPULSE_WINDOW_BUCKETS:-2}"
       confirmation_buckets: "${CML_LIVE_CONFIRMATION_BUCKETS:-1}"
-      min_return_pct: "${CML_LIVE_MIN_RETURN_PCT:-0.005}"
+      min_return_pct: "${CML_LIVE_MIN_RETURN_PCT:-0.0075}"
       min_imbalance: "${CML_LIVE_MIN_IMBALANCE:-0.30}"
-      min_intensity: "${CML_LIVE_MIN_INTENSITY:-4.0}"
-      min_notional_5m_vs_30m: "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M:-1.50}"
+      min_intensity: "${CML_LIVE_MIN_INTENSITY:-3.0}"
+      min_notional_5m_vs_30m: "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M:-1.25}"
       cooldown_buckets: "${CML_LIVE_COOLDOWN_BUCKETS:-0}"
       entry_positive_gainer_top_count: "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-10}"
       require_price_above_ema5: false
@@ -40,7 +40,7 @@ accounts:
       candle_grace_decision_profit_pct: "${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT:-0.001}"
       candle_grace_profit_pct: "${CML_LIVE_CANDLE_GRACE_PROFIT_PCT:-0.0088}"
       persist_exchange_operations: "${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-submit,cancel}"
-      max_concurrency: "${CML_LIVE_MAX_CONCURRENCY:-}"
+      max_concurrency: "${CML_LIVE_MAX_CONCURRENCY:-2}"
     profile_ref: compose.server.yaml#services.live-strategy
     limits_ref: postgres:risk_config/primary
     services:
@@ -55,10 +55,10 @@ accounts:
     strategy_config:
       impulse_window_buckets: "${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_2:-2}"
       confirmation_buckets: "${CML_LIVE_CONFIRMATION_BUCKETS_ACCOUNT_2:-1}"
-      min_return_pct: "${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_2:-0.005}"
+      min_return_pct: "${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_2:-0.0075}"
       min_imbalance: "${CML_LIVE_MIN_IMBALANCE_ACCOUNT_2:-0.30}"
-      min_intensity: "${CML_LIVE_MIN_INTENSITY_ACCOUNT_2:-4.0}"
-      min_notional_5m_vs_30m: "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_2:-1.50}"
+      min_intensity: "${CML_LIVE_MIN_INTENSITY_ACCOUNT_2:-3.0}"
+      min_notional_5m_vs_30m: "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_2:-1.25}"
       cooldown_buckets: "${CML_LIVE_COOLDOWN_BUCKETS_ACCOUNT_2:-0}"
       entry_positive_gainer_top_count: "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_2:-10}"
       require_price_above_ema5: false
@@ -76,7 +76,7 @@ accounts:
       candle_grace_decision_profit_pct: "${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT_ACCOUNT_2:-0.001}"
       candle_grace_profit_pct: "${CML_LIVE_CANDLE_GRACE_PROFIT_PCT_ACCOUNT_2:-0.0088}"
       persist_exchange_operations: "${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS_ACCOUNT_2:-submit,cancel}"
-      max_concurrency: "${CML_LIVE_MAX_CONCURRENCY_ACCOUNT_2:-}"
+      max_concurrency: "${CML_LIVE_MAX_CONCURRENCY_ACCOUNT_2:-2}"
     migration_revision: "${CML_LIVE_MIGRATION_REVISION_ACCOUNT_2:-20260911_0036}"
     profile_ref: compose.live.accounts.yaml#services.live-strategy-account-2
     limits_ref: postgres:risk_config/account-2
@@ -92,7 +92,7 @@ accounts:
     strategy_config:
       impulse_window_buckets: "${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_3:-2}"
       confirmation_buckets: "${CML_LIVE_CONFIRMATION_BUCKETS_ACCOUNT_3:-1}"
-      min_return_pct: "${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_3:-0.005}"
+      min_return_pct: "${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_3:-0.0075}"
       min_imbalance: "${CML_LIVE_MIN_IMBALANCE_ACCOUNT_3:-0.30}"
       min_intensity: "${CML_LIVE_MIN_INTENSITY_ACCOUNT_3:-3.0}"
       min_notional_5m_vs_30m: "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_3:-1.25}"
@@ -129,7 +129,7 @@ accounts:
     strategy_config:
       impulse_window_buckets: "${CML_LIVE_IMPULSE_WINDOW_BUCKETS_ACCOUNT_4:-2}"
       confirmation_buckets: "${CML_LIVE_CONFIRMATION_BUCKETS_ACCOUNT_4:-1}"
-      min_return_pct: "${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_4:-0.005}"
+      min_return_pct: "${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_4:-0.0075}"
       min_imbalance: "${CML_LIVE_MIN_IMBALANCE_ACCOUNT_4:-0.30}"
       min_intensity: "${CML_LIVE_MIN_INTENSITY_ACCOUNT_4:-3.0}"
       min_notional_5m_vs_30m: "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_4:-1.25}"
