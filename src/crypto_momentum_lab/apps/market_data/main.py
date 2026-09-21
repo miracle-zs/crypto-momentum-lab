@@ -463,6 +463,7 @@ class CaptureUniverseObserver:
         self._gainer_rank_by_symbol: dict[str, int] = {}
         self._applied_symbols: frozenset[str] | None = None
         self._prewarm_until_by_symbol: dict[str, datetime] = {}
+        self._previous_trade_tier: frozenset[str] | None = None
         # First wall-clock time the symbol entered the per-symbol trade tier.
         # Used to decide whether a T1→T0 promotion already has enough local
         # 15s history or still needs a REST backfill.
@@ -484,10 +485,6 @@ class CaptureUniverseObserver:
             self._gainer_rank_by_symbol = {
                 entry.symbol: entry.rank for entry in snapshot.ranking.gainers
             }
-            self._update_prewarm_symbols(
-                universe_symbols=universe_symbols,
-                observed_at=snapshot.observed_at,
-            )
             self._universe_symbols = universe_symbols
             await self._apply_symbols(now=snapshot.observed_at)
 
@@ -506,27 +503,16 @@ class CaptureUniverseObserver:
                 return
             await self._apply_symbols()
 
-    def _trade_stream_symbols(
+    def _active_trade_tier_symbols(
         self,
         *,
         universe_symbols: frozenset[str],
         protected_symbols: frozenset[str],
     ) -> frozenset[str]:
-        """Return symbols that keep per-symbol trade streams (T0/T1).
+        """Return symbols actively qualifying for per-symbol trade streams (T0/T1)."""
 
-        With ``full_stream_max_gainer_rank == 0`` every monitoring symbol is
-        subscribed, matching the historical single-tier behaviour.  Above that
-        cutoff, extended gainers stay in the universe for ranking but only see
-        the global bookTicker stream until they promote.
-        """
-
-        prewarm = frozenset(self._prewarm_until_by_symbol)
-        if self._full_stream_max_gainer_rank <= 0:
-            return universe_symbols | prewarm | protected_symbols
-        if not self._gainer_rank_by_symbol:
-            # No ranking yet (startup): keep the conservative full subscription
-            # until the first universe snapshot lands.
-            return universe_symbols | prewarm | protected_symbols
+        if self._full_stream_max_gainer_rank <= 0 or not self._gainer_rank_by_symbol:
+            return universe_symbols | protected_symbols
         full = {
             symbol
             for symbol in universe_symbols
@@ -534,7 +520,59 @@ class CaptureUniverseObserver:
             <= self._full_stream_max_gainer_rank
         }
         full |= self._universe_forced_symbols & universe_symbols
-        return frozenset(full) | prewarm | protected_symbols
+        return frozenset(full) | protected_symbols
+
+    def _update_prewarm_symbols(
+        self,
+        *,
+        current_trade_tier: frozenset[str],
+        observed_at: datetime,
+    ) -> None:
+        """Keep recently exited trade-tier symbols subscribed for re-entry."""
+
+        if (
+            self._prewarm_retention > timedelta(0)
+            and self._previous_trade_tier is not None
+        ):
+            left_symbols = self._previous_trade_tier - current_trade_tier
+            expiry = observed_at + self._prewarm_retention
+            for symbol in left_symbols:
+                self._prewarm_until_by_symbol[symbol] = expiry
+
+        for symbol in current_trade_tier:
+            self._prewarm_until_by_symbol.pop(symbol, None)
+        self._prewarm_until_by_symbol = {
+            symbol: expiry
+            for symbol, expiry in self._prewarm_until_by_symbol.items()
+            if expiry > observed_at
+        }
+        self._previous_trade_tier = current_trade_tier
+
+    def _trade_stream_symbols(
+        self,
+        *,
+        universe_symbols: frozenset[str],
+        protected_symbols: frozenset[str],
+        observed_at: datetime,
+    ) -> frozenset[str]:
+        """Return symbols that keep per-symbol trade streams (T0/T1).
+
+        With ``full_stream_max_gainer_rank == 0`` every monitoring symbol is
+        subscribed, matching the historical single-tier behaviour. Above that
+        cutoff, only active trade-tier gainers plus recently exited prewarmed
+        trade symbols keep per-symbol trade streams.
+        """
+
+        active_trade_tier = self._active_trade_tier_symbols(
+            universe_symbols=universe_symbols,
+            protected_symbols=protected_symbols,
+        )
+        self._update_prewarm_symbols(
+            current_trade_tier=active_trade_tier,
+            observed_at=observed_at,
+        )
+        prewarm = frozenset(self._prewarm_until_by_symbol)
+        return active_trade_tier | prewarm
 
     def _compute_must_warm_symbols(
         self,
@@ -641,6 +679,9 @@ class CaptureUniverseObserver:
     async def _apply_symbols(self, *, now: datetime | None = None) -> None:
         if self._universe_symbols is None:
             return
+        observed_at = datetime.now(tz=UTC) if now is None else now
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=UTC)
         protected_symbols = (
             frozenset()
             if self._protected_symbol_loader is None
@@ -649,10 +690,8 @@ class CaptureUniverseObserver:
         symbols = self._trade_stream_symbols(
             universe_symbols=self._universe_symbols,
             protected_symbols=protected_symbols,
+            observed_at=observed_at,
         )
-        observed_at = datetime.now(tz=UTC) if now is None else now
-        if observed_at.tzinfo is None:
-            observed_at = observed_at.replace(tzinfo=UTC)
         lookback = timedelta(minutes=35)
         previous_symbols = self._applied_symbols
         added_symbols = (
@@ -723,29 +762,6 @@ class CaptureUniverseObserver:
         # universe refreshes represent a real promotion into the trade tier.
         if previous_symbols is not None and needing_backfill:
             self._schedule_history_backfill(needing_backfill)
-
-    def _update_prewarm_symbols(
-        self,
-        *,
-        universe_symbols: frozenset[str],
-        observed_at: datetime,
-    ) -> None:
-        """Keep recently exited universe symbols subscribed for re-entry."""
-
-        previous_universe = self._universe_symbols or frozenset()
-        if self._prewarm_retention > timedelta(0):
-            left_symbols = previous_universe - universe_symbols
-            expiry = observed_at + self._prewarm_retention
-            for symbol in left_symbols:
-                self._prewarm_until_by_symbol[symbol] = expiry
-
-        for symbol in universe_symbols:
-            self._prewarm_until_by_symbol.pop(symbol, None)
-        self._prewarm_until_by_symbol = {
-            symbol: expiry
-            for symbol, expiry in self._prewarm_until_by_symbol.items()
-            if expiry > observed_at
-        }
 
 
 async def reconcile_paper_exit_subscriptions(

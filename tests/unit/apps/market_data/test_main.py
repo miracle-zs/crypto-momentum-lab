@@ -1027,3 +1027,88 @@ async def test_capture_observer_keeps_recently_removed_symbols_for_prewarm() -> 
 
     assert capture.calls[-1][0] == frozenset()
     assert len(capture.calls) == 2
+
+
+async def test_capture_observer_trade_tier_retains_falling_symbols() -> None:
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def apply_symbols(self, symbols, *, streams, generation) -> None:
+            self.calls.append((symbols, streams, generation))
+
+    capture = FakeCapture()
+    observer = main.CaptureUniverseObserver(
+        capture,
+        streams=(CaptureStream.AGG_TRADE,),
+        initial_generation=1,
+        full_stream_max_gainer_rank=30,
+        prewarm_retention_minutes=40,
+    )
+
+    first = fixture_tiered_snapshot()
+    await observer.snapshot_updated(first)
+    assert "S25USDT" in capture.calls[-1][0]
+    assert "S35USDT" not in capture.calls[-1][0]
+
+    # S25 drops to rank 35 (in extended universe, > 30).
+    # Since it was in the trade tier, it must be retained in prewarm.
+    second = replace(
+        first,
+        observed_at=first.observed_at + timedelta(minutes=5),
+        ranking=replace(
+            first.ranking,
+            gainers=tuple(
+                replace(entry, rank=35) if entry.symbol == "S25USDT" else entry
+                for entry in first.ranking.gainers
+            ),
+        ),
+    )
+    await observer.snapshot_updated(second)
+    assert "S25USDT" in capture.calls[-1][0]
+
+    # After 41 minutes (> 40m retention), S25 should expire and be dropped.
+    expired = replace(
+        second,
+        observed_at=second.observed_at + timedelta(minutes=41),
+    )
+    await observer.snapshot_updated(expired)
+    assert "S25USDT" not in capture.calls[-1][0]
+
+
+async def test_capture_observer_watch_only_symbols_do_not_gain_trade_stream_on_exit() -> None:
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def apply_symbols(self, symbols, *, streams, generation) -> None:
+            self.calls.append((symbols, streams, generation))
+
+    capture = FakeCapture()
+    observer = main.CaptureUniverseObserver(
+        capture,
+        streams=(CaptureStream.AGG_TRADE,),
+        initial_generation=1,
+        full_stream_max_gainer_rank=30,
+        prewarm_retention_minutes=40,
+    )
+
+    first = fixture_tiered_snapshot()
+    await observer.snapshot_updated(first)
+    assert "S35USDT" not in capture.calls[-1][0]
+
+    # S35 was in watch-only (rank 35). It leaves the universe entirely.
+    second = replace(
+        first,
+        observed_at=first.observed_at + timedelta(minutes=5),
+        memberships=tuple(m for m in first.memberships if m.symbol != "S35USDT"),
+        ranking=replace(
+            first.ranking,
+            gainers=tuple(g for g in first.ranking.gainers if g.symbol != "S35USDT"),
+        ),
+    )
+    await observer.snapshot_updated(second)
+
+    # S35 was NEVER in the trade tier; leaving the universe must NOT give it an aggTrade stream.
+    assert "S35USDT" not in capture.calls[-1][0]
+
