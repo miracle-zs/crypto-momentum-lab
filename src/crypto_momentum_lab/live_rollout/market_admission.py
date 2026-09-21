@@ -52,6 +52,16 @@ class LiveMarketStateAdmission:
         self._telemetry = telemetry
         self._clock = clock
 
+    def invalidate_context_cache(self) -> None:
+        """Invalidate the underlying context provider cache if supported."""
+        invalidator = getattr(self._context_provider, "invalidate_cache", None)
+        if callable(invalidator):
+            invalidator()
+        else:
+            invalidator = getattr(self._context_provider, "invalidate", None)
+            if callable(invalidator):
+                invalidator()
+
     async def prepare(
         self,
         prefetched: PrefetchedContext,

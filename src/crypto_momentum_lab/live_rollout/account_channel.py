@@ -140,13 +140,15 @@ class LiveAccountEventRuntime:
                             state,
                             quote=quote,
                         )
-                        if not is_pending_position_sync_failure(failure):
+                        if failure is None:
                             log.info(
                                 "live_account_event_position_sync_recovered",
                                 run_id=event_run_id,
                                 symbol=state.symbol,
                                 attempt=attempt,
                             )
+                            break
+                        if not is_pending_position_sync_failure(failure):
                             break
                     failure = (
                         promote_pending_position_failure(failure)

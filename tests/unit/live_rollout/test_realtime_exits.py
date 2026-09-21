@@ -25,7 +25,7 @@ class _FailingCandleLoader:
         raise AssertionError("realtime quote path must not load candles")
 
 
-async def test_fixed_realtime_stop_loss_does_not_wait_for_candle_loader() -> None:
+async def test_requests_for_quote_returns_empty_tuple() -> None:
     loader = _FailingCandleLoader()
     manager = LiveExitManager(
         config=LiveExitConfig(
@@ -34,9 +34,7 @@ async def test_fixed_realtime_stop_loss_does_not_wait_for_candle_loader() -> Non
             strategy_version="v1",
             strategy_config_hash="hash",
             policy=PositionExitPolicy(
-                take_profit_pct=Decimal("0.02"),
-                stop_loss_pct=Decimal("0.01"),
-                mode=PositionExitMode.FIXED,
+                mode=PositionExitMode.CANDLE_15M,
             ),
         ),
         candle_loader=loader,
@@ -48,8 +46,8 @@ async def test_fixed_realtime_stop_loss_does_not_wait_for_candle_loader() -> Non
         symbol="BTCUSDT",
         event_at=opened_at + timedelta(minutes=1),
         received_at=opened_at + timedelta(minutes=1),
-        bid_price=Decimal("98"),
-        ask_price=Decimal("99"),
+        bid_price=Decimal("90"),
+        ask_price=Decimal("91"),
     )
     position = ManagedLivePosition(
         symbol="BTCUSDT",
@@ -62,14 +60,11 @@ async def test_fixed_realtime_stop_loss_does_not_wait_for_candle_loader() -> Non
 
     requests = await manager.requests_for_quote(quote, (position,))
 
-    assert len(requests) == 1
-    assert requests[0].candidate.reason == "stop_loss_realtime"
-    assert requests[0].candidate.created_at == quote.received_at
-    assert requests[0].candidate.features["reference_price"] == "98"
+    assert requests == ()
     assert loader.calls == 0
 
 
-async def test_candle_exit_mode_ignores_realtime_fixed_thresholds() -> None:
+async def test_candle_exit_mode_ignores_realtime_quotes() -> None:
     loader = _FailingCandleLoader()
     manager = LiveExitManager(
         config=LiveExitConfig(
@@ -78,8 +73,6 @@ async def test_candle_exit_mode_ignores_realtime_fixed_thresholds() -> None:
             strategy_version="v1",
             strategy_config_hash="hash",
             policy=PositionExitPolicy(
-                take_profit_pct=Decimal("0.02"),
-                stop_loss_pct=Decimal("0.01"),
                 mode=PositionExitMode.CANDLE_15M,
             ),
         ),
@@ -125,50 +118,3 @@ async def test_candle_exit_mode_ignores_realtime_fixed_thresholds() -> None:
     assert take_profit_requests == ()
     assert stop_loss_requests == ()
     assert loader.calls == 0
-
-
-async def test_realtime_exit_candidate_is_idempotent_across_quotes() -> None:
-    manager = LiveExitManager(
-        config=LiveExitConfig(
-            run_id="run-1",
-            strategy_name="strategy",
-            strategy_version="v1",
-            strategy_config_hash="hash",
-            policy=PositionExitPolicy(
-                take_profit_pct=Decimal("0.02"),
-                stop_loss_pct=Decimal("0.01"),
-            ),
-        )
-    )
-    opened_at = datetime(2026, 8, 23, 0, 0, tzinfo=UTC)
-    position = ManagedLivePosition(
-        symbol="BTCUSDT",
-        side=StrategySide.LONG,
-        position_side=FuturesPositionSide.LONG,
-        quantity=Decimal("1"),
-        entry_price=Decimal("100"),
-        opened_at=opened_at,
-    )
-    first_quote = RealtimeMarketQuote(
-        exchange="binance-usdm",
-        environment="research",
-        symbol="BTCUSDT",
-        event_at=opened_at + timedelta(seconds=1),
-        received_at=opened_at + timedelta(seconds=1),
-        bid_price=Decimal("98"),
-        ask_price=Decimal("99"),
-    )
-    second_quote = RealtimeMarketQuote(
-        exchange="binance-usdm",
-        environment="research",
-        symbol="BTCUSDT",
-        event_at=opened_at + timedelta(seconds=2),
-        received_at=opened_at + timedelta(seconds=2),
-        bid_price=Decimal("97"),
-        ask_price=Decimal("98"),
-    )
-
-    first = await manager.requests_for_quote(first_quote, (position,))
-    second = await manager.requests_for_quote(second_quote, (position,))
-
-    assert first[0].candidate.candidate_id == second[0].candidate.candidate_id

@@ -8,6 +8,7 @@ in as the already-separated lanes and coordinators.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import (
     AsyncIterable,
     Awaitable,
@@ -146,6 +147,7 @@ class LiveMarketLoop:
         ] | None = None,
         commit_market_state_cursor: Callable[[MarketState15s], None] | None = None,
         entered_symbol_lookup: Callable[[str], bool] | None = None,
+        unmanaged_halt_debounce_seconds: float = 15.0,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
@@ -170,6 +172,13 @@ class LiveMarketLoop:
         self._hub_cursor_provider = hub_cursor_provider
         self._commit_market_state_cursor = commit_market_state_cursor
         self._entered_symbol_lookup = entered_symbol_lookup
+        self._unmanaged_halt_debounce_seconds = float(
+            os.environ.get(
+                "CML_UNMANAGED_HALT_DEBOUNCE_SECONDS",
+                str(unmanaged_halt_debounce_seconds),
+            )
+        )
+        self._unmanaged_first_seen_at: dict[str, float] = {}
         self._market_gap_generation = 0
         self._strategy_gap_reset_generation_by_symbol: dict[str, int] = {}
         self._last_transient_gate_reasons: tuple[str, ...] | None = None
@@ -485,15 +494,74 @@ class LiveMarketLoop:
                 )
             self._last_transient_gate_reasons = None
             if context.unmanaged_position_symbols:
-                await self._checkpoint_coordinator.save_final()
-                symbols = ",".join(sorted(context.unmanaged_position_symbols))
-                return LiveDaemonResult(
-                    processed,
-                    approved,
-                    submitted,
-                    f"unmanaged_live_positions:{symbols}",
-                    final_state_at,
+                loop_now = asyncio.get_running_loop().time()
+                current_unmanaged = set(context.unmanaged_position_symbols)
+                for s in list(self._unmanaged_first_seen_at.keys()):
+                    if s not in current_unmanaged:
+                        self._unmanaged_first_seen_at.pop(s, None)
+                for s in current_unmanaged:
+                    if s not in self._unmanaged_first_seen_at:
+                        self._unmanaged_first_seen_at[s] = loop_now
+                        log.warning(
+                            "live_unmanaged_position_detected_debouncing",
+                            run_id=self._run_id,
+                            symbol=s,
+                            debounce_seconds=self._unmanaged_halt_debounce_seconds,
+                        )
+                invalidator = getattr(
+                    self._market_admission, "invalidate_context_cache", None
                 )
+                if callable(invalidator):
+                    invalidator()
+
+                expired_symbols = [
+                    s
+                    for s in current_unmanaged
+                    if (loop_now - self._unmanaged_first_seen_at[s])
+                    >= self._unmanaged_halt_debounce_seconds
+                ]
+                if expired_symbols:
+                    await self._checkpoint_coordinator.save_final()
+                    symbols = ",".join(sorted(expired_symbols))
+                    return LiveDaemonResult(
+                        processed,
+                        approved,
+                        submitted,
+                        f"unmanaged_live_positions:{symbols}",
+                        final_state_at,
+                    )
+                log.info(
+                    "live_unmanaged_position_debouncing_active",
+                    run_id=self._run_id,
+                    symbols=sorted(current_unmanaged),
+                    elapsed={
+                        s: round(loop_now - self._unmanaged_first_seen_at[s], 2)
+                        for s in current_unmanaged
+                    },
+                )
+                decision = self._strategy.on_market_state(state)
+                self._entry_lane.record_decision(
+                    decision=decision,
+                    state=state,
+                    recorded_at=self._clock(),
+                    context=context,
+                    gate_reasons=("unmanaged_live_positions_debouncing",),
+                    filter_context={
+                        "context_available": True,
+                        "gate_approved": False,
+                    },
+                )
+                processed += 1
+                final_state_at = state.bucket_start
+                self._record_processed_state(state, saved_at=context.now)
+                continue
+            elif self._unmanaged_first_seen_at:
+                log.info(
+                    "live_unmanaged_positions_cleared",
+                    run_id=self._run_id,
+                    symbols=sorted(self._unmanaged_first_seen_at.keys()),
+                )
+                self._unmanaged_first_seen_at.clear()
             orphan_cancel_reason = await self._cancel_orphan_exit_orders(context)
             if orphan_cancel_reason is not None:
                 await self._checkpoint_coordinator.save_final()
@@ -549,11 +617,15 @@ class LiveMarketLoop:
             final_state_at = state.bucket_start
             self._record_processed_state(state, saved_at=context.now)
         await self._checkpoint_coordinator.save_final()
+        final_halt_reason: str | None = None
+        if self._unmanaged_first_seen_at:
+            symbols = ",".join(sorted(self._unmanaged_first_seen_at.keys()))
+            final_halt_reason = f"unmanaged_live_positions:{symbols}"
         return LiveDaemonResult(
             processed,
             approved,
             submitted,
-            None,
+            final_halt_reason,
             final_state_at,
         )
 

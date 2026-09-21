@@ -424,6 +424,7 @@ class PostgresLiveContextProvider(LiveContextReader):
     # TTL lets consecutive market buckets reuse the same account/risk view
     # instead of issuing the full nine-query context load every 15 seconds.
     _CONTEXT_CACHE_SECONDS = 30
+    _ABNORMAL_CONTEXT_CACHE_SECONDS = 0.5
 
     def __init__(
         self,
@@ -483,6 +484,8 @@ class PostgresLiveContextProvider(LiveContextReader):
             cached_loaded_at=getattr(self, "_cached_loaded_at", None),
             now=now,
             max_age_seconds=self._CONTEXT_CACHE_SECONDS,
+            cached_context=cached_context,
+            abnormal_max_age_seconds=self._ABNORMAL_CONTEXT_CACHE_SECONDS,
         ):
             symbol_rules = await self._load_symbol_rules(state.symbol, now)
             current_context = self._cached_context
@@ -497,6 +500,8 @@ class PostgresLiveContextProvider(LiveContextReader):
                     cached_loaded_at=getattr(self, "_cached_loaded_at", None),
                     now=now,
                     max_age_seconds=self._CONTEXT_CACHE_SECONDS,
+                    cached_context=current_context,
+                    abnormal_max_age_seconds=self._ABNORMAL_CONTEXT_CACHE_SECONDS,
                 )
             ):
                 return replace(
@@ -520,6 +525,8 @@ class PostgresLiveContextProvider(LiveContextReader):
                 cached_loaded_at=getattr(self, "_cached_loaded_at", None),
                 now=now,
                 max_age_seconds=self._CONTEXT_CACHE_SECONDS,
+                cached_context=cached_context,
+                abnormal_max_age_seconds=self._ABNORMAL_CONTEXT_CACHE_SECONDS,
             ):
                 symbol_rules = await self._load_symbol_rules(state.symbol, now)
                 current_context = self._cached_context
@@ -534,6 +541,8 @@ class PostgresLiveContextProvider(LiveContextReader):
                         cached_loaded_at=getattr(self, "_cached_loaded_at", None),
                         now=now,
                         max_age_seconds=self._CONTEXT_CACHE_SECONDS,
+                        cached_context=current_context,
+                        abnormal_max_age_seconds=self._ABNORMAL_CONTEXT_CACHE_SECONDS,
                     )
                 ):
                     return replace(
@@ -1576,6 +1585,8 @@ def _classify_live_positions_detailed(
     pending: set[str] = set()
     unmanaged: set[str] = set()
     for position in positions:
+        if position.position_amt == 0:
+            continue
         try:
             position_side = FuturesPositionSide(position.position_side)
         except (TypeError, ValueError):
@@ -1646,10 +1657,36 @@ def _classify_live_positions_detailed(
             ),
             start=Decimal("0"),
         )
-        # The account snapshot can still show a position briefly after a full
-        # reduce-only fill.  Use strict equality here: a larger filled amount
-        # can belong to a closed add-on lot while an older lot remains open.
-        closing_filled = closing_filled_quantity == abs(position.position_amt)
+        closing_filled_strict = (
+            closing_filled_quantity == abs(position.position_amt)
+        )
+        # Also handle residual snapshot lag during exit settlement (e.g. partial
+        # snapshot updates arriving as the position drains from full quantity to zero).
+        closing_filled_draining = False
+        if not closing_filled_strict and (
+            closing_filled_quantity > abs(position.position_amt)
+        ):
+            latest_closing_order = max(
+                reduce_only_orders,
+                key=lambda o: (o.updated_at, o.created_at),
+                default=None,
+            )
+            observed_at = getattr(position, "observed_at", None)
+            if isinstance(observed_at, datetime) and latest_closing_order is not None:
+                # The snapshot was observed after the exit order was submitted
+                # (allowing minor clock skew) and before settlement window expires.
+                time_since_submission = (
+                    observed_at - latest_closing_order.created_at
+                ).total_seconds()
+                time_since_fill = (
+                    observed_at - latest_closing_order.updated_at
+                ).total_seconds()
+                if (
+                    time_since_submission >= -1.0
+                    and time_since_fill <= _PENDING_POSITION_MAX_AGE_SECONDS
+                ):
+                    closing_filled_draining = True
+        closing_filled = closing_filled_strict or closing_filled_draining
         batches = _build_position_batches(
             position=position,
             side=side,
@@ -1763,7 +1800,6 @@ def _has_recent_pending_entry_order(
             order.reduce_only
             or not _opening_order_matches_side(order.side, side)
             or order.state not in _PENDING_ENTRY_STATES
-            or _is_entry_fill_observed(order, fill_times)
         ):
             continue
         try:
@@ -2635,7 +2671,24 @@ def _context_cache_can_be_reused(
     cached_loaded_at: datetime | None,
     now: datetime,
     max_age_seconds: int,
+    cached_context: LiveDaemonRuntimeContext | None = None,
+    abnormal_max_age_seconds: float = 0.5,
 ) -> bool:
+    if cached_loaded_at is not None:
+        age_seconds = (now - cached_loaded_at).total_seconds()
+        if age_seconds < 0:
+            return False
+        # Abnormal contexts (pending or unmanaged positions) must never bypass TTL
+        # and should be refreshed frequently (default 0.5s debounce) to settle quickly.
+        if cached_context is not None and (
+            cached_context.pending_position_symbols
+            or cached_context.unmanaged_position_symbols
+        ):
+            return age_seconds < abnormal_max_age_seconds
+        # Hard TTL ceiling: same-bucket queries must never bypass max_age_seconds
+        if age_seconds >= max_age_seconds:
+            return False
+
     if cached_bucket_start is not None and state.bucket_start <= cached_bucket_start:
         return True
     if cached_loaded_at is None:

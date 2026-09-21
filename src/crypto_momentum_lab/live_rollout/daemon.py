@@ -165,6 +165,7 @@ class LiveDaemonConfig:
     scheduled_risk_window: ScheduledRiskWindowConfig | None = None
     max_concurrency: int | None = None
     readiness_provider: Callable[[], ExecutionReadiness] | None = None
+    unmanaged_halt_debounce_seconds: float = 15.0
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -440,6 +441,7 @@ class LiveStrategyDaemon:
             hub_cursor_provider=hub_cursor_provider,
             commit_market_state_cursor=commit_market_state_cursor,
             entered_symbol_lookup=entered_symbol_lookup,
+            unmanaged_halt_debounce_seconds=config.unmanaged_halt_debounce_seconds,
         )
         self._lifecycle = LiveDaemonLifecycle(
             run_id=config.run_id,

@@ -449,7 +449,13 @@ def _entry_fill_quantity(
     if order.state is ExchangeOrderState.FILLED:
         return order.quantity
     if (
-        order.state is ExchangeOrderState.PARTIALLY_FILLED
+        order.state
+        in {
+            ExchangeOrderState.PARTIALLY_FILLED,
+            ExchangeOrderState.ACKNOWLEDGED,
+            ExchangeOrderState.SUBMITTED,
+            ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION,
+        }
         and _entry_fill_at(order, fill_times) is not None
     ):
         return order.quantity

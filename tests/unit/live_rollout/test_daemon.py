@@ -2149,6 +2149,7 @@ def _daemon(
     cancel_unfilled_entry_orders=None,
     fetch_exchange_positions=None,
     readiness_provider=None,
+    unmanaged_halt_debounce_seconds: float = 15.0,
 ) -> LiveStrategyDaemon:
     order_repository = FakeOrderRepository()
     machine = OrderExecutionStateMachine(
@@ -2193,6 +2194,7 @@ def _daemon(
             entry_order_type=entry_order_type,
             scheduled_risk_window=scheduled_risk_window,
             readiness_provider=readiness_provider,
+            unmanaged_halt_debounce_seconds=unmanaged_halt_debounce_seconds,
         ),
         exit_manager=exit_manager,
         exit_recovery_client=exit_recovery_client,

@@ -91,6 +91,16 @@ class LiveExitChannelRuntime:
         retry_delay_by_symbol: dict[str, float] = {}
         async for quote in source:
             loop_time = asyncio.get_running_loop().time()
+            managed_symbols = getattr(self._daemon, "managed_position_symbols", None)
+            if managed_symbols is not None and quote.symbol not in managed_symbols:
+                if (
+                    quote.symbol in retry_at_by_symbol
+                    or quote.symbol in retry_delay_by_symbol
+                ):
+                    retry_at_by_symbol.pop(quote.symbol, None)
+                    retry_delay_by_symbol.pop(quote.symbol, None)
+                    if self._on_exit_failure is not None:
+                        self._on_exit_failure(quote.symbol, None)
             if loop_time < retry_at_by_symbol.get(quote.symbol, 0.0):
                 continue
             self._latest_market_quotes.observe(quote)
@@ -255,8 +265,19 @@ class LiveExitChannelRuntime:
         while True:
             now = datetime.now(tz=UTC)
             loop_time = asyncio.get_running_loop().time()
+            managed_symbols = (
+                self._daemon.managed_position_symbols
+                if hasattr(self._daemon, "managed_position_symbols")
+                else frozenset()
+            )
+            for symbol in list(retry_at_by_symbol.keys()):
+                if symbol not in managed_symbols:
+                    retry_at_by_symbol.pop(symbol, None)
+                    retry_delay_by_symbol.pop(symbol, None)
+                    if self._on_exit_failure is not None:
+                        self._on_exit_failure(symbol, None)
             for state in self._latest_market_states.for_symbols(
-                tuple(sorted(self._daemon.managed_position_symbols))
+                tuple(sorted(managed_symbols))
             ):
                 if loop_time < retry_at_by_symbol.get(state.symbol, 0.0):
                     continue

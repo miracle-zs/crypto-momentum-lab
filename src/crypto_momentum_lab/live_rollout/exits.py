@@ -523,44 +523,15 @@ class LiveExitManager:
         quote: RealtimeMarketQuote,
         positions: tuple[ManagedLivePosition, ...],
     ) -> tuple[LiveExitRequest, ...]:
-        """Evaluate only immediate exits against the live bid/ask.
+        """Realtime quotes do not trigger immediate fixed TP/SL exits.
 
-        Candle-direction exits stay on the closed-state path.  Stop loss,
-        take profit, and max-holding protection do not need a 15-minute
-        candle and therefore must not wait for the candle loader or the
-        durable state watermark.
+        Intraday fixed TP/SL (+2.0% / -1.0%) has been removed. All strategy exits
+        are strictly evaluated on 15-minute candle closes (requests_for_state),
+        grace recovery limit fills (requests_for_grace_recovery), or grace timeouts
+        (requests_for_grace_timeout).
         """
-        requests: list[LiveExitRequest] = []
-        for position in _strategy_positions(positions):
-            if (
-                position.symbol != quote.symbol
-                or position.closing_order_filled
-                or quote.received_at <= position.opened_at
-                or _recovery_order_blocks_current_episode(position)
-                or _uncovered_position_quantity(position) <= 0
-            ):
-                continue
-            mark_price = _quote_exit_mark_price(quote, position.side)
-            reason = _realtime_exit_reason(
-                position=position,
-                mark_price=mark_price,
-                held_until=quote.received_at,
-                policy=self._config.policy,
-            )
-            if reason is None:
-                continue
-            requests.append(
-                self._build_order_request(
-                    state=None,
-                    position=position,
-                    reason=reason,
-                    trigger_at=quote.received_at,
-                    identity_trigger_at=position.opened_at,
-                    created_at=quote.received_at,
-                    reference_price=mark_price,
-                )
-            )
-        return tuple(requests)
+        del quote, positions
+        return ()
 
     async def _request_for_position(
         self,
@@ -908,25 +879,6 @@ def _gross_return(
     price_return = (mark_price - position.entry_price) / position.entry_price
     return -price_return if position.side is StrategySide.SHORT else price_return
 
-
-def _realtime_exit_reason(
-    *,
-    position: ManagedLivePosition,
-    mark_price: Decimal,
-    held_until: datetime,
-    policy: PositionExitPolicy,
-) -> str | None:
-    """Evaluate immediate exits without changing the configured mode semantics."""
-    reason = position_exit_reason(
-        gross_return=_gross_return(position, mark_price),
-        held_until=held_until,
-        opened_at=position.opened_at,
-        symbol=position.symbol,
-        side=position.side,
-        policy=policy,
-        closed_candle=None,
-    )
-    return None if reason is None else f"{reason}_realtime"
 
 
 def _recovery_price(
