@@ -250,7 +250,7 @@ def test_server_compose_exposes_complete_paper_stack() -> None:
         assert profile_env in services["live-strategy"]["environment"]
     assert services["live-strategy"]["environment"][
         "CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT"
-    ] == "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-10}"
+    ] == "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-30}"
     assert services["live-strategy"]["environment"][
         "CML_LIVE_IMPULSE_WINDOW_BUCKETS"
     ] == "${CML_LIVE_IMPULSE_WINDOW_BUCKETS:-2}"
@@ -427,7 +427,7 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
     )
     assert (
         account_two_environment["CML_LIVE_MIN_RETURN_PCT"]
-        == "${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_2:-0.005}"
+        == "${CML_LIVE_MIN_RETURN_PCT_ACCOUNT_2:-0.0075}"
     )
     assert (
         account_two_environment["CML_LIVE_MIN_IMBALANCE"]
@@ -435,11 +435,11 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
     )
     assert (
         account_two_environment["CML_LIVE_MIN_INTENSITY"]
-        == "${CML_LIVE_MIN_INTENSITY_ACCOUNT_2:-4.0}"
+        == "${CML_LIVE_MIN_INTENSITY_ACCOUNT_2:-3.0}"
     )
     assert (
         account_two_environment["CML_LIVE_MIN_NOTIONAL_5M_VS_30M"]
-        == "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_2:-1.50}"
+        == "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_2:-1.25}"
     )
     assert (
         account_two_environment["CML_LIVE_SESSION_ID_ACCOUNT_2"]
@@ -460,7 +460,7 @@ def test_multi_live_overlay_keeps_one_market_data_and_isolates_accounts() -> Non
         )
         assert (
             account_environment["CML_LIVE_MIN_RETURN_PCT"]
-            == f"${{CML_LIVE_MIN_RETURN_PCT_ACCOUNT_{account_number}:-0.005}}"
+            == f"${{CML_LIVE_MIN_RETURN_PCT_ACCOUNT_{account_number}:-0.0075}}"
         )
         assert (
             account_environment["CML_LIVE_MIN_IMBALANCE"]

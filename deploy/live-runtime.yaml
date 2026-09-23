@@ -24,7 +24,7 @@ accounts:
       min_intensity: "${CML_LIVE_MIN_INTENSITY:-3.0}"
       min_notional_5m_vs_30m: "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M:-1.25}"
       cooldown_buckets: "${CML_LIVE_COOLDOWN_BUCKETS:-0}"
-      entry_positive_gainer_top_count: "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-10}"
+      entry_positive_gainer_top_count: "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT:-30}"
       require_price_above_ema5: false
       require_price_above_ema10: false
       entry_policy_mode: "${CML_LIVE_ENTRY_POLICY_MODE:-enforce}"
@@ -60,7 +60,7 @@ accounts:
       min_intensity: "${CML_LIVE_MIN_INTENSITY_ACCOUNT_2:-3.0}"
       min_notional_5m_vs_30m: "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_2:-1.25}"
       cooldown_buckets: "${CML_LIVE_COOLDOWN_BUCKETS_ACCOUNT_2:-0}"
-      entry_positive_gainer_top_count: "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_2:-10}"
+      entry_positive_gainer_top_count: "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_2:-30}"
       require_price_above_ema5: false
       require_price_above_ema10: false
       entry_policy_mode: "${CML_LIVE_ENTRY_POLICY_MODE_ACCOUNT_2:-enforce}"
@@ -97,7 +97,7 @@ accounts:
       min_intensity: "${CML_LIVE_MIN_INTENSITY_ACCOUNT_3:-3.0}"
       min_notional_5m_vs_30m: "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_3:-1.25}"
       cooldown_buckets: "${CML_LIVE_COOLDOWN_BUCKETS_ACCOUNT_3:-0}"
-      entry_positive_gainer_top_count: "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_3:-10}"
+      entry_positive_gainer_top_count: "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_3:-30}"
       require_price_above_ema5: false
       require_price_above_ema10: false
       entry_policy_mode: "${CML_LIVE_ENTRY_POLICY_MODE_ACCOUNT_3:-enforce}"
@@ -134,7 +134,7 @@ accounts:
       min_intensity: "${CML_LIVE_MIN_INTENSITY_ACCOUNT_4:-3.0}"
       min_notional_5m_vs_30m: "${CML_LIVE_MIN_NOTIONAL_5M_VS_30M_ACCOUNT_4:-1.25}"
       cooldown_buckets: "${CML_LIVE_COOLDOWN_BUCKETS_ACCOUNT_4:-0}"
-      entry_positive_gainer_top_count: "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_4:-10}"
+      entry_positive_gainer_top_count: "${CML_LIVE_ENTRY_POSITIVE_GAINER_TOP_COUNT_ACCOUNT_4:-30}"
       require_price_above_ema5: false
       require_price_above_ema10: false
       entry_policy_mode: "${CML_LIVE_ENTRY_POLICY_MODE_ACCOUNT_4:-enforce}"
