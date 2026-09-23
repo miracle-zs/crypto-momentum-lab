@@ -193,6 +193,26 @@ async def test_recoverer_bounds_overall_batch_recovery_latency() -> None:
     assert result.unrecovered_gaps[0].reason == "history_timeout"
 
 
+async def test_recoverer_congestion_bypass_bypasses_network_without_error() -> None:
+    history = FakeAggTradeHistory((_trade(11), _trade(12)))
+    recoverer = AggTradeGapRecoverer(history)
+    # Establish baseline trade 10
+    await recoverer.expand((_envelope(10),))
+
+    # Next envelope has gap (11, 12 missing) and triggers network bypass (queue congestion)
+    result = await recoverer.expand((_envelope(13),), bypass_network=True)
+
+    assert [item.exchange_sequence for item in result.envelopes] == ["13"]
+    assert len(result.unrecovered_gaps) == 1
+    assert result.unrecovered_gaps[0].reason == "congestion_bypass"
+    assert result.unrecovered_gaps[0].previous_id == 10
+    assert result.unrecovered_gaps[0].current_id == 13
+    assert result.unrecovered_gaps[0].missing_count == 2
+    # Network was bypassed, so history API must not be called
+    assert history.calls == []
+
+
+
 def _trade(aggregate_trade_id: int) -> BinanceAggTrade:
     event_at = datetime(2026, 8, 23, 14, 43, tzinfo=UTC) + timedelta(
         milliseconds=aggregate_trade_id

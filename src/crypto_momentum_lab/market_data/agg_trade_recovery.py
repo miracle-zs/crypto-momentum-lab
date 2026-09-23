@@ -222,29 +222,29 @@ class AggTradeGapRecoverer:
                     asyncio.create_task(_timed_recover(request)): request
                     for request in requests
                 }
-            done, pending = await asyncio.wait(
-                task_map.keys(),
-                timeout=self._max_batch_recovery_seconds,
-            )
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+                done, pending = await asyncio.wait(
+                    task_map.keys(),
+                    timeout=self._max_batch_recovery_seconds,
+                )
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
 
-            for task, request in task_map.items():
-                if task in done and not task.cancelled():
-                    try:
-                        results.append(task.result())
-                    except Exception as exc:
-                        results.append(
-                            _RecoveryResult(
-                                request,
-                                (),
-                                f"history_error:{exc.__class__.__name__}",
+                for task, request in task_map.items():
+                    if task in done and not task.cancelled():
+                        try:
+                            results.append(task.result())
+                        except Exception as exc:
+                            results.append(
+                                _RecoveryResult(
+                                    request,
+                                    (),
+                                    f"history_error:{exc.__class__.__name__}",
+                                )
                             )
-                        )
-                else:
-                    results.append(_RecoveryResult(request, (), "history_timeout"))
+                    else:
+                        results.append(_RecoveryResult(request, (), "history_timeout"))
         recovered_before: dict[int, tuple[RawEnvelope, ...]] = {}
         gaps: list[AggTradeGap] = []
         for result in results:
