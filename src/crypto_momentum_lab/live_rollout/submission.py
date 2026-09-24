@@ -28,6 +28,7 @@ import structlog
 
 from crypto_momentum_lab.domain.execution import (
     OrderExecutionPlan,
+    count_active_symbol_batch_concurrency,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import RiskDecision, RiskEvaluation
@@ -232,23 +233,12 @@ class LiveCandidateSubmission:
             )
             risk_open_position_symbols |= pending_symbols
             managed_positions = getattr(context, "managed_positions", ()) or ()
-            matching_positions = [
-                p
-                for p in managed_positions
-                if getattr(p, "symbol", "") == candidate.symbol
-            ]
-            active_batch_count = sum(
-                len(getattr(p, "batches", ())) if getattr(p, "batches", ()) else 1
-                for p in matching_positions
-            )
             unresolved_orders = getattr(context, "unresolved_orders", ()) or ()
-            pending_order_count = sum(
-                1
-                for o in unresolved_orders
-                if getattr(o, "symbol", "") == candidate.symbol
-                and not getattr(o, "reduce_only", False)
+            symbol_concurrency = count_active_symbol_batch_concurrency(
+                symbol=candidate.symbol,
+                managed_positions=managed_positions,
+                unresolved_orders=unresolved_orders,
             )
-            symbol_concurrency = active_batch_count + pending_order_count
             limit_decision = evaluate_fixed_live_limits(
                 self._limits,
                 LiveLimitContext(

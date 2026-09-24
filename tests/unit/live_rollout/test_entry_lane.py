@@ -202,3 +202,61 @@ async def test_entry_lane_rejects_when_progress_lagging() -> None:
     assert outcome.approved_intent_count == 0
     assert outcome.submitted_order_count == 0
 
+
+async def test_entry_lane_enforces_concurrency_even_when_entry_policy_enforce_is_true() -> None:
+    executed: list[str] = []
+
+    class MockPosition:
+        symbol = "BTCUSDT"
+
+    class MockContext:
+        managed_positions = (MockPosition(), MockPosition())
+        unresolved_orders = ()
+
+    from crypto_momentum_lab.domain.strategy.entry_policy import (
+        UniverseRankingEntry,
+        UniverseRankingSnapshot,
+    )
+    from crypto_momentum_lab.domain.strategy.models import StrategySide
+
+    snapshot = UniverseRankingSnapshot(
+        snapshot_id="snap-1",
+        observed_at=NOW,
+        entries=(
+            UniverseRankingEntry(
+                symbol="BTCUSDT",
+                rank=1,
+                direction=StrategySide.LONG,
+            ),
+        ),
+    )
+
+    lane = EntryExecutionLane(
+        config=EntryLaneConfig(
+            run_id="run-1",
+            max_concurrency=2,
+            entry_policy_enforce=True,
+            entry_universe_snapshot_provider=lambda **kwargs: snapshot,
+        ),
+        clock=lambda: NOW,
+        entry_enabled=lambda: True,
+        entry_enabled_reason=lambda: "ready",
+        execute_candidate=lambda candidate, **kwargs: executed.append(candidate.candidate_id),
+        invalidate_context=lambda: None,
+    )
+
+    outcome = await lane.process(
+        decision=_decision(_intent()),  # _intent().symbol is BTCUSDT
+        state=_state(),
+        context=cast(LiveDaemonRuntimeContext, MockContext()),
+        gate_reasons=(),
+        recorded_at=NOW,
+    )
+
+    # Must be rejected because concurrency (2) >= max_concurrency (2),
+    # even though policy_decision.eligible was True!
+    assert executed == []
+    assert outcome.approved_intent_count == 0
+    assert outcome.submitted_order_count == 0
+
+

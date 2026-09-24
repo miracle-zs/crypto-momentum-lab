@@ -15,6 +15,9 @@ from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 from crypto_momentum_lab.execution_account.orders.coordinator import (
     OrderExecutionPort,
 )
+from crypto_momentum_lab.execution_account.orders.quantization import (
+    SymbolTradingRules,
+)
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
     PreparedOrderSubmission,
@@ -92,10 +95,16 @@ class LegacyStateMachine:
         )
 
 
-def _submission(*, repository, state_machine) -> LiveCandidateSubmission:
+def _submission(
+    *,
+    repository,
+    state_machine,
+    limits: FixedLiveLimits | None = None,
+) -> LiveCandidateSubmission:
     return LiveCandidateSubmission(
         risk_gateway=RiskGateway(),
-        limits=FixedLiveLimits(
+        limits=limits
+        or FixedLiveLimits(
             notional_cap=Decimal("25"),
             max_open_positions=1,
             max_daily_loss=Decimal("10"),
@@ -352,3 +361,150 @@ async def test_submission_shadow_trade_command_evaluation(
     assert len(shadow_calls) == 1
     assert shadow_calls[0].plan is not None
     assert shadow_calls[0].plan.quantity == Decimal("0.001")
+
+
+async def test_submission_enforces_max_concurrency_per_symbol_per_batch() -> None:
+    repository = RecordingPreparedRepository()
+    coordinator = RecordingCoordinator()
+    limits = FixedLiveLimits(
+        notional_cap=Decimal("100"),
+        max_open_positions=5,
+        max_daily_loss=Decimal("50"),
+        max_gross_exposure=Decimal("100"),
+        max_concurrency_per_symbol=2,
+    )
+    submission = _submission(
+        repository=repository,
+        state_machine=coordinator,
+        limits=limits,
+    )
+    candidate_btc = replace(
+        _intent(),
+        reduce_only=False,
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        desired_notional=Decimal("10"),
+        entry_type=EntryType.MARKET,
+        features={"position_side": "BOTH"},
+    )
+    rules = dict(_runtime_context().trading_rules)
+    rules["ETHUSDT"] = SymbolTradingRules(
+        symbol="ETHUSDT",
+        tick_size=Decimal("0.01"),
+        step_size=Decimal("0.001"),
+        min_quantity=Decimal("0.001"),
+        max_quantity=Decimal("100"),
+        min_notional=Decimal("5"),
+    )
+    state = replace(
+        _state(),
+        symbol="BTCUSDT",
+        mark_price=Decimal("10000"),
+        close_price=Decimal("10000"),
+    )
+
+    # 1. No open position -> 1st order allowed
+    context0 = replace(_runtime_context(), trading_rules=rules)
+    res1 = await submission.execute(
+        candidate_btc,
+        requested_quantity=Decimal("0.001"),
+        state=state,
+        context=context0,
+        reference_price=Decimal("10000"),
+    )
+    assert res1 is not None
+
+    # 2. Position has 1 batch with entry_order_count = 1 -> 2nd order allowed
+    b1_active = ManagedLivePositionBatch(
+        batch_id="btc-b1",
+        quantity=Decimal("0.001"),
+        entry_price=Decimal("10000"),
+        opened_at=NOW,
+        entry_order_count=1,
+    )
+    pos_btc_1 = ManagedLivePosition(
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        position_side=FuturesPositionSide.BOTH,
+        quantity=Decimal("0.001"),
+        entry_price=Decimal("10000"),
+        opened_at=NOW,
+        batches=(b1_active,),
+    )
+    context1 = replace(context0, managed_positions=(pos_btc_1,))
+    res2 = await submission.execute(
+        candidate_btc,
+        requested_quantity=Decimal("0.001"),
+        state=state,
+        context=context1,
+        reference_price=Decimal("10000"),
+    )
+    assert res2 is not None
+
+    # 3. Position has 1 batch with entry_order_count = 2 (max reached!) -> 3rd order REJECTED!
+    b1_full = ManagedLivePositionBatch(
+        batch_id="btc-b1",
+        quantity=Decimal("0.002"),
+        entry_price=Decimal("10000"),
+        opened_at=NOW,
+        entry_order_count=2,
+    )
+    pos_btc_2 = ManagedLivePosition(
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        position_side=FuturesPositionSide.BOTH,
+        quantity=Decimal("0.002"),
+        entry_price=Decimal("10000"),
+        opened_at=NOW,
+        batches=(b1_full,),
+    )
+    context2 = replace(context0, managed_positions=(pos_btc_2,))
+    res3 = await submission.execute(
+        candidate_btc,
+        requested_quantity=Decimal("0.001"),
+        state=state,
+        context=context2,
+        reference_price=Decimal("10000"),
+    )
+    assert res3 is None  # Blocked!
+
+    # 4. Batch 1 submits exit order (exit_order_submitted_at set, even if not filled) -> batch ended, new batch 1st order ALLOWED!
+    b1_exited = replace(b1_full, exit_order_submitted_at=NOW + timedelta(minutes=5))
+    pos_btc_exited = replace(pos_btc_2, batches=(b1_exited,))
+    context3 = replace(context0, managed_positions=(pos_btc_exited,))
+    res4 = await submission.execute(
+        candidate_btc,
+        requested_quantity=Decimal("0.001"),
+        state=state,
+        context=context3,
+        reference_price=Decimal("10000"),
+    )
+    assert res4 is not None  # Allowed for new batch!
+
+    # 5. Different symbol (ETHUSDT) is NOT restricted by BTCUSDT
+    candidate_eth = replace(
+        _intent(),
+        candidate_id="eth-1",
+        reduce_only=False,
+        symbol="ETHUSDT",
+        side=StrategySide.LONG,
+        desired_notional=Decimal("10"),
+        entry_type=EntryType.MARKET,
+        features={"position_side": "BOTH"},
+    )
+    state_eth = replace(
+        _state(),
+        symbol="ETHUSDT",
+        mark_price=Decimal("2000"),
+        close_price=Decimal("2000"),
+    )
+    # Even when BTCUSDT is at full concurrency (pos_btc_2), ETHUSDT can execute!
+    res_eth = await submission.execute(
+        candidate_eth,
+        requested_quantity=Decimal("0.005"),
+        state=state_eth,
+        context=context2,
+        reference_price=Decimal("2000"),
+    )
+    assert res_eth is not None
+

@@ -4,9 +4,11 @@ from decimal import Decimal
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderState,
     FuturesPositionSide,
+    ManagedLivePositionBatch,
     PositionHistory,
     PositionObservation,
     PositionOrderFact,
+    count_active_symbol_batch_concurrency,
     rebuild_position_batches,
 )
 from crypto_momentum_lab.domain.strategy import StrategySide
@@ -315,4 +317,168 @@ def test_rebuild_position_batches_reconcile_fifo_preserves_newest() -> None:
     assert result.batches[0].batch_id == "B2USDT:BOTH:e2_new"
     assert result.batches[0].quantity == Decimal("172.0")
     assert result.batches[0].opened_at == t2
+
+
+def test_rebuild_position_batches_tracks_entry_order_count_and_client_ids() -> None:
+    t1 = NOW
+    t2 = NOW + timedelta(minutes=5)
+    obs = PositionObservation(
+        symbol="ACUUSDT",
+        side=StrategySide.LONG,
+        position_side=FuturesPositionSide.BOTH,
+        position_amt=Decimal("20.0"),
+        entry_price=Decimal("1.5"),
+    )
+    e1 = _order(
+        "ACUUSDT",
+        quantity=Decimal("10.0"),
+        price=Decimal("1.4"),
+        client_order_id="acu_entry_1",
+        created_at=t1,
+    )
+    e2 = _order(
+        "ACUUSDT",
+        quantity=Decimal("10.0"),
+        price=Decimal("1.6"),
+        client_order_id="acu_entry_2",
+        created_at=t2,
+    )
+    history = PositionHistory(orders=[e1, e2])
+    result = rebuild_position_batches(obs, history)
+
+    assert len(result.batches) == 1
+    batch = result.batches[0]
+    assert batch.batch_id == "ACUUSDT:BOTH:acu_entry_1"
+    assert batch.quantity == Decimal("20.0")
+    assert batch.entry_price == Decimal("1.5")
+    assert batch.entry_order_count == 2
+    assert batch.entry_client_order_ids == frozenset({"acu_entry_1", "acu_entry_2"})
+    assert batch.exit_order_submitted_at is None
+
+
+def test_rebuild_position_batches_exit_submitted_unfilled_starts_new_batch() -> None:
+    t1 = NOW
+    t2 = NOW + timedelta(minutes=5)
+    t3 = NOW + timedelta(minutes=10)
+    obs = PositionObservation(
+        symbol="ACUUSDT",
+        side=StrategySide.LONG,
+        position_side=FuturesPositionSide.BOTH,
+        position_amt=Decimal("25.0"),
+        entry_price=Decimal("1.5"),
+    )
+    # Batch 1: e1 (10 units)
+    e1 = _order("ACUUSDT", quantity=Decimal("10.0"), client_order_id="e1", created_at=t1)
+    # Exit order submitted for Batch 1, but 0 filled (e.g. limit order placed)
+    x1 = _order(
+        "ACUUSDT",
+        side="SELL",
+        reduce_only=True,
+        quantity=Decimal("10.0"),
+        executed_quantity=Decimal("0"),
+        state=ExchangeOrderState.SUBMITTED,
+        client_order_id="x1",
+        created_at=t2,
+        exit_batch_id="ACUUSDT:BOTH:e1",
+    )
+    # Batch 2: e2 arrives after exit was submitted
+    e2 = _order("ACUUSDT", quantity=Decimal("15.0"), client_order_id="e2", created_at=t3)
+
+    history = PositionHistory(orders=[e1, x1, e2])
+    result = rebuild_position_batches(obs, history)
+
+    # Must be 2 separate batches
+    assert len(result.batches) == 2
+    b1 = result.batches[0]
+    b2 = result.batches[1]
+
+    # Batch 1 has exit_order_submitted_at set!
+    assert b1.batch_id == "ACUUSDT:BOTH:e1"
+    assert b1.exit_order_submitted_at is not None
+    assert b1.entry_order_count == 1
+
+    # Batch 2 is clean with exit_order_submitted_at = None and entry_order_count = 1
+    assert b2.batch_id == "ACUUSDT:BOTH:e2"
+    assert b2.exit_order_submitted_at is None
+    assert b2.entry_order_count == 1
+
+
+def test_count_active_symbol_batch_concurrency_scenarios() -> None:
+    class MockOrder:
+        def __init__(self, symbol: str, reduce_only: bool, client_order_id: str | None = None) -> None:
+            self.symbol = symbol
+            self.reduce_only = reduce_only
+            self.client_order_id = client_order_id
+
+    class MockPosition:
+        def __init__(self, symbol: str, batches: tuple[ManagedLivePositionBatch, ...] = ()) -> None:
+            self.symbol = symbol
+            self.batches = batches
+
+    # Case 1: No positions, no orders -> 0
+    assert count_active_symbol_batch_concurrency("ACUUSDT", (), ()) == 0
+
+    # Case 2: 1 pending entry order -> 1
+    pending_o1 = MockOrder("ACUUSDT", False, "pending-1")
+    assert count_active_symbol_batch_concurrency("ACUUSDT", (), (pending_o1,)) == 1
+
+    # Case 3: 2 pending entry orders -> 2
+    pending_o2 = MockOrder("ACUUSDT", False, "pending-2")
+    assert count_active_symbol_batch_concurrency("ACUUSDT", (), (pending_o1, pending_o2)) == 2
+
+    # Case 4: Active batch with 1 entry order, 0 pending -> 1
+    batch_1 = ManagedLivePositionBatch(
+        batch_id="b1",
+        quantity=Decimal("10"),
+        entry_price=Decimal("1.5"),
+        opened_at=NOW,
+        entry_order_count=1,
+        entry_client_order_ids=frozenset({"e1"}),
+    )
+    pos = MockPosition("ACUUSDT", (batch_1,))
+    assert count_active_symbol_batch_concurrency("ACUUSDT", (pos,), ()) == 1
+
+    # Case 5: Active batch with 2 entry orders (consolidated), 0 pending -> 2
+    batch_2 = ManagedLivePositionBatch(
+        batch_id="b1",
+        quantity=Decimal("20"),
+        entry_price=Decimal("1.5"),
+        opened_at=NOW,
+        entry_order_count=2,
+        entry_client_order_ids=frozenset({"e1", "e2"}),
+    )
+    pos2 = MockPosition("ACUUSDT", (batch_2,))
+    assert count_active_symbol_batch_concurrency("ACUUSDT", (pos2,), ()) == 2
+
+    # Case 6: Partial fill deduplication (order is in batch and also in unresolved_orders) -> 1, not 2!
+    order_in_flight = MockOrder("ACUUSDT", False, "e1")
+    assert count_active_symbol_batch_concurrency("ACUUSDT", (pos,), (order_in_flight,)) == 1
+
+    # Case 7: Batch 1 has exit order submitted -> treated as ENDED, does NOT count!
+    batch_ended = ManagedLivePositionBatch(
+        batch_id="b1",
+        quantity=Decimal("20"),
+        entry_price=Decimal("1.5"),
+        opened_at=NOW,
+        entry_order_count=2,
+        exit_order_submitted_at=NOW + timedelta(minutes=10),
+    )
+    pos_ended = MockPosition("ACUUSDT", (batch_ended,))
+    # Active batch concurrency must be 0, allowing new batch to open!
+    assert count_active_symbol_batch_concurrency("ACUUSDT", (pos_ended,), ()) == 0
+
+    # Case 8: Batch 1 has exit order submitted, Batch 2 is active with 1 entry -> 1
+    batch_new = ManagedLivePositionBatch(
+        batch_id="b2",
+        quantity=Decimal("10"),
+        entry_price=Decimal("1.7"),
+        opened_at=NOW + timedelta(minutes=15),
+        entry_order_count=1,
+    )
+    pos_multi_batch = MockPosition("ACUUSDT", (batch_ended, batch_new))
+    assert count_active_symbol_batch_concurrency("ACUUSDT", (pos_multi_batch,), ()) == 1
+
+    # Case 9: Different symbol (e.g. BTCUSDT) -> 0
+    assert count_active_symbol_batch_concurrency("BTCUSDT", (pos2,), ()) == 0
+
 

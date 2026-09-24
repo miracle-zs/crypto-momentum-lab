@@ -1,7 +1,7 @@
 """Wall-clock risk controls around a recurring volatility window."""
 
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from enum import StrEnum
 from zoneinfo import ZoneInfo
 
@@ -79,6 +79,31 @@ class ScheduledRiskWindowConfig:
         if current_time < self.reopen_at:
             return ScheduledRiskWindowPhase.VERIFYING
         return ScheduledRiskWindowPhase.REOPENED
+
+    def is_entry_allowed(self, value: datetime) -> bool:
+        """Check whether new order entries are allowed at the given timestamp."""
+        local_value = self.localize(value)
+        current_time = local_value.time().replace(tzinfo=None)
+        if self.entry_stop_at < self.reopen_at:
+            return not (self.entry_stop_at <= current_time < self.reopen_at)
+        return not (
+            current_time >= self.entry_stop_at or current_time < self.reopen_at
+        )
+
+    def next_flatten_time(self, value: datetime) -> datetime:
+        """Calculate the earliest flatten timestamp on or after value."""
+        local_value = self.localize(value)
+        candidate = local_value.replace(
+            hour=self.flatten_start_at.hour,
+            minute=self.flatten_start_at.minute,
+            second=self.flatten_start_at.second,
+            microsecond=0,
+        )
+        if local_value <= candidate:
+            target = candidate
+        else:
+            target = candidate + timedelta(days=1)
+        return target.astimezone(value.tzinfo) if value.tzinfo else target
 
 
 __all__ = [

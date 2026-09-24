@@ -2397,6 +2397,20 @@ def _build_position_batches(
                             if idx < len(result.batches)
                             else False
                         ),
+                        entry_order_count=(
+                            result.batches[idx].entry_order_count
+                            if idx < len(result.batches)
+                            else 1
+                        ),
+                        entry_client_order_ids=(
+                            result.batches[idx].entry_client_order_ids
+                            if idx < len(result.batches)
+                            else (
+                                frozenset({ab.client_order_id})
+                                if ab.client_order_id
+                                else frozenset()
+                            )
+                        ),
                     )
                     for idx, ab in enumerate(shadow_projection.active_batches)
                 )

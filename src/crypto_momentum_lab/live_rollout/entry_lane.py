@@ -19,6 +19,7 @@ import structlog
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderState,
     ExecutionReadiness,
+    count_active_symbol_batch_concurrency,
 )
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -489,7 +490,7 @@ class EntryExecutionLane:
                     or not comparison.policy_decision.eligible
                 ):
                     continue
-            elif (
+            if (
                 _live_entry_candidate_rejection_reason(
                     candidate,
                     entry_enabled=self._entry_enabled(),
@@ -686,20 +687,12 @@ def _count_symbol_concurrency(
     if context is None:
         return 0
     managed_positions = getattr(context, "managed_positions", ()) or ()
-    matching_positions = [
-        p for p in managed_positions if getattr(p, "symbol", "") == symbol
-    ]
-    active_batch_count = sum(
-        len(getattr(p, "batches", ())) if getattr(p, "batches", ()) else 1
-        for p in matching_positions
-    )
     unresolved_orders = getattr(context, "unresolved_orders", ()) or ()
-    pending_order_count = sum(
-        1
-        for o in unresolved_orders
-        if getattr(o, "symbol", "") == symbol and not getattr(o, "reduce_only", False)
+    return count_active_symbol_batch_concurrency(
+        symbol=symbol,
+        managed_positions=managed_positions,
+        unresolved_orders=unresolved_orders,
     )
-    return active_batch_count + pending_order_count
 
 
 def _live_entry_candidate_rejection_reason(

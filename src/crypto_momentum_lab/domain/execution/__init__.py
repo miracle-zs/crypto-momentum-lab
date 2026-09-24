@@ -17,6 +17,7 @@ from crypto_momentum_lab.domain.execution.position_batches import (
     PositionOrderFact,
     PositionRebuildResult,
     RebuildDiagnostic,
+    count_active_symbol_batch_concurrency,
     rebuild_position_batches,
 )
 from crypto_momentum_lab.domain.execution.position_ledger import (
@@ -64,6 +65,7 @@ __all__ = [
     "PositionRebuildResult",
     "RebuildDiagnostic",
     "rebuild_position_batches",
+    "count_active_symbol_batch_concurrency",
     "PositionKey",
     "FactCoverageInterval",
     "AccountFacts",
