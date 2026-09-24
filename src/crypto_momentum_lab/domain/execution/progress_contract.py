@@ -20,7 +20,7 @@ class ExecutionReadiness(str, Enum):
 class ProgressFreshnessSLA:
     """Configurable SLA boundaries for progress evaluation."""
 
-    max_lag_seconds_for_execution: float = 60.0
+    max_lag_seconds_for_execution: float = 90.0
     max_lag_seconds_for_stall: float = 300.0
     allow_exits_during_lag: bool = True
 

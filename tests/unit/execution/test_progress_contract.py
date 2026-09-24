@@ -18,8 +18,8 @@ NOW = datetime(2026, 9, 20, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_progress_contract_fresh_data_is_independent_executable() -> None:
-    """When watermark lag is within SLA (<= 60s) and gap is 0, readiness is INDEPENDENT_EXECUTABLE."""
-    watermark = NOW - timedelta(seconds=15)
+    """When watermark lag is within SLA (<= 90s) and gap is 0, readiness is INDEPENDENT_EXECUTABLE."""
+    watermark = NOW - timedelta(seconds=75)
     assessment = ReadinessEvaluator.evaluate(
         current_time=NOW,
         watermark_time=watermark,
@@ -28,12 +28,12 @@ def test_progress_contract_fresh_data_is_independent_executable() -> None:
     assert assessment.readiness == ExecutionReadiness.INDEPENDENT_EXECUTABLE
     assert assessment.allows_entries is True
     assert assessment.allows_exits is True
-    assert assessment.lag_seconds == 15.0
+    assert assessment.lag_seconds == 75.0
 
 
 def test_progress_contract_lagging_suppresses_entries_retains_exits() -> None:
-    """When watermark lag exceeds execution SLA (e.g. 75s > 60s), system degrades to PROGRESS_LAGGING."""
-    watermark = NOW - timedelta(seconds=75)
+    """When watermark lag exceeds execution SLA (e.g. 105s > 90s), system degrades to PROGRESS_LAGGING."""
+    watermark = NOW - timedelta(seconds=105)
     assessment = ReadinessEvaluator.evaluate(
         current_time=NOW,
         watermark_time=watermark,
@@ -44,7 +44,7 @@ def test_progress_contract_lagging_suppresses_entries_retains_exits() -> None:
     assert assessment.allows_entries is False
     # Retains exit rights for safe risk reduction
     assert assessment.allows_exits is True
-    assert "lag:75.0s" in assessment.reason
+    assert "lag:105.0s" in assessment.reason
 
 
 def test_progress_contract_reconciliation_gap_causes_lagging() -> None:
