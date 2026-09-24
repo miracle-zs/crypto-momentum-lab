@@ -58,6 +58,7 @@ class ShadowAuditResult:
     success: bool
     is_concordant: bool
     divergence_category: str | None = None
+    severity: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     shadow_plan: OrderExecutionPlan | None = None
@@ -70,6 +71,21 @@ class LiveExecutionShadowAuditor:
     _revision: int = 0
     _failure_count: int = 0
     _divergence_count: int = 0
+    _audit_count_by_type: dict[str, int] = {}
+    _failure_count_by_type: dict[str, int] = {}
+    _divergence_by_category: dict[str, int] = {}
+    _divergence_by_severity: dict[str, int] = {}
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset all audit counters and metrics."""
+        cls._revision = 0
+        cls._failure_count = 0
+        cls._divergence_count = 0
+        cls._audit_count_by_type.clear()
+        cls._failure_count_by_type.clear()
+        cls._divergence_by_category.clear()
+        cls._divergence_by_severity.clear()
 
     @classmethod
     def next_revision(cls) -> int:
@@ -77,11 +93,111 @@ class LiveExecutionShadowAuditor:
         return cls._revision
 
     @classmethod
-    def get_stats(cls) -> dict[str, int]:
+    def _classify_divergence(
+        cls,
+        base_category: str | None,
+        mismatches: dict[str, Any],
+    ) -> tuple[str, str, list[str]]:
+        """Classify divergence into low-cardinality categories and severity tier.
+
+        Returns (primary_category, severity, all_categories).
+        Severity is 'CRITICAL' for core execution differences (quantity, price,
+        side, position_side, rejection_mismatch, command_missing) and
+        'NON_CRITICAL' for metadata differences (time_in_force, order_type, run_id).
+        """
+        all_cats: list[str] = []
+        is_critical = False
+
+        if base_category == "rejection_mismatch":
+            all_cats.append("rejection_mismatch")
+            is_critical = True
+        elif base_category == "command_missing":
+            all_cats.append("command_missing")
+            is_critical = True
+
+        if "quantity" in mismatches:
+            all_cats.append("attribute_mismatch_quantity")
+            is_critical = True
+        if "price" in mismatches:
+            all_cats.append("attribute_mismatch_price")
+            is_critical = True
+        if "side" in mismatches:
+            all_cats.append("attribute_mismatch_side")
+            is_critical = True
+        if "position_side" in mismatches:
+            all_cats.append("attribute_mismatch_position_side")
+            is_critical = True
+        if "reduce_only" in mismatches:
+            all_cats.append("attribute_mismatch_reduce_only")
+            is_critical = True
+        if "order_type" in mismatches:
+            all_cats.append("attribute_mismatch_order_type")
+        if "time_in_force" in mismatches:
+            all_cats.append("attribute_mismatch_time_in_force")
+        if any(
+            k in mismatches
+            for k in ("client_order_id", "intent_id", "run_id", "symbol")
+        ):
+            all_cats.append("identity_mismatch")
+
+        if not all_cats:
+            fallback = base_category or "attribute_mismatch"
+            all_cats.append(fallback)
+            if fallback in ("rejection_mismatch", "command_missing"):
+                is_critical = True
+
+        primary_cat = all_cats[0]
+        severity = "CRITICAL" if is_critical else "NON_CRITICAL"
+        return primary_cat, severity, all_cats
+
+    @classmethod
+    def get_stats(cls) -> dict[str, Any]:
         return {
             "revision": cls._revision,
             "failure_count": cls._failure_count,
             "divergence_count": cls._divergence_count,
+            "audit_count_by_type": dict(cls._audit_count_by_type),
+            "failure_count_by_type": dict(cls._failure_count_by_type),
+            "divergence_by_category": dict(cls._divergence_by_category),
+            "divergence_by_severity": dict(cls._divergence_by_severity),
+        }
+
+    @classmethod
+    def get_metrics(cls) -> dict[str, Any]:
+        total_audits = cls._revision
+        failure_rate = (
+            (cls._failure_count / total_audits) if total_audits > 0 else 0.0
+        )
+        divergence_rate = (
+            (cls._divergence_count / total_audits) if total_audits > 0 else 0.0
+        )
+        critical_count = cls._divergence_by_severity.get("CRITICAL", 0)
+        critical_rate = (
+            (critical_count / total_audits) if total_audits > 0 else 0.0
+        )
+        non_critical_count = cls._divergence_by_severity.get("NON_CRITICAL", 0)
+        concordant_count = max(
+            0, total_audits - cls._failure_count - cls._divergence_count
+        )
+        concordance_rate = (
+            (concordant_count / total_audits) if total_audits > 0 else 1.0
+        )
+
+        return {
+            "sample_volume": total_audits,
+            "concordant_count": concordant_count,
+            "concordance_rate": concordance_rate,
+            "failure_count": cls._failure_count,
+            "failure_rate": failure_rate,
+            "divergence_count": cls._divergence_count,
+            "divergence_rate": divergence_rate,
+            "critical_divergence_count": critical_count,
+            "critical_divergence_rate": critical_rate,
+            "non_critical_divergence_count": non_critical_count,
+            "audit_count_by_type": dict(cls._audit_count_by_type),
+            "failure_count_by_type": dict(cls._failure_count_by_type),
+            "divergence_by_category": dict(cls._divergence_by_category),
+            "divergence_by_severity": dict(cls._divergence_by_severity),
         }
 
     @classmethod
@@ -98,6 +214,9 @@ class LiveExecutionShadowAuditor:
     ) -> ShadowAuditResult:
         """Audit trade submission against TradeCommandExecutor in shadow mode."""
         rev = cls.next_revision()
+        cls._audit_count_by_type["submission"] = (
+            cls._audit_count_by_type.get("submission", 0) + 1
+        )
         try:
             raw_position_side = candidate.features.get("position_side")
             if isinstance(raw_position_side, str) and raw_position_side.strip():
@@ -286,13 +405,26 @@ class LiveExecutionShadowAuditor:
                         category = "attribute_mismatch"
                     details = mismatches
 
+            severity: str | None = None
             if not is_concordant:
                 cls._divergence_count += 1
+                primary_cat, severity, all_cats = cls._classify_divergence(
+                    category, details
+                )
+                category = primary_cat
+                for cat in all_cats:
+                    cls._divergence_by_category[cat] = (
+                        cls._divergence_by_category.get(cat, 0) + 1
+                    )
+                cls._divergence_by_severity[severity] = (
+                    cls._divergence_by_severity.get(severity, 0) + 1
+                )
                 log.info(
                     "shadow_execution_divergence",
                     audit_type="submission",
                     revision=rev,
                     category=category,
+                    severity=severity,
                     candidate_id=candidate.candidate_id,
                     symbol=candidate.symbol,
                     **details,
@@ -304,11 +436,15 @@ class LiveExecutionShadowAuditor:
                 success=True,
                 is_concordant=is_concordant,
                 divergence_category=category,
+                severity=severity,
                 details=details,
                 shadow_plan=shadow_result.plan,
             )
         except Exception as exc:
             cls._failure_count += 1
+            cls._failure_count_by_type["submission"] = (
+                cls._failure_count_by_type.get("submission", 0) + 1
+            )
             log.warning(
                 "shadow_execution_audit_failed",
                 audit_type="submission",
@@ -337,6 +473,9 @@ class LiveExecutionShadowAuditor:
     ) -> ShadowAuditResult:
         """Audit exit order creation against ExitAllocator in shadow mode."""
         rev = cls.next_revision()
+        cls._audit_count_by_type["exit_allocation"] = (
+            cls._audit_count_by_type.get("exit_allocation", 0) + 1
+        )
         try:
             pos_side = getattr(position, "position_side", None)
             if isinstance(pos_side, FuturesPositionSide):
@@ -423,14 +562,6 @@ class LiveExecutionShadowAuditor:
                 is_concordant = False
                 category = "command_missing"
                 details = {"reason": "ExitAllocator produced no command"}
-                cls._divergence_count += 1
-                log.info(
-                    "shadow_exit_allocation_divergence",
-                    audit_type="exit_allocation",
-                    revision=rev,
-                    symbol=position.symbol,
-                    **details,
-                )
             else:
                 mismatches: dict[str, Any] = {}
                 if shadow_cmd.requested_quantity != order_quantity:
@@ -457,14 +588,30 @@ class LiveExecutionShadowAuditor:
                     is_concordant = False
                     category = "attribute_mismatch"
                     details = mismatches
-                    cls._divergence_count += 1
-                    log.info(
-                        "shadow_exit_allocation_divergence",
-                        audit_type="exit_allocation",
-                        revision=rev,
-                        symbol=position.symbol,
-                        **details,
+
+            severity: str | None = None
+            if not is_concordant:
+                cls._divergence_count += 1
+                primary_cat, severity, all_cats = cls._classify_divergence(
+                    category, details
+                )
+                category = primary_cat
+                for cat in all_cats:
+                    cls._divergence_by_category[cat] = (
+                        cls._divergence_by_category.get(cat, 0) + 1
                     )
+                cls._divergence_by_severity[severity] = (
+                    cls._divergence_by_severity.get(severity, 0) + 1
+                )
+                log.info(
+                    "shadow_exit_allocation_divergence",
+                    audit_type="exit_allocation",
+                    revision=rev,
+                    category=category,
+                    severity=severity,
+                    symbol=position.symbol,
+                    **details,
+                )
 
             return ShadowAuditResult(
                 audit_type="exit_allocation",
@@ -472,11 +619,15 @@ class LiveExecutionShadowAuditor:
                 success=True,
                 is_concordant=is_concordant,
                 divergence_category=category,
+                severity=severity,
                 details=details,
                 shadow_command=shadow_cmd,
             )
         except Exception as exc:
             cls._failure_count += 1
+            cls._failure_count_by_type["exit_allocation"] = (
+                cls._failure_count_by_type.get("exit_allocation", 0) + 1
+            )
             log.warning(
                 "shadow_exit_allocation_failed",
                 audit_type="exit_allocation",

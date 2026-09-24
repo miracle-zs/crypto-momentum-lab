@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import structlog
 from sqlalchemy import and_, func, or_, select
@@ -1067,14 +1068,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                         {row.client_order_id for row in orders if not row.reduce_only}
                     )
                 )
-                active_times = [
-                    row.observed_at
-                    for row in active
-                    if getattr(row, "observed_at", None)
-                ]
-                since_time = (
-                    (min(active_times) - timedelta(hours=24)) if active_times else None
-                )
+                since_time = _resolve_symbol_fill_horizon(orders, active)
                 order_identity_metadata = await _load_order_identity_metadata(
                     session,
                     orders,
@@ -1195,14 +1189,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                         {row.client_order_id for row in orders if not row.reduce_only}
                     )
                 )
-                active_times = [
-                    row.observed_at
-                    for row in active
-                    if getattr(row, "observed_at", None)
-                ]
-                since_time = (
-                    (min(active_times) - timedelta(hours=24)) if active_times else None
-                )
+                since_time = _resolve_symbol_fill_horizon(orders, active)
                 order_identity_metadata = await _load_order_identity_metadata(
                     session,
                     orders,
@@ -1314,6 +1301,31 @@ class PostgresLiveContextProvider(LiveContextReader):
         return _resolve_strategy_live_state(control_state, state)
 
 
+def _resolve_symbol_fill_horizon(
+    orders: Sequence[Any],
+    active: Sequence[Any],
+) -> datetime | None:
+    """Resolve the lower bound for symbol-based fill scanning.
+
+    Order IDs are always queried exactly without any wall-clock cutoff.
+    For broader symbol-level scans (capturing external/manual fills), anchor to
+    24h before the earliest known order of the active positions. If no orders
+    are recorded (e.g. unmanaged external positions), fall back to 7 days before
+    the snapshot observation time.
+    """
+    order_times = [
+        order.created_at for order in orders if getattr(order, "created_at", None)
+    ]
+    if order_times:
+        return min(order_times) - timedelta(hours=24)
+    active_times = [
+        row.observed_at for row in active if getattr(row, "observed_at", None)
+    ]
+    if active_times:
+        return min(active_times) - timedelta(days=7)
+    return None
+
+
 async def _load_order_identity_metadata(
     session: AsyncSession,
     orders: Sequence[ExchangeOrderRow],
@@ -1365,33 +1377,40 @@ async def _load_order_identity_metadata(
         AccountFillEventRow.environment == "live",
         AccountFillEventRow.account_label == account_label,
     ]
+
+    # Resolve symbol scan lower bound to protect against full table scan
+    symbol_since = since
+    if symbol_since is None:
+        order_times = [
+            order.created_at for order in orders if getattr(order, "created_at", None)
+        ]
+        if order_times:
+            symbol_since = min(order_times) - timedelta(hours=24)
+        else:
+            symbol_since = datetime.now(UTC) - timedelta(days=30)
+
+    # Dual-track query:
+    # 1. Exact track: exchange_order_ids are matched by ID without wall-clock cutoff.
+    # 2. Range track: active_symbols are scanned from symbol_since.
     if exchange_order_ids and active_symbols:
         predicates.append(
             or_(
                 AccountFillEventRow.order_id.in_(tuple(exchange_order_ids)),
-                AccountFillEventRow.symbol.in_(active_symbols),
+                and_(
+                    AccountFillEventRow.symbol.in_(active_symbols),
+                    AccountFillEventRow.trade_at >= symbol_since,
+                ),
             )
         )
     elif exchange_order_ids:
         predicates.append(AccountFillEventRow.order_id.in_(tuple(exchange_order_ids)))
     elif active_symbols:
-        predicates.append(AccountFillEventRow.symbol.in_(active_symbols))
-
-    # Bound fill queries to avoid hot-path full table scans
-    if since is not None:
-        predicates.append(AccountFillEventRow.trade_at >= since)
-    else:
-        order_times = [
-            order.created_at for order in orders if getattr(order, "created_at", None)
-        ]
-        if order_times:
-            predicates.append(
-                AccountFillEventRow.trade_at >= min(order_times) - timedelta(hours=24)
+        predicates.append(
+            and_(
+                AccountFillEventRow.symbol.in_(active_symbols),
+                AccountFillEventRow.trade_at >= symbol_since,
             )
-        else:
-            predicates.append(
-                AccountFillEventRow.trade_at >= datetime.now(UTC) - timedelta(days=30)
-            )
+        )
 
     account_fills = tuple(
         (

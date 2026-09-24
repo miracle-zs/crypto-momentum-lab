@@ -7,6 +7,7 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crypto_momentum_lab.domain.account import (
+    AccountFillEvent,
     AccountFillReconciliationCursor,
     AccountPositionSnapshot,
     AccountReconciliationRun,
@@ -15,6 +16,7 @@ from crypto_momentum_lab.persistence.postgres.account_repository import (
     PostgresAccountRepository,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
+    AccountFillEventRow,
     AccountFillReconciliationCursorRow,
     AccountPositionSnapshotRow,
     AccountReconciliationHeadRow,
@@ -36,6 +38,11 @@ async def account_repository(
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
         async with session.begin():
+            await session.execute(
+                delete(AccountFillEventRow).where(
+                    AccountFillEventRow.environment == ENVIRONMENT
+                )
+            )
             await session.execute(
                 delete(AccountFillReconciliationCursorRow).where(
                     AccountFillReconciliationCursorRow.environment == ENVIRONMENT
@@ -59,6 +66,11 @@ async def account_repository(
     yield PostgresAccountRepository(factory)
     async with factory() as session:
         async with session.begin():
+            await session.execute(
+                delete(AccountFillEventRow).where(
+                    AccountFillEventRow.environment == ENVIRONMENT
+                )
+            )
             await session.execute(
                 delete(AccountFillReconciliationCursorRow).where(
                     AccountFillReconciliationCursorRow.environment == ENVIRONMENT
@@ -338,3 +350,66 @@ async def test_reconciliation_heads_survive_service_stop_and_empty_positions(
     )
     # The stopped account MUST still be discovered for market risk protection
     assert active_labels == frozenset({"stopped_with_pos"})
+
+
+async def test_save_reconciliation_fills_and_cursors_idempotent_and_monotonic(
+    account_repository: PostgresAccountRepository,
+) -> None:
+    fill_1 = AccountFillEvent(
+        environment=ENVIRONMENT,
+        account_label="primary",
+        symbol="BTCUSDT",
+        trade_id="trade-1001",
+        order_id="order-1",
+        side="BUY",
+        price=Decimal("50000"),
+        quantity=Decimal("0.5"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0.005"),
+        fee_asset="USDT",
+        trade_at=NOW,
+        raw_payload={},
+    )
+    cursor_1 = AccountFillReconciliationCursor(
+        environment=ENVIRONMENT,
+        account_label="primary",
+        symbol="BTCUSDT",
+        from_id=1001,
+        start_time_ms=None,
+        last_checked_at=NOW,
+    )
+
+    # 1. Save fills and cursor
+    await account_repository.save_reconciliation_fills_and_cursors(
+        fills=(fill_1,),
+        cursors=(cursor_1,),
+    )
+
+    cursors = await account_repository.load_fill_reconciliation_cursors(
+        environment=ENVIRONMENT,
+        account_label="primary",
+    )
+    assert cursors["BTCUSDT"].from_id == 1001
+
+    # 2. Duplicate fill and older cursor from_id=999:
+    # Fill must be idempotent (no error), cursor must NOT regress
+    cursor_stale = AccountFillReconciliationCursor(
+        environment=ENVIRONMENT,
+        account_label="primary",
+        symbol="BTCUSDT",
+        from_id=999,
+        start_time_ms=None,
+        last_checked_at=NOW + timedelta(seconds=1),
+    )
+    await account_repository.save_reconciliation_fills_and_cursors(
+        fills=(fill_1,),
+        cursors=(cursor_stale,),
+    )
+
+    cursors_after = await account_repository.load_fill_reconciliation_cursors(
+        environment=ENVIRONMENT,
+        account_label="primary",
+    )
+    # The database must have kept 1001, never moving backwards to 999
+    assert cursors_after["BTCUSDT"].from_id == 1001
+

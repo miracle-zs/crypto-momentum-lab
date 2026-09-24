@@ -18,8 +18,11 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     RiskExecutionResponse,
     RunReportSummaryResponse,
     StrategyRunResponse,
+    StreamReadinessDetailResponse,
     SystemOverviewResponse,
     SystemPerformanceResponse,
+    SystemReadinessResponse,
+    TradeabilityDetailResponse,
     PersistencePerformanceResponse,
     MarketDataPerformanceResponse,
     HostResourcesResponse,
@@ -68,6 +71,27 @@ def test_dashboard_app_mounts_static_index() -> None:
 class FakeQueries:
     async def health(self) -> dict[str, str]:
         return {"app_status": "UP", "database_status": "UP"}
+
+    async def readiness(self) -> SystemReadinessResponse:
+        return SystemReadinessResponse(
+            status=OperationalStatus.READY,
+            observed_at=NOW,
+            liveness={"app_status": "UP", "database_status": "UP"},
+            tradeability=TradeabilityDetailResponse(
+                mode="FULLY_TRADEABLE",
+                entry_gate_open=True,
+                entry_gate_reason="live_entry_prerequisites_ready",
+                exit_gate_open=True,
+                exit_gate_reason="normal",
+                unmanaged_risk_clear=True,
+                halt_active=False,
+            ),
+            stream_readiness=StreamReadinessDetailResponse(
+                overall="READY",
+                streams={"account": "READY", "market": "READY"},
+            ),
+            accounts=[],
+        )
 
     async def decision_slo(
         self,

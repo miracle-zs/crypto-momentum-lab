@@ -1,4 +1,4 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -138,6 +138,7 @@ class PostgresAccountRepository:
         open_orders: tuple[AccountOpenOrderSnapshot, ...],
         fills: tuple[AccountFillEvent, ...],
         run: AccountReconciliationRun,
+        cursors: tuple[AccountFillReconciliationCursor, ...] = (),
     ) -> None:
         """Persist one account observation atomically across all tables."""
         async with self._session_factory() as session:
@@ -199,12 +200,38 @@ class PostgresAccountRepository:
                     AccountFillEventRow,
                     [fill_event_row(item) for item in fills],
                 )
+                if cursors:
+                    await self._save_fill_reconciliation_cursors_in_session(
+                        session, cursors
+                    )
                 await self._insert_in_session(
                     session,
                     AccountReconciliationRunRow,
                     reconciliation_run_row(run),
                 )
                 await self._upsert_reconciliation_head_in_session(session, run)
+
+    async def save_reconciliation_fills_and_cursors(
+        self,
+        *,
+        fills: tuple[AccountFillEvent, ...],
+        cursors: tuple[AccountFillReconciliationCursor, ...] = (),
+    ) -> None:
+        """Persist fills and cursor updates atomically without snapshot state."""
+        if not fills and not cursors:
+            return
+        async with self._session_factory() as session:
+            async with session.begin():
+                if fills:
+                    await self._insert_in_session(
+                        session,
+                        AccountFillEventRow,
+                        [fill_event_row(item) for item in fills],
+                    )
+                if cursors:
+                    await self._save_fill_reconciliation_cursors_in_session(
+                        session, cursors
+                    )
 
     async def save_process_state(self, state: ExecutionAccountProcessState) -> None:
         await self._insert(ExecutionAccountProcessStateRow, process_state_row(state))
@@ -267,6 +294,63 @@ class PostgresAccountRepository:
                 for row in rows.all()
             }
 
+    @staticmethod
+    async def _save_fill_reconciliation_cursors_in_session(
+        session: AsyncSession,
+        cursors: Sequence[AccountFillReconciliationCursor],
+    ) -> None:
+        if not cursors:
+            return
+        values = [fill_reconciliation_cursor_row(cursor) for cursor in cursors]
+        statement = insert(AccountFillReconciliationCursorRow).values(values)
+        statement = statement.on_conflict_do_update(
+            index_elements=[
+                "environment",
+                "account_label",
+                "symbol",
+            ],
+            set_={
+                # Reconciliation persistence is intentionally
+                # asynchronous.  A slower result must never move a
+                # cursor backwards after a newer result committed.
+                # The cursor mode is part of the versioned value: an
+                # id cursor clears the time cursor and vice versa, so
+                # the one-position check constraint remains valid.
+                "from_id": case(
+                    (
+                        statement.excluded.from_id.is_not(None),
+                        func.greatest(
+                            func.coalesce(
+                                AccountFillReconciliationCursorRow.from_id,
+                                0,
+                            ),
+                            statement.excluded.from_id,
+                        ),
+                    ),
+                    else_=None,
+                ),
+                "start_time_ms": case(
+                    (
+                        statement.excluded.start_time_ms.is_not(None),
+                        func.greatest(
+                            func.coalesce(
+                                AccountFillReconciliationCursorRow.start_time_ms,
+                                0,
+                            ),
+                            statement.excluded.start_time_ms,
+                        ),
+                    ),
+                    else_=None,
+                ),
+                "last_checked_at": statement.excluded.last_checked_at,
+            },
+            where=(
+                AccountFillReconciliationCursorRow.last_checked_at
+                <= statement.excluded.last_checked_at
+            ),
+        )
+        await session.execute(statement)
+
     async def save_fill_reconciliation_cursors(
         self,
         cursors: tuple[AccountFillReconciliationCursor, ...],
@@ -275,55 +359,9 @@ class PostgresAccountRepository:
             return
         async with self._session_factory() as session:
             async with session.begin():
-                values = [fill_reconciliation_cursor_row(cursor) for cursor in cursors]
-                statement = insert(AccountFillReconciliationCursorRow).values(values)
-                statement = statement.on_conflict_do_update(
-                    index_elements=[
-                        "environment",
-                        "account_label",
-                        "symbol",
-                    ],
-                    set_={
-                        # Reconciliation persistence is intentionally
-                        # asynchronous.  A slower result must never move a
-                        # cursor backwards after a newer result committed.
-                        # The cursor mode is part of the versioned value: an
-                        # id cursor clears the time cursor and vice versa, so
-                        # the one-position check constraint remains valid.
-                        "from_id": case(
-                            (
-                                statement.excluded.from_id.is_not(None),
-                                func.greatest(
-                                    func.coalesce(
-                                        AccountFillReconciliationCursorRow.from_id,
-                                        0,
-                                    ),
-                                    statement.excluded.from_id,
-                                ),
-                            ),
-                            else_=None,
-                        ),
-                        "start_time_ms": case(
-                            (
-                                statement.excluded.start_time_ms.is_not(None),
-                                func.greatest(
-                                    func.coalesce(
-                                        AccountFillReconciliationCursorRow.start_time_ms,
-                                        0,
-                                    ),
-                                    statement.excluded.start_time_ms,
-                                ),
-                            ),
-                            else_=None,
-                        ),
-                        "last_checked_at": statement.excluded.last_checked_at,
-                    },
-                    where=(
-                        AccountFillReconciliationCursorRow.last_checked_at
-                        <= statement.excluded.last_checked_at
-                    ),
+                await self._save_fill_reconciliation_cursors_in_session(
+                    session, cursors
                 )
-                await session.execute(statement)
 
     async def load_active_position_symbols(
         self,

@@ -26,6 +26,11 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
+from crypto_momentum_lab.health.stream_availability import (
+    StreamAvailabilityClock,
+    StreamAvailabilityConfig,
+)
+
 log = structlog.get_logger()
 
 _SCHEMA_VERSION = 1
@@ -119,8 +124,26 @@ class RiskControlHubConfig:
     replay_event_count: int = 512
     handshake_timeout_seconds: float = 10.0
     unavailable_timeout_seconds: float = 120.0
+    startup_timeout_seconds: float | None = None
+    recovery_timeout_seconds: float | None = None
     reconnect_delays: tuple[float, ...] = (0.0, 1.0, 5.0, 15.0)
     publish_token: str | None = None
+
+    @property
+    def effective_startup_timeout_seconds(self) -> float:
+        return (
+            self.startup_timeout_seconds
+            if self.startup_timeout_seconds is not None
+            else self.unavailable_timeout_seconds
+        )
+
+    @property
+    def effective_recovery_timeout_seconds(self) -> float:
+        return (
+            self.recovery_timeout_seconds
+            if self.recovery_timeout_seconds is not None
+            else self.unavailable_timeout_seconds
+        )
 
     def __post_init__(self) -> None:
         if not self.host.strip():
@@ -135,6 +158,16 @@ class RiskControlHubConfig:
             raise ValueError("handshake_timeout_seconds must be positive")
         if self.unavailable_timeout_seconds <= 0:
             raise ValueError("unavailable_timeout_seconds must be positive")
+        if (
+            self.startup_timeout_seconds is not None
+            and self.startup_timeout_seconds <= 0
+        ):
+            raise ValueError("startup_timeout_seconds must be positive")
+        if (
+            self.recovery_timeout_seconds is not None
+            and self.recovery_timeout_seconds <= 0
+        ):
+            raise ValueError("recovery_timeout_seconds must be positive")
         if not self.reconnect_delays or any(
             delay < 0 for delay in self.reconnect_delays
         ):
@@ -488,6 +521,7 @@ class WebSocketRiskControlSource:
         session_id: str | None = None,
         config: RiskControlHubConfig | None = None,
         on_connection_change: Callable[[bool, str | None], None] | None = None,
+        availability_clock: StreamAvailabilityClock | None = None,
     ) -> None:
         for value, field_name in (
             (url, "url"),
@@ -511,6 +545,15 @@ class WebSocketRiskControlSource:
         self._session_id = session_id
         self._config = config or RiskControlHubConfig()
         self._on_connection_change = on_connection_change
+        self._availability_clock = availability_clock or StreamAvailabilityClock(
+            StreamAvailabilityConfig(
+                startup_timeout_seconds=self._config.effective_startup_timeout_seconds,
+                disrupted_timeout_seconds=self._config.unavailable_timeout_seconds,
+                recovery_timeout_seconds=self._config.effective_recovery_timeout_seconds,
+            ),
+            stream_name="risk-control hub",
+            clock=lambda: time.monotonic(),
+        )
         self._stopping = False
         self._connection_available: bool | None = None
         self._stream_epoch: str | None = None
@@ -518,6 +561,10 @@ class WebSocketRiskControlSource:
         self._recovery_count = 0
         self._queue_overflow_count = 0
         self._last_recovery_reason: str | None = None
+
+    @property
+    def availability_clock(self) -> StreamAvailabilityClock:
+        return self._availability_clock
 
     @property
     def metrics(self) -> RiskControlHubClientMetrics:
@@ -535,10 +582,10 @@ class WebSocketRiskControlSource:
 
     async def _iterate(self) -> AsyncIterator[RiskControlEvent]:
         self._notify_connection_change(False, "connecting")
-        unavailable_since = time.monotonic()
         reconnect_attempt = 0
         while not self._stopping:
             try:
+                self._availability_clock.mark_connecting()
                 async with connect(
                     self._url,
                     open_timeout=self._config.handshake_timeout_seconds,
@@ -594,7 +641,7 @@ class WebSocketRiskControlSource:
                     if ready.get("stream_reset") is True:
                         self._prepare_recovery("risk_control_stream_reset")
                     self._notify_connection_change(True, None)
-                    unavailable_since = None
+                    self._availability_clock.mark_connected(needs_recovery=False)
                     reconnect_attempt = 0
                     receive_queue: asyncio.Queue[_QueueItem] = asyncio.Queue(
                         maxsize=_CLIENT_RECEIVE_QUEUE_SIZE
@@ -605,7 +652,14 @@ class WebSocketRiskControlSource:
                     )
                     try:
                         while not self._stopping:
-                            item = await receive_queue.get()
+                            remaining = self._availability_clock.remaining_budget()
+                            if remaining < float("inf"):
+                                item = await asyncio.wait_for(
+                                    receive_queue.get(),
+                                    timeout=max(0.001, remaining),
+                                )
+                            else:
+                                item = await receive_queue.get()
                             if isinstance(item, Exception):
                                 raise item
                             if isinstance(item, _QueueOverflow):
@@ -620,7 +674,7 @@ class WebSocketRiskControlSource:
                                 strategy_name=self._strategy_name,
                                 session_id=self._session_id,
                             ):
-                                unavailable_since = None
+                                self._availability_clock.mark_ready()
                                 yield event
                     finally:
                         if not reader_task.done():
@@ -638,15 +692,11 @@ class WebSocketRiskControlSource:
                 RiskControlHubError,
             ) as error:
                 self._notify_connection_change(False, type(error).__name__)
-                now = time.monotonic()
-                if unavailable_since is None:
-                    unavailable_since = now
-                if now - unavailable_since >= (
-                    self._config.unavailable_timeout_seconds
-                ):
-                    raise RiskControlHubError(
-                        "risk-control hub unavailable beyond timeout"
-                    ) from error
+                self._availability_clock.mark_disrupted(str(error))
+                self._availability_clock.check_timeout(
+                    error_factory=RiskControlHubError,
+                    custom_message="risk-control hub unavailable beyond timeout",
+                )
                 delay = self._config.reconnect_delays[
                     min(reconnect_attempt, len(self._config.reconnect_delays) - 1)
                 ]
@@ -712,6 +762,7 @@ class WebSocketRiskControlSource:
         self._last_sequence = None
         self._recovery_count += 1
         self._last_recovery_reason = reason
+        self._availability_clock.mark_recovering(reason)
         self._notify_connection_change(False, reason)
 
     def _notify_connection_change(self, available: bool, reason: str | None) -> None:

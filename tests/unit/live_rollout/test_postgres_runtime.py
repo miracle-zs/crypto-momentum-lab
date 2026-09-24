@@ -2133,4 +2133,91 @@ async def test_load_order_anchor_events_isolates_position_side_zero_crossing() -
     assert latest_entry_times == {"BTCUSDT": t_long}
 
 
+def test_resolve_symbol_fill_horizon_anchors_to_earliest_order() -> None:
+    from crypto_momentum_lab.live_rollout.postgres_runtime import _resolve_symbol_fill_horizon
+
+    t_now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    t_order_old = t_now - timedelta(days=3)  # Order 72h ago
+    t_order_recent = t_now - timedelta(hours=2)
+
+    order_old = _order(
+        symbol="BTCUSDT",
+        reduce_only=False,
+        side="BUY",
+        created_at=t_order_old,
+    )
+    order_recent = _order(
+        symbol="BTCUSDT",
+        reduce_only=False,
+        side="BUY",
+        created_at=t_order_recent,
+    )
+    active = [SimpleNamespace(observed_at=t_now, symbol="BTCUSDT")]
+
+    horizon = _resolve_symbol_fill_horizon([order_recent, order_old], active)
+    # Must anchor to earliest order (72h ago) - 24h = 96h ago, NOT to t_now - 24h!
+    assert horizon == t_order_old - timedelta(hours=24)
+
+
+def test_resolve_symbol_fill_horizon_falls_back_to_7d_when_no_orders() -> None:
+    from crypto_momentum_lab.live_rollout.postgres_runtime import _resolve_symbol_fill_horizon
+
+    t_now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    active = [SimpleNamespace(observed_at=t_now, symbol="ETHUSDT")]
+
+    horizon = _resolve_symbol_fill_horizon([], active)
+    assert horizon == t_now - timedelta(days=7)
+
+
+def test_resolve_symbol_fill_horizon_safe_on_empty() -> None:
+    from crypto_momentum_lab.live_rollout.postgres_runtime import _resolve_symbol_fill_horizon
+
+    assert _resolve_symbol_fill_horizon([], []) is None
+
+
+async def test_load_order_identity_metadata_dual_track_query() -> None:
+    from crypto_momentum_lab.live_rollout.postgres_runtime import _load_order_identity_metadata
+
+    captured_query = None
+
+    class CaptureSession:
+        async def scalars(self, query):
+            nonlocal captured_query
+            captured_query = query
+            class Result:
+                def all(self):
+                    return []
+            return Result()
+
+    t_now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    t_order_old = t_now - timedelta(days=3)
+
+    order = _order(
+        symbol="BTCUSDT",
+        reduce_only=False,
+        side="BUY",
+        exchange_order_id="ex-12345",
+        client_order_id="cml-12345",
+        created_at=t_order_old,
+    )
+
+    session = CaptureSession()
+    # Query with since = t_now - 24h (which is newer than t_order_old)
+    since = t_now - timedelta(hours=24)
+    await _load_order_identity_metadata(
+        session,  # type: ignore[arg-type]
+        [order],
+        account_label="primary",
+        since=since,
+    )
+
+    # In captured query, order_id IN ('ex-12345') must NOT be constrained by trade_at >= since!
+    # Instead, the clause must be: order_id IN (...) OR (symbol IN (...) AND trade_at >= since)
+    query_str = str(captured_query)
+    assert "account_fill_events.order_id IN" in query_str
+    assert "account_fill_events.symbol IN" in query_str
+    assert "account_fill_events.trade_at >=" in query_str
+
+
+
 

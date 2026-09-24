@@ -13,7 +13,9 @@ from crypto_momentum_lab.execution_account.binance.user_data import (
     parse_user_data_event,
 )
 from crypto_momentum_lab.execution_account.sync import (
+    AccountSnapshot,
     ExecutionAccountSyncConfig,
+    ExecutionAccountSyncResult,
     ExecutionAccountSyncService,
 )
 from crypto_momentum_lab.execution_account.user_data_sync import (
@@ -131,6 +133,7 @@ class FakeRepository:
         open_orders,
         fills,
         run,
+        cursors=(),
     ):
         self.snapshot_calls += 1
         self.configs.append(config)
@@ -139,6 +142,18 @@ class FakeRepository:
         self.open_orders.extend(open_orders)
         self.fills.extend(fills)
         self.reconciliation_runs.append(run)
+        if cursors:
+            self.fill_cursor_calls.append(tuple(cursors))
+
+    async def save_reconciliation_fills_and_cursors(
+        self,
+        *,
+        fills,
+        cursors=(),
+    ):
+        self.fills.extend(fills)
+        if cursors:
+            self.fill_cursor_calls.append(tuple(cursors))
 
     async def save_fill_reconciliation_cursors(self, cursors):
         self.fill_cursor_calls.append(tuple(cursors))
@@ -656,3 +671,181 @@ def _fill(symbol: str, trade_id: str) -> AccountFillEvent:
         trade_at=datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
         raw_payload={},
     )
+
+
+async def test_persist_reconciliation_result_stale_snapshot_still_persists_fills_and_cursors() -> None:
+    repository = FakeRepository()
+    service = ExecutionAccountSyncService(
+        client=FakeClient(),
+        repository=repository,
+        config=_config(),
+    )
+    # 1. Establish latest observation time at T2
+    t2 = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+    service._remember_observation(t2)
+    assert service._latest_observation_at == t2
+
+    # 2. Receive a result observed at T1 < T2 with new fills and cursor updates
+    t1 = datetime(2026, 7, 4, 11, 0, tzinfo=UTC)
+    fill_item = _fill("BTCUSDT", "trade-101")
+    cursor_item = AccountFillReconciliationCursor(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        from_id=101,
+        start_time_ms=None,
+        last_checked_at=t1,
+    )
+    stale_result = ExecutionAccountSyncResult(
+        reconciliation_id="stale:test",
+        status=ExecutionAccountStatus.READY_READONLY,
+        mismatch_count=0,
+        snapshot=AccountSnapshot(
+            config=AccountConfigSnapshot(
+                environment="live",
+                account_label="primary",
+                multi_assets_mode=False,
+                hedge_mode=False,
+                fee_tier=0,
+                observed_at=t1,
+                raw_payload={},
+            ),
+            balances=(),
+            positions=(),
+            open_orders=(),
+        ),
+        fills=(fill_item,),
+        fill_cursor_updates=(cursor_item,),
+    )
+
+    await service.persist_reconciliation_result(stale_result)
+
+    # Snapshot tables and process state must NOT be touched
+    assert repository.snapshot_calls == 0
+    assert repository.process_states == []
+    assert repository.balances == []
+    assert repository.positions == []
+
+    # Fills and cursors MUST be persisted
+    assert repository.fills == [fill_item]
+    assert repository.fill_cursor_calls == [(cursor_item,)]
+
+    # In-memory cursor must advance to the new progress
+    assert service._fill_cursors["BTCUSDT"].from_id == 101
+    assert service._fill_cursor_checked_at["BTCUSDT"] == t1
+
+    # Observation time must not regress
+    assert service._latest_observation_at == t2
+
+
+async def test_persist_reconciliation_result_cursors_do_not_regress() -> None:
+    repository = FakeRepository()
+    service = ExecutionAccountSyncService(
+        client=FakeClient(),
+        repository=repository,
+        config=_config(),
+    )
+    t_base = datetime(2026, 7, 4, 10, 0, tzinfo=UTC)
+    service._remember_observation(t_base)
+
+    # Initialize in-memory cursor at higher from_id = 200
+    from crypto_momentum_lab.execution_account.sync import _FillCursor
+    service._fill_cursors["BTCUSDT"] = _FillCursor(from_id=200, start_time_ms=None)
+    service._fill_cursor_checked_at["BTCUSDT"] = t_base
+
+    # Incoming result has an older cursor with from_id = 150
+    stale_cursor = AccountFillReconciliationCursor(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        from_id=150,
+        start_time_ms=None,
+        last_checked_at=t_base - timedelta(minutes=10),
+    )
+    result = ExecutionAccountSyncResult(
+        reconciliation_id="regress:test",
+        status=ExecutionAccountStatus.READY_READONLY,
+        mismatch_count=0,
+        snapshot=AccountSnapshot(
+            config=AccountConfigSnapshot(
+                environment="live",
+                account_label="primary",
+                multi_assets_mode=False,
+                hedge_mode=False,
+                fee_tier=0,
+                observed_at=t_base - timedelta(minutes=10),
+                raw_payload={},
+            ),
+            balances=(),
+            positions=(),
+            open_orders=(),
+        ),
+        fills=(),
+        fill_cursor_updates=(stale_cursor,),
+    )
+
+    await service.persist_reconciliation_result(result)
+
+    # In-memory cursor must NOT regress from 200 to 150
+    assert service._fill_cursors["BTCUSDT"].from_id == 200
+    assert service._fill_cursor_checked_at["BTCUSDT"] == t_base
+
+
+async def test_persist_reconciliation_result_db_failure_does_not_advance_cursor() -> None:
+    class FailingRepository(FakeRepository):
+        async def save_reconciliation_fills_and_cursors(self, *, fills, cursors=()):
+            raise RuntimeError("Database connection dropped during cursor update")
+
+        async def save_reconciliation_snapshot(self, **kwargs):
+            raise RuntimeError("Database connection dropped during snapshot write")
+
+    repository = FailingRepository()
+    service = ExecutionAccountSyncService(
+        client=FakeClient(),
+        repository=repository,
+        config=_config(),
+    )
+    t = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+    service._remember_observation(t)
+
+    from crypto_momentum_lab.execution_account.sync import _FillCursor
+    service._fill_cursors["BTCUSDT"] = _FillCursor(from_id=50, start_time_ms=None)
+
+    new_cursor = AccountFillReconciliationCursor(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        from_id=100,
+        start_time_ms=None,
+        last_checked_at=t - timedelta(minutes=5),
+    )
+    result = ExecutionAccountSyncResult(
+        reconciliation_id="fail:test",
+        status=ExecutionAccountStatus.READY_READONLY,
+        mismatch_count=0,
+        snapshot=AccountSnapshot(
+            config=AccountConfigSnapshot(
+                environment="live",
+                account_label="primary",
+                multi_assets_mode=False,
+                hedge_mode=False,
+                fee_tier=0,
+                observed_at=t - timedelta(minutes=5),
+                raw_payload={},
+            ),
+            balances=(),
+            positions=(),
+            open_orders=(),
+        ),
+        fills=(_fill("BTCUSDT", "1"),),
+        fill_cursor_updates=(new_cursor,),
+    )
+
+    import pytest
+    with pytest.raises(RuntimeError, match="Database connection dropped"):
+        await service.persist_reconciliation_result(result)
+
+    # In-memory cursor must NOT advance when database write fails
+    assert service._fill_cursors["BTCUSDT"].from_id == 50
+    assert service._fill_cursors["BTCUSDT"].start_time_ms is None
+

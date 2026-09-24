@@ -55,6 +55,7 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     StrategyRunResponse,
     SystemOverviewResponse,
     SystemPerformanceResponse,
+    SystemReadinessResponse,
     UniverseStatusResponse,
 )
 from crypto_momentum_lab.operator_dashboard.status import (
@@ -342,6 +343,9 @@ class DashboardQueries:
 
     async def health(self) -> dict[str, str]:
         return await self._overview_queries.health()
+
+    async def readiness(self) -> SystemReadinessResponse:
+        return await self._overview_queries.readiness()
 
     async def decision_slo(
         self,

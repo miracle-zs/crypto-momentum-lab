@@ -47,8 +47,25 @@ def test_all_read_only_dashboard_routes_are_available() -> None:
             "/api/risk-execution",
             "/api/reports",
             "/api/performance",
+            "/api/readiness",
         ):
             assert client.get(route, auth=DASHBOARD_BASIC_AUTH).status_code == 200
+
+
+def test_readiness_endpoint_returns_layered_state() -> None:
+    with TestClient(
+        create_dashboard_app(queries=FakeQueries(), **DASHBOARD_AUTH_KWARGS)
+    ) as client:
+        response = client.get("/api/readiness", auth=DASHBOARD_BASIC_AUTH)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "READY"
+    assert payload["liveness"] == {"app_status": "UP", "database_status": "UP"}
+    assert payload["tradeability"]["mode"] == "FULLY_TRADEABLE"
+    assert payload["tradeability"]["entry_gate_open"] is True
+    assert payload["stream_readiness"]["overall"] == "READY"
+    assert "account" in payload["stream_readiness"]["streams"]
 
 
 def test_decision_slo_endpoint_accepts_a_bounded_window() -> None:

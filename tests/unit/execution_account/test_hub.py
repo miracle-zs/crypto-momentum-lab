@@ -1025,3 +1025,96 @@ async def test_account_event_source_silent_account_with_existing_state_resets_un
 
     source.stop()
     await events.aclose()
+
+
+async def test_account_event_source_separate_startup_vs_disruption_budgets(
+    monkeypatch,
+) -> None:
+    current_time = 1000.0
+
+    def fake_monotonic() -> float:
+        return current_time
+
+    monkeypatch.setattr(hub_module.time, "monotonic", fake_monotonic)
+    snapshot = _snapshot()
+    first_event = replace(
+        _event(),
+        sequence=1,
+        snapshot_kind="full",
+        account_snapshot=snapshot,
+    )
+    connections = 0
+
+    class DualBudgetConnection:
+        def __init__(self) -> None:
+            nonlocal connections
+            connections += 1
+            self._conn_id = connections
+            self._sent_ready = False
+            self._sent_event = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, _message):
+            return None
+
+        async def recv(self):
+            nonlocal current_time
+            if self._conn_id == 1:
+                # First attempt: takes 20s during startup (allowed by startup_timeout=60s, would fail if disrupted_timeout=10s applied)
+                if not self._sent_ready:
+                    self._sent_ready = True
+                    current_time += 20.0
+                    return json.dumps(
+                        {
+                            "type": "account_event_hub_ready",
+                            "schema_version": 1,
+                            "environment": "live",
+                            "account_label": "primary",
+                            "full_snapshot": True,
+                        }
+                    )
+                if not self._sent_event:
+                    self._sent_event = True
+                    return encode_account_event(first_event, sequence=1)
+                raise ConnectionResetError("flapped after event")
+            # Reconnect attempt after disruption: fails
+            current_time += 15.0
+            raise ConnectionResetError("flapped on reconnect")
+
+    monkeypatch.setattr(
+        hub_module,
+        "connect",
+        lambda *_args, **_kwargs: DualBudgetConnection(),
+    )
+
+    source = WebSocketAccountEventSource(
+        url="ws://unused",
+        environment="live",
+        account_label="primary",
+        consumer_id="test",
+        config=AccountEventHubConfig(
+            reconnect_delays=(0,),
+            startup_timeout_seconds=60.0,
+            unavailable_timeout_seconds=10.0,
+        ),
+    )
+
+    events = source.__aiter__()
+    received = await anext(events)
+    assert received.account_snapshot == snapshot
+    assert source.availability_clock.state.value == "ready"
+
+    # The reader raised ConnectionResetError after first_event, triggering disruption.
+    # The reconnect attempt (conn_id == 2) advances time by 15.0s, which exceeds unavailable_timeout_seconds (10.0s).
+    with pytest.raises(
+        hub_module.AccountEventHubError,
+        match="account-event hub unavailable beyond timeout",
+    ):
+        await anext(events)
+
+

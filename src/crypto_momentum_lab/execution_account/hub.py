@@ -41,6 +41,12 @@ from crypto_momentum_lab.execution_account.sync import (
     AccountSnapshotDelta,
     apply_account_snapshot_delta,
 )
+from crypto_momentum_lab.health.stream_availability import (
+    StreamAvailabilityClock,
+    StreamAvailabilityConfig,
+    StreamAvailabilityState,
+    StreamAvailabilityTimeoutError,
+)
 
 log = structlog.get_logger()
 
@@ -235,8 +241,26 @@ class AccountEventHubConfig:
     subscriber_queue_size: int = 16
     handshake_timeout_seconds: float = 10.0
     unavailable_timeout_seconds: float = 120.0
+    startup_timeout_seconds: float | None = None
+    recovery_timeout_seconds: float | None = None
     reconnect_delays: tuple[float, ...] = (0.0, 1.0, 5.0, 15.0)
     replay_event_count: int = 4096
+
+    @property
+    def effective_startup_timeout_seconds(self) -> float:
+        return (
+            self.startup_timeout_seconds
+            if self.startup_timeout_seconds is not None
+            else self.unavailable_timeout_seconds
+        )
+
+    @property
+    def effective_recovery_timeout_seconds(self) -> float:
+        return (
+            self.recovery_timeout_seconds
+            if self.recovery_timeout_seconds is not None
+            else self.unavailable_timeout_seconds
+        )
 
     def __post_init__(self) -> None:
         if not self.host.strip():
@@ -249,12 +273,23 @@ class AccountEventHubConfig:
             raise ValueError("handshake_timeout_seconds must be positive")
         if self.unavailable_timeout_seconds <= 0:
             raise ValueError("unavailable_timeout_seconds must be positive")
+        if (
+            self.startup_timeout_seconds is not None
+            and self.startup_timeout_seconds <= 0
+        ):
+            raise ValueError("startup_timeout_seconds must be positive")
+        if (
+            self.recovery_timeout_seconds is not None
+            and self.recovery_timeout_seconds <= 0
+        ):
+            raise ValueError("recovery_timeout_seconds must be positive")
         if not self.reconnect_delays or any(
             delay < 0 for delay in self.reconnect_delays
         ):
             raise ValueError("reconnect_delays must contain non-negative values")
         if self.replay_event_count <= 0:
             raise ValueError("replay_event_count must be positive")
+
 
 
 @dataclass(slots=True)
@@ -749,6 +784,7 @@ class WebSocketAccountEventSource:
         consumer_id: str,
         config: AccountEventHubConfig | None = None,
         on_recovery: Callable[[str], None] | None = None,
+        availability_clock: StreamAvailabilityClock | None = None,
     ) -> None:
         for value, field_name in (
             (url, "url"),
@@ -764,6 +800,15 @@ class WebSocketAccountEventSource:
         self._consumer_id = consumer_id
         self._config = config or AccountEventHubConfig()
         self._on_recovery = on_recovery
+        self._availability_clock = availability_clock or StreamAvailabilityClock(
+            StreamAvailabilityConfig(
+                startup_timeout_seconds=self._config.effective_startup_timeout_seconds,
+                disrupted_timeout_seconds=self._config.unavailable_timeout_seconds,
+                recovery_timeout_seconds=self._config.effective_recovery_timeout_seconds,
+            ),
+            stream_name="account-event hub",
+            clock=lambda: time.monotonic(),
+        )
         self._stopping = False
         self._stream_epoch: str | None = None
         self._last_sequence: int | None = None
@@ -772,6 +817,10 @@ class WebSocketAccountEventSource:
         self._recovery_count = 0
         self._queue_overflow_count = 0
         self._last_recovery_reason: str | None = None
+
+    @property
+    def availability_clock(self) -> StreamAvailabilityClock:
+        return self._availability_clock
 
     @property
     def metrics(self) -> AccountEventHubClientMetrics:
@@ -788,10 +837,10 @@ class WebSocketAccountEventSource:
         return self._iterate()
 
     async def _iterate(self) -> AsyncIterator[AccountEvent]:
-        unavailable_since: float | None = time.monotonic()
         reconnect_attempt = 0
         while not self._stopping:
             try:
+                self._availability_clock.mark_connecting()
                 async with connect(
                     self._url,
                     open_timeout=self._config.handshake_timeout_seconds,
@@ -854,13 +903,14 @@ class WebSocketAccountEventSource:
                             self._prepare_full_snapshot_recovery(
                                 "account_event_full_snapshot_recovery"
                             )
-                    if (
-                        self._account_snapshot is not None
-                        and not self._require_full_snapshot
-                        and ready.get("stream_reset") is not True
-                        and ready.get("full_snapshot") is not True
-                    ):
-                        unavailable_since = None
+                    needs_recovery = (
+                        self._account_snapshot is None
+                        or self._require_full_snapshot
+                        or ready.get("stream_reset") is True
+                        or ready.get("full_snapshot") is True
+                    )
+                    self._availability_clock.mark_connected(needs_recovery=needs_recovery)
+                    if not needs_recovery:
                         reconnect_attempt = 0
                     receive_queue: asyncio.Queue[_AccountEventQueueItem] = (
                         asyncio.Queue(maxsize=_CLIENT_RECEIVE_QUEUE_SIZE)
@@ -874,7 +924,14 @@ class WebSocketAccountEventSource:
                     )
                     try:
                         while not self._stopping:
-                            item = await receive_queue.get()
+                            remaining = self._availability_clock.remaining_budget()
+                            if remaining < float("inf"):
+                                item = await asyncio.wait_for(
+                                    receive_queue.get(),
+                                    timeout=max(0.001, remaining),
+                                )
+                            else:
+                                item = await receive_queue.get()
                             if isinstance(item, Exception):
                                 raise item
                             if isinstance(item, _AccountEventQueueOverflow):
@@ -886,7 +943,7 @@ class WebSocketAccountEventSource:
                                 )
                             materialized = self._materialize_event(item)
                             if materialized is not None:
-                                unavailable_since = None
+                                self._availability_clock.mark_ready()
                                 reconnect_attempt = 0
                                 yield materialized
                     finally:
@@ -904,15 +961,11 @@ class WebSocketAccountEventSource:
                 TimeoutError,
                 AccountEventHubError,
             ) as error:
-                now = time.monotonic()
-                if unavailable_since is None:
-                    unavailable_since = now
-                if now - unavailable_since >= (
-                    self._config.unavailable_timeout_seconds
-                ):
-                    raise AccountEventHubError(
-                        "account-event hub unavailable beyond timeout"
-                    ) from error
+                self._availability_clock.mark_disrupted(str(error))
+                self._availability_clock.check_timeout(
+                    error_factory=AccountEventHubError,
+                    custom_message="account-event hub unavailable beyond timeout",
+                )
                 delay = self._config.reconnect_delays[
                     min(reconnect_attempt, len(self._config.reconnect_delays) - 1)
                 ]
@@ -927,6 +980,7 @@ class WebSocketAccountEventSource:
         self._require_full_snapshot = True
         self._recovery_count += 1
         self._last_recovery_reason = reason
+        self._availability_clock.mark_recovering(reason)
         if self._on_recovery is not None:
             try:
                 self._on_recovery(reason)

@@ -1,5 +1,5 @@
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -114,6 +114,15 @@ class AccountSyncRepository(Protocol):
         open_orders: tuple[AccountOpenOrderSnapshot, ...],
         fills: tuple[AccountFillEvent, ...],
         run: AccountReconciliationRun,
+        cursors: tuple[AccountFillReconciliationCursor, ...] = (),
+    ) -> None:
+        pass
+
+    async def save_reconciliation_fills_and_cursors(
+        self,
+        *,
+        fills: tuple[AccountFillEvent, ...],
+        cursors: tuple[AccountFillReconciliationCursor, ...] = (),
     ) -> None:
         pass
 
@@ -823,6 +832,18 @@ class ExecutionAccountSyncService:
             self._latest_observation_at is not None
             and snapshot.config.observed_at < self._latest_observation_at
         ):
+            # Stale snapshot: skip snapshot, balances, positions, open orders,
+            # and status update.  HOWEVER, fills and cursor updates are immutable
+            # or monotonic progress: persist them atomically without the stale state.
+            if result.fills or result.fill_cursor_updates:
+                await self._repository.save_reconciliation_fills_and_cursors(
+                    fills=result.fills,
+                    cursors=result.fill_cursor_updates,
+                )
+                if result.fill_cursor_updates:
+                    self._update_fill_cursors_monotonically(
+                        result.fill_cursor_updates
+                    )
             return
         config = replace(
             self._config,
@@ -847,6 +868,7 @@ class ExecutionAccountSyncService:
             positions=persisted_positions,
             open_orders=snapshot.open_orders,
             fills=result.fills,
+            cursors=result.fill_cursor_updates,
             run=_reconciliation_run(
                 config,
                 reconciliation_id=result.reconciliation_id,
@@ -864,28 +886,47 @@ class ExecutionAccountSyncService:
             observed_at=snapshot.config.observed_at,
         )
         if result.fill_cursor_updates:
-            await self._repository.save_fill_reconciliation_cursors(
+            self._update_fill_cursors_monotonically(
                 result.fill_cursor_updates
-            )
-            self._fill_cursors.update(
-                {
-                    cursor.symbol.strip().upper(): _FillCursor(
-                        from_id=cursor.from_id,
-                        start_time_ms=cursor.start_time_ms,
-                    )
-                    for cursor in result.fill_cursor_updates
-                }
-            )
-            self._fill_cursor_checked_at.update(
-                {
-                    cursor.symbol.strip().upper(): cursor.last_checked_at
-                    for cursor in result.fill_cursor_updates
-                }
             )
         await self._save_state(
             ExecutionAccountStatus.READY_READONLY,
             config=config,
         )
+
+    def _update_fill_cursors_monotonically(
+        self,
+        cursors: Sequence[AccountFillReconciliationCursor],
+    ) -> None:
+        """Update in-memory fill cursors monotonically to prevent regression."""
+        for cursor in cursors:
+            sym = cursor.symbol.strip().upper()
+            current = self._fill_cursors.get(sym)
+            new_from_id = cursor.from_id
+            new_start_time_ms = cursor.start_time_ms
+            if current is not None:
+                if current.from_id is not None:
+                    new_from_id = (
+                        max(current.from_id, new_from_id)
+                        if new_from_id is not None
+                        else current.from_id
+                    )
+                if current.start_time_ms is not None:
+                    new_start_time_ms = (
+                        max(current.start_time_ms, new_start_time_ms)
+                        if new_start_time_ms is not None
+                        else current.start_time_ms
+                    )
+            self._fill_cursors[sym] = _FillCursor(
+                from_id=new_from_id,
+                start_time_ms=new_start_time_ms,
+            )
+            current_checked_at = self._fill_cursor_checked_at.get(sym)
+            if (
+                current_checked_at is None
+                or cursor.last_checked_at >= current_checked_at
+            ):
+                self._fill_cursor_checked_at[sym] = cursor.last_checked_at
 
     async def persist_user_data_event(
         self,

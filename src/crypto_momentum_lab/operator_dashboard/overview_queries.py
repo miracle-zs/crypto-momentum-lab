@@ -24,7 +24,10 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     LiveAccountSummaryResponse,
     ResearchCollectorResponse,
     ServiceStatusResponse,
+    StreamReadinessDetailResponse,
     SystemOverviewResponse,
+    SystemReadinessResponse,
+    TradeabilityDetailResponse,
     UniverseStatusResponse,
 )
 from crypto_momentum_lab.operator_dashboard.status import (
@@ -199,6 +202,70 @@ class OverviewQueries:
         async with self._session_factory() as session:
             await session.execute(text("SELECT 1"))
         return {"app_status": "UP", "database_status": "UP"}
+
+    async def readiness(self) -> SystemReadinessResponse:
+        now = self._clock()
+        liveness = await self.health()
+        accounts_resp = await self.live_accounts()
+        overview_resp = await self.overview()
+
+        has_halt = overview_resp.active_halt_count > 0
+        all_accounts_ready = bool(
+            accounts_resp.accounts
+            and all(
+                a.status == OperationalStatus.READY
+                for a in accounts_resp.accounts
+            )
+        )
+
+        mode = (
+            "HALTED"
+            if has_halt
+            else "FULLY_TRADEABLE"
+            if all_accounts_ready
+            else "EXIT_ONLY"
+            if accounts_resp.accounts
+            else "DEGRADED"
+        )
+        status = (
+            OperationalStatus.UNHEALTHY
+            if has_halt or liveness.get("database_status") != "UP"
+            else OperationalStatus.READY
+            if all_accounts_ready
+            else OperationalStatus.DEGRADED
+        )
+
+        streams_dict: dict[str, str] = {}
+        for s in overview_resp.services:
+            streams_dict[s.name] = (
+                "READY" if s.status == OperationalStatus.FRESH else "RECOVERING"
+            )
+
+        return SystemReadinessResponse(
+            status=status,
+            observed_at=now,
+            liveness=liveness,
+            tradeability=TradeabilityDetailResponse(
+                mode=mode,
+                entry_gate_open=all_accounts_ready and not has_halt,
+                entry_gate_reason=(
+                    "halt_active"
+                    if has_halt
+                    else "live_entry_prerequisites_ready"
+                    if all_accounts_ready
+                    else "account_or_strategy_not_ready"
+                ),
+                exit_gate_open=not has_halt,
+                exit_gate_reason="normal" if not has_halt else "halt_active",
+                unmanaged_risk_clear=not has_halt,
+                halt_active=has_halt,
+            ),
+            stream_readiness=StreamReadinessDetailResponse(
+                overall="READY" if all_accounts_ready else "RECOVERING",
+                streams=streams_dict,
+            ),
+            accounts=accounts_resp.accounts,
+        )
 
     async def research_collector(self) -> ResearchCollectorResponse:
         return await asyncio.to_thread(

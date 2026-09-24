@@ -340,3 +340,28 @@ class SystemPerformanceResponse(DashboardSchema):
     market_data: MarketDataPerformanceResponse
     host_resources: HostResourcesResponse
 
+
+class TradeabilityDetailResponse(DashboardSchema):
+    mode: str
+    entry_gate_open: bool
+    entry_gate_reason: str
+    exit_gate_open: bool
+    exit_gate_reason: str
+    unmanaged_risk_clear: bool
+    halt_active: bool
+
+
+class StreamReadinessDetailResponse(DashboardSchema):
+    overall: str
+    streams: dict[str, str] = Field(default_factory=dict)
+
+
+class SystemReadinessResponse(DashboardSchema):
+    status: OperationalStatus
+    observed_at: datetime
+    liveness: dict[str, str]
+    tradeability: TradeabilityDetailResponse
+    stream_readiness: StreamReadinessDetailResponse
+    accounts: list[LiveAccountSummaryResponse] = Field(default_factory=list)
+
+

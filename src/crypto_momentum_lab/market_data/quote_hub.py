@@ -23,6 +23,10 @@ from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from crypto_momentum_lab.domain.market.models import RealtimeMarketQuote
+from crypto_momentum_lab.health.stream_availability import (
+    StreamAvailabilityClock,
+    StreamAvailabilityConfig,
+)
 from crypto_momentum_lab.market_data.protocol_parsing import (
     require_datetime,
     require_string,
@@ -55,7 +59,25 @@ class MarketQuoteHubConfig:
     subscriber_queue_size: int = 256
     handshake_timeout_seconds: float = 10.0
     unavailable_timeout_seconds: float = 120.0
+    startup_timeout_seconds: float | None = None
+    recovery_timeout_seconds: float | None = None
     reconnect_delays: tuple[float, ...] = (0.0, 1.0, 5.0, 15.0)
+
+    @property
+    def effective_startup_timeout_seconds(self) -> float:
+        return (
+            self.startup_timeout_seconds
+            if self.startup_timeout_seconds is not None
+            else self.unavailable_timeout_seconds
+        )
+
+    @property
+    def effective_recovery_timeout_seconds(self) -> float:
+        return (
+            self.recovery_timeout_seconds
+            if self.recovery_timeout_seconds is not None
+            else self.unavailable_timeout_seconds
+        )
 
     def __post_init__(self) -> None:
         if not self.host.strip():
@@ -68,6 +90,16 @@ class MarketQuoteHubConfig:
             raise ValueError("handshake_timeout_seconds must be positive")
         if self.unavailable_timeout_seconds <= 0:
             raise ValueError("unavailable_timeout_seconds must be positive")
+        if (
+            self.startup_timeout_seconds is not None
+            and self.startup_timeout_seconds <= 0
+        ):
+            raise ValueError("startup_timeout_seconds must be positive")
+        if (
+            self.recovery_timeout_seconds is not None
+            and self.recovery_timeout_seconds <= 0
+        ):
+            raise ValueError("recovery_timeout_seconds must be positive")
         if not self.reconnect_delays or any(
             delay < 0 for delay in self.reconnect_delays
         ):
@@ -347,6 +379,7 @@ class WebSocketMarketQuoteSource:
         consumer_id: str,
         config: MarketQuoteHubConfig | None = None,
         on_connection_change: Callable[[bool, str | None], None] | None = None,
+        availability_clock: StreamAvailabilityClock | None = None,
     ) -> None:
         if not url.strip():
             raise ValueError("url must not be empty")
@@ -359,8 +392,21 @@ class WebSocketMarketQuoteSource:
         self._consumer_id = consumer_id
         self._config = config or MarketQuoteHubConfig()
         self._on_connection_change = on_connection_change
+        self._availability_clock = availability_clock or StreamAvailabilityClock(
+            StreamAvailabilityConfig(
+                startup_timeout_seconds=self._config.effective_startup_timeout_seconds,
+                disrupted_timeout_seconds=self._config.unavailable_timeout_seconds,
+                recovery_timeout_seconds=self._config.effective_recovery_timeout_seconds,
+            ),
+            stream_name="market quote hub",
+            clock=lambda: time.monotonic(),
+        )
         self._connection_available: bool | None = None
         self._stopping = False
+
+    @property
+    def availability_clock(self) -> StreamAvailabilityClock:
+        return self._availability_clock
 
     def stop(self) -> None:
         self._stopping = True
@@ -370,10 +416,10 @@ class WebSocketMarketQuoteSource:
 
     async def _iterate(self) -> AsyncIterator[RealtimeMarketQuote]:
         self._notify_connection_change(False, "connecting")
-        unavailable_since = time.monotonic()
         reconnect_attempt = 0
         while not self._stopping:
             try:
+                self._availability_clock.mark_connecting()
                 async with connect(
                     self._url,
                     open_timeout=self._config.handshake_timeout_seconds,
@@ -404,7 +450,7 @@ class WebSocketMarketQuoteSource:
                             "market quote hub environment mismatch"
                         )
                     self._notify_connection_change(True, None)
-                    unavailable_since = None
+                    self._availability_clock.mark_connected(needs_recovery=False)
                     reconnect_attempt = 0
                     latest_quotes: dict[str, RealtimeMarketQuote] = {}
                     quote_available = asyncio.Event()
@@ -423,12 +469,19 @@ class WebSocketMarketQuoteSource:
                         while not self._stopping:
                             while latest_quotes:
                                 symbol = next(iter(latest_quotes))
-                                unavailable_since = None
+                                self._availability_clock.mark_ready()
                                 yield latest_quotes.pop(symbol)
                             if reader_error[0] is not None:
                                 raise reader_error[0]
                             quote_available.clear()
-                            await quote_available.wait()
+                            remaining = self._availability_clock.remaining_budget()
+                            if remaining < float("inf"):
+                                await asyncio.wait_for(
+                                    quote_available.wait(),
+                                    timeout=max(0.001, remaining),
+                                )
+                            else:
+                                await quote_available.wait()
                     finally:
                         if not reader_task.done():
                             reader_task.cancel()
@@ -448,17 +501,14 @@ class WebSocketMarketQuoteSource:
                     False,
                     f"{type(error).__name__}: {error}",
                 )
-                now = time.monotonic()
-                if unavailable_since is None:
-                    unavailable_since = now
-                if (
-                    now - unavailable_since
-                    >= self._config.unavailable_timeout_seconds
-                ):
-                    raise MarketQuoteHubError(
-                        "market quote hub unavailable for "
+                self._availability_clock.mark_disrupted(str(error))
+                self._availability_clock.check_timeout(
+                    error_factory=MarketQuoteHubError,
+                    custom_message=(
+                        f"market quote hub unavailable for "
                         f"{self._config.unavailable_timeout_seconds:.1f} seconds"
-                    ) from error
+                    ),
+                )
                 delay = self._config.reconnect_delays[
                     min(reconnect_attempt, len(self._config.reconnect_delays) - 1)
                 ]
@@ -535,6 +585,7 @@ class WebSocketMarketQuoteVolumeSource:
         environment: str,
         consumer_id: str,
         config: MarketQuoteHubConfig | None = None,
+        availability_clock: StreamAvailabilityClock | None = None,
     ) -> None:
         if not url.strip():
             raise ValueError("url must not be empty")
@@ -546,7 +597,20 @@ class WebSocketMarketQuoteVolumeSource:
         self._environment = environment
         self._consumer_id = consumer_id
         self._config = config or MarketQuoteHubConfig()
+        self._availability_clock = availability_clock or StreamAvailabilityClock(
+            StreamAvailabilityConfig(
+                startup_timeout_seconds=self._config.effective_startup_timeout_seconds,
+                disrupted_timeout_seconds=self._config.unavailable_timeout_seconds,
+                recovery_timeout_seconds=self._config.effective_recovery_timeout_seconds,
+            ),
+            stream_name="market quote volume hub",
+            clock=lambda: time.monotonic(),
+        )
         self._stopping = False
+
+    @property
+    def availability_clock(self) -> StreamAvailabilityClock:
+        return self._availability_clock
 
     def stop(self) -> None:
         self._stopping = True
@@ -555,10 +619,10 @@ class WebSocketMarketQuoteVolumeSource:
         return self._iterate()
 
     async def _iterate(self) -> AsyncIterator[QuoteVolume24hSnapshot]:
-        unavailable_since = time.monotonic()
         reconnect_attempt = 0
         while not self._stopping:
             try:
+                self._availability_clock.mark_connecting()
                 async with connect(
                     self._url,
                     open_timeout=self._config.handshake_timeout_seconds,
@@ -588,7 +652,7 @@ class WebSocketMarketQuoteVolumeSource:
                         raise MarketQuoteHubProtocolError(
                             "market quote volume environment mismatch"
                         )
-                    unavailable_since = None
+                    self._availability_clock.mark_connected(needs_recovery=False)
                     reconnect_attempt = 0
                     latest: dict[str, QuoteVolume24hSnapshot] = {}
                     available = asyncio.Event()
@@ -606,12 +670,19 @@ class WebSocketMarketQuoteVolumeSource:
                         while not self._stopping:
                             while latest:
                                 symbol = next(iter(latest))
-                                unavailable_since = None
+                                self._availability_clock.mark_ready()
                                 yield latest.pop(symbol)
                             if reader_error[0] is not None:
                                 raise reader_error[0]
                             available.clear()
-                            await available.wait()
+                            remaining = self._availability_clock.remaining_budget()
+                            if remaining < float("inf"):
+                                await asyncio.wait_for(
+                                    available.wait(),
+                                    timeout=max(0.001, remaining),
+                                )
+                            else:
+                                await available.wait()
                     finally:
                         if not reader_task.done():
                             reader_task.cancel()
@@ -627,17 +698,14 @@ class WebSocketMarketQuoteVolumeSource:
                 TimeoutError,
                 MarketQuoteHubError,
             ) as error:
-                now = time.monotonic()
-                if unavailable_since is None:
-                    unavailable_since = now
-                if (
-                    now - unavailable_since
-                    >= self._config.unavailable_timeout_seconds
-                ):
-                    raise MarketQuoteHubError(
-                        "market quote volume hub unavailable for "
+                self._availability_clock.mark_disrupted(str(error))
+                self._availability_clock.check_timeout(
+                    error_factory=MarketQuoteHubError,
+                    custom_message=(
+                        f"market quote volume hub unavailable for "
                         f"{self._config.unavailable_timeout_seconds:.1f} seconds"
-                    ) from error
+                    ),
+                )
                 delay = self._config.reconnect_delays[
                     min(reconnect_attempt, len(self._config.reconnect_delays) - 1)
                 ]

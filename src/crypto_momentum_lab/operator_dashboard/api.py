@@ -36,6 +36,7 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
     StrategyRunResponse,
     SystemOverviewResponse,
     SystemPerformanceResponse,
+    SystemReadinessResponse,
     UniverseStatusResponse,
 )
 from crypto_momentum_lab.persistence.postgres.session import (
@@ -161,6 +162,8 @@ class _ResponseCache:
 
 class DashboardQueryProtocol(Protocol):
     async def health(self) -> dict[str, str]: ...
+
+    async def readiness(self) -> SystemReadinessResponse: ...
 
     async def decision_slo(
         self,
@@ -347,6 +350,19 @@ def create_dashboard_app(
                 status_code=503,
                 detail={"app_status": "UP", "database_status": "DOWN"},
             ) from exc
+
+    @dashboard.get(
+        "/api/readiness",
+        response_model=SystemReadinessResponse,
+        dependencies=[Depends(require_dashboard_auth)],
+    )
+    async def readiness() -> SystemReadinessResponse:
+        return await response_cache.get(
+            "readiness",
+            query_service().readiness,
+            ttl_seconds=5.0,
+            stale_while_revalidate_seconds=default_stale_grace_seconds,
+        )
 
     @dashboard.get(
         "/api/decision-slo",

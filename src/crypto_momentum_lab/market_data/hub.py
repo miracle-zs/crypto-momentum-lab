@@ -25,6 +25,10 @@ from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.health.stream_availability import (
+    StreamAvailabilityClock,
+    StreamAvailabilityConfig,
+)
 from crypto_momentum_lab.market_data.protocol_parsing import (
     require_datetime,
     require_string,
@@ -128,7 +132,25 @@ class MarketStateHubConfig:
     replay_batch_count: int = 64
     handshake_timeout_seconds: float = 10.0
     unavailable_timeout_seconds: float = 120.0
+    startup_timeout_seconds: float | None = None
+    recovery_timeout_seconds: float | None = None
     reconnect_delays: tuple[float, ...] = (0.0, 1.0, 5.0, 15.0)
+
+    @property
+    def effective_startup_timeout_seconds(self) -> float:
+        return (
+            self.startup_timeout_seconds
+            if self.startup_timeout_seconds is not None
+            else self.unavailable_timeout_seconds
+        )
+
+    @property
+    def effective_recovery_timeout_seconds(self) -> float:
+        return (
+            self.recovery_timeout_seconds
+            if self.recovery_timeout_seconds is not None
+            else self.unavailable_timeout_seconds
+        )
 
     def __post_init__(self) -> None:
         if not self.host.strip():
@@ -143,6 +165,16 @@ class MarketStateHubConfig:
             raise ValueError("handshake_timeout_seconds must be positive")
         if self.unavailable_timeout_seconds <= 0:
             raise ValueError("unavailable_timeout_seconds must be positive")
+        if (
+            self.startup_timeout_seconds is not None
+            and self.startup_timeout_seconds <= 0
+        ):
+            raise ValueError("startup_timeout_seconds must be positive")
+        if (
+            self.recovery_timeout_seconds is not None
+            and self.recovery_timeout_seconds <= 0
+        ):
+            raise ValueError("recovery_timeout_seconds must be positive")
         if not self.reconnect_delays or any(
             delay < 0 for delay in self.reconnect_delays
         ):
@@ -501,6 +533,7 @@ class WebSocketMarketStateSource:
         fail_on_replay_unavailable: bool = False,
         preserve_sequence_on_overflow: bool = False,
         client_receive_queue_size: int | None = None,
+        availability_clock: StreamAvailabilityClock | None = None,
     ) -> None:
         if not url.strip():
             raise ValueError("url must not be empty")
@@ -524,12 +557,25 @@ class WebSocketMarketStateSource:
             if client_receive_queue_size is not None
             else _CLIENT_RECEIVE_QUEUE_SIZE
         )
+        self._availability_clock = availability_clock or StreamAvailabilityClock(
+            StreamAvailabilityConfig(
+                startup_timeout_seconds=self._config.effective_startup_timeout_seconds,
+                disrupted_timeout_seconds=self._config.unavailable_timeout_seconds,
+                recovery_timeout_seconds=self._config.effective_recovery_timeout_seconds,
+            ),
+            stream_name="market-state hub",
+            clock=lambda: time.monotonic(),
+        )
         self._connection_available: bool | None = None
         self._connection_reason: str | None = None
         self._stream_id: str | None = None
         self._last_sequence: int | None = None
         self._rewarm_required = False
         self._stopping = False
+
+    @property
+    def availability_clock(self) -> StreamAvailabilityClock:
+        return self._availability_clock
 
     def stop(self) -> None:
         self._stopping = True
@@ -683,15 +729,17 @@ class WebSocketMarketStateSource:
                         and self._last_sequence >= ready_latest_sequence
                     ):
                         self._notify_connection_change(True, None)
-                        unavailable_since = None
+                        self._availability_clock.mark_connected(needs_recovery=False)
                     else:
-                        self._notify_connection_change(
-                            False,
-                            (
-                                "market_state_rewarming"
-                                if self._rewarm_required
-                                else "market_state_replaying"
-                            ),
+                        reason = (
+                            "market_state_rewarming"
+                            if self._rewarm_required
+                            else "market_state_replaying"
+                        )
+                        self._notify_connection_change(False, reason)
+                        self._availability_clock.mark_connected(
+                            needs_recovery=True,
+                            reason=reason,
                         )
                     reconnect_attempt = 0
                     receive_queue: asyncio.Queue[_MarketStateQueueItem] = asyncio.Queue(
@@ -706,7 +754,14 @@ class WebSocketMarketStateSource:
                     )
                     try:
                         while not self._stopping:
-                            item = await receive_queue.get()
+                            remaining = self._availability_clock.remaining_budget()
+                            if remaining < float("inf"):
+                                item = await asyncio.wait_for(
+                                    receive_queue.get(),
+                                    timeout=max(0.001, remaining),
+                                )
+                            else:
+                                item = await receive_queue.get()
                             if isinstance(item, _MarketStateQueueOverflow):
                                 if not self._preserve_sequence_on_overflow:
                                     self._last_sequence = item.latest_sequence
@@ -714,6 +769,9 @@ class WebSocketMarketStateSource:
                                 self._notify_connection_change(
                                     False,
                                     "market_state_consumer_lagged",
+                                )
+                                self._availability_clock.mark_recovering(
+                                    "market_state_consumer_lagged"
                                 )
                                 raise MarketStateHubSequenceGap(
                                     "market-state consumer queue overflowed; "
@@ -757,7 +815,7 @@ class WebSocketMarketStateSource:
                             yield batch
                             self._last_sequence = batch.sequence
                             self._notify_cursor_change()
-                            unavailable_since = None
+                            self._availability_clock.mark_ready()
                             if self._rewarm_required:
                                 self._rewarm_required = False
                                 self._notify_connection_change(True, None)
@@ -794,14 +852,14 @@ class WebSocketMarketStateSource:
                     False,
                     f"{type(error).__name__}: {error}",
                 )
-                now = time.monotonic()
-                if unavailable_since is None:
-                    unavailable_since = now
-                if now - unavailable_since >= self._config.unavailable_timeout_seconds:
-                    raise MarketStateHubError(
-                        "market-state hub unavailable for "
+                self._availability_clock.mark_disrupted(str(error))
+                self._availability_clock.check_timeout(
+                    error_factory=MarketStateHubError,
+                    custom_message=(
+                        f"market-state hub unavailable for "
                         f"{self._config.unavailable_timeout_seconds:.1f} seconds"
-                    ) from error
+                    ),
+                )
                 delay = self._config.reconnect_delays[
                     min(reconnect_attempt, len(self._config.reconnect_delays) - 1)
                 ]
