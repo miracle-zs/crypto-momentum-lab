@@ -11,6 +11,7 @@ from crypto_momentum_lab.research_collector.journal import ArchiveJournal
 from crypto_momentum_lab.research_collector.models import (
     CollectionBatch,
     CollectorPaused,
+    CollectorStateConflict,
     SelectionSnapshot,
     SourceKind,
 )
@@ -271,3 +272,60 @@ def test_out_of_order_commit_advances_only_contiguous_materialized_sequence(
     # 3. Commit batch 2 -> contiguous prefix now covers all up to 3!
     journal.commit_materialization([r2])
     assert journal.materialized_sequence == 3
+
+
+def test_recover_fails_closed_on_corrupted_manifest(tmp_path: Path) -> None:
+    journal_dir = tmp_path / "journal"
+    journal = ArchiveJournal(
+        journal_dir,
+        environment="research",
+        max_bytes=1024 * 1024,
+    )
+    # 1. Corrupted JSON (syntax error)
+    manifest_file = journal_dir / "manifest.json"
+    manifest_file.write_text('{"environment": "research", "highest_committed_sequence": ', encoding="utf-8")
+    with pytest.raises(CollectorStateConflict, match="cannot read collector manifest"):
+        journal.recover()
+
+    # 2. Corrupted schema (not a dict)
+    manifest_file.write_text("[1, 2, 3]", encoding="utf-8")
+    with pytest.raises(CollectorStateConflict, match="corrupted collector manifest.*expected dict"):
+        journal.recover()
+
+    # 3. Corrupted values (non-integer sequence)
+    manifest_file.write_text('{"environment": "research", "highest_committed_sequence": "invalid"}', encoding="utf-8")
+    with pytest.raises(CollectorStateConflict, match="corrupted sequence values in manifest"):
+        journal.recover()
+
+    # 4. Environment mismatch
+    manifest_file.write_text('{"environment": "production", "highest_committed_sequence": 10}', encoding="utf-8")
+    with pytest.raises(CollectorStateConflict, match="collector manifest environment mismatch"):
+        journal.recover()
+
+
+def test_recover_and_read_resolutions_fails_closed_on_corrupted_resolutions(tmp_path: Path) -> None:
+    journal_dir = tmp_path / "journal"
+    journal = ArchiveJournal(
+        journal_dir,
+        environment="research",
+        max_bytes=1024 * 1024,
+    )
+    res_file = journal_dir / "resolutions.jsonl"
+
+    # 1. Corrupted JSON syntax on a line
+    res_file.write_text('{"record_id": "rec-1", "sequence": 1}\n{"corrupted": line\n', encoding="utf-8")
+    with pytest.raises(CollectorStateConflict, match="corrupted materialization resolution.*line 2"):
+        journal.recover()
+    with pytest.raises(CollectorStateConflict, match="corrupted materialization resolution.*line 2"):
+        journal.read_resolutions()
+
+    # 2. Non-dict JSON on a line
+    res_file.write_text('["not", "a", "dict"]\n', encoding="utf-8")
+    with pytest.raises(CollectorStateConflict, match="expected dict"):
+        journal.recover()
+
+    # 3. Non-integer sequence on a line
+    res_file.write_text('{"record_id": "rec-1", "sequence": "not-an-int"}\n', encoding="utf-8")
+    with pytest.raises(CollectorStateConflict, match="corrupted sequence in resolution record"):
+        journal.recover()
+

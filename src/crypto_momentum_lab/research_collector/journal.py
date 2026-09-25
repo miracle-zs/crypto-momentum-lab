@@ -373,24 +373,15 @@ class ArchiveJournal:
             res_path = self._root / "resolutions.jsonl"
             existing_rec_ids: set[str] = set()
             existing_keys: set[tuple[str, str, int]] = set()
-            if res_path.exists():
-                with res_path.open("r", encoding="utf-8") as f:
-                    for line in f:
-                        line_str = line.strip()
-                        if line_str:
-                            try:
-                                item = json.loads(line_str)
-                                if isinstance(item, dict):
-                                    rid = item.get("record_id")
-                                    if rid:
-                                        existing_rec_ids.add(str(rid))
-                                    sk = item.get("source_kind")
-                                    sid = item.get("stream_id")
-                                    seq = item.get("sequence")
-                                    if sk is not None and sid is not None and seq is not None:
-                                        existing_keys.add((str(sk), str(sid), int(seq)))
-                            except Exception:
-                                pass
+            for item in self.read_resolutions():
+                rid = item.get("record_id")
+                if rid:
+                    existing_rec_ids.add(str(rid))
+                sk = item.get("source_kind")
+                sid = item.get("stream_id")
+                seq = item.get("sequence")
+                if sk is not None and sid is not None and seq is not None:
+                    existing_keys.add((str(sk), str(sid), int(seq)))
 
             to_append: list[dict[str, Any]] = []
             for res in resolutions:
@@ -465,11 +456,35 @@ class ArchiveJournal:
         if not res_path.exists():
             return []
         records = []
-        with res_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    records.append(json.loads(line))
+        try:
+            with res_path.open("r", encoding="utf-8") as f:
+                for line_no, raw_line in enumerate(f, start=1):
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError as error:
+                        raise CollectorStateConflict(
+                            f"corrupted materialization resolution in {res_path} at line {line_no}: {error}"
+                        ) from error
+                    if not isinstance(record, dict):
+                        raise CollectorStateConflict(
+                            f"corrupted materialization resolution in {res_path} at line {line_no}: expected dict, got {type(record).__name__}"
+                        )
+                    seq = record.get("sequence")
+                    if seq is not None:
+                        try:
+                            int(seq)
+                        except (ValueError, TypeError) as error:
+                            raise CollectorStateConflict(
+                                f"corrupted sequence in resolution record {res_path} at line {line_no}: {error}"
+                            ) from error
+                    records.append(record)
+        except OSError as error:
+            raise CollectorStateConflict(
+                f"cannot read collector materialization resolutions {res_path}: {error}"
+            ) from error
         return records
 
     def recover(
@@ -485,26 +500,53 @@ class ArchiveJournal:
         # Read manifest if available to restore highest_committed_sequence and materialized_sequence
         if self._manifest_path.exists():
             try:
-                mdata = json.loads(self._manifest_path.read_text(encoding="utf-8"))
-                if isinstance(mdata, dict):
-                    hcs = mdata.get("highest_committed_sequence")
-                    if hcs is not None:
-                        if self._highest_committed_sequence is None:
-                            self._highest_committed_sequence = int(hcs)
-                        else:
-                            self._highest_committed_sequence = max(
-                                self._highest_committed_sequence, int(hcs)
-                            )
-                    ms = mdata.get("materialized_sequence")
-                    if ms is not None:
-                        if self._materialized_sequence is None:
-                            self._materialized_sequence = int(ms)
-                        else:
-                            self._materialized_sequence = max(
-                                self._materialized_sequence, int(ms)
-                            )
-            except Exception:
-                pass
+                manifest_content = self._manifest_path.read_text(encoding="utf-8")
+                mdata = json.loads(manifest_content)
+            except (OSError, json.JSONDecodeError) as error:
+                raise CollectorStateConflict(
+                    f"cannot read collector manifest {self._manifest_path}: {error}"
+                ) from error
+            if not isinstance(mdata, dict):
+                raise CollectorStateConflict(
+                    f"corrupted collector manifest in {self._manifest_path}: expected dict, got {type(mdata).__name__}"
+                )
+            env = mdata.get("environment")
+            if env is not None and str(env).strip() != self._environment:
+                raise CollectorStateConflict(
+                    f"collector manifest environment mismatch in {self._manifest_path}: expected {self._environment}, got {env}"
+                )
+            try:
+                hcs = mdata.get("highest_committed_sequence")
+                if hcs is not None:
+                    parsed_hcs = int(hcs)
+                    if self._highest_committed_sequence is None:
+                        self._highest_committed_sequence = parsed_hcs
+                    else:
+                        self._highest_committed_sequence = max(
+                            self._highest_committed_sequence, parsed_hcs
+                        )
+                ms = mdata.get("materialized_sequence")
+                if ms is not None:
+                    parsed_ms = int(ms)
+                    if self._materialized_sequence is None:
+                        self._materialized_sequence = parsed_ms
+                    else:
+                        self._materialized_sequence = max(
+                            self._materialized_sequence, parsed_ms
+                        )
+                acs = mdata.get("accepted_sequence")
+                if acs is not None:
+                    parsed_acs = int(acs)
+                    if self._accepted_sequence is None:
+                        self._accepted_sequence = parsed_acs
+                    else:
+                        self._accepted_sequence = max(
+                            self._accepted_sequence, parsed_acs
+                        )
+            except (ValueError, TypeError) as error:
+                raise CollectorStateConflict(
+                    f"corrupted sequence values in manifest {self._manifest_path}: {error}"
+                ) from error
 
         existing_resolutions = self.read_resolutions()
         existing_res_keys: set[tuple[str, str, int]] = set()

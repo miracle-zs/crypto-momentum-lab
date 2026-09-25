@@ -774,3 +774,65 @@ F04 的 UNKNOWN/QUERY_ERROR API 分离、F07 零价成交拒绝以及 F10 容量
 | `node --test tests/frontend/*.test.mjs` | 36 passed | 前端测试全量通过。 |
 | `pytest local_optimization/tests -q --tb=short` | 256 passed | 本地优化测试全量通过，保持本地未跟踪状态。 |
 
+## 25. 对 HEAD `5f28ceb` 的独立复核
+
+复核时 `HEAD` 与 `origin/main` 均为 `5f28cebb98fc4b731d554e07cf4ee3fd68f3e462`，工作区代码干净。本轮修复了第 23 节提出的 `X-API-Key`、`api-key` 日志脱敏缺口；新回归测试覆盖这两种形式及 `X-MBX-APIKEY`，并增加 SQLSTATE 提取。主项目、前端和本地对账测试通过。
+
+**本轮具体缺口已修复，但不能据此说最初的全项目工程原则审查全部闭环。** 至少仍有以下旧项未关闭：
+
+- **F01 [P2，journal 恢复诊断]：**当前 `journal.py` 在解析 resolution 行（约第 392 行）及恢复 manifest 状态（约第 506 行）仍存在宽泛 `except Exception: pass`。损坏或不兼容的持久状态可被当作不存在而静默继续，需报错或显式降级并保留诊断原因。
+- **F08 [P2，成交方向身份不确定性]：**本机 `local_optimization/reconciliation.py` 在 `position_side` 缺失时仍依据 BUY/SELL 和后续成交推断开平仓方向；输出未标记该方向是推断值或不确定。该目录按用户要求保持本地即可，不要求 Git 跟踪；此处记录的是实现语义风险。
+
+服务器容器仍使用镜像 `crypto-momentum-lab-app:86a89a911f3ae9b3385d1d7deced1c7b8beb261e`，尚未运行本地 `5f28ceb`。本轮只读取容器名称与镜像标签，没有读取账户资料或密钥，也没有执行写操作或下单。
+
+### 25.1 验证结果
+
+| 验证 | 结果 | 范围 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1632 passed、4 skipped、1 deselected、1 warning | 当前 `5f28ceb`；4 项需要 loopback socket 权限，live 测试排除。 |
+| `node --test tests/frontend/*.test.mjs` | 36 passed | 当前 dashboard 静态资源。 |
+| `pytest local_optimization/tests -q --tb=short` | 256 passed | 本地目录；按用户要求不以 Git 跟踪状态作为验收条件。 |
+
+## 26. 第十一轮整改闭环与验证
+
+针对第 25 节审查指出的 F01 journal 恢复解析 resolution/manifest 时的宽泛 `except Exception: pass` 静默忽略损坏状态风险，以及 F08 本地对账在缺少 `position_side` 时启发式推断方向未标注不确定性的问题，完成全面 fail-closed 与显式不确定性闭环：
+
+- **F01（Journal 恢复与持久决议损坏严格 Fail-Closed）彻底闭环：**
+  1. **彻底移除所有宽泛异常吞噬**：
+     - 彻底删除 `src/crypto_momentum_lab/research_collector/journal.py` 中历史遗留的两处 `except Exception: pass`（原第 392 行与第 506 行）；
+  2. **Manifest 损坏严格 Fail-Closed 校验**：
+     - `ArchiveJournal.recover()` 在读取 `manifest.json` 时，严密校验文件 JSON 语法、dict 结构、`environment` 环境变量一致性以及 `highest_committed_sequence` / `materialized_sequence` / `accepted_sequence` 整数类型；
+     - 若遭遇文件截断损坏、无效 JSON、非 dict、环境不匹配或非法数值，立即抛出明确描述的 `CollectorStateConflict`（如 `collector manifest environment mismatch in ...` 或 `cannot read collector manifest ...`），杜绝在元数据损坏时被当作不存在而引发序列回退或数据覆盖；
+  3. **Resolutions 逐行校验与统一去重**：
+     - `ArchiveJournal.read_resolutions()` 逐行校验 `resolutions.jsonl`，遇到非空损坏 JSON、非 dict 结构或非法序列号时抛出包含准确行号的 `CollectorStateConflict`；
+     - `commit_materialization()` 复用 `read_resolutions()` 统一去重，杜绝任何吞异常写入的盲区；
+  4. **专项自动化测试**：
+     - 在 `tests/unit/research_collector/test_journal.py` 中新增 `test_recover_fails_closed_on_corrupted_manifest` 与 `test_recover_and_read_resolutions_fails_closed_on_corrupted_resolutions`，覆盖截断语法错误、非 dict 结构、非法字段值与环境不匹配等全量损坏场景。
+
+- **F08（本地对账缺失 `position_side` 启发式推断显式标注不确定性）彻底闭环：**
+  1. **逐笔成交身份与仓位追踪**：
+     - 在 `local_optimization/reconciliation.py` 的 `pair_round_trip_trades` 中，对所有参与成交追踪 `has_explicit_position_side` 标志（当 `position_side` 明确为 `LONG` 或 `SHORT` 时为 True）；
+  2. **启发式推断显式标注不确定性**：
+     - 当 live 成交缺失 `position_side` 时，虽然依据 FIFO 与 BUY/SELL 匹配出 `trade_side` 并推断出方向（BUY 入场为 `LONG`，SELL 入场为 `SHORT`），但在生成的 `trade_entry` 中显式标注不确定性标签：
+       - `position_side`: 标明推断出的仓位方向（如 `LONG` 或 `SHORT`）；
+       - `has_explicit_position_side`: `False`；
+       - `direction_inferred`: `True`；
+       - `is_uncertain`: `True`；
+       - `uncertainty_reason`: `"missing_position_side_heuristic_direction"`；
+     - 对 carry-in 未匹配入场的孤儿平仓成交，同样标注 `is_uncertain: True` 与 `uncertainty_reason: "carry_in_unmatched_exit"`；
+     - 仅当入场批次与出场成交均显式具备标准 `position_side` 且非 carry-in 时，`is_uncertain` 方为 `False`；
+  3. **对账记录与摘要透传**：
+     - `match_per_symbol_trades` 将 `position_side`、`has_explicit_position_side`、`direction_inferred`、`is_uncertain`、`uncertainty_reason` 透传至每个比对记录（`MATCHED` 与 `LIVE_ONLY`）；
+     - Summary 统计字典新增 `"uncertain_trades_count"` 与 `"direction_inferred_count"` 指标，并在 `dashboard.py` 中支持多账户聚合；
+  4. **专项自动化测试**：
+     - 新增单测 `test_f08_missing_position_side_labels_uncertainty_and_inferred_direction`，断言缺失 `position_side` 时方向推断正确且带有显式不确定性标签；
+     - 本地 257 项单测全量通过；`local_optimization/` 保持本地未跟踪状态。
+
+### 26.1 验证结果
+
+| 验证项 | 结果 | 详细说明 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1634 passed, 4 skipped, 1 deselected, 1 warning | 新增 manifest/resolution 损坏 fail-closed 专项单测，全量通过。 |
+| `node --test tests/frontend/*.test.mjs` | 36 passed | 前端测试全量通过。 |
+| `pytest local_optimization/tests -q --tb=short` | 257 passed | 本地优化测试全量通过（含 F08 缺失 position_side 显式不确定性标注单测）。 |
+
