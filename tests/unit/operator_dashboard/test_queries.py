@@ -1821,4 +1821,37 @@ def test_sanitize_error_detail_redacts_credentials_and_tokens() -> None:
     assert "MIIEowIBAAKCAQEA0" not in sanitized_pkey
     assert "[REDACTED_PRIVATE_KEY]" in sanitized_pkey
 
+    # 9. Hyphenated and header formats: X-API-Key, api-key, X-MBX-APIKEY
+    exc_xapikey = RuntimeError("Header X-API-Key: xapi_secret_123 rejected by gateway")
+    sanitized_xapikey = _sanitize_error_detail(exc_xapikey)
+    assert "xapi_secret_123" not in sanitized_xapikey
+    assert "X-API-Key: ***" in sanitized_xapikey
+
+    exc_hyphen_param = ValueError("Parameter api-key=api_secret_123 is invalid")
+    sanitized_hyphen_param = _sanitize_error_detail(exc_hyphen_param)
+    assert "api_secret_123" not in sanitized_hyphen_param
+    assert "api-key=***" in sanitized_hyphen_param
+
+    exc_mbx = ConnectionError("Exchange request X-MBX-APIKEY: mbx_secret_123 failed")
+    sanitized_mbx = _sanitize_error_detail(exc_mbx)
+    assert "mbx_secret_123" not in sanitized_mbx
+    assert "X-MBX-APIKEY: ***" in sanitized_mbx
+
+
+def test_extract_sqlstate_retrieves_pgcode_or_sqlstate() -> None:
+    """F04: Helper extracts standard SQLSTATE from DBAPI/SQLAlchemy exceptions."""
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import _extract_sqlstate
+
+    class MockOrig:
+        pgcode = "08006"
+
+    class MockDBError(Exception):
+        orig = MockOrig()
+
+    err = MockDBError("Connection lost")
+    assert _extract_sqlstate(err) == "08006"
+
+    # When no sqlstate is available, returns None safely
+    assert _extract_sqlstate(RuntimeError("generic")) is None
+
 

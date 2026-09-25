@@ -42,7 +42,7 @@ _PRIVATE_KEY_PATTERN = re.compile(
 )
 _SENSITIVE_KEY_PATTERN = re.compile(
     r"""(?xi)
-    (?P<key>['\"]?(?!authorization\b)[a-zA-Z0-9_\-]*(?:secret|token|password|passwd|api_?key|auth|signature|credential|private_?key)[a-zA-Z0-9_\-]*['\"]?)
+    (?P<key>['\"]?(?!authorization\b)[a-zA-Z0-9_\-]*(?:secret|token|password|passwd|api[_\-]?key|auth|signature|credential|private[_\-]?key)[a-zA-Z0-9_\-]*['\"]?)
     (?P<sep>\s*[:=]\s*)
     (?P<quote>['\"]?)(?!\*{3})(?!\s*(?:bearer|basic)\b)(?P<val>[^'\"\s,;&}\])]+)(?P=quote)
     """
@@ -55,6 +55,17 @@ def _auth_repl(match: re.Match[str]) -> str:
     if scheme:
         return f"{prefix}{scheme} ***"
     return f"{prefix}***"
+
+
+def _extract_sqlstate(exc: Exception) -> str | None:
+    """Extract safe SQLSTATE / pgcode if available from DBAPI / SQLAlchemy exception."""
+    for target in (exc, getattr(exc, "orig", None)):
+        if target is None:
+            continue
+        code = getattr(target, "pgcode", None) or getattr(target, "sqlstate", None)
+        if code and isinstance(code, str):
+            return code
+    return None
 
 
 def _sanitize_error_detail(exc: Exception) -> str:
@@ -194,6 +205,8 @@ class RiskExecutionQueries:
                         "Risk execution universe coverage query failed",
                         error_code=coverage_error_code,
                         trace_id=coverage_trace_id,
+                        exc_type=type(exc).__name__,
+                        sqlstate=_extract_sqlstate(exc),
                         error_detail=_sanitize_error_detail(exc),
                     )
 
@@ -225,6 +238,8 @@ class RiskExecutionQueries:
                         "Risk execution market state query failed",
                         error_code=coverage_error_code,
                         trace_id=coverage_trace_id,
+                        exc_type=type(exc).__name__,
+                        sqlstate=_extract_sqlstate(exc),
                         error_detail=_sanitize_error_detail(exc),
                     )
                 market_rows = []

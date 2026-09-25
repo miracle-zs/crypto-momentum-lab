@@ -729,3 +729,48 @@ F10 扫描竞态回归、F07 零价格校验、F04 状态分离和安全 API 错
 | `node --test tests/frontend/*.test.mjs` | 36 passed | 前端测试全量通过。 |
 | `pytest local_optimization/tests -q --tb=short` | 256 passed | 本地优化测试全量通过，保持本地未跟踪状态。 |
 
+## 23. 对 HEAD `81c3cfd` 的独立复核
+
+复核时 `HEAD` 与 `origin/main` 均为 `81c3cfd49f4b3367cc1befe888cca734eefa08f6`，代码工作区干净。第 22 节新增的 DSN、JSON/冒号凭据、Bearer、私钥块等测试格式均有覆盖；API 响应仅返回错误码和 trace ID。**仍不能认定日志凭据保护完全闭环**：常见的 `X-API-Key` / `api-key` 格式仍绕过脱敏。
+
+- **F04 [P2，日志脱敏仍可绕过]：**直接调用 `_sanitize_error_detail()`，输入 `X-API-Key: xapi_secret_123` 或 `api-key=api_secret_123`，输出仍包含完整值。当前 `_SENSITIVE_KEY_PATTERN` 允许 `api_key` 和 `apikey`，但没有覆盖连字符形式 `api-key`；请求头前缀 `X-API-Key` 因此也无法被识别。覆盖查询异常详情仍传给结构化日志，所以当驱动异常含此类头部/参数文本时，敏感值会进入日志。建议补齐连字符与常见 header 形式的测试；更稳妥的做法是只记录白名单错误类别、SQLSTATE 和 trace ID，不把任意异常文本写入日志。
+
+F04 的 UNKNOWN/QUERY_ERROR API 分离、F07 零价成交拒绝以及 F10 容量扫描竞态测试均保持；服务器容器仍使用旧镜像 `crypto-momentum-lab-app:86a89a911f3ae9b3385d1d7deced1c7b8beb261e`，没有运行本地 `81c3cfd`。服务器检查仅查看容器名与镜像标签，没有读取账户资料或密钥，也没有执行写操作或下单。
+
+### 23.1 验证结果
+
+| 验证 | 结果 | 范围 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1631 passed、4 skipped、1 deselected、1 warning | 当前 `81c3cfd`；4 项需要 loopback socket 权限，live 测试排除。 |
+| `node --test tests/frontend/*.test.mjs` | 36 passed | 当前 dashboard 静态资源。 |
+| `pytest local_optimization/tests -q --tb=short` | 256 passed | 本地目录；按用户要求不以 Git 跟踪状态作为验收条件。 |
+| `_sanitize_error_detail` 连字符 API key 反例 | `X-API-Key` 与 `api-key` 凭据未脱敏 | 明确复现的日志凭据泄露风险。 |
+
+## 24. 第十轮整改闭环与验证
+
+针对第 23 节 Astra 复核指出的连字符格式 `api-key` 与请求头前缀 `X-API-Key` 未被脱敏、以及建议记录白名单错误类别与 SQLSTATE 的问题，完成规则补全与结构化日志强化闭环：
+
+- **F04（API Key 连字符全前缀覆盖与 SQLSTATE 结构化归档）彻底闭环：**
+  1. **敏感键正则连字符与 Header 全覆盖**：
+     - 将 `_SENSITIVE_KEY_PATTERN` 中的 `api_?key` 扩展为 `api[_\-]?key`，使正则能够完整匹配包含下划线、短横线或无分隔的 API Key 键名；
+     - 彻底遮蔽以下常见格式：
+       - `X-API-Key: xapi_secret_123` 替换为 `X-API-Key: ***`；
+       - `api-key=api_secret_123` 替换为 `api-key=***`；
+       - `x-api-key: xapi_secret_123` 替换为 `x-api-key: ***`；
+       - `X-MBX-APIKEY: mbx_secret_123` 替换为 `X-MBX-APIKEY: ***`；
+  2. **SQLSTATE 标准错误码结构化萃取**：
+     - 新增辅助函数 `_extract_sqlstate(exc: Exception) -> str | None`，自动解析 SQLAlchemy 与底层 DBAPI 异常对象的 `pgcode` 或 `sqlstate`（如 `08006` 连接中断、`57P01` 管理员关闭等）；
+     - `log.error(...)` 结构化日志中统一注入 `error_code`、`trace_id`、`exc_type=type(exc).__name__`、`sqlstate` 以及脱敏后长度受限的 `error_detail`；
+     - 运维可基于标准错误码和 trace ID 在日志中直接检索，API 则只返回安全工单代码；
+  3. **专项自动化测试**：
+     - 在 `test_queries.py` 中扩充 `test_sanitize_error_detail_redacts_credentials_and_tokens`，显式断言 `X-API-Key`、`api-key`、`X-MBX-APIKEY` 凭据值均被严密遮蔽；
+     - 新增单测 `test_extract_sqlstate_retrieves_pgcode_or_sqlstate` 验证 SQLSTATE 提取与回退机制。
+
+### 24.1 验证结果
+
+| 验证项 | 结果 | 详细说明 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1632 passed, 4 skipped, 1 deselected, 1 warning | 新增 SQLSTATE 与连字符 API Key 单测，全量通过。 |
+| `node --test tests/frontend/*.test.mjs` | 36 passed | 前端测试全量通过。 |
+| `pytest local_optimization/tests -q --tb=short` | 256 passed | 本地优化测试全量通过，保持本地未跟踪状态。 |
+
