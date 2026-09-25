@@ -6,10 +6,13 @@ cash-flow adjustment, adaptive bucketing, baseline selection, and bounded
 curve construction. Database query orchestration stays outside this module.
 """
 
+from __future__ import annotations
+
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import (
@@ -31,6 +34,29 @@ class LiveCashFlowAdjustment:
     amount: Decimal
     cash_flow_type: str = "deposit"
 
+    def to_fact(
+        self,
+        reason: str = "legacy_env_config",
+        approval_ref: str = "legacy_operator",
+    ) -> Any:
+        import hashlib
+
+        from crypto_momentum_lab.domain.performance.metric_models import CashFlowFact
+
+        h = hashlib.sha256(
+            f"{self.account_label}:{self.effective_at.isoformat()}:{self.amount}".encode()
+        ).hexdigest()
+        return CashFlowFact(
+            correction_id=f"cf_leg_{h[:16]}",
+            account_label=self.account_label,
+            amount=self.amount,
+            cash_flow_type=self.cash_flow_type,
+            effective_at=self.effective_at,
+            reason=reason,
+            approval_ref=approval_ref,
+            evidence_hash=h,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class EquityObservation:
@@ -43,9 +69,7 @@ class EquityObservation:
 class CommonEquityResult:
     """Bounded common-equity result consumed by the dashboard response."""
 
-    curves_by_run: dict[str, list[dict[str, JsonValue]]] = field(
-        default_factory=dict
-    )
+    curves_by_run: dict[str, list[dict[str, JsonValue]]] = field(default_factory=dict)
     baselines_by_run: dict[str, Decimal] = field(default_factory=dict)
     end_at: datetime | None = None
     anchor_accounts: list[str] = field(default_factory=list)
@@ -203,10 +227,14 @@ def live_equity_observations(
         if row.account_label != account_label:
             continue
         observed_at = as_utc(row.observed_at)
-        raw_by_timestamp[observed_at] = raw_by_timestamp.get(
-            observed_at,
-            Decimal("0"),
-        ) + row.wallet_balance + (row.unrealized_pnl or Decimal("0"))
+        raw_by_timestamp[observed_at] = (
+            raw_by_timestamp.get(
+                observed_at,
+                Decimal("0"),
+            )
+            + row.wallet_balance
+            + (row.unrealized_pnl or Decimal("0"))
+        )
 
     return apply_live_cash_flow_adjustments(
         (
@@ -297,9 +325,7 @@ def build_common_equity_curve(
         raise ValueError("interval_seconds must be positive")
     if max_points <= 0:
         raise ValueError("max_points must be positive")
-    resolved_source_end_at = (
-        None if source_end_at is None else as_utc(source_end_at)
-    )
+    resolved_source_end_at = None if source_end_at is None else as_utc(source_end_at)
     bucket_origin = as_utc(common_start_at)
     buckets = bucket_equity_observations(
         (
@@ -307,8 +333,7 @@ def build_common_equity_curve(
             for observation in observations
             if (
                 resolved_source_end_at is None
-                or as_utc(observation.source_observed_at)
-                <= resolved_source_end_at
+                or as_utc(observation.source_observed_at) <= resolved_source_end_at
             )
         ),
         interval_seconds=interval_seconds,

@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+from crypto_momentum_lab.domain.operational.operational_read_model import (
+    HealthDimension,
+    HealthDimensionName,
+    HealthDimensionStatus,
+    OperationalView,
+    read_health,
+)
 from crypto_momentum_lab.domain.operational.retention_authority import (
     DependencyVersionConflictError,
     DependencyViolationError,
@@ -33,7 +40,11 @@ __all__ = [
     "ConsumerDependency",
     "DependencyVersionConflictError",
     "DependencyViolationError",
+    "HealthDimension",
+    "HealthDimensionName",
+    "HealthDimensionStatus",
     "InMemoryRetentionRepository",
+    "OperationalView",
     "PrunePlan",
     "PrunePlanStatus",
     "PruneReceipt",
@@ -48,4 +59,5 @@ __all__ = [
     "RuntimeMetadataSnapshot",
     "compute_content_hash",
     "compute_trading_rules_hash",
+    "read_health",
 ]

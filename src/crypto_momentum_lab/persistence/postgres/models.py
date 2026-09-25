@@ -1548,9 +1548,7 @@ class MarketRevisionRefRow(Base):
     )
     source_epoch: Mapped[str] = mapped_column(String(64), nullable=False)
     visibility_mode: Mapped[str] = mapped_column(String(32), nullable=False)
-    is_canonical: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False
-    )
+    is_canonical: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     lineage: Mapped[dict[str, object]] = mapped_column(
         JSONB, nullable=False, default=dict
@@ -1587,9 +1585,7 @@ class DatasetManifestRow(Base):
     start_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
-    end_time: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     visibility_mode: Mapped[str] = mapped_column(String(32), nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     feature_algorithm_version: Mapped[str] = mapped_column(
@@ -1600,9 +1596,7 @@ class DatasetManifestRow(Base):
         Numeric(10, 4), nullable=False, default=Decimal("1.0")
     )
     revision_ids: Mapped[list[object]] = mapped_column(JSONB, nullable=False)
-    holes: Mapped[list[object]] = mapped_column(
-        JSONB, nullable=False, default=list
-    )
+    holes: Mapped[list[object]] = mapped_column(JSONB, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
@@ -1622,9 +1616,7 @@ class DecisionTraceRow(Base):
     intent_produced: Mapped[bool] = mapped_column(Boolean, nullable=False)
     intent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     rejection_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    evaluated_revision_ids: Mapped[list[object]] = mapped_column(
-        JSONB, nullable=False
-    )
+    evaluated_revision_ids: Mapped[list[object]] = mapped_column(JSONB, nullable=False)
     trace_payload: Mapped[dict[str, object]] = mapped_column(
         JSONB, nullable=False, default=dict
     )
@@ -1638,5 +1630,78 @@ class DecisionTraceRow(Base):
             "strategy_name",
             "account_label",
             "decision_time",
+        ),
+    )
+
+
+class CashFlowCorrectionRow(Base):
+    """Postgres table mapping for authoritative cash flow corrections with proof."""
+
+    __tablename__ = "cash_flow_corrections"
+
+    correction_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    account_label: Mapped[str] = mapped_column(String(64), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    cash_flow_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    effective_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    approval_ref: Mapped[str] = mapped_column(String(128), nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_cash_flow_corrections_account",
+            "account_label",
+            "effective_at",
+        ),
+    )
+
+
+class AccountPerformanceMetricRow(Base):
+    """Postgres table mapping for durable AccountPerformance metric evaluation
+    snapshots.
+    """
+
+    __tablename__ = "account_performance_metrics"
+
+    metric_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    account_label: Mapped[str] = mapped_column(String(64), nullable=False)
+    metric_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    metric_family: Mapped[str] = mapped_column(String(64), nullable=False)
+    metric_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    interval_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    interval_end: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    value: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
+    unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_as_of: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    source_refs: Mapped[list[object]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    details: Mapped[dict[str, object]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    calculated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_account_perf_metrics_lookup",
+            "account_label",
+            "metric_name",
+            "interval_start",
+            "interval_end",
         ),
     )
