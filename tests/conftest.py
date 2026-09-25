@@ -159,12 +159,54 @@ class FakeUniverseRepository:
         return None
 
 
+from urllib.parse import urlsplit
+
+_ALLOWED_TEST_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def assert_safe_test_database_url(url: str) -> None:
+    """Validate that the test database target is strictly local and safe for destructive cleanup."""
+    parsed = urlsplit(url)
+    hostname = (parsed.hostname or "").lower()
+
+    if hostname not in _ALLOWED_TEST_HOSTS:
+        raise RuntimeError(
+            f"SECURITY: Refusing destructive test execution on non-local database host: '{hostname}'. "
+            "Tests may only run against localhost / 127.0.0.1."
+        )
+
+    database_name = parsed.path.lstrip("/").lower()
+    if not database_name:
+        raise RuntimeError("SECURITY: Database name is empty in test URL.")
+
+    for dangerous in ("prod", "production", "live", "mainnet"):
+        if dangerous in database_name:
+            raise RuntimeError(
+                f"SECURITY: Refusing destructive test cleanup on database with production keyword: '{database_name}'."
+            )
+
+    port = parsed.port
+    is_test_named = any(
+        marker in database_name
+        for marker in ("test", "review", "temp", "ci")
+    )
+    is_local_docker_test_port = port == 54329
+
+    if not (is_test_named or is_local_docker_test_port):
+        raise RuntimeError(
+            f"SECURITY: Target database '{database_name}' on port {port} is not recognized as a disposable test database. "
+            "Database name must contain 'test', 'review', or run on local test port 54329."
+        )
+
+
 @pytest.fixture(scope="session")
 def async_database_url() -> str:
-    return os.environ.get(
+    url = os.environ.get(
         "CML_TEST_ASYNC_DATABASE_URL",
         "postgresql+asyncpg://cml:cml@localhost:54329/cml",
     )
+    assert_safe_test_database_url(url)
+    return url
 
 
 @pytest.fixture

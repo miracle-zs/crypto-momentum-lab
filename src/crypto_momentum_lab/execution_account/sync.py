@@ -65,6 +65,10 @@ class ReadOnlyAccountClient(Protocol):
     async def fetch_open_orders(self) -> tuple[AccountOpenOrderSnapshot, ...]:
         pass
 
+    @property
+    def incomplete_fill_symbols(self) -> frozenset[str]:
+        pass
+
     async def fetch_recent_fills(
         self,
         symbols: tuple[str, ...] = (),
@@ -239,6 +243,7 @@ class ExecutionAccountSyncResult:
     new_fill_keys: frozenset[FillKey] = frozenset()
     fill_count_by_symbol: tuple[tuple[str, int], ...] = ()
     fill_cursor_updates: tuple[AccountFillReconciliationCursor, ...] = ()
+    fills_catching_up: bool = False
 
 
 def diff_account_snapshots(
@@ -481,6 +486,7 @@ class ExecutionAccountSyncService:
         self._latest_observation_at: datetime | None = None
         self._latest_rest_account_config: AccountConfigSnapshot | None = None
         self._last_persisted_process_state: ExecutionAccountStatus | None = None
+        self._last_persisted_process_state_reason: str | None = None
         self._last_persisted_process_state_at: datetime | None = None
 
     async def snapshot_once(self, *, observed_at: datetime | None = None) -> None:
@@ -725,6 +731,10 @@ class ExecutionAccountSyncService:
                 if include_fills and tracked_fill_symbols
                 else ()
             )
+            incomplete_fill_symbols = getattr(
+                self._client, "incomplete_fill_symbols", frozenset()
+            )
+            fills_catching_up = bool(incomplete_fill_symbols)
             fill_keys = _fill_keys(fills)
             new_fill_keys = frozenset(
                 key
@@ -773,9 +783,13 @@ class ExecutionAccountSyncService:
             self._remember_balance_values(balances)
             for key in fill_keys:
                 self._remember_fill_key(key)
-            self._has_completed_sync = True
+            self._has_completed_sync = not fills_catching_up
             result = ExecutionAccountSyncResult(
-                status=ExecutionAccountStatus.READY_READONLY,
+                status=(
+                    ExecutionAccountStatus.SYNCING
+                    if fills_catching_up
+                    else ExecutionAccountStatus.READY_READONLY
+                ),
                 reconciliation_id=reconciliation_id,
                 mismatch_count=0,
                 snapshot=AccountSnapshot(
@@ -790,6 +804,7 @@ class ExecutionAccountSyncService:
                 new_fill_keys=new_fill_keys,
                 fill_count_by_symbol=fill_count_by_symbol,
                 fill_cursor_updates=fill_cursor_updates,
+                fills_catching_up=fills_catching_up,
             )
             assert result.snapshot is not None
             self._remember_observation(result.snapshot.config.observed_at)
@@ -823,10 +838,16 @@ class ExecutionAccountSyncService:
         database catch up independently.
         """
         if (
-            result.status is not ExecutionAccountStatus.READY_READONLY
+            result.status
+            not in (
+                ExecutionAccountStatus.READY_READONLY,
+                ExecutionAccountStatus.SYNCING,
+            )
             or result.snapshot is None
         ):
-            raise ValueError("only a ready account result can be persisted")
+            raise ValueError(
+                "only a ready or syncing account result can be persisted"
+            )
         snapshot = result.snapshot
         if (
             self._latest_observation_at is not None
@@ -852,6 +873,11 @@ class ExecutionAccountSyncService:
         details: dict[str, JsonValue] = {}
         if source is not None:
             details["source"] = source
+        if result.fills_catching_up:
+            details["fills_catching_up"] = True
+            details["incomplete_symbols"] = sorted(
+                getattr(self._client, "incomplete_fill_symbols", ())
+            )
         # Same sparsify rule as snapshot_once / user-data persist: the in-memory
         # snapshot keeps every asset, but durable history only stores non-zero
         # balances and the zero that closes a previously non-zero asset.
@@ -872,7 +898,7 @@ class ExecutionAccountSyncService:
             run=_reconciliation_run(
                 config,
                 reconciliation_id=result.reconciliation_id,
-                status="ready",
+                status="catching_up" if result.fills_catching_up else "ready",
                 mismatch_count=result.mismatch_count,
                 details=details,
                 balance_count=len(persisted_balances),
@@ -890,7 +916,12 @@ class ExecutionAccountSyncService:
                 result.fill_cursor_updates
             )
         await self._save_state(
-            ExecutionAccountStatus.READY_READONLY,
+            (
+                ExecutionAccountStatus.SYNCING
+                if result.fills_catching_up
+                else ExecutionAccountStatus.READY_READONLY
+            ),
+            reason="fills_catching_up" if result.fills_catching_up else None,
             config=config,
         )
 
@@ -1166,6 +1197,7 @@ class ExecutionAccountSyncService:
         # without writing a heartbeat every poll.
         if (
             state == self._last_persisted_process_state
+            and reason == self._last_persisted_process_state_reason
             and self._last_persisted_process_state_at is not None
             and observed_at - self._last_persisted_process_state_at
             < _PROCESS_STATE_REFRESH
@@ -1181,6 +1213,7 @@ class ExecutionAccountSyncService:
             )
         )
         self._last_persisted_process_state = state
+        self._last_persisted_process_state_reason = reason
         self._last_persisted_process_state_at = observed_at
 
 

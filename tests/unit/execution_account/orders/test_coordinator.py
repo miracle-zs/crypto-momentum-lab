@@ -309,3 +309,106 @@ def _prepared(plan: OrderExecutionPlan):
         details={},
     )
     return PreparedOrderSubmission(plan=plan, submitting_event=event)
+
+
+async def test_coordinator_queue_capacity_and_exit_headroom() -> None:
+    backend = BlockingBackend()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        max_queue_depth=4,
+        exit_headroom=2,  # Entries can only fill up to 4 - 2 = 2 slots
+    )
+
+    # First command is picked up and blocks backend
+    block_task = asyncio.create_task(
+        coordinator.reconcile_order(_plan("BTCUSDT", reduce_only=False))
+    )
+    await backend.query_started.wait()
+
+    # Now queue 2 entry commands (fills queue to entry_limit = 2)
+    e1_task = asyncio.create_task(
+        coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+    )
+    e2_task = asyncio.create_task(
+        coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+    )
+    await asyncio.sleep(0.01)
+
+    # 3rd entry command must be rejected immediately due to headroom preservation
+    with pytest.raises(OrderPreSubmissionError, match="entry capacity exceeded"):
+        await coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+
+    # But an EXIT command (reduce_only=True) CAN still enter because headroom is reserved for exits!
+    exit_task = asyncio.create_task(
+        coordinator.submit(_plan("BTCUSDT", reduce_only=True))
+    )
+    await asyncio.sleep(0.01)
+
+    # Unblock backend and let all tasks drain
+    backend.release_query.set()
+    await asyncio.gather(block_task, e1_task, e2_task, exit_task)
+    await coordinator.aclose()
+
+
+async def test_coordinator_queue_max_wait_timeout() -> None:
+    backend = BlockingBackend()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        max_queue_wait_seconds=0.05,  # Short timeout for testing
+    )
+
+    # Block the worker
+    block_task = asyncio.create_task(
+        coordinator.reconcile_order(_plan("BTCUSDT", reduce_only=False))
+    )
+    await backend.query_started.wait()
+
+    # Queue an entry command
+    entry_task = asyncio.create_task(
+        coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+    )
+
+    # Sleep longer than max_queue_wait_seconds
+    await asyncio.sleep(0.08)
+
+    # Unblock the worker; the entry command waited > 0.05s so it should fail with timeout
+    backend.release_query.set()
+    await block_task
+
+    with pytest.raises(OrderPreSubmissionError, match="waited .* in queue exceeding limit"):
+        await entry_task
+
+    await coordinator.aclose()
+
+
+async def test_coordinator_idle_worker_reclamation() -> None:
+    backend = BlockingBackend()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        idle_timeout_seconds=0.05,  # Short idle timeout for test
+    )
+
+    key = OrderExecutionKey("primary", "BTCUSDT", FuturesPositionSide.BOTH)
+
+    # Submit one command
+    res1 = await coordinator.submit(_plan("BTCUSDT", reduce_only=True))
+    assert res1.state is ExchangeOrderState.ACKNOWLEDGED
+    assert key in coordinator._schedulers
+
+    # Wait for idle timeout
+    await asyncio.sleep(0.1)
+
+    # Scheduler should have been removed from coordinator after becoming idle
+    assert key not in coordinator._schedulers or coordinator._schedulers[key].is_closed
+
+    # Submitting another command should seamlessly spawn a fresh scheduler
+    res2 = await coordinator.submit(_plan("BTCUSDT", reduce_only=True))
+    assert res2.state is ExchangeOrderState.ACKNOWLEDGED
+    assert key in coordinator._schedulers
+    assert not coordinator._schedulers[key].is_closed
+
+    await coordinator.aclose()
+

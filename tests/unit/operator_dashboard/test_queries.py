@@ -1177,3 +1177,137 @@ def _paper_position_row(
         exit_fee=Decimal("0"),
         close_reason=None if closed_at is None else "take_profit",
     )
+
+
+async def test_readiness_handles_halt_without_unhealthy_attribute_error() -> None:
+    from crypto_momentum_lab.operator_dashboard.overview_queries import OverviewQueries
+    from crypto_momentum_lab.operator_dashboard.schemas import (
+        LiveAccountSummaryResponse,
+        LiveAccountsResponse,
+        ServiceStatusResponse,
+        SystemOverviewResponse,
+    )
+
+    now = datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
+
+    class StubOverviewQueries(OverviewQueries):
+        def __init__(self) -> None:
+            super().__init__(
+                session_factory=None,  # type: ignore[arg-type]
+                clock=lambda: now,
+                stale_after_seconds=60.0,
+                research_collector_root=Path("/tmp"),
+            )
+
+        async def health(self) -> dict[str, str]:
+            return {"app_status": "UP", "database_status": "UP"}
+
+        async def live_accounts(self) -> LiveAccountsResponse:
+            return LiveAccountsResponse(
+                status=OperationalStatus.READY,
+                accounts=[
+                    LiveAccountSummaryResponse(
+                        account_label="primary",
+                        environment="live",
+                        status=OperationalStatus.READY,
+                        readiness="ready_readonly",
+                        observed_at=now,
+                        strategy_name="orderflow_impulse",
+                        strategy_state="running",
+                        lease_expires_at=now + timedelta(minutes=10),
+                    )
+                ],
+            )
+
+        async def overview(self) -> SystemOverviewResponse:
+            return SystemOverviewResponse(
+                generated_at=now,
+                database_status=OperationalStatus.READY,
+                services=[
+                    ServiceStatusResponse(
+                        name="market-data",
+                        status=OperationalStatus.FRESH,
+                        observed_at=now,
+                        age_seconds=1.0,
+                    )
+                ],
+                active_halt_count=1,
+                active_lease=None,
+            )
+
+    queries = StubOverviewQueries()
+    resp = await queries.readiness()
+    assert resp.status == OperationalStatus.HALTED
+    assert resp.tradeability.mode == "HALTED"
+    assert resp.tradeability.entry_gate_open is False
+    assert resp.tradeability.halt_active is True
+    assert resp.tradeability.entry_gate_reason == "halt_active"
+
+
+async def test_readiness_prevents_fully_tradeable_when_prerequisites_missing() -> None:
+    from crypto_momentum_lab.operator_dashboard.overview_queries import OverviewQueries
+    from crypto_momentum_lab.operator_dashboard.schemas import (
+        LiveAccountSummaryResponse,
+        LiveAccountsResponse,
+        ServiceStatusResponse,
+        SystemOverviewResponse,
+    )
+
+    now = datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
+    yesterday = now - timedelta(days=1)
+
+    class StubOverviewQueries(OverviewQueries):
+        def __init__(self) -> None:
+            super().__init__(
+                session_factory=None,  # type: ignore[arg-type]
+                clock=lambda: now,
+                stale_after_seconds=60.0,
+                research_collector_root=Path("/tmp"),
+            )
+
+        async def health(self) -> dict[str, str]:
+            return {"app_status": "UP", "database_status": "UP"}
+
+        async def live_accounts(self) -> LiveAccountsResponse:
+            # Day-old account, no strategy state, no active lease
+            return LiveAccountsResponse(
+                status=OperationalStatus.READY,
+                accounts=[
+                    LiveAccountSummaryResponse(
+                        account_label="primary",
+                        environment="live",
+                        status=OperationalStatus.READY,
+                        readiness="ready_readonly",
+                        observed_at=yesterday,
+                        strategy_name=None,
+                        strategy_state=None,
+                        lease_expires_at=None,
+                    )
+                ],
+            )
+
+        async def overview(self) -> SystemOverviewResponse:
+            # market-data is recovering / stale
+            return SystemOverviewResponse(
+                generated_at=now,
+                database_status=OperationalStatus.READY,
+                services=[
+                    ServiceStatusResponse(
+                        name="market-data",
+                        status=OperationalStatus.STALE,
+                        observed_at=yesterday,
+                        age_seconds=86400.0,
+                    )
+                ],
+                active_halt_count=0,
+                active_lease=None,
+            )
+
+    queries = StubOverviewQueries()
+    resp = await queries.readiness()
+    # Must NOT be FULLY_TRADEABLE
+    assert resp.tradeability.mode == "EXIT_ONLY"
+    assert resp.tradeability.entry_gate_open is False
+    assert resp.stream_readiness.overall == "RECOVERING"
+    assert resp.status in (OperationalStatus.DEGRADED, OperationalStatus.STALE)
+

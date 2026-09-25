@@ -269,10 +269,12 @@ async def test_health_marker_tracks_durable_progress_pause_and_stop(tmp_path):
     assert check_health(tmp_path, "research")[0]
     # A failed capacity guard must never publish a fresh successful checkpoint.
     (tmp_path / "quota-fill").write_bytes(b"x" * (2 * 1024**2))
+    await collector.refresh_capacity()
     with pytest.raises(CollectorPaused):
         await collector.ingest(_batch(state, 2))
     assert not check_health(tmp_path, "research")[0]
     (tmp_path / "quota-fill").unlink()
+    await collector.refresh_capacity()
     await collector.ingest(_batch(state, 2))
     assert check_health(tmp_path, "research")[0]
     await collector.stop()

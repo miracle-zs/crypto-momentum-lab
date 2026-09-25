@@ -111,6 +111,7 @@ class ResearchStateCollector:
             hard_limit_bytes=config.hard_limit_bytes,
             global_warning_free_bytes=config.global_warning_free_bytes,
             global_pause_free_bytes=config.global_pause_free_bytes,
+            max_snapshot_age_seconds=max(90.0, config.capacity_check_interval_seconds * 3.0),
         )
         self._backfill_source = backfill_source
         self._startup_timer = startup_timer
@@ -137,6 +138,7 @@ class ResearchStateCollector:
         self._initialized = False
         self._capacity_snapshot: CapacitySnapshot | None = None
         self._last_capacity_refresh = 0.0
+        self._capacity_task: asyncio.Task[None] | None = None
         self._health_store = CollectorHealthStore(config.root, config.environment)
         self._health_store.reset()
         self._queue: asyncio.Queue[JournalRecord | None] = asyncio.Queue(
@@ -154,9 +156,57 @@ class ResearchStateCollector:
             task = getattr(self, "_materializer_task", None)
             if task is not None and not task.done():
                 task.cancel()
+            cap_task = getattr(self, "_capacity_task", None)
+            if cap_task is not None and not cap_task.done():
+                cap_task.cancel()
         except Exception:
             pass
 
+    async def refresh_capacity(self) -> CapacitySnapshot:
+        """Scan collector directory and disk usage in a thread, updating cached snapshot."""
+        snapshot = await asyncio.to_thread(self._capacity.scan)
+        self._capacity_snapshot = snapshot
+        self._last_capacity_refresh = time.monotonic()
+        if snapshot.state is CapacityState.WARNING:
+            log.warning(
+                "research_collector_capacity_warning",
+                environment=self._config.environment,
+                collector_bytes=snapshot.collector_bytes,
+                disk_free_bytes=snapshot.disk_free_bytes,
+            )
+        return snapshot
+
+    def _ensure_capacity_task(self) -> None:
+        if not self._stopping and (
+            self._capacity_task is None or self._capacity_task.done()
+        ):
+            self._capacity_task = asyncio.create_task(
+                self._capacity_monitor_worker(),
+                name="research-collector-capacity-monitor",
+            )
+
+    async def _capacity_monitor_worker(self) -> None:
+        interval = max(0.1, self._config.capacity_check_interval_seconds)
+        try:
+            while not self._stopping:
+                try:
+                    await asyncio.sleep(interval)
+                except asyncio.CancelledError:
+                    break
+                if self._stopping:
+                    break
+                try:
+                    await self.refresh_capacity()
+                except asyncio.CancelledError:
+                    break
+                except Exception as exc:
+                    log.warning(
+                        "research_collector_capacity_scan_failed",
+                        environment=self._config.environment,
+                        error=str(exc),
+                    )
+        except asyncio.CancelledError:
+            pass
 
     def _ensure_materializer_task(self) -> None:
         if not self._stopping and (
@@ -359,6 +409,7 @@ class ResearchStateCollector:
                     source_kind=record.collection_batch.source_kind,
                 )
 
+        await self.refresh_capacity()
         self._ensure_capacity()
         if recovered:
             await self._flush_all_buffers()
@@ -440,6 +491,8 @@ class ResearchStateCollector:
             selection,
             selected_states,
         )
+        if receipt.record_bytes:
+            self._capacity.record_written_bytes(receipt.record_bytes)
         if collection_batch.source_kind is SourceKind.HUB:
             self._last_seen_sequence = collection_batch.sequence
 
@@ -473,6 +526,7 @@ class ResearchStateCollector:
         """Run until stopped, recovering replay gaps from PostgreSQL."""
 
         await self.initialize()
+        self._ensure_capacity_task()
         while not self._stopping:
             try:
                 await self._consume_source_once()
@@ -502,6 +556,13 @@ class ResearchStateCollector:
             stop()
         if not self._initialized:
             return
+        if self._capacity_task is not None and not self._capacity_task.done():
+            self._capacity_task.cancel()
+            try:
+                await self._capacity_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
         if self._materializer_task is not None and not self._materializer_task.done():
             await self._queue.put(None)
             try:
@@ -531,9 +592,7 @@ class ResearchStateCollector:
                 await self.drain_queue(timeout_seconds=2.0)
             except (TimeoutError, RuntimeError):
                 pass
-        snapshot = await asyncio.to_thread(self._capacity.snapshot)
-        self._capacity_snapshot = snapshot
-        self._last_capacity_refresh = time.monotonic()
+        snapshot = await self.refresh_capacity()
         pending_bytes = self._journal.pending_bytes
         pending_records = self._journal.pending_records()
         checkpoint = self._require_checkpoint()
@@ -665,9 +724,7 @@ class ResearchStateCollector:
             )
         self._publish_health()
         while not self._stopping:
-            snapshot = await asyncio.to_thread(self._capacity.snapshot)
-            self._capacity_snapshot = snapshot
-            self._last_capacity_refresh = time.monotonic()
+            snapshot = await self.refresh_capacity()
             if snapshot.state is not CapacityState.PAUSED:
                 try:
                     await self._flush_all_buffers()
@@ -760,7 +817,12 @@ class ResearchStateCollector:
     def _publish_health(self) -> None:
         checkpoint = self._checkpoint
         snapshot = self._capacity_snapshot
-        ready = not self._paused and not self._stopping and snapshot is not None
+        ready = (
+            not self._paused
+            and not self._stopping
+            and snapshot is not None
+            and snapshot.state is not CapacityState.PAUSED
+        )
         if (
             ready
             and self._startup_timer is not None
@@ -962,7 +1024,6 @@ class ResearchStateCollector:
             self._health_store.reset()
             raise
         self._capacity_snapshot = snapshot
-        self._last_capacity_refresh = time.monotonic()
         if snapshot.state is CapacityState.WARNING:
             log.warning(
                 "research_collector_capacity_warning",

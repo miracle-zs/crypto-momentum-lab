@@ -336,6 +336,9 @@ class AccountEventHub:
         self._replay_buffers: dict[
             tuple[str, str], deque[_ReplayEntry]
         ] = {}
+        self._bootstrap_cache: dict[
+            tuple[str, str], tuple[str, int, str]
+        ] = {}
         self._published_event_count = 0
         self._subscriber_queue_overflow_count = 0
         self._replay_request_count = 0
@@ -371,6 +374,7 @@ class AccountEventHub:
             self._latest_events.clear()
             self._latest_snapshots.clear()
             self._replay_buffers.clear()
+            self._bootstrap_cache.clear()
             self._seen_fill_keys.clear()
             self._seen_fill_key_order.clear()
         self._server = await serve(
@@ -508,11 +512,18 @@ class AccountEventHub:
         latest_sequence = self._sequences.get(scope, 0)
         if snapshot is None or latest_event is None or latest_sequence <= 0:
             return self._latest_messages.get(scope)
+        cached = self._bootstrap_cache.get(scope)
+        if (
+            cached is not None
+            and cached[0] == self._stream_epoch
+            and cached[1] == latest_sequence
+        ):
+            return cached[2]
         observed_at = snapshot.config.observed_at
         bootstrap = replace(
             latest_event,
             event_type="ACCOUNT_SNAPSHOT",
-            event_id=f"hub-bootstrap:{uuid4()}",
+            event_id=f"hub-bootstrap:{self._stream_epoch}:{latest_sequence}",
             event_at=observed_at,
             received_at=observed_at,
             symbols=tuple(
@@ -529,7 +540,9 @@ class AccountEventHub:
             snapshot_kind=_SNAPSHOT_KIND_FULL,
             account_delta=None,
         )
-        return encode_account_event(bootstrap, sequence=latest_sequence)
+        encoded = encode_account_event(bootstrap, sequence=latest_sequence)
+        self._bootstrap_cache[scope] = (self._stream_epoch, latest_sequence, encoded)
+        return encoded
 
     def _subscription_messages(
         self,

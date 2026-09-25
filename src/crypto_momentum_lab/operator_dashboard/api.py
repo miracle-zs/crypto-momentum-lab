@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import secrets
 import time
@@ -59,14 +60,61 @@ _PERFORMANCE_QUERY_TIMEOUT_SECONDS = 10.0
 _T = TypeVar("_T")
 
 
+logger = logging.getLogger(__name__)
+
+
 class _ResponseCache:
-    def __init__(self, ttl_seconds: float) -> None:
+    def __init__(
+        self,
+        ttl_seconds: float,
+        max_entries: int = 512,
+        max_refresh_tasks: int = 16,
+    ) -> None:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
+        if max_refresh_tasks <= 0:
+            raise ValueError("max_refresh_tasks must be positive")
         self._ttl_seconds = ttl_seconds
+        self._max_entries = max_entries
+        self._max_refresh_tasks = max_refresh_tasks
         self._entries: dict[str, tuple[float, object]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._refresh_tasks: dict[str, asyncio.Task[None]] = {}
+        self._refresh_errors: dict[str, tuple[float, str]] = {}
+
+    def _prune(self, now: float) -> None:
+        # First remove expired entries
+        expired_keys = [k for k, v in self._entries.items() if v[0] <= now]
+        for k in expired_keys:
+            self._entries.pop(k, None)
+        # If still over capacity, remove oldest by expiry
+        if len(self._entries) > self._max_entries:
+            sorted_keys = sorted(self._entries.keys(), key=lambda k: self._entries[k][0])
+            for k in sorted_keys[: len(self._entries) - self._max_entries]:
+                self._entries.pop(k, None)
+
+        # Prune finished refresh tasks
+        finished_tasks = [k for k, t in self._refresh_tasks.items() if t.done()]
+        for k in finished_tasks:
+            self._refresh_tasks.pop(k, None)
+
+        # Prune expired or excessive refresh errors
+        expired_errors = [k for k, v in self._refresh_errors.items() if v[0] + 300.0 <= now]
+        for k in expired_errors:
+            self._refresh_errors.pop(k, None)
+        if len(self._refresh_errors) > self._max_entries:
+            sorted_errs = sorted(self._refresh_errors.keys(), key=lambda k: self._refresh_errors[k][0])
+            for k in sorted_errs[: len(self._refresh_errors) - self._max_entries]:
+                self._refresh_errors.pop(k, None)
+
+        # Prune unheld locks for keys not active in entries or tasks
+        active_keys = set(self._entries) | set(self._refresh_tasks)
+        unused_locks = [
+            k for k, lock in self._locks.items()
+            if k not in active_keys and not lock.locked()
+        ]
+        for k in unused_locks:
+            self._locks.pop(k, None)
 
     async def get(
         self,
@@ -91,17 +139,26 @@ class _ResponseCache:
                 )
                 return cast(_T, entry[1])
         lock = self._locks.setdefault(key, asyncio.Lock())
-        async with lock:
-            now = time.monotonic()
-            entry = self._entries.get(key)
-            if entry is not None and entry[0] > now:
-                return cast(_T, entry[1])
-            value = await loader()
-            ttl = self._ttl_seconds if ttl_seconds is None else ttl_seconds
-            if ttl <= 0:
-                raise ValueError("ttl_seconds must be positive")
-            self._entries[key] = (time.monotonic() + ttl, value)
-            return value
+        try:
+            async with lock:
+                now = time.monotonic()
+                entry = self._entries.get(key)
+                if entry is not None and entry[0] > now:
+                    return cast(_T, entry[1])
+                value = await loader()
+                ttl = self._ttl_seconds if ttl_seconds is None else ttl_seconds
+                if ttl <= 0:
+                    raise ValueError("ttl_seconds must be positive")
+                self._entries[key] = (time.monotonic() + ttl, value)
+                self._prune(now)
+                return value
+        finally:
+            if (
+                not lock.locked()
+                and key not in self._entries
+                and key not in self._refresh_tasks
+            ):
+                self._locks.pop(key, None)
 
     def _schedule_refresh(
         self,
@@ -110,6 +167,13 @@ class _ResponseCache:
         *,
         ttl_seconds: float | None,
     ) -> None:
+        finished = [k for k, t in self._refresh_tasks.items() if t.done()]
+        for k in finished:
+            self._refresh_tasks.pop(k, None)
+
+        if len(self._refresh_tasks) >= self._max_refresh_tasks:
+            return
+
         task = self._refresh_tasks.get(key)
         if task is not None and not task.done():
             return
@@ -140,16 +204,25 @@ class _ResponseCache:
                 if ttl <= 0:
                     return
                 self._entries[key] = (time.monotonic() + ttl, value)
+                self._refresh_errors.pop(key, None)
+                self._prune(time.monotonic())
         except asyncio.CancelledError:
             raise
-        except Exception:
-            # Keep serving the last value during the grace window. The next
-            # request after that window retries in the foreground.
+        except Exception as exc:
+            self._refresh_errors[key] = (time.monotonic(), str(exc))
+            logger.warning(
+                "Dashboard cache background refresh failed for %s: %s",
+                key,
+                exc,
+            )
             return
         finally:
             current = asyncio.current_task()
             if self._refresh_tasks.get(key) is current:
                 self._refresh_tasks.pop(key, None)
+            lock = self._locks.get(key)
+            if lock is not None and not lock.locked() and key not in self._entries:
+                self._locks.pop(key, None)
 
     async def aclose(self) -> None:
         tasks = tuple(self._refresh_tasks.values())
@@ -361,7 +434,7 @@ def create_dashboard_app(
             "readiness",
             query_service().readiness,
             ttl_seconds=5.0,
-            stale_while_revalidate_seconds=default_stale_grace_seconds,
+            stale_while_revalidate_seconds=0.0,
         )
 
     @dashboard.get(

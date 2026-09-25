@@ -288,6 +288,121 @@ async def test_client_fetches_recent_user_trades() -> None:
     assert fills[0].fee == Decimal("0.12")
 
 
+async def test_client_paginates_user_trades_across_pages() -> None:
+    requested_from_ids: list[str | None] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/fapi/v1/userTrades"
+        assert request.url.params["symbol"] == "BTCUSDT"
+        from_id = request.url.params.get("fromId")
+        requested_from_ids.append(from_id)
+        if from_id is None:
+            # First page: 1000 items (id 1 to 1000)
+            items = [
+                {
+                    "symbol": "BTCUSDT",
+                    "id": i,
+                    "orderId": 1000 + i,
+                    "side": "BUY",
+                    "price": "30000.0",
+                    "qty": "0.01",
+                    "realizedPnl": "0.0",
+                    "commission": "0.01",
+                    "commissionAsset": "USDT",
+                    "time": 1783123200000 + i,
+                }
+                for i in range(1, 1001)
+            ]
+            return httpx.Response(200, json=items)
+        if from_id == "1001":
+            # Second page: 1 item (id 1001)
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "symbol": "BTCUSDT",
+                        "id": 1001,
+                        "orderId": 2001,
+                        "side": "SELL",
+                        "price": "31000.0",
+                        "qty": "0.01",
+                        "realizedPnl": "10.0",
+                        "commission": "0.01",
+                        "commissionAsset": "USDT",
+                        "time": 1783123300000,
+                    }
+                ],
+            )
+        return httpx.Response(200, json=[])
+
+    client = BinanceUsdMPrivateReadClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        fills = await client.fetch_recent_fills(("btcusdt",))
+    finally:
+        await client.aclose()
+
+    assert len(fills) == 1001
+    assert requested_from_ids == [None, "1001"]
+    assert client.incomplete_fill_symbols == frozenset()
+
+
+async def test_client_marks_symbol_incomplete_when_budget_exhausted() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        from_id = int(request.url.params.get("fromId", "1"))
+        items = [
+            {
+                "symbol": "BTCUSDT",
+                "id": from_id + i,
+                "orderId": 5000 + i,
+                "side": "BUY",
+                "price": "30000.0",
+                "qty": "0.01",
+                "realizedPnl": "0.0",
+                "commission": "0.01",
+                "commissionAsset": "USDT",
+                "time": 1783123200000 + i,
+            }
+            for i in range(1000)
+        ]
+        return httpx.Response(200, json=items)
+
+    client = BinanceUsdMPrivateReadClient(
+        api_key="key",
+        api_secret="secret",
+        environment="live",
+        account_label="primary",
+        base_url="https://fapi.binance.com",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://fapi.binance.com",
+        ),
+        clock=lambda: datetime(2026, 7, 4, 0, 0, tzinfo=UTC),
+    )
+
+    try:
+        fills = await client.fetch_recent_fills(
+            ("btcusdt",),
+            max_pages_per_symbol=2,
+        )
+    finally:
+        await client.aclose()
+
+    assert len(fills) == 2000
+    assert "BTCUSDT" in client.incomplete_fill_symbols
+
+
 async def test_client_fetches_recent_user_trades_from_symbol_cursor() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/fapi/v1/userTrades"

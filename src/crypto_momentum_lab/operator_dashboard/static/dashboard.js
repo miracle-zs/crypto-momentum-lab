@@ -154,9 +154,13 @@ function globalReadinessModel() {
             : String(account.reconciliation?.status || "READY").toUpperCase();
   }
 
+  const hasRisk = Boolean(risk);
+  const hasAccount = Boolean(account);
+  const hasOverview = Boolean(overview);
+
   let status = "READY";
   let detail = "关键读数正常";
-  if (!overview) {
+  if (!hasOverview) {
     status = "UNKNOWN";
     detail = "等待系统总览数据";
   } else if (activeHalts > 0) {
@@ -168,6 +172,13 @@ function globalReadinessModel() {
   } else if (mismatch != null && mismatch > 0) {
     status = "REVIEW";
     detail = "账户对账存在差异 · 暂不视为安全";
+  } else if (latestLiveMode === "LIVE" && (!hasRisk || !hasAccount)) {
+    status = "UNKNOWN";
+    detail = !hasRisk && !hasAccount
+      ? "等待风险与账户数据同步"
+      : !hasRisk
+        ? "等待风险数据同步"
+        : "等待账户数据同步";
   } else if (uncertain > 0) {
     status = "UNKNOWN";
     detail = `${uncertain} 个关键读数需要确认`;
@@ -405,6 +416,10 @@ async function poll() {
   const now = Date.now();
   const activeView = document.body.dataset.activeView || "overview";
   const visibleSections = new Set(["overview", activeView]);
+  if (latestLiveMode === "LIVE") {
+    visibleSections.add("risk");
+    visibleSections.add("account");
+  }
   const allSectionIds = Array.from(new Set([
     ...SECTIONS,
     ...Object.keys(renderers).filter((id) => document.getElementById(id)?.dataset?.endpoint),

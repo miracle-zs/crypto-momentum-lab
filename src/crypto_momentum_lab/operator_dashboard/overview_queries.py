@@ -90,9 +90,18 @@ def account_label_sort_key(account_label: str) -> tuple[int, int | str]:
     return (1, int(suffix)) if suffix.isdigit() else (2, account_label)
 
 
-def live_account_status(state: str | None) -> OperationalStatus:
+def live_account_status(
+    state: str | None,
+    *,
+    observed_at: datetime | None = None,
+    now: datetime | None = None,
+    max_age_seconds: float = 90.0,
+) -> OperationalStatus:
     if state is None:
         return OperationalStatus.UNKNOWN
+    if observed_at is not None and now is not None:
+        if (now - observed_at).total_seconds() > max_age_seconds:
+            return OperationalStatus.STALE
     return (
         OperationalStatus.READY
         if state == "ready_readonly"
@@ -105,10 +114,18 @@ def live_account_fleet_status(
 ) -> OperationalStatus:
     if not accounts:
         return OperationalStatus.NO_DATA
+    if any(account.status is OperationalStatus.HALTED for account in accounts):
+        return OperationalStatus.HALTED
+    if any(account.status is OperationalStatus.STALE for account in accounts):
+        return OperationalStatus.STALE
+    if any(account.status is OperationalStatus.UNKNOWN for account in accounts):
+        return OperationalStatus.UNKNOWN
+    if any(account.status is OperationalStatus.DEGRADED for account in accounts):
+        return OperationalStatus.DEGRADED
     return (
         OperationalStatus.READY
         if all(account.status is OperationalStatus.READY for account in accounts)
-        else OperationalStatus.HALTED
+        else OperationalStatus.DEGRADED
     )
 
 
@@ -116,6 +133,8 @@ def live_account_summaries(
     processes: Sequence[ExecutionAccountProcessStateRow],
     strategy_states: Sequence[StrategyLiveStateRow],
     leases: Sequence[TradingLeaseRow],
+    *,
+    now: datetime | None = None,
 ) -> list[LiveAccountSummaryResponse]:
     """Join current process, strategy, and lease state by account label."""
     process_by_account = {row.account_label: row for row in processes}
@@ -135,31 +154,34 @@ def live_account_summaries(
     )
     summaries: list[LiveAccountSummaryResponse] = []
     for account_label in account_labels:
+        process_row = process_by_account.get(account_label)
         strategy = strategy_by_account.get(account_label)
         lease = lease_by_account.get(account_label)
+        occurred_at = (
+            process_row.occurred_at
+            if process_row is not None
+            else None
+        )
+        state = process_row.state if process_row is not None else None
         summaries.append(
             LiveAccountSummaryResponse(
                 account_label=account_label,
                 environment=(
-                    process_by_account[account_label].environment
-                    if account_label in process_by_account
+                    process_row.environment
+                    if process_row is not None
                     else "live"
                 ),
                 status=live_account_status(
-                    None
-                    if account_label not in process_by_account
-                    else process_by_account[account_label].state
+                    state,
+                    observed_at=occurred_at,
+                    now=now,
                 ),
                 readiness=(
-                    process_by_account[account_label].state
-                    if account_label in process_by_account
+                    state
+                    if state is not None
                     else "missing"
                 ),
-                observed_at=(
-                    process_by_account[account_label].occurred_at
-                    if account_label in process_by_account
-                    else None
-                ),
+                observed_at=occurred_at,
                 strategy_name=(
                     strategy.strategy_name
                     if strategy is not None
@@ -209,37 +231,114 @@ class OverviewQueries:
         accounts_resp = await self.live_accounts()
         overview_resp = await self.overview()
 
-        has_halt = overview_resp.active_halt_count > 0
-        all_accounts_ready = bool(
-            accounts_resp.accounts
-            and all(
-                a.status == OperationalStatus.READY
-                for a in accounts_resp.accounts
-            )
+        has_halt = overview_resp.active_halt_count > 0 or any(
+            a.status == OperationalStatus.HALTED for a in accounts_resp.accounts
         )
-
-        mode = (
-            "HALTED"
-            if has_halt
-            else "FULLY_TRADEABLE"
-            if all_accounts_ready
-            else "EXIT_ONLY"
-            if accounts_resp.accounts
-            else "DEGRADED"
-        )
-        status = (
-            OperationalStatus.UNHEALTHY
-            if has_halt or liveness.get("database_status") != "UP"
-            else OperationalStatus.READY
-            if all_accounts_ready
-            else OperationalStatus.DEGRADED
-        )
+        database_up = liveness.get("database_status") == "UP"
 
         streams_dict: dict[str, str] = {}
         for s in overview_resp.services:
             streams_dict[s.name] = (
                 "READY" if s.status == OperationalStatus.FRESH else "RECOVERING"
             )
+        streams_all_ready = bool(
+            streams_dict and all(v == "READY" for v in streams_dict.values())
+        )
+
+        # To be FULLY_TRADEABLE, we must satisfy all conditions:
+        # 1. No active halt and database is UP
+        # 2. Market data and execution streams are FRESH/READY
+        # 3. Accounts exist, are fresh, have valid active leases, and strategy is active
+        accounts_tradeable = (
+            bool(accounts_resp.accounts)
+            and all(
+                a.status == OperationalStatus.READY
+                and a.observed_at is not None
+                and (now - a.observed_at).total_seconds() <= 90.0
+                and a.lease_expires_at is not None
+                and a.lease_expires_at > now
+                and a.strategy_state in ("active", "running")
+                for a in accounts_resp.accounts
+            )
+        )
+
+        can_trade = (
+            not has_halt
+            and database_up
+            and streams_all_ready
+            and accounts_tradeable
+        )
+
+        if has_halt:
+            status = OperationalStatus.HALTED
+            mode = "HALTED"
+            entry_gate_open = False
+            entry_gate_reason = "halt_active"
+            exit_gate_open = False
+            exit_gate_reason = "halt_active"
+            unmanaged_risk_clear = False
+        elif not database_up:
+            status = OperationalStatus.DOWN
+            mode = "HALTED"
+            entry_gate_open = False
+            entry_gate_reason = "database_down"
+            exit_gate_open = False
+            exit_gate_reason = "database_down"
+            unmanaged_risk_clear = False
+        elif can_trade:
+            status = OperationalStatus.READY
+            mode = "FULLY_TRADEABLE"
+            entry_gate_open = True
+            entry_gate_reason = "live_entry_prerequisites_ready"
+            exit_gate_open = True
+            exit_gate_reason = "normal"
+            unmanaged_risk_clear = True
+        elif accounts_resp.accounts:
+            # Accounts are present, exit channels remain open, but entry is blocked
+            status = (
+                OperationalStatus.STALE
+                if any(a.status == OperationalStatus.STALE for a in accounts_resp.accounts)
+                else OperationalStatus.DEGRADED
+            )
+            mode = "EXIT_ONLY"
+            entry_gate_open = False
+            if not streams_all_ready:
+                entry_gate_reason = "market_data_not_ready"
+            elif any(
+                a.lease_expires_at is None or a.lease_expires_at <= now
+                for a in accounts_resp.accounts
+            ):
+                entry_gate_reason = "trading_lease_missing_or_expired"
+            elif any(
+                a.strategy_state not in ("active", "running")
+                for a in accounts_resp.accounts
+            ):
+                entry_gate_reason = "strategy_not_active"
+            elif any(
+                a.observed_at is None
+                or (now - a.observed_at).total_seconds() > 90.0
+                for a in accounts_resp.accounts
+            ):
+                entry_gate_reason = "account_stale"
+            else:
+                entry_gate_reason = "account_readonly_mode"
+            exit_gate_open = True
+            exit_gate_reason = "normal"
+            unmanaged_risk_clear = True
+        else:
+            status = OperationalStatus.UNKNOWN
+            mode = "DEGRADED"
+            entry_gate_open = False
+            entry_gate_reason = "no_accounts_configured"
+            exit_gate_open = False
+            exit_gate_reason = "no_accounts_configured"
+            unmanaged_risk_clear = False
+
+        stream_overall = (
+            "READY"
+            if streams_all_ready and bool(accounts_resp.accounts)
+            else "RECOVERING"
+        )
 
         return SystemReadinessResponse(
             status=status,
@@ -247,21 +346,15 @@ class OverviewQueries:
             liveness=liveness,
             tradeability=TradeabilityDetailResponse(
                 mode=mode,
-                entry_gate_open=all_accounts_ready and not has_halt,
-                entry_gate_reason=(
-                    "halt_active"
-                    if has_halt
-                    else "live_entry_prerequisites_ready"
-                    if all_accounts_ready
-                    else "account_or_strategy_not_ready"
-                ),
-                exit_gate_open=not has_halt,
-                exit_gate_reason="normal" if not has_halt else "halt_active",
-                unmanaged_risk_clear=not has_halt,
+                entry_gate_open=entry_gate_open,
+                entry_gate_reason=entry_gate_reason,
+                exit_gate_open=exit_gate_open,
+                exit_gate_reason=exit_gate_reason,
+                unmanaged_risk_clear=unmanaged_risk_clear,
                 halt_active=has_halt,
             ),
             stream_readiness=StreamReadinessDetailResponse(
-                overall="READY" if all_accounts_ready else "RECOVERING",
+                overall=stream_overall,
                 streams=streams_dict,
             ),
             accounts=accounts_resp.accounts,
@@ -299,7 +392,12 @@ class OverviewQueries:
                     .order_by(TradingLeaseRow.expires_at.desc())
                 )
             ).all()
-        accounts = live_account_summaries(processes, strategy_states, leases)
+        accounts = live_account_summaries(
+            processes,
+            strategy_states,
+            leases,
+            now=now,
+        )
         return LiveAccountsResponse(
             status=live_account_fleet_status(accounts),
             accounts=accounts,
@@ -381,6 +479,7 @@ class OverviewQueries:
             account_rows,
             strategy_states=strategy_states,
             leases=leases,
+            now=now,
         )
         services = [
             service("market-data", now, market_at, self._stale_after_seconds),

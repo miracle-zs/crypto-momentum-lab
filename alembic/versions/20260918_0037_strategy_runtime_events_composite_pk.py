@@ -37,6 +37,21 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
+    # Check if strategy_runtime_events is a partitioned table in PostgreSQL
+    if bind.dialect.name == "postgresql":
+        relkind = bind.execute(
+            sa.text(
+                "SELECT relkind FROM pg_class WHERE relname = 'strategy_runtime_events'"
+            )
+        ).scalar()
+        if relkind == "p":
+            raise RuntimeError(
+                "Cannot downgrade primary key on partitioned table 'strategy_runtime_events': "
+                "PostgreSQL requires unique/primary key constraints on partitioned tables to include "
+                "the partition key column 'occurred_at'. Downgrade requires migrating data to a "
+                "non-partitioned table or performing roll-forward."
+            )
+
     inspector = sa.inspect(bind)
     pk_constraint = inspector.get_pk_constraint("strategy_runtime_events")
     constrained_columns = pk_constraint.get("constrained_columns", [])

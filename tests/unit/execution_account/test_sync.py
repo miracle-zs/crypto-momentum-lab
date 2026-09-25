@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -66,6 +67,8 @@ class FakeClient:
                 raw_payload={},
             ),
         )
+
+    incomplete_fill_symbols: frozenset[str] = frozenset()
 
     async def fetch_positions(self):
         return ()
@@ -848,4 +851,52 @@ async def test_persist_reconciliation_result_db_failure_does_not_advance_cursor(
     # In-memory cursor must NOT advance when database write fails
     assert service._fill_cursors["BTCUSDT"].from_id == 50
     assert service._fill_cursors["BTCUSDT"].start_time_ms is None
+
+
+async def test_sync_once_handles_incomplete_fills_catching_up() -> None:
+    repository = FakeRepository()
+
+    class IncompleteFillClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.incomplete_fill_symbols = frozenset({"BTCUSDT"})
+
+        async def fetch_recent_fills(
+            self,
+            symbols=(),
+            *,
+            from_id_by_symbol=None,
+            start_time_by_symbol=None,
+        ):
+            return (_fill("BTCUSDT", "100"),)
+
+    config = replace(
+        _config(),
+        recent_fill_symbols=("BTCUSDT",),
+    )
+    service = ExecutionAccountSyncService(
+        client=IncompleteFillClient(),
+        repository=repository,
+        config=config,
+    )
+
+    result = await service.sync_once(include_fills=True)
+
+    # When fill coverage is incomplete (catching up), status must NOT be READY_READONLY
+    assert result.status is ExecutionAccountStatus.SYNCING
+    assert result.fills_catching_up is True
+    # But cursor must advance to continuation point so work is not lost
+    assert len(result.fill_cursor_updates) == 1
+    assert result.fill_cursor_updates[0].symbol == "BTCUSDT"
+    assert result.fill_cursor_updates[0].from_id == 101
+
+    # Persisted run must record catching_up and details
+    assert repository.reconciliation_runs[-1].status == "catching_up"
+    assert repository.reconciliation_runs[-1].details["fills_catching_up"] is True
+    assert repository.reconciliation_runs[-1].details["incomplete_symbols"] == ["BTCUSDT"]
+
+    # Persisted process state must be SYNCING, not READY_READONLY
+    assert repository.process_states[-1].state is ExecutionAccountStatus.SYNCING
+    assert repository.process_states[-1].reason == "fills_catching_up"
+
 

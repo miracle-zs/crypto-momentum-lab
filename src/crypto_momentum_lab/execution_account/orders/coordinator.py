@@ -9,6 +9,7 @@ an unknown REST read cannot hold an order command for another symbol hostage.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
@@ -69,12 +70,26 @@ class OrderExecutionKey:
 
 
 class _KeyCommandScheduler:
-    """One priority queue for one position serialization key."""
+    """One bounded priority queue for one position serialization key."""
 
-    def __init__(self, key: OrderExecutionKey) -> None:
+    def __init__(
+        self,
+        key: OrderExecutionKey,
+        *,
+        max_queue_depth: int = 64,
+        exit_headroom: int = 16,
+        max_queue_wait_seconds: float = 30.0,
+        idle_timeout_seconds: float = 120.0,
+        on_idle: Callable[[OrderExecutionKey], None] | None = None,
+    ) -> None:
         self._key = key
-        self._queue: asyncio.PriorityQueue[tuple[int, int, Any, Any]] = (
-            asyncio.PriorityQueue()
+        self._max_queue_depth = max_queue_depth
+        self._exit_headroom = exit_headroom
+        self._max_queue_wait_seconds = max_queue_wait_seconds
+        self._idle_timeout_seconds = idle_timeout_seconds
+        self._on_idle = on_idle
+        self._queue: asyncio.PriorityQueue[tuple[int, int, Any, Any, float]] = (
+            asyncio.PriorityQueue(maxsize=max_queue_depth)
         )
         self._state_lock = asyncio.Lock()
         self._sequence = 0
@@ -87,6 +102,14 @@ class _KeyCommandScheduler:
             ),
         )
 
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
+
+    @property
+    def qsize(self) -> int:
+        return self._queue.qsize()
+
     async def submit(
         self,
         *,
@@ -97,9 +120,33 @@ class _KeyCommandScheduler:
         async with self._state_lock:
             if self._closed:
                 raise RuntimeError("order command scheduler is closed")
+
+            is_exit = (priority <= OrderExecutionCoordinator._EXIT_PRIORITY)
+            current_depth = self._queue.qsize()
+
+            if is_exit:
+                if current_depth >= self._max_queue_depth:
+                    raise OrderPreSubmissionError(
+                        f"order scheduler queue full ({current_depth}/{self._max_queue_depth}) "
+                        f"for key {self._key.symbol}:{self._key.position_side.value}"
+                    )
+            else:
+                entry_limit = max(1, self._max_queue_depth - self._exit_headroom)
+                if current_depth >= entry_limit:
+                    raise OrderPreSubmissionError(
+                        f"order scheduler entry capacity exceeded ({current_depth}/{entry_limit}, "
+                        f"headroom={self._exit_headroom}) for key {self._key.symbol}:{self._key.position_side.value}"
+                    )
+
             sequence = self._sequence
             self._sequence += 1
-            await self._queue.put((priority, sequence, operation, future))
+            enqueued_at = time.monotonic()
+            try:
+                self._queue.put_nowait((priority, sequence, operation, future, enqueued_at))
+            except asyncio.QueueFull:
+                raise OrderPreSubmissionError(
+                    f"order scheduler queue full for key {self._key.symbol}:{self._key.position_side.value}"
+                )
         return await future
 
     async def close(self) -> None:
@@ -107,25 +154,70 @@ class _KeyCommandScheduler:
             if not self._closed:
                 self._closed = True
                 while not self._queue.empty():
-                    _priority, _sequence, _operation, future = (
-                        self._queue.get_nowait()
-                    )
-                    self._queue.task_done()
+                    try:
+                        item = self._queue.get_nowait()
+                        self._queue.task_done()
+                    except asyncio.QueueEmpty:
+                        break
+                    _priority, _sequence, _operation, future, _enqueued_at = item
                     if future is not None and not future.done():
                         future.set_exception(
                             RuntimeError("order command scheduler is closed")
                         )
-                await self._queue.put((2**31 - 1, self._sequence, None, None))
-        await self._worker
+                try:
+                    self._queue.put_nowait((2**31 - 1, self._sequence, None, None, 0.0))
+                except asyncio.QueueFull:
+                    pass
+        if not self._worker.done():
+            try:
+                await self._worker
+            except asyncio.CancelledError:
+                pass
 
     async def _run(self) -> None:
         while True:
-            _priority, _sequence, operation, future = await self._queue.get()
+            try:
+                if self._idle_timeout_seconds > 0:
+                    try:
+                        item = await asyncio.wait_for(
+                            self._queue.get(),
+                            timeout=self._idle_timeout_seconds,
+                        )
+                    except TimeoutError:
+                        async with self._state_lock:
+                            if self._queue.empty() and not self._closed:
+                                self._closed = True
+                                if self._on_idle is not None:
+                                    self._on_idle(self._key)
+                                return
+                        continue
+                else:
+                    item = await self._queue.get()
+            except asyncio.CancelledError:
+                return
+
+            _priority, _sequence, operation, future, enqueued_at = item
             try:
                 if operation is None:
                     return
                 if future is None or future.cancelled():
                     continue
+
+                waited = time.monotonic() - enqueued_at
+                is_exit = (_priority <= OrderExecutionCoordinator._EXIT_PRIORITY)
+                if (
+                    not is_exit
+                    and self._max_queue_wait_seconds > 0
+                    and waited > self._max_queue_wait_seconds
+                ):
+                    if not future.done():
+                        future.set_exception(
+                            OrderPreSubmissionError(
+                                f"order command waited {waited:.2f}s in queue exceeding limit {self._max_queue_wait_seconds:.2f}s"
+                            )
+                        )
+                    continue
+
                 try:
                     result = await operation()
                 except BaseException as error:
@@ -161,11 +253,23 @@ class OrderExecutionCoordinator:
         *,
         backend: OrderExecutionPort,
         account_label: str,
+        max_queue_depth: int = 64,
+        exit_headroom: int = 16,
+        max_queue_wait_seconds: float = 30.0,
+        idle_timeout_seconds: float = 120.0,
     ) -> None:
         if not account_label.strip():
             raise ValueError("account_label must not be empty")
+        if max_queue_depth <= 0:
+            raise ValueError("max_queue_depth must be positive")
+        if exit_headroom < 0 or exit_headroom >= max_queue_depth:
+            raise ValueError("exit_headroom must be non-negative and less than max_queue_depth")
         self._backend = backend
         self._account_label = account_label.strip()
+        self._max_queue_depth = max_queue_depth
+        self._exit_headroom = exit_headroom
+        self._max_queue_wait_seconds = max_queue_wait_seconds
+        self._idle_timeout_seconds = idle_timeout_seconds
         self._schedulers: dict[OrderExecutionKey, _KeyCommandScheduler] = {}
         self._scheduler_lock = asyncio.Lock()
         self._closed = False
@@ -348,6 +452,9 @@ class OrderExecutionCoordinator:
         if schedulers:
             await asyncio.gather(*(scheduler.close() for scheduler in schedulers))
 
+    def _remove_idle_scheduler(self, key: OrderExecutionKey) -> None:
+        self._schedulers.pop(key, None)
+
     async def _schedule(
         self,
         plan: OrderExecutionPlan,
@@ -364,8 +471,15 @@ class OrderExecutionCoordinator:
             if self._closed:
                 raise RuntimeError("order execution coordinator is closed")
             scheduler = self._schedulers.get(key)
-            if scheduler is None:
-                scheduler = _KeyCommandScheduler(key)
+            if scheduler is None or scheduler.is_closed:
+                scheduler = _KeyCommandScheduler(
+                    key,
+                    max_queue_depth=self._max_queue_depth,
+                    exit_headroom=self._exit_headroom,
+                    max_queue_wait_seconds=self._max_queue_wait_seconds,
+                    idle_timeout_seconds=self._idle_timeout_seconds,
+                    on_idle=self._remove_idle_scheduler,
+                )
                 self._schedulers[key] = scheduler
         return await scheduler.submit(priority=priority, operation=operation)
 

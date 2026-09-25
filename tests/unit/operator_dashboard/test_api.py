@@ -284,3 +284,64 @@ def test_decision_slo_caches_response() -> None:
         assert calls == 1
 
 
+async def test_response_cache_bounded_entries_and_lock_reclamation() -> None:
+    cache = _ResponseCache(ttl_seconds=60.0, max_entries=10)
+    try:
+        # Load 30 unique keys
+        for i in range(30):
+            async def loader(idx=i):
+                return idx
+            res = await cache.get(f"key-{i}", loader)
+            assert res == i
+
+        # Entries must be bounded to max_entries=10
+        assert len(cache._entries) <= 10
+
+        # Now simulate 20 failing loaders with unique keys
+        async def failing_loader():
+            raise RuntimeError("not found")
+
+        for i in range(100, 120):
+            try:
+                await cache.get(f"fail-key-{i}", failing_loader)
+            except RuntimeError:
+                pass
+
+        # Locks must not leak for failed or non-cached keys!
+        active_keys = set(cache._entries) | set(cache._refresh_tasks)
+        assert set(cache._locks).issubset(active_keys)
+        assert len(cache._locks) <= len(cache._entries)
+    finally:
+        await cache.aclose()
+
+
+async def test_response_cache_refresh_concurrency_budget() -> None:
+    cache = _ResponseCache(ttl_seconds=0.01, max_entries=50, max_refresh_tasks=3)
+    try:
+        # Prime 10 keys
+        for i in range(10):
+            async def loader(idx=i):
+                return idx
+            await cache.get(f"budget-key-{i}", loader)
+
+        # Wait for them to expire into stale grace
+        await asyncio.sleep(0.02)
+
+        release_hang = asyncio.Event()
+
+        async def hanging_loader():
+            await release_hang.wait()
+            return 999
+
+        # Request all 10 keys with stale_while_revalidate
+        for i in range(10):
+            await cache.get(f"budget-key-{i}", hanging_loader, stale_while_revalidate_seconds=10.0)
+
+        # Background tasks must be capped at max_refresh_tasks=3
+        assert len(cache._refresh_tasks) <= 3
+        release_hang.set()
+    finally:
+        await cache.aclose()
+
+
+

@@ -87,3 +87,67 @@ def test_materializer_stages_and_flushes_to_parquet(tmp_path: Path) -> None:
     rows = pq.ParquetFile(parquet_files[0]).read().to_pylist()
     assert len(rows) == 1
     assert rows[0]["symbol"] == "BTCUSDT"
+
+
+def test_materializer_does_not_commit_unwritten_conflicting_revision(tmp_path: Path) -> None:
+    from dataclasses import replace
+    from decimal import Decimal
+
+    journal = ArchiveJournal(
+        tmp_path / "journal",
+        environment="research",
+        max_bytes=1024 * 1024,
+    )
+    sink = ParquetWindowSink(
+        tmp_path / "parquet",
+        window_seconds=15,
+        late_tolerance_seconds=0,
+    )
+    materializer = WindowMaterializer(sink=sink, journal=journal)
+
+    s1 = fixture_state("BTCUSDT", 0)
+    s2_conflict = replace(s1, close_price=Decimal("102"))
+    selection = SelectionSnapshot(
+        observed_at=s1.bucket_start,
+        symbols=(SelectedSymbol(symbol="BTCUSDT", reason="test"),),
+    )
+
+    # 1. Accept first revision (close=100)
+    b1 = _batch(s1, 1)
+    journal.accept(b1, selection, (s1,))
+
+    # 2. Accept conflicting revision with same key but different payload (close=102)
+    b2 = _batch(s2_conflict, 2)
+    journal.accept(b2, selection, (s2_conflict,))
+
+    pending = journal.pending_records()
+    assert len(pending) == 2
+
+    # Stage both
+    materializer.stage_record(pending[0])
+    append_res2 = materializer.stage_record(pending[1])
+    assert append_res2 is not None
+    assert append_res2.conflicting_rows == 1  # Rejected by sink due to same priority
+
+    # Flush all
+    flush_result = materializer.flush_all()
+
+    # The unwritten revision b2 must NOT be in committed_receipts
+    committed_seqs = {r.sequence for r in flush_result.committed_receipts}
+    assert committed_seqs == {1}
+    assert 2 not in committed_seqs
+
+    # Journal must not advance past sequence 1
+    assert journal.materialized_sequence == 1
+    # Unwritten record 2 must remain pending in journal
+    remaining_pending = journal.pending_records()
+    assert len(remaining_pending) == 1
+    assert remaining_pending[0].receipt.sequence == 2
+
+    # The parquet file must contain close=100
+    parquet_files = list(tmp_path.joinpath("parquet").rglob("*.parquet"))
+    assert len(parquet_files) == 1
+    rows = pq.ParquetFile(parquet_files[0]).read().to_pylist()
+    assert len(rows) == 1
+    assert rows[0]["close_price"] == "100"
+

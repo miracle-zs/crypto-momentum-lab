@@ -106,7 +106,7 @@ export function renderPerformance(data) {
     ? `${Number(marketData.market_delay_ms).toFixed(0)} ms`
     : "—";
   const marketSub = marketData.realtime_closure_delay_seconds != null
-    ? `闭桶交付 ${Number(marketData.realtime_closure_delay_seconds * 1000).toFixed(0)}ms · 完整100%`
+    ? `闭桶水位 ${Number(marketData.realtime_closure_delay_seconds * 1000).toFixed(0)}ms`
     : "行情接收中";
   const marketTone = marketData.market_delay_ms != null && marketData.market_delay_ms < 1000
     ? "pos"

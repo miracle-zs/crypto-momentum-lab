@@ -21,6 +21,8 @@ import json
 import os
 import shutil
 import string
+import threading
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -57,6 +59,15 @@ from crypto_momentum_lab.research_collector.models import (
 log = structlog.get_logger()
 
 _STATE_KEY = tuple[str, str, datetime]
+_VERSION_KEY = tuple[str, str, datetime, str]
+
+
+def state_payload_digest(row: dict[str, object]) -> str:
+    """Compute a stable SHA256 digest of non-metadata market state columns."""
+    keys = sorted(set(row) - _METADATA_COLUMNS)
+    items = tuple((k, str(row.get(k))) for k in keys)
+    return hashlib.sha256(repr(items).encode("utf-8")).hexdigest()
+
 _METADATA_COLUMNS = frozenset(
     {
         "selection_reason",
@@ -165,6 +176,7 @@ class SinkFlushResult:
     last_symbol: str | None
     files_written: int
     bytes_written: int
+    committed_version_keys: frozenset[_VERSION_KEY] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,6 +427,7 @@ class ParquetWindowSink:
         committed_rows = 0
         committed_sequences: set[int] = set()
         committed_state_keys: set[_STATE_KEY] = set()
+        committed_version_keys: set[_VERSION_KEY] = set()
         last_bucket_start: datetime | None = None
         last_symbol: str | None = None
         files_written = 0
@@ -436,7 +449,11 @@ class ParquetWindowSink:
             files_written += 1
             bytes_written += written
             for row in ordered_rows:
-                committed_state_keys.add(_row_key(row))
+                state_key = _row_key(row)
+                committed_state_keys.add(state_key)
+                committed_version_keys.add(
+                    (state_key[0], state_key[1], state_key[2], state_payload_digest(row))
+                )
                 sequence = row.get("hub_sequence")
                 if isinstance(sequence, int):
                     committed_sequences.add(sequence)
@@ -453,6 +470,7 @@ class ParquetWindowSink:
             committed_rows=committed_rows,
             committed_sequences=frozenset(committed_sequences),
             committed_state_keys=frozenset(committed_state_keys),
+            committed_version_keys=frozenset(committed_version_keys),
             last_bucket_start=last_bucket_start,
             last_symbol=last_symbol,
             files_written=files_written,
@@ -591,6 +609,9 @@ class CapacitySnapshot:
     state: CapacityState
     collector_bytes: int
     disk_free_bytes: int
+    observed_at: datetime | None = None
+    is_degraded: bool = False
+    degraded_reason: str | None = None
 
 
 class CapacityGuard:
@@ -605,6 +626,7 @@ class CapacityGuard:
         global_warning_free_bytes: int,
         global_pause_free_bytes: int,
         disk_usage_fn: Callable[[Path], Any] | None = None,
+        max_snapshot_age_seconds: float = 90.0,
     ) -> None:
         if soft_limit_bytes <= 0 or hard_limit_bytes <= soft_limit_bytes:
             raise ValueError("invalid collector capacity limits")
@@ -614,46 +636,125 @@ class CapacityGuard:
             or global_warning_free_bytes <= global_pause_free_bytes
         ):
             raise ValueError("invalid global capacity limits")
+        if max_snapshot_age_seconds <= 0:
+            raise ValueError("max_snapshot_age_seconds must be positive")
         self._root = root
         self._soft_limit_bytes = soft_limit_bytes
         self._hard_limit_bytes = hard_limit_bytes
         self._global_warning_free_bytes = global_warning_free_bytes
         self._global_pause_free_bytes = global_pause_free_bytes
         self._disk_usage_fn = disk_usage_fn or shutil.disk_usage
+        self._max_snapshot_age_seconds = max_snapshot_age_seconds
 
-    def snapshot(self) -> CapacitySnapshot:
-        collector_bytes = _directory_size(self._root)
-        usage = self._disk_usage_fn(self._root)
-        disk_free_bytes = (
-            getattr(usage, "free", usage)
-            if not isinstance(usage, int)
-            else usage
-        )
+        self._base_collector_bytes: int = 0
+        self._written_bytes_since_scan: int = 0
+        self._base_disk_free_bytes: int = 0
+        self._last_scan_monotonic: float = 0.0
+        self._last_scan_observed_at: datetime | None = None
+        self._last_snapshot: CapacitySnapshot | None = None
+        self._scan_lock = threading.Lock()
+
+    def _evaluate_state(
+        self,
+        collector_bytes: int,
+        disk_free_bytes: int,
+    ) -> CapacityState:
         if (
             collector_bytes >= self._hard_limit_bytes
             or disk_free_bytes <= self._global_pause_free_bytes
         ):
-            state = CapacityState.PAUSED
+            return CapacityState.PAUSED
         elif (
             collector_bytes >= self._soft_limit_bytes
             or disk_free_bytes < self._global_warning_free_bytes
         ):
-            state = CapacityState.WARNING
-        else:
-            state = CapacityState.HEALTHY
+            return CapacityState.WARNING
+        return CapacityState.HEALTHY
+
+    def scan(self) -> CapacitySnapshot:
+        """Perform a full directory walk and disk usage check (intended to run in a thread)."""
+        with self._scan_lock:
+            collector_bytes = _directory_size(self._root)
+            usage = self._disk_usage_fn(self._root)
+            disk_free_bytes = (
+                getattr(usage, "free", usage)
+                if not isinstance(usage, int)
+                else usage
+            )
+            now_dt = datetime.now(UTC)
+            now_mono = time.monotonic()
+            self._base_collector_bytes = collector_bytes
+            self._written_bytes_since_scan = 0
+            self._base_disk_free_bytes = disk_free_bytes
+            self._last_scan_monotonic = now_mono
+            self._last_scan_observed_at = now_dt
+
+            state = self._evaluate_state(collector_bytes, disk_free_bytes)
+            snapshot = CapacitySnapshot(
+                state=state,
+                collector_bytes=collector_bytes,
+                disk_free_bytes=disk_free_bytes,
+                observed_at=now_dt,
+                is_degraded=False,
+            )
+            self._last_snapshot = snapshot
+            return snapshot
+
+    def record_written_bytes(self, num_bytes: int) -> None:
+        """Incrementally track bytes written to avoid rescanning on every write."""
+        if num_bytes > 0:
+            self._written_bytes_since_scan += num_bytes
+
+    def current_snapshot(self, now: float | None = None) -> CapacitySnapshot:
+        """Fast non-blocking read of current capacity state based on cached baseline and writes."""
+        if self._last_snapshot is None:
+            return self.scan()
+        if now is None:
+            now = time.monotonic()
+        estimated_collector = self._base_collector_bytes + self._written_bytes_since_scan
+        estimated_disk_free = max(0, self._base_disk_free_bytes - self._written_bytes_since_scan)
+
+        state = self._evaluate_state(estimated_collector, estimated_disk_free)
+        age = now - self._last_scan_monotonic
+        is_degraded = False
+        degraded_reason: str | None = None
+
+        if age > self._max_snapshot_age_seconds:
+            is_degraded = True
+            degraded_reason = (
+                f"capacity snapshot expired ({age:.1f}s > {self._max_snapshot_age_seconds:.1f}s)"
+            )
+            if state is CapacityState.HEALTHY:
+                state = CapacityState.WARNING
+            # Hard degrade to PAUSED if critically expired (> 3x max_age)
+            if age > self._max_snapshot_age_seconds * 3.0:
+                state = CapacityState.PAUSED
+                degraded_reason = f"capacity snapshot critically expired ({age:.1f}s)"
+
         return CapacitySnapshot(
             state=state,
-            collector_bytes=collector_bytes,
-            disk_free_bytes=disk_free_bytes,
+            collector_bytes=estimated_collector,
+            disk_free_bytes=estimated_disk_free,
+            observed_at=self._last_scan_observed_at,
+            is_degraded=is_degraded,
+            degraded_reason=degraded_reason,
         )
 
-    def ensure_writable(self) -> CapacitySnapshot:
-        snapshot = self.snapshot()
+    def snapshot(self, *, force_scan: bool = False) -> CapacitySnapshot:
+        """Return the capacity snapshot; triggers scan if force_scan or not yet scanned."""
+        if force_scan or self._last_snapshot is None:
+            return self.scan()
+        return self.current_snapshot()
+
+    def ensure_writable(self, now: float | None = None) -> CapacitySnapshot:
+        """Fast check if collector is writable using the current cached snapshot."""
+        snapshot = self.current_snapshot(now=now)
         if snapshot.state is CapacityState.PAUSED:
+            reason = f": {snapshot.degraded_reason}" if snapshot.degraded_reason else ""
             raise CollectorPaused(
                 "research collector paused by storage guard: "
                 f"collector_bytes={snapshot.collector_bytes}, "
-                f"disk_free_bytes={snapshot.disk_free_bytes}"
+                f"disk_free_bytes={snapshot.disk_free_bytes}{reason}"
             )
         return snapshot
 

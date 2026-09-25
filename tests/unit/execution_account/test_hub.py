@@ -1118,3 +1118,71 @@ async def test_account_event_source_separate_startup_vs_disruption_budgets(
         await anext(events)
 
 
+def test_account_event_hub_bootstrap_message_caching() -> None:
+    snapshot_1 = _snapshot()
+    hub = AccountEventHub()
+    scope_primary = ("live", "primary")
+    scope_account_2 = ("live", "account-2")
+
+    # Publish snapshot for primary
+    hub.publish(
+        replace(
+            _event(),
+            environment="live",
+            account_label="primary",
+            snapshot_kind="full",
+            account_snapshot=snapshot_1,
+            account_state=ExecutionAccountStatus.READY_READONLY,
+        )
+    )
+
+    # First call: computes and caches
+    msg1 = hub._bootstrap_message(scope_primary)
+    assert msg1 is not None
+
+    # Second call (e.g. for a second slow consumer): returns cached string identically
+    msg2 = hub._bootstrap_message(scope_primary)
+    assert msg2 is msg1
+
+    # Publish snapshot for account-2
+    snapshot_acc2 = replace(
+        snapshot_1,
+        config=replace(snapshot_1.config, account_label="account-2"),
+    )
+    hub.publish(
+        replace(
+            _event(),
+            environment="live",
+            account_label="account-2",
+            snapshot_kind="full",
+            account_snapshot=snapshot_acc2,
+            account_state=ExecutionAccountStatus.READY_READONLY,
+        )
+    )
+    msg_acc2 = hub._bootstrap_message(scope_account_2)
+    assert msg_acc2 is not None
+    assert msg_acc2 != msg1  # Isolated per scope
+
+    # Publish an update for primary
+    snapshot_2 = replace(
+        snapshot_1,
+        balances=(replace(snapshot_1.balances[0], wallet_balance=Decimal("999")),),
+    )
+    hub.publish(
+        replace(
+            _event(),
+            environment="live",
+            account_label="primary",
+            snapshot_kind="full",
+            account_snapshot=snapshot_2,
+            account_state=ExecutionAccountStatus.READY_READONLY,
+        )
+    )
+    msg3 = hub._bootstrap_message(scope_primary)
+    assert msg3 is not None
+    assert msg3 != msg1
+    # Subsequent call reuses the new cached message
+    assert hub._bootstrap_message(scope_primary) is msg3
+
+
+

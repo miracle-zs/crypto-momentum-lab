@@ -323,6 +323,7 @@ class BinanceUsdMPrivateReadClient:
             trust_env=False,
         )
         self._endpoint_metrics: dict[str, _EndpointMetric] = {}
+        self._incomplete_fill_symbols: frozenset[str] = frozenset()
 
     @property
     def endpoint_metrics(self) -> dict[str, _EndpointMetric]:
@@ -478,55 +479,94 @@ class BinanceUsdMPrivateReadClient:
             for item in _require_sequence_of_mappings(payload)
         )
 
+    @property
+    def incomplete_fill_symbols(self) -> frozenset[str]:
+        return self._incomplete_fill_symbols
+
     async def fetch_recent_fills(
         self,
         symbols: tuple[str, ...] = (),
         *,
         from_id_by_symbol: Mapping[str, int] | None = None,
         start_time_by_symbol: Mapping[str, int] | None = None,
+        max_pages_per_symbol: int = 10,
     ) -> tuple[AccountFillEvent, ...]:
         normalized_symbols = _normalize_symbols(symbols)
         normalized_from_ids = _normalize_fill_cursors(from_id_by_symbol)
         normalized_start_times = _normalize_fill_cursors(start_time_by_symbol)
         fills: dict[tuple[str, str], AccountFillEvent] = {}
+        incomplete_symbols: set[str] = set()
         for symbol in normalized_symbols:
             if symbol in normalized_from_ids and symbol in normalized_start_times:
                 raise ValueError(
                     f"from_id and start_time cannot both be set for {symbol}"
                 )
-            params: dict[str, str | int | float | bool | None] = {
-                "symbol": symbol,
-                "limit": 1000,
-            }
-            if symbol in normalized_from_ids:
-                params["fromId"] = normalized_from_ids[symbol]
-            elif symbol in normalized_start_times:
-                params["startTime"] = normalized_start_times[symbol]
-            payload = await self._signed_get(
-                "/fapi/v1/userTrades",
-                params,
-            )
-            for item in _require_sequence_of_mappings(payload):
-                trade_id = str(item.get("id", ""))
-                fill = AccountFillEvent(
-                    environment=self._environment,
-                    account_label=self._account_label,
-                    symbol=str(item.get("symbol", symbol)),
-                    trade_id=trade_id,
-                    order_id=str(item.get("orderId", "")),
-                    side=str(item.get("side", "")),
-                    price=_decimal(item.get("price", "0")),
-                    quantity=_decimal(item.get("qty", "0")),
-                    realized_pnl=_decimal(item.get("realizedPnl", "0")),
-                    fee=_decimal(item.get("commission", "0")),
-                    fee_asset=str(item.get("commissionAsset", "")),
-                    trade_at=datetime.fromtimestamp(
-                        int(str(item.get("time", 0))) / 1000,
-                        tz=UTC,
-                    ),
-                    raw_payload=_json_mapping(item),
+            current_from_id = normalized_from_ids.get(symbol)
+            current_start_time = normalized_start_times.get(symbol)
+            reached_short_page = False
+            for _ in range(max_pages_per_symbol):
+                params: dict[str, str | int | float | bool | None] = {
+                    "symbol": symbol,
+                    "limit": 1000,
+                }
+                if current_from_id is not None:
+                    params["fromId"] = current_from_id
+                elif current_start_time is not None:
+                    params["startTime"] = current_start_time
+
+                payload = await self._signed_get(
+                    "/fapi/v1/userTrades",
+                    params,
                 )
-                fills[(fill.symbol, fill.trade_id)] = fill
+                items = _require_sequence_of_mappings(payload)
+                if not items:
+                    reached_short_page = True
+                    break
+
+                max_seen_trade_id: int | None = None
+                for item in items:
+                    trade_id = str(item.get("id", ""))
+                    if trade_id.isdigit():
+                        tid_int = int(trade_id)
+                        if max_seen_trade_id is None or tid_int > max_seen_trade_id:
+                            max_seen_trade_id = tid_int
+                    fill = AccountFillEvent(
+                        environment=self._environment,
+                        account_label=self._account_label,
+                        symbol=str(item.get("symbol", symbol)),
+                        trade_id=trade_id,
+                        order_id=str(item.get("orderId", "")),
+                        side=str(item.get("side", "")),
+                        price=_decimal(item.get("price", "0")),
+                        quantity=_decimal(item.get("qty", "0")),
+                        realized_pnl=_decimal(item.get("realizedPnl", "0")),
+                        fee=_decimal(item.get("commission", "0")),
+                        fee_asset=str(item.get("commissionAsset", "")),
+                        trade_at=datetime.fromtimestamp(
+                            int(str(item.get("time", 0))) / 1000,
+                            tz=UTC,
+                        ),
+                        raw_payload=_json_mapping(item),
+                    )
+                    fills[(fill.symbol, fill.trade_id)] = fill
+
+                # If the returned batch is less than limit, symbol coverage is complete
+                if len(items) < 1000:
+                    reached_short_page = True
+                    break
+
+                # Advance cursor for next page
+                if max_seen_trade_id is not None:
+                    current_from_id = max_seen_trade_id + 1
+                    current_start_time = None
+                else:
+                    reached_short_page = True
+                    break
+
+            if not reached_short_page:
+                incomplete_symbols.add(symbol)
+
+        self._incomplete_fill_symbols = frozenset(incomplete_symbols)
         return tuple(
             sorted(
                 fills.values(),

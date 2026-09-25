@@ -242,12 +242,6 @@ class RuntimeMarketState15sRow(Base):
             "symbol",
         ),
         Index(
-            "ix_runtime_market_states_15s_symbol_time",
-            "environment",
-            "symbol",
-            "bucket_start",
-        ),
-        Index(
             "ix_runtime_market_states_15s_created",
             "environment",
             "created_at",

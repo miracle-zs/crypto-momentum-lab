@@ -16,15 +16,18 @@ from pathlib import Path
 
 import structlog
 
+from crypto_momentum_lab.persistence.parquet.datasets import market_state_15s_row
 from crypto_momentum_lab.research_collector.journal import ArchiveJournal
 from crypto_momentum_lab.research_collector.models import (
     DurableReceipt,
     JournalRecord,
 )
 from crypto_momentum_lab.research_collector.storage import (
+    _VERSION_KEY,
     ParquetWindowSink,
     SinkAppendResult,
     SinkFlushResult,
+    state_payload_digest,
 )
 
 log = structlog.get_logger()
@@ -57,8 +60,8 @@ class WindowMaterializer:
     ) -> None:
         self._sink = sink
         self._journal = journal
-        self._staged_records: dict[Path, tuple[DurableReceipt, set[_STATE_KEY]]] = {}
-        self._covered_keys: dict[Path, set[_STATE_KEY]] = {}
+        self._staged_records: dict[Path, tuple[DurableReceipt, set[_VERSION_KEY]]] = {}
+        self._covered_keys: dict[Path, set[_VERSION_KEY]] = {}
         self._empty_receipts: list[DurableReceipt] = []
         self._persisted_rows = 0
         self._duplicate_rows = 0
@@ -92,7 +95,12 @@ class WindowMaterializer:
         self._duplicate_rows += append_result.duplicate_rows
 
         record_keys = {
-            (s.environment, s.symbol, s.bucket_start)
+            (
+                s.environment,
+                s.symbol,
+                s.bucket_start,
+                state_payload_digest(market_state_15s_row(s)),
+            )
             for s in record.collection_batch.states
         }
         self._staged_records[record.path] = (record.receipt, record_keys)
@@ -124,7 +132,7 @@ class WindowMaterializer:
         flush_all: bool,
     ) -> MaterializerFlushResult:
         self._persisted_rows += sink_result.committed_rows
-        committed_keys = sink_result.committed_state_keys
+        committed_keys = sink_result.committed_version_keys
 
         ready_receipts: list[DurableReceipt] = []
 
