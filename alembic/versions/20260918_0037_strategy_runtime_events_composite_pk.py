@@ -52,6 +52,22 @@ def downgrade() -> None:
                 "non-partitioned table or performing roll-forward."
             )
 
+        # For non-partitioned tables, verify that no duplicate event_id rows exist
+        # before attempting to drop the composite PK and restore the single-column PK.
+        dup_count = bind.execute(
+            sa.text(
+                "SELECT count(*) FROM ("
+                "  SELECT event_id FROM strategy_runtime_events GROUP BY event_id HAVING count(*) > 1"
+                ") AS dups"
+            )
+        ).scalar() or 0
+        if dup_count > 0:
+            raise RuntimeError(
+                f"Cannot downgrade primary key on 'strategy_runtime_events': "
+                f"found {dup_count} duplicate event_id values. "
+                "Restoring single-column primary key requires unique event_id values."
+            )
+
     inspector = sa.inspect(bind)
     pk_constraint = inspector.get_pk_constraint("strategy_runtime_events")
     constrained_columns = pk_constraint.get("constrained_columns", [])

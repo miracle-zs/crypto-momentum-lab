@@ -472,6 +472,8 @@ test("risk renderer separates confirmed pending orders from uncertain orders", (
   assert.match(html, /无不确定订单/);
   assert.match(html, /risk-order-grid-single/);
   assert.match(html, /先完成交易所对账，再决定恢复执行或人工处理/);
+  assert.match(html, /chip-source/);
+  assert.match(html, /数据年龄/);
 });
 
 test("strategy section owns paper-account rendering state", () => {

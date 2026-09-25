@@ -117,6 +117,7 @@ class _KeyCommandScheduler:
         operation: Callable[[], Awaitable[Any]],
     ) -> Any:
         future = asyncio.get_running_loop().create_future()
+        started = asyncio.Event()
         async with self._state_lock:
             if self._closed:
                 raise RuntimeError("order command scheduler is closed")
@@ -142,11 +143,27 @@ class _KeyCommandScheduler:
             self._sequence += 1
             enqueued_at = time.monotonic()
             try:
-                self._queue.put_nowait((priority, sequence, operation, future, enqueued_at))
+                self._queue.put_nowait((priority, sequence, operation, future, enqueued_at, started))
             except asyncio.QueueFull:
                 raise OrderPreSubmissionError(
                     f"order scheduler queue full for key {self._key.symbol}:{self._key.position_side.value}"
                 )
+        if not is_exit and self._max_queue_wait_seconds > 0:
+            waiter = asyncio.create_task(started.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    [waiter, future],
+                    timeout=self._max_queue_wait_seconds,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    future.cancel()
+                    raise OrderPreSubmissionError(
+                        f"order command waited {self._max_queue_wait_seconds:.2f}s in queue exceeding limit {self._max_queue_wait_seconds:.2f}s"
+                    )
+            finally:
+                if not waiter.done():
+                    waiter.cancel()
         return await future
 
     async def close(self) -> None:
@@ -159,13 +176,13 @@ class _KeyCommandScheduler:
                         self._queue.task_done()
                     except asyncio.QueueEmpty:
                         break
-                    _priority, _sequence, _operation, future, _enqueued_at = item
+                    _priority, _sequence, _operation, future, _enqueued_at, *rest = item
                     if future is not None and not future.done():
                         future.set_exception(
                             RuntimeError("order command scheduler is closed")
                         )
                 try:
-                    self._queue.put_nowait((2**31 - 1, self._sequence, None, None, 0.0))
+                    self._queue.put_nowait((2**31 - 1, self._sequence, None, None, 0.0, None))
                 except asyncio.QueueFull:
                     pass
         if not self._worker.done():
@@ -196,7 +213,7 @@ class _KeyCommandScheduler:
             except asyncio.CancelledError:
                 return
 
-            _priority, _sequence, operation, future, enqueued_at = item
+            _priority, _sequence, operation, future, enqueued_at, started = item
             try:
                 if operation is None:
                     return
@@ -218,6 +235,8 @@ class _KeyCommandScheduler:
                         )
                     continue
 
+                if started is not None:
+                    started.set()
                 try:
                     result = await operation()
                 except BaseException as error:
@@ -375,12 +394,11 @@ class OrderExecutionCoordinator:
         return await self.submit(plan, prepared_submission=prepared_submission)
 
     async def cancel_order(self, plan: OrderExecutionPlan) -> OrderExecutionResult:
-        priority = self._EXIT_PRIORITY if plan.reduce_only else self._ENTRY_PRIORITY
         return cast(
             OrderExecutionResult,
             await self._schedule(
                 plan,
-                priority=priority,
+                priority=self._EXIT_PRIORITY,
                 operation=lambda: self._backend.cancel_order(plan),
             ),
         )

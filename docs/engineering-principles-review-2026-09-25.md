@@ -330,3 +330,40 @@ Python测试有 Starlette/httpx 弃用警告，WebSocket E2E另有 ConnectionClo
 重要设计决策中，“行情版本和物化凭证”“业务readiness权威来源”“持仓身份及研究复用边界”“分区迁移兼容”适合长期ADR；具体枚举修复、短期缓存参数和单个渲染文案用测试/变更说明即可，不需要机械新增ADR。每个暂存兼容路径写明原因、适用数据版本和移除条件。
 
 这份报告记录发现及建议，不代表上述缺陷已修复。后续每项应以对应反例测试、迁移/恢复证据和部署版本完成闭环。
+
+## 8. 修复提交复核（2026-09-25）
+
+复核对象：`e79fbce4dad6d732a76fbfb056c28ac6786d5556..9d81b0c5bff6e118a471e3700ad18e35132c163f`。HEAD 提交说明称处理了 F01–F14；本次按当前代码、测试和隔离 PostgreSQL 复核，结论是**没有全部改完**。这里不对修复者身份作推断。
+
+| 编号 | 复核状态 | 复核结论 |
+| --- | --- | --- |
+| F01 | 部分完成 | 增加了内容版本键和落盘 receipt 核验；同源同优先级的冲突仍保留旧行，incoming receipt 因找不到对应版本而可能一直 pending。digest 又排除了 `source_kind` 等来源字段，来源修订不能由版本键区分。 |
+| F02 | 未完成 | 加入账户 freshness、lease、strategy 检查；但 readiness 只把 `FRESH` 服务映射成 READY，overview 又总包含 `database=READY`，所以 `streams_all_ready` 会被数据库项恒定挡住，正常状态也不能进入 `FULLY_TRADEABLE`。 |
+| F03 | 部分完成 | active halt 的无效枚举引用已修；健康检查或数据库调用异常仍可能从 readiness 冒泡，而不是全部映射为结构化降级状态。 |
+| F04 | 部分完成 | LIVE 路径增加了依赖加载检查和主动轮询，但相关视图仍缺少完整的数据年龄与来源状态表达。 |
+| F05 | 未完成 | `/api/readiness` 关闭了 stale-while-revalidate；overview、账户及风险读接口仍可在 grace 窗口内交付旧缓存，响应没有明确的 `STALE` 标记。 |
+| F06 | 未完成 | 成交分页和 `SYNCING/catching_up` 已实现；daemon 仍只接受 `READY_READONLY`，超页预算时会关闭事件接收并请求 pipeline recovery。Dashboard 也把非 READY_READONLY 映射成 HALTED、关闭 exit gate。 |
+| F07/F08 | 当前提交未包含 | `local_optimization/` 被 `.gitignore` 整体排除。工作区文件虽有 Decimal 和方向处理改动，但 `reconciliation.to_decimal("not-a-number")` 实测仍返回 0；LONG 与 SHORT 在 FIFO 配对时按环境/账户/币种合组，没有把 `position_side` 纳入分组。最小复现将 SHORT 平仓配到了 LONG 入场，输出方向为 BUY。 |
+| F09 | 部分完成 | 远端数据库和常见生产库名会被拒绝；本地测试端口 `54329` 会放行任意库名（包括 `cml`）。集成测试同步 URL fixture 也没有同等 guard，虽然当前只读迁移检查使用它。 |
+| F10 | 部分完成 | 全目录扫描已移出高频路径并定期刷新；增量字节只记录 journal 写入，Parquet 新落盘在下一次全量扫描前未计入。容量读数因此会短时低估。单测退出还出现一次 materializer worker pending-task 诊断。 |
+| F11 | 大体完成 | 缓存条目、后台刷新任务和锁增加了上限及清理；后台刷新异常会记入日志。仍应确认 stale 响应如何向操作人员标识（见 F05）。 |
+| F12 | 未完成 | 空库 `alembic upgrade head` 成功，但对该空库执行 `alembic check` 仍以 exit 255 失败：检测到表达式索引定义差异、未由模型描述的账户/对账索引，以及唯一约束命名差异。迁移可执行不代表模型与 schema 契约已对齐。 |
+| F13 | 部分完成 | 分区表 downgrade 会明确拒绝；非分区表回退仍可能因重复 `event_id` 无法重建唯一主键。 |
+| F14 | 完成 | 前端移除了无依据的“完整100%”表述；前端测试 34 项通过。 |
+
+复核还发现订单调度器的新边界问题：`cancel_order()` 对非 `reduce_only` 计划使用 entry priority，因此 entry 队列达到容量门槛时，取消仍打开的普通入场单也会被拒绝；队列等待超时只在 worker 取出命令后检查，前序 backend 操作挂起时，后续调用方仍会无限等待。两项都应加入拥塞/取消测试。
+
+### 8.1 本次验证
+
+| 验证 | 结果 | 解释 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1608 passed、4 skipped、1 deselected | 4 项需要本地 loopback socket 权限，live 测试显式排除；首轮有一个行情序列测试短暂失败，单测重跑和随后全量重跑均通过。通过不覆盖上述未测边界。 |
+| `pytest tests/integration -m 'not live' -q --tb=short` | 72 passed | 使用本次新建的本地隔离 PostgreSQL 库，非生产库。 |
+| 隔离库 `alembic upgrade head` | 成功到 `20260925_0040` | 空库迁移路径可执行。 |
+| 隔离库 `alembic check` | **失败，exit 255** | 存在上表所述的索引/约束 metadata drift。 |
+| `pytest local_optimization/tests -q --tb=short` | 241 passed | 目录被 Git 忽略，结果只说明当前工作区文件；这些实现和测试不在上述修复提交里。 |
+| `node --test tests/frontend/*.test.mjs` | 34 passed | 验证当前 dashboard 静态资源测试。 |
+
+单元测试全量退出时另打印 `Task was destroyed but it is pending!`，指向 `ResearchStateCollector._materializer_worker()`。测试退出码为 0，但该异步清理诊断说明关闭路径仍应单独验证取消、等待和状态保存。
+
+本次没有修改应用代码、没有连接真实交易账户或下单。服务器没有在本次复核中重新读取；本文上一轮服务器采样记录的 SHA 仍为 `86a89a9...`，不能据此确认服务器已部署 `9d81b0c`。因此，代码修复和线上部署状态需分开确认。

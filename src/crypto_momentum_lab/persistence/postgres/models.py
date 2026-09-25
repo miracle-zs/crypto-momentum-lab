@@ -14,6 +14,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     desc,
     text,
 )
@@ -665,7 +666,7 @@ class AccountBalanceSnapshotRow(Base):
             "environment",
             "account_label",
             "asset",
-            text("(date_trunc('hour', observed_at AT TIME ZONE 'UTC'))"),
+            text("date_trunc('hour'::text, (observed_at AT TIME ZONE 'UTC'::text))"),
             desc(observed_at),
         ),
         Index(
@@ -815,6 +816,15 @@ class AccountConfigSnapshotRow(Base):
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     raw_payload: Mapped[dict[str, object]] = mapped_column(JSONB)
 
+    __table_args__ = (
+        Index(
+            "ix_account_config_account_observed",
+            "environment",
+            "account_label",
+            "observed_at",
+        ),
+    )
+
 
 class AccountReconciliationRunRow(Base):
     __tablename__ = "account_reconciliation_runs"
@@ -838,6 +848,21 @@ class AccountReconciliationRunRow(Base):
             "account_label",
             "status",
             "observed_at",
+        ),
+        Index(
+            "ix_account_reconciliation_account_observed",
+            "environment",
+            "account_label",
+            "observed_at",
+        ),
+        Index(
+            "ix_account_reconciliation_active_discovery",
+            "environment",
+            "account_label",
+            desc(observed_at),
+            desc("reconciliation_id"),
+            postgresql_include=["position_count"],
+            postgresql_where=text("status = 'ready'"),
         ),
     )
 
@@ -1056,15 +1081,16 @@ class ExitEpisodeReservationRow(Base):
     intent_id: Mapped[str] = mapped_column(
         String(128),
         ForeignKey("order_intents.intent_id", ondelete="CASCADE"),
-        unique=True,
     )
-    client_order_id: Mapped[str] = mapped_column(String(36), unique=True)
+    client_order_id: Mapped[str] = mapped_column(String(36))
     active: Mapped[bool] = mapped_column(Boolean)
     state: Mapped[str] = mapped_column(String(48))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
+        UniqueConstraint("intent_id", name="uq_exit_episode_intent"),
+        UniqueConstraint("client_order_id", name="uq_exit_episode_client_order"),
         Index(
             "ix_exit_episode_reservations_active",
             "environment",

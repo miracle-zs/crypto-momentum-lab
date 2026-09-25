@@ -5,11 +5,12 @@ import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal, Protocol, TypeVar, cast
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -60,7 +61,16 @@ _PERFORMANCE_QUERY_TIMEOUT_SECONDS = 10.0
 _T = TypeVar("_T")
 
 
-logger = logging.getLogger(__name__)
+_cache_status_context: ContextVar[dict[str, str]] = ContextVar("cache_status_context")
+
+
+def _set_cache_status(status: str) -> None:
+    try:
+        ctx = _cache_status_context.get()
+        ctx["status"] = status
+    except LookupError:
+        pass
+
 
 
 class _ResponseCache:
@@ -130,6 +140,7 @@ class _ResponseCache:
         entry = self._entries.get(key)
         if entry is not None:
             if entry[0] > now:
+                _set_cache_status("HIT")
                 return cast(_T, entry[1])
             if entry[0] + stale_while_revalidate_seconds > now:
                 self._schedule_refresh(
@@ -137,6 +148,7 @@ class _ResponseCache:
                     loader,
                     ttl_seconds=ttl_seconds,
                 )
+                _set_cache_status("STALE")
                 return cast(_T, entry[1])
         lock = self._locks.setdefault(key, asyncio.Lock())
         try:
@@ -144,8 +156,10 @@ class _ResponseCache:
                 now = time.monotonic()
                 entry = self._entries.get(key)
                 if entry is not None and entry[0] > now:
+                    _set_cache_status("HIT")
                     return cast(_T, entry[1])
                 value = await loader()
+                _set_cache_status("MISS")
                 ttl = self._ttl_seconds if ttl_seconds is None else ttl_seconds
                 if ttl <= 0:
                     raise ValueError("ttl_seconds must be positive")
@@ -365,6 +379,20 @@ def create_dashboard_app(
         lifespan=lifespan,
     )
     dashboard.add_middleware(GZipMiddleware, minimum_size=1024)
+
+    @dashboard.middleware("http")
+    async def add_cache_status_header(request: Request, call_next):
+        state = {"status": ""}
+        token = _cache_status_context.set(state)
+        try:
+            response = await call_next(request)
+            status = state.get("status")
+            if status:
+                response.headers["X-Cache-Status"] = status
+            return response
+        finally:
+            _cache_status_context.reset(token)
+
     dashboard.mount("/static", _CachedStaticFiles(directory=STATIC_DIR), name="static")
     response_cache = _ResponseCache(_PAPER_CACHE_TTL_SECONDS)
 

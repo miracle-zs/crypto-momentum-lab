@@ -102,11 +102,11 @@ def live_account_status(
     if observed_at is not None and now is not None:
         if (now - observed_at).total_seconds() > max_age_seconds:
             return OperationalStatus.STALE
-    return (
-        OperationalStatus.READY
-        if state == "ready_readonly"
-        else OperationalStatus.HALTED
-    )
+    if state == "ready_readonly":
+        return OperationalStatus.READY
+    if state == "syncing":
+        return OperationalStatus.DEGRADED
+    return OperationalStatus.HALTED
 
 
 def live_account_fleet_status(
@@ -221,15 +221,39 @@ class OverviewQueries:
         self._research_collector_root = research_collector_root
 
     async def health(self) -> dict[str, str]:
-        async with self._session_factory() as session:
-            await session.execute(text("SELECT 1"))
-        return {"app_status": "UP", "database_status": "UP"}
+        try:
+            async with self._session_factory() as session:
+                await session.execute(text("SELECT 1"))
+            return {"app_status": "UP", "database_status": "UP"}
+        except Exception:
+            return {"app_status": "UP", "database_status": "DOWN"}
 
     async def readiness(self) -> SystemReadinessResponse:
         now = self._clock()
-        liveness = await self.health()
-        accounts_resp = await self.live_accounts()
-        overview_resp = await self.overview()
+        try:
+            liveness = await self.health()
+            accounts_resp = await self.live_accounts()
+            overview_resp = await self.overview()
+        except Exception as exc:
+            return SystemReadinessResponse(
+                status=OperationalStatus.DEGRADED,
+                observed_at=now,
+                liveness={"app_status": "UP", "database_status": "DOWN"},
+                tradeability=TradeabilityDetailResponse(
+                    mode="HALTED",
+                    entry_gate_open=False,
+                    entry_gate_reason=f"readiness_query_failed: {exc}",
+                    exit_gate_open=False,
+                    exit_gate_reason=f"readiness_query_failed: {exc}",
+                    unmanaged_risk_clear=False,
+                    halt_active=True,
+                ),
+                stream_readiness=StreamReadinessDetailResponse(
+                    overall="DOWN",
+                    streams={},
+                ),
+                accounts=[],
+            )
 
         has_halt = overview_resp.active_halt_count > 0 or any(
             a.status == OperationalStatus.HALTED for a in accounts_resp.accounts
@@ -238,8 +262,12 @@ class OverviewQueries:
 
         streams_dict: dict[str, str] = {}
         for s in overview_resp.services:
+            if s.name == "database":
+                continue
             streams_dict[s.name] = (
-                "READY" if s.status == OperationalStatus.FRESH else "RECOVERING"
+                "READY"
+                if s.status in (OperationalStatus.FRESH, OperationalStatus.READY, OperationalStatus.LIVE)
+                else "RECOVERING"
             )
         streams_all_ready = bool(
             streams_dict and all(v == "READY" for v in streams_dict.values())

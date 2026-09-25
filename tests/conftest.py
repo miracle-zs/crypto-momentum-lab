@@ -190,12 +190,11 @@ def assert_safe_test_database_url(url: str) -> None:
         marker in database_name
         for marker in ("test", "review", "temp", "ci")
     )
-    is_local_docker_test_port = port == 54329
 
-    if not (is_test_named or is_local_docker_test_port):
+    if not is_test_named:
         raise RuntimeError(
             f"SECURITY: Target database '{database_name}' on port {port} is not recognized as a disposable test database. "
-            "Database name must contain 'test', 'review', or run on local test port 54329."
+            "Database name must contain 'test', 'review', 'temp', or 'ci'."
         )
 
 
@@ -203,7 +202,7 @@ def assert_safe_test_database_url(url: str) -> None:
 def async_database_url() -> str:
     url = os.environ.get(
         "CML_TEST_ASYNC_DATABASE_URL",
-        "postgresql+asyncpg://cml:cml@localhost:54329/cml",
+        "postgresql+asyncpg://cml:cml@localhost:54329/cml_test",
     )
     assert_safe_test_database_url(url)
     return url

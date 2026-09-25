@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>多空动量策略 - 批次开单并发限制 6 根权益曲线对比</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    body {
+      background-color: #0b0f19;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    .glass-card {
+      background: rgba(17, 24, 39, 0.75);
+      border: 1px solid rgba(55, 65, 81, 0.5);
+      backdrop-filter: blur(12px);
+      border-radius: 12px;
+    }
+    .glow-blue { box-shadow: 0 0 15px rgba(59, 130, 246, 0.15); }
+    .glow-orange { box-shadow: 0 0 15px rgba(249, 115, 22, 0.15); }
+    .badge-primary { background: rgba(37, 99, 235, 0.2); color: #93c5fd; border: 1px solid rgba(59, 130, 246, 0.3); }
+    .badge-acc02 { background: rgba(234, 88, 12, 0.2); color: #fdba74; border: 1px solid rgba(249, 115, 22, 0.3); }
+    /* Custom scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0b0f19; }
+    ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+  </style>
+</head>
+<body class="p-4 md:p-8 max-w-7xl mx-auto space-y-6">
+
+  <!-- Header -->
+  <header class="glass-card p-6 border-l-4 border-indigo-500">
+    <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div>
+        <div class="flex items-center gap-3">
+          <span class="px-2.5 py-1 text-xs font-semibold rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">全样本历史回放 (2026.09.03 - 09.19)</span>
+          <span class="px-2.5 py-1 text-xs font-semibold rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">起始资金 500.00 USDT</span>
+        </div>
+        <h1 class="text-2xl md:text-3xl font-bold mt-2 text-white tracking-tight">同一 Symbol 批次开单并发限制 · 6 根权益走势对比</h1>
+        <p class="text-gray-400 text-sm mt-1">评估实盘两套基准参数在「不限制 / 最多2单 / 限制1单」下的收益能力、回撤深度与风控边界</p>
+      </div>
+      <div class="text-right text-xs text-gray-400 space-y-1">
+        <div>数据覆盖: 16.5 天 (501 币种, 293万行高频订单流)</div>
+        <div>名义本金: 100 USDT / 单 (5x 杠杆, 占用保证金 20 USDT)</div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Control Bar & View Toggles -->
+  <div class="glass-card p-4 flex flex-wrap items-center justify-between gap-4">
+    <!-- Preset Filters -->
+    <div class="flex flex-wrap items-center gap-2 text-xs">
+      <span class="text-gray-400 font-medium">快速预设:</span>
+      <button onclick="setPreset('all')" class="px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700 font-medium transition">全显 (6根)</button>
+      <button onclick="setPreset('set1')" class="px-3 py-1.5 rounded bg-blue-900/40 hover:bg-blue-800/50 text-blue-300 border border-blue-700/50 font-medium transition">仅 Set 1 (Primary)</button>
+      <button onclick="setPreset('set2')" class="px-3 py-1.5 rounded bg-amber-900/40 hover:bg-amber-800/50 text-amber-300 border border-amber-700/50 font-medium transition">仅 Set 2 (acc02)</button>
+      <button onclick="setPreset('max2')" class="px-3 py-1.5 rounded bg-emerald-900/40 hover:bg-emerald-800/50 text-emerald-300 border border-emerald-700/50 font-medium transition">仅对比「最多2单」</button>
+      <button onclick="setPreset('max1')" class="px-3 py-1.5 rounded bg-purple-900/40 hover:bg-purple-800/50 text-purple-300 border border-purple-700/50 font-medium transition">仅对比「只能1单」</button>
+    </div>
+
+    <!-- Chart Metric Mode -->
+    <div class="flex items-center gap-2 text-xs">
+      <span class="text-gray-400 font-medium">视图维度:</span>
+      <div class="inline-flex rounded-md shadow-sm" role="group">
+        <button type="button" id="btn-mode-equity" onclick="switchMetricMode('equity')" class="px-3 py-1.5 text-xs font-medium rounded-l-lg bg-indigo-600 text-white border border-indigo-500">累计净值 ($)</button>
+        <button type="button" id="btn-mode-drawdown" onclick="switchMetricMode('drawdown')" class="px-3 py-1.5 text-xs font-medium bg-gray-800 text-gray-300 hover:bg-gray-700 border border-gray-700">回撤深度 (%)</button>
+        <button type="button" id="btn-mode-margin" onclick="switchMetricMode('margin')" class="px-3 py-1.5 text-xs font-medium rounded-r-lg bg-gray-800 text-gray-300 hover:bg-gray-700 border border-gray-700">在持保证金 ($)</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Canvas Chart Card -->
+  <div class="glass-card p-4 md:p-6 space-y-4">
+    <!-- Interactive Legend Checkboxes -->
+    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 text-xs select-none">
+      <div id="legend-container" class="contents"></div>
+    </div>
+
+    <!-- Canvas Wrapper with Tooltip Popover -->
+    <div class="relative w-full" style="height: 480px;">
+      <canvas id="mainChart" class="w-full h-full block rounded"></canvas>
+      
+      <!-- Hover Crosshair Tooltip -->
+      <div id="chartTooltip" class="absolute pointer-events-none hidden glass-card p-3 shadow-2xl border border-gray-600 text-xs z-30 transition-opacity duration-75" style="min-width: 240px;">
+        <div id="tooltipTime" class="font-bold text-gray-300 border-b border-gray-700 pb-1.5 mb-2">--</div>
+        <div id="tooltipValues" class="space-y-1"></div>
+      </div>
+    </div>
+
+    <div class="flex items-center justify-between text-xs text-gray-500 pt-2 border-t border-gray-800">
+      <span>💡 交互说明: 鼠标悬停图表可触发十字光标与高精度净值悬浮卡；点击上方图例复选框可单独显示/隐藏曲线。</span>
+      <span>时间坐标: 北京时间 (UTC+8)</span>
+    </div>
+  </div>
+
+  <!-- Comprehensive KPI Comparison Scorecard -->
+  <div class="glass-card p-6 space-y-4">
+    <div class="flex items-center justify-between">
+      <h2 class="text-lg font-bold text-white flex items-center gap-2">
+        <span class="w-2.5 h-2.5 rounded-full bg-indigo-500"></span>
+        6 组方案核心绩效与风控指标对比表 (全样本回放)
+      </h2>
+      <span class="text-xs text-gray-400">初始本金 500U · 杠杆 5x</span>
+    </div>
+
+    <div class="overflow-x-auto">
+      <table class="w-full text-left text-xs border-collapse">
+        <thead>
+          <tr class="border-b border-gray-800 text-gray-400 uppercase tracking-wider bg-gray-900/50">
+            <th class="p-3">方案名称 / 基准参数</th>
+            <th class="p-3">并发限制</th>
+            <th class="p-3 text-right">成交 / 拒单</th>
+            <th class="p-3 text-right">胜率</th>
+            <th class="p-3 text-right">最终权益</th>
+            <th class="p-3 text-right">净利润</th>
+            <th class="p-3 text-right">净收益率</th>
+            <th class="p-3 text-right">盈亏比 (PF)</th>
+            <th class="p-3 text-right">最大回撤 (USDT / %)</th>
+            <th class="p-3 text-right">Calmar (收益/回撤)</th>
+            <th class="p-3 text-right">峰值保证金</th>
+            <th class="p-3 text-right">Ulcer Index</th>
+          </tr>
+        </thead>
+        <tbody id="metricsTableBody" class="divide-y divide-gray-800/60 font-mono">
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Deep-dive Empirical Discovery: Batch Position Slicing Analysis -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <!-- Set 1 Breakdown -->
+    <div class="glass-card p-6 space-y-4 glow-blue">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <span class="w-3 h-3 rounded-full bg-blue-500"></span>
+          <h3 class="text-base font-bold text-blue-300">Set 1 (Primary: 2/1/0.50%/0.30/4.0/1.50x) 批次阶梯收益剖析</h3>
+        </div>
+        <span class="text-xs text-gray-400">成交总单数: 437 单</span>
+      </div>
+      <p class="text-xs text-gray-300 leading-relaxed">
+        Set 1 具备极高的成交门槛（强度 4.0 + 成交量比 1.50x），同一批次内能连续触发 3 单以上的极端行情极少（16.5天内仅10单）。首单与第2单均具备稳健正期望（首单胜率 76.7%, 均利 +0.512U；第2单胜率 74.6%, 均利 +0.661U）。「限制只能1单」使 15s MTM 最大回撤由 <b class="text-rose-400">59.10U (-10.0%)</b> 进一步收窄至 <b class="text-emerald-400">49.87U (-8.0%)</b>，Ulcer 仅 <b>0.03</b>！
+      </p>
+      <table class="w-full text-xs text-left">
+        <thead>
+          <tr class="border-b border-gray-700 text-gray-400 bg-gray-900/40">
+            <th class="p-2">开单位序</th>
+            <th class="p-2 text-right">成交次数</th>
+            <th class="p-2 text-right">胜率</th>
+            <th class="p-2 text-right">总利润 (U)</th>
+            <th class="p-2 text-right">单笔均利 (U)</th>
+          </tr>
+        </thead>
+        <tbody id="rankTableSet1" class="divide-y divide-gray-800 font-mono"></tbody>
+      </table>
+    </div>
+
+    <!-- Set 2 Breakdown -->
+    <div class="glass-card p-6 space-y-4 glow-orange">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <span class="w-3 h-3 rounded-full bg-amber-500"></span>
+          <h3 class="text-base font-bold text-amber-300">Set 2 (acc02: 3/1/1.50%/0.30/1.5/0.00x) 动能衰竭与负阿尔法剔除</h3>
+        </div>
+        <span class="text-xs text-gray-400">成交总单数: 623 单</span>
+      </div>
+      <p class="text-xs text-gray-300 leading-relaxed">
+        <b class="text-amber-400">关键实证发现：</b>在 Set 2 高冲量门槛 (1.50%) 下，第 3 单 (35单) 与第 4 单 (7单) 处于动能行情的尾声冲顶阶段，均利剧烈坍塌至 <b class="text-rose-400">-2.436U</b> 和 <b class="text-rose-400">-0.929U</b>，累计造成 <b class="text-rose-400">-91.76U</b> 纯亏损！「限制最多2单」切断冲顶衰竭亏损，使利润逆势从 <b>+186.61U</b> 激增至 <b>+288.61U (+54.7%)</b>！
+      </p>
+      <table class="w-full text-xs text-left">
+        <thead>
+          <tr class="border-b border-gray-700 text-gray-400 bg-gray-900/40">
+            <th class="p-2">开单位序</th>
+            <th class="p-2 text-right">成交次数</th>
+            <th class="p-2 text-right">胜率</th>
+            <th class="p-2 text-right">总利润 (U)</th>
+            <th class="p-2 text-right">单笔均利 (U)</th>
+          </tr>
+        </thead>
+        <tbody id="rankTableSet2" class="divide-y divide-gray-800 font-mono"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Analytical Findings & Strategic Recommendations -->
+  <div class="glass-card p-6 space-y-6">
+    <h2 class="text-lg font-bold text-white border-b border-gray-800 pb-3 flex items-center gap-2">
+      <span class="text-indigo-400">✦</span> 核心量化发现与实盘落地推导解读
+    </h2>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 text-xs leading-relaxed">
+      <div class="p-4 rounded-lg bg-gray-900/60 border border-gray-800 space-y-2">
+        <div class="text-indigo-300 font-bold text-sm flex items-center gap-2">
+          <span>1. 动能衰竭陷阱 (Exhaustion Trap)</span>
+        </div>
+        <p class="text-gray-300">
+          Set 2 (acc02) 在不限制开单时产生 623 单，最终盈利 +186.61U。而设置「限制最多2单」后，成交 584 单，拒单 39 单，净利润飙升至 <b>+288.61U (+57.7% 收益率)</b>！
+        </p>
+        <p class="text-gray-400">
+          这 39 笔被拒的第 3/4 单在动能冲顶尾声买在针尖上，累计净亏损高达 -91.76U。并且在 09.19 的极端行情（如 CAP / BR 急剧暴跌）中，不限制并发会导致单币同时持有 3~4 单重仓遭受连环止损。<b>限制最多 2 单是一个天然的动能衰竭过滤器与敞口防爆器。</b>
+        </p>
+      </div>
+
+      <div class="p-4 rounded-lg bg-gray-900/60 border border-gray-800 space-y-2">
+        <div class="text-blue-300 font-bold text-sm flex items-center gap-2">
+          <span>2. 15s MTM 真实回撤与风险隔离</span>
+        </div>
+        <p class="text-gray-300">
+          采用 15s MTM 连续盯市后，Set 2 不限制开单的真实浮亏最大回撤高达 <b class="text-rose-400">257.46U (-28.0%)</b>，彻底揭示了离散已平仓回测遗漏的 120U+ 盘中持仓浮亏！
+        </p>
+        <p class="text-gray-400">
+          通过限制最多 2 单，Set 2 的 MTM 最大回撤直接缩减至 <b>165.51U (-18.0%)</b>，回撤绝对值降低了 <b>91.95 USDT (-35.7%)</b>！若收紧至限制只能 1 单，回撤更是降至 <b>100.26U (-13.0%)</b>，收益回撤比 (Calmar) 达 <b>364.5</b>。
+        </p>
+      </div>
+
+      <div class="p-4 rounded-lg bg-gray-900/60 border border-gray-800 space-y-2">
+        <div class="text-emerald-300 font-bold text-sm flex items-center gap-2">
+          <span>3. 500U 本金下的保证金安全性</span>
+        </div>
+        <p class="text-gray-300">
+          在 500U 本金、100U 名义本金 (5x 杠杆 = 20U 保证金/单) 体系下，不限制并发时：
+        </p>
+        <p class="text-gray-400">
+          Set 2 峰值并发达到 13 单，占用保证金 260 USDT (保证金使用率达 <b>52.0%</b>)；若叠加极端行情下的未实现浮亏，极易触碰资金警戒线。而在「限制只能1单」下，峰值占用仅 180U (36.0%)，Set 1 更是仅 140U (28.0%)，为极端黑天鹅行情留出了充足的安全边际。
+        </p>
+      </div>
+    </div>
+
+    <!-- Practical Verdict Banner -->
+    <div class="p-4 rounded-lg bg-indigo-950/40 border border-indigo-500/40 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+      <div class="space-y-1">
+        <div class="text-sm font-bold text-indigo-200">🎯 实盘最优部署结论 (Live Actionable Guidance)</div>
+        <div class="text-xs text-indigo-300/80">
+          • <b>Account-3 / Account-4 (基准 3/1)</b>：【已立即上线部署】设置 <b>max_concurrency = 2</b>，消除尾部单 -91.76U 纯亏损，利润由 +186.61U 暴增至 +288.61U (+54.7%)，MTM 回撤减少 91.95U (-35.7%)。<br>
+          • <b>Primary / Account-2 (基准 2/1)</b>：若追求绝对收益建议 <b>max_concurrency = 2</b> (保留 94.4% 利润)；若偏好极致稳健与平滑净值曲线，建议 <b>max_concurrency = 1</b> (MTM 回撤仅 49.87U，Ulcer 仅 0.03)。
+        </div>
+      </div>
+      <div class="shrink-0 text-right">
+        <span class="inline-block px-4 py-2 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shadow-lg shadow-indigo-600/30">
+          综合帕累托最优: 限制最多 2 单
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <footer class="text-center text-xs text-gray-500 py-4">
+    Crypto Momentum Lab · Local Optimization & Concurrency Analysis Framework · 2026-09-19
+  </footer>
+
+  <!-- Chart Logic and Interactivity Script -->
+  <script>
+    const RAW_DATA = __DATA_JSON__;
+
+    let currentMetricMode = 'equity'; // 'equity' | 'drawdown' | 'margin'
+    const visibleCurves = {};
+
+    // Initialize visibility
+    Object.keys(RAW_DATA.curves).forEach(key => {
+      visibleCurves[key] = true;
+    });
+
+    const CURVE_CONFIGS = RAW_DATA.curves;
+
+    function initLegend() {
+      const container = document.getElementById('legend-container');
+      container.innerHTML = '';
+      
+      Object.entries(CURVE_CONFIGS).forEach(([key, curve]) => {
+        const card = document.createElement('div');
+        card.className = `flex items-center gap-2 p-2 rounded cursor-pointer transition border ${
+          curve.set === 1 ? 'border-blue-900/40 bg-blue-950/20 hover:bg-blue-900/30' : 'border-orange-900/40 bg-orange-950/20 hover:bg-orange-900/30'
+        }`;
+        card.onclick = (e) => {
+          if (e.target.tagName !== 'INPUT') {
+            const cb = card.querySelector('input');
+            cb.checked = !cb.checked;
+            visibleCurves[key] = cb.checked;
+          } else {
+            visibleCurves[key] = e.target.checked;
+          }
+          renderChart();
+        };
+
+        card.innerHTML = `
+          <input type="checkbox" id="cb-${key}" ${visibleCurves[key] ? 'checked' : ''} 
+            class="rounded border-gray-700 text-indigo-600 focus:ring-0 cursor-pointer" 
+            onchange="visibleCurves['${key}'] = this.checked; renderChart();">
+          <span class="w-3 h-1 rounded" style="background-color: ${curve.color};"></span>
+          <label for="cb-${key}" class="truncate text-gray-300 cursor-pointer font-medium">${curve.short_label}</label>
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    function setPreset(preset) {
+      Object.keys(visibleCurves).forEach(k => {
+        if (preset === 'all') visibleCurves[k] = true;
+        else if (preset === 'set1') visibleCurves[k] = k.startsWith('s1');
+        else if (preset === 'set2') visibleCurves[k] = k.startsWith('s2');
+        else if (preset === 'max2') visibleCurves[k] = k.endsWith('max2');
+        else if (preset === 'max1') visibleCurves[k] = k.endsWith('max1');
+      });
+      Object.keys(visibleCurves).forEach(k => {
+        const cb = document.getElementById(`cb-${k}`);
+        if (cb) cb.checked = visibleCurves[k];
+      });
+      renderChart();
+    }
+
+    function switchMetricMode(mode) {
+      currentMetricMode = mode;
+      ['equity', 'drawdown', 'margin'].forEach(m => {
+        const btn = document.getElementById(`btn-mode-${m}`);
+        if (m === mode) {
+          btn.className = 'px-3 py-1.5 text-xs font-medium rounded-md bg-indigo-600 text-white border border-indigo-500 shadow';
+        } else {
+          btn.className = 'px-3 py-1.5 text-xs font-medium bg-gray-800 text-gray-300 hover:bg-gray-700 border border-gray-700';
+        }
+      });
+      renderChart();
+    }
+
+    function populateMetricsTable() {
+      const tbody = document.getElementById('metricsTableBody');
+      tbody.innerHTML = '';
+      
+      const rows = [
+        { key: 's1_unlimited', name: 'Set 1 (Primary / 2-1)', limit: '不限制开单', set: 1 },
+        { key: 's1_max2', name: 'Set 1 (Primary / 2-1)', limit: '限制最多 2 单', set: 1 },
+        { key: 's1_max1', name: 'Set 1 (Primary / 2-1)', limit: '限制只能 1 单', set: 1 },
+        { key: 's2_unlimited', name: 'Set 2 (acc02 / 3-1)', limit: '不限制开单', set: 2 },
+        { key: 's2_max2', name: 'Set 2 (acc02 / 3-1)', limit: '限制最多 2 单', set: 2 },
+        { key: 's2_max1', name: 'Set 2 (acc02 / 3-1)', limit: '限制只能 1 单', set: 2 },
+      ];
+
+      rows.forEach(r => {
+        const c = CURVE_CONFIGS[r.key];
+        const m = c.metrics;
+        const tr = document.createElement('tr');
+        tr.className = 'hover:bg-gray-800/40 transition';
+        
+        const badgeColor = r.set === 1 ? 'badge-primary' : 'badge-acc02';
+        const pnlColor = m.total_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
+        const isBestProfit = r.key === 's2_max2';
+        const isBestDD = r.key === 's1_max1';
+
+        tr.innerHTML = `
+          <td class="p-3 font-medium text-gray-200 flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full" style="background-color: ${c.color};"></span>
+            <span>${r.name}</span>
+          </td>
+          <td class="p-3"><span class="px-2 py-0.5 rounded text-xs ${badgeColor} font-sans">${r.limit}</span></td>
+          <td class="p-3 text-right text-gray-300">${m.n_trades} <span class="text-gray-500 font-sans">(${m.n_rejected > 0 ? '拒' + m.n_rejected : '无拒'})</span></td>
+          <td class="p-3 text-right text-gray-200">${m.win_rate}%</td>
+          <td class="p-3 text-right font-bold text-white">${m.final_equity.toFixed(2)} U</td>
+          <td class="p-3 text-right font-bold ${pnlColor}">${m.total_pnl > 0 ? '+' : ''}${m.total_pnl.toFixed(2)} U ${isBestProfit ? '👑' : ''}</td>
+          <td class="p-3 text-right font-bold ${pnlColor}">${m.return_pct > 0 ? '+' : ''}${m.return_pct.toFixed(1)}%</td>
+          <td class="p-3 text-right text-gray-300">${m.profit_factor.toFixed(2)}</td>
+          <td class="p-3 text-right text-gray-200">${m.max_dd_usdt.toFixed(2)} U <span class="text-rose-400 font-sans">(-${m.max_dd_pct.toFixed(1)}%)</span> ${isBestDD ? '🛡️' : ''}</td>
+          <td class="p-3 text-right font-bold text-indigo-300">${m.calmar.toFixed(2)}</td>
+          <td class="p-3 text-right text-gray-300">${m.peak_margin.toFixed(0)} U <span class="text-gray-500 font-sans">(${m.peak_margin_pct}%)</span></td>
+          <td class="p-3 text-right text-gray-400">${m.ulcer_index.toFixed(2)}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function populateRankTables() {
+      const tbody1 = document.getElementById('rankTableSet1');
+      const tbody2 = document.getElementById('rankTableSet2');
+      tbody1.innerHTML = '';
+      tbody2.innerHTML = '';
+
+      RAW_DATA.ranks.set1.forEach(r => {
+        const tr = document.createElement('tr');
+        tr.className = 'hover:bg-gray-800/30';
+        tr.innerHTML = `
+          <td class="p-2 font-medium text-gray-200">${r.rank_label}</td>
+          <td class="p-2 text-right text-gray-300">${r.count}</td>
+          <td class="p-2 text-right text-gray-300">${r.win_rate}%</td>
+          <td class="p-2 text-right font-bold ${r.total_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${r.total_pnl >= 0 ? '+' : ''}${r.total_pnl.toFixed(2)} U</td>
+          <td class="p-2 text-right text-gray-400">${r.avg_pnl >= 0 ? '+' : ''}${r.avg_pnl.toFixed(3)} U</td>
+        `;
+        tbody1.appendChild(tr);
+      });
+
+      RAW_DATA.ranks.set2.forEach(r => {
+        const tr = document.createElement('tr');
+        const isExhaustion = r.rank >= 3;
+        tr.className = isExhaustion ? 'bg-rose-950/20 hover:bg-rose-900/30' : 'hover:bg-gray-800/30';
+        tr.innerHTML = `
+          <td class="p-2 font-medium ${isExhaustion ? 'text-rose-300' : 'text-gray-200'}">${r.rank_label} ${isExhaustion ? '⚠️' : ''}</td>
+          <td class="p-2 text-right text-gray-300">${r.count}</td>
+          <td class="p-2 text-right text-gray-300">${r.win_rate}%</td>
+          <td class="p-2 text-right font-bold ${r.total_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${r.total_pnl >= 0 ? '+' : ''}${r.total_pnl.toFixed(2)} U</td>
+          <td class="p-2 text-right font-bold ${r.avg_pnl >= 0 ? 'text-gray-400' : 'text-rose-400'}">${r.avg_pnl >= 0 ? '+' : ''}${r.avg_pnl.toFixed(3)} U</td>
+        `;
+        tbody2.appendChild(tr);
+      });
+    }
+
+    const canvas = document.getElementById('mainChart');
+    const ctx = canvas.getContext('2d');
+    let lastHoverIndex = -1;
+
+    function resizeCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.parentElement.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.scale(dpr, dpr);
+      renderChart();
+    }
+
+    window.addEventListener('resize', resizeCanvas);
+
+    function renderChart() {
+      const width = canvas.width / (window.devicePixelRatio || 1);
+      const height = canvas.height / (window.devicePixelRatio || 1);
+      ctx.clearRect(0, 0, width, height);
+
+      const timeline = RAW_DATA.timeline;
+      if (!timeline || timeline.length === 0) return;
+
+      const padding = { top: 30, right: 30, bottom: 45, left: 65 };
+      const chartW = width - padding.left - padding.right;
+      const chartH = height - padding.top - padding.bottom;
+
+      let minVal = Infinity;
+      let maxVal = -Infinity;
+
+      Object.entries(CURVE_CONFIGS).forEach(([key, curve]) => {
+        if (!visibleCurves[key]) return;
+        timeline.forEach(pt => {
+          const v = pt[key][currentMetricMode];
+          if (v < minVal) minVal = v;
+          if (v > maxVal) maxVal = v;
+        });
+      });
+
+      if (minVal === Infinity) {
+        minVal = currentMetricMode === 'equity' ? 500 : 0;
+        maxVal = currentMetricMode === 'equity' ? 900 : 100;
+      }
+
+      if (currentMetricMode === 'equity') {
+        minVal = Math.floor(Math.min(minVal, 480) / 50) * 50;
+        maxVal = Math.ceil(Math.max(maxVal, 900) / 50) * 50;
+      } else if (currentMetricMode === 'drawdown') {
+        minVal = Math.floor(minVal / 5) * 5;
+        maxVal = 0;
+      } else if (currentMetricMode === 'margin') {
+        minVal = 0;
+        maxVal = Math.ceil(Math.max(maxVal, 280) / 50) * 50;
+      }
+
+      const valRange = maxVal - minVal || 1;
+
+      const getX = (idx) => padding.left + (idx / (timeline.length - 1)) * chartW;
+      const getY = (val) => padding.top + chartH - ((val - minVal) / valRange) * chartH;
+
+      // Draw Grid & Y-Axis labels
+      ctx.lineWidth = 1;
+      ctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+
+      const nYSteps = 6;
+      for (let i = 0; i <= nYSteps; i++) {
+        const v = minVal + (valRange * i) / nYSteps;
+        const y = getY(v);
+
+        ctx.strokeStyle = i === 0 || v === 500 || v === 0 ? 'rgba(75, 85, 99, 0.5)' : 'rgba(55, 65, 81, 0.25)';
+        ctx.beginPath();
+        ctx.moveTo(padding.left, y);
+        ctx.lineTo(padding.left + chartW, y);
+        ctx.stroke();
+
+        ctx.fillStyle = v === 500 || v === 0 ? '#9ca3af' : '#6b7280';
+        let labelText = '';
+        if (currentMetricMode === 'equity') labelText = '$' + v.toFixed(0);
+        else if (currentMetricMode === 'drawdown') labelText = v.toFixed(1) + '%';
+        else if (currentMetricMode === 'margin') labelText = '$' + v.toFixed(0);
+        ctx.fillText(labelText, padding.left - 10, y);
+      }
+
+      // Draw X-Axis Time Labels
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = '#6b7280';
+
+      const nXSteps = 7;
+      for (let i = 0; i < nXSteps; i++) {
+        const idx = Math.floor((i / (nXSteps - 1)) * (timeline.length - 1));
+        const pt = timeline[idx];
+        const x = getX(idx);
+
+        ctx.strokeStyle = 'rgba(55, 65, 81, 0.2)';
+        ctx.beginPath();
+        ctx.moveTo(x, padding.top);
+        ctx.lineTo(x, padding.top + chartH);
+        ctx.stroke();
+
+        ctx.fillText(pt.short_time, x, padding.top + chartH + 10);
+      }
+
+      // Baseline reference line for 500U initial equity
+      if (currentMetricMode === 'equity' && minVal <= 500 && maxVal >= 500) {
+        const y500 = getY(500);
+        ctx.strokeStyle = 'rgba(156, 163, 175, 0.4)';
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(padding.left, y500);
+        ctx.lineTo(padding.left + chartW, y500);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        
+        ctx.fillStyle = 'rgba(156, 163, 175, 0.7)';
+        ctx.textAlign = 'left';
+        ctx.fillText('初始本金: $500.00', padding.left + 8, y500 - 8);
+      }
+
+      // Render Each Visible Curve
+      Object.entries(CURVE_CONFIGS).forEach(([key, curve]) => {
+        if (!visibleCurves[key]) return;
+
+        ctx.strokeStyle = curve.color;
+        ctx.lineWidth = curve.short_label.includes('最多2单') ? 2.8 : 2.0;
+
+        if (curve.short_label.includes('不限制')) {
+          ctx.setLineDash([5, 3]);
+        } else {
+          ctx.setLineDash([]);
+        }
+
+        ctx.beginPath();
+        timeline.forEach((pt, idx) => {
+          const val = pt[key][currentMetricMode];
+          const x = getX(idx);
+          const y = getY(val);
+          if (idx === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Final dot
+        const lastIdx = timeline.length - 1;
+        const lastVal = timeline[lastIdx][key][currentMetricMode];
+        const lastX = getX(lastIdx);
+        const lastY = getY(lastVal);
+
+        ctx.fillStyle = curve.color;
+        ctx.beginPath();
+        ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      // Draw Crosshair if active
+      if (lastHoverIndex >= 0 && lastHoverIndex < timeline.length) {
+        const hX = getX(lastHoverIndex);
+        ctx.strokeStyle = 'rgba(156, 163, 175, 0.6)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(hX, padding.top);
+        ctx.lineTo(hX, padding.top + chartH);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        Object.entries(CURVE_CONFIGS).forEach(([key, curve]) => {
+          if (!visibleCurves[key]) return;
+          const val = timeline[lastHoverIndex][key][currentMetricMode];
+          const hY = getY(val);
+
+          ctx.fillStyle = curve.color;
+          ctx.beginPath();
+          ctx.arc(hX, hY, 5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = '#0b0f19';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        });
+      }
+    }
+
+    canvas.addEventListener('mousemove', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+
+      const padding = { top: 30, right: 30, bottom: 45, left: 65 };
+      const chartW = rect.width - padding.left - padding.right;
+
+      if (mouseX < padding.left || mouseX > padding.left + chartW) {
+        hideTooltip();
+        return;
+      }
+
+      const ratio = (mouseX - padding.left) / chartW;
+      const timeline = RAW_DATA.timeline;
+      const idx = Math.min(Math.max(0, Math.round(ratio * (timeline.length - 1))), timeline.length - 1);
+      lastHoverIndex = idx;
+      renderChart();
+      showTooltip(e.clientX, e.clientY, timeline[idx]);
+    });
+
+    canvas.addEventListener('mouseleave', () => {
+      hideTooltip();
+    });
+
+    function hideTooltip() {
+      lastHoverIndex = -1;
+      const tt = document.getElementById('chartTooltip');
+      if (tt) tt.classList.add('hidden');
+      renderChart();
+    }
+
+    function showTooltip(clientX, clientY, pt) {
+      const tt = document.getElementById('chartTooltip');
+      if (!tt) return;
+
+      document.getElementById('tooltipTime').innerText = `北京时间: ${pt.time} (UTC+8)`;
+      const valuesDiv = document.getElementById('tooltipValues');
+      valuesDiv.innerHTML = '';
+
+      Object.entries(CURVE_CONFIGS).forEach(([key, curve]) => {
+        if (!visibleCurves[key]) return;
+        const data = pt[key];
+        const row = document.createElement('div');
+        row.className = 'flex items-center justify-between gap-3 text-xs';
+        
+        let valDisplay = '';
+        if (currentMetricMode === 'equity') {
+          const pnl = data.equity - 500;
+          const ret = (pnl / 500) * 100;
+          valDisplay = `<span class="font-bold text-white">$${data.equity.toFixed(2)}</span> <span class="${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}">(${pnl >= 0 ? '+' : ''}${ret.toFixed(1)}%)</span>`;
+        } else if (currentMetricMode === 'drawdown') {
+          valDisplay = `<span class="font-bold text-rose-400">${data.drawdown.toFixed(2)}%</span>`;
+        } else if (currentMetricMode === 'margin') {
+          valDisplay = `<span class="font-bold text-amber-300">$${data.margin.toFixed(0)} U</span>`;
+        }
+
+        row.innerHTML = `
+          <div class="flex items-center gap-1.5 truncate">
+            <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: ${curve.color};"></span>
+            <span class="text-gray-300 truncate">${curve.short_label}</span>
+          </div>
+          <div class="text-right shrink-0">${valDisplay}</div>
+        `;
+        valuesDiv.appendChild(row);
+      });
+
+      tt.classList.remove('hidden');
+
+      const containerRect = canvas.parentElement.getBoundingClientRect();
+      let left = clientX - containerRect.left + 15;
+      let top = clientY - containerRect.top + 15;
+
+      if (left + 260 > containerRect.width) {
+        left = left - 280;
+      }
+      if (top + 220 > containerRect.height) {
+        top = top - 180;
+      }
+
+      tt.style.left = `${left}px`;
+      tt.style.top = `${top}px`;
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      initLegend();
+      populateMetricsTable();
+      populateRankTables();
+      resizeCanvas();
+    });
+  </script>
+</body>
+</html>

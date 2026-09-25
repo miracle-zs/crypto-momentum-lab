@@ -1311,3 +1311,121 @@ async def test_readiness_prevents_fully_tradeable_when_prerequisites_missing() -
     assert resp.stream_readiness.overall == "RECOVERING"
     assert resp.status in (OperationalStatus.DEGRADED, OperationalStatus.STALE)
 
+
+async def test_readiness_allows_fully_tradeable_when_services_include_database_ready() -> None:
+    from crypto_momentum_lab.operator_dashboard.overview_queries import OverviewQueries
+    from crypto_momentum_lab.operator_dashboard.schemas import (
+        LiveAccountSummaryResponse,
+        LiveAccountsResponse,
+        ServiceStatusResponse,
+        SystemOverviewResponse,
+    )
+
+    now = datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
+
+    class StubOverviewQueries(OverviewQueries):
+        def __init__(self) -> None:
+            super().__init__(
+                session_factory=None,  # type: ignore[arg-type]
+                clock=lambda: now,
+                stale_after_seconds=60.0,
+                research_collector_root=Path("/tmp"),
+            )
+
+        async def health(self) -> dict[str, str]:
+            return {"app_status": "UP", "database_status": "UP"}
+
+        async def live_accounts(self) -> LiveAccountsResponse:
+            return LiveAccountsResponse(
+                status=OperationalStatus.READY,
+                accounts=[
+                    LiveAccountSummaryResponse(
+                        account_label="primary",
+                        environment="live",
+                        status=OperationalStatus.READY,
+                        readiness="ready_readonly",
+                        observed_at=now,
+                        strategy_name="orderflow_impulse",
+                        strategy_state="running",
+                        lease_expires_at=now + timedelta(minutes=10),
+                    )
+                ],
+            )
+
+        async def overview(self) -> SystemOverviewResponse:
+            return SystemOverviewResponse(
+                generated_at=now,
+                database_status=OperationalStatus.READY,
+                services=[
+                    ServiceStatusResponse(
+                        name="market-data",
+                        status=OperationalStatus.FRESH,
+                        observed_at=now,
+                        age_seconds=1.0,
+                    ),
+                    ServiceStatusResponse(
+                        name="execution-account",
+                        status=OperationalStatus.FRESH,
+                        observed_at=now,
+                        age_seconds=1.0,
+                    ),
+                    ServiceStatusResponse(
+                        name="strategy-runner",
+                        status=OperationalStatus.FRESH,
+                        observed_at=now,
+                        age_seconds=1.0,
+                    ),
+                    ServiceStatusResponse(
+                        name="database",
+                        status=OperationalStatus.READY,
+                        observed_at=now,
+                        age_seconds=0.0,
+                    ),
+                ],
+                active_halt_count=0,
+                active_lease=None,
+            )
+
+    queries = StubOverviewQueries()
+    resp = await queries.readiness()
+    assert resp.status == OperationalStatus.READY
+    assert resp.tradeability.mode == "FULLY_TRADEABLE"
+    assert resp.tradeability.entry_gate_open is True
+    assert resp.tradeability.exit_gate_open is True
+    assert resp.stream_readiness.overall == "READY"
+
+
+async def test_readiness_shields_exceptions_to_degraded_response() -> None:
+    from crypto_momentum_lab.operator_dashboard.overview_queries import OverviewQueries
+
+    now = datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
+
+    class FailingOverviewQueries(OverviewQueries):
+        def __init__(self) -> None:
+            super().__init__(
+                session_factory=None,  # type: ignore[arg-type]
+                clock=lambda: now,
+                stale_after_seconds=60.0,
+                research_collector_root=Path("/tmp"),
+            )
+
+        async def health(self) -> dict[str, str]:
+            raise ConnectionRefusedError("PostgreSQL connection refused")
+
+    queries = FailingOverviewQueries()
+    resp = await queries.readiness()
+    assert resp.status == OperationalStatus.DEGRADED
+    assert resp.tradeability.mode == "HALTED"
+    assert resp.tradeability.entry_gate_open is False
+    assert resp.tradeability.exit_gate_open is False
+    assert "readiness_query_failed" in resp.tradeability.entry_gate_reason
+
+
+def test_live_account_status_syncing_is_degraded() -> None:
+    from crypto_momentum_lab.operator_dashboard.overview_queries import live_account_status
+
+    now = datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
+    status = live_account_status("syncing", observed_at=now, now=now)
+    assert status == OperationalStatus.DEGRADED
+
+

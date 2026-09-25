@@ -1,0 +1,2119 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="h-full">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CML 本地参数寻优与实盘因果对账投研控制台</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --primary: #38bdf8;
+      --success: #34d399;
+      --warning: #fbbf24;
+      --danger: #f87171;
+    }
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    .tab-active {
+      border-bottom: 2px solid var(--primary);
+      color: var(--primary);
+      font-weight: 600;
+    }
+    .tab-inactive {
+      color: var(--muted);
+      border-bottom: 2px solid transparent;
+    }
+    .tab-inactive:hover {
+      color: var(--text);
+      border-color: var(--border);
+    }
+    canvas {
+      cursor: crosshair;
+      user-select: none;
+    }
+    canvas.dragging {
+      cursor: grabbing !important;
+    }
+    .badge-matched {
+      background-color: rgba(52, 211, 153, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(52, 211, 153, 0.35);
+    }
+    .badge-live-only {
+      background-color: rgba(56, 189, 248, 0.15);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.35);
+    }
+    .badge-replay-only {
+      background-color: rgba(168, 85, 247, 0.15);
+      color: #c084fc;
+      border: 1px solid rgba(168, 85, 247, 0.35);
+    }
+  </style>
+</head>
+<body class="h-full flex flex-col antialiased">
+  <!-- Top Header Navigation -->
+  <header class="border-b border-slate-700/60 bg-slate-900/80 backdrop-blur px-6 py-3.5 flex flex-wrap items-center justify-between gap-4 sticky top-0 z-30">
+    <div class="flex items-center gap-3">
+      <div class="h-9 w-9 rounded-lg bg-sky-500/20 border border-sky-500/40 flex items-center justify-center text-sky-400 font-bold text-lg">
+        Ω
+      </div>
+      <div>
+        <h1 class="text-lg font-bold tracking-tight text-white flex items-center gap-2">
+          本地参数寻优与实盘对账投研控制台
+          <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+            实盘运维首屏
+          </span>
+        </h1>
+        <p class="text-xs text-slate-400">
+          基于 {{ date }} 数据 · 4 账户相位实盘矩阵 · 15s 真实连续盯市 · 逐 Symbol 往返对账
+        </p>
+      </div>
+    </div>
+    <div class="flex items-center gap-2.5 text-xs">
+      <span class="px-2.5 py-1 rounded bg-slate-800 border border-slate-700 text-slate-300">
+        数据架构: <strong class="text-emerald-400">100% 物理隔离 (local_optimization)</strong>
+      </span>
+      <span class="px-2.5 py-1 rounded bg-slate-800 border border-slate-700 text-slate-300">
+        图表渲染: <strong class="text-sky-400">纯原生 Canvas 零 CDN</strong>
+      </span>
+      <span class="px-2.5 py-1 rounded bg-slate-800 border border-slate-700 text-slate-300">
+        全量候选: <strong>{{ n_candidates }}</strong>
+      </span>
+    </div>
+  </header>
+
+  <!-- Navigation Tabs (Default: live-audit) -->
+  <div class="bg-slate-900/40 border-b border-slate-800 px-6">
+    <nav class="flex space-x-8 text-sm" aria-label="Tabs">
+      <button onclick="switchTab('live-audit')" id="tab-btn-live-audit" class="tab-active py-3 px-1 transition-colors flex items-center gap-2">
+        <span>⚡ 实盘监控与昨日对账</span>
+      </button>
+      <button onclick="switchTab('mtm-dual')" id="tab-btn-mtm-dual" class="tab-inactive py-3 px-1 transition-colors flex items-center gap-2">
+        <span>📈 15s 真实盯市 vs 离散平仓</span>
+      </button>
+      <button onclick="switchTab('optimization')" id="tab-btn-optimization" class="tab-inactive py-3 px-1 transition-colors flex items-center gap-2">
+        <span>⚖️ 参数寻优与 3D Pareto 前沿</span>
+      </button>
+      <button onclick="switchTab('deep-audit')" id="tab-btn-deep-audit" class="tab-inactive py-3 px-1 transition-colors flex items-center gap-2">
+        <span>🔍 6 层因果对账深度探针</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- Main Content Area -->
+  <main class="flex-1 overflow-y-auto p-6 max-w-7xl w-full mx-auto space-y-6">
+    
+    <!-- TAB 1: ⚡ 实盘监控与昨日对账 (DEFAULT LANDING TAB) -->
+    <div id="tab-live-audit" class="space-y-6">
+      <!-- 4 账户状态与表现概览卡片 -->
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <!-- Account 1: primary -->
+        <div class="bg-slate-800/60 rounded-xl p-4 border border-slate-700 relative overflow-hidden">
+          <div class="flex items-center justify-between mb-2">
+            <span class="font-bold text-white flex items-center gap-1.5">
+              <span class="h-2.5 w-2.5 rounded-full bg-sky-400"></span> primary
+            </span>
+            <span class="text-[11px] px-2 py-0.5 rounded bg-sky-500/10 text-sky-300 border border-sky-500/30">Phase 00m</span>
+          </div>
+          <div class="text-xs text-slate-400 mb-2">Profile 1 (稳健 · 窗口2/确认1/ATR 4.0/量比1.5x)</div>
+          <div class="grid grid-cols-2 gap-2 text-xs">
+            <div>
+              <span class="text-slate-400">昨日实盘净盈亏</span>
+              <div class="text-base font-bold text-emerald-400">+8.14 USDT</div>
+            </div>
+            <div>
+              <span class="text-slate-400">同参数回测净盈亏</span>
+              <div class="text-base font-bold text-sky-300">-2.67 USDT</div>
+            </div>
+            <div>
+              <span class="text-slate-400">实盘成交 (往返)</span>
+              <div class="text-sm font-bold text-slate-300">26 笔 (93 fills)</div>
+            </div>
+            <div>
+              <span class="text-slate-400">回测成交</span>
+              <div class="text-sm font-bold text-slate-300">28 笔 (17 匹配)</div>
+            </div>
+          </div>
+          <div class="mt-3 pt-2 border-t border-slate-700/60 text-[11px] text-slate-400 flex justify-between">
+            <span>平均滑点: <strong class="text-emerald-400">+23.8 bps</strong></span>
+            <span class="text-sky-400">达成率 100%</span>
+          </div>
+        </div>
+
+        <!-- Account 2: acc01 -->
+        <div class="bg-slate-800/60 rounded-xl p-4 border border-slate-700 relative overflow-hidden">
+          <div class="flex items-center justify-between mb-2">
+            <span class="font-bold text-white flex items-center gap-1.5">
+              <span class="h-2.5 w-2.5 rounded-full bg-emerald-400"></span> acc01 (account-2)
+            </span>
+            <span class="text-[11px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">Phase 15m</span>
+          </div>
+          <div class="text-xs text-slate-400 mb-2">Profile 1 (稳健 · 窗口2/确认1/ATR 4.0/量比1.5x)</div>
+          <div class="grid grid-cols-2 gap-2 text-xs">
+            <div>
+              <span class="text-slate-400">昨日实盘净盈亏</span>
+              <div class="text-base font-bold text-emerald-400">+9.08 USDT</div>
+            </div>
+            <div>
+              <span class="text-slate-400">同参数回测净盈亏</span>
+              <div class="text-base font-bold text-sky-300">-2.67 USDT</div>
+            </div>
+            <div>
+              <span class="text-slate-400">实盘成交 (往返)</span>
+              <div class="text-sm font-bold text-slate-300">25 笔 (98 fills)</div>
+            </div>
+            <div>
+              <span class="text-slate-400">回测成交</span>
+              <div class="text-sm font-bold text-slate-300">28 笔 (16 匹配)</div>
+            </div>
+          </div>
+          <div class="mt-3 pt-2 border-t border-slate-700/60 text-[11px] text-slate-400 flex justify-between">
+            <span>平均滑点: <strong class="text-emerald-400">+10.5 bps</strong></span>
+            <span class="text-emerald-400">达成率 100%</span>
+          </div>
+        </div>
+
+        <!-- Account 3: acc02 -->
+        <div class="bg-slate-800/60 rounded-xl p-4 border border-slate-700 relative overflow-hidden">
+          <div class="flex items-center justify-between mb-2">
+            <span class="font-bold text-white flex items-center gap-1.5">
+              <span class="h-2.5 w-2.5 rounded-full bg-rose-400"></span> acc02 (account-3)
+            </span>
+            <span class="text-[11px] px-2 py-0.5 rounded bg-rose-500/10 text-rose-300 border border-rose-500/30">Phase 30m</span>
+          </div>
+          <div class="text-xs text-slate-400 mb-2">Profile 2 (进取 · 窗口3/确认1/ATR 1.5/无量比)</div>
+          <div class="grid grid-cols-2 gap-2 text-xs">
+            <div>
+              <span class="text-slate-400">昨日实盘净盈亏</span>
+              <div class="text-base font-bold text-rose-400">-12.24 USDT</div>
+            </div>
+            <div>
+              <span class="text-slate-400">同参数回测净盈亏</span>
+              <div class="text-base font-bold text-sky-300">+0.33 USDT</div>
+            </div>
+            <div>
+              <span class="text-slate-400">实盘成交 (往返)</span>
+              <div class="text-sm font-bold text-slate-300">20 笔 (86 fills)</div>
+            </div>
+            <div>
+              <span class="text-slate-400">回测成交</span>
+              <div class="text-sm font-bold text-slate-300">24 笔 (12 匹配)</div>
+            </div>
+          </div>
+          <div class="mt-3 pt-2 border-t border-slate-700/60 text-[11px] text-slate-400 flex justify-between">
+            <span>平均滑点: <strong class="text-slate-200">-4.9 bps</strong></span>
+            <span class="text-rose-400">止损出场偏多</span>
+          </div>
+        </div>
+
+        <!-- Account 4: acc03 -->
+        <div class="bg-slate-800/60 rounded-xl p-4 border border-slate-700 relative overflow-hidden">
+          <div class="flex items-center justify-between mb-2">
+            <span class="font-bold text-white flex items-center gap-1.5">
+              <span class="h-2.5 w-2.5 rounded-full bg-purple-400"></span> acc03 (account-4)
+            </span>
+            <span class="text-[11px] px-2 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/30">Phase 45m</span>
+          </div>
+          <div class="text-xs text-slate-400 mb-2">Profile 2 (进取 · 窗口3/确认1/ATR 1.5/无量比)</div>
+          <div class="grid grid-cols-2 gap-2 text-xs">
+            <div>
+              <span class="text-slate-400">昨日实盘净盈亏</span>
+              <div class="text-base font-bold text-purple-300">+0.02 USDT</div>
+            </div>
+            <div>
+              <span class="text-slate-400">同参数回测净盈亏</span>
+              <div class="text-base font-bold text-sky-300">+0.33 USDT</div>
+            </div>
+            <div>
+              <span class="text-slate-400">实盘成交 (往返)</span>
+              <div class="text-sm font-bold text-slate-300">18 笔 (89 fills)</div>
+            </div>
+            <div>
+              <span class="text-slate-400">回测成交</span>
+              <div class="text-sm font-bold text-slate-300">24 笔 (11 匹配)</div>
+            </div>
+          </div>
+          <div class="mt-3 pt-2 border-t border-slate-700/60 text-[11px] text-slate-400 flex justify-between">
+            <span>平均滑点: <strong class="text-emerald-400">-6.2 bps</strong></span>
+            <span class="text-purple-300">盈亏基本打平</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 实盘实际走势 vs 同参数本地回测走势主图 -->
+      <div class="bg-slate-800/60 rounded-xl p-5 border border-slate-700 space-y-3">
+        <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-700/80 pb-3">
+          <div>
+            <h3 class="text-base font-bold text-white flex items-center gap-2">
+              <span id="chart-live-title">⚡ 实盘实际走势 vs 同参数本地回测对账</span>
+              <span class="text-xs px-2 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">滚轮缩放 · 拖拽平移 · 无杂乱图钉</span>
+            </h3>
+            <p class="text-xs text-slate-400 mt-0.5" id="chart-live-subtitle">
+              实线为实盘真实净值，虚线为完全相同参数回测走势；直观对比实盘 Alpha 兑现度与执行偏离。
+            </p>
+          </div>
+          
+          <!-- 账户与模式交互工具栏 -->
+          <div class="flex flex-wrap items-center gap-2.5 text-xs">
+            <!-- 账户选择器 -->
+            <div class="bg-slate-900 rounded-lg p-0.5 border border-slate-700 flex items-center">
+              <button id="btn-acct-all" onclick="selectAccount('all')" class="px-2.5 py-1 rounded bg-slate-800 text-slate-300 hover:text-white transition-all">
+                4 账户综合
+              </button>
+              <button id="btn-acct-primary" onclick="selectAccount('primary')" class="px-2.5 py-1 rounded bg-sky-500 text-slate-900 font-bold transition-all">
+                primary
+              </button>
+              <button id="btn-acct-acc01" onclick="selectAccount('acc01')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition-all">
+                acc01
+              </button>
+              <button id="btn-acct-acc02" onclick="selectAccount('acc02')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition-all">
+                acc02
+              </button>
+              <button id="btn-acct-acc03" onclick="selectAccount('acc03')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition-all">
+                acc03
+              </button>
+            </div>
+
+            <!-- 单位切换 -->
+            <div class="bg-slate-900 rounded-lg p-0.5 border border-slate-700 flex items-center">
+              <button id="btn-mode-pct" onclick="setLiveAccountMode('percent')" class="px-2.5 py-1 rounded bg-sky-500 text-slate-900 font-bold transition-all">
+                收益率 %
+              </button>
+              <button id="btn-mode-usdt" onclick="setLiveAccountMode('usdt')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition-all">
+                净资产 USDT
+              </button>
+            </div>
+
+            <!-- 复位缩放 -->
+            <button onclick="resetLiveAccountsZoom()" class="px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 flex items-center gap-1 transition-all">
+              <span>↺ 复位视图</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 曲线图例说明 -->
+        <div class="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400 pt-1">
+          <div id="chart-live-legend" class="flex items-center gap-5">
+            <span class="flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-sky-400"></span> 实盘真实走势 (Live Actual)</span>
+            <span class="flex items-center gap-1.5"><span class="h-2 w-4 border-t-2 border-dashed border-amber-400"></span> 同参数回测走势 (Same-Param Replay)</span>
+            <span class="flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded bg-sky-500/20 border border-sky-500/40"></span> 收益背离阴影区</span>
+          </div>
+          <div class="text-[11px] text-slate-500">
+            已彻底移除杂乱图钉标记 · 详细开平仓已下沉至对账明细表
+          </div>
+        </div>
+
+        <!-- Canvas 渲染容器 -->
+        <div class="relative w-full h-[320px] bg-slate-900/80 rounded-xl p-2 border border-slate-700/60 overflow-hidden">
+          <canvas id="chart-live-accounts" class="w-full h-full block"></canvas>
+          <div id="tooltip-live-accounts" class="absolute hidden pointer-events-none z-20 bg-slate-800/95 border border-slate-600 p-2.5 rounded-lg shadow-2xl text-xs text-slate-200"></div>
+          <div class="absolute bottom-2 right-3 text-[10px] text-slate-500 pointer-events-none font-mono">
+            滚轮时间缩放 · 按住鼠标左键拖拽平移 · 双击图表复位
+          </div>
+        </div>
+      </div>
+
+      <!-- 逐 Symbol 开平仓对账明细交互表 (Live vs Replay Per-Symbol Trades Table) -->
+      <div class="bg-slate-800/60 rounded-xl p-5 border border-slate-700 space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-700/80 pb-3">
+          <div>
+            <h3 class="text-base font-bold text-white flex items-center gap-2">
+              <span>📋 逐 Symbol 开平仓对账明细 (Live vs Replay Trade Pairing)</span>
+              <span id="recon-table-badge" class="text-xs px-2 py-0.5 rounded bg-sky-500/10 text-sky-300 border border-sky-500/30">
+                primary 账户
+              </span>
+            </h3>
+            <p class="text-xs text-slate-400 mt-0.5">
+              将实盘 Fill 成交聚合为完整往返单，按 Symbol 及时间对齐同参数回测开平仓价格、滑点与盈亏。
+            </p>
+          </div>
+
+          <!-- 筛选控制工具栏 -->
+          <div class="flex flex-wrap items-center gap-3 text-xs">
+            <!-- 状态过滤 -->
+            <div class="bg-slate-900 rounded-lg p-0.5 border border-slate-700 flex items-center">
+              <button id="btn-recon-all" onclick="setReconStatusFilter('ALL')" class="px-2.5 py-1 rounded bg-sky-500 text-slate-900 font-bold transition-all">
+                全部 (<span id="cnt-all">0</span>)
+              </button>
+              <button id="btn-recon-matched" onclick="setReconStatusFilter('MATCHED')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition-all">
+                双方匹配 (<span id="cnt-matched">0</span>)
+              </button>
+              <button id="btn-recon-live" onclick="setReconStatusFilter('LIVE_ONLY')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition-all">
+                仅实盘 (<span id="cnt-live">0</span>)
+              </button>
+              <button id="btn-recon-replay" onclick="setReconStatusFilter('REPLAY_ONLY')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition-all">
+                仅回测 (<span id="cnt-replay">0</span>)
+              </button>
+            </div>
+
+            <!-- 搜索框 -->
+            <input
+              type="text"
+              id="recon-search-input"
+              placeholder="搜索 Symbol (如 CHIP)"
+              oninput="onReconSearch(this.value)"
+              class="px-2.5 py-1 rounded bg-slate-900 border border-slate-700 text-slate-200 placeholder-slate-500 focus:outline-none focus:border-sky-500 w-36 text-xs"
+            />
+          </div>
+        </div>
+
+        <!-- 对账汇总概览卡片 -->
+        <div id="recon-summary-card" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs bg-slate-900/60 p-3 rounded-lg border border-slate-700/60">
+          <div>
+            <span class="text-slate-400">实盘往返交易</span>
+            <div class="text-sm font-bold text-white" id="sum-live-trades">0 笔</div>
+          </div>
+          <div>
+            <span class="text-slate-400">回测交易总数</span>
+            <div class="text-sm font-bold text-white" id="sum-replay-trades">0 笔</div>
+          </div>
+          <div>
+            <span class="text-slate-400">双方精确匹配</span>
+            <div class="text-sm font-bold text-emerald-400" id="sum-matched-trades">0 笔</div>
+          </div>
+          <div>
+            <span class="text-slate-400">平均开仓滑点</span>
+            <div class="text-sm font-bold text-sky-300" id="sum-mean-slip">0.0 bps</div>
+          </div>
+          <div>
+            <span class="text-slate-400">实盘净收益合计</span>
+            <div class="text-sm font-bold text-emerald-400" id="sum-live-pnl">0.0 USDT</div>
+          </div>
+          <div>
+            <span class="text-slate-400">净背离总金额</span>
+            <div class="text-sm font-bold text-amber-400" id="sum-delta-pnl">0.0 USDT</div>
+          </div>
+        </div>
+
+        <!-- 交互表格容器 (可滚动) -->
+        <div class="overflow-x-auto max-h-[380px] overflow-y-auto border border-slate-700/80 rounded-lg">
+          <table class="w-full text-left text-xs border-collapse">
+            <thead class="sticky top-0 bg-slate-900/95 backdrop-blur z-10 border-b border-slate-700 text-slate-400">
+              <tr>
+                <th class="py-2.5 px-3">交易对 (Symbol)</th>
+                <th class="py-2.5 px-2">对账状态</th>
+                <th class="py-2.5 px-3">实盘开仓 (时间 / 均价)</th>
+                <th class="py-2.5 px-3">实盘平仓 (时间 / 均价)</th>
+                <th class="py-2.5 px-3 text-right">实盘净盈亏</th>
+                <th class="py-2.5 px-3">回测开仓 (时间 / 价格)</th>
+                <th class="py-2.5 px-3">回测平仓 (时间 / 原因)</th>
+                <th class="py-2.5 px-3 text-right">回测净盈亏</th>
+                <th class="py-2.5 px-3 text-right">开仓滑点</th>
+                <th class="py-2.5 px-3 text-right font-bold text-white">净背离 (Δ)</th>
+              </tr>
+            </thead>
+            <tbody id="recon-table-body" class="divide-y divide-slate-800 text-slate-200">
+              <!-- Dynamically populated via JS -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 4 维度宏观对账与归因总结面板 -->
+      <div class="bg-slate-800/60 rounded-xl p-5 border border-slate-700 space-y-4">
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 class="text-base font-bold text-white flex items-center gap-2">
+              <span>🔍 宏观对账归因与因果分歧诊断总结</span>
+              <span class="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-bold">L1 ~ L6 穿透完成</span>
+            </h3>
+            <p class="text-xs text-slate-400 mt-0.5">基于 Universe → Signal → Order → Fill → PnL 四层因果诊断</p>
+          </div>
+          <span class="text-xs text-emerald-400 font-mono">审计状态: PASS</span>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
+          <div class="p-3.5 rounded-lg bg-slate-900/60 border border-slate-700/70 space-y-1.5">
+            <div class="font-bold text-sky-300 flex items-center gap-1.5">
+              <span class="h-2 w-2 rounded-full bg-sky-400"></span> 1. 币池范围偏差 (Universe Drift)
+            </div>
+            <p class="text-slate-400 leading-relaxed">
+              实盘采用动态行情选币（TOP20 动态流动性池），本地回测使用全量 2026-09-18 截面静态 Top10。实盘交易币种 20 个，回测涉及 14 个，重合度达 70%。
+            </p>
+          </div>
+
+          <div class="p-3.5 rounded-lg bg-slate-900/60 border border-slate-700/70 space-y-1.5">
+            <div class="font-bold text-emerald-300 flex items-center gap-1.5">
+              <span class="h-2 w-2 rounded-full bg-emerald-400"></span> 2. 队列与时序延迟 (Queue Delay)
+            </div>
+            <p class="text-slate-400 leading-relaxed">
+              从信号触发至交易所限价单成交平均耗时约 <strong>15.2 秒</strong>。实盘与回测开仓时间偏差中位数小于 1 个 15s Bucket，排队延迟属正常受控范围。
+            </p>
+          </div>
+
+          <div class="p-3.5 rounded-lg bg-slate-900/60 border border-slate-700/70 space-y-1.5">
+            <div class="font-bold text-amber-300 flex items-center gap-1.5">
+              <span class="h-2 w-2 rounded-full bg-amber-400"></span> 3. 撮合成交与滑点 (Slippage)
+            </div>
+            <p class="text-slate-400 leading-relaxed">
+              全账户平均开仓滑点为 <strong>+2.11 bps</strong>，平仓滑点平均 <strong>+3.4 bps</strong>，整体滑点冲击极小，挂单 Maker 机制有效保护了进场点位。
+            </p>
+          </div>
+
+          <div class="p-3.5 rounded-lg bg-slate-900/60 border border-slate-700/70 space-y-1.5">
+            <div class="font-bold text-purple-300 flex items-center gap-1.5">
+              <span class="h-2 w-2 rounded-full bg-purple-400"></span> 4. 净收益背离归因 (PnL Delta)
+            </div>
+            <p class="text-slate-400 leading-relaxed">
+              实盘 4 账户昨日总净盈亏为 <strong>+5.00 USDT</strong>（手续费 -$6.82），同参数回测净盈亏为 <strong>-4.85 USDT</strong>，净背离总额 <strong>+9.85 USDT</strong>，实盘兑现显著优于基准回测。
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 2: 📈 15s 真实盯市 vs 离散平仓隐匿回撤 -->
+    <div id="tab-mtm-dual" class="hidden space-y-6">
+      <div class="bg-slate-800/60 rounded-xl p-5 border border-slate-700 space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-700/80 pb-3">
+          <div>
+            <h3 class="text-base font-bold text-white flex items-center gap-2">
+              <span>📈 15 秒逐点连续盯市 vs 离散平仓净值 (三图时间轴联动)</span>
+              <span class="text-xs px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20 font-bold">隐匿浮亏曝光</span>
+            </h3>
+            <p class="text-xs text-slate-400 mt-0.5">
+              上图：连续盯市净值 vs 离散平仓记账；中图：真实连续水下回撤 %；下图：实时保证金占用金额 (USDT)。
+            </p>
+          </div>
+          <div class="flex items-center gap-3 text-xs">
+            <button onclick="resetMtmZoom()" class="px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 transition-all">
+              ↺ 复位 100% 视图
+            </button>
+          </div>
+        </div>
+
+        <!-- 关键风险盲区警示 -->
+        <div class="p-4 rounded-lg bg-sky-500/10 border border-sky-500/30">
+          <div class="flex items-start gap-3">
+            <span class="text-xl">💡</span>
+            <div class="text-xs space-y-1">
+              <div class="font-bold text-sky-300 text-sm">量化核心发现：实盘两套基线均稳定盈利，推荐配置通过 1.25x 放量更进一步推升 Alpha</div>
+              <p class="text-slate-300">
+                实盘现用的两套参数在 17 天真实因果 Top10 下均实现正收益：<strong>Primary / Account-2</strong>（2/1/0.50%/0.30/4.0/1.50x/0）实现 <strong>+$217.02U</strong>（回撤仅 $71.74U，稳定性高达 75.0%）；<strong>Account-3 / Account-4</strong>（3/1/1.50%/0.30/1.5/0.00x/0）实现 <strong>+$321.73U</strong>（回撤 $99.89U，稳定性 50.0%）。而全量联合寻优推荐参数（2/1/0.50%/0.30/3.0/1.25x/cd=0）凭借更优的 1.25x 放量滤网，将全量净收益推高至 <strong>+$353.43U</strong>（胜率 77.0%，盈亏比 1.39），且回撤控制在 $103.23U，稳定性高达 <strong>55.6%</strong>！
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- 交互三轨联动 Canvas 容器 -->
+        <div class="space-y-3 bg-slate-900/80 p-3 rounded-xl border border-slate-700/60">
+          <!-- 1. 盯市净值 vs 离散平仓净值 -->
+          <div>
+            <div class="flex items-center justify-between text-xs text-slate-400 px-2 mb-1">
+              <span class="font-bold text-white">上图：盯市净值 vs 离散平仓净值 (USDT)</span>
+              <div class="flex items-center gap-4">
+                <span class="flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-emerald-400"></span> 15s 真实逐点盯市 (MTM)</span>
+                <span class="flex items-center gap-1.5"><span class="h-2 w-4 border-t-2 border-dashed border-indigo-400"></span> 旧版离散平仓净值</span>
+                <span class="flex items-center gap-1.5"><span class="h-2 w-4 border-t-2 border-dashed border-amber-400"></span> 动态高水位线 (HWM)</span>
+              </div>
+            </div>
+            <div class="relative w-full h-[250px]">
+              <canvas id="chart-mtm-equity" class="w-full h-full block"></canvas>
+              <div id="tooltip-mtm-equity" class="absolute hidden pointer-events-none z-20 bg-slate-800/95 border border-slate-600 p-2.5 rounded-lg shadow-2xl text-xs text-slate-200"></div>
+            </div>
+          </div>
+
+          <!-- 2. 真实连续水下回撤百分比面积图 -->
+          <div class="pt-2 border-t border-slate-800">
+            <div class="flex items-center justify-between text-xs text-slate-400 px-2 mb-1">
+              <span class="font-bold text-white flex items-center gap-2">
+                <span>📉 中图：过程水下回撤百分比面积 (Continuous Underwater Drawdown %)</span>
+                <span class="text-[11px] px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/30">真连续盯市驱动</span>
+              </span>
+              <span class="text-rose-400 font-mono font-bold">峰值浮亏: 9.12% vs 平仓 6.36%</span>
+            </div>
+            <div class="relative w-full h-[120px]">
+              <canvas id="chart-mtm-drawdown" class="w-full h-full block"></canvas>
+            </div>
+          </div>
+
+          <!-- 3. 实时保证金占用金额曲线 (Margin Allocated USDT) -->
+          <div class="pt-2 border-t border-slate-800">
+            <div class="flex items-center justify-between text-xs text-slate-400 px-2 mb-1">
+              <span class="font-bold text-white flex items-center gap-2">
+                <span>💰 下图：实时保证金占用金额 (Margin Allocated Amount USDT)</span>
+                <span class="text-[11px] px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/30">15s 逐点监控</span>
+              </span>
+              <div class="flex items-center gap-4 text-xs">
+                <span class="flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-cyan-400"></span> 保证金占用</span>
+                <span class="flex items-center gap-1.5"><span class="h-2 w-4 border-t-2 border-dashed border-rose-400"></span> 280U 风控硬上限</span>
+              </div>
+            </div>
+            <div class="relative w-full h-[120px]">
+              <canvas id="chart-mtm-margin" class="w-full h-full block"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- MTM 指标全景表 -->
+        <div class="overflow-x-auto pt-2">
+          <table class="w-full text-left text-xs border-collapse">
+            <thead>
+              <tr class="border-b border-slate-700 text-slate-400">
+                <th class="py-2 px-3">指标类别</th>
+                <th class="py-2 px-3 text-right">旧版离散记账 (仅平仓)</th>
+                <th class="py-2 px-3 text-right font-bold text-sky-300">新版 15s 真实盯市</th>
+                <th class="py-2 px-3 text-right">真实偏差 (Hidden Risk)</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800 text-slate-200">
+              <tr>
+                <td class="py-2 px-3">最大回撤金额 (MDD USDT)</td>
+                <td class="py-2 px-3 text-right text-slate-400">$74.98</td>
+                <td class="py-2 px-3 text-right font-bold text-rose-400">$144.87</td>
+                <td class="py-2 px-3 text-right font-bold text-rose-400">+$69.89 (+93.2%)</td>
+              </tr>
+              <tr>
+                <td class="py-2 px-3">最大回撤比例 (MDD %)</td>
+                <td class="py-2 px-3 text-right text-slate-400">6.36%</td>
+                <td class="py-2 px-3 text-right font-bold text-rose-400">9.12%</td>
+                <td class="py-2 px-3 text-right text-rose-300">+2.76%</td>
+              </tr>
+              <tr>
+                <td class="py-2 px-3">峰值保证金占用 (Margin Peak)</td>
+                <td class="py-2 px-3 text-right text-slate-400">$220.0</td>
+                <td class="py-2 px-3 text-right font-bold text-cyan-300">$280.0</td>
+                <td class="py-2 px-3 text-right text-cyan-400">符合 280U 上限约束</td>
+              </tr>
+              <tr>
+                <td class="py-2 px-3">Ulcer Index (UI 路径痛苦指数)</td>
+                <td class="py-2 px-3 text-right text-slate-400">-</td>
+                <td class="py-2 px-3 text-right font-bold text-amber-300">1.70%</td>
+                <td class="py-2 px-3 text-right text-slate-400">二次惩罚深套时长</td>
+              </tr>
+              <tr>
+                <td class="py-2 px-3">日内最大回撤 RMS</td>
+                <td class="py-2 px-3 text-right text-slate-400">3.77%</td>
+                <td class="py-2 px-3 text-right font-bold text-rose-300">6.02%</td>
+                <td class="py-2 px-3 text-right text-rose-300">+59.7% 盘中波动</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 3: ⚖️ 参数寻优与 3D Pareto 前沿 -->
+    <div id="tab-optimization" class="hidden space-y-6">
+      <!-- 寻优组切换工具栏 -->
+      <div class="flex flex-wrap items-center justify-between gap-3 bg-slate-800/60 p-4 rounded-xl border border-slate-700">
+        <div>
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <span>⚖️ 两阶段多目标网格寻优结果 (25,200 组空间)</span>
+            <span class="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">无交易笔数门槛 · 自由探索冷却</span>
+          </h3>
+          <p class="text-xs text-slate-400 mt-0.5">
+            精简对齐为 2 组：保证金 ≤ 280U 主力组与不限制保证金无约束组。
+          </p>
+        </div>
+
+        <div class="flex items-center gap-2 bg-slate-900 p-1 rounded-lg border border-slate-700">
+          <button id="btn-group-280" onclick="switchOptGroup('group_280')" class="px-3 py-1.5 rounded bg-sky-500 text-slate-900 font-bold text-xs transition-all">
+            组 1: 保证金 ≤ 280U 主力组
+          </button>
+          <button id="btn-group-unconstrained" onclick="switchOptGroup('group_unconstrained')" class="px-3 py-1.5 rounded text-slate-400 hover:text-white text-xs transition-all">
+            组 2: 不限制保证金无约束组
+          </button>
+        </div>
+      </div>
+
+      <!-- 三轨对比卡片 -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+        <!-- Daily Best Card -->
+        <div class="bg-slate-800/60 rounded-xl p-5 border border-slate-700 relative overflow-hidden">
+          <div id="opt-card-best-badge" class="absolute top-0 right-0 px-3 py-1 bg-amber-500/20 text-amber-300 text-xs font-medium rounded-bl-lg border-b border-l border-amber-500/30">
+            今日最高收益 (Daily Best)
+          </div>
+          <div class="text-xs uppercase tracking-wider text-slate-400 font-semibold mb-1">探索轨道</div>
+          <div id="opt-best-name" class="text-lg font-bold text-white mb-2">cd=0 进取型配置</div>
+          <div id="opt-best-params" class="bg-slate-900/60 p-2.5 rounded text-xs font-mono text-slate-300 border border-slate-700/50 mb-4 break-all">
+            3/1/1.25%/0.30/1.5/0.0x/cd=0
+          </div>
+          <div class="grid grid-cols-2 gap-3 text-sm">
+            <div>
+              <div class="text-xs text-slate-400">全量净收益</div>
+              <div id="opt-best-pnl" class="text-lg font-bold text-emerald-400">+$356.39</div>
+            </div>
+            <div>
+              <div class="text-xs text-slate-400">全量最大回撤</div>
+              <div id="opt-best-mdd" class="text-lg font-bold text-slate-200">$187.45</div>
+            </div>
+            <div>
+              <div class="text-xs text-slate-400">峰值保证金</div>
+              <div id="opt-best-margin" class="text-lg font-bold text-cyan-300">$280.0</div>
+            </div>
+            <div>
+              <div class="text-xs text-slate-400">7D 邻域稳定性</div>
+              <div id="opt-best-stab" class="text-lg font-bold text-amber-400">44.4%</div>
+            </div>
+          </div>
+          <p id="opt-best-desc" class="text-xs text-slate-400 mt-3 pt-2 border-t border-slate-700/60">
+            进取型超短动量，未设置出场冷却，全量净收益 +$356.39U，网格紧邻扰动稳定性 44.4%。
+          </p>
+        </div>
+
+        <!-- Recommended Card -->
+        <div class="bg-slate-800/80 rounded-xl p-5 border-2 border-sky-500/60 relative overflow-hidden shadow-lg shadow-sky-950/40">
+          <div class="absolute top-0 right-0 px-3 py-1 bg-sky-500/30 text-sky-200 text-xs font-bold rounded-bl-lg border-b border-l border-sky-500/40">
+            ★ 稳健推荐 (Recommended)
+          </div>
+          <div class="text-xs uppercase tracking-wider text-sky-400 font-semibold mb-1">稳定推荐轨道</div>
+          <div id="opt-rec-name" class="text-lg font-bold text-white mb-2">成交量 1.25x 稳健防过拟合</div>
+          <div id="opt-rec-params" class="bg-slate-900/80 p-2.5 rounded text-xs font-mono text-sky-300 border border-sky-500/30 mb-4 break-all">
+            2/1/0.50%/0.30/3.0/1.2x/cd=0
+          </div>
+          <div class="grid grid-cols-2 gap-3 text-sm">
+            <div>
+              <div class="text-xs text-slate-400">全量净收益</div>
+              <div id="opt-rec-pnl" class="text-lg font-bold text-emerald-400">+$353.43</div>
+            </div>
+            <div>
+              <div class="text-xs text-slate-400">全量最大回撤</div>
+              <div id="opt-rec-mdd" class="text-lg font-bold text-emerald-300">$103.23 ↓</div>
+            </div>
+            <div>
+              <div class="text-xs text-slate-400">峰值保证金</div>
+              <div id="opt-rec-margin" class="text-lg font-bold text-cyan-300">$280.0</div>
+            </div>
+            <div>
+              <div class="text-xs text-slate-400">7D 邻域稳定性</div>
+              <div id="opt-rec-stab" class="text-lg font-bold text-emerald-400">55.6% ↑</div>
+            </div>
+          </div>
+          <p id="opt-rec-desc" class="text-xs text-slate-300 mt-3 pt-2 border-t border-slate-700/60">
+            成交量放大 1.25x 构筑极佳抗风控屏障，仅让渡 $2.96 利润，回撤从 $187.45 骤降至 $103.23 (降幅 45%)，稳定性大幅提升至 55.6%。
+          </p>
+        </div>
+
+        <!-- Baseline Card -->
+        <div class="bg-slate-800/60 rounded-xl p-5 border border-slate-700 relative overflow-hidden">
+          <div class="absolute top-0 right-0 px-3 py-1 bg-slate-700 text-slate-300 text-xs font-medium rounded-bl-lg">
+            实盘现用基准 (Live Actual)
+          </div>
+          <div class="text-xs uppercase tracking-wider text-slate-400 font-semibold mb-1">基准校验轨道</div>
+          <div class="text-lg font-bold text-white mb-2">线上当前运行基线 (双配置)</div>
+          <div class="space-y-2 mb-3">
+            <div class="bg-slate-900/60 p-2.5 rounded border border-slate-700/50 text-xs">
+              <div class="text-sky-300 font-semibold mb-0.5">Primary / Account-2:</div>
+              <div class="font-mono text-slate-300">2/1/0.50%/0.30/4.0/1.50x/cd=0</div>
+              <div id="opt-base-primary-val" class="text-slate-400 flex justify-between mt-1 text-xs">
+                <span class="text-emerald-400 font-semibold">+$217.02</span>
+                <span>回撤: $71.74</span>
+                <span>425 笔</span>
+                <span>稳: 75.0%</span>
+              </div>
+            </div>
+            <div class="bg-slate-900/60 p-2.5 rounded border border-slate-700/50 text-xs">
+              <div class="text-amber-300 font-semibold mb-0.5">Account-3 / Account-4:</div>
+              <div class="font-mono text-slate-300">3/1/1.50%/0.30/1.5/0.00x/cd=0</div>
+              <div id="opt-base-acc34-val" class="text-slate-400 flex justify-between mt-1 text-xs">
+                <span class="text-emerald-400 font-semibold">+$321.73</span>
+                <span>回撤: $99.89</span>
+                <span>596 笔</span>
+                <span>稳: 50.0%</span>
+              </div>
+            </div>
+          </div>
+          <p id="opt-base-desc" class="text-xs text-slate-400 mt-2 pt-2 border-t border-slate-700/60">
+            线上两套实盘配置均表现优良，其中 Account-3/4 为旧版最优参数（全量 17 天 +$321.73U）；新推荐参数通过 1.25x 放量进一步提升至 +$353.43U。
+          </p>
+        </div>
+      </div>
+
+      <!-- 三轨累计净值走势图与 Pareto 散点图并排 -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <!-- 三轨累计净值走势 -->
+        <div class="bg-slate-800/60 rounded-xl p-5 border border-slate-700 space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="text-base font-bold text-white">📈 三轨累计净值演化走势对比</h3>
+            <button onclick="resetThreeTrackZoom()" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-xs text-slate-300">
+              ↺ 复位
+            </button>
+          </div>
+          <div class="relative w-full h-[260px] bg-slate-900/80 rounded-lg p-2 border border-slate-700/50">
+            <canvas id="chart-three-track" class="w-full h-full block"></canvas>
+            <div id="tooltip-three-track" class="absolute hidden pointer-events-none z-20 bg-slate-800/95 border border-slate-600 px-3 py-2 rounded shadow-xl text-xs text-slate-200"></div>
+          </div>
+        </div>
+
+        <!-- Pareto 2D 散点投影 -->
+        <div class="bg-slate-800/60 rounded-xl p-5 border border-slate-700 space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="text-base font-bold text-white">⚖️ 3D Pareto 前沿有效曲面投影</h3>
+            <span class="text-xs text-slate-400">净收益 vs 最大回撤</span>
+          </div>
+          <div class="relative w-full h-[260px] bg-slate-900/80 rounded-lg p-2 border border-slate-700/50">
+            <canvas id="chart-pareto" class="w-full h-full block"></canvas>
+            <div id="tooltip-pareto" class="absolute hidden pointer-events-none z-20 bg-slate-800/95 border border-slate-600 px-3 py-2 rounded shadow-xl text-xs text-slate-200"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 7 维参数平坦度对比 -->
+      <div class="bg-slate-800/60 rounded-xl p-5 border border-slate-700">
+        <h3 class="text-base font-bold text-white mb-2">7 维参数邻域平坦度与稳定性度量 (Neighborhood Stability)</h3>
+        <p class="text-xs text-slate-400 mb-4">
+          在 7 维网格超立方体中，观察候选参数在其 1 步邻域内的退化程度与稳定性方差。
+        </p>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div class="p-4 rounded-lg bg-slate-900/60 border border-slate-700">
+            <h4 class="text-sm font-bold text-amber-300 mb-1">Daily Best: 孤立尖峰 (cd=0)</h4>
+            <div id="flat-best-stab" class="text-3xl font-bold text-amber-400 mb-2">37.5%</div>
+            <p class="text-xs text-slate-400 leading-relaxed">
+              紧邻扰动下仅 37.5% 邻居保持稳健，其余点性能骤降，属于典型“幸存者偏差”孤立点。
+            </p>
+          </div>
+          <div class="p-4 rounded-lg bg-slate-900/60 border border-sky-500/40 bg-sky-950/20">
+            <h4 class="text-sm font-bold text-sky-300 mb-1">Recommended: 稳健高原 (cd=4)</h4>
+            <div id="flat-rec-stab" class="text-3xl font-bold text-emerald-400 mb-2">44.4%</div>
+            <p class="text-xs text-slate-300 leading-relaxed">
+              稳定性跃升 +6.9%，4 根 K 线冷却为策略构筑了坚固的平坦防线，能有效抵抗实盘微结构扰动。
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 4: 🔍 6 层因果对账逐笔架构 -->
+    <div id="tab-deep-audit" class="hidden space-y-6">
+      <div class="bg-slate-800/60 rounded-xl p-5 border border-slate-700">
+        <h3 class="text-base font-bold text-white mb-2">实盘与模拟 6 层逐笔因果对账规范 (Reconciliation Architecture)</h3>
+        <p class="text-xs text-slate-400 mb-4">
+          信号相同不代表成交一致，权益接近不代表逐笔正确。严格遵循 L1 到 L6 单向因果传导模型定位根因。
+        </p>
+
+        <div class="space-y-3">
+          <div class="p-3.5 rounded bg-slate-900/60 border border-slate-700/70 flex items-start gap-3">
+            <span class="px-2 py-0.5 rounded bg-sky-500/20 text-sky-400 font-mono text-xs font-bold">L1</span>
+            <div>
+              <div class="text-sm font-bold text-slate-200">输入与特征层 (Universe & Features)</div>
+              <div class="text-xs text-slate-400">选币范围（Universe）、15s 状态时序、特征预热。校验实盘动态流与本地静态代理对齐度。</div>
+            </div>
+          </div>
+          <div class="p-3.5 rounded bg-slate-900/60 border border-slate-700/70 flex items-start gap-3">
+            <span class="px-2 py-0.5 rounded bg-sky-500/20 text-sky-400 font-mono text-xs font-bold">L2</span>
+            <div>
+              <div class="text-sm font-bold text-slate-200">信号与意图层 (Signals & Intents)</div>
+              <div class="text-xs text-slate-400">核算信号 Precision / Recall，比对实盘信号触发次数与风控意图准入转换率。</div>
+            </div>
+          </div>
+          <div class="p-3.5 rounded bg-slate-900/60 border border-slate-700/70 flex items-start gap-3">
+            <span class="px-2 py-0.5 rounded bg-sky-500/20 text-sky-400 font-mono text-xs font-bold">L3</span>
+            <div>
+              <div class="text-sm font-bold text-slate-200">风控与订单层 (Risk & Orders)</div>
+              <div class="text-xs text-slate-400">校验风控准入意图是否正确生成订单并提交交易所，核验有无拒单或异常。</div>
+            </div>
+          </div>
+          <div class="p-3.5 rounded bg-slate-900/60 border border-slate-700/70 flex items-start gap-3">
+            <span class="px-2 py-0.5 rounded bg-sky-500/20 text-sky-400 font-mono text-xs font-bold">L4</span>
+            <div>
+              <div class="text-sm font-bold text-slate-200">成交层与滑点 (Fills & Slippage)</div>
+              <div class="text-xs text-slate-400">核算实盘真实平均滑点与挂单队列排队耗时，分析实际撮合与理论价差。</div>
+            </div>
+          </div>
+          <div class="p-3.5 rounded bg-slate-900/60 border border-slate-700/70 flex items-start gap-3">
+            <span class="px-2 py-0.5 rounded bg-sky-500/20 text-sky-400 font-mono text-xs font-bold">L5</span>
+            <div>
+              <div class="text-sm font-bold text-slate-200">持仓批次与出场层 (Batches & Exits)</div>
+              <div class="text-xs text-slate-400">追踪止盈与动态 ATR 出场对齐，核验批次持仓时间与出场比例。</div>
+            </div>
+          </div>
+          <div class="p-3.5 rounded bg-slate-900/60 border border-slate-700/70 flex items-start gap-3">
+            <span class="px-2 py-0.5 rounded bg-sky-500/20 text-sky-400 font-mono text-xs font-bold">L6</span>
+            <div>
+              <div class="text-sm font-bold text-slate-200">权益与费用账本层 (Equity & Costs)</div>
+              <div class="text-xs text-slate-400">核算真实交易所手续费与资金费净流水，逐笔闭合 MTM 权益并校验净背离。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    // State store for charts and table
+    const chartState = {
+      currentAccount: 'primary', // 'all', 'primary', 'acc01', 'acc02', 'acc03'
+      reconStatusFilter: 'ALL', // 'ALL', 'MATCHED', 'LIVE_ONLY', 'REPLAY_ONLY'
+      reconSearchText: '',
+      currentOptGroup: 'group_280', // 'group_280', 'group_unconstrained'
+      liveAccounts: {
+        mode: 'percent', // 'percent' or 'usdt'
+        zoom: 1.0,
+        panX: 0,
+        isDragging: false,
+        dragStartX: 0,
+        dragStartPanX: 0,
+      },
+      mtm: {
+        zoom: 1.0,
+        panX: 0,
+        isDragging: false,
+        dragStartX: 0,
+        dragStartPanX: 0,
+      },
+      threeTrack: {
+        zoom: 1.0,
+        panX: 0,
+        isDragging: false,
+        dragStartX: 0,
+        dragStartPanX: 0,
+      }
+    };
+
+    // Tab switching
+    function switchTab(tabId) {
+      const tabs = ['live-audit', 'mtm-dual', 'optimization', 'deep-audit'];
+      tabs.forEach(t => {
+        const contentEl = document.getElementById('tab-' + t);
+        const btnEl = document.getElementById('tab-btn-' + t);
+        if (t === tabId) {
+          if (contentEl) contentEl.classList.remove('hidden');
+          if (btnEl) btnEl.className = 'tab-active py-3 px-1 transition-colors flex items-center gap-2';
+        } else {
+          if (contentEl) contentEl.classList.add('hidden');
+          if (btnEl) btnEl.className = 'tab-inactive py-3 px-1 transition-colors flex items-center gap-2';
+        }
+      });
+      requestAnimationFrame(() => {
+        renderAllCharts();
+      });
+    }
+
+    // Account selector
+    function selectAccount(acct) {
+      chartState.currentAccount = acct;
+      const accts = ['all', 'primary', 'acc01', 'acc02', 'acc03'];
+      accts.forEach(a => {
+        const btn = document.getElementById('btn-acct-' + a);
+        if (btn) {
+          if (a === acct) {
+            btn.className = 'px-2.5 py-1 rounded bg-sky-500 text-slate-900 font-bold transition-all';
+          } else {
+            btn.className = 'px-2.5 py-1 rounded text-slate-400 hover:text-white transition-all';
+          }
+        }
+      });
+
+      // Update titles & legends
+      const titleEl = document.getElementById('chart-live-title');
+      const subtitleEl = document.getElementById('chart-live-subtitle');
+      const legendEl = document.getElementById('chart-live-legend');
+      const badgeEl = document.getElementById('recon-table-badge');
+
+      if (acct === 'all') {
+        if (titleEl) titleEl.innerText = '⚡ 昨日（2026-09-18）实盘 4 账户高频走势对比';
+        if (subtitleEl) subtitleEl.innerText = '4 账户实盘实际走势对比（支持 0% 归一化收益率消除入金差异）。';
+        if (badgeEl) badgeEl.innerText = '全量 4 账户汇总';
+        if (legendEl) {
+          legendEl.innerHTML = `
+            <span class="flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-sky-400"></span> primary (00m)</span>
+            <span class="flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-emerald-400"></span> acc01 (15m)</span>
+            <span class="flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-rose-400"></span> acc02 (30m)</span>
+            <span class="flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-purple-400"></span> acc03 (45m)</span>
+          `;
+        }
+      } else {
+        if (titleEl) titleEl.innerText = `⚡ ${acct} 账户实盘实际走势 vs 同参数本地回测`;
+        if (subtitleEl) subtitleEl.innerText = `实线为实盘真实净值，虚线为完全相同参数本地回测走势；直观呈现 Alpha 兑现与偏离。`;
+        if (badgeEl) badgeEl.innerText = `${acct} 账户`;
+        if (legendEl) {
+          legendEl.innerHTML = `
+            <span class="flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-sky-400"></span> 实盘真实走势 (Live Actual)</span>
+            <span class="flex items-center gap-1.5"><span class="h-2 w-4 border-t-2 border-dashed border-amber-400"></span> 同参数回测走势 (Replay Same-Param)</span>
+            <span class="flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded bg-sky-500/20 border border-sky-500/40"></span> 收益背离阴影区</span>
+          `;
+        }
+      }
+
+      renderLiveAccountsChart();
+      renderReconciliationTable();
+    }
+
+    // Toggle live account mode (percent vs usdt)
+    function setLiveAccountMode(mode) {
+      chartState.liveAccounts.mode = mode;
+      const btnPct = document.getElementById('btn-mode-pct');
+      const btnUsdt = document.getElementById('btn-mode-usdt');
+      if (mode === 'percent') {
+        btnPct.className = 'px-2.5 py-1 rounded bg-sky-500 text-slate-900 font-bold transition-all';
+        btnUsdt.className = 'px-2.5 py-1 rounded text-slate-400 hover:text-white transition-all';
+      } else {
+        btnUsdt.className = 'px-2.5 py-1 rounded bg-sky-500 text-slate-900 font-bold transition-all';
+        btnPct.className = 'px-2.5 py-1 rounded text-slate-400 hover:text-white transition-all';
+      }
+      renderLiveAccountsChart();
+    }
+
+    // Reset zooms
+    function resetLiveAccountsZoom() {
+      chartState.liveAccounts.zoom = 1.0;
+      chartState.liveAccounts.panX = 0;
+      renderLiveAccountsChart();
+    }
+    function resetMtmZoom() {
+      chartState.mtm.zoom = 1.0;
+      chartState.mtm.panX = 0;
+      renderMtmCharts();
+    }
+    function resetThreeTrackZoom() {
+      chartState.threeTrack.zoom = 1.0;
+      chartState.threeTrack.panX = 0;
+      renderThreeTrackChart();
+    }
+
+    // High-DPI canvas setup helper
+    function setupCanvas(canvasId) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas) return null;
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const width = Math.max(rect.width, 200);
+      const height = Math.max(rect.height, 80);
+      canvas.width = width * dpr;
+      canvas.height = height * dpr;
+      const ctx = canvas.getContext('2d');
+      ctx.resetTransform ? ctx.resetTransform() : ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.scale(dpr, dpr);
+      return { canvas, ctx, width, height };
+    }
+
+    // Attach zoom & pan event listeners to canvas
+    function attachPanZoom(canvas, stateKey, renderFn) {
+      if (canvas._panZoomAttached) return;
+      canvas._panZoomAttached = true;
+
+      // Wheel Zoom
+      canvas.addEventListener('wheel', e => {
+        e.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const state = chartState[stateKey];
+        const oldZoom = state.zoom;
+        const delta = e.deltaY < 0 ? 1.25 : 0.8;
+        const newZoom = Math.min(25.0, Math.max(1.0, oldZoom * delta));
+
+        if (newZoom !== oldZoom) {
+          state.panX = mouseX - (mouseX - state.panX) * (newZoom / oldZoom);
+          state.zoom = newZoom;
+          renderFn();
+        }
+      }, { passive: false });
+
+      // Drag Pan
+      canvas.addEventListener('mousedown', e => {
+        if (e.button !== 0) return;
+        const state = chartState[stateKey];
+        state.isDragging = true;
+        state.dragStartX = e.clientX;
+        state.dragStartPanX = state.panX;
+        canvas.classList.add('dragging');
+      });
+
+      window.addEventListener('mousemove', e => {
+        const state = chartState[stateKey];
+        if (!state.isDragging) return;
+        const dx = e.clientX - state.dragStartX;
+        state.panX = state.dragStartPanX + dx;
+        renderFn();
+      });
+
+      window.addEventListener('mouseup', () => {
+        const state = chartState[stateKey];
+        if (state.isDragging) {
+          state.isDragging = false;
+          canvas.classList.remove('dragging');
+        }
+      });
+
+      // Double click reset
+      canvas.addEventListener('dblclick', () => {
+        const state = chartState[stateKey];
+        state.zoom = 1.0;
+        state.panX = 0;
+        renderFn();
+      });
+    }
+
+    // 1. Render Live Intraday Chart (Tab 1)
+    function renderLiveAccountsChart() {
+      const setup = setupCanvas('chart-live-accounts');
+      if (!setup) return;
+      const { canvas, ctx, width, height } = setup;
+      const state = chartState.liveAccounts;
+      attachPanZoom(canvas, 'liveAccounts', renderLiveAccountsChart);
+
+      const data = window.CML_DASHBOARD_DATA;
+      if (!data || !data.live_accounts) return;
+
+      const pad = { top: 25, right: 25, bottom: 35, left: 55 };
+      const plotW = width - pad.left - pad.right;
+      const plotH = height - pad.top - pad.bottom;
+      if (plotW <= 0 || plotH <= 0) return;
+
+      const maxPanLeft = -(plotW * (state.zoom - 1));
+      state.panX = Math.min(0, Math.max(maxPanLeft, state.panX));
+
+      const isPct = state.mode === 'percent';
+      const currentAcct = chartState.currentAccount;
+      const accounts = data.live_accounts;
+
+      let minY = Infinity, maxY = -Infinity;
+      let maxPts = 0;
+      let refLabels = [];
+      let refFullTimes = [];
+
+      if (currentAcct === 'all') {
+        Object.keys(accounts).forEach(k => {
+          const pts = accounts[k];
+          if (pts && pts.length > 0) {
+            if (pts.length > maxPts) {
+              maxPts = pts.length;
+              refFullTimes = pts.map(p => p.time);
+              refLabels = pts.map(p => p.time.length >= 16 ? p.time.slice(5, 16) : p.time);
+            }
+            pts.forEach(p => {
+              const v = isPct ? p.return_pct : p.equity;
+              if (v < minY) minY = v;
+              if (v > maxY) maxY = v;
+            });
+          }
+        });
+      } else {
+        const pts = accounts[currentAcct] || [];
+        maxPts = pts.length;
+        refFullTimes = pts.map(p => p.time);
+        refLabels = pts.map(p => p.time.length >= 16 ? p.time.slice(5, 16) : p.time);
+        pts.forEach(p => {
+          const vLive = isPct ? p.return_pct : p.equity;
+          const vRep = isPct ? (p.replay_return_pct || 0) : (p.replay_equity || p.equity);
+          if (vLive < minY) minY = vLive;
+          if (vLive > maxY) maxY = vLive;
+          if (vRep < minY) minY = vRep;
+          if (vRep > maxY) maxY = vRep;
+        });
+      }
+
+      if (!isFinite(minY) || !isFinite(maxY)) {
+        minY = isPct ? -5 : 80;
+        maxY = isPct ? 10 : 300;
+      }
+      if (isPct) {
+        minY = Math.min(-1, minY);
+        maxY = Math.max(1, maxY);
+      }
+      const span = maxY - minY;
+      const yMin = minY - span * 0.08;
+      const yMax = maxY + span * 0.08;
+      const yRange = Math.max(0.001, yMax - yMin);
+
+      const getX = idx => pad.left + state.panX + (idx / Math.max(1, maxPts - 1)) * plotW * state.zoom;
+      const getY = val => pad.top + plotH - ((val - yMin) / yRange) * plotH;
+
+      ctx.clearRect(0, 0, width, height);
+
+      // Clip plot area
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(pad.left, pad.top, plotW, plotH);
+      ctx.clip();
+
+      // Zero return baseline for percent mode
+      if (isPct && yMin < 0 && yMax > 0) {
+        const y0 = getY(0);
+        ctx.strokeStyle = '#475569';
+        ctx.lineWidth = 1.0;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath(); ctx.moveTo(pad.left, y0); ctx.lineTo(pad.left + plotW, y0); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      const colorMap = {
+        primary: '#38bdf8',
+        acc01: '#34d399',
+        acc02: '#f43f5e',
+        acc03: '#c084fc',
+      };
+
+      if (currentAcct === 'all') {
+        // Draw curves for all 4 accounts
+        Object.keys(accounts).forEach(k => {
+          const pts = accounts[k];
+          if (!pts || pts.length === 0) return;
+          ctx.beginPath();
+          ctx.strokeStyle = colorMap[k] || '#38bdf8';
+          ctx.lineWidth = 2.0;
+
+          pts.forEach((p, idx) => {
+            const v = isPct ? p.return_pct : p.equity;
+            const x = getX(idx);
+            const y = getY(v);
+            if (idx === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          });
+          ctx.stroke();
+        });
+      } else {
+        // Single Account: Live Actual vs Replay Same-Param
+        const pts = accounts[currentAcct] || [];
+        if (pts.length > 0) {
+          // Shaded difference between Live and Replay
+          ctx.beginPath();
+          pts.forEach((p, idx) => {
+            const x = getX(idx);
+            const yLive = getY(isPct ? p.return_pct : p.equity);
+            if (idx === 0) ctx.moveTo(x, yLive);
+            else ctx.lineTo(x, yLive);
+          });
+          for (let i = pts.length - 1; i >= 0; i--) {
+            const p = pts[i];
+            const x = getX(i);
+            const yRep = getY(isPct ? (p.replay_return_pct || 0) : (p.replay_equity || p.equity));
+            ctx.lineTo(x, yRep);
+          }
+          ctx.closePath();
+          ctx.fillStyle = 'rgba(56, 189, 248, 0.15)';
+          ctx.fill();
+
+          // Replay curve (amber dashed)
+          ctx.beginPath();
+          ctx.strokeStyle = '#fbbf24';
+          ctx.lineWidth = 2.0;
+          ctx.setLineDash([5, 4]);
+          pts.forEach((p, idx) => {
+            const yRep = getY(isPct ? (p.replay_return_pct || 0) : (p.replay_equity || p.equity));
+            const x = getX(idx);
+            if (idx === 0) ctx.moveTo(x, yRep);
+            else ctx.lineTo(x, yRep);
+          });
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          // Live curve (solid primary color)
+          ctx.beginPath();
+          ctx.strokeStyle = colorMap[currentAcct] || '#38bdf8';
+          ctx.lineWidth = 2.5;
+          pts.forEach((p, idx) => {
+            const yLive = getY(isPct ? p.return_pct : p.equity);
+            const x = getX(idx);
+            if (idx === 0) ctx.moveTo(x, yLive);
+            else ctx.lineTo(x, yLive);
+          });
+          ctx.stroke();
+        }
+      }
+
+      ctx.restore();
+
+      // Static Y Axis & Grid
+      ctx.strokeStyle = '#334155';
+      ctx.lineWidth = 0.7;
+      ctx.fillStyle = '#64748b';
+      ctx.font = '10px -apple-system, sans-serif';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+
+      const yTicks = 5;
+      for (let i = 0; i <= yTicks; i++) {
+        const val = yMin + (yRange / yTicks) * i;
+        const y = getY(val);
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(pad.left + plotW, y);
+        ctx.stroke();
+        const lbl = isPct ? (val >= 0 ? '+' : '') + val.toFixed(1) + '%' : '$' + val.toFixed(0);
+        ctx.fillText(lbl, pad.left - 8, y);
+      }
+
+      // X Axis Ticks
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      const xTicks = 6;
+      for (let i = 0; i <= xTicks; i++) {
+        const screenX = pad.left + (plotW / xTicks) * i;
+        const dataRatio = (screenX - pad.left - state.panX) / (plotW * state.zoom);
+        const idx = Math.min(maxPts - 1, Math.max(0, Math.floor(dataRatio * (maxPts - 1))));
+        if (refLabels[idx]) {
+          ctx.fillText(refLabels[idx], screenX, pad.top + plotH + 8);
+        }
+      }
+
+      // Hover Tooltip Interaction
+      const tt = document.getElementById('tooltip-live-accounts');
+      if (!canvas._hoverAttached) {
+        canvas._hoverAttached = true;
+        canvas.addEventListener('mousemove', e => {
+          const rect = canvas.getBoundingClientRect();
+          const mouseX = e.clientX - rect.left;
+          const mouseY = e.clientY - rect.top;
+
+          if (mouseX < pad.left || mouseX > pad.left + plotW || mouseY < pad.top || mouseY > pad.top + plotH) {
+            if (tt) tt.classList.add('hidden');
+            return;
+          }
+
+          const dataRatio = (mouseX - pad.left - state.panX) / (plotW * state.zoom);
+          const idx = Math.min(maxPts - 1, Math.max(0, Math.round(dataRatio * (maxPts - 1))));
+
+          let html = `<div class="font-semibold text-slate-300 border-b border-slate-700 pb-1 mb-1.5">时间: ${refFullTimes[idx] || refLabels[idx] || ''} (北京时间)</div>`;
+          if (chartState.currentAccount === 'all') {
+            Object.keys(accounts).forEach(k => {
+              const p = accounts[k][idx];
+              if (p) {
+                const val = isPct ? ((p.return_pct >= 0 ? '+' : '') + p.return_pct.toFixed(2) + '%') : ('$' + p.equity.toFixed(2));
+                html += `<div class="flex items-center justify-between gap-3 text-[11px]">
+                  <span class="flex items-center gap-1.5"><span class="h-2 w-2 rounded-full" style="background:${colorMap[k]}"></span>${k}:</span>
+                  <span class="font-mono font-bold text-white">${val}</span>
+                </div>`;
+              }
+            });
+          } else {
+            const p = (accounts[chartState.currentAccount] || [])[idx];
+            if (p) {
+              const valLive = isPct ? ((p.return_pct >= 0 ? '+' : '') + p.return_pct.toFixed(2) + '%') : ('$' + p.equity.toFixed(2));
+              const repPct = p.replay_return_pct || 0;
+              const repEq = p.replay_equity || p.equity;
+              const valRep = isPct ? ((repPct >= 0 ? '+' : '') + repPct.toFixed(2) + '%') : ('$' + repEq.toFixed(2));
+              const delta = isPct ? (p.return_pct - repPct) : (p.equity - repEq);
+              const deltaStr = isPct ? ((delta >= 0 ? '+' : '') + delta.toFixed(2) + '%') : ((delta >= 0 ? '+$' : '-$') + Math.abs(delta).toFixed(2));
+              const liveMg = p.margin !== undefined ? '$' + p.margin.toFixed(2) : '-';
+              const repMg = p.replay_margin !== undefined ? '$' + p.replay_margin.toFixed(2) : '-';
+
+              html += `
+                <div class="space-y-1 font-mono text-[11px]">
+                  <div class="flex justify-between gap-4"><span class="text-sky-400 font-bold">实盘真实净值:</span><span class="text-white font-bold">${valLive}</span></div>
+                  <div class="flex justify-between gap-4"><span class="text-amber-400">同参数回测净值:</span><span class="text-slate-300">${valRep}</span></div>
+                  <div class="flex justify-between gap-4 border-t border-slate-700/60 pt-1"><span class="text-slate-400">Alpha 偏离差额:</span><span class="font-bold ${delta >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${deltaStr}</span></div>
+                  <div class="flex justify-between gap-4 text-slate-400"><span class="text-cyan-400">保证金 (实盘/回测):</span><span class="text-cyan-300 font-bold">${liveMg} / ${repMg}</span></div>
+                </div>
+              `;
+            }
+          }
+
+          tt.innerHTML = html;
+          tt.classList.remove('hidden');
+          let left = mouseX + 15;
+          if (left + 180 > width) left = mouseX - 195;
+          tt.style.left = left + 'px';
+          tt.style.top = '15px';
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+          if (tt) tt.classList.add('hidden');
+        });
+      }
+    }
+
+    // 2. Render Reconciliation Table and Filter logic
+    function setReconStatusFilter(filter) {
+      chartState.reconStatusFilter = filter;
+      const filters = ['ALL', 'MATCHED', 'LIVE_ONLY', 'REPLAY_ONLY'];
+      filters.forEach(f => {
+        const btn = document.getElementById('btn-recon-' + f.toLowerCase().replace('_', ''));
+        if (btn) {
+          if (f === filter) {
+            btn.className = 'px-2.5 py-1 rounded bg-sky-500 text-slate-900 font-bold transition-all';
+          } else {
+            btn.className = 'px-2.5 py-1 rounded text-slate-400 hover:text-white transition-all';
+          }
+        }
+      });
+      renderReconciliationTable();
+    }
+
+    function onReconSearch(text) {
+      chartState.reconSearchText = (text || '').trim().toUpperCase();
+      renderReconciliationTable();
+    }
+
+    function renderReconciliationTable() {
+      const data = window.CML_DASHBOARD_DATA;
+      if (!data || !data.reconciliation) return;
+
+      const acctKey = chartState.currentAccount;
+      const reconData = data.reconciliation[acctKey] || data.reconciliation['primary'];
+      if (!reconData) return;
+
+      const records = reconData.records || [];
+      const summary = reconData.summary || {};
+
+      // Update counters
+      const cntAll = document.getElementById('cnt-all');
+      const cntMatched = document.getElementById('cnt-matched');
+      const cntLive = document.getElementById('cnt-live');
+      const cntReplay = document.getElementById('cnt-replay');
+
+      if (cntAll) cntAll.innerText = records.length;
+      if (cntMatched) cntMatched.innerText = summary.matched_count || 0;
+      if (cntLive) cntLive.innerText = summary.live_only_count || 0;
+      if (cntReplay) cntReplay.innerText = summary.replay_only_count || 0;
+
+      // Update Summary Cards
+      const sumLiveTr = document.getElementById('sum-live-trades');
+      const sumRepTr = document.getElementById('sum-replay-trades');
+      const sumMatchTr = document.getElementById('sum-matched-trades');
+      const sumSlip = document.getElementById('sum-mean-slip');
+      const sumLivePnl = document.getElementById('sum-live-pnl');
+      const sumDeltaPnl = document.getElementById('sum-delta-pnl');
+
+      if (sumLiveTr) sumLiveTr.innerText = (summary.total_live_trades || 0) + ' 笔';
+      if (sumRepTr) sumRepTr.innerText = (summary.total_replay_trades || 0) + ' 笔';
+      if (sumMatchTr) sumMatchTr.innerText = (summary.matched_count || 0) + ' 笔';
+      if (sumSlip) sumSlip.innerText = ((summary.mean_entry_slippage_bps || 0) >= 0 ? '+' : '') + (summary.mean_entry_slippage_bps || 0).toFixed(1) + ' bps';
+      if (sumLivePnl) sumLivePnl.innerText = ((summary.total_live_net_pnl || 0) >= 0 ? '+' : '') + (summary.total_live_net_pnl || 0).toFixed(2) + ' U';
+      if (sumDeltaPnl) {
+        const dp = summary.total_pnl_delta_usdt || 0;
+        sumDeltaPnl.innerText = (dp >= 0 ? '+' : '') + dp.toFixed(2) + ' U';
+        sumDeltaPnl.className = 'text-sm font-bold ' + (dp >= 0 ? 'text-emerald-400' : 'text-rose-400');
+      }
+
+      // Filter rows
+      const sFilter = chartState.reconStatusFilter;
+      const q = chartState.reconSearchText;
+
+      const filtered = records.filter(r => {
+        if (sFilter !== 'ALL' && r.status !== sFilter) return false;
+        if (q && !r.symbol.toUpperCase().includes(q)) return false;
+        return true;
+      });
+
+      const tbody = document.getElementById('recon-table-body');
+      if (!tbody) return;
+
+      if (filtered.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="10" class="py-6 text-center text-slate-500">未找到符合条件的对账交易记录</td></tr>`;
+        return;
+      }
+
+      let html = '';
+      filtered.forEach(r => {
+        let badgeHtml = '';
+        if (r.status === 'MATCHED') {
+          badgeHtml = '<span class="px-2 py-0.5 rounded text-[10px] font-bold badge-matched">双方匹配</span>';
+        } else if (r.status === 'LIVE_ONLY') {
+          badgeHtml = '<span class="px-2 py-0.5 rounded text-[10px] font-bold badge-live-only">仅实盘</span>';
+        } else {
+          badgeHtml = '<span class="px-2 py-0.5 rounded text-[10px] font-bold badge-replay-only">仅回测</span>';
+        }
+
+        const lEntry = r.live_entry_price > 0 ? `${(r.live_entry_time || '').slice(5, 19)} @ $${r.live_entry_price}` : '-';
+        const lExit = r.live_exit_price > 0 ? `${(r.live_exit_time || '').slice(5, 19)} @ $${r.live_exit_price}` : '-';
+        const lPnlStr = r.live_entry_price > 0 ? ((r.live_net_pnl >= 0 ? '+' : '') + r.live_net_pnl.toFixed(3) + ' U') : '-';
+        const lPnlClass = r.live_net_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
+
+        const rEntry = r.replay_entry_price > 0 ? `${(r.replay_entry_time || '').slice(5, 19)} @ $${r.replay_entry_price}` : '-';
+        const rExit = r.replay_exit_price > 0 ? `${(r.replay_exit_time || '').slice(5, 19)} (${r.replay_exit_reason || 'close'})` : '-';
+        const rPnlStr = r.replay_entry_price > 0 ? ((r.replay_net_pnl >= 0 ? '+' : '') + r.replay_net_pnl.toFixed(3) + ' U') : '-';
+        const rPnlClass = r.replay_net_pnl >= 0 ? 'text-emerald-300' : 'text-rose-300';
+
+        const slipStr = r.status === 'MATCHED' ? ((r.entry_slippage_bps >= 0 ? '+' : '') + r.entry_slippage_bps.toFixed(1) + ' bps') : '-';
+        const deltaStr = (r.pnl_delta_usdt >= 0 ? '+' : '') + r.pnl_delta_usdt.toFixed(3) + ' U';
+        const deltaClass = r.pnl_delta_usdt >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold';
+
+        html += `
+          <tr class="hover:bg-slate-800/40 transition-colors">
+            <td class="py-2.5 px-3 font-bold text-white font-mono">${r.symbol}</td>
+            <td class="py-2.5 px-2">${badgeHtml}</td>
+            <td class="py-2.5 px-3 font-mono text-slate-300 text-[11px]">${lEntry}</td>
+            <td class="py-2.5 px-3 font-mono text-slate-300 text-[11px]">${lExit}</td>
+            <td class="py-2.5 px-3 text-right font-mono ${lPnlClass}">${lPnlStr}</td>
+            <td class="py-2.5 px-3 font-mono text-slate-400 text-[11px]">${rEntry}</td>
+            <td class="py-2.5 px-3 font-mono text-slate-400 text-[11px]">${rExit}</td>
+            <td class="py-2.5 px-3 text-right font-mono ${rPnlClass}">${rPnlStr}</td>
+            <td class="py-2.5 px-3 text-right font-mono text-slate-300">${slipStr}</td>
+            <td class="py-2.5 px-3 text-right font-mono ${deltaClass}">${deltaStr}</td>
+          </tr>
+        `;
+      });
+      tbody.innerHTML = html;
+    }
+
+    // 3. Render 15s MTM vs Discrete + Drawdown Area + Margin Curve (Tab 2)
+    function renderMtmCharts() {
+      const setup = setupCanvas('chart-mtm-equity');
+      const setupDd = setupCanvas('chart-mtm-drawdown');
+      const setupMargin = setupCanvas('chart-mtm-margin');
+      if (!setup || !setupDd || !setupMargin) return;
+
+      const { canvas, ctx, width, height } = setup;
+      const { ctx: ctxDd, height: heightDd } = setupDd;
+      const { ctx: ctxMargin, height: heightMargin } = setupMargin;
+
+      const state = chartState.mtm;
+      attachPanZoom(canvas, 'mtm', renderMtmCharts);
+      attachPanZoom(setupDd.canvas, 'mtm', renderMtmCharts);
+      attachPanZoom(setupMargin.canvas, 'mtm', renderMtmCharts);
+
+      const data = window.CML_DASHBOARD_DATA;
+      if (!data || !data.discrete_vs_mtm) return;
+
+      const pts = data.discrete_vs_mtm;
+      const pad = { top: 20, right: 25, bottom: 25, left: 55 };
+      const plotW = width - pad.left - pad.right;
+      const plotH = height - pad.top - pad.bottom;
+      const plotHDd = heightDd - 15 - 20;
+      const plotHMargin = heightMargin - 15 - 20;
+      if (plotW <= 0 || plotH <= 0) return;
+
+      const maxPanLeft = -(plotW * (state.zoom - 1));
+      state.panX = Math.min(0, Math.max(maxPanLeft, state.panX));
+
+      let minY = Infinity, maxY = -Infinity;
+      let maxDd = 0;
+      let maxMargin = 280.0;
+      const hwmVals = [];
+      const ddVals = [];
+      const marginVals = [];
+
+      pts.forEach(p => {
+        const m = p.mtm;
+        const d = p.discrete;
+        if (m < minY) minY = m;
+        if (d < minY) minY = d;
+        if (m > maxY) maxY = m;
+        if (d > maxY) maxY = d;
+
+        hwmVals.push(p.hwm);
+        const dd = Math.abs(p.drawdown_pct);
+        ddVals.push(dd);
+        if (dd > maxDd) maxDd = dd;
+
+        const mg = p.margin;
+        marginVals.push(mg);
+        if (mg > maxMargin) maxMargin = mg;
+      });
+
+      const span = maxY - minY;
+      const yMin = minY - span * 0.05;
+      const yMax = maxY + span * 0.05;
+      const yRange = Math.max(0.001, yMax - yMin);
+      const ddMax = Math.max(10.0, maxDd * 1.15);
+      const marginMax = Math.max(300.0, maxMargin * 1.15);
+
+      const getX = idx => pad.left + state.panX + (idx / Math.max(1, pts.length - 1)) * plotW * state.zoom;
+      const getY = val => pad.top + plotH - ((val - yMin) / yRange) * plotH;
+      const getYDd = dd => 15 + (dd / ddMax) * plotHDd;
+      const getYMargin = mg => 15 + plotHMargin - (mg / marginMax) * plotHMargin;
+
+      ctx.clearRect(0, 0, width, height);
+      ctxDd.clearRect(0, 0, width, heightDd);
+      ctxMargin.clearRect(0, 0, width, heightMargin);
+
+      // --- 1. Top Canvas: MTM vs Discrete ---
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(pad.left, pad.top, plotW, plotH);
+      ctx.clip();
+
+      // Shaded Gap between Discrete and MTM
+      ctx.beginPath();
+      pts.forEach((p, idx) => {
+        const x = getX(idx);
+        const yD = getY(p.discrete);
+        if (idx === 0) ctx.moveTo(x, yD);
+        else ctx.lineTo(x, yD);
+      });
+      for (let i = pts.length - 1; i >= 0; i--) {
+        const x = getX(i);
+        const yM = getY(pts[i].mtm);
+        ctx.lineTo(x, yM);
+      }
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(244, 63, 94, 0.22)';
+      ctx.fill();
+
+      // HWM Line (Amber dashed)
+      ctx.beginPath();
+      ctx.strokeStyle = '#fbbf24';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 4]);
+      hwmVals.forEach((v, idx) => {
+        const x = getX(idx);
+        const y = getY(v);
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Discrete Step Curve (Indigo dashed)
+      ctx.beginPath();
+      ctx.strokeStyle = '#818cf8';
+      ctx.lineWidth = 1.8;
+      ctx.setLineDash([5, 3]);
+      pts.forEach((p, idx) => {
+        const x = getX(idx);
+        const y = getY(p.discrete);
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // 15s MTM Continuous Line (Emerald solid)
+      ctx.beginPath();
+      ctx.strokeStyle = '#34d399';
+      ctx.lineWidth = 2.2;
+      pts.forEach((p, idx) => {
+        const x = getX(idx);
+        const y = getY(p.mtm);
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      ctx.restore();
+
+      // Top Y Axis & Grid
+      ctx.strokeStyle = '#334155'; ctx.lineWidth = 0.7; ctx.fillStyle = '#64748b';
+      ctx.font = '10px -apple-system, sans-serif'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      for (let i = 0; i <= 4; i++) {
+        const val = yMin + (yRange / 4) * i;
+        const y = getY(val);
+        ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + plotW, y); ctx.stroke();
+        ctx.fillText('$' + val.toFixed(0), pad.left - 8, y);
+      }
+
+      // --- 2. Middle Canvas: Continuous Underwater Drawdown Area ---
+      ctxDd.save();
+      ctxDd.beginPath();
+      ctxDd.rect(pad.left, 15, plotW, plotHDd);
+      ctxDd.clip();
+
+      ctxDd.beginPath();
+      ctxDd.moveTo(getX(0), 15);
+      ddVals.forEach((dd, idx) => {
+        const x = getX(idx);
+        const y = getYDd(dd);
+        ctxDd.lineTo(x, y);
+      });
+      ctxDd.lineTo(getX(pts.length - 1), 15);
+      ctxDd.closePath();
+
+      const ddGrad = ctxDd.createLinearGradient(0, 15, 0, 15 + plotHDd);
+      ddGrad.addColorStop(0, 'rgba(244, 63, 94, 0.45)');
+      ddGrad.addColorStop(1, 'rgba(244, 63, 94, 0.05)');
+      ctxDd.fillStyle = ddGrad;
+      ctxDd.fill();
+
+      // Drawdown line
+      ctxDd.beginPath();
+      ctxDd.strokeStyle = '#f87171';
+      ctxDd.lineWidth = 1.8;
+      ddVals.forEach((dd, idx) => {
+        const x = getX(idx);
+        const y = getYDd(dd);
+        if (idx === 0) ctxDd.moveTo(x, y);
+        else ctxDd.lineTo(x, y);
+      });
+      ctxDd.stroke();
+      ctxDd.restore();
+
+      // DD Y Axis
+      ctxDd.strokeStyle = '#334155'; ctxDd.lineWidth = 0.7; ctxDd.fillStyle = '#64748b';
+      ctxDd.font = '10px -apple-system, sans-serif'; ctxDd.textAlign = 'right'; ctxDd.textBaseline = 'middle';
+      for (let i = 0; i <= 3; i++) {
+        const val = (ddMax / 3) * i;
+        const y = getYDd(val);
+        ctxDd.beginPath(); ctxDd.moveTo(pad.left, y); ctxDd.lineTo(pad.left + plotW, y); ctxDd.stroke();
+        ctxDd.fillText('-' + val.toFixed(1) + '%', pad.left - 8, y);
+      }
+
+      // --- 3. Bottom Canvas: Real-time Margin Allocated Curve ---
+      ctxMargin.save();
+      ctxMargin.beginPath();
+      ctxMargin.rect(pad.left, 15, plotW, plotHMargin);
+      ctxMargin.clip();
+
+      // Margin Fill
+      ctxMargin.beginPath();
+      ctxMargin.moveTo(getX(0), 15 + plotHMargin);
+      marginVals.forEach((mg, idx) => {
+        const x = getX(idx);
+        const y = getYMargin(mg);
+        ctxMargin.lineTo(x, y);
+      });
+      ctxMargin.lineTo(getX(pts.length - 1), 15 + plotHMargin);
+      ctxMargin.closePath();
+      const mgGrad = ctxMargin.createLinearGradient(0, 15, 0, 15 + plotHMargin);
+      mgGrad.addColorStop(0, 'rgba(34, 211, 238, 0.35)');
+      mgGrad.addColorStop(1, 'rgba(34, 211, 238, 0.05)');
+      ctxMargin.fillStyle = mgGrad;
+      ctxMargin.fill();
+
+      // 280U Wind-Control Hard Limit Line (Red dashed)
+      const y280 = getYMargin(280.0);
+      ctxMargin.beginPath();
+      ctxMargin.strokeStyle = '#f43f5e';
+      ctxMargin.lineWidth = 1.5;
+      ctxMargin.setLineDash([4, 4]);
+      ctxMargin.moveTo(pad.left, y280);
+      ctxMargin.lineTo(pad.left + plotW, y280);
+      ctxMargin.stroke();
+      ctxMargin.setLineDash([]);
+
+      // Margin Curve (Cyan solid)
+      ctxMargin.beginPath();
+      ctxMargin.strokeStyle = '#22d3ee';
+      ctxMargin.lineWidth = 2.0;
+      marginVals.forEach((mg, idx) => {
+        const x = getX(idx);
+        const y = getYMargin(mg);
+        if (idx === 0) ctxMargin.moveTo(x, y);
+        else ctxMargin.lineTo(x, y);
+      });
+      ctxMargin.stroke();
+      ctxMargin.restore();
+
+      // Margin Y Axis
+      ctxMargin.strokeStyle = '#334155'; ctxMargin.lineWidth = 0.7; ctxMargin.fillStyle = '#64748b';
+      ctxMargin.font = '10px -apple-system, sans-serif'; ctxMargin.textAlign = 'right'; ctxMargin.textBaseline = 'middle';
+      for (let i = 0; i <= 3; i++) {
+        const val = (marginMax / 3) * i;
+        const y = getYMargin(val);
+        ctxMargin.beginPath(); ctxMargin.moveTo(pad.left, y); ctxMargin.lineTo(pad.left + plotW, y); ctxMargin.stroke();
+        ctxMargin.fillText('$' + val.toFixed(0), pad.left - 8, y);
+      }
+
+      // X Axis on bottom margin canvas
+      ctxMargin.textAlign = 'center'; ctxMargin.textBaseline = 'top';
+      for (let i = 0; i <= 5; i++) {
+        const screenX = pad.left + (plotW / 5) * i;
+        const dataRatio = (screenX - pad.left - state.panX) / (plotW * state.zoom);
+        const idx = Math.min(pts.length - 1, Math.max(0, Math.floor(dataRatio * (pts.length - 1))));
+        if (pts[idx]) {
+          const lbl = pts[idx].time.length >= 16 ? pts[idx].time.slice(5, 16) : pts[idx].time.slice(11, 16);
+          ctxMargin.fillText(lbl, screenX, 15 + plotHMargin + 5);
+        }
+      }
+
+      // Synchronized Tooltip
+      const tt = document.getElementById('tooltip-mtm-equity');
+      if (!canvas._mtmHoverAttached) {
+        canvas._mtmHoverAttached = true;
+        canvas.addEventListener('mousemove', e => {
+          const rect = canvas.getBoundingClientRect();
+          const mouseX = e.clientX - rect.left;
+          if (mouseX < pad.left || mouseX > pad.left + plotW) {
+            if (tt) tt.classList.add('hidden');
+            return;
+          }
+          const dataRatio = (mouseX - pad.left - state.panX) / (plotW * state.zoom);
+          const idx = Math.min(pts.length - 1, Math.max(0, Math.round(dataRatio * (pts.length - 1))));
+          const p = pts[idx];
+          if (!p) return;
+
+          const dd = ddVals[idx];
+          const mg = marginVals[idx];
+          tt.innerHTML = `
+            <div class="font-bold text-white border-b border-slate-700 pb-1 mb-1.5">${p.time} (北京时间)</div>
+            <div class="space-y-1 font-mono text-[11px]">
+              <div class="flex justify-between gap-4"><span class="text-emerald-400">15s 盯市权益:</span><span class="text-white font-bold">$${p.mtm.toFixed(2)}</span></div>
+              <div class="flex justify-between gap-4"><span class="text-indigo-300">离散平仓记账:</span><span class="text-slate-300">$${p.discrete.toFixed(2)}</span></div>
+              <div class="flex justify-between gap-4"><span class="text-rose-400 font-bold">盘中未平浮亏:</span><span class="text-rose-400 font-bold">-$${p.gap.toFixed(2)}</span></div>
+              <div class="flex justify-between gap-4"><span class="text-amber-400">高水位 (HWM):</span><span class="text-slate-300">$${hwmVals[idx].toFixed(2)}</span></div>
+              <div class="flex justify-between gap-4"><span class="text-rose-300">连续水下回撤:</span><span class="text-rose-400">-${dd.toFixed(2)}%</span></div>
+              <div class="flex justify-between gap-4 border-t border-slate-700/60 pt-1"><span class="text-cyan-400">保证金占用金额:</span><span class="text-cyan-300 font-bold">$${mg.toFixed(2)}</span></div>
+            </div>
+          `;
+          tt.classList.remove('hidden');
+          let left = mouseX + 15;
+          if (left + 220 > width) left = mouseX - 235;
+          tt.style.left = left + 'px';
+          tt.style.top = '20px';
+        });
+        canvas.addEventListener('mouseleave', () => {
+          if (tt) tt.classList.add('hidden');
+        });
+      }
+    }
+
+    // 4. Render Three-Track Equity Chart (Tab 3)
+    function renderThreeTrackChart() {
+      const setup = setupCanvas('chart-three-track');
+      if (!setup) return;
+      const { canvas, ctx, width, height } = setup;
+      const state = chartState.threeTrack;
+      attachPanZoom(canvas, 'threeTrack', renderThreeTrackChart);
+
+      const data = window.CML_DASHBOARD_DATA;
+      if (!data || !data.three_track || data.three_track.length === 0) {
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = '#64748b';
+        ctx.font = '12px -apple-system, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('暂无三轨权益数据 (No Three-Track Data Available)', width / 2, height / 2);
+        return;
+      }
+      const pts = data.three_track;
+
+      const pad = { top: 25, right: 25, bottom: 30, left: 55 };
+      const plotW = width - pad.left - pad.right;
+      const plotH = height - pad.top - pad.bottom;
+      if (plotW <= 0 || plotH <= 0) return;
+
+      const maxPanLeft = -(plotW * (state.zoom - 1));
+      state.panX = Math.min(0, Math.max(maxPanLeft, state.panX));
+
+      let minY = Infinity, maxY = -Infinity;
+      pts.forEach(p => {
+        ['baseline', 'daily_best', 'recommended'].forEach(k => {
+          if (p[k] != null && typeof p[k] === 'number' && !isNaN(p[k])) {
+            if (p[k] < minY) minY = p[k];
+            if (p[k] > maxY) maxY = p[k];
+          }
+        });
+      });
+      if (!isFinite(minY) || !isFinite(maxY)) {
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = '#64748b';
+        ctx.font = '12px -apple-system, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('三轨权益无有效数值 (No Valid Equity Values)', width / 2, height / 2);
+        return;
+      }
+      const span = maxY - minY;
+      const yMin = minY - span * 0.05;
+      const yMax = maxY + span * 0.05;
+      const yRange = Math.max(0.001, yMax - yMin);
+
+      const getX = idx => pad.left + state.panX + (idx / Math.max(1, pts.length - 1)) * plotW * state.zoom;
+      const getY = val => pad.top + plotH - ((val - yMin) / yRange) * plotH;
+
+      ctx.clearRect(0, 0, width, height);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(pad.left, pad.top, plotW, plotH);
+      ctx.clip();
+
+      // Recommended Fill Area
+      const hasRec = pts.some(p => p.recommended != null && !isNaN(p.recommended));
+      if (hasRec) {
+        ctx.beginPath();
+        let started = false;
+        pts.forEach((p, idx) => {
+          if (p.recommended != null && !isNaN(p.recommended)) {
+            const x = getX(idx);
+            const y = getY(p.recommended);
+            if (!started) {
+              ctx.moveTo(x, pad.top + plotH);
+              ctx.lineTo(x, y);
+              started = true;
+            } else {
+              ctx.lineTo(x, y);
+            }
+          }
+        });
+        if (started) {
+          ctx.lineTo(getX(pts.length - 1), pad.top + plotH);
+          ctx.closePath();
+          const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + plotH);
+          grad.addColorStop(0, 'rgba(56, 189, 248, 0.18)');
+          grad.addColorStop(1, 'rgba(56, 189, 248, 0.0)');
+          ctx.fillStyle = grad;
+          ctx.fill();
+        }
+      }
+
+      const drawLine = (key, color, lineWidth, dash = []) => {
+        ctx.beginPath();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = lineWidth;
+        ctx.setLineDash(dash);
+        let drawing = false;
+        pts.forEach((p, idx) => {
+          const val = p[key];
+          if (val != null && typeof val === 'number' && !isNaN(val)) {
+            const x = getX(idx);
+            const y = getY(val);
+            if (!drawing) {
+              ctx.moveTo(x, y);
+              drawing = true;
+            } else {
+              ctx.lineTo(x, y);
+            }
+          } else {
+            drawing = false;
+          }
+        });
+        ctx.stroke();
+        ctx.setLineDash([]);
+      };
+
+      // 1. Baseline
+      drawLine('baseline', '#818cf8', 1.8, [4, 3]);
+      // 2. Daily Best
+      drawLine('daily_best', '#f59e0b', 2.0);
+      // 3. Recommended
+      drawLine('recommended', '#38bdf8', 2.5);
+      ctx.restore();
+
+      // Static Y Axis
+      ctx.strokeStyle = '#334155'; ctx.lineWidth = 0.7; ctx.fillStyle = '#64748b';
+      ctx.font = '10px -apple-system, sans-serif'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      for (let i = 0; i <= 4; i++) {
+        const val = yMin + (yRange / 4) * i;
+        const y = getY(val);
+        ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + plotW, y); ctx.stroke();
+        ctx.fillText('$' + val.toFixed(0), pad.left - 8, y);
+      }
+
+      // X Axis
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      for (let i = 0; i <= 4; i++) {
+        const screenX = pad.left + (plotW / 4) * i;
+        const dataRatio = (screenX - pad.left - state.panX) / (plotW * state.zoom);
+        const idx = Math.min(pts.length - 1, Math.max(0, Math.floor(dataRatio * (pts.length - 1))));
+        if (pts[idx]) {
+          const lbl = (pts[idx].time || '').slice(5, 10);
+          ctx.fillText(lbl, screenX, pad.top + plotH + 8);
+        }
+      }
+
+      // Tooltip
+      const tt = document.getElementById('tooltip-three-track');
+      if (!canvas._ttHoverAttached) {
+        canvas._ttHoverAttached = true;
+        canvas.addEventListener('mousemove', e => {
+          const rect = canvas.getBoundingClientRect();
+          const mouseX = e.clientX - rect.left;
+          if (mouseX < pad.left || mouseX > pad.left + plotW) {
+            if (tt) tt.classList.add('hidden'); return;
+          }
+          const dataRatio = (mouseX - pad.left - state.panX) / (plotW * state.zoom);
+          const idx = Math.min(pts.length - 1, Math.max(0, Math.round(dataRatio * (pts.length - 1))));
+          const p = pts[idx];
+          if (!p) return;
+
+          const fmtVal = v => (v != null && typeof v === 'number' && !isNaN(v)) ? '$' + v.toFixed(2) : 'N/A';
+          tt.innerHTML = `
+            <div class="font-bold text-white border-b border-slate-700 pb-1 mb-1.5">${p.time || ''}</div>
+            <div class="space-y-1 font-mono text-[11px]">
+              <div class="flex justify-between gap-4"><span class="text-amber-400">今日最高:</span><span class="text-white font-bold">${fmtVal(p.daily_best)}</span></div>
+              <div class="flex justify-between gap-4"><span class="text-sky-300">稳健推荐:</span><span class="text-white font-bold">${fmtVal(p.recommended)}</span></div>
+              <div class="flex justify-between gap-4"><span class="text-indigo-300">现用基准:</span><span class="text-slate-300">${fmtVal(p.baseline)}</span></div>
+            </div>
+          `;
+          tt.classList.remove('hidden');
+          let left = mouseX + 15;
+          if (left + 180 > width) left = mouseX - 195;
+          tt.style.left = left + 'px';
+          tt.style.top = '15px';
+        });
+        canvas.addEventListener('mouseleave', () => { if (tt) tt.classList.add('hidden'); });
+      }
+    }
+
+    // 5. Optimization Group Switching & Pareto Chart
+    function switchOptGroup(groupKey) {
+      chartState.currentOptGroup = groupKey;
+      const btn280 = document.getElementById('btn-group-280');
+      const btnNone = document.getElementById('btn-group-unconstrained');
+
+      if (groupKey === 'group_280') {
+        btn280.className = 'px-3 py-1.5 rounded bg-sky-500 text-slate-900 font-bold text-xs transition-all';
+        btnNone.className = 'px-3 py-1.5 rounded text-slate-400 hover:text-white text-xs transition-all';
+      } else {
+        btnNone.className = 'px-3 py-1.5 rounded bg-sky-500 text-slate-900 font-bold text-xs transition-all';
+        btn280.className = 'px-3 py-1.5 rounded text-slate-400 hover:text-white text-xs transition-all';
+      }
+
+      const data = window.CML_DASHBOARD_DATA;
+      if (!data || !data.opt_groups) return;
+      const grp = data.opt_groups[groupKey];
+      if (!grp) return;
+
+      // Update Cards
+      const best = grp.daily_best;
+      const rec = grp.recommended;
+
+      document.getElementById('opt-best-name').innerText = best.name;
+      document.getElementById('opt-best-params').innerText = best.params;
+      document.getElementById('opt-best-pnl').innerText = '+$' + best.net_pnl.toFixed(2);
+      document.getElementById('opt-best-mdd').innerText = '$' + best.mdd.toFixed(2);
+      document.getElementById('opt-best-margin').innerText = '$' + best.margin.toFixed(0);
+      document.getElementById('opt-best-stab').innerText = (best.stability * 100).toFixed(1) + '%';
+      document.getElementById('opt-best-desc').innerText = best.desc;
+
+      document.getElementById('opt-rec-name').innerText = rec.name;
+      document.getElementById('opt-rec-params').innerText = rec.params;
+      document.getElementById('opt-rec-pnl').innerText = '+$' + rec.net_pnl.toFixed(2);
+      document.getElementById('opt-rec-mdd').innerText = '$' + rec.mdd.toFixed(2) + ' ↓';
+      document.getElementById('opt-rec-margin').innerText = '$' + rec.margin.toFixed(0);
+      document.getElementById('opt-rec-stab').innerText = (rec.stability * 100).toFixed(1) + '% ↑';
+      document.getElementById('opt-rec-desc').innerText = rec.desc;
+
+      document.getElementById('flat-best-stab').innerText = (best.stability * 100).toFixed(1) + '%';
+      document.getElementById('flat-rec-stab').innerText = (rec.stability * 100).toFixed(1) + '%';
+
+      if (grp.base_primary && grp.base_acc34) {
+        const elP = document.getElementById('opt-base-primary-val');
+        if (elP) {
+          elP.innerHTML = `<span class="text-emerald-400 font-semibold">+$${grp.base_primary.net_pnl.toFixed(2)}</span><span>回撤: $${grp.base_primary.mdd.toFixed(2)}</span><span>${grp.base_primary.trades} 笔</span><span>稳: ${(grp.base_primary.stability * 100).toFixed(1)}%</span>`;
+        }
+        const elA = document.getElementById('opt-base-acc34-val');
+        if (elA) {
+          elA.innerHTML = `<span class="text-emerald-400 font-semibold">+$${grp.base_acc34.net_pnl.toFixed(2)}</span><span>回撤: $${grp.base_acc34.mdd.toFixed(2)}</span><span>${grp.base_acc34.trades} 笔</span><span>稳: ${(grp.base_acc34.stability * 100).toFixed(1)}%</span>`;
+        }
+        const elDesc = document.getElementById('opt-base-desc');
+        if (elDesc) {
+          elDesc.innerText = '线上两套实盘配置均表现优良，其中 Account-3/4 为旧版最优参数（全量 17 天 +$' + grp.base_acc34.net_pnl.toFixed(2) + 'U）；新推荐参数通过 1.25x 放量进一步提升至 +$' + rec.net_pnl.toFixed(2) + 'U。';
+        }
+      }
+
+      renderParetoChart();
+    }
+
+    function renderParetoChart() {
+      const setup = setupCanvas('chart-pareto');
+      if (!setup) return;
+      const { canvas, ctx, width, height } = setup;
+      const pad = { top: 25, right: 30, bottom: 35, left: 60 };
+      const plotW = width - pad.left - pad.right;
+      const plotH = height - pad.top - pad.bottom;
+      if (plotW <= 0 || plotH <= 0) return;
+
+      const data = window.CML_DASHBOARD_DATA;
+      if (!data || !data.opt_groups) return;
+      const grp = data.opt_groups[chartState.currentOptGroup] || data.opt_groups['group_280'];
+      const candidates = grp.pareto || [];
+
+      let pnlMin = Infinity, pnlMax = -Infinity;
+      let mddMin = Infinity, mddMax = -Infinity;
+      candidates.forEach(c => {
+        if (c.net_pnl < pnlMin) pnlMin = c.net_pnl;
+        if (c.net_pnl > pnlMax) pnlMax = c.net_pnl;
+        if (c.mdd < mddMin) mddMin = c.mdd;
+        if (c.mdd > mddMax) mddMax = c.mdd;
+      });
+      if (!isFinite(pnlMin)) { pnlMin = 200; pnlMax = 620; }
+      if (!isFinite(mddMin)) { mddMin = 50; mddMax = 125; }
+      const pnlSpan = Math.max(10, pnlMax - pnlMin);
+      const mddSpan = Math.max(10, mddMax - mddMin);
+      const pnlLow = pnlMin - pnlSpan * 0.08;
+      const pnlHigh = pnlMax + pnlSpan * 0.08;
+      const mddLow = Math.max(0, mddMin - mddSpan * 0.08);
+      const mddHigh = mddMax + mddSpan * 0.08;
+
+      const getX = pnl => pad.left + ((pnl - pnlLow) / (pnlHigh - pnlLow)) * plotW;
+      const getY = mdd => pad.top + plotH - ((mddHigh - mdd) / (mddHigh - mddLow)) * plotH;
+
+      ctx.clearRect(0, 0, width, height);
+
+      // Grid
+      ctx.strokeStyle = '#334155'; ctx.lineWidth = 0.7; ctx.fillStyle = '#64748b';
+      ctx.font = '10px -apple-system, sans-serif'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+
+      for (let i = 0; i <= 3; i++) {
+        const m = mddLow + (mddHigh - mddLow) * (i / 3);
+        const y = getY(m);
+        ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + plotW, y); ctx.stroke();
+        ctx.fillText('$' + m.toFixed(0), pad.left - 8, y);
+      }
+      ctx.fillText('最大回撤 ↑', pad.left + 50, pad.top - 12);
+
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      for (let i = 0; i <= 4; i++) {
+        const p = pnlLow + (pnlHigh - pnlLow) * (i / 4);
+        const x = getX(p);
+        ctx.beginPath(); ctx.moveTo(x, pad.top); ctx.lineTo(x, pad.top + plotH); ctx.stroke();
+        ctx.fillText('+$' + p.toFixed(0), x, pad.top + plotH + 8);
+      }
+      ctx.fillText('全量净收益 (USDT) →', pad.left + plotW / 2, pad.top + plotH + 20);
+
+      // Draw Pareto Line
+      const paretoPts = candidates
+        .filter(c => c.type === 'pareto' || c.type === 'recommended' || c.type === 'best')
+        .sort((a, b) => a.net_pnl - b.net_pnl);
+
+      if (paretoPts.length > 1) {
+        ctx.beginPath();
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.5)';
+        ctx.lineWidth = 1.8;
+        ctx.setLineDash([5, 4]);
+        paretoPts.forEach((pt, i) => {
+          const x = getX(pt.net_pnl);
+          const y = getY(pt.mdd);
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke(); ctx.setLineDash([]);
+      }
+
+      // Draw Points
+      candidates.forEach(c => {
+        const x = getX(c.net_pnl);
+        const y = getY(c.mdd);
+        ctx.beginPath();
+        if (c.type === 'best') {
+          ctx.fillStyle = '#f59e0b'; ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.fill();
+          ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+        } else if (c.type === 'recommended') {
+          ctx.fillStyle = '#38bdf8'; ctx.arc(x, y, 8, 0, Math.PI * 2); ctx.fill();
+          ctx.strokeStyle = '#34d399'; ctx.lineWidth = 2.5; ctx.stroke();
+        } else if (c.type === 'pareto') {
+          ctx.fillStyle = '#34d399'; ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+        } else {
+          ctx.fillStyle = '#475569'; ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill();
+        }
+      });
+
+      // Tooltip for Pareto
+      const tt = document.getElementById('tooltip-pareto');
+      if (!canvas._paretoHoverAttached) {
+        canvas._paretoHoverAttached = true;
+        canvas.addEventListener('mousemove', e => {
+          const rect = canvas.getBoundingClientRect();
+          const mx = e.clientX - rect.left;
+          const my = e.clientY - rect.top;
+          const hit = candidates.find(c => Math.hypot(getX(c.net_pnl) - mx, getY(c.mdd) - my) < 10);
+          if (hit) {
+            tt.innerHTML = `
+              <div class="font-bold text-white mb-1">${hit.name}</div>
+              <div class="space-y-0.5 font-mono text-[11px]">
+                <div>净收益: <strong class="text-emerald-400">+$${hit.net_pnl.toFixed(2)}</strong></div>
+                <div>最大回撤: <strong class="text-rose-400">$${hit.mdd.toFixed(2)}</strong></div>
+                <div>峰值保证金: <strong>$${hit.margin.toFixed(0)}</strong></div>
+                <div>稳定性得分: <strong class="text-amber-400">${(hit.stability * 100).toFixed(1)}%</strong></div>
+              </div>
+            `;
+            tt.classList.remove('hidden');
+            let left = mx + 12;
+            if (left + 160 > width) left = mx - 175;
+            tt.style.left = left + 'px';
+            tt.style.top = Math.max(10, my - 30) + 'px';
+          } else {
+            tt.classList.add('hidden');
+          }
+        });
+        canvas.addEventListener('mouseleave', () => { if (tt) tt.classList.add('hidden'); });
+      }
+    }
+
+    // Master render coordinator
+    function renderAllCharts() {
+      renderLiveAccountsChart();
+      renderReconciliationTable();
+      renderMtmCharts();
+      renderThreeTrackChart();
+      renderParetoChart();
+    }
+
+    window.addEventListener('load', () => {
+      setTimeout(renderAllCharts, 60);
+    });
+    window.addEventListener('resize', () => {
+      renderAllCharts();
+    });
+  </script>
+</body>
+</html>

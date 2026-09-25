@@ -271,6 +271,10 @@ class RiskExecutionResponse(DashboardSchema):
     exchange_orders: list[dict[str, JsonValue]]
     pending_orders: list[dict[str, JsonValue]] = Field(default_factory=list)
     ambiguous_orders: list[dict[str, JsonValue]]
+    observed_at: datetime | None = None
+    source_status: str | None = None
+    data_age_seconds: float | None = None
+
 
 
 class RunReportSummaryResponse(DashboardSchema):

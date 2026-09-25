@@ -454,7 +454,7 @@ class UserDataAccountSyncDaemon:
                     snapshot_task = None
                     try:
                         result = await self._recover_pipeline()
-                        if _is_ready_result(result):
+                        if _is_usable_result(result):
                             consecutive_failures = 0
                         else:
                             consecutive_failures += 1
@@ -512,7 +512,7 @@ class UserDataAccountSyncDaemon:
                     reconciliation_task = None
                     try:
                         result = await self._reconcile(include_fills=True)
-                        if _is_ready_result(result):
+                        if _is_usable_result(result):
                             consecutive_failures = 0
                         else:
                             self._accept_events = False
@@ -786,7 +786,7 @@ class UserDataAccountSyncDaemon:
             include_fills=True,
             wait_for_pipeline=False,
         )
-        if _is_ready_result(result):
+        if _is_usable_result(result):
             origin_event = self._pipeline_recovery_origin_event
             async with self._state_lock:
                 recovery_still_current = (
@@ -1043,8 +1043,9 @@ class UserDataAccountSyncDaemon:
                         publish_transient_states=False,
                         include_fills=include_fills,
                     )
-            if _is_ready_result(result):
-                snapshot = _ready_snapshot(result)
+            if _is_usable_result(result):
+                snapshot = result.snapshot
+                assert snapshot is not None
                 if self._state is None:
                     self._state = AccountUserDataState(
                         snapshot,
@@ -1058,7 +1059,7 @@ class UserDataAccountSyncDaemon:
                 self._accept_events = False
                 if self._event_queue is not None:
                     self._request_pipeline_recovery("reconciliation_not_ready")
-        if _is_ready_result(result):
+        if _is_usable_result(result):
             self._notify_heartbeat()
             # Publish immediately after the in-memory state has been replaced.
             # Reconciliation inspection is telemetry/recovery bookkeeping and
@@ -1357,6 +1358,13 @@ def _metric_fill_keys(metrics: object) -> set[FillKey] | None:
 
 def _is_ready_result(result: ExecutionAccountSyncResult) -> bool:
     return result.status.value == "ready_readonly" and result.snapshot is not None
+
+
+def _is_usable_result(result: ExecutionAccountSyncResult) -> bool:
+    return (
+        result.status.value in ("ready_readonly", "syncing")
+        and result.snapshot is not None
+    )
 
 
 def _ready_snapshot(result: ExecutionAccountSyncResult) -> AccountSnapshot:

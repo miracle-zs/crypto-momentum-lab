@@ -17,12 +17,17 @@ from crypto_momentum_lab.domain.universe.models import (
 )
 
 
+from tests.conftest import assert_safe_test_database_url
+
+
 @pytest.fixture(scope="session")
 def database_url() -> str:
-    return os.environ.get(
+    url = os.environ.get(
         "CML_TEST_DATABASE_URL",
-        "postgresql+psycopg://cml:cml@localhost:54329/cml",
+        "postgresql+psycopg://cml:cml@localhost:54329/cml_test",
     )
+    assert_safe_test_database_url(url)
+    return url
 
 
 @pytest.fixture

@@ -2,12 +2,9 @@ import pytest
 from tests.conftest import assert_safe_test_database_url
 
 
-def test_safe_test_database_url_accepts_localhost_test_port() -> None:
-    assert_safe_test_database_url("postgresql+asyncpg://cml:cml@localhost:54329/cml")
-    assert_safe_test_database_url("postgresql+asyncpg://cml:cml@127.0.0.1:54329/cml")
-
-
 def test_safe_test_database_url_accepts_test_database_names() -> None:
+    assert_safe_test_database_url("postgresql+asyncpg://cml:cml@localhost:54329/cml_test")
+    assert_safe_test_database_url("postgresql+asyncpg://cml:cml@127.0.0.1:54329/cml_test")
     assert_safe_test_database_url("postgresql+asyncpg://cml:cml@localhost:5432/cml_test")
     assert_safe_test_database_url("postgresql+asyncpg://cml:cml@127.0.0.1:5432/cml_review_20260925")
 
@@ -31,3 +28,5 @@ def test_safe_test_database_url_rejects_production_names() -> None:
 def test_safe_test_database_url_rejects_unrecognized_default_port_db() -> None:
     with pytest.raises(RuntimeError, match="not recognized as a disposable test database"):
         assert_safe_test_database_url("postgresql+asyncpg://cml:cml@localhost:5432/cml")
+    with pytest.raises(RuntimeError, match="not recognized as a disposable test database"):
+        assert_safe_test_database_url("postgresql+asyncpg://cml:cml@localhost:54329/cml")

@@ -412,3 +412,65 @@ async def test_coordinator_idle_worker_reclamation() -> None:
 
     await coordinator.aclose()
 
+
+async def test_coordinator_caller_timeout_when_worker_is_hung() -> None:
+    backend = BlockingBackend()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        max_queue_wait_seconds=0.05,
+    )
+
+    # Worker starts and hangs on query without releasing
+    block_task = asyncio.create_task(
+        coordinator.reconcile_order(_plan("BTCUSDT", reduce_only=False))
+    )
+    await backend.query_started.wait()
+
+    # Entry command submitted while worker is hung.
+    # The caller must time out within max_queue_wait_seconds without waiting forever for worker
+    with pytest.raises(OrderPreSubmissionError, match="waited .* in queue exceeding limit"):
+        await coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+
+    backend.release_query.set()
+    await block_task
+    await coordinator.aclose()
+
+
+async def test_cancel_order_succeeds_even_when_entry_queue_is_congested() -> None:
+    backend = BlockingBackend()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        max_queue_depth=4,
+        exit_headroom=2,  # entry limit = 2
+    )
+
+    # Block worker with a reconcile
+    block_task = asyncio.create_task(
+        coordinator.reconcile_order(_plan("BTCUSDT", reduce_only=False))
+    )
+    await backend.query_started.wait()
+
+    # Fill entry capacity (limit = 2)
+    e1_task = asyncio.create_task(coordinator.submit(_plan("BTCUSDT", reduce_only=False)))
+    e2_task = asyncio.create_task(coordinator.submit(_plan("BTCUSDT", reduce_only=False)))
+    await asyncio.sleep(0.01)
+
+    # Attempting another entry fails due to entry capacity
+    with pytest.raises(OrderPreSubmissionError, match="entry capacity exceeded"):
+        await coordinator.submit(_plan("BTCUSDT", reduce_only=False))
+
+    # But cancel_order for a non-reduce_only entry order MUST still succeed using exit priority!
+    non_reduce_only_plan = _plan("BTCUSDT", reduce_only=False)
+    cancel_task = asyncio.create_task(coordinator.cancel_order(non_reduce_only_plan))
+    await asyncio.sleep(0.01)
+
+    backend.release_query.set()
+    await asyncio.gather(block_task, e1_task, e2_task)
+    cancel_res = await cancel_task
+    assert cancel_res.state is ExchangeOrderState.CANCELED
+
+    await coordinator.aclose()
+
+

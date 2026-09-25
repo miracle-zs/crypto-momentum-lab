@@ -76,7 +76,6 @@ _METADATA_COLUMNS = frozenset(
         "membership_status",
         "universe_snapshot_id",
         "universe_snapshot_observed_at",
-        "source_kind",
         "hub_stream_id",
         "hub_sequence",
         "hub_published_at",
@@ -165,6 +164,9 @@ class SinkAppendResult:
     # Rows whose natural key was already present with a different payload and
     # that DID win: a more complete source superseded the archived copy.
     upgraded_rows: int = 0
+    accepted_version_keys: frozenset[_VERSION_KEY] = frozenset()
+    dropped_version_keys: frozenset[_VERSION_KEY] = frozenset()
+    superseded_version_keys: frozenset[_VERSION_KEY] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,6 +355,9 @@ class ParquetWindowSink:
         duplicate_rows = 0
         conflicting_rows = 0
         upgraded_rows = 0
+        accepted_keys: set[_VERSION_KEY] = set()
+        dropped_keys: set[_VERSION_KEY] = set()
+        superseded_keys: set[_VERSION_KEY] = set()
         for state in collection_batch.states:
             selected = selected_by_symbol.get(state.symbol)
             if selected is None:
@@ -364,10 +369,12 @@ class ParquetWindowSink:
                 rows = self._load_existing(path)
                 self._buffers[path] = rows
             key = _row_key(row)
+            version_key = (key[0], key[1], key[2], state_payload_digest(row))
             existing = rows.get(key)
             if existing is not None:
                 if _same_state_payload(existing, row):
                     duplicate_rows += 1
+                    accepted_keys.add(version_key)
                     continue
                 # A durable consumer can legitimately re-receive a bucket it
                 # already archived: the hub rewarm after a restart, a window
@@ -377,8 +384,16 @@ class ParquetWindowSink:
                 # supersedes the hub copy, everything else keeps the row that
                 # was accepted when the bucket closed.
                 if _source_priority(row) > _source_priority(existing):
+                    old_version_key = (
+                        key[0],
+                        key[1],
+                        key[2],
+                        state_payload_digest(existing),
+                    )
+                    superseded_keys.add(old_version_key)
                     rows[key] = row
                     upgraded_rows += 1
+                    accepted_keys.add(version_key)
                     log.warning(
                         "research_collector_state_conflict_upgraded",
                         path=str(path),
@@ -390,6 +405,7 @@ class ParquetWindowSink:
                     )
                     continue
                 conflicting_rows += 1
+                dropped_keys.add(version_key)
                 log.warning(
                     "research_collector_state_conflict_kept_existing",
                     path=str(path),
@@ -402,11 +418,15 @@ class ParquetWindowSink:
                 continue
             rows[key] = row
             selected_rows += 1
+            accepted_keys.add(version_key)
         return SinkAppendResult(
             selected_rows=selected_rows,
             duplicate_rows=duplicate_rows,
             conflicting_rows=conflicting_rows,
             upgraded_rows=upgraded_rows,
+            accepted_version_keys=frozenset(accepted_keys),
+            dropped_version_keys=frozenset(dropped_keys),
+            superseded_version_keys=frozenset(superseded_keys),
         )
 
     def flush_ready(self, latest_bucket_start: datetime) -> SinkFlushResult:

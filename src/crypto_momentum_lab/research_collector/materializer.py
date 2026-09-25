@@ -62,6 +62,7 @@ class WindowMaterializer:
         self._journal = journal
         self._staged_records: dict[Path, tuple[DurableReceipt, set[_VERSION_KEY]]] = {}
         self._covered_keys: dict[Path, set[_VERSION_KEY]] = {}
+        self._superseded_keys: set[_VERSION_KEY] = set()
         self._empty_receipts: list[DurableReceipt] = []
         self._persisted_rows = 0
         self._duplicate_rows = 0
@@ -94,15 +95,14 @@ class WindowMaterializer:
         )
         self._duplicate_rows += append_result.duplicate_rows
 
-        record_keys = {
-            (
-                s.environment,
-                s.symbol,
-                s.bucket_start,
-                state_payload_digest(market_state_15s_row(s)),
-            )
-            for s in record.collection_batch.states
-        }
+        if append_result.superseded_version_keys:
+            self._superseded_keys.update(append_result.superseded_version_keys)
+
+        if not append_result.accepted_version_keys:
+            self._empty_receipts.append(record.receipt)
+            return append_result
+
+        record_keys = set(append_result.accepted_version_keys)
         self._staged_records[record.path] = (record.receipt, record_keys)
         self._covered_keys.setdefault(record.path, set())
         return append_result
@@ -141,6 +141,7 @@ class WindowMaterializer:
         for path, (receipt, record_keys) in self._staged_records.items():
             covered = self._covered_keys.setdefault(path, set())
             covered.update(committed_keys.intersection(record_keys))
+            covered.update(self._superseded_keys.intersection(record_keys))
             if record_keys.issubset(covered):
                 ready_receipts.append(receipt)
                 completed_paths.append(path)
@@ -148,6 +149,8 @@ class WindowMaterializer:
         for path in completed_paths:
             self._staged_records.pop(path, None)
             self._covered_keys.pop(path, None)
+        if not self._staged_records:
+            self._superseded_keys.clear()
 
         # Include empty receipts whose sequence precedes all pending staged records
         if flush_all:

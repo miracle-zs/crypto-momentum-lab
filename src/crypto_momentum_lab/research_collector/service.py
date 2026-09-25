@@ -554,8 +554,6 @@ class ResearchStateCollector:
         stop = getattr(self._source, "stop", None)
         if callable(stop):
             stop()
-        if not self._initialized:
-            return
         if self._capacity_task is not None and not self._capacity_task.done():
             self._capacity_task.cancel()
             try:
@@ -564,7 +562,10 @@ class ResearchStateCollector:
                 pass
 
         if self._materializer_task is not None and not self._materializer_task.done():
-            await self._queue.put(None)
+            try:
+                self._queue.put_nowait(None)
+            except (asyncio.QueueFull, Exception):
+                pass
             try:
                 async with asyncio.timeout(10.0):
                     await self._materializer_task
@@ -574,6 +575,9 @@ class ResearchStateCollector:
                     await self._materializer_task
                 except (asyncio.CancelledError, Exception):
                     pass
+
+        if not self._initialized:
+            return
 
         try:
             await self._flush_all_buffers()
@@ -759,6 +763,8 @@ class ResearchStateCollector:
 
 
     async def _apply_flush_result(self, result: MaterializerFlushResult) -> None:
+        if result.bytes_written > 0:
+            self._capacity.record_written_bytes(result.bytes_written)
         if (
             result.committed_rows > 0
             and self._startup_timer is not None

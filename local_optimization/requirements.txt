@@ -1,0 +1,6 @@
+# Local Optimization Research & Evaluation Dependencies
+# Required for 15s MTM accounting, 7D grid search, equity metrics, and audit reconciliation.
+numpy>=1.26.0
+pandas>=2.2.0
+pyarrow>=15.0.0
+pytest>=8.0.0

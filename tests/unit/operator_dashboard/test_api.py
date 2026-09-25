@@ -344,4 +344,35 @@ async def test_response_cache_refresh_concurrency_budget() -> None:
         await cache.aclose()
 
 
+def test_api_endpoints_return_x_cache_status_header() -> None:
+    import time
+
+    with TestClient(
+        create_dashboard_app(
+            queries=FakeQueries(),
+            overview_cache_ttl_seconds=0.05,
+            default_stale_grace_seconds=1.0,
+            **DASHBOARD_AUTH_KWARGS,
+        )
+    ) as client:
+        # First call: cache MISS
+        resp1 = client.get("/api/overview", auth=DASHBOARD_BASIC_AUTH)
+        assert resp1.status_code == 200
+        assert resp1.headers.get("X-Cache-Status") == "MISS"
+
+        # Second call within TTL: cache HIT
+        resp2 = client.get("/api/overview", auth=DASHBOARD_BASIC_AUTH)
+        assert resp2.status_code == 200
+        assert resp2.headers.get("X-Cache-Status") == "HIT"
+
+        # Wait past TTL but within stale grace
+        time.sleep(0.06)
+
+        # Third call: cache STALE
+        resp3 = client.get("/api/overview", auth=DASHBOARD_BASIC_AUTH)
+        assert resp3.status_code == 200
+        assert resp3.headers.get("X-Cache-Status") == "STALE"
+
+
+
 

@@ -89,7 +89,7 @@ def test_materializer_stages_and_flushes_to_parquet(tmp_path: Path) -> None:
     assert rows[0]["symbol"] == "BTCUSDT"
 
 
-def test_materializer_does_not_commit_unwritten_conflicting_revision(tmp_path: Path) -> None:
+def test_materializer_handles_conflicting_revision_without_hanging_pending(tmp_path: Path) -> None:
     from dataclasses import replace
     from decimal import Decimal
 
@@ -128,26 +128,90 @@ def test_materializer_does_not_commit_unwritten_conflicting_revision(tmp_path: P
     append_res2 = materializer.stage_record(pending[1])
     assert append_res2 is not None
     assert append_res2.conflicting_rows == 1  # Rejected by sink due to same priority
+    assert len(append_res2.accepted_version_keys) == 0
+    assert len(append_res2.dropped_version_keys) == 1
 
     # Flush all
     flush_result = materializer.flush_all()
 
-    # The unwritten revision b2 must NOT be in committed_receipts
+    # Both receipts must be committed so rejected receipts do not hang pending forever
     committed_seqs = {r.sequence for r in flush_result.committed_receipts}
-    assert committed_seqs == {1}
-    assert 2 not in committed_seqs
+    assert committed_seqs == {1, 2}
 
-    # Journal must not advance past sequence 1
-    assert journal.materialized_sequence == 1
-    # Unwritten record 2 must remain pending in journal
-    remaining_pending = journal.pending_records()
-    assert len(remaining_pending) == 1
-    assert remaining_pending[0].receipt.sequence == 2
+    # Journal advances without being blocked by dropped revision
+    assert journal.materialized_sequence == 2
+    assert len(journal.pending_records()) == 0
 
-    # The parquet file must contain close=100
+    # The parquet file retains close=100
     parquet_files = list(tmp_path.joinpath("parquet").rglob("*.parquet"))
     assert len(parquet_files) == 1
     rows = pq.ParquetFile(parquet_files[0]).read().to_pylist()
     assert len(rows) == 1
     assert rows[0]["close_price"] == "100"
+
+
+def test_materializer_commits_upgraded_backfill_revision(tmp_path: Path) -> None:
+    from dataclasses import replace
+    from decimal import Decimal
+
+    journal = ArchiveJournal(
+        tmp_path / "journal",
+        environment="research",
+        max_bytes=1024 * 1024,
+    )
+    sink = ParquetWindowSink(
+        tmp_path / "parquet",
+        window_seconds=15,
+        late_tolerance_seconds=0,
+    )
+    materializer = WindowMaterializer(sink=sink, journal=journal)
+
+    s1 = fixture_state("BTCUSDT", 0)
+    selection = SelectionSnapshot(
+        observed_at=s1.bucket_start,
+        symbols=(SelectedSymbol(symbol="BTCUSDT", reason="test"),),
+    )
+
+    # 1. Accept hub revision
+    b1 = _batch(s1, 1)
+    journal.accept(b1, selection, (s1,))
+
+    # 2. Accept backfill revision with higher priority
+    s2_backfill = replace(s1, close_price=Decimal("105"), trade_count=s1.trade_count + 10)
+    b2 = CollectionBatch(
+        batch=MarketStateBatch(
+            sequence=2,
+            published_at=s2_backfill.bucket_end,
+            environment=s2_backfill.environment,
+            states=(s2_backfill,),
+            stream_id="test-stream",
+        ),
+        source_kind=SourceKind.POSTGRES_BACKFILL,
+    )
+    journal.accept(b2, selection, (s2_backfill,))
+
+    pending = journal.pending_records()
+    assert len(pending) == 2
+
+    # Stage both
+    materializer.stage_record(pending[0])
+    append_res2 = materializer.stage_record(pending[1])
+    assert append_res2 is not None
+    assert append_res2.upgraded_rows == 1
+    assert len(append_res2.accepted_version_keys) == 1
+
+    # Flush all
+    flush_result = materializer.flush_all()
+    committed_seqs = {r.sequence for r in flush_result.committed_receipts}
+    assert committed_seqs == {1, 2}
+    assert len(journal.pending_records()) == 0
+
+    # The parquet file contains upgraded row close=105 and source_kind=postgres_backfill
+    parquet_files = list(tmp_path.joinpath("parquet").rglob("*.parquet"))
+    assert len(parquet_files) == 1
+    rows = pq.ParquetFile(parquet_files[0]).read().to_pylist()
+    assert len(rows) == 1
+    assert rows[0]["close_price"] == "105"
+    assert rows[0]["source_kind"] == SourceKind.POSTGRES_BACKFILL.value
+
 

@@ -151,12 +151,16 @@ async def test_collector_replays_pending_spool_after_restart(tmp_path: Path) -> 
         source=_IdleSource(),
         selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
     )
-    await second_collector.initialize()
-    health = await second_collector.health()
+    try:
+        await second_collector.initialize()
+        health = await second_collector.health()
 
-    assert health.last_sequence == 10
-    assert health.pending_spool_files == 0
-    assert health.last_persisted_bucket == state.bucket_start
+        assert health.last_sequence == 10
+        assert health.pending_spool_files == 0
+        assert health.last_persisted_bucket == state.bucket_start
+    finally:
+        await first_collector.stop()
+        await second_collector.stop()
 
 
 async def test_collector_recovers_after_hub_stream_reset(tmp_path: Path) -> None:
@@ -188,23 +192,26 @@ async def test_collector_recovers_after_hub_stream_reset(tmp_path: Path) -> None
         selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
         backfill_source=backfill,
     )
-    await collector.initialize()
+    try:
+        await collector.initialize()
 
-    await collector._recover_replay_gap(
-        MarketStateHubReplayUnavailable(
-            "market-state replay is unavailable: Hub stream reset",
-            requested_sequence=7,
-            latest_sequence=1,
-            stream_id="stream-b",
+        await collector._recover_replay_gap(
+            MarketStateHubReplayUnavailable(
+                "market-state replay is unavailable: Hub stream reset",
+                requested_sequence=7,
+                latest_sequence=1,
+                stream_id="stream-b",
+            )
         )
-    )
 
-    health = await collector.health()
-    assert len(backfill.calls) == 1
-    assert source.resume_calls == [("stream-b", 1)]
-    assert health.last_sequence == 1
-    assert health.last_persisted_bucket == recovered.bucket_start
-    assert health.pending_spool_files == 0
+        health = await collector.health()
+        assert len(backfill.calls) == 1
+        assert source.resume_calls == [("stream-b", 1)]
+        assert health.last_sequence == 1
+        assert health.last_persisted_bucket == recovered.bucket_start
+        assert health.pending_spool_files == 0
+    finally:
+        await collector.stop()
 
 
 async def test_collector_records_market_state_time_gap(tmp_path: Path) -> None:
@@ -224,22 +231,24 @@ async def test_collector_records_market_state_time_gap(tmp_path: Path) -> None:
         source=_IdleSource(),
         selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
     )
+    try:
+        first = fixture_state("BTCUSDT", 0)
+        after_gap = fixture_state("BTCUSDT", 2)
+        await collector.ingest(_batch(first, 1))
+        await collector.ingest(_batch(after_gap, 2))
 
-    first = fixture_state("BTCUSDT", 0)
-    after_gap = fixture_state("BTCUSDT", 2)
-    await collector.ingest(_batch(first, 1))
-    await collector.ingest(_batch(after_gap, 2))
-
-    health = await collector.health()
-    assert health.market_state_gap_count == 1
-    assert health.last_market_state_gap_start == first.bucket_start + timedelta(
-        seconds=15
-    )
-    assert health.last_market_state_gap_end == first.bucket_start + timedelta(
-        seconds=15
-    )
-    assert health.last_market_state_gap_buckets == 1
-    assert health.selected_rows == 2
+        health = await collector.health()
+        assert health.market_state_gap_count == 1
+        assert health.last_market_state_gap_start == first.bucket_start + timedelta(
+            seconds=15
+        )
+        assert health.last_market_state_gap_end == first.bucket_start + timedelta(
+            seconds=15
+        )
+        assert health.last_market_state_gap_buckets == 1
+        assert health.selected_rows == 2
+    finally:
+        await collector.stop()
 
 
 async def test_health_marker_tracks_durable_progress_pause_and_stop(tmp_path):
@@ -309,43 +318,49 @@ async def test_dual_progress_crash_recovery_and_journal_backpressure(
     s2 = fixture_state("BTCUSDT", 1)
     s3 = fixture_state("BTCUSDT", 2)
 
-    await collector.ingest(_batch(s1, 1))
-    await collector.ingest(_batch(s2, 2))
+    restarted = None
+    try:
+        await collector.ingest(_batch(s1, 1))
+        await collector.ingest(_batch(s2, 2))
 
-    health = await collector.health()
-    # At this point, batches are in journal but unmaterialized due to late tolerance
-    assert health.accepted_sequence == 2
-    assert health.materialized_sequence is None
-    assert health.pending_spool_files == 2
-    assert health.pending_spool_bytes > 0
+        health = await collector.health()
+        # At this point, batches are in journal but unmaterialized due to late tolerance
+        assert health.accepted_sequence == 2
+        assert health.materialized_sequence is None
+        assert health.pending_spool_files == 2
+        assert health.pending_spool_bytes > 0
 
-    # Ingesting s3 triggers journal byte limit (2000 bytes)
-    with pytest.raises(CollectorPaused):
-        await collector.ingest(_batch(s3, 3))
+        # Ingesting s3 triggers journal byte limit (2000 bytes)
+        with pytest.raises(CollectorPaused):
+            await collector.ingest(_batch(s3, 3))
 
-    # Simulate crash by dropping collector without calling stop()!
-    # A fresh collector restarts against the same root directory.
-    restarted = ResearchStateCollector(
-        config=config,
-        source=_IdleSource(),
-        selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
-    )
-    # On initialize, recovered records should be staged and flushed durably!
-    await restarted.initialize()
+        # Simulate crash by dropping collector without calling stop()!
+        # A fresh collector restarts against the same root directory.
+        restarted = ResearchStateCollector(
+            config=config,
+            source=_IdleSource(),
+            selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
+        )
+        # On initialize, recovered records should be staged and flushed durably!
+        await restarted.initialize()
 
-    restarted_health = await restarted.health()
-    # Checkpoint has advanced to include recovered sequences
-    assert restarted_health.accepted_sequence == 2
-    assert restarted_health.materialized_sequence == 2
-    assert restarted_health.last_sequence == 2
-    assert restarted_health.pending_spool_files == 0
-    assert restarted_health.pending_spool_bytes == 0
+        restarted_health = await restarted.health()
+        # Checkpoint has advanced to include recovered sequences
+        assert restarted_health.accepted_sequence == 2
+        assert restarted_health.materialized_sequence == 2
+        assert restarted_health.last_sequence == 2
+        assert restarted_health.pending_spool_files == 0
+        assert restarted_health.pending_spool_bytes == 0
 
-    # Backpressure is now relieved because pending bytes dropped to 0!
-    # Ingesting s3 now succeeds!
-    r3 = await restarted.ingest(_batch(s3, 3))
-    assert r3.selected_rows == 1
-    assert (await restarted.health()).accepted_sequence == 3
+        # Backpressure is now relieved because pending bytes dropped to 0!
+        # Ingesting s3 now succeeds!
+        r3 = await restarted.ingest(_batch(s3, 3))
+        assert r3.selected_rows == 1
+        assert (await restarted.health()).accepted_sequence == 3
+    finally:
+        await collector.stop()
+        if restarted is not None:
+            await restarted.stop()
 
 
 async def test_empty_selection_receipt_survives_restart_recovery(
@@ -367,39 +382,45 @@ async def test_empty_selection_receipt_survives_restart_recovery(
         source=_IdleSource(),
         selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
     )
-    s_btc = fixture_state("BTCUSDT", 0)
-    s_eth = fixture_state("ETHUSDT", 0)
+    restarted = None
+    try:
+        s_btc = fixture_state("BTCUSDT", 0)
+        s_eth = fixture_state("ETHUSDT", 0)
 
-    # 1. Ingest BTC batch -> selected
-    r1 = await collector.ingest(_batch(s_btc, 1))
-    assert r1.selected_rows == 1
+        # 1. Ingest BTC batch -> selected
+        r1 = await collector.ingest(_batch(s_btc, 1))
+        assert r1.selected_rows == 1
 
-    # 2. Ingest ETH batch -> empty selection, writes empty receipt to journal
-    r2 = await collector.ingest(_batch(s_eth, 2))
-    assert r2.selected_rows == 0
+        # 2. Ingest ETH batch -> empty selection, writes empty receipt to journal
+        r2 = await collector.ingest(_batch(s_eth, 2))
+        assert r2.selected_rows == 0
 
-    health = await collector.health()
-    assert health.pending_spool_files == 2
+        health = await collector.health()
+        assert health.pending_spool_files == 2
 
-    # 3. Simulate crash before materialization: create fresh collector
-    restarted = ResearchStateCollector(
-        config=config,
-        source=_IdleSource(),
-        selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
-    )
-    # On initialize, recovery must not fail with empty batch error
-    await restarted.initialize()
+        # 3. Simulate crash before materialization: create fresh collector
+        restarted = ResearchStateCollector(
+            config=config,
+            source=_IdleSource(),
+            selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
+        )
+        # On initialize, recovery must not fail with empty batch error
+        await restarted.initialize()
 
-    restarted_health = await restarted.health()
-    assert restarted_health.accepted_sequence == 2
-    assert restarted_health.materialized_sequence == 2
-    assert restarted_health.pending_spool_files == 0
+        restarted_health = await restarted.health()
+        assert restarted_health.accepted_sequence == 2
+        assert restarted_health.materialized_sequence == 2
+        assert restarted_health.pending_spool_files == 0
 
-    # Ingest sequence 3 after recovery
-    s_btc2 = fixture_state("BTCUSDT", 1)
-    r3 = await restarted.ingest(_batch(s_btc2, 3))
-    assert r3.selected_rows == 1
-    assert (await restarted.health()).accepted_sequence == 3
+        # Ingest sequence 3 after recovery
+        s_btc2 = fixture_state("BTCUSDT", 1)
+        r3 = await restarted.ingest(_batch(s_btc2, 3))
+        assert r3.selected_rows == 1
+        assert (await restarted.health()).accepted_sequence == 3
+    finally:
+        await collector.stop()
+        if restarted is not None:
+            await restarted.stop()
 
 
 async def test_recovered_journal_sequence_gap_raises(tmp_path: Path) -> None:
@@ -422,37 +443,43 @@ async def test_recovered_journal_sequence_gap_raises(tmp_path: Path) -> None:
         source=_IdleSource(),
         selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
     )
-    s1 = fixture_state("BTCUSDT", 0)
-    s2 = fixture_state("BTCUSDT", 1)
-    s3 = fixture_state("BTCUSDT", 2)
+    restarted = None
+    try:
+        s1 = fixture_state("BTCUSDT", 0)
+        s2 = fixture_state("BTCUSDT", 1)
+        s3 = fixture_state("BTCUSDT", 2)
 
-    await collector.ingest(_batch(s1, 1))
-    await collector.ingest(_batch(s2, 2))
-    await collector.ingest(_batch(s3, 3))
+        await collector.ingest(_batch(s1, 1))
+        await collector.ingest(_batch(s2, 2))
+        await collector.ingest(_batch(s3, 3))
 
-    # Artificially remove sequence 2 from the pending journal on disk
-    pending_files = list((tmp_path / "journal" / "pending" / "hub").glob("**/*.json"))
-    deleted = False
-    for f in pending_files:
-        import json
+        # Artificially remove sequence 2 from the pending journal on disk
+        pending_files = list((tmp_path / "journal" / "pending" / "hub").glob("**/*.json"))
+        deleted = False
+        for f in pending_files:
+            import json
 
-        data = json.loads(f.read_text())
-        if data.get("sequence") == 2:
-            f.unlink()
-            deleted = True
-            break
-    assert deleted
+            data = json.loads(f.read_text())
+            if data.get("sequence") == 2:
+                f.unlink()
+                deleted = True
+                break
+        assert deleted
 
-    # Restart: initialize should detect gap 1 -> 3 in pending journal
-    restarted = ResearchStateCollector(
-        config=config,
-        source=_IdleSource(),
-        selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
-    )
-    with pytest.raises(
-        CollectorSequenceGap, match="recovered journal has sequence gap"
-    ):
-        await restarted.initialize()
+        # Restart: initialize should detect gap 1 -> 3 in pending journal
+        restarted = ResearchStateCollector(
+            config=config,
+            source=_IdleSource(),
+            selector=StaticSymbolSelector(frozenset({"BTCUSDT"})),
+        )
+        with pytest.raises(
+            CollectorSequenceGap, match="recovered journal has sequence gap"
+        ):
+            await restarted.initialize()
+    finally:
+        await collector.stop()
+        if restarted is not None:
+            await restarted.stop()
 
 
 async def test_collector_pipeline_decoupled_ingress_and_queue_backpressure(

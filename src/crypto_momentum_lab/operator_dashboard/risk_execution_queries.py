@@ -7,6 +7,7 @@ seam so callers cannot accidentally treat an unknown state as safe.
 """
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -116,6 +117,9 @@ class RiskExecutionQueries:
             exchange_orders=[exchange_order(row) for row in orders],
             pending_orders=[exchange_order(row) for row in pending],
             ambiguous_orders=[exchange_order(row) for row in ambiguous],
+            observed_at=datetime.now(UTC),
+            source_status="LIVE",
+            data_age_seconds=0.0,
         )
 
 
