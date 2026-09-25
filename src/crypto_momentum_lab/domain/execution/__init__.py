@@ -54,11 +54,18 @@ from crypto_momentum_lab.domain.execution.progress_contract import (
     ReadinessAssessment,
     ReadinessEvaluator,
 )
+from crypto_momentum_lab.domain.execution.execution_coordinator import (
+    ExecutionCoordinator,
+    ExecutionReadinessError,
+    ReservationConflictError,
+    VersionConflictError,
+)
 from crypto_momentum_lab.domain.execution.trade_command import (
     ExitAllocation,
     ExitAllocationPlan,
     ExitAllocator,
     ExitPolicyMode,
+    PositionReservation,
     TradeCommand,
     TradeCommandType,
 )
@@ -100,6 +107,11 @@ __all__ = [
     "AccountJournal",
     "AccountFactEnvelope",
     "PositionBook",
+    "PositionReservation",
+    "ExecutionCoordinator",
+    "ExecutionReadinessError",
+    "ReservationConflictError",
+    "VersionConflictError",
     "ExitAllocation",
     "ExitAllocationPlan",
     "ExitAllocator",
