@@ -210,3 +210,39 @@ def test_capacity_guard_writes_after_scan_before_snapshot_commit_not_zeroed(tmp_
     assert current.collector_bytes == 350
 
 
+def test_capacity_guard_writes_between_traversal_return_and_lock_acquisition_not_zeroed(tmp_path: Path) -> None:
+    """F10: Writes occurring after _directory_size returns but before _written_lock acquisition must not be zeroed out."""
+    import crypto_momentum_lab.research_collector.storage as storage_mod
+
+    guard = CapacityGuard(
+        root=tmp_path,
+        soft_limit_bytes=10000,
+        hard_limit_bytes=20000,
+        global_warning_free_bytes=500,
+        global_pause_free_bytes=100,
+        disk_usage_fn=lambda p: _DummyUsage(free=100000),
+    )
+    guard.scan()
+
+    orig_dir_size = storage_mod._directory_size
+
+    def simulated_write_between_traversal_and_lock(path):
+        size = orig_dir_size(path)  # Directory size was 0
+        # Exactly in the window after traversal finishes and before scan() re-enters _written_lock:
+        (tmp_path / "race_post_traversal.dat").write_bytes(b"x" * 350)
+        guard.record_written_bytes(350)
+        return size  # Returns 0 from earlier traversal
+
+    storage_mod._directory_size = simulated_write_between_traversal_and_lock
+    try:
+        snapshot = guard.scan()
+    finally:
+        storage_mod._directory_size = orig_dir_size
+
+    # The 350 bytes written in the race window must be correctly reported as 350 bytes, NEVER 0!
+    assert snapshot.collector_bytes == 350
+    current = guard.current_snapshot()
+    assert current.collector_bytes == 350
+
+
+

@@ -1,3 +1,48 @@
+.alert-missing-symbols {
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--line));
+  background: color-mix(in srgb, var(--warn) 8%, var(--surface-2));
+  margin-bottom: 12px;
+}
+
+.risk-coverage-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 6px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.risk-coverage-bar .coverage-tag {
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.risk-coverage-bar .coverage-symbols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.risk-coverage-bar .symbol-tag {
+  padding: 2px 7px;
+  background: color-mix(in srgb, var(--brand) 12%, var(--surface-2));
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text);
+}
+
+.risk-coverage-bar .symbol-tag.missing {
+  background: color-mix(in srgb, var(--warn) 20%, var(--surface-2));
+  color: var(--warn);
+  font-weight: 600;
+}
+
 .risk-priority-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(230px, .75fr);

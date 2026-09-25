@@ -1662,9 +1662,45 @@ async def test_risk_execution_ready_when_all_required_symbols_fresh() -> None:
         required_symbols=["BTCUSDT", "ETHUSDT"],
     )
     resp = await queries.risk_execution()
-
     assert resp.status == OperationalStatus.READY
     assert resp.source_status == "LIVE"
     assert resp.observed_at == eth_time
     assert resp.data_age_seconds is not None
     assert 9.0 <= resp.data_age_seconds <= 11.0
+    assert resp.required_symbols == ["BTCUSDT", "ETHUSDT"]
+    assert resp.missing_symbols == []
+    assert resp.coverage_scope == "2/2 covered"
+
+
+async def test_risk_execution_fails_closed_when_coverage_query_errors() -> None:
+    """F04: When universe/symbol coverage query fails, status MUST fail-closed to STALE, never READY/LIVE."""
+    from unittest.mock import AsyncMock, MagicMock
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
+
+    now = datetime.now(UTC)
+    fresh_time = now - timedelta(seconds=5)
+
+    scalars_mock = MagicMock()
+    scalars_mock.all.side_effect = [[], [], []]
+    session_mock = AsyncMock()
+    session_mock.scalars.return_value = scalars_mock
+    # Simulate DB failure during universe coverage resolution
+    session_mock.scalar.side_effect = RuntimeError("Database connection lost during coverage check")
+
+    # Even if market state rows exist and are fresh:
+    exec_mock = MagicMock()
+    exec_mock.all.return_value = [("BTCUSDT", fresh_time)]
+    session_mock.execute.return_value = exec_mock
+
+    factory_mock = MagicMock()
+    factory_mock.return_value.__aenter__.return_value = session_mock
+
+    queries = RiskExecutionQueries(session_factory=factory_mock)
+    resp = await queries.risk_execution()
+
+    # Must NOT swallow error and report READY/LIVE! Must fail closed to STALE
+    assert resp.status == OperationalStatus.STALE
+    assert resp.source_status == "STALE"
+    assert resp.coverage_scope == "QUERY_ERROR"
+    assert "<coverage_query_failed>" in resp.missing_symbols
+

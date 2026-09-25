@@ -274,6 +274,9 @@ class RiskExecutionResponse(DashboardSchema):
     observed_at: datetime | None = None
     source_status: str | None = None
     data_age_seconds: float | None = None
+    required_symbols: list[str] = Field(default_factory=list)
+    missing_symbols: list[str] = Field(default_factory=list)
+    coverage_scope: str | None = None
 
 
 

@@ -9,7 +9,17 @@ export function renderRisk(data) {
   const age = data.data_age_seconds;
   const observedAt = data.observed_at;
   const ageLabel = age != null ? relAge(age) : (observedAt ? relToNow(observedAt) : "实时");
-  const metaStrip = `<div class="risk-meta-strip"><span class="chip chip-source">${esc(sourceStatus)}</span><span class="chip-age">数据年龄: ${esc(ageLabel)}</span></div>`;
+  const requiredSymbols = data.required_symbols || [];
+  const missingSymbols = data.missing_symbols || [];
+  const coverageScope = data.coverage_scope || (requiredSymbols.length ? `${requiredSymbols.length - missingSymbols.length}/${requiredSymbols.length} 覆盖` : "全品种");
+  const coverageChip = `<span class="chip-coverage">覆盖范围: ${esc(coverageScope)}</span>`;
+  const metaStrip = `<div class="risk-meta-strip"><span class="chip chip-source">${esc(sourceStatus)}</span><span class="chip-age">数据年龄: ${esc(ageLabel)}</span>${coverageChip}</div>`;
+  const missingAlert = missingSymbols.length
+    ? `<div class="alert-box alert-missing-symbols"><strong>行情缺失</strong><div>必需品种未覆盖 (${missingSymbols.length}): <code>${esc(missingSymbols.join(", "))}</code></div></div>`
+    : "";
+  const coverageBar = requiredSymbols.length
+    ? `<div class="risk-coverage-bar"><span class="coverage-tag">必需品种 (${requiredSymbols.length}):</span><div class="coverage-symbols">${requiredSymbols.map(s => `<span class="symbol-tag${missingSymbols.includes(s) ? " missing" : ""}">${esc(s)}</span>`).join("")}</div></div>`
+    : "";
   const halts = data.active_halts?.length
     ? data.active_halts.map((halt) => `<div class="alert-box"><strong>HALT</strong><div>${esc(halt.reason)}<small>${esc(dayTime(halt.created_at))} ${DISPLAY_TIME_ZONE_LABEL}</small></div></div>`).join("")
     : `<div class="ok-box"><i></i>风控畅通 · 0 活跃停机</div>`;
@@ -42,7 +52,7 @@ export function renderRisk(data) {
   const ambiguousBlock = ambiguousOrders.length
     ? `<div class="block risk-ambiguous">${blockTitle("不确定订单", "AMBIGUOUS / UNRESOLVED", `<strong class="num">${ambiguousOrders.length}</strong>`)}${ambiguousTable}</div>`
     : "";
-  const body = `${metaStrip}<div class="risk-priority-grid">
+  const body = `${metaStrip}${missingAlert}${coverageBar}<div class="risk-priority-grid">
       <div class="block risk-halts">${blockTitle("活跃停机", "ACTIVE HALTS")}${halts}</div>
       <div class="risk-decision-callout">
         <span class="callout-tag">处置顺序</span>

@@ -109,6 +109,7 @@ class RiskExecutionQueries:
 
             pending, ambiguous = split_exchange_orders(orders)
 
+            coverage_query_error = False
             # Determine strategy-required symbols to evaluate coverage & freshness
             if self._required_symbols is not None:
                 required_symbols = set(self._required_symbols)
@@ -136,7 +137,7 @@ class RiskExecutionQueries:
                         ).all()
                         required_symbols.update(monitored)
                 except Exception:
-                    pass
+                    coverage_query_error = True
 
             market_query = (
                 select(
@@ -167,12 +168,18 @@ class RiskExecutionQueries:
             if row[1] is not None
         }
 
-        if required_symbols:
-            missing_symbols = required_symbols - set(symbol_times.keys())
+        if coverage_query_error:
+            coverage_complete = False
+            missing_symbols = sorted(required_symbols) if required_symbols else ["<coverage_query_failed>"]
+            coverage_scope = "QUERY_ERROR"
+        elif required_symbols:
+            missing_symbols = sorted(required_symbols - set(symbol_times.keys()))
             coverage_complete = (len(missing_symbols) == 0)
+            coverage_scope = f"{len(symbol_times)}/{len(required_symbols)} covered"
         else:
-            missing_symbols = set()
+            missing_symbols = []
             coverage_complete = bool(symbol_times)
+            coverage_scope = f"{len(symbol_times)} symbols" if symbol_times else "unconstrained"
 
         if symbol_times:
             # Multi-symbol worst-case freshness: determined by the oldest symbol
@@ -181,7 +188,7 @@ class RiskExecutionQueries:
             data_age_seconds = round(
                 max(0.0, (now - worst_market_time).total_seconds()), 1
             )
-            is_stale = (data_age_seconds > 120.0) or (not coverage_complete)
+            is_stale = (data_age_seconds > 120.0) or (not coverage_complete) or coverage_query_error
             if halts or ambiguous:
                 status = OperationalStatus.HALTED
                 source_status = "HALTED"
@@ -218,12 +225,15 @@ class RiskExecutionQueries:
             if not candidate_timestamps:
                 observed_at = None
                 data_age_seconds = None
-                source_status = "NO_DATA"
-                status = (
-                    OperationalStatus.HALTED
-                    if halts or ambiguous
-                    else OperationalStatus.NO_DATA
-                )
+                if halts or ambiguous:
+                    status = OperationalStatus.HALTED
+                    source_status = "HALTED"
+                elif coverage_query_error:
+                    status = OperationalStatus.STALE
+                    source_status = "STALE"
+                else:
+                    status = OperationalStatus.NO_DATA
+                    source_status = "NO_DATA"
             else:
                 observed_at = max(candidate_timestamps)
                 data_age_seconds = round(
@@ -232,6 +242,9 @@ class RiskExecutionQueries:
                 if halts or ambiguous:
                     status = OperationalStatus.HALTED
                     source_status = "HALTED"
+                elif coverage_query_error:
+                    status = OperationalStatus.STALE
+                    source_status = "STALE"
                 else:
                     status = OperationalStatus.NO_DATA
                     source_status = "NO_DATA"
@@ -257,6 +270,9 @@ class RiskExecutionQueries:
             observed_at=observed_at,
             source_status=source_status,
             data_age_seconds=data_age_seconds,
+            required_symbols=sorted(required_symbols),
+            missing_symbols=sorted(missing_symbols),
+            coverage_scope=coverage_scope,
         )
 
 

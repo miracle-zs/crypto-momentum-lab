@@ -526,3 +526,56 @@ F05 的 STALE 缓存展示继续保持；F08 对已提供 LONG/SHORT 的分组�
 | `node --test tests/frontend/*.test.mjs` | 34 passed | 前端测试全量通过。 |
 | `pytest local_optimization/tests -q --tb=short` | 255 passed | 本地优化测试全量通过（含 F07 缺失价格/数量拒绝匹配与缺失费用/PnL fail-closed 单测）。 |
 
+## 15. 对 HEAD `1ee38b7` 的独立复核
+
+复核时 `HEAD` 与 `origin/main` 均为 `1ee38b7d12ae75d5f34a78e9d6ce53f14c0467fd`，代码工作区干净。结论：第 14 节的改动修复了上轮 F10 漏计时序，并显著收紧了 F07；但不能认定全部完成，F04 仍有会误报业务就绪的失败路径，F07 仍接受零价格成交。
+
+- **F10 [实现已修复，自动回归覆盖不足]：**用“先完成目录大小读取，再在计数快照前写入 350 字节”的时序复测，当前扫描报告 350 字节，增量计数为 0，修复了上轮报告为 0 的缺陷。本提交未修改容量测试文件；现有容量测试主要在目录遍历函数内部或 `disk_usage_fn` 回调里注入写入，没有回归测试精确固定“`_directory_size()` 已返回、扫描线程尚未取得 `_written_lock`”的调度窗口。建议把本轮手动复现固化成自动测试，避免竞态回归。
+- **F04 [P1，仍未闭环]：**现在按必要品种分别取完整窗口，并用最陈旧品种决定数据年龄，缺失品种也能转为 `STALE`；但发现必需品种集合时仍有 `except Exception: pass`。注入 universe membership 查询失败，同时返回一条新鲜 BTC 行，接口仍报 `READY / LIVE / age=0`，即覆盖度查询故障可绕过覆盖判断。应让该故障返回明确 `DEGRADED/UNKNOWN` 或让请求失败，不能回退到任意市场行后报就绪。此外，虽然代码计算了缺失品种，响应 schema 和风险面板没有返回/展示必需品种、缺失品种或覆盖度；操作人员只能看到 `STALE`，不能知道覆盖失败原因。
+- **F07 [P2，明显改善但仍有边界缺陷]：**缺失/空白的 CSV 手续费和 realized PnL 现在会抛 `ValueError`；对账匹配也会排除缺失或非正价格/数量。`pair_round_trip_trades` 却仍只拒绝负价格（`px < 0`），零价格成交可以参与 round-trip；我用一笔价格为 0 的买入和一笔价格为 1 的卖出复现，函数返回 1 笔 round-trip。对真实交易成交，价格必须大于零；这里应与对账匹配路径一致拒绝 `px <= 0`。`local_optimization/` 按用户要求保留在本机即可，其 Git 跟踪状态不是问题。
+
+只读查看服务器容器镜像标签后，策略、执行、研究采集、行情和 dashboard 应用容器仍使用 `crypto-momentum-lab-app:86a89a911f3ae9b3385d1d7deced1c7b8beb261e`，不是本地 `1ee38b7`。因此本地改动仍不能视为已部署。本次只查看容器名称和镜像标签，没有读取环境变量、账户明细或密钥，也没有执行写操作或下单。
+
+### 15.1 验证结果
+
+| 验证 | 结果 | 范围 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1627 passed、4 skipped、1 deselected、1 warning | 当前 `1ee38b7`；4 项需要 loopback socket 权限，live 测试排除。 |
+| `node --test tests/frontend/*.test.mjs` | 34 passed | 当前 dashboard 静态资源。 |
+| `pytest local_optimization/tests -q --tb=short` | 255 passed | 本地目录；按用户要求不以 Git 跟踪状态作为验收条件。 |
+| F10 边界时序手动复现 | 实际目录 350 字节，扫描报告 350 字节 | 覆盖目录读取完成到扫描基线锁快照之间的写入；尚未固化为自动测试。 |
+| F04 覆盖发现失败注入 | 查询异常时仍返回 `READY/LIVE` | 明确复现的 fail-open 缺陷。 |
+| F07 缺失值/零价格复现 | 空白 fee/PnL 抛错；零价格 round-trip 仍被接受 | 本地对账/配对路径。 |
+
+## 16. 第六轮整改闭环与验证
+
+针对第 15 节 Astra 复核指出的 F04 覆盖度查询异常吞掉导致的 fail-open 风险、缺少覆盖度与必需/缺失品种展示、F07 接受零价格成交配对、以及 F10 目录读取到计数锁快照之间竞态缺少自动回归测试的问题，完成全面闭环与自动化测试：
+
+- **F04（覆盖度查询 fail-closed 与必需/缺失品种运维可视化）彻底闭环：**
+  1. `RiskExecutionQueries` 移除 `except Exception: pass` 吞异常逻辑，当查询 `UniverseSnapshotRow` 与 `MonitoringMembershipRow` 发生数据库异常或底层故障时，明确标记 `coverage_query_error = True`；
+  2. 强制触发 fail-closed 保护：`coverage_complete = False`，`is_stale = True`，`coverage_scope = "QUERY_ERROR"`，`missing_symbols = ["<coverage_query_failed>"]`，返回状态严格置为 `OperationalStatus.STALE`（或有停机时的 `HALTED`），绝对杜绝在覆盖度查询失败时回退到任意市场行误报 `READY / LIVE`；
+  3. `RiskExecutionResponse` Schema（Pydantic 严格模式）扩展返回 `required_symbols: list[str]`、`missing_symbols: list[str]`、`coverage_scope: str | None`；
+  4. 仪表盘风控面板（`risk.js` / `risk.css`）新增多维度可视化：
+     - 元数据条中展示 `coverage_scope`（如 `2/2 覆盖` 或 `QUERY_ERROR`）；
+     - 新增 `risk-coverage-bar` 列出全部策略必需监控品种（`symbol-tag`）；
+     - 当存在未闭合或陈旧缺失品种时，渲染高亮警报条 `alert-missing-symbols` 明确告警缺失的具体品种列表与数量；
+  5. 补充单测 `test_risk_execution_fails_closed_when_coverage_query_errors` 与前端模块测试 `risk renderer displays required symbols, missing symbols, and coverage alert`。
+
+- **F07（本地配对严格拒绝零价格成交）彻底闭环：**
+  1. `local_optimization/reconciliation.py` 的 `pair_round_trip_trades` 校验逻辑由 `if px < Decimal("0")` 严格收紧为 `if px <= Decimal("0"): raise ValueError(f"Fill price must be positive, got {px}")`；
+  2. 真实成交价格必须严格大于零，彻底禁止零价格成交参与 round-trip 汇总计算；
+  3. 新增单测 `test_f07_zero_price_fill_rejected_in_pair_round_trip_trades` 验证零价格成交被显式拒绝；本地 256 项测试全量通过；`local_optimization/` 保持本地未跟踪状态。
+
+- **F10（容量扫描目录遍历返回后锁获取前写入竞态自动化回归）彻底闭环：**
+  1. 在 `tests/unit/research_collector/test_capacity_governance.py` 中新增自动化回归测试 `test_capacity_guard_writes_between_traversal_return_and_lock_acquisition_not_zeroed`；
+  2. 精确拦截并模拟“`_directory_size()` 已返回 0、但线程尚未取得 `_written_lock`”的调度窗口，并在该缝隙内写入 350 字节文件及调用 `record_written_bytes(350)`；
+  3. 断言最终 `scan()` 返回的快照以及 `current_snapshot()` 均准确报告 350 字节（`collector_bytes == 350`），绝不被清零为 0，彻底锁死该竞态边界。
+
+### 16.1 验证结果
+
+| 验证项 | 结果 | 详细说明 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1629 passed, 4 skipped, 1 deselected, 1 warning | 相比上一轮新增 F04 fail-closed 单测与 F10 竞态回归单测，全量通过。 |
+| `node --test tests/frontend/*.test.mjs` | 35 passed | 新增 F04 覆盖度展示与缺失品种警报前端单测，全量通过。 |
+| `pytest local_optimization/tests -q --tb=short` | 256 passed | 本地优化测试全量通过（含 F07 零价格成交严格拒绝单测）。 |
+

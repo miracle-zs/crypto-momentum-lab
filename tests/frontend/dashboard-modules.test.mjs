@@ -482,6 +482,27 @@ test("risk renderer separates confirmed pending orders from uncertain orders", (
   assert.match(html, /先完成交易所对账，再决定恢复执行或人工处理/);
   assert.match(html, /chip-source/);
   assert.match(html, /数据年龄/);
+  assert.match(html, /chip-coverage/);
+  assert.match(html, /覆盖范围/);
+});
+
+test("risk renderer displays required symbols, missing symbols, and coverage alert", () => {
+  const [status, html] = renderRisk({
+    status: "STALE",
+    active_halts: [],
+    latest_risk_decisions: [],
+    pending_orders: [],
+    ambiguous_orders: [],
+    required_symbols: ["BTCUSDT", "ETHUSDT"],
+    missing_symbols: ["ETHUSDT"],
+    coverage_scope: "1/2 covered",
+  });
+  assert.equal(status, "STALE");
+  assert.match(html, /必需品种未覆盖/);
+  assert.match(html, /alert-missing-symbols/);
+  assert.match(html, /ETHUSDT/);
+  assert.match(html, /1\/2 covered/);
+  assert.match(html, /risk-coverage-bar/);
 });
 
 test("strategy section owns paper-account rendering state", () => {
