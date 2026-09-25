@@ -278,6 +278,8 @@ class RiskExecutionResponse(DashboardSchema):
     missing_symbols: list[str] = Field(default_factory=list)
     coverage_scope: str | None = None
     coverage_error: str | None = None
+    coverage_error_code: str | None = None
+    coverage_trace_id: str | None = None
 
 
 

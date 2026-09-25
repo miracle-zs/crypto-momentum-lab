@@ -6,9 +6,12 @@ operation; order-state classification and response shaping stay behind this
 seam so callers cannot accidentally treat an unknown state as safe.
 """
 
+import re
+import secrets
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
+import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -24,6 +27,23 @@ from crypto_momentum_lab.persistence.postgres.models import (
     RuntimeMarketState15sRow,
     UniverseSnapshotRow,
 )
+
+log = structlog.get_logger(__name__)
+
+_CREDENTIAL_PATTERN = re.compile(r"://([^:]+):([^@]+)@", re.IGNORECASE)
+_TOKEN_PATTERN = re.compile(
+    r"(?i)\b(api_key|token|secret|password|passwd|auth|access_key|signature)=['\"]?[^'\";\s]+['\"]?"
+)
+
+
+def _sanitize_error_detail(exc: Exception) -> str:
+    """Sanitize exception message for safe internal logging without leaking credentials."""
+    raw = f"{type(exc).__name__}: {exc}"
+    sanitized = _CREDENTIAL_PATTERN.sub(r"://\1:***@", raw)
+    sanitized = _TOKEN_PATTERN.sub(r"\1=***", sanitized)
+    if len(sanitized) > 500:
+        sanitized = sanitized[:497] + "..."
+    return sanitized
 
 _CONFIRMED_OPEN_ORDER_STATES = frozenset(
     {
@@ -111,6 +131,8 @@ class RiskExecutionQueries:
 
             coverage_query_error = False
             coverage_error: str | None = None
+            coverage_error_code: str | None = None
+            coverage_trace_id: str | None = None
             # Determine strategy-required symbols to evaluate coverage & freshness
             if self._required_symbols is not None:
                 required_symbols = set(self._required_symbols)
@@ -139,7 +161,15 @@ class RiskExecutionQueries:
                         required_symbols.update(monitored)
                 except Exception as exc:
                     coverage_query_error = True
-                    coverage_error = f"{type(exc).__name__}: {exc}"
+                    coverage_error_code = "UNIVERSE_QUERY_FAILED"
+                    coverage_trace_id = f"cov_{secrets.token_hex(4)}"
+                    coverage_error = f"{coverage_error_code} (ref: {coverage_trace_id})"
+                    log.error(
+                        "Risk execution universe coverage query failed",
+                        error_code=coverage_error_code,
+                        trace_id=coverage_trace_id,
+                        error_detail=_sanitize_error_detail(exc),
+                    )
 
             market_query = (
                 select(
@@ -162,7 +192,15 @@ class RiskExecutionQueries:
             except Exception as exc:
                 coverage_query_error = True
                 if coverage_error is None:
-                    coverage_error = f"{type(exc).__name__}: {exc}"
+                    coverage_error_code = "MARKET_QUERY_FAILED"
+                    coverage_trace_id = f"cov_{secrets.token_hex(4)}"
+                    coverage_error = f"{coverage_error_code} (ref: {coverage_trace_id})"
+                    log.error(
+                        "Risk execution market state query failed",
+                        error_code=coverage_error_code,
+                        trace_id=coverage_trace_id,
+                        error_detail=_sanitize_error_detail(exc),
+                    )
                 market_rows = []
 
         now = datetime.now(UTC)
@@ -285,6 +323,8 @@ class RiskExecutionQueries:
             missing_symbols=sorted(missing_symbols),
             coverage_scope=coverage_scope,
             coverage_error=coverage_error,
+            coverage_error_code=coverage_error_code,
+            coverage_trace_id=coverage_trace_id,
         )
 
 

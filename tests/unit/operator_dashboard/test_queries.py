@@ -1673,7 +1673,7 @@ async def test_risk_execution_ready_when_all_required_symbols_fresh() -> None:
 
 
 async def test_risk_execution_fails_closed_when_coverage_query_errors() -> None:
-    """F04: When universe/symbol coverage query fails, status MUST report UNKNOWN/QUERY_ERROR, preserve error detail, and keep missing_symbols clean."""
+    """F04: When coverage query fails, API MUST return only safe error code & trace ID without raw exception text."""
     from unittest.mock import AsyncMock, MagicMock
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
 
@@ -1684,8 +1684,10 @@ async def test_risk_execution_fails_closed_when_coverage_query_errors() -> None:
     scalars_mock.all.side_effect = [[], [], []]
     session_mock = AsyncMock()
     session_mock.scalars.return_value = scalars_mock
-    # Simulate DB failure during universe coverage resolution
-    session_mock.scalar.side_effect = RuntimeError("Database connection lost during coverage check")
+    # Simulate DB failure with sensitive tokens / host / credentials
+    session_mock.scalar.side_effect = RuntimeError(
+        "CRITICAL_DB_FAILURE user=admin secret_key=secret_12345 host=db.internal:5432"
+    )
 
     # Even if market state rows exist and are fresh:
     exec_mock = MagicMock()
@@ -1702,12 +1704,20 @@ async def test_risk_execution_fails_closed_when_coverage_query_errors() -> None:
     assert resp.status == OperationalStatus.UNKNOWN
     assert resp.source_status == "QUERY_ERROR"
     assert resp.coverage_scope == "QUERY_ERROR"
-    assert resp.coverage_error == "RuntimeError: Database connection lost during coverage check"
+    assert resp.coverage_error_code == "UNIVERSE_QUERY_FAILED"
+    assert resp.coverage_trace_id is not None
+    assert resp.coverage_trace_id.startswith("cov_")
+    assert resp.coverage_error == f"UNIVERSE_QUERY_FAILED (ref: {resp.coverage_trace_id})"
+
+    # Critical security assertion: NEVER leak raw exception, credentials, or internal topology to the response!
+    assert "secret_12345" not in resp.coverage_error
+    assert "db.internal" not in resp.coverage_error
+    assert "RuntimeError" not in resp.coverage_error
     assert resp.missing_symbols == []
 
 
 async def test_risk_execution_halts_prioritized_over_coverage_query_error() -> None:
-    """F04: If halts exist when coverage query fails, status is HALTED but coverage_error is preserved."""
+    """F04: If halts exist when coverage query fails, status is HALTED but safe error code & trace are preserved."""
     from unittest.mock import AsyncMock, MagicMock
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
     from crypto_momentum_lab.persistence.postgres.models import RiskHaltRow
@@ -1723,7 +1733,7 @@ async def test_risk_execution_halts_prioritized_over_coverage_query_error() -> N
     scalars_mock.all.side_effect = [[halt_row], [], []]
     session_mock = AsyncMock()
     session_mock.scalars.return_value = scalars_mock
-    session_mock.scalar.side_effect = RuntimeError("DB error")
+    session_mock.scalar.side_effect = RuntimeError("DB connection dropped")
     exec_mock = MagicMock()
     exec_mock.all.return_value = []
     session_mock.execute.return_value = exec_mock
@@ -1737,6 +1747,23 @@ async def test_risk_execution_halts_prioritized_over_coverage_query_error() -> N
     assert resp.status == OperationalStatus.HALTED
     assert resp.source_status == "HALTED"
     assert resp.coverage_scope == "QUERY_ERROR"
-    assert resp.coverage_error == "RuntimeError: DB error"
+    assert resp.coverage_error_code == "UNIVERSE_QUERY_FAILED"
+    assert resp.coverage_trace_id is not None
+    assert resp.coverage_error == f"UNIVERSE_QUERY_FAILED (ref: {resp.coverage_trace_id})"
     assert resp.missing_symbols == []
+
+
+def test_sanitize_error_detail_redacts_credentials_and_tokens() -> None:
+    """F04: Internal log helper must redact database passwords and secret tokens."""
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import _sanitize_error_detail
+
+    exc1 = RuntimeError("Failed connecting to postgresql://cml_user:super_secret_pw@10.0.0.1:5432/cml_prod")
+    sanitized1 = _sanitize_error_detail(exc1)
+    assert "super_secret_pw" not in sanitized1
+    assert "postgresql://cml_user:***@10.0.0.1:5432/cml_prod" in sanitized1
+
+    exc2 = ValueError("Auth rejected api_key='ak_live_xyz987' signature=sig1234567")
+    sanitized2 = _sanitize_error_detail(exc2)
+    assert "ak_live_xyz987" not in sanitized2
+    assert "sig1234567" not in sanitized2
 

@@ -512,7 +512,9 @@ test("risk renderer distinguishes UNKNOWN/QUERY_ERROR coverage error from real m
     status: "UNKNOWN",
     source_status: "QUERY_ERROR",
     coverage_scope: "QUERY_ERROR",
-    coverage_error: "RuntimeError: Database connection lost during coverage check",
+    coverage_error: "UNIVERSE_QUERY_FAILED (ref: cov_3f8a12bc)",
+    coverage_error_code: "UNIVERSE_QUERY_FAILED",
+    coverage_trace_id: "cov_3f8a12bc",
     required_symbols: [],
     missing_symbols: [],
     active_halts: [],
@@ -523,7 +525,7 @@ test("risk renderer distinguishes UNKNOWN/QUERY_ERROR coverage error from real m
   assert.equal(status, "UNKNOWN");
   assert.match(html, /alert-coverage-error/);
   assert.match(html, /覆盖查询异常 \(QUERY_ERROR\)/);
-  assert.match(html, /Database connection lost during coverage check/);
+  assert.match(html, /UNIVERSE_QUERY_FAILED \(ref: cov_3f8a12bc\)/);
   assert.doesNotMatch(html, /alert-missing-symbols/);
   assert.doesNotMatch(html, /行情缺失/);
 });

@@ -598,7 +598,9 @@ F05 的 STALE 缓存展示继续保持；F08 对已提供 LONG/SHORT 的分组�
 | `pytest local_optimization/tests -q --tb=short` | 256 passed | 本地目录；Git 跟踪状态不是验收条件。 |
 | F04 查询异常 fail-closed 与界面展示 | 回归测试通过；错误仍被编码为缺失品种 | 应拆分 `UNKNOWN/QUERY_ERROR` 与实际 `MISSING` 状态。 |
 
-## 18. 第七轮整改闭环与验证
+## 18. Gemini 自述的第七轮整改（待独立验证）
+
+以下保留该提交附带的整改说明，作为变更记录；其“闭环”判断仍需以第 19 节独立复核为准。
 
 针对第 17 节 Astra 复核指出的 F04 覆盖查询失败与实际缺行情混淆、错误标记塞入 `missing_symbols`、界面被误渲染为“行情缺失”、以及未保留具体错误原因的问题，完成彻底拆分与闭环改造：
 
@@ -624,4 +626,51 @@ F05 的 STALE 缓存展示继续保持；F08 对已提供 LONG/SHORT 的分组�
 | `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1630 passed, 4 skipped, 1 deselected, 1 warning | 新增停机优先级单测，全量通过。 |
 | `node --test tests/frontend/*.test.mjs` | 36 passed | 新增查询错误与真实缺行情隔离前端单测，全量通过。 |
 | `pytest local_optimization/tests -q --tb=short` | 256 passed | 本地优化测试全量通过。 |
+
+## 19. 对 HEAD `ffcd02c` 的独立复核
+
+复核时 `HEAD` 与 `origin/main` 均为 `ffcd02ced55fc0b37bb0f1b454a0b0aecf34663a`。第 17 节指出的“查询失败被误标为缺行情”已修复：接口使用 `UNKNOWN/QUERY_ERROR`，真实缺失品种列表保持为空，仪表盘也显示独立查询告警；F04 的 fail-closed、F07 零价格校验和 F10 竞态测试均有自动覆盖。当前仍有一项安全边界需处理：异常原文被放进公开响应字段 `coverage_error`。
+
+- **F04 [P2，原始异常文本泄露风险]：**`RiskExecutionQueries` 将 `f"{type(exc).__name__}: {exc}"` 赋给 `RiskExecutionResponse.coverage_error`，前端随后原样展示（虽经过 HTML 转义）。我注入了虚构标记 `dummy_secret_marker=not-a-real-secret`，响应字段也原样包含该内容。真实数据库/驱动异常可能包含主机、库名、SQL 片段或参数；原始异常不应直接作为 API 响应。应向 UI 返回有限错误码和追踪标识，将经脱敏的详细原因写入受控结构化日志，并确保日志也不包含凭据。
+
+服务器容器仍使用镜像 `crypto-momentum-lab-app:86a89a911f3ae9b3385d1d7deced1c7b8beb261e`，不是本地 `ffcd02c`。本轮只读容器名称和镜像标签，没有读取环境变量、账户明细或密钥，也没有执行写操作或下单。
+
+### 19.1 验证结果
+
+| 验证 | 结果 | 范围 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1630 passed、4 skipped、1 deselected、1 warning | 当前 `ffcd02c`；4 项需要 loopback socket 权限，live 测试排除。 |
+| `node --test tests/frontend/*.test.mjs` | 36 passed | 当前 dashboard 静态资源。 |
+| `pytest local_optimization/tests -q --tb=short` | 256 passed | 本地目录；按用户要求不以 Git 跟踪状态作为验收条件。 |
+| 异常响应边界复现 | `UNKNOWN/QUERY_ERROR` 正确；注入的异常文本也原样出现在 `coverage_error` | 状态 fail-closed 已验证，原始错误信息暴露风险仍在。 |
+
+## 20. 第八轮整改闭环与验证
+
+针对第 19 节 Astra 复核指出的原始异常文本（可能含数据库主机名、库名、SQL 片段或凭据）被放进公开响应 `coverage_error` 导致信息泄露的问题，完成受控脱敏与安全错误码闭环改造：
+
+- **F04（API 响应仅暴露受控错误码与追踪标识，详细异常受控脱敏归档）彻底闭环：**
+  1. **Schema 安全字段约束**：
+     - 在 [`RiskExecutionResponse`](src/crypto_momentum_lab/operator_dashboard/schemas.py) 中新增安全受控字段 `coverage_error_code: str | None = None` 与 `coverage_trace_id: str | None = None`；
+  2. **API 错误信息安全隔离**：
+     - 在 [`RiskExecutionQueries`](src/crypto_momentum_lab/operator_dashboard/risk_execution_queries.py) 中，当 Universe 监控范围查询或市场行情查询发生异常时，禁止将原始 `exc` 字符串暴露给 API；
+     - 限制仅返回受限的安全错误码：`UNIVERSE_QUERY_FAILED` 或 `MARKET_QUERY_FAILED`；
+     - 生成安全的随机追踪标识：`coverage_trace_id = f"cov_{secrets.token_hex(4)}"`（如 `cov_a1b2c3d4`）；
+     - `coverage_error` 字段格式化为只包含错误码与追踪号的安全描述：`f"{coverage_error_code} (ref: {coverage_trace_id})"`；
+  3. **受控脱敏结构化日志**：
+     - 引入专用脱敏函数 `_sanitize_error_detail(exc: Exception)`，对数据库连接串凭据（如 `postgresql://user:***@host`）、API 密钥、Token、密码等敏感特征进行正则遮蔽，并对长度做边界控制；
+     - 通过 `log.error("Risk execution coverage query failed", ...)` 将脱敏后的异常摘要及 `trace_id` 记录至内部受控日志，确保运维人员可通过前端展示的 `trace_id` 在服务器日志中检索排错，同时外部 API 绝不泄露敏感拓扑或注入标记；
+  4. **仪表盘前端安全呈现**：
+     - [`risk.js`](src/crypto_momentum_lab/operator_dashboard/static/sections/risk.js) 渲染 `UNIVERSE_QUERY_FAILED (ref: cov_xxxxxxxx)` 错误代码与工单标识，不展示任何内部异常文本；
+  5. **安全与回归自动化测试**：
+     - 在 `test_queries.py` 中更新单测 `test_risk_execution_fails_closed_when_coverage_query_errors`：注入包含假密钥、内网主机名与原始异常类型的异常对象，严格断言响应中绝不包含 `secret_12345`、`db.internal` 或 `RuntimeError`，且仅返回结构化安全错误码与以 `cov_` 开头的追踪标识；
+     - 新增单测 `test_sanitize_error_detail_redacts_credentials_and_tokens`：验证连接串密码与 token 脱敏逻辑；
+     - 前端单测断言安全错误代码与追踪标识的稳定展示。
+
+### 20.1 验证结果
+
+| 验证项 | 结果 | 详细说明 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1631 passed, 4 skipped, 1 deselected, 1 warning | 新增脱敏函数单测与凭据防泄露安全断言，全量通过。 |
+| `node --test tests/frontend/*.test.mjs` | 36 passed | 前端安全错误码与 trace 展示测试通过。 |
+| `pytest local_optimization/tests -q --tb=short` | 256 passed | 本地优化测试全量通过，保持本地未跟踪状态。 |
 
