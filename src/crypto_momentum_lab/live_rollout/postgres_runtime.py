@@ -2333,11 +2333,6 @@ def _build_position_batches(
                 pos_ps_str = position_side.value.upper()
                 if fill_ps_str != "BOTH" and fill_ps_str != pos_ps_str:
                     return False
-            if earliest_order_time is not None:
-                if str(fill.order_id) in matching_order_ids:
-                    return True
-                if fill.trade_at < earliest_order_time - timedelta(minutes=5):
-                    return False
             return True
 
         matching_fills = tuple(

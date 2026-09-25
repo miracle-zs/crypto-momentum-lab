@@ -12,9 +12,10 @@ Provides strict identity types:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
@@ -22,6 +23,14 @@ from crypto_momentum_lab.domain.account import (
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.strategy import StrategySide
+
+
+class FactCoverageStatus(StrEnum):
+    """Integrity and completeness status of a fact coverage interval."""
+
+    CONFIRMED = "CONFIRMED"
+    GAP_DETECTED = "GAP_DETECTED"
+    PENDING = "PENDING"
 
 
 class PositionHealthStatus(StrEnum):
@@ -107,6 +116,8 @@ class FactCoverageInterval:
     end_at: datetime
     has_known_gaps: bool = False
     source_cursor: str | None = None
+    status: FactCoverageStatus = FactCoverageStatus.CONFIRMED
+    confirmed_revision: int | None = None
 
     def __post_init__(self) -> None:
         if self.start_at.tzinfo is None:
@@ -115,6 +126,50 @@ class FactCoverageInterval:
             raise ValueError("end_at must be timezone-aware")
         if self.end_at < self.start_at:
             raise ValueError("end_at must not precede start_at")
+        if not isinstance(self.status, FactCoverageStatus):
+            object.__setattr__(
+                self,
+                "status",
+                FactCoverageStatus(self.status),
+            )
+
+    def covers(self, point_in_time: datetime) -> bool:
+        """Returns True if point_in_time is within interval without known gaps."""
+        if self.has_known_gaps or self.status != FactCoverageStatus.CONFIRMED:
+            return False
+        return self.start_at <= point_in_time <= self.end_at
+
+    def covers_range(self, start: datetime, end: datetime) -> bool:
+        """Returns True if [start, end] is within interval without known gaps."""
+        if self.has_known_gaps or self.status != FactCoverageStatus.CONFIRMED:
+            return False
+        return self.start_at <= start and end <= self.end_at
+
+
+@dataclass(frozen=True, slots=True)
+class PositionCheckpoint:
+    """Materialized checkpoint representing complete state at a known event cut."""
+
+    checkpoint_id: str
+    key: PositionKey
+    event_cut: datetime
+    net_quantity: Decimal
+    entry_price: Decimal
+    active_episode_id: str | None = None
+    active_batches: tuple[PositionLedgerBatch, ...] = ()
+    coverage_start: datetime | None = None
+    coverage_end: datetime | None = None
+    facts_hash: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.checkpoint_id.strip():
+            raise ValueError("checkpoint_id must not be empty")
+        if self.event_cut.tzinfo is None:
+            raise ValueError("event_cut must be timezone-aware")
+        if self.net_quantity < 0:
+            raise ValueError("net_quantity must be non-negative")
+        if self.entry_price < 0:
+            raise ValueError("entry_price must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +199,8 @@ class AccountFacts:
     snapshots: tuple[AccountPositionSnapshot, ...] = ()
     exit_boundaries: tuple[ExitOrderSubmissionFact, ...] = ()
     coverage: FactCoverageInterval | None = None
+    checkpoint: PositionCheckpoint | None = None
+    has_synthetic_fills: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,3 +316,50 @@ class PositionLedgerProjection:
     event_cut: datetime | None = None
     discrepancy: PositionDiscrepancy | None = None
     is_comparable: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class FreshnessRequirement:
+    """Freshness constraints for reading an authoritative PositionView."""
+
+    max_staleness: timedelta = timedelta(seconds=15)
+    min_event_cut: datetime | None = None
+    require_comparable: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class PositionView:
+    """Authoritative, immutable point-in-time view consumed by strategy and execution coordinators."""
+
+    key: PositionKey
+    projection_version: str
+    input_revision: int
+    event_cut: datetime | None
+    policy_version: str
+    schema_version: str
+    coverage: FactCoverageInterval | None
+    active_episode: PositionEpisode | None
+    batches: tuple[PositionLedgerBatch, ...]
+    unallocated_quantity: Decimal
+    reservations: tuple[Any, ...] = ()
+    observation_id: str | None = None
+    reconciliation_status: str = "OK"
+    reconciliation_gap: Decimal | None = None
+    health_status: PositionHealthStatus = PositionHealthStatus.READY
+    diagnostics: tuple[str, ...] = ()
+    discrepancy: PositionDiscrepancy | None = None
+    is_comparable: bool = True
+
+    @property
+    def total_quantity(self) -> Decimal:
+        return sum((b.quantity for b in self.batches), start=Decimal("0"))
+
+    @property
+    def is_ready_for_trade(self) -> bool:
+        return (
+            self.health_status == PositionHealthStatus.READY
+            and self.is_comparable
+            and (self.reconciliation_gap is None or self.reconciliation_gap == Decimal("0"))
+            and self.unallocated_quantity == Decimal("0")
+        )
+

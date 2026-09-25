@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.account import (
@@ -24,6 +24,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     DiscrepancyKind,
     ExitOrderSubmissionFact,
     ExternalReductionFact,
+    FactCoverageStatus,
     PositionDiscrepancy,
     PositionEpisode,
     PositionHealthStatus,
@@ -54,11 +55,25 @@ class PositionLedger:
                 f"ledger key {self._position_key.canonical_id}"
             )
 
-        # 1. Deduplicate fills by trade_id and sort chronologically
+        # 1. Deduplicate fills by trade_id and detect conflicting duplicate trade IDs
         deduped_fills: dict[str, AccountFillEvent] = {}
+        conflicting_fills: list[AccountFillEvent] = []
         for fill in facts.fills:
-            if fill.trade_id not in deduped_fills:
+            if fill.trade_id in deduped_fills:
+                existing = deduped_fills[fill.trade_id]
+                if (
+                    existing.quantity != fill.quantity
+                    or existing.price != fill.price
+                    or existing.side.upper() != fill.side.upper()
+                ):
+                    conflicting_fills.append(fill)
+            else:
                 deduped_fills[fill.trade_id] = fill
+
+        has_synthetic_fills = getattr(facts, "has_synthetic_fills", False) or any(
+            bool((getattr(f, "raw_payload", None) or {}).get("synthetic_from_order", False))
+            for f in facts.fills
+        )
 
         sorted_fills = sorted(
             deduped_fills.values(),
@@ -587,6 +602,99 @@ class PositionLedger:
 
         if unallocated_quantity > Decimal("0") and health_status == PositionHealthStatus.READY:
             health_status = PositionHealthStatus.INCOMPLETE
+
+        if conflicting_fills:
+            health_status = PositionHealthStatus.CONFLICT
+            is_comparable = False
+            diag_msg = (
+                f"Conflicting duplicate fills detected for trade IDs: "
+                f"{[f.trade_id for f in conflicting_fills]}"
+            )
+            diagnostics.append(diag_msg)
+            if discrepancy is None:
+                first_conf = conflicting_fills[0]
+                raw_hash = f"{self._position_key.canonical_id}:conflict:{first_conf.trade_id}"
+                disc_hash = hashlib.sha256(raw_hash.encode()).hexdigest()[:16]
+                discrepancy = PositionDiscrepancy(
+                    discrepancy_id=f"disc_{self._position_key.symbol}_{disc_hash}",
+                    key=self._position_key,
+                    kind=DiscrepancyKind.IDENTITY_MISMATCH,
+                    first_seen_at=first_conf.trade_at,
+                    last_seen_at=first_conf.trade_at,
+                    count=len(conflicting_fills),
+                    input_hash=disc_hash,
+                    details=diag_msg,
+                    event_cut=high_watermark,
+                )
+
+        if has_synthetic_fills and total_active_qty > Decimal("0"):
+            health_status = PositionHealthStatus.INCOMPLETE
+            is_comparable = False
+            diag_msg = "Synthetic fills present; non-authoritative input"
+            diagnostics.append(diag_msg)
+            if discrepancy is None:
+                now_dt = datetime.now(UTC) if high_watermark is None else high_watermark
+                raw_hash = f"{self._position_key.canonical_id}:synthetic_fill"
+                disc_hash = hashlib.sha256(raw_hash.encode()).hexdigest()[:16]
+                discrepancy = PositionDiscrepancy(
+                    discrepancy_id=f"disc_{self._position_key.symbol}_{disc_hash}",
+                    key=self._position_key,
+                    kind=DiscrepancyKind.INPUT_MISSING,
+                    first_seen_at=now_dt,
+                    last_seen_at=now_dt,
+                    count=1,
+                    input_hash=disc_hash,
+                    details=diag_msg,
+                    event_cut=high_watermark,
+                )
+
+        if facts.coverage is not None:
+            if (
+                facts.coverage.has_known_gaps
+                or facts.coverage.status == FactCoverageStatus.GAP_DETECTED
+            ):
+                health_status = PositionHealthStatus.INCOMPLETE
+                diag_msg = "Fact coverage interval has known gaps or gap detected"
+                diagnostics.append(diag_msg)
+                if discrepancy is None:
+                    raw_hash = f"{self._position_key.canonical_id}:coverage_gap"
+                    disc_hash = hashlib.sha256(raw_hash.encode()).hexdigest()[:16]
+                    discrepancy = PositionDiscrepancy(
+                        discrepancy_id=f"disc_{self._position_key.symbol}_{disc_hash}",
+                        key=self._position_key,
+                        kind=DiscrepancyKind.INPUT_MISSING,
+                        first_seen_at=facts.coverage.start_at,
+                        last_seen_at=facts.coverage.end_at,
+                        count=1,
+                        input_hash=disc_hash,
+                        details=diag_msg,
+                        event_cut=high_watermark,
+                    )
+            elif (
+                final_active_episode is not None
+                and facts.coverage.start_at > final_active_episode.opened_at
+            ):
+                health_status = PositionHealthStatus.INCOMPLETE
+                diag_msg = (
+                    f"Fact coverage start ({facts.coverage.start_at.isoformat()}) does not "
+                    f"cover active episode opened_at ({final_active_episode.opened_at.isoformat()})"
+                )
+                diagnostics.append(diag_msg)
+                if discrepancy is None:
+                    raw_hash = f"{self._position_key.canonical_id}:coverage_truncated"
+                    disc_hash = hashlib.sha256(raw_hash.encode()).hexdigest()[:16]
+                    discrepancy = PositionDiscrepancy(
+                        discrepancy_id=f"disc_{self._position_key.symbol}_{disc_hash}",
+                        key=self._position_key,
+                        kind=DiscrepancyKind.INPUT_MISSING,
+                        first_seen_at=facts.coverage.start_at,
+                        last_seen_at=facts.coverage.end_at,
+                        count=1,
+                        input_hash=disc_hash,
+                        details=diag_msg,
+                        event_cut=high_watermark,
+                    )
+
 
         return PositionLedgerProjection(
             position_key=self._position_key,

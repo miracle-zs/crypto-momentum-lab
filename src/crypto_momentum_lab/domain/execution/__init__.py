@@ -20,19 +20,33 @@ from crypto_momentum_lab.domain.execution.position_batches import (
     count_active_symbol_batch_concurrency,
     rebuild_position_batches,
 )
+from crypto_momentum_lab.domain.execution.account_journal import (
+    AccountFactEnvelope,
+    AccountJournal,
+)
+from crypto_momentum_lab.domain.execution.position_book import (
+    PositionBook,
+)
 from crypto_momentum_lab.domain.execution.position_ledger import (
     PositionLedger,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
     BatchReductionAttribution,
+    DiscrepancyKind,
     ExitOrderSubmissionFact,
     ExternalReductionFact,
     FactCoverageInterval,
+    FactCoverageStatus,
+    FreshnessRequirement,
+    PositionCheckpoint,
+    PositionDiscrepancy,
     PositionEpisode,
+    PositionHealthStatus,
     PositionKey,
     PositionLedgerBatch,
     PositionLedgerProjection,
+    PositionView,
 )
 from crypto_momentum_lab.domain.execution.progress_contract import (
     ExecutionReadiness,
@@ -67,7 +81,14 @@ __all__ = [
     "rebuild_position_batches",
     "count_active_symbol_batch_concurrency",
     "PositionKey",
+    "PositionHealthStatus",
+    "DiscrepancyKind",
+    "PositionDiscrepancy",
+    "FactCoverageStatus",
     "FactCoverageInterval",
+    "PositionCheckpoint",
+    "PositionView",
+    "FreshnessRequirement",
     "AccountFacts",
     "ExitOrderSubmissionFact",
     "BatchReductionAttribution",
@@ -76,6 +97,9 @@ __all__ = [
     "PositionEpisode",
     "PositionLedgerProjection",
     "PositionLedger",
+    "AccountJournal",
+    "AccountFactEnvelope",
+    "PositionBook",
     "ExitAllocation",
     "ExitAllocationPlan",
     "ExitAllocator",

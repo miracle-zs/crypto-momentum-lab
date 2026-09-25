@@ -124,8 +124,10 @@ class LegacyOrderIdentityAdapter:
             return True
 
         fill_list: list[AccountFillEvent] = [f for f in fills if _fill_matches_side(f)]
+        has_synthetic = False
 
         if not fill_list and orders:
+            has_synthetic = True
             for ord_idx, order in enumerate(orders):
                 if order.executed_quantity > 0:
                     oid = (
@@ -201,6 +203,7 @@ class LegacyOrderIdentityAdapter:
             fills=tuple(fill_list),
             snapshots=tuple(snapshots),
             exit_boundaries=tuple(exit_boundaries),
+            has_synthetic_fills=has_synthetic,
         )
 
 
