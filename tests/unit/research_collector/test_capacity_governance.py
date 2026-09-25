@@ -150,7 +150,7 @@ async def test_collector_ingest_does_not_scan_directory(tmp_path: Path) -> None:
     await collector.stop()
 
 
-def test_capacity_guard_concurrent_writes_during_scan_are_not_lost(tmp_path: Path) -> None:
+def test_capacity_guard_concurrent_writes_during_scan_do_not_double_count(tmp_path: Path) -> None:
     import crypto_momentum_lab.research_collector.storage as storage_mod
 
     guard = CapacityGuard(
@@ -162,22 +162,27 @@ def test_capacity_guard_concurrent_writes_during_scan_are_not_lost(tmp_path: Pat
         disk_usage_fn=lambda p: _DummyUsage(free=100000),
     )
     guard.scan()
-    guard.record_written_bytes(500)
 
     orig_dir_size = storage_mod._directory_size
 
-    def slow_directory_size(path):
-        # A concurrent write happens while the directory scan is reading disk
+    def simulated_scan_with_concurrent_write(path):
+        # A file of 350 bytes is written to disk and recorded during directory traversal
+        (tmp_path / "concurrent.dat").write_bytes(b"x" * 350)
         guard.record_written_bytes(350)
         return orig_dir_size(path)
 
-    storage_mod._directory_size = slow_directory_size
+    storage_mod._directory_size = simulated_scan_with_concurrent_write
     try:
         guard.scan()
     finally:
         storage_mod._directory_size = orig_dir_size
 
     current = guard.current_snapshot()
-    # The 350 bytes written during directory traversal must be preserved without loss
+    # The 350 bytes written during traversal must be reported as 350 bytes, never double-counted to 700
     assert current.collector_bytes == 350
+
+    # Subsequent incremental writes after scan are properly tracked under lock
+    guard.record_written_bytes(150)
+    current_after = guard.current_snapshot()
+    assert current_after.collector_bytes == 500
 

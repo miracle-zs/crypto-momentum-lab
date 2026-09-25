@@ -1478,4 +1478,51 @@ async def test_risk_execution_computes_data_age_and_freshness() -> None:
     assert resp2.data_age_seconds is None
 
 
+async def test_risk_execution_stale_market_not_masked_by_recent_orders() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
+    from crypto_momentum_lab.persistence.postgres.models import ExchangeOrderRow
+
+    now = datetime.now(UTC)
+    old_market_time = now - timedelta(seconds=240)
+    fresh_order_time = now - timedelta(seconds=1)
+
+    fake_order = MagicMock(spec=ExchangeOrderRow)
+    fake_order.updated_at = fresh_order_time
+    fake_order.state = "acknowledged"
+    fake_order.client_order_id = "test_order"
+    fake_order.exchange_order_id = "ex_1"
+    fake_order.symbol = "BTCUSDT"
+    fake_order.side = "BUY"
+    fake_order.price = Decimal("60000")
+    fake_order.quantity = Decimal("1.0")
+    fake_order.filled_quantity = Decimal("0.0")
+    fake_order.average_price = None
+    fake_order.fee = Decimal("0")
+    fake_order.created_at = fresh_order_time
+
+    scalars_mock = MagicMock()
+    scalars_mock.all.side_effect = [
+        [],  # halts
+        [],  # decisions
+        [fake_order],  # orders updated just 1s ago
+    ]
+    session_mock = AsyncMock()
+    session_mock.scalars.return_value = scalars_mock
+    session_mock.scalar.return_value = old_market_time  # market is 240s old
+
+    factory_mock = MagicMock()
+    factory_mock.return_value.__aenter__.return_value = session_mock
+
+    queries = RiskExecutionQueries(session_factory=factory_mock)
+    resp = await queries.risk_execution()
+
+    # The 240s old market must NOT be masked by fresh order
+    assert resp.status == OperationalStatus.STALE
+    assert resp.source_status == "STALE"
+    assert resp.data_age_seconds is not None
+    assert resp.data_age_seconds >= 239.0
+    assert resp.observed_at == old_market_time
+
+
 

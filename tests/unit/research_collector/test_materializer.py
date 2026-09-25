@@ -224,3 +224,38 @@ def test_materializer_commits_upgraded_backfill_revision(tmp_path: Path) -> None
     assert rows[0]["source_kind"] == SourceKind.POSTGRES_BACKFILL.value
 
 
+def test_materializer_resolutions_persisted_before_journal_unlink(tmp_path: Path) -> None:
+    journal = ArchiveJournal(
+        tmp_path / "journal",
+        environment="research",
+        max_bytes=1024 * 1024,
+    )
+    s1 = fixture_state("BTCUSDT", 0)
+    selection = SelectionSnapshot(
+        observed_at=s1.bucket_start,
+        symbols=(SelectedSymbol(symbol="BTCUSDT", reason="test"),),
+    )
+    b1 = _batch(s1, 1)
+    r1 = journal.accept(b1, selection, (s1,))
+
+    resolutions_seen_before_unlink = []
+    orig_unlink = Path.unlink
+
+    def mock_unlink(self_path):
+        resolutions_file = tmp_path / "journal" / "resolutions.jsonl"
+        resolutions_seen_before_unlink.append(resolutions_file.exists())
+        orig_unlink(self_path)
+
+    import unittest.mock
+    with unittest.mock.patch.object(Path, "unlink", mock_unlink):
+        journal.commit_materialization(
+            [r1],
+            resolutions=[{"sequence": 1, "status": "materialized", "reason": "accepted"}],
+        )
+
+    assert len(resolutions_seen_before_unlink) == 1
+    assert resolutions_seen_before_unlink[0] is True
+    assert len(journal.read_resolutions()) == 1
+
+
+

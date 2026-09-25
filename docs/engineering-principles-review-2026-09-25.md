@@ -370,7 +370,7 @@ Python测试有 Starlette/httpx 弃用警告，WebSocket E2E另有 ConnectionClo
 
 ## 9. 最新提交复核（HEAD `a67c21a`）
 
-复核时 `HEAD` 与 `origin/main` 均为 `a67c21a`，应用代码没有未提交改动；本次把复核结果追加到本文后，工作区只剩本文的文档改动。此前 `24d305b` 把整个 `local_optimization/` 纳入版本控制；最新 `a67c21a` 又将该目录撤出并加入 `.gitignore`。所以主程序修复保留，但 F07/F08 相关研究对账修复没有进入可克隆版本。目录当前仍在本机，且 251 项本地测试通过；Git 不跟踪它们，普通 clone/checkout 不会得到这些文件。
+复核时 `HEAD` 与 `origin/main` 均为 `a67c21a`，应用代码没有未提交改动；本次把复核结果追加到本文后，工作区只剩本文的文档改动。此前 `24d305b` 曾把整个 `local_optimization/` 纳入版本控制；最新 `a67c21a` 又将该目录撤出并加入 `.gitignore`。用户随后明确 `local_optimization` 可保持本地、不要求纳入版本控制。因此该目录未被 Git 跟踪是预期工作方式，不作为缺陷或验收失败；F07/F08 仍按本机实际代码与测试结果审查。
 
 本次再次确认已修正的部分：F02 readiness 排除了 database 服务项并检查运行流状态；F03 对 readiness 查询故障返回降级结果；F05 API 增加 `X-Cache-Status: STALE`；F08 的本机对账函数按 `position_side` 分组；F09 两套数据库测试 fixture 均检查 URL；F12 模型索引与约束同步后，空库 `alembic check` 返回 `No new upgrade operations detected`；F13 对分区表和重复 `event_id` 的 downgrade 都增加了拒绝条件；F14 前端不再显示无依据的完整百分比。
 
@@ -380,10 +380,10 @@ Python测试有 Starlette/httpx 弃用警告，WebSocket E2E另有 ConnectionClo
 - **F04：**`RiskExecutionQueries` 每次查询都用 `datetime.now(UTC)`、`source_status="LIVE"`、`data_age_seconds=0.0` 填充元数据，没有从订单、风控决策和 halt 记录计算实际来源时间；仪表盘的“数据年龄”因此可能把旧记录标成实时。
 - **F05：**`X-Cache-Status` 已区分 STALE，但静态 dashboard 代码没有读取或展示该响应头，操作人员页面仍看不到旧缓存状态。
 - **F06：**分页超预算状态现作为可用快照让事件流水继续运行；但其后 `_publish_heartbeat()` 调用 `publish_user_data_heartbeat()`，该函数无条件把持久状态写为 `READY_READONLY`。补采尚未完成时，心跳仍可能覆盖 `SYNCING`。
-- **F07：**本机忽略目录里的非法 Decimal 字符串现在会报错，但缺失金额/数量仍在调用处默认成零；Round-trip 结果随后转成 `float`，`match_per_symbol_trades()` 继续用浮点数计算滑点与 PnL 差值。且整个实现及测试不在 Git 中。
+- **F07：**本机目录里的非法 Decimal 字符串现在会报错，但缺失金额/数量仍在调用处默认成零；Round-trip 结果随后转成 `float`，`match_per_symbol_trades()` 继续用浮点数计算滑点与 PnL 差值。
 - **F10：**容量统计现同时计入 journal 和 Parquet 写入；`scan()` 持锁重置增量计数，`record_written_bytes()` 不取同一把锁，扫描和写入并发时仍可能丢失一次增量，直至后续扫描校正。
 
-本机忽略目录里另外出现了性能改动：DuckDB/Polars 读取路径和依赖仍只存在于被忽略的 `local_optimization` 文件；其 fallback 用宽泛的 `except Exception: pass` 静默切换路径，也没有在这轮改动中提供目标负载、前后延迟或内存基准。应先界定可接受的 fallback 异常并记录性能证据，再考虑纳入版本。
+本机目录里另外出现了 DuckDB/Polars 读取路径；其 fallback 用宽泛的 `except Exception: pass` 静默切换路径，也没有在这轮改动中提供目标负载、前后延迟或内存基准。该路径是否纳入版本控制不属于验收条件；若继续依赖这项性能改动，应界定可接受的 fallback 异常并补充性能证据。
 
 ### 9.1 最新状态验证
 
@@ -393,6 +393,34 @@ Python测试有 Starlette/httpx 弃用警告，WebSocket E2E另有 ConnectionClo
 | `node --test tests/frontend/*.test.mjs` | 34 passed | 当前主项目静态 dashboard 资源。 |
 | `pytest tests/integration -m 'not live' -q --tb=short` | 72 passed | 本地临时 PostgreSQL 库，执行后已删除。 |
 | 空库 `alembic upgrade head` + `alembic check` | 到 `20260925_0040`；`No new upgrade operations detected` | 迁移和模型在本次隔离空库上对齐；不替代生产大表迁移演练。 |
-| `pytest local_optimization/tests -q --tb=short` | 251 passed | 本机忽略目录，结果不属于当前 Git 提交的可复现验证。 |
+| `pytest local_optimization/tests -q --tb=short` | 251 passed | 验证本机 `local_optimization` 工作树；该目录按用户要求保持本地，不以 clone/checkout 可复现性作为验收条件。 |
 
-本次未检查服务器；上一轮报告的服务器 SHA 为 `86a89a9...`，不能据此宣称服务器已运行 `a67c21a`。
+本轮对该节对应提交后的补充复核见下节。
+
+## 10. 最新提交复核（HEAD `5cc8d6f`）
+
+复核时 `HEAD` 与 `origin/main` 均为 `5cc8d6f342e1f9c9af2923968dc1c779e2f8b7dc`，开始审查时代码工作区干净。用户已明确 `local_optimization/` 保持本地即可；本节照常评估该目录的实现，但不要求 Git 跟踪它。
+
+上一轮的主要未闭环项中，F05 的 API `X-Cache-Status: STALE` 现在被 dashboard 读取，分区状态和全局 readiness 都会把 stale 缓存计为不确定；F06 的 account daemon 会把 `SYNCING` 或 `fills_catching_up` 状态传给 heartbeat 持久化，sync service 也不再无条件覆盖成 `READY_READONLY`。F10 的写入计数与容量扫描现使用同一把锁，旧的“扫描期间写入增量可能被重置丢失”问题已修复。F01 为已拒绝/空批次增加了 `resolutions.jsonl` 持久记录；真实 journal/materializer 单测能区分已物化与被拒绝版本。
+
+仍不能认定所有事项都已改完：
+
+- **F01 [P2，部分完成]：**拒绝结果现在可持久审计，但 `commit_materialization()` 先从内存索引删除记录并 unlink journal，随后才 append+fsync resolution，最后更新 manifest。若在删除与 resolution 落盘之间崩溃，Parquet 仍保留旧版本、journal 已消失、拒绝原因也未落盘；如果在 resolution 与 manifest 间崩溃，恢复逻辑也没有据 resolution 重建 checkpoint。需要以 receipt 身份幂等写入决议，并让恢复流程能安全完成/重放该提交顺序。
+- **F04 [P1，未完全修复]：**现在能给出数据年龄，但把行情、决策、halt、订单更新时间取最大值作为整体 `observed_at`。我用真实 `RiskExecutionQueries` 加隔离 mock 复现：行情时间落后 240 秒，同时有刚更新的 `filled` 订单时，接口返回 `READY / LIVE / age=0`。新订单活动会掩盖陈旧行情或陈旧决策。应按权威来源分别计算 freshness，并由关键输入的最差状态决定整体 readiness，或明确哪些来源不参与决策门禁。
+- **F07 [P2，仍未完成]：**无效非空 Decimal 已报错，配对的核心运算也使用 Decimal；但成交对账入口仍用 `float` 解析 fill 价格/数量并把缺失值当零，费用与 realized PnL 的缺失字段也默认零。Round-trip 输出先将价格、数量、手续费和 PnL 舍入后转成 `float`，下游再转回 Decimal，原精度已不可恢复。这些是本机目录中的实际实现问题，与是否纳入 Git 无关。
+- **F10 [P2，部分完成]：**共享锁修复了增量丢失，但扫描期间新增文件可能同时进入目录扫描基数和增量计数，导致重复计数。我用 350 字节文件在扫描回调中创建并记录，实际目录为 350 字节而 `CapacityGuard.scan()` 报 700 字节。这个方向是保守的，但接近阈值时可能提前把 collector 降级/暂停；应建立一致快照边界，或明确并验证可接受的保守偏差。
+- **F06 [验证缺口]：**状态传递的实现已接线，但新增测试主要验证 sync service 自身保留 `SYNCING`，没有直接验证 daemon 在补采状态下实际向 service 传递 `state=SYNCING`。另外 `_publish_heartbeat()` 用宽泛 `except TypeError` 兼容旧签名，会把被调用方法内部的 TypeError 也误判为签名不兼容并再次调用；建议更新所有实现后移除此回退，至少增加 daemon 级状态转换测试。
+
+F08 的已知 `LONG/SHORT` 持仓方向分组合并入对账逻辑，针对性测试通过；`position_side` 缺失时仍按 BUY/SELL 和未来成交做启发式配对，结果应标为不确定而不是静默视为确定身份。F02/F03/F09/F12/F13/F14 的既有修复未被本提交触碰，沿用上一节的复核结论；F11 仍是大体完成，缓存键与任务清理行为没有在本轮重新压力验证。
+
+### 10.1 验证结果
+
+| 验证 | 结果 | 范围 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1616 passed、4 skipped、1 deselected | 当前 `5cc8d6f` 工作树；4 项需要 loopback socket 权限，live 测试排除。 |
+| `node --test tests/frontend/*.test.mjs` | 34 passed | 当前 dashboard 静态资源。 |
+| `pytest local_optimization/tests -q --tb=short` | 251 passed | 本机本地目录；不把 Git 跟踪作为要求。 |
+| `pytest tests/integration/persistence/parquet/test_writer.py tests/integration/raw_files/test_journal.py -q --tb=short` | 4 passed | 当前 journal/Parquet 文件持久化测试。 |
+| 全量 PostgreSQL integration 与 Alembic 检查 | 本轮未重跑 | 上一轮 `a67c21a` 的隔离库验证通过；本提交未改 ORM 模型或迁移。 |
+
+本轮只读登录服务器并查看容器列表：实盘相关容器仍使用镜像 `crypto-momentum-lab-app:86a89a911f3ae9b3385d1d7deced1c7b8beb261e`，明显早于本地 `5cc8d6f`。所以本地代码修复不能视为已部署；本轮未读取环境变量、账户明细或密钥，没有调用写 API，也没有下单。服务器部署状态是独立未完成项。

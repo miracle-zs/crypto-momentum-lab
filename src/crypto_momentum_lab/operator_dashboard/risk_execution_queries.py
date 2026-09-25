@@ -102,49 +102,16 @@ class RiskExecutionQueries:
             )
         pending, ambiguous = split_exchange_orders(orders)
 
-        candidate_timestamps: list[datetime] = []
+        now = datetime.now(UTC)
         if latest_market_time is not None:
-            candidate_timestamps.append(
+            market_time = (
                 latest_market_time
                 if latest_market_time.tzinfo is not None
                 else latest_market_time.replace(tzinfo=UTC)
             )
-        for h in halts:
-            if h.created_at is not None:
-                candidate_timestamps.append(
-                    h.created_at
-                    if h.created_at.tzinfo is not None
-                    else h.created_at.replace(tzinfo=UTC)
-                )
-        for d in decisions:
-            if d.evaluated_at is not None:
-                candidate_timestamps.append(
-                    d.evaluated_at
-                    if d.evaluated_at.tzinfo is not None
-                    else d.evaluated_at.replace(tzinfo=UTC)
-                )
-        for o in orders:
-            if o.updated_at is not None:
-                candidate_timestamps.append(
-                    o.updated_at
-                    if o.updated_at.tzinfo is not None
-                    else o.updated_at.replace(tzinfo=UTC)
-                )
-
-        now = datetime.now(UTC)
-        if not candidate_timestamps:
-            observed_at = None
-            data_age_seconds = None
-            source_status = "NO_DATA"
-            status = (
-                OperationalStatus.HALTED
-                if halts or ambiguous
-                else OperationalStatus.NO_DATA
-            )
-        else:
-            observed_at = max(candidate_timestamps)
+            observed_at = market_time
             data_age_seconds = round(
-                max(0.0, (now - observed_at).total_seconds()), 1
+                max(0.0, (now - market_time).total_seconds()), 1
             )
             is_stale = data_age_seconds > 120.0
             if halts or ambiguous:
@@ -156,6 +123,50 @@ class RiskExecutionQueries:
             else:
                 status = OperationalStatus.READY
                 source_status = "LIVE"
+        else:
+            candidate_timestamps: list[datetime] = []
+            for h in halts:
+                if h.created_at is not None:
+                    candidate_timestamps.append(
+                        h.created_at
+                        if h.created_at.tzinfo is not None
+                        else h.created_at.replace(tzinfo=UTC)
+                    )
+            for d in decisions:
+                if d.evaluated_at is not None:
+                    candidate_timestamps.append(
+                        d.evaluated_at
+                        if d.evaluated_at.tzinfo is not None
+                        else d.evaluated_at.replace(tzinfo=UTC)
+                    )
+            for o in orders:
+                if o.updated_at is not None:
+                    candidate_timestamps.append(
+                        o.updated_at
+                        if o.updated_at.tzinfo is not None
+                        else o.updated_at.replace(tzinfo=UTC)
+                    )
+
+            if not candidate_timestamps:
+                observed_at = None
+                data_age_seconds = None
+                source_status = "NO_DATA"
+                status = (
+                    OperationalStatus.HALTED
+                    if halts or ambiguous
+                    else OperationalStatus.NO_DATA
+                )
+            else:
+                observed_at = max(candidate_timestamps)
+                data_age_seconds = round(
+                    max(0.0, (now - observed_at).total_seconds()), 1
+                )
+                if halts or ambiguous:
+                    status = OperationalStatus.HALTED
+                    source_status = "HALTED"
+                else:
+                    status = OperationalStatus.NO_DATA
+                    source_status = "NO_DATA"
 
         return RiskExecutionResponse(
             status=status,

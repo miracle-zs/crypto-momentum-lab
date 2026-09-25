@@ -306,21 +306,7 @@ class ArchiveJournal:
             ):
                 paths_to_remove.append(path)
 
-        for path in paths_to_remove:
-            record = self._pending_records.pop(path, None)
-            if record is not None:
-                try:
-                    size = path.stat().st_size
-                except OSError:
-                    size = record.receipt.record_bytes
-                try:
-                    path.unlink()
-                    _fsync_directory(path.parent)
-                except FileNotFoundError:
-                    pass
-                self._pending_bytes = max(0, self._pending_bytes - size)
-
-        # Recalculate materialized_sequence as the contiguous covered prefix
+        # Recalculate materialized_sequence as the contiguous covered prefix of remaining records
         hub_committed = [
             r.sequence
             for r in committed_receipts
@@ -338,18 +324,19 @@ class ArchiveJournal:
                     self._highest_committed_sequence, highest_committed
                 )
 
-            active_pending_sequences = [
+            remaining_pending_sequences = [
                 rec.receipt.sequence
-                for rec in self._pending_records.values()
-                if rec.receipt.source_kind is SourceKind.HUB
+                for path, rec in self._pending_records.items()
+                if path not in paths_to_remove
+                and rec.receipt.source_kind is SourceKind.HUB
                 and (
                     self._active_stream_id is None
                     or rec.receipt.stream_id == self._active_stream_id
                 )
                 and rec.receipt.sequence is not None
             ]
-            if active_pending_sequences:
-                min_pending = min(active_pending_sequences)
+            if remaining_pending_sequences:
+                min_pending = min(remaining_pending_sequences)
                 covered_prefix = min_pending - 1
                 if self._materialized_sequence is None:
                     self._materialized_sequence = covered_prefix
@@ -381,6 +368,7 @@ class ArchiveJournal:
                     or None
                 )
 
+        # 1. WRITE-AHEAD AUDIT: Persist durable resolution audit log BEFORE deleting any journal files
         if resolutions:
             res_path = self._root / "resolutions.jsonl"
             with res_path.open("a", encoding="utf-8") as f:
@@ -390,6 +378,7 @@ class ArchiveJournal:
                 os.fsync(f.fileno())
             _fsync_directory(self._root)
 
+        # 2. WRITE-AHEAD AUDIT: Update manifest atomically BEFORE deleting any journal files
         manifest_data = {
             "environment": self._environment,
             "accepted_sequence": self._accepted_sequence,
@@ -410,6 +399,21 @@ class ArchiveJournal:
             os.fsync(f.fileno())
         temp_manifest.replace(self._manifest_path)
         _fsync_directory(self._root)
+
+        # 3. ONLY AFTER audit trail and manifest are safely fsynced, remove committed journal files
+        for path in paths_to_remove:
+            record = self._pending_records.pop(path, None)
+            if record is not None:
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    size = record.receipt.record_bytes
+                try:
+                    path.unlink()
+                    _fsync_directory(path.parent)
+                except FileNotFoundError:
+                    pass
+                self._pending_bytes = max(0, self._pending_bytes - size)
 
     def read_resolutions(self) -> list[dict[str, Any]]:
         """Read all durable materialization resolutions from disk."""

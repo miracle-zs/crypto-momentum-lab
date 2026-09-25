@@ -1,6 +1,7 @@
 import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -49,6 +50,7 @@ class FakeService:
         self.sync_calls = 0
         self.persisted = []
         self.heartbeats = []
+        self.heartbeat_states = []
         self.sync_include_fills = []
         self.sync_started = asyncio.Event()
 
@@ -80,6 +82,47 @@ class FakeService:
 
     async def publish_user_data_heartbeat(self, *, observed_at, state=None):
         self.heartbeats.append(observed_at)
+        self.heartbeat_states.append(state)
+
+
+async def test_publish_heartbeat_propagates_syncing_state_when_fills_catching_up() -> None:
+    service = FakeService(_snapshot())
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=BlockingStream(),
+        config=UserDataAccountSyncConfig(),
+    )
+    daemon._state = _snapshot()
+    daemon._accept_events = True
+
+    # 1. Default without sync result -> publishes READY_READONLY
+    daemon._last_sync_result = None
+    await daemon._publish_heartbeat()
+    assert service.heartbeat_states[-1] == ExecutionAccountStatus.READY_READONLY
+
+    # 2. Sync result with fills_catching_up=True -> publishes SYNCING
+    daemon._last_sync_result = SimpleNamespace(
+        fills_catching_up=True,
+        status=ExecutionAccountStatus.READY_READONLY,
+    )
+    await daemon._publish_heartbeat()
+    assert service.heartbeat_states[-1] == ExecutionAccountStatus.SYNCING
+
+    # 3. Sync result with status == SYNCING -> publishes SYNCING
+    daemon._last_sync_result = SimpleNamespace(
+        fills_catching_up=False,
+        status=ExecutionAccountStatus.SYNCING,
+    )
+    await daemon._publish_heartbeat()
+    assert service.heartbeat_states[-1] == ExecutionAccountStatus.SYNCING
+
+    # 4. Sync result resolved -> publishes READY_READONLY
+    daemon._last_sync_result = SimpleNamespace(
+        fills_catching_up=False,
+        status=ExecutionAccountStatus.READY_READONLY,
+    )
+    await daemon._publish_heartbeat()
+    assert service.heartbeat_states[-1] == ExecutionAccountStatus.READY_READONLY
 
 
 async def test_run_does_not_block_startup_on_historical_fill_reconciliation() -> None:
