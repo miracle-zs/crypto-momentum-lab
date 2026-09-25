@@ -164,7 +164,7 @@ class LiveRuntimeExecution:
     candle_grace_bars: int
     candle_grace_decision_profit_pct: Decimal
     candle_grace_profit_pct: Decimal
-    max_concurrency: int | None = None
+    max_concurrency_per_symbol: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

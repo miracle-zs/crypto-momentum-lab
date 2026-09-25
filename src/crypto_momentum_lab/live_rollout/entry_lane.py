@@ -94,7 +94,7 @@ class EntryLaneConfig:
     entry_policy_enforce: bool = False
     entry_order_type: EntryType = EntryType.LIMIT
     entry_limit_ttl_seconds: int = 900
-    max_concurrency: int | None = None
+    max_concurrency_per_symbol: int | None = None
     readiness_provider: Callable[[], ExecutionReadiness] | None = None
 
 
@@ -107,8 +107,11 @@ class EntryLaneConfig:
             raise ValueError("entry_limit_ttl_seconds must be at least 601")
         if not isinstance(self.entry_order_type, EntryType):
             raise TypeError("entry_order_type must be an EntryType")
-        if self.max_concurrency is not None and self.max_concurrency <= 0:
-            raise ValueError("max_concurrency must be positive")
+        if (
+            self.max_concurrency_per_symbol is not None
+            and self.max_concurrency_per_symbol <= 0
+        ):
+            raise ValueError("max_concurrency_per_symbol must be positive")
         if self.entry_policy_compare_only and self.entry_policy_enforce:
             raise ValueError(
                 "entry_policy_compare_only and entry_policy_enforce "
@@ -220,7 +223,7 @@ class EntryExecutionLane:
                 context=entry_filter_context,
                 require_price_above_ema5=self._config.require_price_above_ema5,
                 require_price_above_ema10=self._config.require_price_above_ema10,
-                max_concurrency=self._config.max_concurrency,
+                max_concurrency_per_symbol=self._config.max_concurrency_per_symbol,
                 symbol_concurrency=symbol_concurrency,
                 readiness=self._current_readiness(),
                 now=recorded_at,
@@ -503,7 +506,7 @@ class EntryExecutionLane:
                     require_price_above_ema10=(
                         self._config.require_price_above_ema10
                     ),
-                    max_concurrency=self._config.max_concurrency,
+                    max_concurrency_per_symbol=self._config.max_concurrency_per_symbol,
                     symbol_concurrency=_count_symbol_concurrency(
                         candidate.symbol, context
                     ),
@@ -704,7 +707,7 @@ def _live_entry_candidate_rejection_reason(
     context: LiveEntryFilterContext | None,
     require_price_above_ema5: bool,
     require_price_above_ema10: bool,
-    max_concurrency: int | None = None,
+    max_concurrency_per_symbol: int | None = None,
     symbol_concurrency: int = 0,
     readiness: ExecutionReadiness | None = None,
     now: datetime | None = None,
@@ -730,7 +733,10 @@ def _live_entry_candidate_rejection_reason(
         return "short_entries_disabled"
     if entry_symbols is not None and candidate.symbol not in entry_symbols:
         return "outside_entry_symbol_pool"
-    if max_concurrency is not None and symbol_concurrency >= max_concurrency:
+    if (
+        max_concurrency_per_symbol is not None
+        and symbol_concurrency >= max_concurrency_per_symbol
+    ):
         return "max_concurrency_per_symbol_exceeded"
     if not _live_entry_candidate_passes(
         candidate,

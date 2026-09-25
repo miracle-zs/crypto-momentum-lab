@@ -40,7 +40,7 @@ accounts:
       candle_grace_decision_profit_pct: "${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT:-0.001}"
       candle_grace_profit_pct: "${CML_LIVE_CANDLE_GRACE_PROFIT_PCT:-0.0088}"
       persist_exchange_operations: "${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-submit,cancel}"
-      max_concurrency: "${CML_LIVE_MAX_CONCURRENCY:-2}"
+      max_concurrency_per_symbol: "${CML_LIVE_MAX_CONCURRENCY_PER_SYMBOL:-2}"
     profile_ref: compose.server.yaml#services.live-strategy
     limits_ref: postgres:risk_config/primary
     services:
@@ -76,7 +76,7 @@ accounts:
       candle_grace_decision_profit_pct: "${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT_ACCOUNT_2:-0.001}"
       candle_grace_profit_pct: "${CML_LIVE_CANDLE_GRACE_PROFIT_PCT_ACCOUNT_2:-0.0088}"
       persist_exchange_operations: "${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS_ACCOUNT_2:-submit,cancel}"
-      max_concurrency: "${CML_LIVE_MAX_CONCURRENCY_ACCOUNT_2:-2}"
+      max_concurrency_per_symbol: "${CML_LIVE_MAX_CONCURRENCY_PER_SYMBOL_ACCOUNT_2:-2}"
     migration_revision: "${CML_LIVE_MIGRATION_REVISION_ACCOUNT_2:-20260911_0036}"
     profile_ref: compose.live.accounts.yaml#services.live-strategy-account-2
     limits_ref: postgres:risk_config/account-2
@@ -113,7 +113,7 @@ accounts:
       candle_grace_decision_profit_pct: "${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT_ACCOUNT_3:-0.001}"
       candle_grace_profit_pct: "${CML_LIVE_CANDLE_GRACE_PROFIT_PCT_ACCOUNT_3:-0.0088}"
       persist_exchange_operations: "${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS_ACCOUNT_3:-submit,cancel}"
-      max_concurrency: "${CML_LIVE_MAX_CONCURRENCY_ACCOUNT_3:-2}"
+      max_concurrency_per_symbol: "${CML_LIVE_MAX_CONCURRENCY_PER_SYMBOL_ACCOUNT_3:-2}"
     migration_revision: "${CML_LIVE_MIGRATION_REVISION_ACCOUNT_3:-20260911_0036}"
     profile_ref: compose.live.accounts.yaml#services.live-strategy-account-3
     limits_ref: postgres:risk_config/account-3
@@ -150,7 +150,7 @@ accounts:
       candle_grace_decision_profit_pct: "${CML_LIVE_CANDLE_GRACE_DECISION_PROFIT_PCT_ACCOUNT_4:-0.001}"
       candle_grace_profit_pct: "${CML_LIVE_CANDLE_GRACE_PROFIT_PCT_ACCOUNT_4:-0.0088}"
       persist_exchange_operations: "${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS_ACCOUNT_4:-submit,cancel}"
-      max_concurrency: "${CML_LIVE_MAX_CONCURRENCY_ACCOUNT_4:-2}"
+      max_concurrency_per_symbol: "${CML_LIVE_MAX_CONCURRENCY_PER_SYMBOL_ACCOUNT_4:-2}"
     migration_revision: "${CML_LIVE_MIGRATION_REVISION_ACCOUNT_4:-20260911_0036}"
     profile_ref: compose.live.accounts.yaml#services.live-strategy-account-4
     limits_ref: postgres:risk_config/account-4

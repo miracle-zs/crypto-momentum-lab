@@ -544,7 +544,7 @@ services:
       CML_LIVE_MIN_INTENSITY: ${CML_LIVE_MIN_INTENSITY:-3.0}
       CML_LIVE_MIN_NOTIONAL_5M_VS_30M: ${CML_LIVE_MIN_NOTIONAL_5M_VS_30M:-1.25}
       CML_LIVE_COOLDOWN_BUCKETS: ${CML_LIVE_COOLDOWN_BUCKETS:-0}
-      CML_LIVE_MAX_CONCURRENCY: ${CML_LIVE_MAX_CONCURRENCY:-2}
+      CML_LIVE_MAX_CONCURRENCY_PER_SYMBOL: ${CML_LIVE_MAX_CONCURRENCY_PER_SYMBOL:-2}
       CML_LIVE_ENTRY_LEVERAGE: ${CML_LIVE_ENTRY_LEVERAGE:-5}
       CML_LIVE_MARGIN_TYPE: ${CML_LIVE_MARGIN_TYPE:-CROSSED}
       CML_LIVE_PERSIST_EXCHANGE_OPERATIONS: ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-submit,cancel}
@@ -620,8 +620,8 @@ services:
       # full-operation diagnostic capture.
       - --persist-exchange-operations
       - ${CML_LIVE_PERSIST_EXCHANGE_OPERATIONS:-submit,cancel}
-      - --max-concurrency
-      - "${CML_LIVE_MAX_CONCURRENCY:-2}"
+      - --max-concurrency-per-symbol
+      - "${CML_LIVE_MAX_CONCURRENCY_PER_SYMBOL:-2}"
       - --exit-mode
       - ${CML_LIVE_EXIT_MODE:-candle_15m}
       - --candle-grace-bars

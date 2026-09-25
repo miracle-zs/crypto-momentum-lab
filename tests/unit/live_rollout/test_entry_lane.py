@@ -128,7 +128,7 @@ async def test_entry_lane_stops_after_uncertain_submission() -> None:
     assert outcome.pending_reconciliation
 
 
-async def test_entry_lane_rejects_when_max_concurrency_exceeded() -> None:
+async def test_entry_lane_rejects_when_max_concurrency_per_symbol_exceeded() -> None:
     executed: list[str] = []
 
     class MockPosition:
@@ -139,7 +139,7 @@ async def test_entry_lane_rejects_when_max_concurrency_exceeded() -> None:
         unresolved_orders = ()
 
     lane = EntryExecutionLane(
-        config=EntryLaneConfig(run_id="run-1", max_concurrency=2),
+        config=EntryLaneConfig(run_id="run-1", max_concurrency_per_symbol=2),
         clock=lambda: NOW,
         entry_enabled=lambda: True,
         entry_enabled_reason=lambda: "ready",
@@ -234,7 +234,7 @@ async def test_entry_lane_enforces_concurrency_even_when_entry_policy_enforce_is
     lane = EntryExecutionLane(
         config=EntryLaneConfig(
             run_id="run-1",
-            max_concurrency=2,
+            max_concurrency_per_symbol=2,
             entry_policy_enforce=True,
             entry_universe_snapshot_provider=lambda **kwargs: snapshot,
         ),
@@ -253,7 +253,7 @@ async def test_entry_lane_enforces_concurrency_even_when_entry_policy_enforce_is
         recorded_at=NOW,
     )
 
-    # Must be rejected because concurrency (2) >= max_concurrency (2),
+    # Must be rejected because concurrency (2) >= max_concurrency_per_symbol (2),
     # even though policy_decision.eligible was True!
     assert executed == []
     assert outcome.approved_intent_count == 0

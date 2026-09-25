@@ -163,7 +163,7 @@ class LiveDaemonConfig:
     entry_order_type: EntryType = EntryType.LIMIT
     entry_limit_ttl_seconds: int = 900
     scheduled_risk_window: ScheduledRiskWindowConfig | None = None
-    max_concurrency: int | None = None
+    max_concurrency_per_symbol: int | None = None
     readiness_provider: Callable[[], ExecutionReadiness] | None = None
     unmanaged_halt_debounce_seconds: float = 15.0
 
@@ -199,8 +199,8 @@ class LiveDaemonConfig:
             raise TypeError("entry_order_type must be an EntryType")
         if self.entry_limit_ttl_seconds < 601:
             raise ValueError("entry_limit_ttl_seconds must be at least 601")
-        if self.max_concurrency is not None and self.max_concurrency <= 0:
-            raise ValueError("max_concurrency must be positive")
+        if self.max_concurrency_per_symbol is not None and self.max_concurrency_per_symbol <= 0:
+            raise ValueError("max_concurrency_per_symbol must be positive")
 
 
 class LiveStrategyDaemon:
@@ -408,7 +408,7 @@ class LiveStrategyDaemon:
                 entry_policy_enforce=config.entry_policy_enforce,
                 entry_order_type=config.entry_order_type,
                 entry_limit_ttl_seconds=config.entry_limit_ttl_seconds,
-                max_concurrency=config.max_concurrency,
+                max_concurrency_per_symbol=config.max_concurrency_per_symbol,
                 readiness_provider=config.readiness_provider,
             ),
             clock=self._clock,

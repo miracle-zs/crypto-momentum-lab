@@ -523,7 +523,7 @@ def count_active_symbol_batch_concurrency(
     """Calculate the active batch entry concurrency for a symbol.
 
     Requirements:
-    - Same symbol, same batch: at most max_concurrency entry orders.
+    - Same symbol, same batch: at most max_concurrency_per_symbol entry orders.
     - If a batch has submitted an exit order (exit_order_submitted_at is not None,
       even if not filled yet), that batch is ended and does NOT count towards the
       active entry batch.
