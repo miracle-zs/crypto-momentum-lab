@@ -30,6 +30,7 @@ from crypto_momentum_lab.domain.market.models import (
 )
 from crypto_momentum_lab.domain.operational.retention_authority import (
     RetentionAuthority,
+    create_authority_from_repository,
 )
 from crypto_momentum_lab.domain.operational.retention_contract import (
     RetentionConsumerRequirement,
@@ -883,19 +884,10 @@ async def prune_operational_database_once(
     runtime_cutoff = observed_at - timedelta(hours=runtime_state_retention_hours)
 
     if authority is None:
-        session_factory = getattr(
+        authority = create_authority_from_repository(
             repository,
-            "session_factory",
-            getattr(repository, "_session_factory", None),
+            async_repo_factory=AsyncPostgresRetentionRepository,
         )
-        if hasattr(session_factory, "_mock_return_value") or type(session_factory).__name__ in ("AsyncMock", "MagicMock", "Mock"):
-            session_factory = None
-        ret_repo = (
-            AsyncPostgresRetentionRepository(session_factory)
-            if session_factory is not None
-            else None
-        )
-        authority = RetentionAuthority(repository=ret_repo)
 
     plan = await authority.plan_prune_async(
         dataset_name="market_data",

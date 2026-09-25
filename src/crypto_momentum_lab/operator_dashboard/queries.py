@@ -11,16 +11,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from crypto_momentum_lab.domain.performance.account_performance import (
-    AccountPerformanceCalculator,
-)
-from crypto_momentum_lab.domain.performance.metric_models import (
-    AccountEquityCut,
-    CashFlowFact,
-    MetricFamily,
-    MetricSpec,
-    ValuationPoint,
-)
 from crypto_momentum_lab.operator_dashboard import (
     account_queries as _account_queries,
 )
@@ -47,6 +37,9 @@ from crypto_momentum_lab.operator_dashboard import (
 )
 from crypto_momentum_lab.operator_dashboard.collector_status import (
     DEFAULT_RESEARCH_COLLECTOR_ROOT,
+)
+from crypto_momentum_lab.operator_dashboard.performance_builder import (
+    build_performance_summary_dict,
 )
 from crypto_momentum_lab.operator_dashboard.performance_queries import (
     PerformanceQueries,
@@ -510,9 +503,6 @@ class DashboardQueries:
             if not snaps:
                 return {"status": "no_data", "account_label": account_label}
 
-            start_equity = snaps[0].wallet_balance
-            end_equity = snaps[-1].wallet_balance
-
             cf_rows = (
                 await session.scalars(
                     select(CashFlowCorrectionRow)
@@ -525,95 +515,10 @@ class DashboardQueries:
                 )
             ).all()
 
-            cash_facts = tuple(
-                CashFlowFact(
-                    correction_id=row.correction_id,
-                    account_label=row.account_label,
-                    amount=row.amount,
-                    cash_flow_type=row.cash_flow_type,
-                    effective_at=row.effective_at,
-                    reason=row.reason or "audit",
-                    approval_ref=row.approval_ref or "system",
-                    evidence_hash=row.evidence_hash or "0" * 64,
-                )
-                for row in cf_rows
-            )
-            valuation_points = tuple(
-                ValuationPoint(timestamp=s.observed_at, equity=s.wallet_balance)
-                for s in snaps
-            )
-
-            cut = AccountEquityCut(
+            return build_performance_summary_dict(
                 account_label=account_label,
-                start_equity=start_equity,
-                end_equity=end_equity,
+                equity_rows=snaps,
+                cf_rows=cf_rows,
                 start_time=start_time,
                 end_time=now,
-                cash_flows=cash_facts,
-                valuation_points=valuation_points,
-                as_of=now,
             )
-
-            pnl_spec = MetricSpec(
-                name="cash_flow_adjusted_pnl",
-                family=MetricFamily.CASH_FLOW_ADJUSTED_PNL,
-                unit="USDT",
-            )
-            delta_spec = MetricSpec(
-                name="net_equity_delta",
-                family=MetricFamily.NET_EQUITY_DELTA,
-                unit="USDT",
-            )
-            twr_spec = MetricSpec(
-                name="twr",
-                family=MetricFamily.TIME_WEIGHTED_RETURN,
-                unit="ratio",
-            )
-            dietz_spec = MetricSpec(
-                name="modified_dietz",
-                family=MetricFamily.MODIFIED_DIETZ,
-                unit="ratio",
-            )
-            mwr_spec = MetricSpec(
-                name="mwr",
-                family=MetricFamily.MONEY_WEIGHTED_RETURN,
-                unit="ratio",
-            )
-
-            pnl_metric = AccountPerformanceCalculator.calculate(pnl_spec, cut)
-            delta_metric = AccountPerformanceCalculator.calculate(delta_spec, cut)
-            twr_metric = AccountPerformanceCalculator.calculate(twr_spec, cut)
-            dietz_metric = AccountPerformanceCalculator.calculate(dietz_spec, cut)
-            mwr_metric = AccountPerformanceCalculator.calculate(mwr_spec, cut)
-
-            return {
-                "account_label": account_label,
-                "start_time": start_time.isoformat(),
-                "end_time": now.isoformat(),
-                "start_equity": str(start_equity),
-                "end_equity": str(end_equity),
-                "net_equity_delta": (
-                    str(delta_metric.value) if delta_metric.value is not None else None
-                ),
-                "cash_flow_adjusted_pnl": (
-                    str(pnl_metric.value) if pnl_metric.value is not None else None
-                ),
-                "twr": (
-                    str(twr_metric.value) if twr_metric.value is not None else None
-                ),
-                "modified_dietz": (
-                    str(dietz_metric.value) if dietz_metric.value is not None else None
-                ),
-                "mwr": (
-                    str(mwr_metric.value) if mwr_metric.value is not None else None
-                ),
-                "status": twr_metric.status.value,
-                "is_certified": bool(cf_rows),
-                "coverage_status": "confirmed" if cf_rows else "uncertified",
-                "cash_flow_coverage_proof": (
-                    f"audited_records_count_{len(cf_rows)}"
-                    if cf_rows
-                    else "uncertified_zero_cash_flow_facts"
-                ),
-                "cash_flow_corrections_count": len(cf_rows),
-            }

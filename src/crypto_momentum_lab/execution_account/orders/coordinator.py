@@ -401,7 +401,7 @@ class OrderExecutionCoordinator:
                 )
                 self._active_reservations[reservation.reservation_id] = reservation
                 if self._domain_coordinator is not None:
-                    self._domain_coordinator._reservations_by_id[reservation.reservation_id] = reservation
+                    self._domain_coordinator.register_reservation(reservation)
         except Exception as res_err:
             log.error(
                 "order_reservation_creation_failed_refusing_submission",

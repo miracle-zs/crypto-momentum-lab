@@ -94,6 +94,16 @@ class ExecutionCoordinator:
             count += 1
         return count
 
+    def register_reservation(
+        self, reservation: PositionReservation
+    ) -> None:
+        """Registers a pre-existing reservation into in-memory tracking.
+
+        Use this to populate the coordinator with reservations recovered
+        from durable storage without going through the full reserve_exit flow.
+        """
+        self._reservations_by_id[reservation.reservation_id] = reservation
+
     def get_active_reservations(
         self, key: PositionKey
     ) -> tuple[PositionReservation, ...]:

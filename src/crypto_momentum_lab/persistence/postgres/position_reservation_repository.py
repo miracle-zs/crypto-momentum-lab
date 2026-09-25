@@ -116,8 +116,16 @@ class PostgresPositionReservationRepository:
                         )
             except ValueError:
                 raise
-            except Exception:
-                pass
+            except Exception as snap_err:
+                # Table may not exist in early migrations; log and
+                # proceed without capacity guard rather than silently
+                # swallowing arbitrary failures.
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "position_snapshot_capacity_check_skipped",
+                    extra={"error": str(snap_err)},
+                )
 
             stmt = (
                 insert(PositionReservationRow)
@@ -303,8 +311,13 @@ class AsyncPostgresPositionReservationRepository:
                         )
             except ValueError:
                 raise
-            except Exception:
-                pass
+            except Exception as snap_err:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "position_snapshot_capacity_check_skipped",
+                    extra={"error": str(snap_err)},
+                )
 
             stmt = (
                 insert(PositionReservationRow)

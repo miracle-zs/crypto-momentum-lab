@@ -637,7 +637,7 @@ async def run_live_daemon(
         domain_coordinator = ExecutionCoordinator()
         if active_reservations:
             for r in active_reservations:
-                domain_coordinator._reservations_by_id[r.reservation_id] = r
+                domain_coordinator.register_reservation(r)
 
         execution_coordinator = OrderExecutionCoordinator(
             backend=state_machine,

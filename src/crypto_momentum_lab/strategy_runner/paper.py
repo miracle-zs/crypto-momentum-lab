@@ -362,7 +362,7 @@ def run_paper_trading(
             strategy_name=config.strategy_name,
             target_notional=config.candidate_notional or Decimal("500.00"),
             candidate_generator=(
-                lambda inp, st: decision.candidates[0] if decision.candidates else None
+                lambda inp, st, _d=decision: _d.candidates[0] if _d.candidates else None
             ),
         )
         dec_res = _decision_engine.evaluate(dec_input, policy_state, policy)
@@ -392,7 +392,10 @@ def run_paper_trading(
                     bucket_start=state.bucket_start,
                     details={
                         "decision_id": dec_res.decision_id,
-                        "raw_reason": dec_res.rejection_reason or "decision_engine_rejected",
+                        "raw_reason": (
+                            dec_res.rejection_reason
+                            or "decision_engine_rejected"
+                        ),
                         "candidate_id": decision.candidates[0].candidate_id,
                     },
                 )

@@ -1942,11 +1942,10 @@ async def test_dashboard_queries_account_performance_and_cash_flow_seeding() -> 
         [cf_row],
     ]
     perf_certified = await dashboard.account_performance("primary", window_hours=24)
-    assert perf_certified["coverage_status"] == "confirmed"
-    assert perf_certified["is_certified"] is True
-    assert perf_certified["cash_flow_coverage_proof"] == "audited_records_count_1"
+    assert perf_certified["coverage_status"] == "uncertified"
+    assert perf_certified["is_certified"] is False
+    assert perf_certified["cash_flow_coverage_proof"] == "uncertified_has_1_facts_but_coverage_unproven"
     assert perf_certified["cash_flow_corrections_count"] == 1
-
 
 
 

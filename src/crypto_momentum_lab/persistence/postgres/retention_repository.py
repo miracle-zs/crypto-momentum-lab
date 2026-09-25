@@ -262,4 +262,3 @@ class AsyncPostgresRetentionRepository:
                 )
                 await session.merge(new_row)
                 await session.commit()
-

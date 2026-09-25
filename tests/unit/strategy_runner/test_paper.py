@@ -571,4 +571,3 @@ def test_run_paper_trading_decision_engine_rejection_when_holding_or_cooldown(mo
     # Candidate 1 and 2 were generated before fill latency resolved; Candidate 3 while holding position is rejected by DecisionEngine
     assert len(report.candidates) == 2
     assert report.rejection_summary["holding_position"]["BTCUSDT"] == 1
-

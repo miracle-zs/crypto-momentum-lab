@@ -17,13 +17,6 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import uuid4
 
-
-async def _maybe_await(val: Any) -> Any:
-    if inspect.isawaitable(val):
-        return await val
-    return val
-
-
 from crypto_momentum_lab.domain.operational.retention_models import (
     ConsumerDependency,
     PrunePlan,
@@ -33,6 +26,13 @@ from crypto_momentum_lab.domain.operational.retention_models import (
     RecoverySpec,
     RestoreReceipt,
 )
+
+
+async def _maybe_await(val: Any) -> Any:
+    if inspect.isawaitable(val):
+        return await val
+    return val
+
 
 
 class RetentionRepository(Protocol):
@@ -93,28 +93,41 @@ class RetentionAuthority:
     def __init__(self, repository: RetentionRepository | None = None) -> None:
         self._repo = repository or InMemoryRetentionRepository()
 
-    def compute_dependency_version(self, dataset_name: str) -> str:
-        """Computes a deterministic hash of active dependencies for dataset."""
-        deps = sorted(
-            self._repo.get_dependencies(dataset_name),
+    @staticmethod
+    def _compute_version_hash_pure(
+        deps: tuple[ConsumerDependency, ...] | list[ConsumerDependency],
+    ) -> str:
+        """Pure function: deterministic hash of dependency set.
+
+        Shared by both sync and async paths to prevent divergence.
+        """
+        sorted_deps = sorted(
+            deps,
             key=lambda d: (
                 d.consumer_id,
                 d.recovery_spec.earliest_needed_watermark.isoformat(),
             ),
         )
-        if not deps:
+        if not sorted_deps:
             return "dep_v0_empty"
 
         hasher = hashlib.sha256()
-        for d in deps:
+        for d in sorted_deps:
             hasher.update(d.consumer_id.encode())
             hasher.update(str(d.generation).encode())
             hasher.update(
                 d.recovery_spec.earliest_needed_watermark.isoformat().encode()
             )
             if d.recovery_spec.earliest_checkpoint_id:
-                hasher.update(d.recovery_spec.earliest_checkpoint_id.encode())
+                hasher.update(
+                    d.recovery_spec.earliest_checkpoint_id.encode()
+                )
         return f"dep_{hasher.hexdigest()[:16]}"
+
+    def compute_dependency_version(self, dataset_name: str) -> str:
+        """Computes a deterministic hash of active dependencies for dataset."""
+        deps = self._repo.get_dependencies(dataset_name)
+        return self._compute_version_hash_pure(deps)
 
     def register_dependency(
         self,
@@ -244,20 +257,12 @@ class RetentionAuthority:
         self._repo.update_plan(bound_plan)
         return bound_plan
 
-    async def compute_dependency_version_async(self, dataset_name: str) -> str:
-        """Asynchronously computes the current version hash of all active dependencies."""
+    async def compute_dependency_version_async(
+        self, dataset_name: str
+    ) -> str:
+        """Async: compute current version hash of active dependencies."""
         deps = await _maybe_await(self._repo.get_dependencies(dataset_name))
-        if not deps:
-            return "empty"
-        sorted_deps = sorted(deps, key=lambda d: d.consumer_id)
-        hasher = hashlib.sha256()
-        for dep in sorted_deps:
-            hasher.update(
-                f"{dep.consumer_id}:{dep.generation}:"
-                f"{dep.recovery_spec.earliest_needed_watermark.isoformat()}:"
-                f"{dep.dependency_version}".encode("utf-8")
-            )
-        return hasher.hexdigest()
+        return self._compute_version_hash_pure(deps)
 
     async def plan_prune_async(
         self,
@@ -587,3 +592,41 @@ class RetentionAuthority:
                 status="FAILED",
                 details=f"Restore verification failed: {ex}",
             )
+
+
+def create_authority_from_repository(
+    repository: Any,
+    *,
+    async_repo_factory: Callable[..., Any] | None = None,
+) -> RetentionAuthority:
+    """Creates a RetentionAuthority backed by a real or in-memory repo.
+
+    Extracts session_factory from the given repository and builds an
+    async retention repository.  Falls back to in-memory when the
+    repository is a test mock or has no usable session factory.
+
+    This replaces the duplicated mock-detection boilerplate that was
+    copy-pasted across market_data/main.py and retention.py.
+    """
+    session_factory = getattr(
+        repository,
+        "session_factory",
+        getattr(repository, "_session_factory", None),
+    )
+    if session_factory is None:
+        return RetentionAuthority()
+
+    # Detect test mocks — production code should not run real DB ops
+    # against a mock session factory.
+    sf_type_name = type(session_factory).__name__
+    if (
+        hasattr(session_factory, "_mock_return_value")
+        or sf_type_name in ("AsyncMock", "MagicMock", "Mock")
+    ):
+        return RetentionAuthority()
+
+    if async_repo_factory is not None:
+        ret_repo = async_repo_factory(session_factory)
+    else:
+        ret_repo = None
+    return RetentionAuthority(repository=ret_repo)
