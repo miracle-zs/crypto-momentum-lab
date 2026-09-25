@@ -8,6 +8,7 @@ Operates strictly in read-only shadow mode:
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -15,8 +16,6 @@ from decimal import Decimal
 from enum import StrEnum
 
 import structlog
-
-import hashlib
 
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
@@ -34,6 +33,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
     DiscrepancyKind,
     ExitOrderSubmissionFact,
+    FactCoverageInterval,
     PositionDiscrepancy,
     PositionHealthStatus,
     PositionKey,
@@ -86,6 +86,7 @@ class LegacyOrderIdentityAdapter:
         orders: Sequence[PositionOrderFact],
         fills: Sequence[AccountFillEvent] = (),
         observation: PositionObservation | None = None,
+        coverage: FactCoverageInterval | None = None,
     ) -> AccountFacts:
         """Construct normalized AccountFacts from legacy inputs.
 
@@ -203,6 +204,7 @@ class LegacyOrderIdentityAdapter:
             fills=tuple(fill_list),
             snapshots=tuple(snapshots),
             exit_boundaries=tuple(exit_boundaries),
+            coverage=coverage,
             has_synthetic_fills=has_synthetic,
         )
 

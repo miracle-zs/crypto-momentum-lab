@@ -98,14 +98,14 @@ from crypto_momentum_lab.persistence.postgres.models import (
 from crypto_momentum_lab.persistence.postgres.operational_retention import (
     PostgresOperationalRetentionRepository,
 )
-from crypto_momentum_lab.persistence.postgres.retention_repository import (
-    AsyncPostgresRetentionRepository,
-)
 from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     PostgresPaperDaemonRepository,
 )
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
+)
+from crypto_momentum_lab.persistence.postgres.retention_repository import (
+    AsyncPostgresRetentionRepository,
 )
 from crypto_momentum_lab.persistence.postgres.runtime_state_partitions import (
     cutover_runtime_state_partition,
@@ -900,14 +900,17 @@ async def prune_operational_database_once(
         else {}
     )
 
+    effective_contract_cutoff = min(contract_cutoff, plan.effective_cutoff)
+    effective_runtime_cutoff = plan.effective_cutoff
+
     deleted_contracts = 0
     deleted_states = 0
 
     async def executor(p: PrunePlan) -> tuple[int, int]:
         nonlocal deleted_contracts, deleted_states
-        effective_contract_cutoff = min(contract_cutoff, p.effective_cutoff)
+        eff_contract_cutoff = min(contract_cutoff, p.effective_cutoff)
         deleted_contracts = await repository.prune_contract_metadata(
-            before=effective_contract_cutoff,
+            before=eff_contract_cutoff,
             batch_size=contract_metadata_batch_size,
             **req_kwargs,
         )
@@ -936,7 +939,8 @@ async def prune_operational_database_once(
             event_partitions_ensured=event_partitions_ensured,
             contract_metadata_cutoff=effective_contract_cutoff.isoformat(),
             runtime_state_cutoff=effective_runtime_cutoff.isoformat(),
-            prune_receipt_id=receipt.receipt_id,
+            prune_receipt_id=receipt.plan_id,
+            prune_receipt_status=receipt.status.value,
         )
 
 

@@ -27,6 +27,8 @@ from crypto_momentum_lab.domain.execution import (
 )
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    FactCoverageInterval,
+    FactCoverageStatus,
     PositionHealthStatus,
     PositionKey,
 )
@@ -1059,6 +1061,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                 tuple[ExchangeOrderEventRow, ...],
             ] = {}
             domain_account_fills: tuple[AccountFillEvent, ...] = ()
+            since_time: datetime | None = None
             if active:
                 active_symbols = tuple(sorted({row.symbol for row in active}))
                 orders = await _load_position_orders_bounded(
@@ -1530,11 +1533,13 @@ def _classify_live_positions_detailed(
     | None = None,
     account_fill_quantities: Mapping[str, Decimal] | None = None,
     account_fills: Sequence[AccountFillEvent] = (),
+    since_time: datetime | None = None,
 ) -> tuple[
     tuple[ManagedLivePosition, ...],
     frozenset[str],
     frozenset[str],
 ]:
+    resolved_since = since_time or _resolve_symbol_fill_horizon(orders, positions)
     fill_times = entry_fill_times or {}
     fill_prices = entry_fill_prices or {}
     identity_events = order_identity_events or {}
@@ -1718,6 +1723,7 @@ def _classify_live_positions_detailed(
             fill_times=fill_times,
             fill_prices=fill_prices,
             account_fills=account_fills,
+            since_time=resolved_since,
         )
         if not batches and not closing_filled:
             # The account snapshot can arrive before the new entry's order
@@ -2269,6 +2275,7 @@ def _build_position_batches(
     fill_times: Mapping[str, datetime],
     fill_prices: Mapping[str, Decimal],
     account_fills: Sequence[AccountFillEvent] = (),
+    since_time: datetime | None = None,
 ) -> tuple[ManagedLivePositionBatch, ...]:
     observation = PositionObservation(
         symbol=position.symbol,
@@ -2306,23 +2313,6 @@ def _build_position_batches(
             position_side=position_side,
         )
 
-        matching_order_ids = {
-            str(oid)
-            for order in matching_orders
-            for oid in (order.client_order_id, order.exchange_order_id)
-            if oid
-        }
-        order_times = [
-            order.created_at
-            for order in matching_orders
-            if getattr(order, "created_at", None)
-        ]
-        for order in matching_orders:
-            for oid in (order.client_order_id, order.exchange_order_id):
-                if oid and oid in fill_times:
-                    order_times.append(fill_times[oid])
-        earliest_order_time = min(order_times) if order_times else None
-
         def _fill_matches_position(fill: AccountFillEvent) -> bool:
             if fill.symbol != position.symbol:
                 return False
@@ -2338,11 +2328,20 @@ def _build_position_batches(
         matching_fills = tuple(
             fill for fill in account_fills if _fill_matches_position(fill)
         )
+        coverage = None
+        if since_time is not None:
+            obs_dt = getattr(position, "observed_at", None) or datetime.now(UTC)
+            coverage = FactCoverageInterval(
+                start_at=since_time,
+                end_at=obs_dt if obs_dt >= since_time else since_time,
+                status=FactCoverageStatus.CONFIRMED,
+            )
         facts = LegacyOrderIdentityAdapter.to_account_facts(
             position_key=position_key,
             orders=matching_orders,
             fills=matching_fills,
             observation=observation,
+            coverage=coverage,
         )
         ledger = PositionLedger(position_key)
         shadow_projection = ledger.project(facts)

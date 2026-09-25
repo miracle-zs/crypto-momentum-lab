@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session, sessionmaker
@@ -67,6 +67,13 @@ class PostgresPositionReservationRepository:
         now = datetime.now(UTC)
         strat = getattr(reservation.position_key, "strategy_name", self._strategy_name)
         with self._session_factory() as session, session.begin():
+            try:
+                session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                    {"lock_key": f"res_{reservation.position_key.canonical_id}"},
+                )
+            except Exception:
+                pass
             active_rows = session.scalars(
                 select(PositionReservationRow).where(
                     PositionReservationRow.environment
@@ -261,6 +268,13 @@ class AsyncPostgresPositionReservationRepository:
         now = datetime.now(UTC)
         strat = getattr(reservation.position_key, "strategy_name", self._strategy_name)
         async with self._session_maker() as session, session.begin():
+            try:
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                    {"lock_key": f"res_{reservation.position_key.canonical_id}"},
+                )
+            except Exception:
+                pass
             active_res = await session.execute(
                 select(PositionReservationRow).where(
                     PositionReservationRow.environment

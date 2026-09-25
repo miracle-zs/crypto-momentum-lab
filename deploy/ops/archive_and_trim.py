@@ -565,6 +565,7 @@ def main(argv: list[str] | None = None) -> int:
                 removed = int(
                     _scalar(
                         "BEGIN;\n"
+                        f"SELECT pg_advisory_xact_lock(hashtext('retention_{p.dataset_name}'));\n"
                         "WITH d AS (DELETE FROM "
                         f"{tbl} WHERE ctid IN (SELECT ctid FROM {tbl} "
                         f'WHERE "{col}" >= \'{from_dt}+00\' '

@@ -357,49 +357,51 @@ def run_paper_trading(
         decision = strategy.on_market_state(state)
         signals.extend(decision.signals)
 
-        policy = EffectivePolicy(
-            policy_id=f"policy_{config.strategy_name}",
-            strategy_name=config.strategy_name,
-            target_notional=config.candidate_notional or Decimal("500.00"),
-            candidate_generator=(
-                lambda inp, st, _d=decision: _d.candidates[0] if _d.candidates else None
-            ),
-        )
-        dec_res = _decision_engine.evaluate(dec_input, policy_state, policy)
-        policy_state = dec_res.next_policy_state
+        evaluated_candidates = decision.candidates if decision.candidates else [None]
+        for raw_cand in evaluated_candidates:
+            policy = EffectivePolicy(
+                policy_id=f"policy_{config.strategy_name}",
+                strategy_name=config.strategy_name,
+                target_notional=config.candidate_notional or Decimal("500.00"),
+                candidate_generator=(
+                    lambda inp, st, _c=raw_cand: _c
+                ),
+            )
+            dec_res = _decision_engine.evaluate(dec_input, policy_state, policy)
+            policy_state = dec_res.next_policy_state
 
-        if dec_res.intent is not None:
-            candidates.append(dec_res.intent)
-            pending_candidates.append(dec_res.intent)
-        elif decision.candidates:
-            rej_reason = (
-                RejectionReason.COOLDOWN_ACTIVE
-                if dec_res.rejection_reason == "cooldown_active"
-                else (
-                    RejectionReason.HOLDING_POSITION
-                    if dec_res.rejection_reason == "holding_position_no_exit"
+            if dec_res.intent is not None:
+                candidates.append(dec_res.intent)
+                pending_candidates.append(dec_res.intent)
+            elif raw_cand is not None:
+                rej_reason = (
+                    RejectionReason.COOLDOWN_ACTIVE
+                    if dec_res.rejection_reason == "cooldown_active"
                     else (
-                        RejectionReason.BELOW_ENTRY_THRESHOLD
-                        if dec_res.rejection_reason == "below_entry_threshold"
-                        else RejectionReason.NO_SIGNAL
+                        RejectionReason.HOLDING_POSITION
+                        if dec_res.rejection_reason == "holding_position_no_exit"
+                        else (
+                            RejectionReason.BELOW_ENTRY_THRESHOLD
+                            if dec_res.rejection_reason == "below_entry_threshold"
+                            else RejectionReason.NO_SIGNAL
+                        )
                     )
                 )
-            )
-            rejections.append(
-                StrategyRejection(
-                    reason=rej_reason,
-                    symbol=state.symbol,
-                    bucket_start=state.bucket_start,
-                    details={
-                        "decision_id": dec_res.decision_id,
-                        "raw_reason": (
-                            dec_res.rejection_reason
-                            or "decision_engine_rejected"
-                        ),
-                        "candidate_id": decision.candidates[0].candidate_id,
-                    },
+                rejections.append(
+                    StrategyRejection(
+                        reason=rej_reason,
+                        symbol=state.symbol,
+                        bucket_start=state.bucket_start,
+                        details={
+                            "decision_id": dec_res.decision_id,
+                            "raw_reason": (
+                                dec_res.rejection_reason
+                                or "decision_engine_rejected"
+                            ),
+                            "candidate_id": raw_cand.candidate_id,
+                        },
+                    )
                 )
-            )
         rejections.extend(decision.rejections)
         # The strategy consumes a closed state.  Resolve after the decision so
         # a zero-latency candidate can fill at this state's bucket_end, never

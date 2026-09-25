@@ -8,7 +8,8 @@ Obeys Astra Architecture Blueprint 2026-09-25:
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session, sessionmaker
 
 from crypto_momentum_lab.domain.operational.retention_models import (
@@ -52,6 +53,13 @@ class PostgresRetentionRepository:
     def save_dependency(self, dependency: ConsumerDependency) -> None:
         spec = dependency.recovery_spec
         with self._session_factory() as session:
+            try:
+                session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                    {"lock_key": f"retention_{dependency.dataset_name}"},
+                )
+            except Exception:
+                pass
             row = ConsumerDependencyRow(
                 consumer_id=dependency.consumer_id,
                 dataset_name=dependency.dataset_name,
@@ -69,6 +77,13 @@ class PostgresRetentionRepository:
 
     def delete_dependency(self, consumer_id: str, dataset_name: str) -> None:
         with self._session_factory() as session:
+            try:
+                session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                    {"lock_key": f"retention_{dataset_name}"},
+                )
+            except Exception:
+                pass
             session.execute(
                 delete(ConsumerDependencyRow).where(
                     ConsumerDependencyRow.consumer_id == consumer_id,
@@ -161,6 +176,13 @@ class AsyncPostgresRetentionRepository:
     async def save_dependency(self, dependency: ConsumerDependency) -> None:
         spec = dependency.recovery_spec
         async with self._session_factory() as session:
+            try:
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                    {"lock_key": f"retention_{dependency.dataset_name}"},
+                )
+            except Exception:
+                pass
             row = ConsumerDependencyRow(
                 consumer_id=dependency.consumer_id,
                 dataset_name=dependency.dataset_name,
@@ -178,6 +200,13 @@ class AsyncPostgresRetentionRepository:
 
     async def delete_dependency(self, consumer_id: str, dataset_name: str) -> None:
         async with self._session_factory() as session:
+            try:
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                    {"lock_key": f"retention_{dataset_name}"},
+                )
+            except Exception:
+                pass
             await session.execute(
                 delete(ConsumerDependencyRow).where(
                     ConsumerDependencyRow.consumer_id == consumer_id,

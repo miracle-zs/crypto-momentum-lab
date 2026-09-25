@@ -145,6 +145,23 @@ class RetentionAuthority:
         deps = self._repo.get_dependencies(dataset_name)
         return self._compute_version_hash_pure(deps)
 
+    @staticmethod
+    def _create_consumer_dependency(
+        *,
+        consumer_id: str,
+        generation: int,
+        recovery_spec: RecoverySpec,
+    ) -> ConsumerDependency:
+        temp_version = f"gen{generation}_{uuid4().hex[:8]}"
+        return ConsumerDependency(
+            consumer_id=consumer_id,
+            dataset_name=recovery_spec.source_dataset,
+            generation=generation,
+            recovery_spec=recovery_spec,
+            dependency_version=temp_version,
+            updated_at=datetime.now(UTC),
+        )
+
     def register_dependency(
         self,
         *,
@@ -153,14 +170,10 @@ class RetentionAuthority:
         recovery_spec: RecoverySpec,
     ) -> str:
         """Registers or refreshes an active consumer recovery dependency."""
-        temp_version = f"gen{generation}_{uuid4().hex[:8]}"
-        dependency = ConsumerDependency(
+        dependency = self._create_consumer_dependency(
             consumer_id=consumer_id,
-            dataset_name=recovery_spec.source_dataset,
             generation=generation,
             recovery_spec=recovery_spec,
-            dependency_version=temp_version,
-            updated_at=datetime.now(UTC),
         )
         self._repo.save_dependency(dependency)
         epoch = self.compute_dependency_version(recovery_spec.source_dataset)
@@ -179,14 +192,10 @@ class RetentionAuthority:
         that the newly-registered dependency's recovery window protects.
         """
         async with self._get_lock(recovery_spec.source_dataset):
-            temp_version = f"gen{generation}_{uuid4().hex[:8]}"
-            dependency = ConsumerDependency(
+            dependency = self._create_consumer_dependency(
                 consumer_id=consumer_id,
-                dataset_name=recovery_spec.source_dataset,
                 generation=generation,
                 recovery_spec=recovery_spec,
-                dependency_version=temp_version,
-                updated_at=datetime.now(UTC),
             )
             await _maybe_await(
                 self._repo.save_dependency(dependency)

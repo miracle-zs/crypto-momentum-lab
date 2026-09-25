@@ -302,6 +302,12 @@ class DashboardQueryProtocol(Protocol):
         window: str = "6h",
     ) -> SystemPerformanceResponse: ...
 
+    async def account_performance(
+        self,
+        account_label: str = "primary",
+        window_hours: int = 24,
+    ) -> dict[str, object]: ...
+
 
 def create_dashboard_app(
     *,
@@ -717,7 +723,7 @@ def create_dashboard_app(
         response_model=dict[str, object],
         dependencies=[Depends(require_dashboard_auth)],
     )
-    async def account_performance(
+    async def get_account_performance(
         account_label: str = "primary",
         window_hours: int = 24,
     ) -> dict[str, object]:

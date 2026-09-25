@@ -385,23 +385,40 @@ class OrderExecutionCoordinator:
                 None,
             )
             if existing is None:
-                batch_id = (
-                    getattr(plan, "batch_id", None)
-                    or f"batch_{plan.symbol}_{plan.position_side.value}"
-                )
-                reservation = PositionReservation(
-                    reservation_id=f"res_{plan.client_order_id}",
-                    command_id=plan.client_order_id,
-                    position_key=key,
-                    batch_id=batch_id,
-                    reserved_quantity=Decimal(str(plan.quantity)),
-                )
-                await _maybe_await(
-                    self._reservation_repository.save_reservation(reservation)
-                )
-                self._active_reservations[reservation.reservation_id] = reservation
-                if self._domain_coordinator is not None:
-                    self._domain_coordinator.register_reservation(reservation)
+                allocations = getattr(plan, "allocations", ())
+                if allocations:
+                    for idx, alloc in enumerate(allocations):
+                        res = PositionReservation(
+                            reservation_id=f"res_{plan.client_order_id}_{idx}",
+                            command_id=plan.client_order_id,
+                            position_key=key,
+                            batch_id=alloc.batch_id,
+                            reserved_quantity=alloc.allocated_quantity,
+                        )
+                        await _maybe_await(
+                            self._reservation_repository.save_reservation(res)
+                        )
+                        self._active_reservations[res.reservation_id] = res
+                        if self._domain_coordinator is not None:
+                            self._domain_coordinator.register_reservation(res)
+                else:
+                    batch_id = (
+                        getattr(plan, "batch_id", None)
+                        or f"batch_{plan.symbol}_{plan.position_side.value}"
+                    )
+                    reservation = PositionReservation(
+                        reservation_id=f"res_{plan.client_order_id}",
+                        command_id=plan.client_order_id,
+                        position_key=key,
+                        batch_id=batch_id,
+                        reserved_quantity=Decimal(str(plan.quantity)),
+                    )
+                    await _maybe_await(
+                        self._reservation_repository.save_reservation(reservation)
+                    )
+                    self._active_reservations[reservation.reservation_id] = reservation
+                    if self._domain_coordinator is not None:
+                        self._domain_coordinator.register_reservation(reservation)
         except Exception as res_err:
             log.error(
                 "order_reservation_creation_failed_refusing_submission",

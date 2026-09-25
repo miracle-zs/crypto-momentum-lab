@@ -135,10 +135,15 @@ class TradeCommandExecutor:
             command.command_id,
         )
 
-        batch_id = (
-            command.allocation_plan.allocations[0].batch_id
+        allocations = (
+            tuple(command.allocation_plan.allocations)
             if command.allocation_plan and command.allocation_plan.allocations
-            else None
+            else ()
+        )
+        batch_id = (
+            allocations[0].batch_id
+            if len(allocations) == 1
+            else (f"batch_multi_{len(allocations)}" if allocations else None)
         )
 
         plan = OrderExecutionPlan(
@@ -155,6 +160,7 @@ class TradeCommandExecutor:
             position_side=position_side,
             quantized=True,
             batch_id=batch_id,
+            allocations=allocations,
         )
 
         return TradeExecutionPlanResult(

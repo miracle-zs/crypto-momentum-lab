@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from crypto_momentum_lab.domain.market.models import JsonValue
 
@@ -58,6 +59,7 @@ class OrderExecutionPlan:
     time_in_force: str | None = None
     expires_at: datetime | None = None
     batch_id: str | None = None
+    allocations: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         for value, field_name in (

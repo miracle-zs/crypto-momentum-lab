@@ -30,6 +30,7 @@ from crypto_momentum_lab.domain.strategy import (
     EntryType,
     OrderIntentCandidate,
     StrategyCheckpoint,
+    StrategyDecision,
     UniverseRankingSnapshot,
 )
 from crypto_momentum_lab.execution_account.orders.coordinator import (
@@ -166,6 +167,13 @@ class LiveDaemonConfig:
     max_concurrency_per_symbol: int | None = None
     readiness_provider: Callable[[], ExecutionReadiness] | None = None
     unmanaged_halt_debounce_seconds: float = 15.0
+    decision_filter: (
+        Callable[
+            [StrategyDecision, MarketState15s],
+            Awaitable[StrategyDecision] | StrategyDecision,
+        ]
+        | None
+    ) = None
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -442,6 +450,7 @@ class LiveStrategyDaemon:
             commit_market_state_cursor=commit_market_state_cursor,
             entered_symbol_lookup=entered_symbol_lookup,
             unmanaged_halt_debounce_seconds=config.unmanaged_halt_debounce_seconds,
+            decision_filter=config.decision_filter,
         )
         self._lifecycle = LiveDaemonLifecycle(
             run_id=config.run_id,

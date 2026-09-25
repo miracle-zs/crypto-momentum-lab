@@ -19,6 +19,7 @@ from datetime import UTC, datetime, time
 from decimal import Decimal
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 
 import structlog
 from sqlalchemy import select
@@ -26,7 +27,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.execution import OrderExecutionPlan
-from crypto_momentum_lab.domain.execution.execution_coordinator import ExecutionCoordinator
+from crypto_momentum_lab.domain.execution.execution_coordinator import (
+    ExecutionCoordinator,
+)
 from crypto_momentum_lab.domain.execution.progress_contract import ExecutionReadiness
 from crypto_momentum_lab.domain.live_rollout import LiveSessionState
 from crypto_momentum_lab.domain.market.models import MarketState15s
