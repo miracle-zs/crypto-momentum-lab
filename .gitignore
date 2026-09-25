@@ -17,10 +17,4 @@ data/
 /reports/
 server_exports/
 runs/
-local_optimization/data/
-local_optimization/reports/history/
-local_optimization/reports/*.html
-local_optimization/reports/*.csv
-local_optimization/reports/*.json
-local_optimization/**/*.pkl
-local_optimization/**/*.parquet
+local_optimization/
