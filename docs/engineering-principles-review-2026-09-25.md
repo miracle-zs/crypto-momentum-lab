@@ -674,3 +674,58 @@ F05 的 STALE 缓存展示继续保持；F08 对已提供 LONG/SHORT 的分组�
 | `node --test tests/frontend/*.test.mjs` | 36 passed | 前端安全错误码与 trace 展示测试通过。 |
 | `pytest local_optimization/tests -q --tb=short` | 256 passed | 本地优化测试全量通过，保持本地未跟踪状态。 |
 
+## 21. 对 HEAD `df9fda1` 的独立复核
+
+复核时 `HEAD` 与 `origin/main` 均为 `df9fda1b1bfd85004e014a6f599a2439562e25b4`，代码工作区干净。第 20 节的 API 响应修复有效：错误响应只含受控错误码和 trace ID，F04 的 `UNKNOWN/QUERY_ERROR` 与真实缺行情保持分离。**仍未完全完成**：结构化日志使用的 `_sanitize_error_detail` 可被常见凭据格式绕过。
+
+- **F04 [P1，日志凭据脱敏仍不充分]：**当前 `_TOKEN_PATTERN` 无法匹配 `client_secret=...`、`access_token=...`、JSON 的 `"password": "..."`、`password: ...` 或 `Authorization: Bearer ...`。我直接调用 `_sanitize_error_detail()` 注入这些格式，字段值仍原样出现在返回的日志详情中。覆盖查询异常会把这个结果写入 `log.error(..., error_detail=...)`，所以修复 API 回包泄露后，凭据仍可能进入结构化日志。建议不记录任意异常文本，优先记录白名单错误类别/SQLSTATE 与 trace ID；如确需详情，应采用覆盖已知凭据格式的统一脱敏器，并增加上述反例测试。
+
+F10 扫描竞态回归、F07 零价格校验、F04 状态分离和安全 API 错误码均已在前述提交中实现；本轮未发现这些具体修复回退。服务器容器仍使用旧镜像 `crypto-momentum-lab-app:86a89a911f3ae9b3385d1d7deced1c7b8beb261e`，没有运行本地 `df9fda1`。服务器检查仅查看容器名称与镜像标签，未读取账户明细或密钥，也未执行写操作或下单。
+
+### 21.1 验证结果
+
+| 验证 | 结果 | 范围 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1631 passed、4 skipped、1 deselected、1 warning | 当前 `df9fda1`；4 项需要 loopback socket 权限，live 测试排除。 |
+| `node --test tests/frontend/*.test.mjs` | 36 passed | 当前 dashboard 静态资源。 |
+| `pytest local_optimization/tests -q --tb=short` | 256 passed | 本地目录；按用户要求不以 Git 跟踪状态作为验收条件。 |
+| `_sanitize_error_detail` 常见凭据格式反例 | `client_secret`、`access_token`、JSON/冒号 password、Bearer token 均未脱敏 | 明确复现的日志凭据泄露风险。 |
+
+## 22. 第九轮整改闭环与验证
+
+针对第 21 节 Astra 复核指出的 `_sanitize_error_detail()` 无法过滤 `client_secret=...`、`access_token=...`、JSON/冒号格式密码以及 `Authorization: Bearer ...` 等常见凭据格式的反例，完成统一多模态脱敏引擎与全格式回归测试闭环：
+
+- **F04（日志脱敏多格式全覆盖与受控受限日志）彻底闭环：**
+  1. **全凭据格式正则覆盖引擎**：
+     - **授权请求头**：`_AUTH_HEADER_PATTERN` 精准匹配并遮蔽 `Authorization: Bearer <token>`、`Authorization: Basic <token>` 为 `Authorization: Bearer ***` / `Authorization: Basic ***`；
+     - **独立 Bearer Token**：`_BEARER_PATTERN` 匹配独立的 `Bearer <token>` / `Basic <token>`；
+     - **全前缀敏感键与键值语法**：`_SENSITIVE_KEY_PATTERN` 覆盖包含 `secret`（含 `client_secret`、`shared_secret`）、`token`（含 `access_token`、`refresh_token`）、`password` / `passwd`、`api_key`、`signature`、`credential`、`private_key` 的任意前缀标识，并完整支持：
+       - 等号赋值（`client_secret=...`, `access_token=...`）；
+       - JSON 键值对（`{"password": "...", "client_secret": "..."}`）；
+       - 冒号格式（`password: ...`, `client_secret: ...`）；
+       - URL 查询参数（`?signature=...&timestamp=...`）；
+     - **私钥文本块**：`_PRIVATE_KEY_PATTERN` 遮蔽 `-----BEGIN ... PRIVATE KEY-----`；
+     - **连接串 DSN**：`_URL_CREDENTIAL_PATTERN` 遮蔽 `://user:pass@host` 密码；
+  2. **日志安全防御与边界约束**：
+     - 去除 `\r` 与 `\n` 防止换行日志伪造注入；
+     - 强制限制长度上限（300 字符以内），杜绝海量文本或异常堆栈刷屏；
+     - 记录受控字段：明确记录 `error_code`、`trace_id`、`exc_type=type(exc).__name__` 与脱敏后 `error_detail`，API 仅返回无感安全工单标识；
+  3. **8 类反例专项回归测试**：
+     - 在 `test_queries.py` 的 `test_sanitize_error_detail_redacts_credentials_and_tokens` 中，完整覆盖并严格断言：
+       1. 数据库 DSN 密码；
+       2. `client_secret=...` 与 `access_token=...`；
+       3. JSON 格式密码与凭据（`{"password": "...", "client_secret": "..."}`）；
+       4. 冒号格式密码（`password: ...`, `client_secret: ...`）；
+       5. `Authorization: Bearer <token>` 与 `Authorization: Basic <token>`；
+       6. 独立 `Bearer <token>`；
+       7. API Key 与 URL 查询参数 `signature=...`；
+       8. 私钥块 `[REDACTED_PRIVATE_KEY]`。
+
+### 22.1 验证结果
+
+| 验证项 | 结果 | 详细说明 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1631 passed, 4 skipped, 1 deselected, 1 warning | 8 类凭据脱敏回归单测全量通过。 |
+| `node --test tests/frontend/*.test.mjs` | 36 passed | 前端测试全量通过。 |
+| `pytest local_optimization/tests -q --tb=short` | 256 passed | 本地优化测试全量通过，保持本地未跟踪状态。 |
+

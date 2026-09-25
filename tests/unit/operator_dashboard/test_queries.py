@@ -1754,16 +1754,71 @@ async def test_risk_execution_halts_prioritized_over_coverage_query_error() -> N
 
 
 def test_sanitize_error_detail_redacts_credentials_and_tokens() -> None:
-    """F04: Internal log helper must redact database passwords and secret tokens."""
+    """F04: Log sanitization must redact client_secret, access_token, JSON/colon passwords, Authorization Bearer, and DSNs."""
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import _sanitize_error_detail
 
-    exc1 = RuntimeError("Failed connecting to postgresql://cml_user:super_secret_pw@10.0.0.1:5432/cml_prod")
-    sanitized1 = _sanitize_error_detail(exc1)
-    assert "super_secret_pw" not in sanitized1
-    assert "postgresql://cml_user:***@10.0.0.1:5432/cml_prod" in sanitized1
+    # 1. Database DSN credentials
+    exc_dsn = RuntimeError("Failed connecting to postgresql://cml_user:super_secret_pw@10.0.0.1:5432/cml_prod")
+    sanitized_dsn = _sanitize_error_detail(exc_dsn)
+    assert "super_secret_pw" not in sanitized_dsn
+    assert "postgresql://cml_user:***@10.0.0.1:5432/cml_prod" in sanitized_dsn
 
-    exc2 = ValueError("Auth rejected api_key='ak_live_xyz987' signature=sig1234567")
-    sanitized2 = _sanitize_error_detail(exc2)
-    assert "ak_live_xyz987" not in sanitized2
-    assert "sig1234567" not in sanitized2
+    # 2. client_secret=... and access_token=...
+    exc_tokens = RuntimeError("OAuth failed client_secret=cs_live_99887766 and access_token=at_live_11223344")
+    sanitized_tokens = _sanitize_error_detail(exc_tokens)
+    assert "cs_live_99887766" not in sanitized_tokens
+    assert "at_live_11223344" not in sanitized_tokens
+    assert "client_secret=***" in sanitized_tokens
+    assert "access_token=***" in sanitized_tokens
+
+    # 3. JSON format passwords and secrets
+    exc_json = ValueError('Invalid json {"password": "p@ssw0rd123", "client_secret": "cs_json_456", "access_token": "at_json_789"}')
+    sanitized_json = _sanitize_error_detail(exc_json)
+    assert "p@ssw0rd123" not in sanitized_json
+    assert "cs_json_456" not in sanitized_json
+    assert "at_json_789" not in sanitized_json
+    assert '{"password": "***", "client_secret": "***", "access_token": "***"}' in sanitized_json
+
+    # 4. Colon format (YAML/header/freeform): password: ...
+    exc_colon = RuntimeError("Config error password: plain_yaml_pass\nclient_secret: plain_yaml_cs")
+    sanitized_colon = _sanitize_error_detail(exc_colon)
+    assert "plain_yaml_pass" not in sanitized_colon
+    assert "plain_yaml_cs" not in sanitized_colon
+    assert "password: ***" in sanitized_colon
+    assert "client_secret: ***" in sanitized_colon
+
+    # 5. Authorization: Bearer <token> and Authorization: Basic <token>
+    exc_auth = ConnectionError("HTTP header Authorization: Bearer jwt_secret_token_123456 rejected")
+    sanitized_auth = _sanitize_error_detail(exc_auth)
+    assert "jwt_secret_token_123456" not in sanitized_auth
+    assert "Authorization: Bearer ***" in sanitized_auth
+
+    exc_basic = ConnectionError("HTTP header Authorization: Basic dXNlcjpwYXNz rejected")
+    sanitized_basic = _sanitize_error_detail(exc_basic)
+    assert "dXNlcjpwYXNz" not in sanitized_basic
+    assert "Authorization: Basic ***" in sanitized_basic
+
+    # 6. Standalone Bearer token
+    exc_bearer = RuntimeError("Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.token_payload expired")
+    sanitized_bearer = _sanitize_error_detail(exc_bearer)
+    assert "token_payload" not in sanitized_bearer
+    assert "Bearer ***" in sanitized_bearer
+
+    # 7. api_key, signature in query string or assignments
+    exc_api = ValueError("Auth rejected api_key='ak_live_xyz987' signature=sig1234567")
+    sanitized_api = _sanitize_error_detail(exc_api)
+    assert "ak_live_xyz987" not in sanitized_api
+    assert "sig1234567" not in sanitized_api
+
+    exc_query = RuntimeError("URL request https://api.binance.com/api/v3/order?symbol=BTCUSDT&signature=d98a72ef8912&timestamp=123 failed")
+    sanitized_query = _sanitize_error_detail(exc_query)
+    assert "d98a72ef8912" not in sanitized_query
+    assert "signature=***" in sanitized_query
+
+    # 8. Private key blocks
+    exc_pkey = RuntimeError("Bad key: -----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0...\n-----END RSA PRIVATE KEY-----")
+    sanitized_pkey = _sanitize_error_detail(exc_pkey)
+    assert "MIIEowIBAAKCAQEA0" not in sanitized_pkey
+    assert "[REDACTED_PRIVATE_KEY]" in sanitized_pkey
+
 

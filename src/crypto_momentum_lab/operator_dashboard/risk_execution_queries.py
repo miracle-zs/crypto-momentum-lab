@@ -30,19 +30,45 @@ from crypto_momentum_lab.persistence.postgres.models import (
 
 log = structlog.get_logger(__name__)
 
-_CREDENTIAL_PATTERN = re.compile(r"://([^:]+):([^@]+)@", re.IGNORECASE)
-_TOKEN_PATTERN = re.compile(
-    r"(?i)\b(api_key|token|secret|password|passwd|auth|access_key|signature)=['\"]?[^'\";\s]+['\"]?"
+_URL_CREDENTIAL_PATTERN = re.compile(r"://([^/\s:@]+):([^/\s:@]+)@", re.IGNORECASE)
+_AUTH_HEADER_PATTERN = re.compile(
+    r"(?i)\b(authorization\s*[:=]\s*)(?:(bearer|basic|token)\s+)?['\"]?(?!\*{3})[^\s'\";,}]+['\"]?"
+)
+_BEARER_PATTERN = re.compile(
+    r"(?i)\b(bearer|basic)\s+['\"]?(?!\*{3})[A-Za-z0-9_\-\.~+/]+=*['\"]?"
+)
+_PRIVATE_KEY_PATTERN = re.compile(
+    r"-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----"
+)
+_SENSITIVE_KEY_PATTERN = re.compile(
+    r"""(?xi)
+    (?P<key>['\"]?(?!authorization\b)[a-zA-Z0-9_\-]*(?:secret|token|password|passwd|api_?key|auth|signature|credential|private_?key)[a-zA-Z0-9_\-]*['\"]?)
+    (?P<sep>\s*[:=]\s*)
+    (?P<quote>['\"]?)(?!\*{3})(?!\s*(?:bearer|basic)\b)(?P<val>[^'\"\s,;&}\])]+)(?P=quote)
+    """
 )
 
 
+def _auth_repl(match: re.Match[str]) -> str:
+    prefix = match.group(1)
+    scheme = match.group(2)
+    if scheme:
+        return f"{prefix}{scheme} ***"
+    return f"{prefix}***"
+
+
 def _sanitize_error_detail(exc: Exception) -> str:
-    """Sanitize exception message for safe internal logging without leaking credentials."""
-    raw = f"{type(exc).__name__}: {exc}"
-    sanitized = _CREDENTIAL_PATTERN.sub(r"://\1:***@", raw)
-    sanitized = _TOKEN_PATTERN.sub(r"\1=***", sanitized)
-    if len(sanitized) > 500:
-        sanitized = sanitized[:497] + "..."
+    """Sanitize exception message for safe internal logging without leaking credentials or tokens."""
+    raw = f"{type(exc).__name__}: {exc}".replace("\r", " ").replace("\n", " ")
+    sanitized = _PRIVATE_KEY_PATTERN.sub("[REDACTED_PRIVATE_KEY]", raw)
+    sanitized = _URL_CREDENTIAL_PATTERN.sub(r"://\1:***@", sanitized)
+    sanitized = _AUTH_HEADER_PATTERN.sub(_auth_repl, sanitized)
+    sanitized = _BEARER_PATTERN.sub(r"\1 ***", sanitized)
+    sanitized = _SENSITIVE_KEY_PATTERN.sub(
+        r"\g<key>\g<sep>\g<quote>***\g<quote>", sanitized
+    )
+    if len(sanitized) > 300:
+        sanitized = sanitized[:297] + "..."
     return sanitized
 
 _CONFIRMED_OPEN_ORDER_STATES = frozenset(
