@@ -474,3 +474,63 @@ async def test_cancel_order_succeeds_even_when_entry_queue_is_congested() -> Non
     await coordinator.aclose()
 
 
+async def test_cancel_order_releases_reservation_after_backend_success() -> None:
+    from decimal import Decimal
+
+    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+        InMemoryPositionReservationRepository,
+    )
+    from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+    from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
+
+    backend = BlockingBackend()
+    reservation_repo = InMemoryPositionReservationRepository()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        reservation_repository=reservation_repo,
+    )
+    key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    res = PositionReservation(
+        reservation_id="res_test_123",
+        command_id="order-exit-1",
+        position_key=key,
+        batch_id="batch_1",
+        reserved_quantity=Decimal("1.5"),
+    )
+    reservation_repo.save_reservation(res)
+
+    plan = OrderExecutionPlan(
+        intent_id="intent-test-exit",
+        run_id="run-1",
+        client_order_id="order-exit-1",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("1.5"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+    )
+
+    cancel_res = await coordinator.cancel_order(plan)
+    assert cancel_res.state is ExchangeOrderState.CANCELED
+
+    # Reservation should be released
+    active = reservation_repo.load_active_reservations(key)
+    assert len(active) == 0
+    saved = reservation_repo._reservations["res_test_123"]
+    assert saved.released_quantity == Decimal("1.5")
+    assert saved.active_quantity == Decimal("0")
+
+    await coordinator.aclose()
+
+
+

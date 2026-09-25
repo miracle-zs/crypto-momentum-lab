@@ -2,6 +2,7 @@
 
 from crypto_momentum_lab.domain.decision.decision_engine import (
     ClockEvent,
+    DecisionEngine,
     DecisionInput,
     DecisionResult,
     EffectivePolicy,
@@ -17,6 +18,7 @@ from crypto_momentum_lab.domain.decision.simulation_execution import (
 
 __all__ = [
     "ClockEvent",
+    "DecisionEngine",
     "DecisionInput",
     "DecisionResult",
     "EffectivePolicy",

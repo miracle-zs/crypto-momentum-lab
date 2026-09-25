@@ -115,6 +115,42 @@ class PositionReservation:
     def active_quantity(self) -> Decimal:
         return max(Decimal("0"), self.reserved_quantity - self.consumed_quantity - self.released_quantity)
 
+    def release(self, quantity: Decimal) -> PositionReservation:
+        if quantity <= Decimal("0"):
+            raise ValueError("quantity to release must be positive")
+        if quantity > self.active_quantity:
+            raise ValueError(
+                f"cannot release {quantity} exceeding active quantity {self.active_quantity}"
+            )
+        return PositionReservation(
+            reservation_id=self.reservation_id,
+            command_id=self.command_id,
+            position_key=self.position_key,
+            batch_id=self.batch_id,
+            reserved_quantity=self.reserved_quantity,
+            consumed_quantity=self.consumed_quantity,
+            released_quantity=self.released_quantity + quantity,
+            created_at=self.created_at,
+        )
+
+    def consume(self, quantity: Decimal) -> PositionReservation:
+        if quantity <= Decimal("0"):
+            raise ValueError("quantity to consume must be positive")
+        if quantity > self.active_quantity:
+            raise ValueError(
+                f"cannot consume {quantity} exceeding active quantity {self.active_quantity}"
+            )
+        return PositionReservation(
+            reservation_id=self.reservation_id,
+            command_id=self.command_id,
+            position_key=self.position_key,
+            batch_id=self.batch_id,
+            reserved_quantity=self.reserved_quantity,
+            consumed_quantity=self.consumed_quantity + quantity,
+            released_quantity=self.released_quantity,
+            created_at=self.created_at,
+        )
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,11 +210,12 @@ class ExitAllocator:
         target_batch_ids: tuple[str, ...] | None = None,
         requested_quantity: Decimal | None = None,
         policy: ExitPolicyMode = ExitPolicyMode.TARGET_BATCHES_ONLY,
+        active_reservations: tuple[PositionReservation, ...] = (),
         reference_price: Decimal | None = None,
         min_notional: Decimal | None = None,
         reason: str = "",
     ) -> ExitAllocationPlan:
-        """Plan exit allocations respecting explicit policies and lot boundaries."""
+        """Plan exit allocations respecting explicit policies, active reservations, and lot boundaries."""
         if hasattr(projection, "batches"):
             open_batches = projection.batches
             total_active_quantity = projection.total_quantity
@@ -186,6 +223,13 @@ class ExitAllocator:
             open_batches = projection.active_batches
             total_active_quantity = projection.total_active_quantity
         proj_ver = getattr(projection, "projection_version", None)
+
+        def get_batch_available(batch: Any) -> Decimal:
+            reserved = sum(
+                (r.active_quantity for r in active_reservations if r.batch_id == batch.batch_id),
+                start=Decimal("0"),
+            )
+            return max(Decimal("0"), batch.quantity - reserved)
 
         if target_batch_ids is not None:
             target_set = set(target_batch_ids)
@@ -210,10 +254,11 @@ class ExitAllocator:
             allocations = tuple(
                 ExitAllocation(
                     batch_id=b.batch_id,
-                    allocated_quantity=b.quantity,
+                    allocated_quantity=get_batch_available(b),
                     entry_price=b.entry_price,
                 )
                 for b in candidate_batches
+                if get_batch_available(b) > Decimal("0")
             )
             total = sum((a.allocated_quantity for a in allocations), start=Decimal("0"))
             return ExitAllocationPlan(
@@ -229,13 +274,14 @@ class ExitAllocator:
             # Only apply dust absorption if there is strictly one single active batch across the entire position!
             if len(open_batches) == 1:
                 batch = open_batches[0]
+                avail = get_batch_available(batch)
                 req = (
                     requested_quantity
                     if requested_quantity is not None
-                    else batch.quantity
+                    else avail
                 )
-                if req < batch.quantity:
-                    dust_remainder = batch.quantity - req
+                if req < avail:
+                    dust_remainder = avail - req
                     if (
                         reference_price is not None
                         and min_notional is not None
@@ -245,14 +291,14 @@ class ExitAllocator:
                         allocations = (
                             ExitAllocation(
                                 batch_id=batch.batch_id,
-                                allocated_quantity=batch.quantity,
+                                allocated_quantity=avail,
                                 entry_price=batch.entry_price,
                             ),
                         )
                         return ExitAllocationPlan(
                             position_key=pos_key,
                             allocations=allocations,
-                            total_allocated_quantity=batch.quantity,
+                            total_allocated_quantity=avail,
                             policy=policy,
                             absorbed_dust=dust_remainder,
                             reason=f"{reason} (absorbed_dust={dust_remainder})".strip(),
@@ -264,10 +310,11 @@ class ExitAllocator:
             allocations = tuple(
                 ExitAllocation(
                     batch_id=b.batch_id,
-                    allocated_quantity=b.quantity,
+                    allocated_quantity=get_batch_available(b),
                     entry_price=b.entry_price,
                 )
                 for b in candidate_batches
+                if get_batch_available(b) > Decimal("0")
             )
             total = sum((a.allocated_quantity for a in allocations), start=Decimal("0"))
             return ExitAllocationPlan(
@@ -284,7 +331,10 @@ class ExitAllocator:
         for batch in candidate_batches:
             if remaining_to_allocate <= 0:
                 break
-            allocated = min(batch.quantity, remaining_to_allocate)
+            avail = get_batch_available(batch)
+            if avail <= Decimal("0"):
+                continue
+            allocated = min(avail, remaining_to_allocate)
             if allocated > 0:
                 allocations_list.append(
                     ExitAllocation(
@@ -316,6 +366,7 @@ class ExitAllocator:
         target_batch_ids: tuple[str, ...] | None = None,
         requested_quantity: Decimal | None = None,
         policy: ExitPolicyMode = ExitPolicyMode.TARGET_BATCHES_ONLY,
+        active_reservations: tuple[PositionReservation, ...] = (),
         order_type: EntryType = EntryType.MARKET,
         limit_price: Decimal | None = None,
         reference_price: Decimal | None = None,
@@ -330,6 +381,7 @@ class ExitAllocator:
             target_batch_ids=target_batch_ids,
             requested_quantity=requested_quantity,
             policy=policy,
+            active_reservations=active_reservations,
             reference_price=reference_price,
             min_notional=min_notional,
             reason=reason,

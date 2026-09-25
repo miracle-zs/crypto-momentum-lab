@@ -221,7 +221,7 @@ def test_simulation_execution_exit_flow_with_reservation() -> None:
         command_id="cmd_exit_sim_01",
         position_key=pos_key,
         command_type=TradeCommandType.EXIT,
-        side=StrategySide.SHORT,
+        side=StrategySide.LONG,
         order_type=EntryType.MARKET,
         requested_quantity=Decimal("0.5"),
         reduce_only=True,
@@ -235,7 +235,7 @@ def test_simulation_execution_exit_flow_with_reservation() -> None:
     assert len(reservations) == 1
     assert reservations[0].active_quantity == Decimal("0.5")
 
-    # 2. Adapter executes the exit
+    # 2. Adapter executes the exit (LONG exit -> SELL)
     fill_result = adapter.execute_exit(
         cmd,
         menv,
@@ -251,6 +251,51 @@ def test_simulation_execution_exit_flow_with_reservation() -> None:
     assert fill_result.realized_pnl == expected_pnl
     assert fill_result.realized_pnl < Decimal("0")
     assert journal.read_cut().fills[0].realized_pnl == expected_pnl
+
+    # 3. Test SHORT exit (SHORT exit -> BUY)
+    short_pos_key = PositionKey(
+        environment="paper",
+        account_label="paper_account",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.SHORT,
+    )
+    short_journal = AccountJournal(short_pos_key)
+    short_alloc = ExitAllocationPlan(
+        position_key=short_pos_key,
+        allocations=(
+            ExitAllocation(
+                batch_id="batch_sim_short",
+                allocated_quantity=Decimal("0.5"),
+                entry_price=Decimal("66000.00"),  # Sold short at 66,000
+            ),
+        ),
+        total_allocated_quantity=Decimal("0.5"),
+        policy=ExitPolicyMode.FULL_POSITION_CLOSE,
+        reason="take_profit",
+    )
+    short_cmd = TradeCommand(
+        command_id="cmd_exit_short_01",
+        position_key=short_pos_key,
+        command_type=TradeCommandType.EXIT,
+        side=StrategySide.SHORT,
+        order_type=EntryType.MARKET,
+        requested_quantity=Decimal("0.5"),
+        reduce_only=True,
+        allocation_plan=short_alloc,
+        reason="take_profit",
+        created_at=t0,
+    )
+    short_fill = adapter.execute_exit(
+        short_cmd,
+        menv,
+        short_journal,
+        coordinator,
+    )
+    assert short_fill.side == "BUY"
+    # Buying to cover below entry price (66,000) generates positive realized PnL
+    expected_short_pnl = (Decimal("66000.00") - short_fill.price) * Decimal("0.5")
+    assert short_fill.realized_pnl == expected_short_pnl
+    assert short_fill.realized_pnl > Decimal("0")
 
     # 3. Reservation should now be fully consumed (active_quantity == 0)
     active_res = coordinator.get_active_reservations(pos_key)

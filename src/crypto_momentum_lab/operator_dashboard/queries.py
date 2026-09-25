@@ -481,9 +481,7 @@ class DashboardQueries:
     async def load_cash_flow_adjustments(
         self,
     ) -> tuple[LiveCashFlowAdjustment, ...]:
-        """Query authoritative cash flow corrections from postgres,
-        seeding default if empty.
-        """
+        """Query authoritative cash flow corrections from postgres."""
         async with self._session_factory() as session:
             rows = (
                 await session.scalars(
@@ -492,34 +490,6 @@ class DashboardQueries:
                     )
                 )
             ).all()
-            if not rows:
-                historical_deposit = CashFlowCorrectionRow(
-                    correction_id="cf_seed_primary_initial",
-                    account_label="primary",
-                    amount=Decimal("200"),
-                    cash_flow_type="deposit",
-                    effective_at=datetime(
-                        2026, 8, 21, 9, 41, 19, 895915, tzinfo=UTC
-                    ),
-                    reason="Initial primary live account capital deposit",
-                    approval_ref="op_genesis_deposit",
-                    evidence_hash="cf_evidence_genesis_200",
-                    created_at=datetime.now(UTC),
-                )
-                session.add(historical_deposit)
-                try:
-                    await session.commit()
-                    rows = [historical_deposit]
-                except Exception:
-                    await session.rollback()
-                    rows = (
-                        await session.scalars(
-                            select(CashFlowCorrectionRow).order_by(
-                                CashFlowCorrectionRow.effective_at
-                            )
-                        )
-                    ).all()
-
             if rows:
                 return tuple(
                     LiveCashFlowAdjustment(
@@ -530,7 +500,7 @@ class DashboardQueries:
                     )
                     for r in rows
                 )
-            return DEFAULT_LIVE_CASH_FLOW_ADJUSTMENTS
+            return self._live_cash_flow_adjustments
 
     async def account_performance(
         self,

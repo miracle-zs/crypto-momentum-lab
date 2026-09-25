@@ -40,7 +40,9 @@ class PositionReservationRepository:
     """Protocol for durable storage and crash-recovery of batch lot reservations."""
 
     def save_reservation(self, reservation: PositionReservation) -> None: ...
-    def update_reservation(self, reservation: PositionReservation) -> None: ...
+    def update_reservation(
+        self, reservation: PositionReservation, release_reason: str | None = None
+    ) -> None: ...
     def load_active_reservations(
         self, key: PositionKey | None = None
     ) -> tuple[PositionReservation, ...]: ...
@@ -56,7 +58,9 @@ class InMemoryPositionReservationRepository:
     def save_reservation(self, reservation: PositionReservation) -> None:
         self._reservations[reservation.reservation_id] = reservation
 
-    def update_reservation(self, reservation: PositionReservation) -> None:
+    def update_reservation(
+        self, reservation: PositionReservation, release_reason: str | None = None
+    ) -> None:
         self._reservations[reservation.reservation_id] = reservation
 
     def load_active_reservations(

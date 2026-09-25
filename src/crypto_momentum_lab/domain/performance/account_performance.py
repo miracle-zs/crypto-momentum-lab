@@ -206,8 +206,8 @@ class AccountPerformanceCalculator:
                 details={"subinterval_count": len(cut.valuation_points)},
             )
 
-        # 4. MONEY_WEIGHTED_RETURN (MWR / Modified Dietz)
-        if spec.family == MetricFamily.MONEY_WEIGHTED_RETURN:
+        # 4. MODIFIED_DIETZ
+        if spec.family == MetricFamily.MODIFIED_DIETZ:
             if cut.has_unknown_cash_flows:
                 return MetricValue(
                     metric_name=spec.name,
@@ -276,12 +276,12 @@ class AccountPerformanceCalculator:
                     },
                 )
 
-            mwr_ret = gain / average_capital
+            dietz_ret = gain / average_capital
             return MetricValue(
                 metric_name=spec.name,
                 family=spec.family,
                 metric_version=spec.version,
-                value=mwr_ret.quantize(Decimal("0.000001")),
+                value=dietz_ret.quantize(Decimal("0.000001")),
                 unit="ratio",
                 interval_start=cut.start_time,
                 interval_end=cut.end_time,
@@ -291,6 +291,150 @@ class AccountPerformanceCalculator:
                 details={
                     "gain": str(gain),
                     "average_capital": str(average_capital),
+                    "cash_flow_count": len(cut.cash_flows),
+                },
+            )
+
+        # 5. MONEY_WEIGHTED_RETURN (True Internal Rate of Return - IRR)
+        if spec.family == MetricFamily.MONEY_WEIGHTED_RETURN:
+            if cut.has_unknown_cash_flows:
+                return MetricValue(
+                    metric_name=spec.name,
+                    family=spec.family,
+                    metric_version=spec.version,
+                    value=None,
+                    unit=spec.unit,
+                    interval_start=cut.start_time,
+                    interval_end=cut.end_time,
+                    as_of=as_of,
+                    source_refs=source_refs,
+                    status=MetricStatus.INSUFFICIENT_COVERAGE,
+                    details={"error": "unknown_cash_flows_present"},
+                )
+
+            if not cut.cash_flows:
+                if cut.start_equity <= Decimal("0"):
+                    return MetricValue(
+                        metric_name=spec.name,
+                        family=spec.family,
+                        metric_version=spec.version,
+                        value=None,
+                        unit=spec.unit,
+                        interval_start=cut.start_time,
+                        interval_end=cut.end_time,
+                        as_of=as_of,
+                        source_refs=source_refs,
+                        status=MetricStatus.UNKNOWN,
+                        details={"error": "zero_or_negative_starting_equity"},
+                    )
+                ret = (cut.end_equity - cut.start_equity) / cut.start_equity
+                return MetricValue(
+                    metric_name=spec.name,
+                    family=spec.family,
+                    metric_version=spec.version,
+                    value=ret.quantize(Decimal("0.000001")),
+                    unit="ratio",
+                    interval_start=cut.start_time,
+                    interval_end=cut.end_time,
+                    as_of=as_of,
+                    source_refs=source_refs,
+                    status=MetricStatus.CONFIRMED,
+                    details={"method": "simple_return_no_cash_flows"},
+                )
+
+            total_seconds = Decimal(
+                str((cut.end_time - cut.start_time).total_seconds())
+            )
+            if total_seconds <= Decimal("0") or cut.start_equity <= Decimal("0"):
+                return MetricValue(
+                    metric_name=spec.name,
+                    family=spec.family,
+                    metric_version=spec.version,
+                    value=None,
+                    unit=spec.unit,
+                    interval_start=cut.start_time,
+                    interval_end=cut.end_time,
+                    as_of=as_of,
+                    source_refs=source_refs,
+                    status=MetricStatus.UNKNOWN,
+                    details={"error": "invalid_duration_or_starting_equity"},
+                )
+
+            # Solve IRR: -E0 - sum(CF_i / (1+r)^w_i) + ET / (1+r) = 0
+            cf_weights = [
+                (
+                    float(cf.amount),
+                    float(
+                        Decimal(
+                            str((cf.effective_at - cut.start_time).total_seconds())
+                        )
+                        / total_seconds
+                    ),
+                )
+                for cf in cut.cash_flows
+            ]
+            e0 = float(cut.start_equity)
+            et = float(cut.end_equity)
+
+            def npv(r: float) -> float:
+                if 1.0 + r <= 0.0:
+                    return float("inf")
+                val = -e0
+                for amt, w in cf_weights:
+                    val -= amt / ((1.0 + r) ** w)
+                val += et / (1.0 + r)
+                return val
+
+            low, high = -0.999, 50.0
+            f_low = npv(low)
+            f_high = npv(high)
+            irr_val = None
+            if f_low * f_high < 0:
+                for _ in range(60):
+                    mid = (low + high) / 2.0
+                    f_mid = npv(mid)
+                    if abs(f_mid) < 1e-9:
+                        irr_val = Decimal(str(mid)).quantize(Decimal("0.000001"))
+                        break
+                    if f_low * f_mid < 0:
+                        high = mid
+                        f_high = f_mid
+                    else:
+                        low = mid
+                        f_low = f_mid
+                if irr_val is None:
+                    irr_val = Decimal(str((low + high) / 2.0)).quantize(
+                        Decimal("0.000001")
+                    )
+
+            if irr_val is None:
+                return MetricValue(
+                    metric_name=spec.name,
+                    family=spec.family,
+                    metric_version=spec.version,
+                    value=None,
+                    unit=spec.unit,
+                    interval_start=cut.start_time,
+                    interval_end=cut.end_time,
+                    as_of=as_of,
+                    source_refs=source_refs,
+                    status=MetricStatus.UNKNOWN,
+                    details={"error": "irr_convergence_failed"},
+                )
+
+            return MetricValue(
+                metric_name=spec.name,
+                family=spec.family,
+                metric_version=spec.version,
+                value=irr_val,
+                unit="ratio",
+                interval_start=cut.start_time,
+                interval_end=cut.end_time,
+                as_of=as_of,
+                source_refs=source_refs,
+                status=MetricStatus.CONFIRMED,
+                details={
+                    "method": "exact_irr_bisection",
                     "cash_flow_count": len(cut.cash_flows),
                 },
             )

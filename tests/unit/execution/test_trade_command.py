@@ -19,6 +19,7 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     ExitAllocationPlan,
     ExitAllocator,
     ExitPolicyMode,
+    PositionReservation,
     TradeCommand,
     TradeCommandType,
 )
@@ -372,4 +373,63 @@ def test_exit_allocator_create_exit_command_both_mode_short() -> None:
     assert exec_plan.plan is not None
     assert exec_plan.plan.side == "BUY"
     assert exec_plan.plan.position_side == FuturesPositionSide.BOTH
+
+
+def test_exit_allocator_respects_active_reservations() -> None:
+    """ExitAllocator must deduct active reservations before planning lot allocation."""
+    b1 = PositionLedgerBatch(
+        batch_id="b1",
+        episode_id="ep-1",
+        quantity=Decimal("1.0"),
+        original_quantity=Decimal("1.0"),
+        entry_price=Decimal("60000"),
+        opened_at=NOW,
+    )
+    b2 = PositionLedgerBatch(
+        batch_id="b2",
+        episode_id="ep-1",
+        quantity=Decimal("2.0"),
+        original_quantity=Decimal("2.0"),
+        entry_price=Decimal("61000"),
+        opened_at=NOW,
+    )
+    episode = PositionEpisode(
+        position_key=POS_KEY_LONG,
+        episode_id="ep-1",
+        side=StrategySide.LONG,
+        opened_at=NOW,
+        batches=(b1, b2),
+    )
+    proj = PositionLedgerProjection(
+        position_key=POS_KEY_LONG,
+        active_episode=episode,
+        active_batches=(b1, b2),
+        total_active_quantity=Decimal("3.0"),
+        unallocated_quantity=Decimal("0"),
+        reconciliation_gap=Decimal("0"),
+        high_watermark_trade_at=NOW,
+    )
+
+    # Reservation on b1 for 0.8 units (leaving 0.2 units available on b1)
+    res_b1 = PositionReservation(
+        reservation_id="res-1",
+        command_id="cmd-prior-exit",
+        position_key=POS_KEY_LONG,
+        batch_id="b1",
+        reserved_quantity=Decimal("0.8"),
+    )
+
+    # Request 1.0 unit. Should allocate 0.2 from b1 and 0.8 from b2!
+    plan = ExitAllocator.plan_exit(
+        proj,
+        requested_quantity=Decimal("1.0"),
+        active_reservations=(res_b1,),
+    )
+    assert plan.total_allocated_quantity == Decimal("1.0")
+    assert len(plan.allocations) == 2
+    assert plan.allocations[0].batch_id == "b1"
+    assert plan.allocations[0].allocated_quantity == Decimal("0.2")
+    assert plan.allocations[1].batch_id == "b2"
+    assert plan.allocations[1].allocated_quantity == Decimal("0.8")
+
 

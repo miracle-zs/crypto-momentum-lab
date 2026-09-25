@@ -7,9 +7,17 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Protocol
 
-from crypto_momentum_lab.domain.decision.simulation_execution import (
+from crypto_momentum_lab.domain.decision import (
     FillModel,
     SimulationExecutionAdapter,
+)
+from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+from crypto_momentum_lab.domain.market.market_book import compute_market_state_hash
+from crypto_momentum_lab.domain.market.revision_models import (
+    MarketEnvelope,
+    MarketRevisionRef,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.runtime.capability_evaluator import (
@@ -211,6 +219,7 @@ def run_paper_trading(
     paper_fills: list[SimulatedFill] = []
     pending_candidates: list[OrderIntentCandidate] = []
     positions_by_id: dict[str, PaperPosition] = {}
+    journals_by_symbol: dict[str, AccountJournal] = {}
     candle_aggregator = (
         Candle15mAggregator()
         if config.portfolio.exit_mode is PaperExitMode.CANDLE_15M
@@ -287,6 +296,38 @@ def run_paper_trading(
             opened = position_from_entry_fill(config.run_id, fill)
             if opened is not None:
                 positions_by_id[opened.position_id] = opened
+                matching_cand = next(
+                    (c for c in candidates if c.candidate_id == fill.candidate_id),
+                    None,
+                )
+                if matching_cand is not None:
+                    try:
+                        envelope = MarketEnvelope(
+                            ref=MarketRevisionRef(
+                                revision_id=f"rev_{state.symbol}_{state.bucket_start.isoformat()}",
+                                symbol=state.symbol,
+                                bucket_start=state.bucket_start,
+                                bucket_end=state.bucket_end,
+                                content_hash=compute_market_state_hash(state),
+                                data_complete=state.data_complete,
+                                created_at=state.bucket_end,
+                            ),
+                            state=state,
+                        )
+                        journal = journals_by_symbol.setdefault(
+                            state.symbol,
+                            AccountJournal(
+                                PositionKey(
+                                    environment="paper",
+                                    account_label=config.run_id,
+                                    symbol=state.symbol,
+                                    position_side=FuturesPositionSide.BOTH,
+                                )
+                            ),
+                        )
+                        _sim_adapter.execute_entry(matching_cand, envelope, journal)
+                    except Exception:
+                        pass
         last_processed_at_by_symbol[state.symbol] = state.bucket_start
 
     if input_state_count == 0:

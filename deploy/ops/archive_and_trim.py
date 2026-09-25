@@ -127,7 +127,9 @@ class PsqlRetentionRepository:
             **self.db,
         )
         if has_table != "t":
-            return
+            raise RuntimeError(
+                "Table 'consumer_dependencies' does not exist; failing closed to prevent data loss"
+            )
         spec = dependency.recovery_spec
         watermark_str = spec.earliest_needed_watermark.isoformat()
         deadline_str = (
@@ -168,7 +170,9 @@ class PsqlRetentionRepository:
             **self.db,
         )
         if has_table != "t":
-            return
+            raise RuntimeError(
+                "Table 'consumer_dependencies' does not exist; failing closed to prevent data loss"
+            )
         sql = (
             f"DELETE FROM consumer_dependencies WHERE consumer_id = '{consumer_id}' "
             f"AND dataset_name = '{dataset_name}'"
@@ -181,7 +185,10 @@ class PsqlRetentionRepository:
             **self.db,
         )
         if has_table != "t":
-            return ()
+            raise RuntimeError(
+                "Table 'consumer_dependencies' does not exist in database. "
+                "Refusing to prune operational data (failing closed)."
+            )
         output = _psql(
             "SELECT consumer_id, dataset_name, generation, recovery_watermark::text, "
             "coalesce(earliest_checkpoint_id, ''), coalesce(recovery_deadline::text, ''), "
@@ -240,7 +247,9 @@ class PsqlRetentionRepository:
             **self.db,
         )
         if has_table != "t":
-            return
+            raise RuntimeError(
+                "Table 'prune_plans' does not exist; failing closed to prevent unrecorded data loss"
+            )
         binding_str = (
             f"'{plan.binding_consumer_id}'" if plan.binding_consumer_id else "NULL"
         )
@@ -254,7 +263,7 @@ class PsqlRetentionRepository:
             f"'{plan.effective_cutoff.isoformat()}', {is_constrained_bool}, {binding_str}, "
             f"{manifest_str}, '{plan.expected_dependency_version}', '{plan.status.value}', "
             f"0, 0, '{plan.created_at.isoformat()}') "
-            "ON CONFLICT (plan_id) DO UPDATE SET status = EXCLUDED.status"
+            "ON CONFLICT (plan_id) DO UPDATE SET status = EXCLUDED.status, manifest_hash = EXCLUDED.manifest_hash"
         )
         _psql(sql, **self.db)
 
@@ -264,8 +273,15 @@ class PsqlRetentionRepository:
             **self.db,
         )
         if has_table != "t":
-            return
-        sql = f"UPDATE prune_plans SET status = '{plan.status.value}' WHERE plan_id = '{plan.plan_id}'"
+            raise RuntimeError(
+                "Table 'prune_plans' does not exist; failing closed"
+            )
+        manifest_str = f"'{plan.manifest_hash}'" if plan.manifest_hash else "NULL"
+        sql = (
+            f"UPDATE prune_plans SET status = '{plan.status.value}', "
+            f"manifest_hash = {manifest_str} "
+            f"WHERE plan_id = '{plan.plan_id}'"
+        )
         _psql(sql, **self.db)
 
     def save_receipt(self, receipt: PruneReceipt) -> None:
@@ -274,7 +290,9 @@ class PsqlRetentionRepository:
             **self.db,
         )
         if has_table != "t":
-            return
+            raise RuntimeError(
+                "Table 'prune_plans' does not exist; failing closed"
+            )
         status_val = (
             PrunePlanStatus.COMPLETED.value
             if receipt.status == PruneReceiptStatus.SUCCESS
@@ -515,11 +533,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  manifest verified: {recorded} rows")
 
         manifest_hash = hashlib.sha256(manifest.read_bytes()).hexdigest()
-        plan = authority.plan_prune(
-            dataset_name=table,
-            requested_cutoff=cutoff_dt,
-            manifest_hash=manifest_hash,
-        )
+        try:
+            plan = authority.bind_manifest(
+                plan,
+                manifest_hash=manifest_hash,
+            )
+        except Exception as bind_err:
+            print(f"  failed to bind manifest to plan: {bind_err}", file=sys.stderr)
+            return 1
 
         def executor(
             p: PrunePlan,
@@ -535,6 +556,7 @@ def main(argv: list[str] | None = None) -> int:
 
             deleted = 0
             while True:
+                authority.verify_fence(p)
                 removed = int(
                     _scalar(
                         "WITH d AS (DELETE FROM "

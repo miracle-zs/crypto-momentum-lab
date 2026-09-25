@@ -9,10 +9,14 @@ an unknown REST read cannot hold an order command for another symbol hostage.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Protocol, cast
+
+import structlog
 
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderSnapshot,
@@ -23,12 +27,21 @@ from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
     OrderPreSubmissionError,
     PreparedOrderSubmission,
 )
+
+log = structlog.get_logger()
+
+
+async def _maybe_await(val: Any) -> Any:
+    if inspect.isawaitable(val):
+        return await val
+    return val
 
 
 class OrderExecutionPort(Protocol):
@@ -341,6 +354,39 @@ class OrderExecutionCoordinator:
 
         async def operation() -> OrderExecutionResult:
             async def submit() -> OrderExecutionResult:
+                if plan.reduce_only and self._reservation_repository is not None:
+                    try:
+                        key = PositionKey(
+                            environment="live",
+                            account_label=self._account_label,
+                            symbol=plan.symbol,
+                            position_side=plan.position_side,
+                        )
+                        active_res = await _maybe_await(
+                            self._reservation_repository.load_active_reservations(key)
+                        )
+                        existing = next(
+                            (r for r in active_res if r.command_id == plan.client_order_id),
+                            None,
+                        )
+                        if existing is None:
+                            reservation = PositionReservation(
+                                reservation_id=f"res_{plan.client_order_id}",
+                                command_id=plan.client_order_id,
+                                position_key=key,
+                                batch_id=f"batch_{plan.symbol}_{plan.position_side.value}",
+                                reserved_quantity=Decimal(str(plan.quantity)),
+                            )
+                            await _maybe_await(
+                                self._reservation_repository.save_reservation(reservation)
+                            )
+                    except Exception as res_err:
+                        log.warning(
+                            "order_reservation_creation_failed",
+                            client_order_id=plan.client_order_id,
+                            error=str(res_err),
+                        )
+
                 res = (
                     await self._backend.execute_approved_intent(
                         plan,
@@ -361,23 +407,24 @@ class OrderExecutionCoordinator:
                             symbol=plan.symbol,
                             position_side=plan.position_side,
                         )
-                        active_res = (
-                            await self._reservation_repository.load_active_reservations(
-                                key
-                            )
+                        active_res = await _maybe_await(
+                            self._reservation_repository.load_active_reservations(key)
                         )
                         for r in active_res:
-                            if (
-                                r.command_id == plan.client_order_id
-                                or r.client_order_id == plan.client_order_id
-                            ):
-                                updated = r.consume(res.executed_quantity)
-                                await self._reservation_repository.update_reservation(
-                                    updated
+                            if r.command_id == plan.client_order_id:
+                                updated = r.consume(Decimal(str(res.executed_quantity)))
+                                await _maybe_await(
+                                    self._reservation_repository.update_reservation(
+                                        updated
+                                    )
                                 )
                                 break
-                    except Exception:
-                        pass
+                    except Exception as consume_err:
+                        log.warning(
+                            "order_reservation_consume_failed",
+                            client_order_id=plan.client_order_id,
+                            error=str(consume_err),
+                        )
                 return res
 
             return cast(
@@ -442,6 +489,14 @@ class OrderExecutionCoordinator:
         return await self.submit(plan, prepared_submission=prepared_submission)
 
     async def cancel_order(self, plan: OrderExecutionPlan) -> OrderExecutionResult:
+        result = cast(
+            OrderExecutionResult,
+            await self._schedule(
+                plan,
+                priority=self._EXIT_PRIORITY,
+                operation=lambda: self._backend.cancel_order(plan),
+            ),
+        )
         if plan.reduce_only and self._reservation_repository is not None:
             try:
                 key = PositionKey(
@@ -450,32 +505,26 @@ class OrderExecutionCoordinator:
                     symbol=plan.symbol,
                     position_side=plan.position_side,
                 )
-                active_res = (
-                    await self._reservation_repository.load_active_reservations(
-                        key
-                    )
+                active_res = await _maybe_await(
+                    self._reservation_repository.load_active_reservations(key)
                 )
                 for r in active_res:
-                    if (
-                        r.command_id == plan.client_order_id
-                        or r.client_order_id == plan.client_order_id
-                    ):
+                    if r.command_id == plan.client_order_id:
                         updated = r.release(r.active_quantity)
-                        await self._reservation_repository.update_reservation(
-                            updated, release_reason="order_cancelled"
+                        await _maybe_await(
+                            self._reservation_repository.update_reservation(
+                                updated, release_reason="order_cancelled"
+                            )
                         )
                         break
-            except Exception:
-                pass
+            except Exception as cancel_err:
+                log.warning(
+                    "order_reservation_release_on_cancel_failed",
+                    client_order_id=plan.client_order_id,
+                    error=str(cancel_err),
+                )
 
-        return cast(
-            OrderExecutionResult,
-            await self._schedule(
-                plan,
-                priority=self._EXIT_PRIORITY,
-                operation=lambda: self._backend.cancel_order(plan),
-            ),
-        )
+        return result
 
     async def reconcile_order(
         self,

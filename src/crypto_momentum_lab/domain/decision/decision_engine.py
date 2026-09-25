@@ -27,6 +27,7 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommand,
     TradeCommandType,
 )
+from crypto_momentum_lab.domain.market.market_book import compute_market_state_hash
 from crypto_momentum_lab.domain.market.revision_models import (
     MarketEnvelope,
     MarketRevisionRef,
@@ -89,6 +90,12 @@ class DecisionInput:
             raise ValueError(
                 f"market_envelope.ref ({self.market_envelope.ref.revision_id}) must match "
                 f"market_ref ({self.market_ref.revision_id})"
+            )
+        computed_hash = compute_market_state_hash(self.market_envelope.state)
+        if computed_hash != self.market_ref.content_hash:
+            raise ValueError(
+                f"market_envelope state content hash ({computed_hash}) does not match "
+                f"market_ref.content_hash ({self.market_ref.content_hash})"
             )
         if self.market_envelope.state.symbol != self.symbol:
             raise ValueError(
@@ -351,3 +358,16 @@ def decide(
         rejection_reason="holding_position_no_exit",
         evaluated_at=clock_time,
     )
+
+
+class DecisionEngine:
+    """Authoritative pure domain DecisionEngine service."""
+
+    @staticmethod
+    def evaluate(
+        decision_input: DecisionInput,
+        state: PolicyState,
+        policy: EffectivePolicy,
+    ) -> DecisionResult:
+        """Evaluates pure strategy decision."""
+        return decide(decision_input, state, policy)

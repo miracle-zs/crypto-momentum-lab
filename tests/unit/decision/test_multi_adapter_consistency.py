@@ -27,6 +27,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionKey,
     PositionView,
 )
+from crypto_momentum_lab.domain.market.market_book import compute_market_state_hash
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import (
     MarketEnvelope,
@@ -79,7 +80,7 @@ def _build_test_market(
         bucket_start=bucket_start,
         bucket_end=bucket_end,
         revision_id=f"rev_{symbol}_{int(bucket_start.timestamp())}",
-        content_hash="content_hash_fixed_12345",
+        content_hash=compute_market_state_hash(state),
         published_at=bucket_end,
         source_epoch="ep1",
         visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
@@ -92,10 +93,7 @@ def test_pure_decision_multi_adapter_consistency() -> None:
     t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
 
     # Prepare identical market state and position views for Live vs Simulation
-    ref_live, env_live = _build_test_market("BTCUSDT", t0, Decimal("65500.00"), "live")
-    ref_sim, env_sim = _build_test_market(
-        "BTCUSDT", t0, Decimal("65500.00"), "simulation"
-    )
+    ref_market, env_market = _build_test_market("BTCUSDT", t0, Decimal("65500.00"))
 
     pos_key_live = PositionKey(
         environment="live",
@@ -148,8 +146,8 @@ def test_pure_decision_multi_adapter_consistency() -> None:
 
     input_live = DecisionInput(
         symbol="BTCUSDT",
-        market_ref=ref_live,
-        market_envelope=env_live,
+        market_ref=ref_market,
+        market_envelope=env_market,
         position_view=view_live,
         universe_version="univ_v1",
         clock_event=clock,
@@ -159,8 +157,8 @@ def test_pure_decision_multi_adapter_consistency() -> None:
 
     input_sim = DecisionInput(
         symbol="BTCUSDT",
-        market_ref=ref_sim,
-        market_envelope=env_sim,
+        market_ref=ref_market,
+        market_envelope=env_market,
         position_view=view_sim,
         universe_version="univ_v1",
         clock_event=clock,
@@ -194,7 +192,7 @@ def test_pure_decision_multi_adapter_consistency() -> None:
     sim_adapter = SimulationExecutionAdapter(
         default_fill_model=FillModel(slippage_bps=Decimal("2.0"))
     )
-    fill_sim = sim_adapter.execute_entry(res_sim.intent, env_sim, journal_sim)
+    fill_sim = sim_adapter.execute_entry(res_sim.intent, env_market, journal_sim)
 
     assert fill_sim.symbol == "BTCUSDT"
     assert fill_sim.quantity > Decimal("0")

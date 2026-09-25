@@ -23,6 +23,7 @@ class MetricFamily(StrEnum):
     CASH_FLOW_ADJUSTED_PNL = "cash_flow_adjusted_pnl"
     TIME_WEIGHTED_RETURN = "time_weighted_return"
     MONEY_WEIGHTED_RETURN = "money_weighted_return"
+    MODIFIED_DIETZ = "modified_dietz"
     MAX_DRAWDOWN = "max_drawdown"
     SHARPE_RATIO = "sharpe_ratio"
 

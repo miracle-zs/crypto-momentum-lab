@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import os
 import shutil
 import signal
@@ -86,6 +87,7 @@ from crypto_momentum_lab.persistence.postgres.capture_repository import (
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountPositionSnapshotRow,
+    ConsumerDependencyRow,
     StrategyRuntimeCheckpointRow,
 )
 from crypto_momentum_lab.persistence.postgres.operational_retention import (
@@ -958,6 +960,28 @@ async def _resolve_market_data_consumer_requirements(
     """
     requirements: list[RetentionConsumerRequirement] = []
     async with session_factory() as session:
+        # 1. Authoritative registered external consumer dependencies (Fail-Closed)
+        registered_deps = await session.scalars(
+            select(ConsumerDependencyRow).where(
+                ConsumerDependencyRow.dataset_name.in_(
+                    ("runtime_market_states_15s", "contract_metadata_snapshots", "all")
+                )
+            )
+        )
+        all_deps = registered_deps.all() if hasattr(registered_deps, "all") else ()
+        if inspect.isawaitable(all_deps):
+            all_deps = await all_deps
+        if isinstance(all_deps, (list, tuple)):
+            for dep in all_deps:
+                requirements.append(
+                    RetentionConsumerRequirement(
+                        consumer_id=dep.consumer_id,
+                        min_required_watermark=dep.recovery_watermark,
+                        reason=f"registered_dependency:{dep.reason}",
+                    )
+                )
+
+        # 2. In-flight active checkpoints and position states
         earliest_checkpoint = await session.scalar(
             select(func.min(StrategyRuntimeCheckpointRow.saved_at))
         )

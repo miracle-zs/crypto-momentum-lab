@@ -288,3 +288,42 @@ def test_execute_prune_rejects_when_caller_passes_current_version_with_stale_pla
     assert receipt.status == PruneReceiptStatus.REJECTED_VERSION_MISMATCH
     assert receipt.rows_deleted == 0
 
+
+def test_bind_manifest_locks_effective_cutoff_and_rejects_version_change() -> None:
+    from crypto_momentum_lab.domain.operational.retention_authority import (
+        DependencyVersionConflictError,
+    )
+
+    authority = RetentionAuthority()
+    spec = RecoverySpec(
+        source_dataset="market_data",
+        earliest_needed_watermark=datetime(2026, 9, 21, 0, 0, tzinfo=UTC),
+    )
+    authority.register_dependency(consumer_id="c1", generation=1, recovery_spec=spec)
+
+    plan = authority.plan_prune(
+        dataset_name="market_data",
+        requested_cutoff=datetime(2026, 9, 24, 0, 0, tzinfo=UTC),
+    )
+    assert plan.effective_cutoff == datetime(2026, 9, 21, 0, 0, tzinfo=UTC)
+
+    # Bind manifest successfully
+    bound = authority.bind_manifest(plan, manifest_hash="sha256_fake_manifest")
+    assert bound.manifest_hash == "sha256_fake_manifest"
+    assert bound.effective_cutoff == plan.effective_cutoff
+
+    # Verify atomic fence passes when version is unchanged
+    authority.verify_fence(bound)
+
+    # If dependency changes mid-execution, verify_fence must fail-closed
+    spec2 = RecoverySpec(
+        source_dataset="market_data",
+        earliest_needed_watermark=datetime(2026, 9, 19, 0, 0, tzinfo=UTC),
+    )
+    authority.register_dependency(consumer_id="c2", generation=1, recovery_spec=spec2)
+
+    with pytest.raises(
+        DependencyVersionConflictError, match="Dependency epoch fence violation mid-prune"
+    ):
+        authority.verify_fence(bound)
+

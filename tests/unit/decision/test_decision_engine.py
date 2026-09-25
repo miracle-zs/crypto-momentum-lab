@@ -23,6 +23,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionLedgerBatch,
     PositionView,
 )
+from crypto_momentum_lab.domain.market.market_book import compute_market_state_hash
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import (
     MarketEnvelope,
@@ -67,6 +68,7 @@ def _make_market_envelope(
         missing_agg_trade_count=0,
         is_backfill=False,
     )
+    content_hash = compute_market_state_hash(state)
     ref = MarketRevisionRef(
         scope="live",
         symbol=symbol,
@@ -74,7 +76,7 @@ def _make_market_envelope(
         bucket_start=bucket_start,
         bucket_end=bucket_end,
         revision_id=f"rev_{symbol}_{int(bucket_start.timestamp())}",
-        content_hash="content_hash_123",
+        content_hash=content_hash,
         published_at=bucket_end,
         source_epoch="ep1",
         visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
@@ -255,4 +257,33 @@ def test_decision_input_rejects_mismatched_market_envelope_ref() -> None:
             cash_balance=Decimal("10000.00"),
             risk_config_version="risk_v1",
         )
+
+
+def test_decision_input_rejects_tampered_content_hash() -> None:
+    """Regression test: DecisionInput must verify compute_market_state_hash(state) == ref.content_hash."""
+    import pytest
+    from dataclasses import replace
+
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    mref, menv = _make_market_envelope("BTCUSDT", t0, Decimal("65500.00"))
+    pview = _make_flat_position_view("BTCUSDT")
+
+    # Tamper with the state content inside the envelope while keeping the same ref
+    tampered_state = replace(menv.state, close_price=Decimal("99999.00"))
+    tampered_env = MarketEnvelope(ref=mref, state=tampered_state)
+
+    with pytest.raises(
+        ValueError, match="content hash .* does not match market_ref.content_hash"
+    ):
+        DecisionInput(
+            symbol="BTCUSDT",
+            market_ref=mref,
+            market_envelope=tampered_env,
+            position_view=pview,
+            universe_version="univ_v1",
+            clock_event=ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=1),
+            cash_balance=Decimal("10000.00"),
+            risk_config_version="risk_v1",
+        )
+
 

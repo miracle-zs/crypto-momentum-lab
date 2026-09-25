@@ -192,14 +192,18 @@ class PostgresRuntimeMarketStateRepository:
             async with session.begin():
                 gap_rows = await _load_overlapping_gaps(session, states)
                 gap_counts = _gap_counts_by_state_key(gap_rows, states)
+                adjusted_states = [
+                    _apply_gap_completeness(state, gap_counts)
+                    for state in states
+                ]
                 values = [
                     runtime_state_row(
-                        _apply_gap_completeness(state, gap_counts),
+                        state,
                         source_watermark_at=source_watermark_at,
                         input_sequence_min=sequence_range.minimum,
                         input_sequence_max=sequence_range.maximum,
                     )
-                    for state in states
+                    for state in adjusted_states
                 ]
                 await _insert_many_idempotent(session, values)
                 revision_values = [
@@ -216,16 +220,14 @@ class PostgresRuntimeMarketStateRepository:
                         "content_hash": compute_market_state_hash(state),
                         "published_at": state.last_received_at or state.bucket_end,
                         "source_epoch": f"seq_{sequence_range.minimum or 0}",
-                        "visibility_mode": (
-                            "canonical" if state.data_complete else "decision_visible"
-                        ),
+                        "visibility_mode": "decision_visible",
                         "is_canonical": state.data_complete,
                         "payload": market_state_to_payload(state),
                         "lineage": {
                             "source_watermark_at": source_watermark_at.isoformat()
                         },
                     }
-                    for state in states
+                    for state in adjusted_states
                 ]
                 await session.execute(
                     insert(MarketRevisionRefRow)

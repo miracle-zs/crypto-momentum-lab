@@ -203,6 +203,51 @@ class RetentionAuthority:
         self._repo.save_plan(plan)
         return plan
 
+    def bind_manifest(self, plan: PrunePlan, manifest_hash: str) -> PrunePlan:
+        """Binds a verified archive manifest hash to an existing prune plan.
+
+        Guarantees that the prune execution is strictly locked to the exact
+        effective_cutoff that was used during archiving, rather than recomputing
+        a new plan which could widen the cutoff if consumer dependencies change.
+        """
+        current_dep_version = self.compute_dependency_version(plan.dataset_name)
+        if current_dep_version != plan.expected_dependency_version:
+            raise DependencyVersionConflictError(
+                f"Dependency version changed from {plan.expected_dependency_version} "
+                f"to {current_dep_version} before manifest binding"
+            )
+        if plan.status != PrunePlanStatus.CREATED:
+            raise RuntimeError(
+                f"Cannot bind manifest to plan in status {plan.status.value}"
+            )
+        bound_plan = PrunePlan(
+            plan_id=plan.plan_id,
+            dataset_name=plan.dataset_name,
+            requested_cutoff=plan.requested_cutoff,
+            effective_cutoff=plan.effective_cutoff,
+            is_constrained=plan.is_constrained,
+            binding_consumer_id=plan.binding_consumer_id,
+            manifest_hash=manifest_hash,
+            expected_dependency_version=plan.expected_dependency_version,
+            cascade_target_tables=plan.cascade_target_tables,
+            status=plan.status,
+            created_at=plan.created_at,
+        )
+        self._repo.update_plan(bound_plan)
+        return bound_plan
+
+    def verify_fence(self, plan: PrunePlan) -> None:
+        """Verifies dependency epoch fence mid-execution.
+
+        Must be called before each batch deletion to guarantee an atomic fence.
+        """
+        current_dep_version = self.compute_dependency_version(plan.dataset_name)
+        if current_dep_version != plan.expected_dependency_version:
+            raise DependencyVersionConflictError(
+                f"Dependency epoch fence violation mid-prune: plan expected "
+                f"{plan.expected_dependency_version}, current {current_dep_version}"
+            )
+
     def execute_prune(
         self,
         *,

@@ -189,31 +189,45 @@ class SimulationExecutionAdapter:
 
         model = fill_model or self._fill_model
         state = envelope.state
-        base_price = state.last_bid_price or state.close_price
+
+        # Determine exit direction: exiting SHORT requires BUY; exiting LONG requires SELL
+        pos_side_str = getattr(
+            command.position_key.position_side, "value", str(command.position_key.position_side)
+        ).upper()
+        is_short = command.side in (StrategySide.SHORT, "SHORT") or pos_side_str.endswith("SHORT")
+        exchange_side = "BUY" if is_short else "SELL"
+
+        if is_short:
+            base_price = state.last_ask_price or state.close_price
+        else:
+            base_price = state.last_bid_price or state.close_price
+
         if base_price is None or base_price <= Decimal("0"):
             raise ValueError(
-                f"Cannot execute exit for {command.position_key.symbol}: missing valid bid or close price"
+                f"Cannot execute exit for {command.position_key.symbol}: missing valid price"
             )
 
-        exec_price, unit_slip = model.compute_executed_price(base_price, "SELL")
+        exec_price, unit_slip = model.compute_executed_price(base_price, exchange_side)
         quantity = command.requested_quantity
         fee = quantity * exec_price * model.fee_rate
         slippage_cost = quantity * unit_slip
 
         # Compute actual realized PnL from allocated batch entry prices
         if command.allocation_plan is not None and command.allocation_plan.allocations:
-            if command.side in (StrategySide.SHORT, "SELL"):
+            if is_short:
+                # Exiting SHORT (buy to cover): profit when entry_price > exec_price
                 realized_pnl = sum(
                     (
-                        (exec_price - alloc.entry_price) * alloc.allocated_quantity
+                        (alloc.entry_price - exec_price) * alloc.allocated_quantity
                         for alloc in command.allocation_plan.allocations
                     ),
                     start=Decimal("0.00"),
                 )
             else:
+                # Exiting LONG (sell to close): profit when exec_price > entry_price
                 realized_pnl = sum(
                     (
-                        (alloc.entry_price - exec_price) * alloc.allocated_quantity
+                        (exec_price - alloc.entry_price) * alloc.allocated_quantity
                         for alloc in command.allocation_plan.allocations
                     ),
                     start=Decimal("0.00"),
@@ -222,7 +236,9 @@ class SimulationExecutionAdapter:
             realized_pnl = Decimal("0.00")
 
         fill_time = state.bucket_end
-        seed = f"exit:{command.command_id}:{envelope.ref.content_hash}:{fill_time.isoformat()}"
+        seed = (
+            f"exit:{command.command_id}:{envelope.ref.content_hash}:{fill_time.isoformat()}"
+        )
         trade_id = f"sim_tr_{hashlib.sha256(seed.encode()).hexdigest()[:12]}"
         order_id = f"sim_exit_{command.command_id[-12:]}"
 
@@ -232,7 +248,7 @@ class SimulationExecutionAdapter:
             symbol=command.position_key.symbol,
             trade_id=trade_id,
             order_id=order_id,
-            side="SELL",
+            side=exchange_side,
             price=exec_price,
             quantity=quantity,
             realized_pnl=realized_pnl,
@@ -277,7 +293,7 @@ class SimulationExecutionAdapter:
             fill_id=trade_id,
             order_id=order_id,
             symbol=command.position_key.symbol,
-            side="SELL",
+            side=exchange_side,
             quantity=quantity,
             price=exec_price,
             fee=fee,

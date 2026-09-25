@@ -111,6 +111,7 @@ class PostgresRetentionRepository:
             row = session.get(PrunePlanRow, plan.plan_id)
             if row is not None:
                 row.status = plan.status.value
+                row.manifest_hash = plan.manifest_hash
                 session.commit()
 
     def save_receipt(self, receipt: PruneReceipt) -> None:

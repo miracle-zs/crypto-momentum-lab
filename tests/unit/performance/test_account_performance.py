@@ -150,11 +150,18 @@ def test_mwr_modified_dietz_weighting() -> None:
         end_time=t1,
         cash_flows=(deposit,),
     )
+    # Test Modified Dietz calculation
+    spec_dietz = MetricSpec(name="dietz", family=MetricFamily.MODIFIED_DIETZ)
+    res_dietz = AccountPerformanceCalculator.calculate(spec_dietz, cut)
+    assert res_dietz.status == MetricStatus.CONFIRMED
+    assert res_dietz.value == Decimal("0.166667")
+
+    # Test True Money-Weighted Return (exact IRR) calculation
     spec_mwr = MetricSpec(name="mwr", family=MetricFamily.MONEY_WEIGHTED_RETURN)
     res_mwr = AccountPerformanceCalculator.calculate(spec_mwr, cut)
-
     assert res_mwr.status == MetricStatus.CONFIRMED
-    assert res_mwr.value == Decimal("0.166667")
+    # Exact IRR is root of -10000 - 4000/(1+r)^0.5 + 16000/(1+r) = 0 => r ≈ 0.167750
+    assert res_mwr.value == Decimal("0.167750")
 
 
 def test_max_drawdown_calculation() -> None:
