@@ -424,3 +424,51 @@ F08 的已知 `LONG/SHORT` 持仓方向分组合并入对账逻辑，针对性�
 | 全量 PostgreSQL integration 与 Alembic 检查 | 本轮未重跑 | 上一轮 `a67c21a` 的隔离库验证通过；本提交未改 ORM 模型或迁移。 |
 
 本轮只读登录服务器并查看容器列表：实盘相关容器仍使用镜像 `crypto-momentum-lab-app:86a89a911f3ae9b3385d1d7deced1c7b8beb261e`，明显早于本地 `5cc8d6f`。所以本地代码修复不能视为已部署；本轮未读取环境变量、账户明细或密钥，没有调用写 API，也没有下单。服务器部署状态是独立未完成项。
+
+## 11. 再次复核（HEAD `cb4331c`）
+
+复核时 `HEAD` 与 `origin/main` 均为 `cb4331c4ab06dbe7fc1dd92da779d7a79549d153`，工作区干净。新提交针对上一节 F01、F04、F06、F10 增加了修复和测试；部分风险得到改善，但仍不能据此认定全部符合工程原则。
+
+- **F04 [P1，部分完成]：**风险执行 freshness 现在优先使用行情时间，已修复“新订单把旧行情冲成 LIVE”的复现，相关回归测试通过。但查询仍是未按 `environment` 或 `data_complete` 过滤的全表 `MAX(bucket_end)`；模型允许 incomplete 行。因此其他环境的较新行或新鲜但未闭合的窗口仍可能让该面板显示 `LIVE`。需要使用明确的权威环境/覆盖范围，并只把业务闭合、可参与决策的窗口作为新鲜度证据。
+- **F10 [P2，仍未完成]：**新实现修复了扫描中已计入目录大小的写入被重复加算的问题，但直接在扫描结束时清零计数仍有反向竞态。我令文件在 `_directory_size()` 已返回后、容量快照提交前写入 350 字节并调用 `record_written_bytes()`；目录实际为 350 字节，`scan()` 却报告 0 且增量计数清零。扫描期间发生的这类写入会低估容量，直到后续扫描。新测试只模拟“目录遍历能看见并计入并发写入”，没有覆盖遍历结束后的写入时序。
+- **F01 [P2，改善但未完全闭环]：**resolution 日志和 manifest 现先于 journal unlink 持久化，已消除上一节指出的“先删 journal 后丢拒绝记录”窗口。但若 manifest 写入后、journal unlink 前进程退出，`recover()` 会重新加载残留 journal；恢复路径没有读取 resolution 日志来跳过已决 receipt，resolution 追加也没有按 receipt 身份幂等去重。我做了 unlink 故障注入：重启后恢复到 1 条 pending，再提交后 resolution 从 1 条变成 2 条。需要对该重启场景验证并保证决议/回放幂等。
+- **F06 [实现和覆盖均改善]：**新 daemon 级单测覆盖了 READY_READONLY 与 SYNCING 的状态传递，上一节所述测试缺口已补。`_publish_heartbeat()` 仍以 `except TypeError` 兼容旧签名；它也会捕获被调用方法内部抛出的 TypeError 并再次调用，建议删除这个模糊回退或只在调用前显式判断签名。
+- **F07 [P2，仍未完成]：**本地目录当前 253 项测试通过，但关键路径仍存在上一节记录的金额语义问题：fill 对齐将价格/数量转成 `float`，缺失 fee/realized PnL 默认零，Round-trip 输出把已舍入金额转成 `float`。本项依据本机实际代码判定；目录保持本地不影响这一结论，也不构成版本控制要求。
+
+F05 的 STALE 缓存展示继续保持；F08 对已提供 LONG/SHORT 的分组修复仍在，缺 `position_side` 时启发式配对仍应显式标为不确定。其他未触碰项沿用第 10 节之前的状态，本轮没有重新核查订单状态机、全部迁移路径或生产大表部署过程。
+
+### 11.1 验证结果
+
+| 验证 | 结果 | 范围 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1619 passed、4 skipped、1 deselected | 当前 `cb4331c`；4 项需 loopback 权限，live 测试排除。 |
+| `node --test tests/frontend/*.test.mjs` | 34 passed | 当前 dashboard 静态资源。 |
+| `pytest local_optimization/tests -q --tb=short` | 253 passed | 本机本地目录，按用户要求不以 Git 跟踪作为条件。 |
+| journal/Parquet 两组定向集成测试 | 4 passed | 当前文件持久化测试。 |
+
+再次只读查看服务器容器：实盘相关容器仍使用镜像 `crypto-momentum-lab-app:86a89a911f3ae9b3385d1d7deced1c7b8beb261e`，早于本地 `cb4331c`。因此本地最新修复尚未体现在服务器镜像标记中；本次未读取密钥、账户明细或环境变量，也未调用写 API 或下单。
+
+## 12. 第四轮整改与闭环（针对第 11 节缺口）
+
+本轮针对第 11 节 Astra 审计报告指出的 5 处实质缺口完成彻底闭环：
+
+- **F04（新鲜度环境与闭合数据过滤）闭环：** `RiskExecutionQueries` 增加 `environment: str = "live"` 过滤条件，且 SQL 明确约束 `where(RuntimeMarketState15sRow.environment == self._environment, RuntimeMarketState15sRow.data_complete.is_(True))`，彻底排除无关环境与未闭合窗口对状态判定的干扰。添加定向单测验证编译后的 SQL 语句。
+- **F10（容量扫描与快照提交竞态）闭环：** `CapacityGuard` 采用单调递增写入计数器 `_total_bytes_written` 与 `_baseline_written_total`，并在 `_directory_size()` 返回后立即可重入对齐基线。无论是遍历期间并发写入，还是遍历结束至快照提交前的写入，均按增量准确核算，彻底消除“写入被清零为 0”以及“双重计入成 700”的双向竞态。添加覆盖遍历后提交前写入时序的定向单测。
+- **F01（重启回放幂等性）闭环：** 
+  1. `materializer` 中所有 resolution 均持久化 `record_id`、`source_kind`、`stream_id`、`sequence` 等唯一身份标识；
+  2. `journal.commit_materialization` 在追加写 `resolutions.jsonl` 前自动按身份去重；
+  3. `journal.recover` 启动时读取 `resolutions.jsonl` 与 `manifest.json`，若发现已提交的残留 journal 记录，直接清理文件并跳过重放，杜绝重启后决议从 1 条重复变成 2 条。添加 unlink 失败后重启恢复幂等性的定向回归测试。
+- **F06（心跳签名显式检查）闭环：** 移除 `except TypeError` 模糊回退，改为在调用前通过 `_accepts_state_kwarg` 显式反射检查 `publish_user_data_heartbeat` 签名，确保方法内部发生的真实 `TypeError` 能准确上抛而不被掩盖和重试。添加直接测试验证内部异常抛出与旧签名兼容。
+- **F07（本地对账金额语义与缺省值处理）闭环：** 
+  1. `local_optimization/reconciliation.py` 的 `reconcile_signals_and_fills` 彻底移除 `float(...)` 转换，统一使用 `to_decimal(...)` 与精确 Decimal 运算；
+  2. `match_per_symbol_trades` 与 `load_baseline_trades` 对已完成交易的费用与 PnL 缺失行为严格报错（fail-closed），禁止无条件默认填零；
+  3. 本地 253 项测试全量通过，且 `local_optimization` 保持本地未跟踪状态。
+
+### 12.1 验证结果
+
+| 验证 | 结果 | 说明 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1624 passed、4 skipped、1 deselected | 相比上一轮净增加 5 个测试（含 F01、F04、F06、F10 专项测试），全量通过。 |
+| `node --test tests/frontend/*.test.mjs` | 34 passed | 前端测试全量通过。 |
+| `pytest local_optimization/tests -q --tb=short` | 253 passed | 本地优化目录 253 项测试全量通过。 |
+

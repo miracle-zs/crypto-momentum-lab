@@ -371,12 +371,56 @@ class ArchiveJournal:
         # 1. WRITE-AHEAD AUDIT: Persist durable resolution audit log BEFORE deleting any journal files
         if resolutions:
             res_path = self._root / "resolutions.jsonl"
-            with res_path.open("a", encoding="utf-8") as f:
-                for res in resolutions:
-                    f.write(json.dumps(dict(res), sort_keys=True) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
-            _fsync_directory(self._root)
+            existing_rec_ids: set[str] = set()
+            existing_keys: set[tuple[str, str, int]] = set()
+            if res_path.exists():
+                with res_path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line_str = line.strip()
+                        if line_str:
+                            try:
+                                item = json.loads(line_str)
+                                if isinstance(item, dict):
+                                    rid = item.get("record_id")
+                                    if rid:
+                                        existing_rec_ids.add(str(rid))
+                                    sk = item.get("source_kind")
+                                    sid = item.get("stream_id")
+                                    seq = item.get("sequence")
+                                    if sk is not None and sid is not None and seq is not None:
+                                        existing_keys.add((str(sk), str(sid), int(seq)))
+                            except Exception:
+                                pass
+
+            to_append: list[dict[str, Any]] = []
+            for res in resolutions:
+                res_dict = dict(res)
+                rid = res_dict.get("record_id")
+                sk = res_dict.get("source_kind")
+                sid = res_dict.get("stream_id")
+                seq = res_dict.get("sequence")
+                res_key = (
+                    (str(sk), str(sid), int(seq))
+                    if (sk is not None and sid is not None and seq is not None)
+                    else None
+                )
+                if rid and str(rid) in existing_rec_ids:
+                    continue
+                if res_key and res_key in existing_keys:
+                    continue
+                to_append.append(res_dict)
+                if rid:
+                    existing_rec_ids.add(str(rid))
+                if res_key:
+                    existing_keys.add(res_key)
+
+            if to_append:
+                with res_path.open("a", encoding="utf-8") as f:
+                    for item in to_append:
+                        f.write(json.dumps(item, sort_keys=True) + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                _fsync_directory(self._root)
 
         # 2. WRITE-AHEAD AUDIT: Update manifest atomically BEFORE deleting any journal files
         manifest_data = {
@@ -411,7 +455,7 @@ class ArchiveJournal:
                 try:
                     path.unlink()
                     _fsync_directory(path.parent)
-                except FileNotFoundError:
+                except OSError:
                     pass
                 self._pending_bytes = max(0, self._pending_bytes - size)
 
@@ -438,6 +482,43 @@ class ArchiveJournal:
         self._pending_records.clear()
         self._pending_bytes = 0
 
+        # Read manifest if available to restore highest_committed_sequence and materialized_sequence
+        if self._manifest_path.exists():
+            try:
+                mdata = json.loads(self._manifest_path.read_text(encoding="utf-8"))
+                if isinstance(mdata, dict):
+                    hcs = mdata.get("highest_committed_sequence")
+                    if hcs is not None:
+                        if self._highest_committed_sequence is None:
+                            self._highest_committed_sequence = int(hcs)
+                        else:
+                            self._highest_committed_sequence = max(
+                                self._highest_committed_sequence, int(hcs)
+                            )
+                    ms = mdata.get("materialized_sequence")
+                    if ms is not None:
+                        if self._materialized_sequence is None:
+                            self._materialized_sequence = int(ms)
+                        else:
+                            self._materialized_sequence = max(
+                                self._materialized_sequence, int(ms)
+                            )
+            except Exception:
+                pass
+
+        existing_resolutions = self.read_resolutions()
+        existing_res_keys: set[tuple[str, str, int]] = set()
+        existing_record_ids: set[str] = set()
+        for res in existing_resolutions:
+            rec_id = res.get("record_id")
+            if rec_id:
+                existing_record_ids.add(str(rec_id))
+            sk = res.get("source_kind")
+            sid = res.get("stream_id")
+            seq = res.get("sequence")
+            if sk is not None and sid is not None and seq is not None:
+                existing_res_keys.add((str(sk), str(sid), int(seq)))
+
         paths: list[Path] = []
         if self._pending_root.exists():
             paths.extend(self._pending_root.rglob("*.json"))
@@ -451,6 +532,34 @@ class ArchiveJournal:
         total_bytes = 0
         for path in sorted(set(paths)):
             record = self._read_record(path)
+            rec = record.receipt
+            res_tuple = (
+                (rec.source_kind.value, str(rec.stream_id), int(rec.sequence))
+                if (rec.source_kind and rec.stream_id is not None and rec.sequence is not None)
+                else None
+            )
+            is_already_committed = (
+                (rec.record_id and str(rec.record_id) in existing_record_ids)
+                or (res_tuple is not None and res_tuple in existing_res_keys)
+                or (
+                    rec.source_kind is SourceKind.HUB
+                    and self._highest_committed_sequence is not None
+                    and rec.sequence is not None
+                    and (
+                        self._active_stream_id is None
+                        or rec.stream_id == self._active_stream_id
+                    )
+                    and rec.sequence <= self._highest_committed_sequence
+                )
+            )
+            if is_already_committed:
+                try:
+                    path.unlink()
+                    _fsync_directory(path.parent)
+                except OSError:
+                    pass
+                continue
+
             self._pending_records[path] = record
             try:
                 total_bytes += path.stat().st_size

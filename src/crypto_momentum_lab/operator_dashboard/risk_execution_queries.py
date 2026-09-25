@@ -71,8 +71,11 @@ class RiskExecutionQueries:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
+        *,
+        environment: str = "live",
     ) -> None:
         self._session_factory = session_factory
+        self._environment = environment
 
     async def risk_execution(self) -> RiskExecutionResponse:
         async with self._session_factory() as session:
@@ -98,7 +101,10 @@ class RiskExecutionQueries:
                 )
             ).all()
             latest_market_time = await session.scalar(
-                select(func.max(RuntimeMarketState15sRow.bucket_end))
+                select(func.max(RuntimeMarketState15sRow.bucket_end)).where(
+                    RuntimeMarketState15sRow.environment == self._environment,
+                    RuntimeMarketState15sRow.data_complete.is_(True),
+                )
             )
         pending, ambiguous = split_exchange_orders(orders)
 

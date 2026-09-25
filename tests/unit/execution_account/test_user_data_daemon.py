@@ -125,6 +125,53 @@ async def test_publish_heartbeat_propagates_syncing_state_when_fills_catching_up
     assert service.heartbeat_states[-1] == ExecutionAccountStatus.READY_READONLY
 
 
+async def test_publish_heartbeat_internal_typeerror_not_caught() -> None:
+    class FailingService(FakeService):
+        def __init__(self, snapshot: AccountSnapshot) -> None:
+            super().__init__(snapshot)
+            self.call_count = 0
+
+        async def publish_user_data_heartbeat(self, *, observed_at, state=None):
+            self.call_count += 1
+            raise TypeError("internal implementation error")
+
+    service = FailingService(_snapshot())
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=BlockingStream(),
+        config=UserDataAccountSyncConfig(),
+    )
+    daemon._state = _snapshot()
+    daemon._accept_events = True
+
+    import pytest
+    with pytest.raises(TypeError, match="internal implementation error"):
+        await daemon._publish_heartbeat()
+
+    # Must only be called once, not retried as a signature mismatch
+    assert service.call_count == 1
+
+
+async def test_publish_heartbeat_backward_compatible_with_old_signature() -> None:
+    calls = []
+
+    class OldSignatureService(FakeService):
+        async def publish_user_data_heartbeat(self, *, observed_at):
+            calls.append(observed_at)
+
+    service = OldSignatureService(_snapshot())
+    daemon = UserDataAccountSyncDaemon(
+        service=service,
+        stream=BlockingStream(),
+        config=UserDataAccountSyncConfig(),
+    )
+    daemon._state = _snapshot()
+    daemon._accept_events = True
+
+    await daemon._publish_heartbeat()
+    assert len(calls) == 1
+
+
 async def test_run_does_not_block_startup_on_historical_fill_reconciliation() -> None:
     service = FakeService(_snapshot())
     daemon = UserDataAccountSyncDaemon(

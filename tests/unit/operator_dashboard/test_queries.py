@@ -1525,4 +1525,24 @@ async def test_risk_execution_stale_market_not_masked_by_recent_orders() -> None
     assert resp.observed_at == old_market_time
 
 
+async def test_risk_execution_filters_by_environment_and_complete_data() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
 
+    scalars_mock = MagicMock()
+    scalars_mock.all.side_effect = [[], [], []]
+    session_mock = AsyncMock()
+    session_mock.scalars.return_value = scalars_mock
+    session_mock.scalar.return_value = None
+
+    factory_mock = MagicMock()
+    factory_mock.return_value.__aenter__.return_value = session_mock
+
+    queries = RiskExecutionQueries(session_factory=factory_mock, environment="paper_1")
+    await queries.risk_execution()
+
+    assert session_mock.scalar.called
+    statement = session_mock.scalar.call_args[0][0]
+    compiled = str(statement.compile(compile_kwargs={"literal_binds": True}))
+    assert "runtime_market_states_15s.environment = 'paper_1'" in compiled
+    assert "runtime_market_states_15s.data_complete IS true" in compiled

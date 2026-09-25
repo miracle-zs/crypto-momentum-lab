@@ -186,3 +186,27 @@ def test_capacity_guard_concurrent_writes_during_scan_do_not_double_count(tmp_pa
     current_after = guard.current_snapshot()
     assert current_after.collector_bytes == 500
 
+
+def test_capacity_guard_writes_after_scan_before_snapshot_commit_not_zeroed(tmp_path: Path) -> None:
+    def fake_disk_usage(p: Path) -> _DummyUsage:
+        # A file of 350 bytes is written and recorded after directory traversal before snapshot commit
+        (tmp_path / "post_scan.dat").write_bytes(b"x" * 350)
+        guard.record_written_bytes(350)
+        return _DummyUsage(free=100000)
+
+    guard = CapacityGuard(
+        root=tmp_path,
+        soft_limit_bytes=10000,
+        hard_limit_bytes=20000,
+        global_warning_free_bytes=500,
+        global_pause_free_bytes=100,
+        disk_usage_fn=fake_disk_usage,
+    )
+
+    snapshot = guard.scan()
+    # The 350 bytes written after traversal must NOT be zeroed out
+    assert snapshot.collector_bytes == 350
+    current = guard.current_snapshot()
+    assert current.collector_bytes == 350
+
+

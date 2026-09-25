@@ -667,13 +667,19 @@ class CapacityGuard:
         self._max_snapshot_age_seconds = max_snapshot_age_seconds
 
         self._base_collector_bytes: int = 0
-        self._written_bytes_since_scan: int = 0
+        self._total_bytes_written: int = 0
+        self._baseline_written_total: int = 0
         self._base_disk_free_bytes: int = 0
         self._last_scan_monotonic: float = 0.0
         self._last_scan_observed_at: datetime | None = None
         self._last_snapshot: CapacitySnapshot | None = None
         self._scan_lock = threading.Lock()
-        self._written_lock = threading.Lock()
+        self._written_lock = threading.RLock()
+
+    @property
+    def _written_bytes_since_scan(self) -> int:
+        with self._written_lock:
+            return max(0, self._total_bytes_written - self._baseline_written_total)
 
     def _evaluate_state(
         self,
@@ -696,23 +702,29 @@ class CapacityGuard:
         """Perform a full directory walk and disk usage check (intended to run in a thread)."""
         with self._scan_lock:
             collector_bytes = _directory_size(self._root)
-            usage = self._disk_usage_fn(self._root)
-            disk_free_bytes = (
-                getattr(usage, "free", usage)
-                if not isinstance(usage, int)
-                else usage
-            )
-            now_dt = datetime.now(UTC)
-            now_mono = time.monotonic()
-
             with self._written_lock:
+                scan_completed_at_written = self._total_bytes_written
+                usage = self._disk_usage_fn(self._root)
+                disk_free_bytes = (
+                    getattr(usage, "free", usage)
+                    if not isinstance(usage, int)
+                    else usage
+                )
+                now_dt = datetime.now(UTC)
+                now_mono = time.monotonic()
+
                 self._base_collector_bytes = collector_bytes
-                self._written_bytes_since_scan = 0
+                self._baseline_written_total = scan_completed_at_written
                 self._base_disk_free_bytes = disk_free_bytes
                 self._last_scan_monotonic = now_mono
                 self._last_scan_observed_at = now_dt
-                total_collector = self._base_collector_bytes
-                total_disk_free = self._base_disk_free_bytes
+                written_since = max(
+                    0, self._total_bytes_written - self._baseline_written_total
+                )
+                total_collector = self._base_collector_bytes + written_since
+                total_disk_free = max(
+                    0, self._base_disk_free_bytes - written_since
+                )
 
             state = self._evaluate_state(total_collector, total_disk_free)
             snapshot = CapacitySnapshot(
@@ -729,7 +741,7 @@ class CapacityGuard:
         """Incrementally track bytes written to avoid rescanning on every write."""
         if num_bytes > 0:
             with self._written_lock:
-                self._written_bytes_since_scan += num_bytes
+                self._total_bytes_written += num_bytes
 
     def current_snapshot(self, now: float | None = None) -> CapacitySnapshot:
         """Fast non-blocking read of current capacity state based on cached baseline and writes."""
@@ -739,7 +751,9 @@ class CapacityGuard:
             now = time.monotonic()
         with self._written_lock:
             base_col = self._base_collector_bytes
-            written = self._written_bytes_since_scan
+            written = max(
+                0, self._total_bytes_written - self._baseline_written_total
+            )
             base_free = self._base_disk_free_bytes
             scan_mono = self._last_scan_monotonic
             scan_obs = self._last_scan_observed_at

@@ -37,6 +37,19 @@ _MISSING_FILL_RECONNECT_RETRY_SECONDS = 60.0
 _DEFAULT_MISSING_FILL_MAX_AGE_SECONDS = 5 * 60.0
 
 
+def _accepts_state_kwarg(func: object) -> bool:
+    try:
+        sig = inspect.signature(func)  # type: ignore[arg-type]
+        if "state" in sig.parameters:
+            return True
+        for p in sig.parameters.values():
+            if p.kind == inspect.Parameter.VAR_KEYWORD:
+                return True
+        return False
+    except (ValueError, TypeError):
+        return True
+
+
 class AccountSyncCycle(Protocol):
     async def sync_once(
         self,
@@ -975,12 +988,14 @@ class UserDataAccountSyncDaemon:
                     else ExecutionAccountStatus.READY_READONLY
                 )
                 async with self._rest_sync_lock:
-                    try:
+                    if _accepts_state_kwarg(
+                        self._service.publish_user_data_heartbeat
+                    ):
                         await self._service.publish_user_data_heartbeat(
                             observed_at=self._now(),
                             state=target_state,
                         )
-                    except TypeError:
+                    else:
                         await self._service.publish_user_data_heartbeat(
                             observed_at=self._now(),
                         )

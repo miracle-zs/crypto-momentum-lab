@@ -258,4 +258,58 @@ def test_materializer_resolutions_persisted_before_journal_unlink(tmp_path: Path
     assert len(journal.read_resolutions()) == 1
 
 
+def test_journal_replay_idempotent_after_failed_unlink(tmp_path: Path) -> None:
+    journal = ArchiveJournal(
+        tmp_path / "journal",
+        environment="live",
+        max_bytes=100_000,
+    )
+    s1 = fixture_state("BTCUSDT", 0)
+    selection = SelectionSnapshot(
+        observed_at=s1.bucket_start,
+        symbols=(SelectedSymbol(symbol="BTCUSDT", reason="test"),),
+    )
+    batch = _batch(s1, 1)
+    r1 = journal.accept(batch, selection, (s1,))
+
+    # Simulate unlink failure during commit
+    import unittest.mock
+    with unittest.mock.patch.object(Path, "unlink", side_effect=OSError("Disk locked")):
+        journal.commit_materialization(
+            [r1],
+            resolutions=[{
+                "record_id": r1.record_id,
+                "sequence": 1,
+                "stream_id": "test_stream",
+                "source_kind": "hub",
+                "status": "materialized",
+                "reason": "accepted",
+            }],
+        )
+
+    # Resolution was written once
+    assert len(journal.read_resolutions()) == 1
+
+    # Restart: recover() should detect that the un-deleted record is already resolved
+    new_journal = ArchiveJournal(
+        tmp_path / "journal",
+        environment="live",
+        max_bytes=100_000,
+    )
+    recovered = new_journal.recover()
+    assert len(recovered) == 0
+
+    # Even if duplicate commit is attempted, resolutions.jsonl remains idempotent (1 entry)
+    new_journal.commit_materialization(
+        [r1],
+        resolutions=[{
+            "record_id": r1.record_id,
+            "sequence": 1,
+            "stream_id": "test_stream",
+            "source_kind": "hub",
+            "status": "materialized",
+            "reason": "accepted",
+        }],
+    )
+    assert len(new_journal.read_resolutions()) == 1
 

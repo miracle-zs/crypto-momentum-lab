@@ -92,6 +92,7 @@ class WindowMaterializer:
         if record.receipt.is_empty:
             self._empty_receipts.append(record.receipt)
             self._receipt_resolutions[rec_id] = {
+                "record_id": record.receipt.record_id,
                 "sequence": record.receipt.sequence,
                 "stream_id": record.receipt.stream_id,
                 "source_kind": record.receipt.source_kind.value,
@@ -122,6 +123,7 @@ class WindowMaterializer:
                 else "empty_selection"
             )
             self._receipt_resolutions[rec_id] = {
+                "record_id": record.receipt.record_id,
                 "sequence": record.receipt.sequence,
                 "stream_id": record.receipt.stream_id,
                 "source_kind": record.receipt.source_kind.value,
@@ -145,6 +147,7 @@ class WindowMaterializer:
         )
         reason = "accepted_by_sink"
         self._receipt_resolutions[rec_id] = {
+            "record_id": record.receipt.record_id,
             "sequence": record.receipt.sequence,
             "stream_id": record.receipt.stream_id,
             "source_kind": record.receipt.source_kind.value,
@@ -247,6 +250,7 @@ class WindowMaterializer:
                 ready_resolutions.append(res)
             else:
                 ready_resolutions.append({
+                    "record_id": r.record_id,
                     "sequence": r.sequence,
                     "stream_id": r.stream_id,
                     "source_kind": r.source_kind.value,
