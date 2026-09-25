@@ -8,6 +8,7 @@ in as the already-separated lanes and coordinators.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 from collections.abc import (
     AsyncIterable,
@@ -148,6 +149,13 @@ class LiveMarketLoop:
         commit_market_state_cursor: Callable[[MarketState15s], None] | None = None,
         entered_symbol_lookup: Callable[[str], bool] | None = None,
         unmanaged_halt_debounce_seconds: float = 15.0,
+        decision_filter: (
+            Callable[
+                [StrategyDecision, MarketState15s],
+                Awaitable[StrategyDecision] | StrategyDecision,
+            ]
+            | None
+        ) = None,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
@@ -172,6 +180,7 @@ class LiveMarketLoop:
         self._hub_cursor_provider = hub_cursor_provider
         self._commit_market_state_cursor = commit_market_state_cursor
         self._entered_symbol_lookup = entered_symbol_lookup
+        self._decision_filter = decision_filter
         self._unmanaged_halt_debounce_seconds = float(
             os.environ.get(
                 "CML_UNMANAGED_HALT_DEBOUNCE_SECONDS",
@@ -590,6 +599,12 @@ class LiveMarketLoop:
                         final_state_at,
                     )
             decision = self._strategy.on_market_state(state)
+            if self._decision_filter is not None:
+                filtered = self._decision_filter(decision, state)
+                if inspect.isawaitable(filtered):
+                    decision = await filtered
+                else:
+                    decision = filtered
             decision_recorded_at = self._clock()
             if self._telemetry is not None:
                 await self._telemetry.strategy_decision(

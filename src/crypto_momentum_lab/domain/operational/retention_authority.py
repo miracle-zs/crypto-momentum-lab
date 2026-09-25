@@ -88,10 +88,26 @@ class DependencyViolationError(Exception):
 
 
 class RetentionAuthority:
-    """Authority module governing data retention and safe pruning."""
+    """Authority module governing data retention and safe pruning.
+
+    Uses per-dataset asyncio.Lock to serialise dependency registration
+    and prune execution within a single process, closing the TOCTOU gap
+    between verify_fence and the actual DELETE.  Cross-process callers
+    (e.g. archive_and_trim.py) must additionally use PostgreSQL advisory
+    locks or equivalent external coordination.
+    """
 
     def __init__(self, repository: RetentionRepository | None = None) -> None:
         self._repo = repository or InMemoryRetentionRepository()
+        self._dataset_locks: dict[str, Any] = {}
+
+    def _get_lock(self, dataset_name: str) -> Any:
+        """Returns (or creates) the asyncio.Lock for a dataset."""
+        import asyncio
+
+        if dataset_name not in self._dataset_locks:
+            self._dataset_locks[dataset_name] = asyncio.Lock()
+        return self._dataset_locks[dataset_name]
 
     @staticmethod
     def _compute_version_hash_pure(
@@ -149,6 +165,35 @@ class RetentionAuthority:
         self._repo.save_dependency(dependency)
         epoch = self.compute_dependency_version(recovery_spec.source_dataset)
         return epoch
+
+    async def register_dependency_async(
+        self,
+        *,
+        consumer_id: str,
+        generation: int,
+        recovery_spec: RecoverySpec,
+    ) -> str:
+        """Async variant that acquires dataset lock before registering.
+
+        Prevents a concurrent execute_prune_async from deleting data
+        that the newly-registered dependency's recovery window protects.
+        """
+        async with self._get_lock(recovery_spec.source_dataset):
+            temp_version = f"gen{generation}_{uuid4().hex[:8]}"
+            dependency = ConsumerDependency(
+                consumer_id=consumer_id,
+                dataset_name=recovery_spec.source_dataset,
+                generation=generation,
+                recovery_spec=recovery_spec,
+                dependency_version=temp_version,
+                updated_at=datetime.now(UTC),
+            )
+            await _maybe_await(
+                self._repo.save_dependency(dependency)
+            )
+            return await self.compute_dependency_version_async(
+                recovery_spec.source_dataset
+            )
 
     def unregister_dependency(
         self,
@@ -361,7 +406,29 @@ class RetentionAuthority:
             Awaitable[tuple[int, int]] | tuple[int, int],
         ],
     ) -> PruneReceipt:
-        """Asynchronously executes a PrunePlan after validating dependency epoch fencing."""
+        """Asynchronously executes a PrunePlan with dependency epoch fencing.
+
+        Acquires per-dataset lock to serialise against concurrent
+        register_dependency_async calls within the same process.
+        """
+        async with self._get_lock(plan.dataset_name):
+            return await self._execute_prune_async_inner(
+                plan=plan,
+                expected_dependency_version=expected_dependency_version,
+                executor_fn=executor_fn,
+            )
+
+    async def _execute_prune_async_inner(
+        self,
+        *,
+        plan: PrunePlan,
+        expected_dependency_version: str,
+        executor_fn: Callable[
+            [PrunePlan],
+            Awaitable[tuple[int, int]] | tuple[int, int],
+        ],
+    ) -> PruneReceipt:
+        """Inner execution logic, called under dataset lock."""
         current_dep_version = await self.compute_dependency_version_async(
             plan.dataset_name
         )
