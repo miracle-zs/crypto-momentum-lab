@@ -26,12 +26,23 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
+from crypto_momentum_lab.domain.performance.account_performance import (
+    AccountPerformanceCalculator,
+)
+from crypto_momentum_lab.domain.performance.metric_models import (
+    AccountEquityCut,
+    CashFlowFact,
+    MetricFamily,
+    MetricSpec,
+    ValuationPoint,
+)
 from crypto_momentum_lab.operator_dashboard.overview_queries import (
     latest_live_account_process_statement,
     live_account_fleet_status,
     live_account_summaries,
 )
 from crypto_momentum_lab.operator_dashboard.schemas import (
+    AccountPerformanceSummaryResponse,
     LiveAccountMetricPointResponse,
     LiveAccountMetricsAccountResponse,
     LiveAccountMetricsResponse,
@@ -40,6 +51,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     AccountBalanceSnapshotRow,
     AccountConfigSnapshotRow,
     AccountReconciliationRunRow,
+    CashFlowCorrectionRow,
     StrategyLiveStateRow,
     TradingLeaseRow,
 )
@@ -382,6 +394,83 @@ class LiveAccountMetricsQueries:
                         )
                     ).all()
                 ]
+                cf_rows = (
+                    await session.scalars(
+                        select(CashFlowCorrectionRow)
+                        .where(
+                            CashFlowCorrectionRow.account_label == account.account_label,
+                            CashFlowCorrectionRow.effective_at >= equity_window_start,
+                            CashFlowCorrectionRow.effective_at <= equity_window_end,
+                        )
+                        .order_by(CashFlowCorrectionRow.effective_at)
+                    )
+                ).all()
+
+                perf_summary = None
+                if equity_rows:
+                    start_eq = equity_rows[0].wallet_balance
+                    end_eq = equity_rows[-1].wallet_balance
+                    cash_facts = tuple(
+                        CashFlowFact(
+                            correction_id=row.correction_id,
+                            account_label=row.account_label,
+                            amount=row.amount,
+                            cash_flow_type=row.cash_flow_type,
+                            effective_at=row.effective_at,
+                            reason=row.reason or "audit",
+                            approval_ref=row.approval_ref or "system",
+                            evidence_hash=row.evidence_hash or "0" * 64,
+                        )
+                        for row in cf_rows
+                    )
+                    vps = tuple(
+                        ValuationPoint(timestamp=r.observed_at, equity=r.wallet_balance)
+                        for r in equity_rows
+                    )
+                    cut = AccountEquityCut(
+                        account_label=account.account_label,
+                        start_equity=start_eq,
+                        end_equity=end_eq,
+                        start_time=equity_window_start,
+                        end_time=equity_window_end,
+                        cash_flows=cash_facts,
+                        valuation_points=vps,
+                        as_of=equity_window_end,
+                    )
+                    pnl_m = AccountPerformanceCalculator.calculate(
+                        MetricSpec("cash_flow_adjusted_pnl", MetricFamily.CASH_FLOW_ADJUSTED_PNL, "USDT"), cut
+                    )
+                    delta_m = AccountPerformanceCalculator.calculate(
+                        MetricSpec("net_equity_delta", MetricFamily.NET_EQUITY_DELTA, "USDT"), cut
+                    )
+                    twr_m = AccountPerformanceCalculator.calculate(
+                        MetricSpec("twr", MetricFamily.TIME_WEIGHTED_RETURN, "ratio"), cut
+                    )
+                    dietz_m = AccountPerformanceCalculator.calculate(
+                        MetricSpec("modified_dietz", MetricFamily.MODIFIED_DIETZ, "ratio"), cut
+                    )
+                    mwr_m = AccountPerformanceCalculator.calculate(
+                        MetricSpec("mwr", MetricFamily.MONEY_WEIGHTED_RETURN, "ratio"), cut
+                    )
+                    perf_summary = AccountPerformanceSummaryResponse(
+                        start_equity=str(start_eq),
+                        end_equity=str(end_eq),
+                        net_equity_delta=str(delta_m.value) if delta_m.value is not None else None,
+                        cash_flow_adjusted_pnl=str(pnl_m.value) if pnl_m.value is not None else None,
+                        twr=str(twr_m.value) if twr_m.value is not None else None,
+                        modified_dietz=str(dietz_m.value) if dietz_m.value is not None else None,
+                        mwr=str(mwr_m.value) if mwr_m.value is not None else None,
+                        status=twr_m.status.value,
+                        is_certified=bool(cf_rows),
+                        coverage_status="confirmed" if cf_rows else "uncertified",
+                        cash_flow_coverage_proof=(
+                            f"audited_records_count_{len(cf_rows)}"
+                            if cf_rows
+                            else "uncertified_zero_cash_flow_facts"
+                        ),
+                        cash_flow_corrections_count=len(cf_rows),
+                    )
+
                 metric_accounts.append(
                     LiveAccountMetricsAccountResponse(
                         account_label=account.account_label,
@@ -392,6 +481,7 @@ class LiveAccountMetricsQueries:
                             margin_rows,
                             interval_seconds=equity_bucket_seconds,
                         ),
+                        performance=perf_summary,
                     )
                 )
         return LiveAccountMetricsResponse(

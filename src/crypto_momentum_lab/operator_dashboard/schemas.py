@@ -85,6 +85,23 @@ class LiveAccountMetricPointResponse(DashboardSchema):
     drawdown_ratio: str | None = None
 
 
+class AccountPerformanceSummaryResponse(DashboardSchema):
+    """Audited performance metrics evaluated by AccountPerformanceCalculator."""
+
+    start_equity: str | None = None
+    end_equity: str | None = None
+    net_equity_delta: str | None = None
+    cash_flow_adjusted_pnl: str | None = None
+    twr: str | None = None
+    modified_dietz: str | None = None
+    mwr: str | None = None
+    status: str = "unknown"
+    is_certified: bool = False
+    coverage_status: str = "uncertified"
+    cash_flow_coverage_proof: str = "uncertified_zero_cash_flow_facts"
+    cash_flow_corrections_count: int = 0
+
+
 class LiveAccountMetricsAccountResponse(DashboardSchema):
     """Time-series metrics for one live account in the comparison fleet."""
 
@@ -94,6 +111,7 @@ class LiveAccountMetricsAccountResponse(DashboardSchema):
     metrics_curve: list[LiveAccountMetricPointResponse] = Field(
         default_factory=list
     )
+    performance: AccountPerformanceSummaryResponse | None = None
 
 
 class LiveAccountMetricsResponse(DashboardSchema):

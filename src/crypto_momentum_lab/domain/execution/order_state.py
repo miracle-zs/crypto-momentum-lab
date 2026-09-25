@@ -57,6 +57,7 @@ class OrderExecutionPlan:
     quantized: bool = False
     time_in_force: str | None = None
     expires_at: datetime | None = None
+    batch_id: str | None = None
 
     def __post_init__(self) -> None:
         for value, field_name in (

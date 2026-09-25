@@ -135,6 +135,12 @@ class TradeCommandExecutor:
             command.command_id,
         )
 
+        batch_id = (
+            command.allocation_plan.allocations[0].batch_id
+            if command.allocation_plan and command.allocation_plan.allocations
+            else None
+        )
+
         plan = OrderExecutionPlan(
             intent_id=command.command_id,
             run_id=run_id,
@@ -148,6 +154,7 @@ class TradeCommandExecutor:
             created_at=command.created_at,
             position_side=position_side,
             quantized=True,
+            batch_id=batch_id,
         )
 
         return TradeExecutionPlanResult(

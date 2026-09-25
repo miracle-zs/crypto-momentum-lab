@@ -36,6 +36,8 @@ class RejectionReason(StrEnum):
     COOLDOWN_ACTIVE = "cooldown_active"
     NO_SIGNAL = "no_signal"
     CANDIDATE_EXPIRED = "candidate_expired"
+    HOLDING_POSITION = "holding_position"
+    BELOW_ENTRY_THRESHOLD = "below_entry_threshold"
 
 
 @dataclass(frozen=True, slots=True)

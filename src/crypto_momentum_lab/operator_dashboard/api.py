@@ -713,6 +713,31 @@ def create_dashboard_app(
             ) from exc
 
     @dashboard.get(
+        "/api/account-performance",
+        response_model=dict[str, object],
+        dependencies=[Depends(require_dashboard_auth)],
+    )
+    async def account_performance(
+        account_label: str = "primary",
+        window_hours: int = 24,
+    ) -> dict[str, object]:
+        try:
+            return await response_cache.get(
+                f"account-performance:{account_label}:{window_hours}",
+                lambda: query_service().account_performance(
+                    account_label=account_label,
+                    window_hours=window_hours,
+                ),
+                ttl_seconds=_PAPER_EQUITY_CACHE_TTL_SECONDS,
+                stale_while_revalidate_seconds=_PAPER_EQUITY_STALE_GRACE_SECONDS,
+            )
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=504,
+                detail="dashboard account performance query timed out",
+            ) from exc
+
+    @dashboard.get(
         "/api/risk-execution",
         response_model=RiskExecutionResponse,
         dependencies=[Depends(require_dashboard_auth)],

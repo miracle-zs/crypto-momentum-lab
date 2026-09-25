@@ -26,6 +26,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.execution import OrderExecutionPlan
+from crypto_momentum_lab.domain.execution.execution_coordinator import ExecutionCoordinator
 from crypto_momentum_lab.domain.execution.progress_contract import ExecutionReadiness
 from crypto_momentum_lab.domain.live_rollout import LiveSessionState
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -618,6 +619,7 @@ async def run_live_daemon(
         reservation_repository = AsyncPostgresPositionReservationRepository(
             execution_factory, strategy_name=strategy_name
         )
+        active_reservations: tuple[Any, ...] = ()
         try:
             active_reservations = (
                 await reservation_repository.load_active_reservations()
@@ -632,10 +634,17 @@ async def run_live_daemon(
                 "position_reservations_recovery_failed", error=str(res_err)
             )
 
+        domain_coordinator = ExecutionCoordinator()
+        if active_reservations:
+            for r in active_reservations:
+                domain_coordinator._reservations_by_id[r.reservation_id] = r
+
         execution_coordinator = OrderExecutionCoordinator(
             backend=state_machine,
             account_label=account_label,
             reservation_repository=reservation_repository,
+            domain_coordinator=domain_coordinator,
+            initial_reservations=active_reservations,
         )
         ownership_registry.register(
             "execution_coordinator", execution_coordinator.aclose

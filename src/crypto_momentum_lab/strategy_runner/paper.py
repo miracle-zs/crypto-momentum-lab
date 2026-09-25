@@ -21,6 +21,7 @@ from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionHealthStatus,
     PositionKey,
+    PositionLedgerBatch,
     PositionView,
 )
 from crypto_momentum_lab.domain.market.market_book import compute_market_state_hash
@@ -41,6 +42,7 @@ from crypto_momentum_lab.domain.runtime.runtime_plan import (
 )
 from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
+    RejectionReason,
     RunMode,
     StrategyCheckpoint,
     StrategyRejection,
@@ -240,6 +242,7 @@ def run_paper_trading(
     last_processed_at_by_symbol: dict[str, datetime] = {}
     max_gap_seconds = strategy.required_data().max_gap_seconds
     input_state_count = 0
+    policy_state = PolicyState()
 
     for state in source:
         if config.max_states is not None and input_state_count >= config.max_states:
@@ -309,6 +312,22 @@ def run_paper_trading(
             position_side=FuturesPositionSide.BOTH,
         )
         journal = journals_by_symbol.setdefault(state.symbol, AccountJournal(pos_key))
+        open_positions = [
+            p
+            for p in positions_by_id.values()
+            if p.symbol == state.symbol and p.status is PaperPositionStatus.OPEN
+        ]
+        batches = tuple(
+            PositionLedgerBatch(
+                batch_id=f"batch_{p.position_id}",
+                episode_id=f"ep_{p.position_id}",
+                quantity=p.quantity,
+                original_quantity=p.quantity,
+                entry_price=p.entry_price,
+                opened_at=p.opened_at,
+            )
+            for p in open_positions
+        )
         pos_view = PositionView(
             key=pos_key,
             projection_version=f"pv_{input_state_count}",
@@ -318,7 +337,7 @@ def run_paper_trading(
             schema_version="v1",
             coverage=None,
             active_episode=None,
-            batches=(),
+            batches=batches,
             unallocated_quantity=Decimal("0"),
             reconciliation_gap=Decimal("0"),
             health_status=PositionHealthStatus.READY,
@@ -335,18 +354,49 @@ def run_paper_trading(
             cash_balance=Decimal("10000.00"),
             risk_config_version="risk_v1",
         )
+        decision = strategy.on_market_state(state)
+        signals.extend(decision.signals)
+
         policy = EffectivePolicy(
             policy_id=f"policy_{config.strategy_name}",
             strategy_name=config.strategy_name,
-            entry_threshold=Decimal("65000.00"),
             target_notional=config.candidate_notional or Decimal("500.00"),
+            candidate_generator=(
+                lambda inp, st: decision.candidates[0] if decision.candidates else None
+            ),
         )
-        _decision_engine.evaluate(dec_input, PolicyState(), policy)
+        dec_res = _decision_engine.evaluate(dec_input, policy_state, policy)
+        policy_state = dec_res.next_policy_state
 
-        decision = strategy.on_market_state(state)
-        signals.extend(decision.signals)
-        candidates.extend(decision.candidates)
-        pending_candidates.extend(decision.candidates)
+        if dec_res.intent is not None:
+            candidates.append(dec_res.intent)
+            pending_candidates.append(dec_res.intent)
+        elif decision.candidates:
+            rej_reason = (
+                RejectionReason.COOLDOWN_ACTIVE
+                if dec_res.rejection_reason == "cooldown_active"
+                else (
+                    RejectionReason.HOLDING_POSITION
+                    if dec_res.rejection_reason == "holding_position_no_exit"
+                    else (
+                        RejectionReason.BELOW_ENTRY_THRESHOLD
+                        if dec_res.rejection_reason == "below_entry_threshold"
+                        else RejectionReason.NO_SIGNAL
+                    )
+                )
+            )
+            rejections.append(
+                StrategyRejection(
+                    reason=rej_reason,
+                    symbol=state.symbol,
+                    bucket_start=state.bucket_start,
+                    details={
+                        "decision_id": dec_res.decision_id,
+                        "raw_reason": dec_res.rejection_reason or "decision_engine_rejected",
+                        "candidate_id": decision.candidates[0].candidate_id,
+                    },
+                )
+            )
         rejections.extend(decision.rejections)
         # The strategy consumes a closed state.  Resolve after the decision so
         # a zero-latency candidate can fill at this state's bucket_end, never

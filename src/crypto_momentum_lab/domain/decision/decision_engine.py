@@ -163,6 +163,7 @@ class EffectivePolicy:
     max_open_positions: int = 4
     exit_policy: PositionExitPolicy = field(default_factory=PositionExitPolicy)
     cooldown_duration: timedelta = timedelta(minutes=15)
+    candidate_generator: Any | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,6 +310,29 @@ def decide(
 
     # 3. Check Entry Eligibility (when position is flat)
     if pos_view.total_quantity == Decimal("0"):
+        if policy.candidate_generator is not None:
+            cand = policy.candidate_generator(decision_input, state)
+            if cand is not None:
+                return DecisionResult(
+                    decision_id=decision_id,
+                    input_hash=input_hash,
+                    intent=cand,
+                    exit_command=None,
+                    next_policy_state=state,
+                    rejection_reason=None,
+                    evaluated_at=clock_time,
+                )
+            else:
+                return DecisionResult(
+                    decision_id=decision_id,
+                    input_hash=input_hash,
+                    intent=None,
+                    exit_command=None,
+                    next_policy_state=state,
+                    rejection_reason="no_candidate",
+                    evaluated_at=clock_time,
+                )
+
         close = state_15s.close_price or Decimal("0")
         if close > policy.entry_threshold:
             intent = OrderIntentCandidate(

@@ -484,3 +484,91 @@ def _without_fill_price(state: MarketState15s) -> MarketState15s:
             changes.get(field.name, getattr(state, field.name)),
         )
     return replacement
+
+
+def test_run_paper_trading_decision_engine_rejection_when_holding_or_cooldown(monkeypatch) -> None:
+    class ContinuousSignalStrategy:
+        def __init__(self, identity) -> None:
+            self._identity = identity
+            self._processed = 0
+            self._checkpoint = StrategyCheckpoint(
+                last_processed_at_by_symbol={},
+                warmup_buckets_by_symbol={},
+                cooldown_buckets_remaining_by_symbol={},
+                payload={},
+            )
+
+        def required_data(self) -> StrategyDataRequirement:
+            return StrategyDataRequirement(
+                base_state_interval_seconds=15,
+                warmup_buckets=1,
+                required_fields=("close_price",),
+                max_gap_seconds=30,
+                allow_entries_before_warmup=True,
+            )
+
+        def reset_symbol(self, symbol: str) -> None:
+            pass
+
+        def on_market_state(self, state: MarketState15s) -> StrategyDecision:
+            self._processed += 1
+            signal = StrategySignal(
+                signal_id=f"sig-{self._processed}",
+                run_id=self._identity.run_id,
+                strategy_name=self._identity.strategy_name,
+                strategy_version=self._identity.strategy_version,
+                config_hash=self._identity.config_hash,
+                symbol=state.symbol,
+                side=StrategySide.LONG,
+                detected_at=state.bucket_end,
+                source_state_at=state.bucket_start,
+                reason="test_entry",
+                features={},
+                reference_prices={"close": str(state.close_price)},
+            )
+            candidate = OrderIntentCandidate(
+                candidate_id=f"cand-{self._processed}",
+                signal_id=signal.signal_id,
+                run_id=self._identity.run_id,
+                strategy_name=self._identity.strategy_name,
+                strategy_version=self._identity.strategy_version,
+                config_hash=self._identity.config_hash,
+                symbol=state.symbol,
+                side=signal.side,
+                entry_type=EntryType.MARKET,
+                limit_price=None,
+                desired_notional=Decimal("100"),
+                reduce_only=False,
+                expires_at=state.bucket_end + timedelta(seconds=30),
+                created_at=state.bucket_end,
+                reason=signal.reason,
+                features={},
+            )
+            return StrategyDecision(
+                signals=(signal,),
+                candidates=(candidate,),
+                rejections=(),
+                checkpoint=self._checkpoint,
+            )
+
+        def checkpoint(self) -> StrategyCheckpoint:
+            return self._checkpoint
+
+    monkeypatch.setattr(
+        "crypto_momentum_lab.strategy_runner.paper.build_runtime_strategy",
+        lambda *args, **kwargs: ContinuousSignalStrategy(args[2] if len(args) > 2 else kwargs["identity"]),
+    )
+
+    states = (
+        _state(0, close=Decimal("100.0")),
+        _state(1, close=Decimal("101.0")),
+        _state(2, close=Decimal("102.0")),
+    )
+    report = run_paper_trading(
+        source=InMemoryPaperMarketStateSource(states),
+        config=_paper_config(),
+    )
+    # Candidate 1 and 2 were generated before fill latency resolved; Candidate 3 while holding position is rejected by DecisionEngine
+    assert len(report.candidates) == 2
+    assert report.rejection_summary["holding_position"]["BTCUSDT"] == 1
+

@@ -608,5 +608,12 @@ class DashboardQueries:
                     str(mwr_metric.value) if mwr_metric.value is not None else None
                 ),
                 "status": twr_metric.status.value,
+                "is_certified": bool(cf_rows),
+                "coverage_status": "confirmed" if cf_rows else "uncertified",
+                "cash_flow_coverage_proof": (
+                    f"audited_records_count_{len(cf_rows)}"
+                    if cf_rows
+                    else "uncertified_zero_cash_flow_facts"
+                ),
                 "cash_flow_corrections_count": len(cf_rows),
             }

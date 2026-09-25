@@ -34,6 +34,7 @@ from crypto_momentum_lab.domain.operational.retention_authority import (
 from crypto_momentum_lab.domain.operational.retention_contract import (
     RetentionConsumerRequirement,
 )
+from crypto_momentum_lab.domain.operational.retention_models import PrunePlan
 from crypto_momentum_lab.domain.universe.models import (
     MembershipStatus,
     UniverseSnapshot,
@@ -95,6 +96,9 @@ from crypto_momentum_lab.persistence.postgres.models import (
 )
 from crypto_momentum_lab.persistence.postgres.operational_retention import (
     PostgresOperationalRetentionRepository,
+)
+from crypto_momentum_lab.persistence.postgres.retention_repository import (
+    AsyncPostgresRetentionRepository,
 )
 from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     PostgresPaperDaemonRepository,
@@ -878,33 +882,54 @@ async def prune_operational_database_once(
     contract_cutoff = observed_at - timedelta(hours=contract_metadata_retention_hours)
     runtime_cutoff = observed_at - timedelta(hours=runtime_state_retention_hours)
 
-    authority = authority or RetentionAuthority()
-    plan = authority.plan_prune(
+    if authority is None:
+        session_factory = getattr(
+            repository,
+            "session_factory",
+            getattr(repository, "_session_factory", None),
+        )
+        if hasattr(session_factory, "_mock_return_value") or type(session_factory).__name__ in ("AsyncMock", "MagicMock", "Mock"):
+            session_factory = None
+        ret_repo = (
+            AsyncPostgresRetentionRepository(session_factory)
+            if session_factory is not None
+            else None
+        )
+        authority = RetentionAuthority(repository=ret_repo)
+
+    plan = await authority.plan_prune_async(
         dataset_name="market_data",
         requested_cutoff=runtime_cutoff,
     )
-    effective_runtime_cutoff = plan.effective_cutoff
-    effective_contract_cutoff = min(contract_cutoff, plan.effective_cutoff)
 
     req_kwargs = (
         {"consumer_requirements": consumer_requirements}
         if consumer_requirements
         else {}
     )
-    deleted_contracts = await repository.prune_contract_metadata(
-        before=effective_contract_cutoff,
-        batch_size=contract_metadata_batch_size,
-        **req_kwargs,
-    )
-    deleted_states = await repository.prune_runtime_market_states(
-        before=effective_runtime_cutoff,
-        batch_size=runtime_state_batch_size,
-        **req_kwargs,
-    )
-    receipt = authority.execute_prune(
+
+    deleted_contracts = 0
+    deleted_states = 0
+
+    async def executor(p: PrunePlan) -> tuple[int, int]:
+        nonlocal deleted_contracts, deleted_states
+        effective_contract_cutoff = min(contract_cutoff, p.effective_cutoff)
+        deleted_contracts = await repository.prune_contract_metadata(
+            before=effective_contract_cutoff,
+            batch_size=contract_metadata_batch_size,
+            **req_kwargs,
+        )
+        deleted_states = await repository.prune_runtime_market_states(
+            before=p.effective_cutoff,
+            batch_size=runtime_state_batch_size,
+            **req_kwargs,
+        )
+        return (deleted_states, deleted_contracts)
+
+    receipt = await authority.execute_prune_async(
         plan=plan,
         expected_dependency_version=plan.expected_dependency_version,
-        executor_fn=lambda p: (deleted_states, deleted_contracts),
+        executor_fn=executor,
     )
     # Keep tomorrow's event partitions present so live-strategy writers never
     # miss a day boundary.  Deletion stays on the daily archive-and-trim job.

@@ -557,29 +557,35 @@ def main(argv: list[str] | None = None) -> int:
                 return (rec, 0)
 
             deleted = 0
-            while True:
+            while deleted < rec:
+                batch_limit = min(args.batch_rows, rec - deleted)
+                if batch_limit <= 0:
+                    break
                 authority.verify_fence(p)
                 removed = int(
                     _scalar(
+                        "BEGIN;\n"
                         "WITH d AS (DELETE FROM "
                         f"{tbl} WHERE ctid IN (SELECT ctid FROM {tbl} "
                         f'WHERE "{col}" >= \'{from_dt}+00\' '
                         f'AND "{col}" < \'{to_dt}+00\' '
-                        f"LIMIT {args.batch_rows}) "
-                        "RETURNING 1) SELECT count(*) FROM d",
+                        f"LIMIT {batch_limit}) "
+                        "RETURNING 1) SELECT count(*) FROM d;\n"
+                        "COMMIT;",
                         **db,
                     )
                 )
                 if removed == 0:
                     break
                 deleted += removed
-                if deleted > rec:
-                    raise RuntimeError(
-                        f"Deleted {deleted} rows exceeding archived manifest rows "
-                        f"({rec})! Aborting prune to prevent unarchived data loss."
-                    )
                 if deleted % (args.batch_rows * 20) == 0:
                     print(f"  deleted {deleted} / {pend}")
+
+            if deleted != rec:
+                raise RuntimeError(
+                    f"Deleted {deleted} rows does not match archived manifest rows "
+                    f"({rec})! Aborting prune to prevent unarchived data loss."
+                )
             print(f"  deleted {deleted} rows")
             return (rec, deleted)
 

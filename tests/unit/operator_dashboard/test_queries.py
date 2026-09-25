@@ -1918,8 +1918,35 @@ async def test_dashboard_queries_account_performance_and_cash_flow_seeding() -> 
     assert perf["end_equity"] == "205.00"
     assert perf["net_equity_delta"] == "5.00"
     assert perf["cash_flow_adjusted_pnl"] == "5.00"
+    assert perf["coverage_status"] == "uncertified"
+    assert perf["is_certified"] is False
+    assert perf["cash_flow_coverage_proof"] == "uncertified_zero_cash_flow_facts"
     # TWR = 205/200 - 1 = 0.025
     assert Decimal(str(perf["twr"])) == Decimal("0.025")
+
+    # Now test with certified cash flows
+    from crypto_momentum_lab.persistence.postgres.models import CashFlowCorrectionRow
+    cf_row = CashFlowCorrectionRow(
+        correction_id="cf_001",
+        account_label="primary",
+        amount=Decimal("10.00"),
+        cash_flow_type="deposit",
+        effective_at=now - timedelta(hours=10),
+        reason="audit_deposit",
+        approval_ref="appr_001",
+        evidence_hash="a" * 64,
+        created_at=now - timedelta(hours=10),
+    )
+    scalars_mock.all.side_effect = [
+        [snap1, snap2],
+        [cf_row],
+    ]
+    perf_certified = await dashboard.account_performance("primary", window_hours=24)
+    assert perf_certified["coverage_status"] == "confirmed"
+    assert perf_certified["is_certified"] is True
+    assert perf_certified["cash_flow_coverage_proof"] == "audited_records_count_1"
+    assert perf_certified["cash_flow_corrections_count"] == 1
+
 
 
 

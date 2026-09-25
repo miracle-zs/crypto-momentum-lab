@@ -21,7 +21,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
 from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
-from crypto_momentum_lab.persistence.postgres.models import PositionReservationRow
+from crypto_momentum_lab.persistence.postgres.models import (
+    AccountPositionSnapshotRow,
+    PositionReservationRow,
+)
 
 
 def _row_to_reservation(r: PositionReservationRow) -> PositionReservation:
@@ -64,6 +67,58 @@ class PostgresPositionReservationRepository:
         now = datetime.now(UTC)
         strat = getattr(reservation.position_key, "strategy_name", self._strategy_name)
         with self._session_factory() as session, session.begin():
+            active_rows = session.scalars(
+                select(PositionReservationRow).where(
+                    PositionReservationRow.environment
+                    == reservation.position_key.environment,
+                    PositionReservationRow.account_label
+                    == reservation.position_key.account_label,
+                    PositionReservationRow.symbol
+                    == reservation.position_key.symbol,
+                    PositionReservationRow.position_side
+                    == reservation.position_key.position_side.value,
+                    PositionReservationRow.status == "ACTIVE",
+                    PositionReservationRow.reservation_id
+                    != reservation.reservation_id,
+                )
+            ).all()
+            total_active = sum(
+                (
+                    r.reserved_quantity
+                    - r.consumed_quantity
+                    - r.released_quantity
+                    for r in active_rows
+                ),
+                start=Decimal("0"),
+            )
+            try:
+                pos_snap = session.scalars(
+                    select(AccountPositionSnapshotRow)
+                    .where(
+                        AccountPositionSnapshotRow.environment
+                        == reservation.position_key.environment,
+                        AccountPositionSnapshotRow.account_label
+                        == reservation.position_key.account_label,
+                        AccountPositionSnapshotRow.symbol
+                        == reservation.position_key.symbol,
+                        AccountPositionSnapshotRow.position_side
+                        == reservation.position_key.position_side.value,
+                    )
+                    .order_by(AccountPositionSnapshotRow.observed_at.desc())
+                    .limit(1)
+                ).first()
+                if pos_snap is not None and abs(pos_snap.position_amt) > Decimal("0"):
+                    max_qty = abs(pos_snap.position_amt)
+                    if total_active + reservation.reserved_quantity > max_qty:
+                        raise ValueError(
+                            f"Database reservation quantity exceeded: requested {reservation.reserved_quantity}, "
+                            f"already reserved {total_active}, available position {max_qty}"
+                        )
+            except ValueError:
+                raise
+            except Exception:
+                pass
+
             stmt = (
                 insert(PositionReservationRow)
                 .values(
@@ -198,6 +253,59 @@ class AsyncPostgresPositionReservationRepository:
         now = datetime.now(UTC)
         strat = getattr(reservation.position_key, "strategy_name", self._strategy_name)
         async with self._session_maker() as session, session.begin():
+            active_res = await session.execute(
+                select(PositionReservationRow).where(
+                    PositionReservationRow.environment
+                    == reservation.position_key.environment,
+                    PositionReservationRow.account_label
+                    == reservation.position_key.account_label,
+                    PositionReservationRow.symbol == reservation.position_key.symbol,
+                    PositionReservationRow.position_side
+                    == reservation.position_key.position_side.value,
+                    PositionReservationRow.status == "ACTIVE",
+                    PositionReservationRow.reservation_id
+                    != reservation.reservation_id,
+                )
+            )
+            active_rows = active_res.scalars().all()
+            total_active = sum(
+                (
+                    r.reserved_quantity
+                    - r.consumed_quantity
+                    - r.released_quantity
+                    for r in active_rows
+                ),
+                start=Decimal("0"),
+            )
+            try:
+                snap_res = await session.execute(
+                    select(AccountPositionSnapshotRow)
+                    .where(
+                        AccountPositionSnapshotRow.environment
+                        == reservation.position_key.environment,
+                        AccountPositionSnapshotRow.account_label
+                        == reservation.position_key.account_label,
+                        AccountPositionSnapshotRow.symbol
+                        == reservation.position_key.symbol,
+                        AccountPositionSnapshotRow.position_side
+                        == reservation.position_key.position_side.value,
+                    )
+                    .order_by(AccountPositionSnapshotRow.observed_at.desc())
+                    .limit(1)
+                )
+                pos_snap = snap_res.scalars().first()
+                if pos_snap is not None and abs(pos_snap.position_amt) > Decimal("0"):
+                    max_qty = abs(pos_snap.position_amt)
+                    if total_active + reservation.reserved_quantity > max_qty:
+                        raise ValueError(
+                            f"Database reservation quantity exceeded: requested {reservation.reserved_quantity}, "
+                            f"already reserved {total_active}, available position {max_qty}"
+                        )
+            except ValueError:
+                raise
+            except Exception:
+                pass
+
             stmt = (
                 insert(PositionReservationRow)
                 .values(

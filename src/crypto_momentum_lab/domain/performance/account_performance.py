@@ -102,6 +102,13 @@ class AccountPerformanceCalculator:
                     "total_cash_flow": str(total_cash_flow),
                     "cash_flow_count": len(cut.cash_flows),
                     "raw_delta": str(cut.end_equity - cut.start_equity),
+                    "coverage_status": "confirmed" if cut.cash_flows else "uncertified",
+                    "is_certified": bool(cut.cash_flows),
+                    "cash_flow_coverage_proof": (
+                        f"audited_records_count_{len(cut.cash_flows)}"
+                        if cut.cash_flows
+                        else "uncertified_zero_cash_flow_facts"
+                    ),
                 },
             )
 
@@ -150,7 +157,12 @@ class AccountPerformanceCalculator:
                     as_of=as_of,
                     source_refs=source_refs,
                     status=MetricStatus.CONFIRMED,
-                    details={"subinterval_count": 1},
+                    details={
+                        "subinterval_count": 1,
+                        "coverage_status": "uncertified",
+                        "is_certified": False,
+                        "cash_flow_coverage_proof": "uncertified_zero_cash_flow_facts",
+                    },
                 )
 
             # Cash flows exist: requires subinterval valuation points
@@ -203,7 +215,12 @@ class AccountPerformanceCalculator:
                 as_of=as_of,
                 source_refs=source_refs,
                 status=MetricStatus.CONFIRMED,
-                details={"subinterval_count": len(cut.valuation_points)},
+                details={
+                    "subinterval_count": len(cut.valuation_points),
+                    "coverage_status": "confirmed",
+                    "is_certified": True,
+                    "cash_flow_coverage_proof": f"audited_records_count_{len(cut.cash_flows)}",
+                },
             )
 
         # 4. MODIFIED_DIETZ
@@ -292,6 +309,13 @@ class AccountPerformanceCalculator:
                     "gain": str(gain),
                     "average_capital": str(average_capital),
                     "cash_flow_count": len(cut.cash_flows),
+                    "coverage_status": "confirmed" if cut.cash_flows else "uncertified",
+                    "is_certified": bool(cut.cash_flows),
+                    "cash_flow_coverage_proof": (
+                        f"audited_records_count_{len(cut.cash_flows)}"
+                        if cut.cash_flows
+                        else "uncertified_zero_cash_flow_facts"
+                    ),
                 },
             )
 

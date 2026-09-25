@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Protocol, cast
@@ -296,6 +296,7 @@ class OrderExecutionCoordinator:
         idle_timeout_seconds: float = 120.0,
         domain_coordinator: ExecutionCoordinator | None = None,
         reservation_repository: Any | None = None,
+        initial_reservations: Iterable[PositionReservation] | None = None,
     ) -> None:
         if not account_label.strip():
             raise ValueError("account_label must not be empty")
@@ -311,6 +312,12 @@ class OrderExecutionCoordinator:
         self._idle_timeout_seconds = idle_timeout_seconds
         self._domain_coordinator = domain_coordinator
         self._reservation_repository = reservation_repository
+        self._active_reservations: dict[str, PositionReservation] = {}
+        if initial_reservations:
+            for r in initial_reservations:
+                self._active_reservations[r.reservation_id] = r
+                if self._domain_coordinator is not None:
+                    self._domain_coordinator._reservations_by_id[r.reservation_id] = r
         self._schedulers: dict[OrderExecutionKey, _KeyCommandScheduler] = {}
         self._scheduler_lock = asyncio.Lock()
         self._closed = False
@@ -326,6 +333,23 @@ class OrderExecutionCoordinator:
     @property
     def reservation_repository(self) -> Any | None:
         return self._reservation_repository
+
+    def get_active_reservations(
+        self, key: PositionKey | None = None
+    ) -> tuple[PositionReservation, ...]:
+        """Returns currently tracked active reservations."""
+        if key is None:
+            return tuple(
+                r
+                for r in self._active_reservations.values()
+                if r.active_quantity > Decimal("0")
+            )
+        return tuple(
+            r
+            for r in self._active_reservations.values()
+            if r.active_quantity > Decimal("0")
+            and r.position_key.canonical_id == key.canonical_id
+        )
 
     def block_entry_submissions(self) -> None:
         """Reject queued/future entries and drain the one already in flight."""
@@ -361,16 +385,23 @@ class OrderExecutionCoordinator:
                 None,
             )
             if existing is None:
+                batch_id = (
+                    getattr(plan, "batch_id", None)
+                    or f"batch_{plan.symbol}_{plan.position_side.value}"
+                )
                 reservation = PositionReservation(
                     reservation_id=f"res_{plan.client_order_id}",
                     command_id=plan.client_order_id,
                     position_key=key,
-                    batch_id=f"batch_{plan.symbol}_{plan.position_side.value}",
+                    batch_id=batch_id,
                     reserved_quantity=Decimal(str(plan.quantity)),
                 )
                 await _maybe_await(
                     self._reservation_repository.save_reservation(reservation)
                 )
+                self._active_reservations[reservation.reservation_id] = reservation
+                if self._domain_coordinator is not None:
+                    self._domain_coordinator._reservations_by_id[reservation.reservation_id] = reservation
         except Exception as res_err:
             log.error(
                 "order_reservation_creation_failed_refusing_submission",
@@ -381,6 +412,45 @@ class OrderExecutionCoordinator:
                 f"Failed to create position reservation for "
                 f"{plan.client_order_id}: {res_err}"
             ) from res_err
+
+    async def _release_reservation_if_present(
+        self,
+        plan: OrderExecutionPlan,
+        reason: str = "preparation_or_execution_failed",
+    ) -> None:
+        if not plan.reduce_only or self._reservation_repository is None:
+            return
+        try:
+            key = PositionKey(
+                environment="live",
+                account_label=self._account_label,
+                symbol=plan.symbol,
+                position_side=plan.position_side,
+            )
+            active_res = await _maybe_await(
+                self._reservation_repository.load_active_reservations(key)
+            )
+            for r in active_res:
+                if (
+                    r.command_id == plan.client_order_id
+                    and r.active_quantity > Decimal("0")
+                ):
+                    released = r.release(r.active_quantity)
+                    await _maybe_await(
+                        self._reservation_repository.update_reservation(
+                            released, release_reason=reason
+                        )
+                    )
+                    self._active_reservations.pop(r.reservation_id, None)
+                    if self._domain_coordinator is not None:
+                        self._domain_coordinator._reservations_by_id.pop(r.reservation_id, None)
+                    break
+        except Exception as rel_err:
+            log.warning(
+                "order_reservation_rollback_failed",
+                client_order_id=plan.client_order_id,
+                error=str(rel_err),
+            )
 
     async def _consume_reservation_if_filled(
         self,
@@ -409,6 +479,14 @@ class OrderExecutionCoordinator:
                     await _maybe_await(
                         self._reservation_repository.update_reservation(updated)
                     )
+                    if updated.active_quantity <= Decimal("0"):
+                        self._active_reservations.pop(r.reservation_id, None)
+                        if self._domain_coordinator is not None:
+                            self._domain_coordinator._reservations_by_id.pop(r.reservation_id, None)
+                    else:
+                        self._active_reservations[r.reservation_id] = updated
+                        if self._domain_coordinator is not None:
+                            self._domain_coordinator._reservations_by_id[r.reservation_id] = updated
                     break
         except Exception as consume_err:
             log.warning(
@@ -430,16 +508,20 @@ class OrderExecutionCoordinator:
         async def operation() -> OrderExecutionResult:
             async def submit() -> OrderExecutionResult:
                 await self._ensure_reservation(plan)
-                res = (
-                    await self._backend.execute_approved_intent(
-                        plan,
-                        prepared_submission=prepared_submission,
+                try:
+                    res = (
+                        await self._backend.execute_approved_intent(
+                            plan,
+                            prepared_submission=prepared_submission,
+                        )
+                        if prepared_submission is not None
+                        else await self._backend.execute_approved_intent(plan)
                     )
-                    if prepared_submission is not None
-                    else await self._backend.execute_approved_intent(plan)
-                )
-                await self._consume_reservation_if_filled(plan, res)
-                return res
+                    await self._consume_reservation_if_filled(plan, res)
+                    return res
+                except Exception:
+                    await self._release_reservation_if_present(plan)
+                    raise
 
             return cast(
                 OrderExecutionResult,
@@ -475,15 +557,22 @@ class OrderExecutionCoordinator:
         async def operation() -> OrderExecutionResult | None:
             async def prepare_and_submit() -> OrderExecutionResult | None:
                 await self._ensure_reservation(plan)
-                prepared = await prepare_submission()
-                if prepared is None:
-                    return None
-                res = await self._backend.execute_approved_intent(
-                    plan,
-                    prepared_submission=prepared,
-                )
-                await self._consume_reservation_if_filled(plan, res)
-                return res
+                try:
+                    prepared = await prepare_submission()
+                    if prepared is None:
+                        await self._release_reservation_if_present(
+                            plan, reason="prepare_submission_returned_none"
+                        )
+                        return None
+                    res = await self._backend.execute_approved_intent(
+                        plan,
+                        prepared_submission=prepared,
+                    )
+                    await self._consume_reservation_if_filled(plan, res)
+                    return res
+                except Exception:
+                    await self._release_reservation_if_present(plan)
+                    raise
 
             return cast(
                 OrderExecutionResult | None,

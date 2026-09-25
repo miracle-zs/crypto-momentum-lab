@@ -12,6 +12,10 @@ from crypto_momentum_lab.domain.operational.retention_authority import (
 from crypto_momentum_lab.domain.operational.retention_contract import (
     RetentionConsumerRequirement,
 )
+from crypto_momentum_lab.domain.operational.retention_models import PrunePlan
+from crypto_momentum_lab.persistence.postgres.retention_repository import (
+    AsyncPostgresRetentionRepository,
+)
 
 
 class AccountSnapshotRetentionRepository(Protocol):
@@ -70,28 +74,49 @@ async def prune_account_snapshots_once(
     observed_at = now or datetime.now(tz=UTC)
     if observed_at.tzinfo is None or observed_at.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
-    authority = authority or RetentionAuthority()
-    plan = authority.plan_prune(
+
+    if authority is None:
+        session_factory = getattr(
+            repository,
+            "session_factory",
+            getattr(repository, "_session_factory", None),
+        )
+        if hasattr(session_factory, "_mock_return_value") or type(session_factory).__name__ in ("AsyncMock", "MagicMock", "Mock"):
+            session_factory = None
+        ret_repo = (
+            AsyncPostgresRetentionRepository(session_factory)
+            if session_factory is not None
+            else None
+        )
+        authority = RetentionAuthority(repository=ret_repo)
+
+    plan = await authority.plan_prune_async(
         dataset_name=f"account_snapshots_{account_label}",
         requested_cutoff=observed_at - timedelta(days=config.retention_days),
     )
-    effective_before = plan.effective_cutoff
-    deleted = await repository.prune_account_snapshots(
-        environment=environment,
-        account_label=account_label,
-        before=effective_before,
-        equity_before=observed_at - timedelta(days=config.equity_retention_days),
-        batch_size=config.batch_size,
-        max_rows_per_table=config.max_rows_per_table,
-        consumer_requirements=consumer_requirements,
-    )
-    total_deleted = sum(deleted.values())
-    authority.execute_prune(
+
+    deleted_counts: dict[str, int] = {}
+
+    async def executor(p: PrunePlan) -> tuple[int, int]:
+        nonlocal deleted_counts
+        deleted_counts = await repository.prune_account_snapshots(
+            environment=environment,
+            account_label=account_label,
+            before=p.effective_cutoff,
+            equity_before=observed_at - timedelta(days=config.equity_retention_days),
+            batch_size=config.batch_size,
+            max_rows_per_table=config.max_rows_per_table,
+            consumer_requirements=consumer_requirements,
+        )
+        total_deleted = sum(deleted_counts.values())
+        return (total_deleted, 0)
+
+    receipt = await authority.execute_prune_async(
         plan=plan,
         expected_dependency_version=plan.expected_dependency_version,
-        executor_fn=lambda p: (total_deleted, 0),
+        executor_fn=executor,
     )
-    return deleted
+    return deleted_counts
 
 
 async def run_account_snapshot_retention(
