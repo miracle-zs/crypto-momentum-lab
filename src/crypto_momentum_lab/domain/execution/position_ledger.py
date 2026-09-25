@@ -10,8 +10,9 @@ Derives position batches and lifecycle episodes strictly from immutable facts
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.account import (
@@ -20,9 +21,12 @@ from crypto_momentum_lab.domain.account import (
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
     BatchReductionAttribution,
+    DiscrepancyKind,
     ExitOrderSubmissionFact,
     ExternalReductionFact,
+    PositionDiscrepancy,
     PositionEpisode,
+    PositionHealthStatus,
     PositionKey,
     PositionLedgerBatch,
     PositionLedgerProjection,
@@ -485,24 +489,104 @@ class PositionLedger:
             start=Decimal("0"),
         )
 
-        # 4. Compare with latest observation snapshot if present
+        # 4. Consistent Cut Reconciliation with observation snapshots
         unallocated_quantity = Decimal("0")
         reconciliation_gap = Decimal("0")
+        health_status = PositionHealthStatus.READY
+        is_comparable = True
+        discrepancy: PositionDiscrepancy | None = None
 
         if facts.snapshots:
             latest_snapshot = max(
                 facts.snapshots,
                 key=lambda s: s.observed_at,
             )
-            # Compare absolute quantities
+            snap_time = latest_snapshot.observed_at
             obs_amt = abs(latest_snapshot.position_amt)
-            reconciliation_gap = obs_amt - total_active_qty
 
-            if reconciliation_gap != Decimal("0"):
-                diagnostics.append(
-                    f"Reconciliation gap detected: snapshot={obs_amt}, "
-                    f"ledger_active={total_active_qty}, gap={reconciliation_gap}"
+            if high_watermark is not None and snap_time < high_watermark:
+                # Fills stream has advanced past snapshot observed_at (mixed cut / in-flight gap).
+                # Replay and verify cut consistency at snap_time.
+                fills_at_cut = tuple(f for f in facts.fills if f.trade_at <= snap_time)
+                cut_facts = replace(
+                    facts,
+                    fills=fills_at_cut,
+                    snapshots=(),
                 )
+                cut_projection = PositionLedger(
+                    self._position_key,
+                    system_order_ids=self._system_order_ids,
+                ).project(cut_facts)
+                cut_qty = cut_projection.total_active_quantity
+
+                if cut_qty == obs_amt:
+                    # Verified consistent at snapshot cut; delta is in-flight recent fills
+                    reconciliation_gap = Decimal("0")
+                    health_status = PositionHealthStatus.CATCHING_UP
+                    is_comparable = False
+                    diagnostics.append(
+                        f"Consistent historical cut verified at {snap_time.isoformat()}: "
+                        f"cut_qty={cut_qty}, obs_amt={obs_amt}. "
+                        f"Recent fills active up to {high_watermark.isoformat()} (status=CATCHING_UP)."
+                    )
+                else:
+                    # True divergence even at historical snapshot cut
+                    reconciliation_gap = obs_amt - cut_qty
+                    health_status = PositionHealthStatus.CONFLICT
+                    is_comparable = True
+                    diagnostics.append(
+                        f"Reconciliation gap at cut {snap_time.isoformat()}: "
+                        f"snapshot={obs_amt}, cut_qty={cut_qty}, gap={reconciliation_gap}"
+                    )
+            else:
+                # Snapshot is at or ahead of all fills
+                reconciliation_gap = obs_amt - total_active_qty
+                if reconciliation_gap == Decimal("0"):
+                    health_status = PositionHealthStatus.READY
+                    is_comparable = True
+                else:
+                    # Check if snapshot is slightly ahead within in-flight stream window
+                    is_transient = (
+                        high_watermark is not None
+                        and (snap_time - high_watermark) <= timedelta(seconds=3.0)
+                    )
+                    if is_transient:
+                        health_status = PositionHealthStatus.CATCHING_UP
+                        is_comparable = False
+                        diagnostics.append(
+                            f"Transient snapshot lead: snapshot={obs_amt} ahead of "
+                            f"fills_qty={total_active_qty} by {reconciliation_gap} within flight window."
+                        )
+                    else:
+                        health_status = PositionHealthStatus.CONFLICT
+                        is_comparable = True
+                        diagnostics.append(
+                            f"Reconciliation gap detected: snapshot={obs_amt}, "
+                            f"ledger_active={total_active_qty}, gap={reconciliation_gap}"
+                        )
+
+            if health_status in {PositionHealthStatus.CONFLICT, PositionHealthStatus.INCOMPLETE}:
+                raw_hash = f"{self._position_key.canonical_id}:{snap_time.isoformat()}:{reconciliation_gap}"
+                disc_hash = hashlib.sha256(raw_hash.encode()).hexdigest()[:16]
+                discrepancy = PositionDiscrepancy(
+                    discrepancy_id=f"disc_{self._position_key.symbol}_{disc_hash}",
+                    key=self._position_key,
+                    kind=(
+                        DiscrepancyKind.QUANTITY_MISMATCH
+                        if reconciliation_gap != Decimal("0")
+                        else DiscrepancyKind.INPUT_MISSING
+                    ),
+                    first_seen_at=snap_time,
+                    last_seen_at=snap_time,
+                    count=1,
+                    input_hash=disc_hash,
+                    details="; ".join(diagnostics),
+                    event_cut=high_watermark,
+                    snapshot_at=snap_time,
+                )
+
+        if unallocated_quantity > Decimal("0") and health_status == PositionHealthStatus.READY:
+            health_status = PositionHealthStatus.INCOMPLETE
 
         return PositionLedgerProjection(
             position_key=self._position_key,
@@ -514,4 +598,9 @@ class PositionLedger:
             high_watermark_trade_at=high_watermark,
             archived_episodes=tuple(archived_episodes),
             diagnostics=tuple(diagnostics),
+            health_status=health_status,
+            event_cut=high_watermark,
+            discrepancy=discrepancy,
+            is_comparable=is_comparable,
         )
+

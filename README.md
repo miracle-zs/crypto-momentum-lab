@@ -123,10 +123,12 @@ bounded paper session directly from those rows:
   --persist
 ```
 
-This command is simulated paper execution. The default server stack also starts
-without Binance private credentials. A separate explicit `live` Compose profile
-adds read-only account synchronization and one gated live strategy; see
-`docs/runbooks/small-capital-live-session.md`.
+This command is simulated paper execution. The default server stack starts
+without Binance private credentials. The explicit `live` Compose profile adds
+the primary read-only account synchronizer and gated live strategy. Additional
+account-specific live services are defined in `compose.live.accounts.yaml`; see
+the [small-capital live runbook](docs/runbooks/small-capital-live-session.md)
+and [multi-account live runbook](docs/runbooks/multi-live-accounts.md).
 
 ## Server Paper Deployment
 

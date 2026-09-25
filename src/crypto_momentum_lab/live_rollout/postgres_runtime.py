@@ -26,7 +26,10 @@ from crypto_momentum_lab.domain.execution import (
     rebuild_position_batches,
 )
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
-from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    PositionHealthStatus,
+    PositionKey,
+)
 from crypto_momentum_lab.domain.live_rollout import LiveOperatorApproval
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import (
@@ -54,6 +57,7 @@ from crypto_momentum_lab.live_rollout.gates import LiveGateContext
 from crypto_momentum_lab.live_rollout.position_ledger_shadow import (
     LegacyOrderIdentityAdapter,
     PositionLedgerShadowComparator,
+    ShadowDiffCategory,
 )
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
@@ -2272,6 +2276,7 @@ def _build_position_batches(
         position_side=position_side,
         position_amt=position.position_amt,
         entry_price=position.entry_price,
+        observed_at=getattr(position, "observed_at", None),
     )
     history = PositionHistory(
         orders=matching_orders,
@@ -2365,13 +2370,26 @@ def _build_position_batches(
             "CML_POSITION_LEDGER_PRIMARY_ENABLED", "1"
         ).lower() in {"1", "true", "yes"}
         if is_primary_enabled:
-            if (
-                diff_report.is_concordant
-                and shadow_projection.total_active_quantity
-                == abs(position.position_amt)
+            ledger_is_ready = (
+                shadow_projection.health_status == PositionHealthStatus.READY
+                and shadow_projection.total_active_quantity == abs(position.position_amt)
                 and shadow_projection.reconciliation_gap == Decimal("0")
                 and shadow_projection.unallocated_quantity == Decimal("0")
-            ):
+            )
+            # Prevent toxic fallback when legacy lot reconstruction is contaminated by pre-zero orders,
+            # but ledger is strictly consistent and matches exchange observation entry price.
+            legacy_price_contaminated = (
+                not diff_report.is_concordant
+                and diff_report.category == ShadowDiffCategory.LOT_ATTRIBUTION_MISMATCH
+                and position.entry_price > Decimal("0")
+                and len(shadow_projection.active_batches) > 0
+                and abs(shadow_projection.active_batches[0].entry_price - position.entry_price) < Decimal("0.0001")
+                and (
+                    not result.batches
+                    or abs(result.batches[0].entry_price - position.entry_price) > Decimal("0.001")
+                )
+            )
+            if ledger_is_ready and (diff_report.is_concordant or legacy_price_contaminated):
                 ledger_batches = tuple(
                     ManagedLivePositionBatch(
                         batch_id=(

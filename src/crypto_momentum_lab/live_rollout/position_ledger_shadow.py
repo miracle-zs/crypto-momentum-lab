@@ -16,6 +16,8 @@ from enum import StrEnum
 
 import structlog
 
+import hashlib
+
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     AccountPositionSnapshot,
@@ -30,7 +32,10 @@ from crypto_momentum_lab.domain.execution.position_batches import (
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
+    DiscrepancyKind,
     ExitOrderSubmissionFact,
+    PositionDiscrepancy,
+    PositionHealthStatus,
     PositionKey,
     PositionLedgerProjection,
 )
@@ -63,6 +68,8 @@ class ShadowDiffReport:
     details: str
     reconciliation_gap: Decimal = Decimal("0")
     unallocated_quantity: Decimal = Decimal("0")
+    health_status: PositionHealthStatus = PositionHealthStatus.READY
+    discrepancy: PositionDiscrepancy | None = None
 
     @property
     def is_concordant(self) -> bool:
@@ -166,7 +173,11 @@ class LegacyOrderIdentityAdapter:
         snapshots: list[AccountPositionSnapshot] = []
         if observation is not None:
             now_dt = datetime.now(UTC)
-            obs_time = orders[-1].updated_at if orders else now_dt
+            obs_time = (
+                observation.observed_at
+                if getattr(observation, "observed_at", None) is not None
+                else (orders[-1].updated_at if orders else now_dt)
+            )
             snapshots.append(
                 AccountPositionSnapshot(
                     environment=position_key.environment,
@@ -320,6 +331,40 @@ class PositionLedgerShadowComparator:
                         )
                         break
 
+        discrepancy: PositionDiscrepancy | None = None
+        if category != ShadowDiffCategory.EXACT_MATCH:
+            kind = DiscrepancyKind.BOUNDARY_MISMATCH
+            if category == ShadowDiffCategory.LOT_ATTRIBUTION_MISMATCH:
+                kind = (
+                    DiscrepancyKind.PRICE_MISMATCH
+                    if "entry_price" in details
+                    else DiscrepancyKind.IDENTITY_MISMATCH
+                )
+            elif category in {
+                ShadowDiffCategory.QUANTITY_MISMATCH,
+                ShadowDiffCategory.RECONCILIATION_GAP_DETECTED,
+            }:
+                kind = DiscrepancyKind.QUANTITY_MISMATCH
+            elif category == ShadowDiffCategory.UNALLOCATED_QUANTITY_DETECTED:
+                kind = DiscrepancyKind.INPUT_MISSING
+            elif category == ShadowDiffCategory.ZERO_CROSSING_DIVERGENCE:
+                kind = DiscrepancyKind.TIME_MISALIGNED
+
+            now_dt = datetime.now(UTC)
+            raw_hash = f"{position_key.canonical_id}:{category.value}:{details}"
+            disc_hash = hashlib.sha256(raw_hash.encode()).hexdigest()[:16]
+            discrepancy = PositionDiscrepancy(
+                discrepancy_id=f"disc_{position_key.symbol}_{disc_hash}",
+                key=position_key,
+                kind=kind,
+                first_seen_at=now_dt,
+                last_seen_at=now_dt,
+                count=1,
+                input_hash=disc_hash,
+                details=details,
+                event_cut=ledger_projection.event_cut,
+            )
+
         report = ShadowDiffReport(
             position_key=position_key,
             category=category,
@@ -331,6 +376,8 @@ class PositionLedgerShadowComparator:
             details=details,
             reconciliation_gap=ledger_projection.reconciliation_gap,
             unallocated_quantity=ledger_projection.unallocated_quantity,
+            health_status=ledger_projection.health_status,
+            discrepancy=discrepancy,
         )
 
         log.info(
@@ -341,6 +388,8 @@ class PositionLedgerShadowComparator:
             legacy_count=legacy_count,
             ledger_count=ledger_count,
             details=details,
+            health_status=ledger_projection.health_status.value,
+            discrepancy_id=discrepancy.discrepancy_id if discrepancy else None,
         )
 
         return report

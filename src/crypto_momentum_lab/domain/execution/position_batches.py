@@ -59,6 +59,7 @@ class PositionObservation:
     position_side: FuturesPositionSide
     position_amt: Decimal
     entry_price: Decimal
+    observed_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

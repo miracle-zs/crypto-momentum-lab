@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from enum import StrEnum
 
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
@@ -21,6 +22,46 @@ from crypto_momentum_lab.domain.account import (
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.strategy import StrategySide
+
+
+class PositionHealthStatus(StrEnum):
+    """Authoritative trading health status for a PositionKey per architecture RFC 2026-09-25."""
+
+    READY = "READY"
+    CATCHING_UP = "CATCHING_UP"
+    INCOMPLETE = "INCOMPLETE"
+    CONFLICT = "CONFLICT"
+
+
+class DiscrepancyKind(StrEnum):
+    """Classification of divergences across models, observations, and fact journals."""
+
+    INPUT_MISSING = "INPUT_MISSING"
+    TIME_MISALIGNED = "TIME_MISALIGNED"
+    QUANTITY_MISMATCH = "QUANTITY_MISMATCH"
+    PRICE_MISMATCH = "PRICE_MISMATCH"
+    IDENTITY_MISMATCH = "IDENTITY_MISMATCH"
+    BOUNDARY_MISMATCH = "BOUNDARY_MISMATCH"
+    PENDING_BINDING = "PENDING_BINDING"
+
+
+@dataclass(frozen=True, slots=True)
+class PositionDiscrepancy:
+    """Structured audit record for a single model or observation discrepancy."""
+
+    discrepancy_id: str
+    key: PositionKey
+    kind: DiscrepancyKind
+    first_seen_at: datetime
+    last_seen_at: datetime
+    count: int
+    input_hash: str
+    details: str
+    event_cut: datetime | None = None
+    snapshot_at: datetime | None = None
+    first_divergent_fact: str | None = None
+    is_reconciled: bool = False
+    resolution_evidence: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,3 +255,7 @@ class PositionLedgerProjection:
     high_watermark_trade_at: datetime | None
     archived_episodes: tuple[PositionEpisode, ...] = ()
     diagnostics: tuple[str, ...] = ()
+    health_status: PositionHealthStatus = PositionHealthStatus.READY
+    event_cut: datetime | None = None
+    discrepancy: PositionDiscrepancy | None = None
+    is_comparable: bool = True
