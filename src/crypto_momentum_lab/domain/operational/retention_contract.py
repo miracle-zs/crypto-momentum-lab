@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,15 +23,13 @@ class RetentionConsumerRequirement:
 
 @dataclass(frozen=True, slots=True)
 class RetentionGatingEvaluation:
-    """Evaluation result establishing the effective, safe cutoff boundary for table pruning."""
+    """Evaluation result establishing safe cutoff boundary for table pruning."""
 
     requested_cutoff: datetime
     effective_cutoff: datetime
     is_constrained: bool
     binding_constraint: RetentionConsumerRequirement | None
-    evaluated_at: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    evaluated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
         if self.requested_cutoff.tzinfo is None:
@@ -40,7 +38,8 @@ class RetentionGatingEvaluation:
             raise ValueError("effective_cutoff must be timezone-aware")
         if self.effective_cutoff > self.requested_cutoff:
             raise ValueError(
-                f"effective_cutoff {self.effective_cutoff} must never be newer than requested_cutoff {self.requested_cutoff}"
+                f"effective_cutoff {self.effective_cutoff} must not be newer "
+                f"than requested_cutoff {self.requested_cutoff}"
             )
 
 
@@ -66,7 +65,7 @@ class RetentionWatermarkEvaluator:
         if requested_cutoff.tzinfo is None:
             raise ValueError("requested_cutoff must be timezone-aware")
 
-        eval_time = current_time or datetime.now(timezone.utc)
+        eval_time = current_time or datetime.now(UTC)
         if eval_time.tzinfo is None:
             raise ValueError("current_time must be timezone-aware")
 

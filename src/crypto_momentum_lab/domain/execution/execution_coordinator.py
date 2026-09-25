@@ -1,10 +1,10 @@
-"""ExecutionCoordinator domain service for transactional lot reservation and exit coordination.
+"""ExecutionCoordinator domain service for transactional lot reservation.
 
-Obays RFC 2026-09-25:
+Obeys RFC 2026-09-25:
 1. Version-pinned lot reservation (CAS check on projection version);
 2. Prevents concurrent exits from double-dipping on the same batch lot;
-3. Tracks reservation consumption upon fills and releases upon order completion/cancellation;
-4. Enforces strict allocation invariants: submitters cannot expand quantity or swap batches.
+3. Tracks reservation consumption upon fills and releases upon cancellation;
+4. Enforces strict allocation invariants: submitters cannot expand quantity.
 """
 
 from __future__ import annotations
@@ -29,34 +29,92 @@ class ReservationConflictError(Exception):
 
 
 class VersionConflictError(Exception):
-    """Raised when command expected_projection_version does not match PositionView version."""
+    """Raised when command expected_projection_version mismatches view."""
 
 
 class ExecutionReadinessError(Exception):
-    """Raised when PositionView is not ready for trade (gap, incomplete coverage, conflict)."""
+    """Raised when PositionView is not ready for trading."""
+
+
+class PositionReservationRepository:
+    """Protocol for durable storage and crash-recovery of batch lot reservations."""
+
+    def save_reservation(self, reservation: PositionReservation) -> None: ...
+    def update_reservation(self, reservation: PositionReservation) -> None: ...
+    def load_active_reservations(
+        self, key: PositionKey | None = None
+    ) -> tuple[PositionReservation, ...]: ...
+    def load_reservation(self, reservation_id: str) -> PositionReservation | None: ...
+
+
+class InMemoryPositionReservationRepository:
+    """In-memory reference implementation of PositionReservationRepository."""
+
+    def __init__(self) -> None:
+        self._reservations: dict[str, PositionReservation] = {}
+
+    def save_reservation(self, reservation: PositionReservation) -> None:
+        self._reservations[reservation.reservation_id] = reservation
+
+    def update_reservation(self, reservation: PositionReservation) -> None:
+        self._reservations[reservation.reservation_id] = reservation
+
+    def load_active_reservations(
+        self, key: PositionKey | None = None
+    ) -> tuple[PositionReservation, ...]:
+        return tuple(
+            r
+            for r in self._reservations.values()
+            if r.active_quantity > Decimal("0")
+            and (key is None or r.position_key.canonical_id == key.canonical_id)
+        )
+
+    def load_reservation(self, reservation_id: str) -> PositionReservation | None:
+        return self._reservations.get(reservation_id)
 
 
 class ExecutionCoordinator:
-    """Coordinates transactional lot reservations and prevents concurrent exit over-allocation."""
+    """Coordinates transactional lot reservations and prevents double-dipping."""
 
-    def __init__(self) -> None:
+    def __init__(self, repository: PositionReservationRepository | None = None) -> None:
+        self._repo = repository or InMemoryPositionReservationRepository()
         self._reservations_by_id: dict[str, PositionReservation] = {}
+        self.recover()
 
-    def get_active_reservations(self, key: PositionKey) -> tuple[PositionReservation, ...]:
+    def recover(self, key: PositionKey | None = None) -> int:
+        """Restores in-flight active reservations from repository upon startup."""
+        active = self._repo.load_active_reservations(key)
+        count = 0
+        for r in active:
+            self._reservations_by_id[r.reservation_id] = r
+            count += 1
+        return count
+
+    def get_active_reservations(
+        self, key: PositionKey
+    ) -> tuple[PositionReservation, ...]:
         """Returns all currently active reservations for a given PositionKey."""
         return tuple(
-            r for r in self._reservations_by_id.values()
-            if r.position_key.canonical_id == key.canonical_id and r.active_quantity > Decimal("0")
+            r
+            for r in self._reservations_by_id.values()
+            if r.position_key.canonical_id == key.canonical_id
+            and r.active_quantity > Decimal("0")
         )
 
-    def get_available_batch_quantity(self, view: PositionView, batch_id: str) -> Decimal:
+    def get_available_batch_quantity(
+        self, view: PositionView, batch_id: str
+    ) -> Decimal:
         """Returns the unreserved, available quantity for a specific batch."""
         matching_batch = next((b for b in view.batches if b.batch_id == batch_id), None)
         if matching_batch is None:
             return Decimal("0")
 
         reserved = sum(
-            (r.active_quantity for r in self.get_active_reservations(view.key) if r.batch_id == batch_id),
+            (
+                r.active_quantity
+                for r in self.get_active_reservations(view.key)
+                if r.batch_id == batch_id
+            ),
             start=Decimal("0"),
         )
         return max(Decimal("0"), matching_batch.quantity - reserved)
@@ -70,8 +128,8 @@ class ExecutionCoordinator:
 
         Raises:
             ExecutionReadinessError: If PositionView is not ready for trading;
-            VersionConflictError: If command expected_projection_version mismatches view;
-            ReservationConflictError: If any target batch has insufficient unreserved quantity.
+            VersionConflictError: If command version mismatches view version;
+            ReservationConflictError: If batch has insufficient quantity.
         """
         if command.position_key.canonical_id != view.key.canonical_id:
             raise ValueError(
@@ -91,11 +149,15 @@ class ExecutionCoordinator:
             and command.expected_projection_version != view.projection_version
         ):
             raise VersionConflictError(
-                f"CAS version mismatch: command expected version "
-                f"{command.expected_projection_version}, but view is {view.projection_version}"
+                f"CAS version mismatch: command expected "
+                f"{command.expected_projection_version}, but view is "
+                f"{view.projection_version}"
             )
 
-        if command.command_type != TradeCommandType.EXIT or command.allocation_plan is None:
+        if (
+            command.command_type != TradeCommandType.EXIT
+            or command.allocation_plan is None
+        ):
             return ()
 
         # 1. Check unreserved quantity across all target batches
@@ -110,7 +172,11 @@ class ExecutionCoordinator:
                 )
 
             currently_reserved = sum(
-                (r.active_quantity for r in active_reservations if r.batch_id == allocation.batch_id),
+                (
+                    r.active_quantity
+                    for r in active_reservations
+                    if r.batch_id == allocation.batch_id
+                ),
                 start=Decimal("0"),
             )
             available = batch.quantity - currently_reserved
@@ -133,6 +199,7 @@ class ExecutionCoordinator:
                 reserved_quantity=allocation.allocated_quantity,
                 created_at=datetime.now(UTC),
             )
+            self._repo.save_reservation(res)
             self._reservations_by_id[res_id] = res
             created_reservations.append(res)
 
@@ -165,6 +232,7 @@ class ExecutionCoordinator:
             released_quantity=res.released_quantity,
             created_at=res.created_at,
         )
+        self._repo.update_reservation(updated)
         self._reservations_by_id[reservation_id] = updated
         return updated
 
@@ -173,7 +241,7 @@ class ExecutionCoordinator:
         reservation_id: str,
         quantity: Decimal | None = None,
     ) -> PositionReservation:
-        """Releases active reserved quantity (e.g. upon order cancellation or rejection)."""
+        """Releases active reserved quantity (e.g. on order cancel/rejection)."""
         res = self._reservations_by_id.get(reservation_id)
         if res is None:
             raise KeyError(f"Reservation {reservation_id} not found")
@@ -181,7 +249,8 @@ class ExecutionCoordinator:
         to_release = res.active_quantity if quantity is None else quantity
         if to_release > res.active_quantity:
             raise ValueError(
-                f"Release quantity {to_release} exceeds active reserved quantity {res.active_quantity}"
+                f"Release quantity {to_release} exceeds active "
+                f"reserved quantity {res.active_quantity}"
             )
 
         updated = PositionReservation(
@@ -194,5 +263,6 @@ class ExecutionCoordinator:
             released_quantity=res.released_quantity + to_release,
             created_at=res.created_at,
         )
+        self._repo.update_reservation(updated)
         self._reservations_by_id[reservation_id] = updated
         return updated

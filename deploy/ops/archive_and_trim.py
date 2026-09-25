@@ -63,8 +63,19 @@ TABLES: tuple[tuple[str, str], ...] = (
 def _psql(sql: str, *, container: str, database: str, user: str) -> str:
     result = subprocess.run(  # noqa: S603 - argv built here, never a shell
         [
-            "docker", "exec", container,
-            "psql", "-U", user, "-d", database, "-At", "-X", "-q", "-c", sql,
+            "docker",
+            "exec",
+            container,
+            "psql",
+            "-U",
+            user,
+            "-d",
+            database,
+            "-At",
+            "-X",
+            "-q",
+            "-c",
+            sql,
         ],
         capture_output=True,
         check=False,
@@ -77,16 +88,50 @@ def _psql(sql: str, *, container: str, database: str, user: str) -> str:
 
 
 def _scalar(sql: str, **kw: str) -> str:
-    return _psql(sql, **kw).splitlines()[0].strip()
+    lines = _psql(sql, **kw).splitlines()
+    return lines[0].strip() if lines else ""
 
 
 def _table_is_partitioned(table: str, **kw: str) -> bool:
     value = _scalar(
-        "SELECT c.relkind = 'p' FROM pg_class c "
-        f"WHERE c.oid = to_regclass('{table}')",
+        f"SELECT c.relkind = 'p' FROM pg_class c WHERE c.oid = to_regclass('{table}')",
         **kw,
     )
     return value == "t"
+
+
+def _resolve_consumer_watermark(table: str, **db: str) -> datetime | None:
+    """Resolve earliest recovery watermark required across active consumers."""
+    has_dep_table = _scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+        "WHERE table_name = 'consumer_dependencies')",
+        **db,
+    )
+    if has_dep_table == "t":
+        earliest_dep = _scalar(
+            "SELECT min(recovery_watermark)::text FROM consumer_dependencies "
+            f"WHERE dataset_name = '{table}'",
+            **db,
+        )
+        if earliest_dep:
+            try:
+                return datetime.fromisoformat(earliest_dep)
+            except Exception:
+                pass
+
+    if table in ("account_position_snapshots", "account_balance_snapshots"):
+        earliest_pos = _scalar(
+            "SELECT min(observed_at)::text FROM account_position_snapshots "
+            "WHERE abs(position_amt) > 0",
+            **db,
+        )
+        if earliest_pos:
+            try:
+                return datetime.fromisoformat(earliest_pos)
+            except Exception:
+                pass
+
+    return None
 
 
 def _drop_expired_partitions(table: str, cutoff: date, **kw: str) -> int:
@@ -112,9 +157,9 @@ def _drop_expired_partitions(table: str, cutoff: date, **kw: str) -> int:
         day_token = name.removeprefix("strategy_runtime_events_p_")
         if len(day_token) != 8 or not day_token.isdigit():
             continue
-        partition_day = datetime.strptime(day_token, "%Y%m%d").replace(
-            tzinfo=UTC
-        ).date()
+        partition_day = (
+            datetime.strptime(day_token, "%Y%m%d").replace(tzinfo=UTC).date()
+        )
         # A partition covers [day, day+1); it is fully outside the window
         # once day+1 <= cutoff, i.e. day < cutoff.
         if partition_day < cutoff:
@@ -150,33 +195,55 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         oldest_raw = _scalar(
-            f'SELECT coalesce(min("{column}")::date::text, \'\') FROM {table}', **db
+            f"SELECT coalesce(min(\"{column}\")::date::text, '') FROM {table}", **db
         )
         if not oldest_raw:
             print(f"{table}: empty, skipping")
             continue
         oldest = datetime.fromisoformat(oldest_raw).date()
-        if oldest >= cutoff:
-            print(f"{table}: oldest {oldest} is already inside the window, skipping")
+        min_watermark = _resolve_consumer_watermark(table, **db)
+        effective_cutoff = cutoff
+        if min_watermark is not None:
+            min_watermark_date = min_watermark.date()
+            if min_watermark_date < cutoff:
+                print(
+                    f"  [CONSTRAINED] {table} cutoff {cutoff} pulled back to "
+                    f"{min_watermark_date} by active consumer/position dependency"
+                )
+                effective_cutoff = min_watermark_date
+
+        if oldest >= effective_cutoff:
+            print(
+                f"{table}: oldest {oldest} is inside protected window "
+                f"[{effective_cutoff}, ...), skipping"
+            )
             continue
 
         pending = int(
             _scalar(
-                f"SELECT count(*) FROM {table} WHERE \"{column}\" < '{cutoff}+00'",
+                f'SELECT count(*) FROM {table} WHERE "{column}" < '
+                f"'{effective_cutoff}+00'",
                 **db,
             )
         )
-        print(f"{table}: archiving [{oldest}, {cutoff}) -> {pending} rows")
+        print(f"{table}: archiving [{oldest}, {effective_cutoff}) -> {pending} rows")
         if args.dry_run:
             continue
 
         archived = subprocess.run(  # noqa: S603
             [
-                sys.executable, str(_ARCHIVER),
-                table, column, str(oldest), str(cutoff),
-                "--container", args.container,
-                "--database", args.database,
-                "--user", args.user,
+                sys.executable,
+                str(_ARCHIVER),
+                table,
+                column,
+                str(oldest),
+                str(effective_cutoff),
+                "--container",
+                args.container,
+                "--database",
+                args.database,
+                "--user",
+                args.user,
             ],
             capture_output=True,
             text=True,
@@ -189,18 +256,25 @@ def main(argv: list[str] | None = None) -> int:
 
         # Verify against the manifest before removing anything.
         manifest = (
-            _ARCHIVE_ROOT / table
-            / f"{table}_{oldest:%Y%m%d}_{cutoff:%Y%m%d}.manifest.json"
+            _ARCHIVE_ROOT
+            / table
+            / f"{table}_{oldest:%Y%m%d}_{effective_cutoff:%Y%m%d}.manifest.json"
         )
         if not manifest.exists():
             print(f"  no manifest at {manifest} -- refusing to delete", file=sys.stderr)
             return 1
         recorded = int(
             subprocess.run(  # noqa: S603
-                [sys.executable, "-c",
-                 f"import json;print(json.load(open({str(manifest)!r}))['rows'])"],
-                capture_output=True, text=True, check=False,
-            ).stdout.strip() or "0"
+                [
+                    sys.executable,
+                    "-c",
+                    f"import json;print(json.load(open({str(manifest)!r}))['rows'])",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.strip()
+            or "0"
         )
         if recorded != pending:
             print(
@@ -211,10 +285,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"  manifest verified: {recorded} rows")
 
-        if table == "strategy_runtime_events" and _table_is_partitioned(
-            table, **db
-        ):
-            dropped = _drop_expired_partitions(table, cutoff, **db)
+        if table == "strategy_runtime_events" and _table_is_partitioned(table, **db):
+            dropped = _drop_expired_partitions(table, effective_cutoff, **db)
             print(f"  dropped {dropped} expired partitions")
             continue
 
@@ -224,7 +296,8 @@ def main(argv: list[str] | None = None) -> int:
                 _scalar(
                     "WITH d AS (DELETE FROM "
                     f"{table} WHERE ctid IN (SELECT ctid FROM {table} "
-                    f"WHERE \"{column}\" < '{cutoff}+00' LIMIT {args.batch_rows}) "
+                    f'WHERE "{column}" < \'{effective_cutoff}+00\' '
+                    f"LIMIT {args.batch_rows}) "
                     "RETURNING 1) SELECT count(*) FROM d",
                     **db,
                 )

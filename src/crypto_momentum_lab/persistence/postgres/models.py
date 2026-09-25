@@ -40,9 +40,7 @@ class ContractMetadataRow(Base):
     onboard_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     raw_payload: Mapped[dict[str, object]] = mapped_column(JSONB)
 
-    __table_args__ = (
-        Index("ix_contract_metadata_effective_at", "effective_at"),
-    )
+    __table_args__ = (Index("ix_contract_metadata_effective_at", "effective_at"),)
 
 
 class DailyOpenRow(Base):
@@ -107,9 +105,7 @@ class MonitoringMembershipRow(Base):
     symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
     status: Mapped[str] = mapped_column(String(16))
     side: Mapped[str | None] = mapped_column(String(16))
-    left_target_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True)
-    )
+    left_target_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class RawArchiveManifestRow(Base):
@@ -157,9 +153,7 @@ class MarketDataQualityEventRow(Base):
     route: Mapped[str | None] = mapped_column(String(16))
     stream: Mapped[str | None] = mapped_column(String(32))
     symbol: Mapped[str | None] = mapped_column(String(32))
-    connection_session_id: Mapped[UUID | None] = mapped_column(
-        PGUUID(as_uuid=True)
-    )
+    connection_session_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
     local_sequence: Mapped[int | None] = mapped_column(Integer)
     details: Mapped[dict[str, object]] = mapped_column(JSONB)
 
@@ -207,24 +201,14 @@ class RuntimeMarketState15sRow(Base):
     closed_kline_1m_close_time: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
-    closed_kline_1m_open_price: Mapped[Decimal | None] = mapped_column(
-        Numeric(38, 18)
-    )
-    closed_kline_1m_close_price: Mapped[Decimal | None] = mapped_column(
-        Numeric(38, 18)
-    )
+    closed_kline_1m_open_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    closed_kline_1m_close_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
     source_event_count: Mapped[int] = mapped_column(Integer)
-    first_received_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True)
-    )
-    last_received_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True)
-    )
+    first_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    source_watermark_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True)
-    )
+    source_watermark_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     closure_reason: Mapped[str] = mapped_column(String(32))
     input_sequence_min: Mapped[int | None] = mapped_column(Integer)
     input_sequence_max: Mapped[int | None] = mapped_column(Integer)
@@ -262,13 +246,9 @@ class RuntimeMarketStateGapRow(Base):
     symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
     previous_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     current_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    previous_event_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True)
-    )
+    previous_event_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     current_event_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    first_bucket_start: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True)
-    )
+    first_bucket_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_bucket_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     missing_count: Mapped[int] = mapped_column(Integer)
     reason: Mapped[str] = mapped_column(Text)
@@ -530,9 +510,7 @@ class PaperPositionRow(Base):
         DateTime(timezone=True)
     )
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    last_candle_end: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True)
-    )
+    last_candle_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         Index(
@@ -585,9 +563,7 @@ class StrategyCheckpointRow(Base):
     )
     last_processed_at_by_symbol: Mapped[dict[str, object]] = mapped_column(JSONB)
     warmup_buckets_by_symbol: Mapped[dict[str, int]] = mapped_column(JSONB)
-    cooldown_buckets_remaining_by_symbol: Mapped[dict[str, int]] = (
-        mapped_column(JSONB)
-    )
+    cooldown_buckets_remaining_by_symbol: Mapped[dict[str, int]] = mapped_column(JSONB)
     payload: Mapped[dict[str, object]] = mapped_column(JSONB)
     saved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -631,9 +607,7 @@ class StrategyRuntimeCheckpointRow(Base):
     run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     last_processed_at_by_symbol: Mapped[dict[str, object]] = mapped_column(JSONB)
     warmup_buckets_by_symbol: Mapped[dict[str, int]] = mapped_column(JSONB)
-    cooldown_buckets_remaining_by_symbol: Mapped[dict[str, int]] = (
-        mapped_column(JSONB)
-    )
+    cooldown_buckets_remaining_by_symbol: Mapped[dict[str, int]] = mapped_column(JSONB)
     payload: Mapped[dict[str, object]] = mapped_column(JSONB)
     saved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -1257,9 +1231,7 @@ class ExecutionCommandRow(Base):
 class ExecutionReconciliationEventRow(Base):
     __tablename__ = "execution_reconciliation_events"
 
-    reconciliation_event_id: Mapped[str] = mapped_column(
-        String(128), primary_key=True
-    )
+    reconciliation_event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     client_order_id: Mapped[str] = mapped_column(String(36))
     outcome: Mapped[str] = mapped_column(String(64))
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -1443,3 +1415,113 @@ class LiveRollbackCommandRow(Base):
     status: Mapped[str] = mapped_column(String(32))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class PositionReservationRow(Base):
+    """Durable single-owner lot reservation for batch-level exit allocation."""
+
+    __tablename__ = "position_reservations"
+
+    reservation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    environment: Mapped[str] = mapped_column(String(32), nullable=False)
+    account_label: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    position_side: Mapped[str] = mapped_column(String(8), nullable=False)
+    batch_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    command_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    client_order_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    reserved_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    consumed_quantity: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18), nullable=False, default=Decimal("0")
+    )
+    released_quantity: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18), nullable=False, default=Decimal("0")
+    )
+    expected_projection_version: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    released_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    release_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_position_reservations_batch_active",
+            "environment",
+            "account_label",
+            "symbol",
+            "batch_id",
+            "status",
+        ),
+        Index(
+            "ix_position_reservations_command",
+            "command_id",
+        ),
+    )
+
+
+class ConsumerDependencyRow(Base):
+    """Durable consumer recovery dependency for RetentionAuthority."""
+
+    __tablename__ = "consumer_dependencies"
+
+    consumer_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    dataset_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    recovery_watermark: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    earliest_checkpoint_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    recovery_deadline: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cold_recovery_supported: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    dependency_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+class PrunePlanRow(Base):
+    """Durable PrunePlan and execution log for RetentionAuthority."""
+
+    __tablename__ = "prune_plans"
+
+    plan_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    dataset_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    requested_cutoff: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    effective_cutoff: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    is_constrained: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    binding_consumer_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    manifest_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    expected_dependency_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    rows_archived: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    rows_deleted: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    executed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
