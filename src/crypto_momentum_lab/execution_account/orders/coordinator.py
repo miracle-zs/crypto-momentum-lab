@@ -19,6 +19,10 @@ from crypto_momentum_lab.domain.execution import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.execution.execution_coordinator import (
+    ExecutionCoordinator,
+)
+from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
 from crypto_momentum_lab.domain.market.models import JsonValue
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
@@ -144,10 +148,10 @@ class _KeyCommandScheduler:
             enqueued_at = time.monotonic()
             try:
                 self._queue.put_nowait((priority, sequence, operation, future, enqueued_at, started))
-            except asyncio.QueueFull:
+            except asyncio.QueueFull as err:
                 raise OrderPreSubmissionError(
                     f"order scheduler queue full for key {self._key.symbol}:{self._key.position_side.value}"
-                )
+                ) from err
         if not is_exit and self._max_queue_wait_seconds > 0:
             waiter = asyncio.create_task(started.wait())
             try:
@@ -276,6 +280,8 @@ class OrderExecutionCoordinator:
         exit_headroom: int = 16,
         max_queue_wait_seconds: float = 30.0,
         idle_timeout_seconds: float = 120.0,
+        domain_coordinator: ExecutionCoordinator | None = None,
+        reservation_repository: Any | None = None,
     ) -> None:
         if not account_label.strip():
             raise ValueError("account_label must not be empty")
@@ -289,6 +295,8 @@ class OrderExecutionCoordinator:
         self._exit_headroom = exit_headroom
         self._max_queue_wait_seconds = max_queue_wait_seconds
         self._idle_timeout_seconds = idle_timeout_seconds
+        self._domain_coordinator = domain_coordinator
+        self._reservation_repository = reservation_repository
         self._schedulers: dict[OrderExecutionKey, _KeyCommandScheduler] = {}
         self._scheduler_lock = asyncio.Lock()
         self._closed = False
@@ -296,6 +304,14 @@ class OrderExecutionCoordinator:
         self._active_entry_submissions = 0
         self._entry_submissions_idle = asyncio.Event()
         self._entry_submissions_idle.set()
+
+    @property
+    def domain_coordinator(self) -> ExecutionCoordinator | None:
+        return self._domain_coordinator
+
+    @property
+    def reservation_repository(self) -> Any | None:
+        return self._reservation_repository
 
     def block_entry_submissions(self) -> None:
         """Reject queued/future entries and drain the one already in flight."""
@@ -325,12 +341,44 @@ class OrderExecutionCoordinator:
 
         async def operation() -> OrderExecutionResult:
             async def submit() -> OrderExecutionResult:
-                if prepared_submission is None:
-                    return await self._backend.execute_approved_intent(plan)
-                return await self._backend.execute_approved_intent(
-                    plan,
-                    prepared_submission=prepared_submission,
+                res = (
+                    await self._backend.execute_approved_intent(
+                        plan,
+                        prepared_submission=prepared_submission,
+                    )
+                    if prepared_submission is not None
+                    else await self._backend.execute_approved_intent(plan)
                 )
+                if (
+                    plan.reduce_only
+                    and self._reservation_repository is not None
+                    and res.executed_quantity > 0
+                ):
+                    try:
+                        key = PositionKey(
+                            environment="live",
+                            account_label=self._account_label,
+                            symbol=plan.symbol,
+                            position_side=plan.position_side,
+                        )
+                        active_res = (
+                            await self._reservation_repository.load_active_reservations(
+                                key
+                            )
+                        )
+                        for r in active_res:
+                            if (
+                                r.command_id == plan.client_order_id
+                                or r.client_order_id == plan.client_order_id
+                            ):
+                                updated = r.consume(res.executed_quantity)
+                                await self._reservation_repository.update_reservation(
+                                    updated
+                                )
+                                break
+                    except Exception:
+                        pass
+                return res
 
             return cast(
                 OrderExecutionResult,
@@ -394,6 +442,32 @@ class OrderExecutionCoordinator:
         return await self.submit(plan, prepared_submission=prepared_submission)
 
     async def cancel_order(self, plan: OrderExecutionPlan) -> OrderExecutionResult:
+        if plan.reduce_only and self._reservation_repository is not None:
+            try:
+                key = PositionKey(
+                    environment="live",
+                    account_label=self._account_label,
+                    symbol=plan.symbol,
+                    position_side=plan.position_side,
+                )
+                active_res = (
+                    await self._reservation_repository.load_active_reservations(
+                        key
+                    )
+                )
+                for r in active_res:
+                    if (
+                        r.command_id == plan.client_order_id
+                        or r.client_order_id == plan.client_order_id
+                    ):
+                        updated = r.release(r.active_quantity)
+                        await self._reservation_repository.update_reservation(
+                            updated, release_reason="order_cancelled"
+                        )
+                        break
+            except Exception:
+                pass
+
         return cast(
             OrderExecutionResult,
             await self._schedule(

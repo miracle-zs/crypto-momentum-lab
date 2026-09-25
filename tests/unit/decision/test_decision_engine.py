@@ -229,3 +229,30 @@ def test_decision_engine_holding_position_exit_evaluation() -> None:
 
     # Next policy state must transition into cooldown
     assert res.next_policy_state.is_in_cooldown("BTCUSDT", clock_time)
+
+
+def test_decision_input_rejects_mismatched_market_envelope_ref() -> None:
+    """Regression test: DecisionInput must enforce market_envelope.ref == market_ref."""
+    import pytest
+
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    mref1, _ = _make_market_envelope("BTCUSDT", t0, Decimal("65500.00"))
+    _, menv2 = _make_market_envelope(
+        "BTCUSDT", t0 + timedelta(seconds=15), Decimal("65600.00")
+    )
+    pview = _make_flat_position_view("BTCUSDT")
+
+    with pytest.raises(
+        ValueError, match="must match market_ref"
+    ):
+        DecisionInput(
+            symbol="BTCUSDT",
+            market_ref=mref1,
+            market_envelope=menv2,
+            position_view=pview,
+            universe_version="univ_v1",
+            clock_event=ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=1),
+            cash_balance=Decimal("10000.00"),
+            risk_config_version="risk_v1",
+        )
+

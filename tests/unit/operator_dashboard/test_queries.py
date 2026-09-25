@@ -1855,3 +1855,71 @@ def test_extract_sqlstate_retrieves_pgcode_or_sqlstate() -> None:
     assert _extract_sqlstate(RuntimeError("generic")) is None
 
 
+async def test_dashboard_queries_account_performance_and_cash_flow_seeding() -> None:
+    """Verifies DashboardQueries computes authoritative metrics via
+    AccountPerformanceCalculator and seeds cash flows.
+    """
+    from decimal import Decimal
+    from unittest.mock import AsyncMock, MagicMock
+
+    from crypto_momentum_lab.operator_dashboard.queries import DashboardQueries
+    from crypto_momentum_lab.persistence.postgres.models import (
+        AccountBalanceSnapshotRow,
+    )
+
+    now = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    mock_session = AsyncMock()
+
+    from uuid import uuid4
+    snap1 = AccountBalanceSnapshotRow(
+        snapshot_id=uuid4(),
+        environment="live",
+        account_label="primary",
+        asset="USDT",
+        wallet_balance=Decimal("200.00"),
+        available_balance=Decimal("200.00"),
+        unrealized_pnl=Decimal("0.00"),
+        observed_at=now - timedelta(hours=20),
+        raw_payload={},
+    )
+    snap2 = AccountBalanceSnapshotRow(
+        snapshot_id=uuid4(),
+        environment="live",
+        account_label="primary",
+        asset="USDT",
+        wallet_balance=Decimal("205.00"),
+        available_balance=Decimal("205.00"),
+        unrealized_pnl=Decimal("0.00"),
+        observed_at=now,
+        raw_payload={},
+    )
+
+    scalars_mock = MagicMock()
+    # 1. snaps call returns [snap1, snap2]
+    # 2. cf_rows call returns empty list
+    scalars_mock.all.side_effect = [
+        [snap1, snap2],
+        [],
+    ]
+    mock_session.scalars.return_value = scalars_mock
+
+    mock_factory = MagicMock()
+    mock_factory.return_value.__aenter__.return_value = mock_session
+
+    dashboard = DashboardQueries(
+        session_factory=mock_factory,
+        clock=lambda: now,
+    )
+
+    perf = await dashboard.account_performance("primary", window_hours=24)
+    assert perf["status"] == "confirmed"
+    assert perf["account_label"] == "primary"
+    assert perf["start_equity"] == "200.00"
+    assert perf["end_equity"] == "205.00"
+    assert perf["net_equity_delta"] == "5.00"
+    assert perf["cash_flow_adjusted_pnl"] == "5.00"
+    # TWR = 205/200 - 1 = 0.025
+    assert Decimal(str(perf["twr"])) == Decimal("0.025")
+
+
+

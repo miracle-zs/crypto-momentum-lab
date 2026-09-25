@@ -247,6 +247,10 @@ def test_simulation_execution_exit_flow_with_reservation() -> None:
     assert fill_result.symbol == "BTCUSDT"
     assert fill_result.side == "SELL"
     assert fill_result.quantity == Decimal("0.5")
+    expected_pnl = (fill_result.price - Decimal("65000.00")) * Decimal("0.5")
+    assert fill_result.realized_pnl == expected_pnl
+    assert fill_result.realized_pnl < Decimal("0")
+    assert journal.read_cut().fills[0].realized_pnl == expected_pnl
 
     # 3. Reservation should now be fully consumed (active_quantity == 0)
     active_res = coordinator.get_active_reservations(pos_key)
@@ -264,3 +268,4 @@ def test_simulation_execution_exit_flow_with_reservation() -> None:
     )
     with pytest.raises(ValueError, match="execute_exit requires EXIT command_type"):
         adapter.execute_exit(non_exit_cmd, menv, journal, coordinator)
+

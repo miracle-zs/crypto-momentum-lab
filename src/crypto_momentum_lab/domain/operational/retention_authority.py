@@ -219,8 +219,11 @@ class RetentionAuthority:
         """
         current_dep_version = self.compute_dependency_version(plan.dataset_name)
 
-        # 1. Verify dependency version epoch fencing
-        if current_dep_version != expected_dependency_version:
+        # 1. Verify dependency version epoch fencing against both plan and caller expectations
+        if (
+            current_dep_version != plan.expected_dependency_version
+            or current_dep_version != expected_dependency_version
+        ):
             receipt = PruneReceipt(
                 plan_id=plan.plan_id,
                 dataset_name=plan.dataset_name,
@@ -231,9 +234,10 @@ class RetentionAuthority:
                 dependency_version_verified=current_dep_version,
                 status=PruneReceiptStatus.REJECTED_VERSION_MISMATCH,
                 details=(
-                    f"Dependency version mismatch: expected "
+                    f"Dependency version mismatch: plan expected "
+                    f"{plan.expected_dependency_version}, caller expected "
                     f"{expected_dependency_version}, current {current_dep_version}. "
-                    "A new consumer dependency was registered."
+                    "A consumer dependency was added or modified since plan creation."
                 ),
                 executed_at=datetime.now(UTC),
             )

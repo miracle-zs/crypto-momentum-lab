@@ -251,3 +251,64 @@ def test_reservation_release_on_cancellation_updates_repository() -> None:
     assert coord.get_available_batch_quantity(view, "batch_sand_001") == Decimal(
         "2189.0"
     )
+
+
+def test_postgres_position_reservation_repository_sync_contract_with_coordinator() -> None:
+    """Regression test: PostgresPositionReservationRepository must match synchronous ExecutionCoordinator protocol."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from crypto_momentum_lab.persistence.postgres.base import Base
+    from crypto_momentum_lab.persistence.postgres.models import PositionReservationRow
+    from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
+        PostgresPositionReservationRepository,
+    )
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine, tables=[PositionReservationRow.__table__])
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    pg_repo = PostgresPositionReservationRepository(
+        session_factory, strategy_name="orderflow_impulse"
+    )
+    coord1 = ExecutionCoordinator(repository=pg_repo)
+    view = _create_ready_view(batch_qty=Decimal("2000.0"), version="pv_sand_v1")
+
+    command = TradeCommand(
+        command_id="cmd_pg_exit_1",
+        position_key=view.key,
+        command_type=TradeCommandType.EXIT,
+        side=StrategySide.SHORT,
+        order_type=EntryType.LIMIT,
+        requested_quantity=Decimal("800.0"),
+        allocation_plan=ExitAllocationPlan(
+            position_key=view.key,
+            allocations=(
+                ExitAllocation(
+                    batch_id="batch_sand_001",
+                    allocated_quantity=Decimal("800.0"),
+                    entry_price=Decimal("0.04568"),
+                ),
+            ),
+            total_allocated_quantity=Decimal("800.0"),
+            policy=ExitPolicyMode.TARGET_BATCHES_ONLY,
+        ),
+    )
+
+    reservations = coord1.reserve_exit(command, view)
+    assert len(reservations) == 1
+    res_id = reservations[0].reservation_id
+
+    # Restart coordinator against the same Postgres repository
+    coord2 = ExecutionCoordinator(repository=pg_repo)
+    assert coord2.get_available_batch_quantity(view, "batch_sand_001") == Decimal(
+        "1200.0"
+    )
+
+    # Reconcile fill
+    coord2.reconcile_fill(res_id, Decimal("800.0"))
+    loaded = pg_repo.load_reservation(res_id)
+    assert loaded is not None
+    assert loaded.consumed_quantity == Decimal("800.0")
+    assert loaded.active_quantity == Decimal("0")
+

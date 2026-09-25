@@ -40,6 +40,9 @@ from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
 from crypto_momentum_lab.persistence.postgres.order_repository import (
     PostgresOrderRepository,
 )
+from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
+    AsyncPostgresPositionReservationRepository,
+)
 from crypto_momentum_lab.persistence.postgres.risk_repository import (
     PostgresRiskRepository,
 )
@@ -187,9 +190,13 @@ async def run_live_plan(
             on_before_exchange_submit=submission_fence.validate,
             serialize_commands=False,
         )
+        reservation_repo = AsyncPostgresPositionReservationRepository(
+            factory, strategy_name=strategy_name
+        )
         execution_coordinator = OrderExecutionCoordinator(
             backend=machine,
             account_label=account_label,
+            reservation_repository=reservation_repo,
         )
         session = LiveRolloutSession(
             repository=live_repository,

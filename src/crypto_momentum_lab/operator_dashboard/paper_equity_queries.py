@@ -48,6 +48,7 @@ from crypto_momentum_lab.operator_dashboard.schemas import (
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountBalanceSnapshotRow,
+    CashFlowCorrectionRow,
     ExecutionAccountProcessStateRow,
     PaperEquitySnapshotRow,
     StrategyLiveStateRow,
@@ -527,6 +528,26 @@ class PaperEquityQueries:
                             )
                         ).all()
                     ]
+        cf_rows = (
+            await session.scalars(
+                select(CashFlowCorrectionRow).order_by(
+                    CashFlowCorrectionRow.effective_at
+                )
+            )
+        ).all()
+        active_adjustments = (
+            tuple(
+                LiveCashFlowAdjustment(
+                    account_label=r.account_label,
+                    effective_at=r.effective_at,
+                    amount=r.amount,
+                    cash_flow_type=r.cash_flow_type,
+                )
+                for r in cf_rows
+            )
+            if cf_rows
+            else self._live_cash_flow_adjustments
+        )
 
         common_equity_result = build_common_equity_result(
             paper_rows=common_paper_rows,
@@ -536,7 +557,7 @@ class PaperEquityQueries:
             window_end=window_end,
             first_buckets=first_buckets,
             live_account_labels=live_balance_rows_by_account,
-            cash_flow_adjustments=self._live_cash_flow_adjustments,
+            cash_flow_adjustments=active_adjustments,
         )
         common_equity_by_run = common_equity_result.curves_by_run
         common_baseline_by_run = common_equity_result.baselines_by_run

@@ -9,10 +9,10 @@ Obeys Astra Architecture Blueprint 2026-09-25:
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from uuid import uuid4
 
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
@@ -82,6 +82,7 @@ class SimulatedFillResult:
     slippage_cost: Decimal
     filled_at: datetime
     fill_model_version: str
+    realized_pnl: Decimal = Decimal("0.00")
 
 
 class SimulationExecutionAdapter:
@@ -101,16 +102,25 @@ class SimulationExecutionAdapter:
         """Executes an entry order intent into canonical AccountJournal."""
         model = fill_model or self._fill_model
         state = envelope.state
-        base_price = state.last_ask_price or state.close_price or Decimal("100.00")
+        base_price = state.last_ask_price or state.close_price
+        if base_price is None or base_price <= Decimal("0"):
+            raise ValueError(
+                f"Cannot execute entry for {intent.symbol}: missing valid ask or close price"
+            )
 
         exec_price, unit_slip = model.compute_executed_price(base_price, "BUY")
-        notional = intent.desired_notional or Decimal("100.0")
+        notional = intent.desired_notional
+        if notional is None or notional <= Decimal("0"):
+            raise ValueError(
+                f"Cannot execute entry for {intent.symbol}: desired_notional must be positive"
+            )
         quantity = (notional / exec_price).quantize(Decimal("0.0001"))
         fee = quantity * exec_price * model.fee_rate
         slippage_cost = quantity * unit_slip
 
         fill_time = state.bucket_end
-        trade_id = f"sim_tr_{uuid4().hex[:12]}"
+        seed = f"entry:{intent.candidate_id}:{envelope.ref.content_hash}:{fill_time.isoformat()}"
+        trade_id = f"sim_tr_{hashlib.sha256(seed.encode()).hexdigest()[:12]}"
         order_id = f"sim_ord_{intent.candidate_id[-12:]}"
 
         fill_event = AccountFillEvent(
@@ -160,6 +170,7 @@ class SimulationExecutionAdapter:
             slippage_cost=slippage_cost,
             filled_at=fill_time,
             fill_model_version=model.model_version,
+            realized_pnl=Decimal("0.00"),
         )
 
     def execute_exit(
@@ -178,15 +189,41 @@ class SimulationExecutionAdapter:
 
         model = fill_model or self._fill_model
         state = envelope.state
-        base_price = state.last_bid_price or state.close_price or Decimal("100.00")
+        base_price = state.last_bid_price or state.close_price
+        if base_price is None or base_price <= Decimal("0"):
+            raise ValueError(
+                f"Cannot execute exit for {command.position_key.symbol}: missing valid bid or close price"
+            )
 
         exec_price, unit_slip = model.compute_executed_price(base_price, "SELL")
         quantity = command.requested_quantity
         fee = quantity * exec_price * model.fee_rate
         slippage_cost = quantity * unit_slip
 
+        # Compute actual realized PnL from allocated batch entry prices
+        if command.allocation_plan is not None and command.allocation_plan.allocations:
+            if command.side in (StrategySide.SHORT, "SELL"):
+                realized_pnl = sum(
+                    (
+                        (exec_price - alloc.entry_price) * alloc.allocated_quantity
+                        for alloc in command.allocation_plan.allocations
+                    ),
+                    start=Decimal("0.00"),
+                )
+            else:
+                realized_pnl = sum(
+                    (
+                        (alloc.entry_price - exec_price) * alloc.allocated_quantity
+                        for alloc in command.allocation_plan.allocations
+                    ),
+                    start=Decimal("0.00"),
+                )
+        else:
+            realized_pnl = Decimal("0.00")
+
         fill_time = state.bucket_end
-        trade_id = f"sim_tr_{uuid4().hex[:12]}"
+        seed = f"exit:{command.command_id}:{envelope.ref.content_hash}:{fill_time.isoformat()}"
+        trade_id = f"sim_tr_{hashlib.sha256(seed.encode()).hexdigest()[:12]}"
         order_id = f"sim_exit_{command.command_id[-12:]}"
 
         fill_event = AccountFillEvent(
@@ -198,7 +235,7 @@ class SimulationExecutionAdapter:
             side="SELL",
             price=exec_price,
             quantity=quantity,
-            realized_pnl=Decimal("0.00"),
+            realized_pnl=realized_pnl,
             fee=fee,
             fee_asset="USDT",
             trade_at=fill_time,
@@ -247,4 +284,5 @@ class SimulationExecutionAdapter:
             slippage_cost=slippage_cost,
             filled_at=fill_time,
             fill_model_version=model.model_version,
+            realized_pnl=realized_pnl,
         )

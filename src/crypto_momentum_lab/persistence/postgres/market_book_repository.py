@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
+from crypto_momentum_lab.domain.market.market_book import UnreproducibleError
 from crypto_momentum_lab.domain.market.revision_models import (
     DatasetManifest,
     DecisionTrace,
@@ -209,22 +210,26 @@ class PostgresMarketBookRepository:
 
             refs = []
             for rid in rev_ids:
-                rrow = rev_rows.get(rid)
-                if rrow is not None:
-                    refs.append(
-                        MarketRevisionRef(
-                            scope=rrow.scope,
-                            symbol=rrow.symbol,
-                            interval=rrow.interval,
-                            bucket_start=rrow.bucket_start,
-                            bucket_end=rrow.bucket_end,
-                            revision_id=rrow.revision_id,
-                            content_hash=rrow.content_hash,
-                            published_at=rrow.published_at,
-                            source_epoch=rrow.source_epoch,
-                            visibility_mode=MarketVisibilityMode(rrow.visibility_mode),
-                        )
+                rrow = rev_rows.get(str(rid))
+                if rrow is None:
+                    raise UnreproducibleError(
+                        f"Manifest {manifest_id} is unreproducible: "
+                        f"missing revision {rid}"
                     )
+                refs.append(
+                    MarketRevisionRef(
+                        scope=rrow.scope,
+                        symbol=rrow.symbol,
+                        interval=rrow.interval,
+                        bucket_start=rrow.bucket_start,
+                        bucket_end=rrow.bucket_end,
+                        revision_id=rrow.revision_id,
+                        content_hash=rrow.content_hash,
+                        published_at=rrow.published_at,
+                        source_epoch=rrow.source_epoch,
+                        visibility_mode=MarketVisibilityMode(rrow.visibility_mode),
+                    )
+                )
 
             holes = tuple(
                 (
@@ -281,22 +286,26 @@ class PostgresMarketBookRepository:
             rev_rows = {r.revision_id: r for r in session.execute(stmt).scalars().all()}
             refs = []
             for rid in rev_ids:
-                rrow = rev_rows.get(rid)
-                if rrow is not None:
-                    refs.append(
-                        MarketRevisionRef(
-                            scope=rrow.scope,
-                            symbol=rrow.symbol,
-                            interval=rrow.interval,
-                            bucket_start=rrow.bucket_start,
-                            bucket_end=rrow.bucket_end,
-                            revision_id=rrow.revision_id,
-                            content_hash=rrow.content_hash,
-                            published_at=rrow.published_at,
-                            source_epoch=rrow.source_epoch,
-                            visibility_mode=MarketVisibilityMode(rrow.visibility_mode),
-                        )
+                rrow = rev_rows.get(str(rid))
+                if rrow is None:
+                    raise UnreproducibleError(
+                        f"Decision trace {decision_id} is unreproducible: "
+                        f"missing revision {rid}"
                     )
+                refs.append(
+                    MarketRevisionRef(
+                        scope=rrow.scope,
+                        symbol=rrow.symbol,
+                        interval=rrow.interval,
+                        bucket_start=rrow.bucket_start,
+                        bucket_end=rrow.bucket_end,
+                        revision_id=rrow.revision_id,
+                        content_hash=rrow.content_hash,
+                        published_at=rrow.published_at,
+                        source_epoch=rrow.source_epoch,
+                        visibility_mode=MarketVisibilityMode(rrow.visibility_mode),
+                    )
+                )
 
             return DecisionTrace(
                 decision_id=row.decision_id,

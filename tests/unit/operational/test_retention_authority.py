@@ -238,3 +238,53 @@ def test_unregister_dependency_requires_explicit_retired_by() -> None:
         retired_by="operator_confirmed_safe",
     )
     assert v_after == "dep_v0_empty"
+
+
+def test_execute_prune_rejects_when_caller_passes_current_version_with_stale_plan() -> None:
+    """Regression test: Stale PrunePlan cannot bypass dependency fencing even if caller supplies latest version."""
+    authority = RetentionAuthority()
+    t_needed = datetime(2026, 9, 22, 0, 0, tzinfo=UTC)
+    spec1 = RecoverySpec(
+        source_dataset="account_position_snapshots",
+        earliest_needed_watermark=t_needed,
+    )
+    authority.register_dependency(
+        consumer_id="live_strategy_1",
+        generation=1,
+        recovery_spec=spec1,
+    )
+
+    stale_plan = authority.plan_prune(
+        dataset_name="account_position_snapshots",
+        requested_cutoff=datetime(2026, 9, 24, 0, 0, tzinfo=UTC),
+    )
+
+    # New dependency registered after plan was created
+    spec2 = RecoverySpec(
+        source_dataset="account_position_snapshots",
+        earliest_needed_watermark=datetime(2026, 9, 20, 0, 0, tzinfo=UTC),
+    )
+    latest_version = authority.register_dependency(
+        consumer_id="live_strategy_2",
+        generation=1,
+        recovery_spec=spec2,
+    )
+
+    executed = False
+
+    def dummy_executor(p) -> tuple[int, int]:
+        nonlocal executed
+        executed = True
+        return (100, 100)
+
+    # Caller tries to pass latest_version with stale_plan
+    receipt = authority.execute_prune(
+        plan=stale_plan,
+        expected_dependency_version=latest_version,
+        executor_fn=dummy_executor,
+    )
+
+    assert executed is False
+    assert receipt.status == PruneReceiptStatus.REJECTED_VERSION_MISMATCH
+    assert receipt.rows_deleted == 0
+

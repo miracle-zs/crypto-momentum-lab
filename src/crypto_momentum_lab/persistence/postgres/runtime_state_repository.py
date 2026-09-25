@@ -8,8 +8,13 @@ from sqlalchemy import func, or_, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from crypto_momentum_lab.domain.market.market_book import (
+    compute_market_state_hash,
+)
 from crypto_momentum_lab.domain.market.models import AggTradeGap, MarketState15s
+from crypto_momentum_lab.market_data.hub import market_state_to_payload
 from crypto_momentum_lab.persistence.postgres.models import (
+    MarketRevisionRefRow,
     RuntimeMarketState15sRow,
     RuntimeMarketStateGapRow,
 )
@@ -197,6 +202,36 @@ class PostgresRuntimeMarketStateRepository:
                     for state in states
                 ]
                 await _insert_many_idempotent(session, values)
+                revision_values = [
+                    {
+                        "revision_id": (
+                            f"{state.environment}:{state.symbol}:15s:"
+                            f"{int(state.bucket_start.timestamp())}:{compute_market_state_hash(state)[:10]}"
+                        ),
+                        "scope": state.environment,
+                        "symbol": state.symbol,
+                        "interval": "15s",
+                        "bucket_start": state.bucket_start,
+                        "bucket_end": state.bucket_end,
+                        "content_hash": compute_market_state_hash(state),
+                        "published_at": state.last_received_at or state.bucket_end,
+                        "source_epoch": f"seq_{sequence_range.minimum or 0}",
+                        "visibility_mode": (
+                            "canonical" if state.data_complete else "decision_visible"
+                        ),
+                        "is_canonical": state.data_complete,
+                        "payload": market_state_to_payload(state),
+                        "lineage": {
+                            "source_watermark_at": source_watermark_at.isoformat()
+                        },
+                    }
+                    for state in states
+                ]
+                await session.execute(
+                    insert(MarketRevisionRefRow)
+                    .values(revision_values)
+                    .on_conflict_do_nothing()
+                )
                 for environment in sorted(
                     {state.environment for state in states}
                 ):

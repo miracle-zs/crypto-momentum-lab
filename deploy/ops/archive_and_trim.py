@@ -17,12 +17,29 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import subprocess
 import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
+_REPO_ROOT = _HERE.parent.parent
+if str(_REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+from crypto_momentum_lab.domain.operational.retention_authority import (  # noqa: E402
+    RetentionAuthority,
+)
+from crypto_momentum_lab.domain.operational.retention_models import (  # noqa: E402
+    ConsumerDependency,
+    PrunePlan,
+    PrunePlanStatus,
+    PruneReceipt,
+    PruneReceiptStatus,
+    RecoverySpec,
+)
+
 _ARCHIVER = _HERE / "archive_table.py"
 _ARCHIVE_ROOT = Path("/var/lib/crypto-momentum-lab/table-archive")
 _DEFAULT_CONTAINER = "crypto-momentum-lab-postgres-1"
@@ -98,6 +115,179 @@ def _table_is_partitioned(table: str, **kw: str) -> bool:
         **kw,
     )
     return value == "t"
+class PsqlRetentionRepository:
+    """RetentionRepository adapter communicating with Postgres via docker exec psql."""
+
+    def __init__(self, db: dict[str, str]) -> None:
+        self.db = db
+
+    def save_dependency(self, dependency: ConsumerDependency) -> None:
+        has_table = _scalar(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'consumer_dependencies')",
+            **self.db,
+        )
+        if has_table != "t":
+            return
+        spec = dependency.recovery_spec
+        watermark_str = spec.earliest_needed_watermark.isoformat()
+        deadline_str = (
+            f"'{spec.recovery_deadline.isoformat()}'"
+            if spec.recovery_deadline
+            else "NULL"
+        )
+        checkpoint_str = (
+            f"'{spec.earliest_checkpoint_id}'"
+            if spec.earliest_checkpoint_id
+            else "NULL"
+        )
+        cold_bool = "TRUE" if spec.cold_recovery_supported else "FALSE"
+        reason_escaped = spec.reason.replace("'", "''")
+        updated_str = dependency.updated_at.isoformat()
+        sql = (
+            "INSERT INTO consumer_dependencies (consumer_id, dataset_name, generation, "
+            "recovery_watermark, earliest_checkpoint_id, recovery_deadline, "
+            "cold_recovery_supported, dependency_version, reason, updated_at) "
+            f"VALUES ('{dependency.consumer_id}', '{dependency.dataset_name}', {dependency.generation}, "
+            f"'{watermark_str}', {checkpoint_str}, {deadline_str}, {cold_bool}, "
+            f"'{dependency.dependency_version}', '{reason_escaped}', '{updated_str}') "
+            "ON CONFLICT (consumer_id, dataset_name) DO UPDATE SET "
+            "generation = EXCLUDED.generation, "
+            "recovery_watermark = EXCLUDED.recovery_watermark, "
+            "earliest_checkpoint_id = EXCLUDED.earliest_checkpoint_id, "
+            "recovery_deadline = EXCLUDED.recovery_deadline, "
+            "cold_recovery_supported = EXCLUDED.cold_recovery_supported, "
+            "dependency_version = EXCLUDED.dependency_version, "
+            "reason = EXCLUDED.reason, "
+            "updated_at = EXCLUDED.updated_at"
+        )
+        _psql(sql, **self.db)
+
+    def delete_dependency(self, consumer_id: str, dataset_name: str) -> None:
+        has_table = _scalar(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'consumer_dependencies')",
+            **self.db,
+        )
+        if has_table != "t":
+            return
+        sql = (
+            f"DELETE FROM consumer_dependencies WHERE consumer_id = '{consumer_id}' "
+            f"AND dataset_name = '{dataset_name}'"
+        )
+        _psql(sql, **self.db)
+
+    def get_dependencies(self, dataset_name: str) -> tuple[ConsumerDependency, ...]:
+        has_table = _scalar(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'consumer_dependencies')",
+            **self.db,
+        )
+        if has_table != "t":
+            return ()
+        output = _psql(
+            "SELECT consumer_id, dataset_name, generation, recovery_watermark::text, "
+            "coalesce(earliest_checkpoint_id, ''), coalesce(recovery_deadline::text, ''), "
+            "cold_recovery_supported::text, dependency_version, reason, updated_at::text "
+            f"FROM consumer_dependencies WHERE dataset_name = '{dataset_name}'",
+            **self.db,
+        )
+        deps: list[ConsumerDependency] = []
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("|")
+            if len(parts) < 10:
+                continue
+            (
+                cid,
+                dname,
+                gen,
+                wmark,
+                chk,
+                dline,
+                cold,
+                dver,
+                reason,
+                up_at,
+            ) = parts[:10]
+            try:
+                wm_dt = datetime.fromisoformat(wmark).astimezone(UTC)
+                dl_dt = datetime.fromisoformat(dline).astimezone(UTC) if dline else None
+                up_dt = datetime.fromisoformat(up_at).astimezone(UTC)
+            except Exception:
+                continue
+            deps.append(
+                ConsumerDependency(
+                    consumer_id=cid,
+                    dataset_name=dname,
+                    generation=int(gen) if gen.isdigit() else 1,
+                    recovery_spec=RecoverySpec(
+                        source_dataset=dname,
+                        earliest_needed_watermark=wm_dt,
+                        earliest_checkpoint_id=chk or None,
+                        recovery_deadline=dl_dt,
+                        cold_recovery_supported=(cold == "t"),
+                        reason=reason,
+                    ),
+                    dependency_version=dver,
+                    updated_at=up_dt,
+                )
+            )
+        return tuple(deps)
+
+    def save_plan(self, plan: PrunePlan) -> None:
+        has_table = _scalar(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'prune_plans')",
+            **self.db,
+        )
+        if has_table != "t":
+            return
+        binding_str = (
+            f"'{plan.binding_consumer_id}'" if plan.binding_consumer_id else "NULL"
+        )
+        manifest_str = f"'{plan.manifest_hash}'" if plan.manifest_hash else "NULL"
+        is_constrained_bool = "TRUE" if plan.is_constrained else "FALSE"
+        sql = (
+            "INSERT INTO prune_plans (plan_id, dataset_name, requested_cutoff, effective_cutoff, "
+            "is_constrained, binding_consumer_id, manifest_hash, expected_dependency_version, "
+            "status, rows_archived, rows_deleted, created_at) "
+            f"VALUES ('{plan.plan_id}', '{plan.dataset_name}', '{plan.requested_cutoff.isoformat()}', "
+            f"'{plan.effective_cutoff.isoformat()}', {is_constrained_bool}, {binding_str}, "
+            f"{manifest_str}, '{plan.expected_dependency_version}', '{plan.status.value}', "
+            f"0, 0, '{plan.created_at.isoformat()}') "
+            "ON CONFLICT (plan_id) DO UPDATE SET status = EXCLUDED.status"
+        )
+        _psql(sql, **self.db)
+
+    def update_plan(self, plan: PrunePlan) -> None:
+        has_table = _scalar(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'prune_plans')",
+            **self.db,
+        )
+        if has_table != "t":
+            return
+        sql = f"UPDATE prune_plans SET status = '{plan.status.value}' WHERE plan_id = '{plan.plan_id}'"
+        _psql(sql, **self.db)
+
+    def save_receipt(self, receipt: PruneReceipt) -> None:
+        has_table = _scalar(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'prune_plans')",
+            **self.db,
+        )
+        if has_table != "t":
+            return
+        status_val = (
+            PrunePlanStatus.COMPLETED.value
+            if receipt.status == PruneReceiptStatus.SUCCESS
+            else PrunePlanStatus.ABORTED.value
+        )
+        sql = (
+            f"UPDATE prune_plans SET status = '{status_val}', "
+            f"rows_archived = {receipt.rows_archived}, "
+            f"rows_deleted = {receipt.rows_deleted}, "
+            f"executed_at = '{receipt.executed_at.isoformat()}' "
+            f"WHERE plan_id = '{receipt.plan_id}'"
+        )
+        _psql(sql, **self.db)
 
 
 def _resolve_consumer_watermark(table: str, **db: str) -> datetime | None:
@@ -185,6 +375,9 @@ def main(argv: list[str] | None = None) -> int:
 
     db = {"container": args.container, "database": args.database, "user": args.user}
     cutoff = (datetime.now(tz=UTC) - timedelta(days=args.retention_days)).date()
+    cutoff_dt = datetime(cutoff.year, cutoff.month, cutoff.day, tzinfo=UTC)
+    repo = PsqlRetentionRepository(db)
+    authority = RetentionAuthority(repository=repo)
     print(
         f"retention: {args.retention_days}d   cutoff: {cutoff}   "
         f"dry-run: {args.dry_run}\n"
@@ -201,16 +394,52 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{table}: empty, skipping")
             continue
         oldest = datetime.fromisoformat(oldest_raw).date()
+
+        # Protect active positions if table holds balance/position snapshots
+        if table in ("account_position_snapshots", "account_balance_snapshots"):
+            earliest_pos_raw = _scalar(
+                "SELECT min(observed_at)::text FROM account_position_snapshots "
+                "WHERE abs(position_amt) > 0",
+                **db,
+            )
+            if earliest_pos_raw:
+                try:
+                    earliest_pos_dt = datetime.fromisoformat(earliest_pos_raw).astimezone(UTC)
+                    authority.register_dependency(
+                        consumer_id="live_active_positions",
+                        generation=1,
+                        recovery_spec=RecoverySpec(
+                            source_dataset=table,
+                            earliest_needed_watermark=earliest_pos_dt,
+                            reason="Active position protection",
+                        ),
+                    )
+                except Exception:
+                    pass
+
         min_watermark = _resolve_consumer_watermark(table, **db)
-        effective_cutoff = cutoff
         if min_watermark is not None:
-            min_watermark_date = min_watermark.date()
-            if min_watermark_date < cutoff:
-                print(
-                    f"  [CONSTRAINED] {table} cutoff {cutoff} pulled back to "
-                    f"{min_watermark_date} by active consumer/position dependency"
-                )
-                effective_cutoff = min_watermark_date
+            authority.register_dependency(
+                consumer_id=f"consumer_{table}",
+                generation=1,
+                recovery_spec=RecoverySpec(
+                    source_dataset=table,
+                    earliest_needed_watermark=min_watermark,
+                    reason="Registered consumer recovery watermark",
+                ),
+            )
+
+        plan = authority.plan_prune(
+            dataset_name=table,
+            requested_cutoff=cutoff_dt,
+        )
+
+        effective_cutoff = plan.effective_cutoff.date()
+        if plan.is_constrained:
+            print(
+                f"  [CONSTRAINED] {table} cutoff {cutoff} pulled back to "
+                f"{effective_cutoff} by active consumer/position dependency ({plan.binding_consumer_id})"
+            )
 
         if oldest >= effective_cutoff:
             print(
@@ -285,29 +514,53 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"  manifest verified: {recorded} rows")
 
-        if table == "strategy_runtime_events" and _table_is_partitioned(table, **db):
-            dropped = _drop_expired_partitions(table, effective_cutoff, **db)
-            print(f"  dropped {dropped} expired partitions")
-            continue
+        manifest_hash = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        plan = authority.plan_prune(
+            dataset_name=table,
+            requested_cutoff=cutoff_dt,
+            manifest_hash=manifest_hash,
+        )
 
-        deleted = 0
-        while True:
-            removed = int(
-                _scalar(
-                    "WITH d AS (DELETE FROM "
-                    f"{table} WHERE ctid IN (SELECT ctid FROM {table} "
-                    f'WHERE "{column}" < \'{effective_cutoff}+00\' '
-                    f"LIMIT {args.batch_rows}) "
-                    "RETURNING 1) SELECT count(*) FROM d",
-                    **db,
+        def executor(
+            p: PrunePlan,
+            tbl: str = table,
+            col: str = column,
+            rec: int = recorded,
+            pend: int = pending,
+        ) -> tuple[int, int]:
+            if tbl == "strategy_runtime_events" and _table_is_partitioned(tbl, **db):
+                dropped = _drop_expired_partitions(tbl, p.effective_cutoff.date(), **db)
+                print(f"  dropped {dropped} expired partitions")
+                return (rec, 0)
+
+            deleted = 0
+            while True:
+                removed = int(
+                    _scalar(
+                        "WITH d AS (DELETE FROM "
+                        f"{tbl} WHERE ctid IN (SELECT ctid FROM {tbl} "
+                        f'WHERE "{col}" < \'{p.effective_cutoff.date()}+00\' '
+                        f"LIMIT {args.batch_rows}) "
+                        "RETURNING 1) SELECT count(*) FROM d",
+                        **db,
+                    )
                 )
-            )
-            if removed == 0:
-                break
-            deleted += removed
-            if deleted % (args.batch_rows * 20) == 0:
-                print(f"  deleted {deleted} / {pending}")
-        print(f"  deleted {deleted} rows")
+                if removed == 0:
+                    break
+                deleted += removed
+                if deleted % (args.batch_rows * 20) == 0:
+                    print(f"  deleted {deleted} / {pend}")
+            print(f"  deleted {deleted} rows")
+            return (rec, deleted)
+
+        receipt = authority.execute_prune(
+            plan=plan,
+            expected_dependency_version=plan.expected_dependency_version,
+            executor_fn=executor,
+        )
+        if receipt.status != PruneReceiptStatus.SUCCESS:
+            print(f"  prune execution rejected: {receipt.details}", file=sys.stderr)
+            return 1
 
     if args.dry_run:
         print("\ndry run: nothing archived or deleted")

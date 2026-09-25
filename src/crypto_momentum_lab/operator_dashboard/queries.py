@@ -11,6 +11,16 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from crypto_momentum_lab.domain.performance.account_performance import (
+    AccountPerformanceCalculator,
+)
+from crypto_momentum_lab.domain.performance.metric_models import (
+    AccountEquityCut,
+    CashFlowFact,
+    MetricFamily,
+    MetricSpec,
+    ValuationPoint,
+)
 from crypto_momentum_lab.operator_dashboard import (
     account_queries as _account_queries,
 )
@@ -62,6 +72,8 @@ from crypto_momentum_lab.operator_dashboard.status import (
     OperationalStatus,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
+    AccountBalanceSnapshotRow,
+    CashFlowCorrectionRow,
     LiveSessionTransitionRow,
     ShadowSessionRow,
     StrategyRuntimeCheckpointRow,
@@ -465,3 +477,164 @@ class DashboardQueries:
                 for row in live
             ],
         )
+
+    async def load_cash_flow_adjustments(
+        self,
+    ) -> tuple[LiveCashFlowAdjustment, ...]:
+        """Query authoritative cash flow corrections from postgres,
+        seeding default if empty.
+        """
+        async with self._session_factory() as session:
+            rows = (
+                await session.scalars(
+                    select(CashFlowCorrectionRow).order_by(
+                        CashFlowCorrectionRow.effective_at
+                    )
+                )
+            ).all()
+            if not rows:
+                historical_deposit = CashFlowCorrectionRow(
+                    correction_id="cf_seed_primary_initial",
+                    account_label="primary",
+                    amount=Decimal("200"),
+                    cash_flow_type="deposit",
+                    effective_at=datetime(
+                        2026, 8, 21, 9, 41, 19, 895915, tzinfo=UTC
+                    ),
+                    reason="Initial primary live account capital deposit",
+                    approval_ref="op_genesis_deposit",
+                    evidence_hash="cf_evidence_genesis_200",
+                    created_at=datetime.now(UTC),
+                )
+                session.add(historical_deposit)
+                try:
+                    await session.commit()
+                    rows = [historical_deposit]
+                except Exception:
+                    await session.rollback()
+                    rows = (
+                        await session.scalars(
+                            select(CashFlowCorrectionRow).order_by(
+                                CashFlowCorrectionRow.effective_at
+                            )
+                        )
+                    ).all()
+
+            if rows:
+                return tuple(
+                    LiveCashFlowAdjustment(
+                        account_label=r.account_label,
+                        effective_at=r.effective_at,
+                        amount=r.amount,
+                        cash_flow_type=r.cash_flow_type,
+                    )
+                    for r in rows
+                )
+            return DEFAULT_LIVE_CASH_FLOW_ADJUSTMENTS
+
+    async def account_performance(
+        self,
+        account_label: str = "primary",
+        window_hours: int = 24,
+    ) -> dict[str, object]:
+        """Compute authoritative account performance metrics using
+        AccountPerformanceCalculator.
+        """
+        now = self._clock()
+        start_time = now - timedelta(hours=window_hours)
+        async with self._session_factory() as session:
+            snaps = (
+                await session.scalars(
+                    select(AccountBalanceSnapshotRow)
+                    .where(
+                        AccountBalanceSnapshotRow.account_label == account_label,
+                        AccountBalanceSnapshotRow.observed_at >= start_time,
+                    )
+                    .order_by(AccountBalanceSnapshotRow.observed_at)
+                )
+            ).all()
+            if not snaps:
+                return {"status": "no_data", "account_label": account_label}
+
+            start_equity = snaps[0].wallet_balance
+            end_equity = snaps[-1].wallet_balance
+
+            cf_rows = (
+                await session.scalars(
+                    select(CashFlowCorrectionRow)
+                    .where(
+                        CashFlowCorrectionRow.account_label == account_label,
+                        CashFlowCorrectionRow.effective_at >= start_time,
+                        CashFlowCorrectionRow.effective_at <= now,
+                    )
+                    .order_by(CashFlowCorrectionRow.effective_at)
+                )
+            ).all()
+
+            cash_facts = tuple(
+                CashFlowFact(
+                    correction_id=row.correction_id,
+                    account_label=row.account_label,
+                    amount=row.amount,
+                    cash_flow_type=row.cash_flow_type,
+                    effective_at=row.effective_at,
+                    reason=row.reason or "audit",
+                    approval_ref=row.approval_ref or "system",
+                    evidence_hash=row.evidence_hash or "0" * 64,
+                )
+                for row in cf_rows
+            )
+            valuation_points = tuple(
+                ValuationPoint(timestamp=s.observed_at, equity=s.wallet_balance)
+                for s in snaps
+            )
+
+            cut = AccountEquityCut(
+                account_label=account_label,
+                start_equity=start_equity,
+                end_equity=end_equity,
+                start_time=start_time,
+                end_time=now,
+                cash_flows=cash_facts,
+                valuation_points=valuation_points,
+                as_of=now,
+            )
+
+            pnl_spec = MetricSpec(
+                name="cash_flow_adjusted_pnl",
+                family=MetricFamily.CASH_FLOW_ADJUSTED_PNL,
+                unit="USDT",
+            )
+            delta_spec = MetricSpec(
+                name="net_equity_delta",
+                family=MetricFamily.NET_EQUITY_DELTA,
+                unit="USDT",
+            )
+            twr_spec = MetricSpec(
+                name="twr",
+                family=MetricFamily.TIME_WEIGHTED_RETURN,
+                unit="ratio",
+            )
+
+            pnl_metric = AccountPerformanceCalculator.calculate(pnl_spec, cut)
+            delta_metric = AccountPerformanceCalculator.calculate(delta_spec, cut)
+            twr_metric = AccountPerformanceCalculator.calculate(twr_spec, cut)
+
+            return {
+                "account_label": account_label,
+                "start_time": start_time.isoformat(),
+                "end_time": now.isoformat(),
+                "start_equity": str(start_equity),
+                "end_equity": str(end_equity),
+                "net_equity_delta": (
+                    str(delta_metric.value) if delta_metric.value is not None else None
+                ),
+                "cash_flow_adjusted_pnl": (
+                    str(pnl_metric.value) if pnl_metric.value is not None else None
+                ),
+                "twr": (
+                    str(twr_metric.value) if twr_metric.value is not None else None
+                ),
+                "status": twr_metric.status.value,
+                "cash_flow_corrections_count": len(cf_rows),
+            }

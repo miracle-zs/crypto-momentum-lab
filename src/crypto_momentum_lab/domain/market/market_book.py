@@ -306,19 +306,14 @@ class MarketBook:
 
         # Filter by visibility published_at <= decision_time if specified
         if decision_time is not None:
-            cands = [r for r in revs if r.published_at <= decision_time]
+            cands = [
+                r
+                for r in revs
+                if r.published_at <= decision_time
+                and r.visibility_mode == MarketVisibilityMode.DECISION_VISIBLE
+            ]
             if cands:
                 return max(cands, key=lambda r: r.published_at)
-            # If all revisions were published later but decision_time is after bucket
-            if decision_time >= bucket_start:
-                obs = [
-                    r
-                    for r in revs
-                    if r.visibility_mode == MarketVisibilityMode.DECISION_VISIBLE
-                ]
-                if obs:
-                    return min(obs, key=lambda r: r.published_at)
-                return min(revs, key=lambda r: r.published_at)
             return None
 
         # Default: return earliest observed revision (original decision-visible)
@@ -329,7 +324,7 @@ class MarketBook:
         ]
         if obs:
             return min(obs, key=lambda r: r.published_at)
-        return min(revs, key=lambda r: r.published_at)
+        return None
 
 
 class DatasetCatalog:

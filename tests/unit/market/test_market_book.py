@@ -182,3 +182,118 @@ def test_read_missing_revision_raises() -> None:
     book = MarketBook()
     with pytest.raises(RevisionNotFoundError, match="not found"):
         book.read("non_existent_revision_123")
+
+
+def test_decision_visible_ref_strict_isolation_and_no_leakage() -> None:
+    """Regression test: get_decision_visible_ref must never leak canonical or future revisions."""
+    repo = InMemoryMarketBookRepository()
+    book = MarketBook(repo)
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+
+    # 1. Bucket t0 has only canonical revision published at t0 + 15s
+    s_canon = _create_sample_state(bucket_start=t0)
+    book.publish(
+        s_canon,
+        visibility_mode=MarketVisibilityMode.CANONICAL,
+        is_canonical=True,
+    )
+    # Decision visible ref must be None at decision_time = t0 + 15s because only canonical exists
+    assert (
+        book.get_decision_visible_ref(
+            "live", "BTCUSDT", "15s", t0, decision_time=t0 + timedelta(seconds=15)
+        )
+        is None
+    )
+
+    # 2. Bucket t0 gets a decision-visible revision, but published at t0 + 16s (delayed)
+    s_dv = _create_sample_state(bucket_start=t0, close_price=Decimal("65010.00"))
+    ref_dv = book.publish(
+        s_dv,
+        visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
+        is_canonical=False,
+        published_at=t0 + timedelta(seconds=16),
+    )
+
+    # If decision_time is t0 + 15s, ref_dv was published in the future (> decision_time), so it must NOT be visible!
+    assert (
+        book.get_decision_visible_ref(
+            "live", "BTCUSDT", "15s", t0, decision_time=t0 + timedelta(seconds=15)
+        )
+        is None
+    )
+
+    # If decision_time is t0 + 17s (after published_at), it IS visible
+    assert (
+        book.get_decision_visible_ref(
+            "live", "BTCUSDT", "15s", t0, decision_time=t0 + timedelta(seconds=17)
+        )
+        == ref_dv
+    )
+
+
+def test_postgres_market_book_repository_fails_closed_on_missing_revision() -> None:
+    """Regression test: PostgresMarketBookRepository must raise UnreproducibleError when revision is missing."""
+    from unittest.mock import MagicMock
+
+    from crypto_momentum_lab.domain.market.market_book import UnreproducibleError
+    from crypto_momentum_lab.persistence.postgres.market_book_repository import (
+        PostgresMarketBookRepository,
+    )
+    from crypto_momentum_lab.persistence.postgres.models import (
+        DatasetManifestRow,
+        DecisionTraceRow,
+    )
+
+    mock_session = MagicMock()
+    mock_session.__enter__.return_value = mock_session
+    mock_session_factory = MagicMock(return_value=mock_session)
+
+    repo = PostgresMarketBookRepository(mock_session_factory)
+
+    # 1. DecisionTraceRow references a missing revision
+    mock_trace_row = DecisionTraceRow(
+        decision_id="dec_missing_rev_1",
+        strategy_name="orderflow_impulse",
+        account_label="primary",
+        decision_time=datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC),
+        intent_produced=True,
+        intent_id="intent_1",
+        rejection_reason=None,
+        evaluated_revision_ids=["rev_exists", "rev_missing_999"],
+        trace_payload={},
+        created_at=datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC),
+    )
+    mock_session.get.return_value = mock_trace_row
+    # Simulate DB returning empty list of revisions
+    mock_session.execute.return_value.scalars.return_value.all.return_value = []
+
+    with pytest.raises(
+        UnreproducibleError, match="missing revision rev_exists"
+    ):
+        repo.load_decision_trace("dec_missing_rev_1")
+
+    # 2. DatasetManifestRow references a missing revision
+    mock_manifest_row = DatasetManifestRow(
+        manifest_id="mf_missing_rev_1",
+        scope="live",
+        symbols="BTCUSDT",
+        interval="15s",
+        start_time=datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC),
+        end_time=datetime(2026, 9, 25, 12, 15, 0, tzinfo=UTC),
+        visibility_mode="canonical",
+        schema_version=1,
+        feature_algorithm_version="v1",
+        manifest_hash="hash_123",
+        coverage_ratio=Decimal("1.0"),
+        revision_ids=["rev_missing_888"],
+        holes=[],
+        created_at=datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC),
+    )
+    mock_session.get.return_value = mock_manifest_row
+
+    with pytest.raises(
+        UnreproducibleError, match="missing revision rev_missing_888"
+    ):
+        repo.load_manifest("mf_missing_rev_1")
+
+

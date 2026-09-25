@@ -223,6 +223,9 @@ from crypto_momentum_lab.persistence.postgres.order_repository import (
 from crypto_momentum_lab.persistence.postgres.paper_daemon_repository import (
     PostgresPaperDaemonRepository,
 )
+from crypto_momentum_lab.persistence.postgres.position_reservation_repository import (
+    AsyncPostgresPositionReservationRepository,
+)
 from crypto_momentum_lab.persistence.postgres.repository import (
     PostgresUniverseRepository,
 )
@@ -612,9 +615,27 @@ async def run_live_daemon(
             on_exchange_response=telemetry.exchange_response_received,
             serialize_commands=False,
         )
+        reservation_repository = AsyncPostgresPositionReservationRepository(
+            execution_factory, strategy_name=strategy_name
+        )
+        try:
+            active_reservations = (
+                await reservation_repository.load_active_reservations()
+            )
+            log.info(
+                "active_position_reservations_recovered",
+                count=len(active_reservations),
+                strategy_name=strategy_name,
+            )
+        except Exception as res_err:
+            log.warning(
+                "position_reservations_recovery_failed", error=str(res_err)
+            )
+
         execution_coordinator = OrderExecutionCoordinator(
             backend=state_machine,
             account_label=account_label,
+            reservation_repository=reservation_repository,
         )
         ownership_registry.register(
             "execution_coordinator", execution_coordinator.aclose

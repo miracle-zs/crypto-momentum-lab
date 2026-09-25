@@ -85,6 +85,15 @@ class DecisionInput:
             raise ValueError(
                 f"Market ref symbol {self.market_ref.symbol} != {self.symbol}"
             )
+        if self.market_envelope.ref != self.market_ref:
+            raise ValueError(
+                f"market_envelope.ref ({self.market_envelope.ref.revision_id}) must match "
+                f"market_ref ({self.market_ref.revision_id})"
+            )
+        if self.market_envelope.state.symbol != self.symbol:
+            raise ValueError(
+                f"market_envelope state symbol {self.market_envelope.state.symbol} != {self.symbol}"
+            )
         if self.position_view.key.symbol != self.symbol:
             raise ValueError(
                 f"Position view symbol {self.position_view.key.symbol} != {self.symbol}"

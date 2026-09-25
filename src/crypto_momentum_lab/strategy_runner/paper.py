@@ -7,7 +7,20 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Protocol
 
+from crypto_momentum_lab.domain.decision.simulation_execution import (
+    FillModel,
+    SimulationExecutionAdapter,
+)
 from crypto_momentum_lab.domain.market.models import MarketState15s
+from crypto_momentum_lab.domain.runtime.capability_evaluator import (
+    CapabilityEvaluator,
+    CapabilityEvidence,
+    SystemAction,
+)
+from crypto_momentum_lab.domain.runtime.runtime_plan import (
+    RuntimePlan,
+    RuntimePlanCompiler,
+)
 from crypto_momentum_lab.domain.strategy import (
     OrderIntentCandidate,
     RunMode,
@@ -131,6 +144,7 @@ class PaperTradingRunReport:
     fill_summary: dict[str, dict[str, FillSummaryValue]]
     portfolio_config: PaperExitConfig = field(default_factory=PaperExitConfig)
     paper_positions: tuple[PaperPosition, ...] = ()
+    runtime_plan: RuntimePlan | None = None
 
 
 def run_paper_trading(
@@ -138,6 +152,36 @@ def run_paper_trading(
     source: PaperMarketStateSource,
     config: PaperRunnerConfig,
 ) -> PaperTradingRunReport:
+    runtime_plan = RuntimePlanCompiler.compile(
+        environment="paper",
+        account_label="paper_account",
+        strategy_name=config.strategy_name,
+        git_commit=config.code_commit,
+        overrides={
+            "target_notional": config.candidate_notional or Decimal("500.00"),
+        },
+    )
+    evaluator = CapabilityEvaluator()
+    evidence = CapabilityEvidence(
+        evidence_version="ev_paper_init",
+        market_freshness_seconds=1.0,
+        is_account_concordant=True,
+        is_account_identity_verified=True,
+        is_approval_valid=True,
+        is_lease_active=True,
+    )
+    sim_eval = evaluator.evaluate(
+        action=SystemAction.ENTER,
+        evidence=evidence,
+        plan=runtime_plan,
+    )
+    if not sim_eval.allowed:
+        raise PaperRunnerError(
+            f"CapabilityEvaluator blocked simulation: {sim_eval.reason}"
+        )
+    _sim_adapter = SimulationExecutionAdapter(
+        default_fill_model=FillModel(fee_rate=config.execution.taker_fee_rate),
+    )
     try:
         runtime_config = build_runtime_config(
             config.strategy_name,
@@ -297,6 +341,7 @@ def run_paper_trading(
         fill_summary=fill_summary(fill_tuple),
         portfolio_config=config.portfolio,
         paper_positions=position_tuple,
+        runtime_plan=runtime_plan,
     )
 
 
