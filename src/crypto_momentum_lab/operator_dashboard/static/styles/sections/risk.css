@@ -1,3 +1,9 @@
+.alert-coverage-error {
+  border-color: color-mix(in srgb, var(--down) 40%, var(--line));
+  background: color-mix(in srgb, var(--down) 8%, var(--surface-2));
+  margin-bottom: 12px;
+}
+
 .alert-missing-symbols {
   border-color: color-mix(in srgb, var(--warn) 40%, var(--line));
   background: color-mix(in srgb, var(--warn) 8%, var(--surface-2));

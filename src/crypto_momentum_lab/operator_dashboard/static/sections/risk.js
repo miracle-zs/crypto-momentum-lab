@@ -14,6 +14,10 @@ export function renderRisk(data) {
   const coverageScope = data.coverage_scope || (requiredSymbols.length ? `${requiredSymbols.length - missingSymbols.length}/${requiredSymbols.length} 覆盖` : "全品种");
   const coverageChip = `<span class="chip-coverage">覆盖范围: ${esc(coverageScope)}</span>`;
   const metaStrip = `<div class="risk-meta-strip"><span class="chip chip-source">${esc(sourceStatus)}</span><span class="chip-age">数据年龄: ${esc(ageLabel)}</span>${coverageChip}</div>`;
+  const hasQueryError = data.status === "UNKNOWN" || data.source_status === "QUERY_ERROR" || data.coverage_scope === "QUERY_ERROR" || Boolean(data.coverage_error);
+  const queryErrorAlert = hasQueryError
+    ? `<div class="alert-box alert-coverage-error"><strong>覆盖查询异常 (QUERY_ERROR)</strong><div>未能确定策略监控品种范围，系统置为 UNKNOWN 降级保护${data.coverage_error ? `：<code>${esc(data.coverage_error)}</code>` : ""}</div></div>`
+    : "";
   const missingAlert = missingSymbols.length
     ? `<div class="alert-box alert-missing-symbols"><strong>行情缺失</strong><div>必需品种未覆盖 (${missingSymbols.length}): <code>${esc(missingSymbols.join(", "))}</code></div></div>`
     : "";
@@ -52,7 +56,7 @@ export function renderRisk(data) {
   const ambiguousBlock = ambiguousOrders.length
     ? `<div class="block risk-ambiguous">${blockTitle("不确定订单", "AMBIGUOUS / UNRESOLVED", `<strong class="num">${ambiguousOrders.length}</strong>`)}${ambiguousTable}</div>`
     : "";
-  const body = `${metaStrip}${missingAlert}${coverageBar}<div class="risk-priority-grid">
+  const body = `${metaStrip}${queryErrorAlert}${missingAlert}${coverageBar}<div class="risk-priority-grid">
       <div class="block risk-halts">${blockTitle("活跃停机", "ACTIVE HALTS")}${halts}</div>
       <div class="risk-decision-callout">
         <span class="callout-tag">处置顺序</span>

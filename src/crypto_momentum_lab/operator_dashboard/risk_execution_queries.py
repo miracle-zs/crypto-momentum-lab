@@ -110,6 +110,7 @@ class RiskExecutionQueries:
             pending, ambiguous = split_exchange_orders(orders)
 
             coverage_query_error = False
+            coverage_error: str | None = None
             # Determine strategy-required symbols to evaluate coverage & freshness
             if self._required_symbols is not None:
                 required_symbols = set(self._required_symbols)
@@ -136,8 +137,9 @@ class RiskExecutionQueries:
                             )
                         ).all()
                         required_symbols.update(monitored)
-                except Exception:
+                except Exception as exc:
                     coverage_query_error = True
+                    coverage_error = f"{type(exc).__name__}: {exc}"
 
             market_query = (
                 select(
@@ -155,7 +157,13 @@ class RiskExecutionQueries:
                     RuntimeMarketState15sRow.symbol.in_(required_symbols)
                 )
 
-            market_rows = (await session.execute(market_query)).all()
+            try:
+                market_rows = (await session.execute(market_query)).all()
+            except Exception as exc:
+                coverage_query_error = True
+                if coverage_error is None:
+                    coverage_error = f"{type(exc).__name__}: {exc}"
+                market_rows = []
 
         now = datetime.now(UTC)
         symbol_times: dict[str, datetime] = {
@@ -170,7 +178,7 @@ class RiskExecutionQueries:
 
         if coverage_query_error:
             coverage_complete = False
-            missing_symbols = sorted(required_symbols) if required_symbols else ["<coverage_query_failed>"]
+            missing_symbols = []
             coverage_scope = "QUERY_ERROR"
         elif required_symbols:
             missing_symbols = sorted(required_symbols - set(symbol_times.keys()))
@@ -188,10 +196,13 @@ class RiskExecutionQueries:
             data_age_seconds = round(
                 max(0.0, (now - worst_market_time).total_seconds()), 1
             )
-            is_stale = (data_age_seconds > 120.0) or (not coverage_complete) or coverage_query_error
+            is_stale = (data_age_seconds > 120.0) or (not coverage_complete)
             if halts or ambiguous:
                 status = OperationalStatus.HALTED
                 source_status = "HALTED"
+            elif coverage_query_error:
+                status = OperationalStatus.UNKNOWN
+                source_status = "QUERY_ERROR"
             elif is_stale:
                 status = OperationalStatus.STALE
                 source_status = "STALE"
@@ -229,8 +240,8 @@ class RiskExecutionQueries:
                     status = OperationalStatus.HALTED
                     source_status = "HALTED"
                 elif coverage_query_error:
-                    status = OperationalStatus.STALE
-                    source_status = "STALE"
+                    status = OperationalStatus.UNKNOWN
+                    source_status = "QUERY_ERROR"
                 else:
                     status = OperationalStatus.NO_DATA
                     source_status = "NO_DATA"
@@ -243,8 +254,8 @@ class RiskExecutionQueries:
                     status = OperationalStatus.HALTED
                     source_status = "HALTED"
                 elif coverage_query_error:
-                    status = OperationalStatus.STALE
-                    source_status = "STALE"
+                    status = OperationalStatus.UNKNOWN
+                    source_status = "QUERY_ERROR"
                 else:
                     status = OperationalStatus.NO_DATA
                     source_status = "NO_DATA"
@@ -273,7 +284,9 @@ class RiskExecutionQueries:
             required_symbols=sorted(required_symbols),
             missing_symbols=sorted(missing_symbols),
             coverage_scope=coverage_scope,
+            coverage_error=coverage_error,
         )
+
 
 
 __all__ = [

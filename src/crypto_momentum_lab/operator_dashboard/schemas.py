@@ -277,6 +277,7 @@ class RiskExecutionResponse(DashboardSchema):
     required_symbols: list[str] = Field(default_factory=list)
     missing_symbols: list[str] = Field(default_factory=list)
     coverage_scope: str | None = None
+    coverage_error: str | None = None
 
 
 

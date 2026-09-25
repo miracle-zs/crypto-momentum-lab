@@ -579,3 +579,49 @@ F05 的 STALE 缓存展示继续保持；F08 对已提供 LONG/SHORT 的分组�
 | `node --test tests/frontend/*.test.mjs` | 35 passed | 新增 F04 覆盖度展示与缺失品种警报前端单测，全量通过。 |
 | `pytest local_optimization/tests -q --tb=short` | 256 passed | 本地优化测试全量通过（含 F07 零价格成交严格拒绝单测）。 |
 
+## 17. 对 HEAD `74e4886` 的独立复核
+
+复核时 `HEAD` 与 `origin/main` 均为 `74e48862a8a388d76f28d50961743ae119ac2c40`，代码工作区干净。第 16 节补齐了上轮发现的 F04 fail-open、覆盖展示、F07 零价格以及 F10 竞态自动测试；当前三组测试均通过。仍有一个 F04 运维语义问题：覆盖查询失败和实际缺行情被放进同一个 `missing_symbols` 字段，界面会把查询错误渲染成缺行情。
+
+- **F04 [P2，状态区分仍未闭环]：**查询异常现在会阻止 `READY/LIVE`，并把 `coverage_scope` 置为 `QUERY_ERROR`，修复了上轮 fail-open。可是错误分支会把 `"<coverage_query_failed>"` 写入 `missing_symbols`（若已发现订单品种则将它们全部写入该字段）；`risk.js` 只要 `missing_symbols` 非空，就显示“行情缺失 / 必需品种未覆盖”。因此数据库覆盖查询故障会被操作人员看成某个品种确实没有行情，甚至把查询已返回行情的订单品种标为缺失。异常对象和具体原因也没有写入结构化日志或独立诊断字段。建议将 `QUERY_ERROR/UNKNOWN` 与真实 `missing_symbols` 分开表达，并保留安全的错误类别/诊断标识。
+- **F10 [修复并已加自动回归]：**当前提交新增的并发时序测试精确覆盖目录读取完成至锁快照之间的写入；本轮主项目全量测试通过。
+- **F07 [本地路径修复并已验证]：**当前本地实现以 `px <= 0` 拒绝配对，零价格回归测试已加入；本地 256 项测试通过。`local_optimization/` 继续按用户要求留在本机，不以版本控制状态作为验收条件。
+
+服务器容器仍使用 `crypto-momentum-lab-app:86a89a911f3ae9b3385d1d7deced1c7b8beb261e`，没有运行本地 `74e4886` 镜像。本轮服务器检查仅读取容器名称和镜像标签；没有读取环境变量、账户明细或密钥，没有执行写操作或下单。
+
+### 17.1 验证结果
+
+| 验证 | 结果 | 范围 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1629 passed、4 skipped、1 deselected、1 warning | 当前 `74e4886`；4 项需要 loopback socket 权限，live 测试排除。 |
+| `node --test tests/frontend/*.test.mjs` | 35 passed | 当前 dashboard 静态资源。 |
+| `pytest local_optimization/tests -q --tb=short` | 256 passed | 本地目录；Git 跟踪状态不是验收条件。 |
+| F04 查询异常 fail-closed 与界面展示 | 回归测试通过；错误仍被编码为缺失品种 | 应拆分 `UNKNOWN/QUERY_ERROR` 与实际 `MISSING` 状态。 |
+
+## 18. 第七轮整改闭环与验证
+
+针对第 17 节 Astra 复核指出的 F04 覆盖查询失败与实际缺行情混淆、错误标记塞入 `missing_symbols`、界面被误渲染为“行情缺失”、以及未保留具体错误原因的问题，完成彻底拆分与闭环改造：
+
+- **F04（彻底分离 UNKNOWN/QUERY_ERROR 覆盖查询异常与真实行情缺失）闭环：**
+  1. **Schema 诊断字段**：在 [`RiskExecutionResponse`](src/crypto_momentum_lab/operator_dashboard/schemas.py) 中新增 `coverage_error: str | None = None`，用于保留覆盖度查询失败时的具体异常类型与错误原因；
+  2. **后端查询语义分离**：
+     - 在 [`RiskExecutionQueries`](src/crypto_momentum_lab/operator_dashboard/risk_execution_queries.py) 中，当覆盖度查询（Universe/监控成员）发生数据库异常时，捕获异常详情写入 `coverage_error = f"{type(exc).__name__}: {exc}"`；
+     - 彻底清除伪标记：`missing_symbols` 保持为纯净的空列表 `[]`，严禁写入任何 `<coverage_query_failed>` 伪错误字符串；
+     - 显式赋予未知降级状态：当发生查询异常时，状态设为 `OperationalStatus.UNKNOWN`、`source_status = "QUERY_ERROR"`、`coverage_scope = "QUERY_ERROR"`（若有活跃停机或不确定订单，仍优先判定为 `HALTED` 并保留 `coverage_error`）；
+     - 当且仅当覆盖度查询正常且真实发现缺少某些监控品种的行情数据时，才填入 `missing_symbols`，并将状态判定为 `OperationalStatus.STALE`（数据陈旧/缺失），`source_status = "STALE"`，`coverage_error = None`；
+  3. **仪表盘前端视觉与告警隔离**：
+     - 在 [`risk.js`](src/crypto_momentum_lab/operator_dashboard/static/sections/risk.js) 中新增独立覆盖查询异常警报条 `.alert-box.alert-coverage-error`，显示“覆盖查询异常 (QUERY_ERROR)”并输出 `<code>coverage_error</code>` 具体失败原因，同时状态显示为 `UNKNOWN`；
+     - “行情缺失”警报条 `.alert-box.alert-missing-symbols` 仅在真实存在未覆盖品种（`missingSymbols.length > 0`）时才渲染；
+     - 在 [`risk.css`](src/crypto_momentum_lab/operator_dashboard/static/styles/sections/risk.css) 中对 `.alert-coverage-error` 采用专属警告样式，与 `.alert-missing-symbols` 在语义、文字与视觉层彻底解耦；
+  4. **全量自动化测试**：
+     - `test_queries.py` 中更新并新增单测：`test_risk_execution_fails_closed_when_coverage_query_errors`（断言状态为 `UNKNOWN`、`QUERY_ERROR`，保留具体异常信息，且 `missing_symbols == []`）以及 `test_risk_execution_halts_prioritized_over_coverage_query_error`；
+     - `dashboard-modules.test.mjs` 中新增前端测试 `risk renderer distinguishes UNKNOWN/QUERY_ERROR coverage error from real market missing alert`，断言查询异常时绝不渲染“行情缺失”，并验证真实缺行情与查询错误互不干扰。
+
+### 18.1 验证结果
+
+| 验证项 | 结果 | 详细说明 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1630 passed, 4 skipped, 1 deselected, 1 warning | 新增停机优先级单测，全量通过。 |
+| `node --test tests/frontend/*.test.mjs` | 36 passed | 新增查询错误与真实缺行情隔离前端单测，全量通过。 |
+| `pytest local_optimization/tests -q --tb=short` | 256 passed | 本地优化测试全量通过。 |
+

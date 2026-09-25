@@ -1673,7 +1673,7 @@ async def test_risk_execution_ready_when_all_required_symbols_fresh() -> None:
 
 
 async def test_risk_execution_fails_closed_when_coverage_query_errors() -> None:
-    """F04: When universe/symbol coverage query fails, status MUST fail-closed to STALE, never READY/LIVE."""
+    """F04: When universe/symbol coverage query fails, status MUST report UNKNOWN/QUERY_ERROR, preserve error detail, and keep missing_symbols clean."""
     from unittest.mock import AsyncMock, MagicMock
     from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
 
@@ -1698,9 +1698,45 @@ async def test_risk_execution_fails_closed_when_coverage_query_errors() -> None:
     queries = RiskExecutionQueries(session_factory=factory_mock)
     resp = await queries.risk_execution()
 
-    # Must NOT swallow error and report READY/LIVE! Must fail closed to STALE
-    assert resp.status == OperationalStatus.STALE
-    assert resp.source_status == "STALE"
+    # Must NOT swallow error and report READY/LIVE! Must report UNKNOWN/QUERY_ERROR
+    assert resp.status == OperationalStatus.UNKNOWN
+    assert resp.source_status == "QUERY_ERROR"
     assert resp.coverage_scope == "QUERY_ERROR"
-    assert "<coverage_query_failed>" in resp.missing_symbols
+    assert resp.coverage_error == "RuntimeError: Database connection lost during coverage check"
+    assert resp.missing_symbols == []
+
+
+async def test_risk_execution_halts_prioritized_over_coverage_query_error() -> None:
+    """F04: If halts exist when coverage query fails, status is HALTED but coverage_error is preserved."""
+    from unittest.mock import AsyncMock, MagicMock
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
+    from crypto_momentum_lab.persistence.postgres.models import RiskHaltRow
+
+    now = datetime.now(UTC)
+    halt_row = RiskHaltRow(
+        halt_id=1,
+        reason="Manual emergency stop",
+        created_at=now - timedelta(minutes=1),
+    )
+
+    scalars_mock = MagicMock()
+    scalars_mock.all.side_effect = [[halt_row], [], []]
+    session_mock = AsyncMock()
+    session_mock.scalars.return_value = scalars_mock
+    session_mock.scalar.side_effect = RuntimeError("DB error")
+    exec_mock = MagicMock()
+    exec_mock.all.return_value = []
+    session_mock.execute.return_value = exec_mock
+
+    factory_mock = MagicMock()
+    factory_mock.return_value.__aenter__.return_value = session_mock
+
+    queries = RiskExecutionQueries(session_factory=factory_mock)
+    resp = await queries.risk_execution()
+
+    assert resp.status == OperationalStatus.HALTED
+    assert resp.source_status == "HALTED"
+    assert resp.coverage_scope == "QUERY_ERROR"
+    assert resp.coverage_error == "RuntimeError: DB error"
+    assert resp.missing_symbols == []
 

@@ -503,6 +503,29 @@ test("risk renderer displays required symbols, missing symbols, and coverage ale
   assert.match(html, /ETHUSDT/);
   assert.match(html, /1\/2 covered/);
   assert.match(html, /risk-coverage-bar/);
+  assert.doesNotMatch(html, /alert-coverage-error/);
+  assert.doesNotMatch(html, /覆盖查询异常/);
+});
+
+test("risk renderer distinguishes UNKNOWN/QUERY_ERROR coverage error from real market missing alert", () => {
+  const [status, html] = renderRisk({
+    status: "UNKNOWN",
+    source_status: "QUERY_ERROR",
+    coverage_scope: "QUERY_ERROR",
+    coverage_error: "RuntimeError: Database connection lost during coverage check",
+    required_symbols: [],
+    missing_symbols: [],
+    active_halts: [],
+    latest_risk_decisions: [],
+    pending_orders: [],
+    ambiguous_orders: [],
+  });
+  assert.equal(status, "UNKNOWN");
+  assert.match(html, /alert-coverage-error/);
+  assert.match(html, /覆盖查询异常 \(QUERY_ERROR\)/);
+  assert.match(html, /Database connection lost during coverage check/);
+  assert.doesNotMatch(html, /alert-missing-symbols/);
+  assert.doesNotMatch(html, /行情缺失/);
 });
 
 test("strategy section owns paper-account rendering state", () => {
