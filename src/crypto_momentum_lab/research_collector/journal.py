@@ -63,6 +63,17 @@ def _clean_temporary_files(root: Path) -> None:
             pass
 
 
+def _require_sequence(value: object, name: str = "sequence") -> int:
+    """Validate that value is strictly a non-negative integer (not float, bool, or string)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise CollectorStateConflict(
+            f"{name} must be an integer, got {type(value).__name__} ({value!r})"
+        )
+    if value < 0:
+        raise CollectorStateConflict(f"{name} must be non-negative, got {value}")
+    return value
+
+
 class ArchiveJournal:
     """A bounded, atomic JSON write-ahead journal for accepted batches."""
 
@@ -381,7 +392,8 @@ class ArchiveJournal:
                 sid = item.get("stream_id")
                 seq = item.get("sequence")
                 if sk is not None and sid is not None and seq is not None:
-                    existing_keys.add((str(sk), str(sid), int(seq)))
+                    parsed_seq = _require_sequence(seq, "existing resolution sequence")
+                    existing_keys.add((str(sk), str(sid), parsed_seq))
 
             to_append: list[dict[str, Any]] = []
             for res in resolutions:
@@ -390,9 +402,10 @@ class ArchiveJournal:
                 sk = res_dict.get("source_kind")
                 sid = res_dict.get("stream_id")
                 seq = res_dict.get("sequence")
+                parsed_seq = _require_sequence(seq, "resolution sequence") if seq is not None else None
                 res_key = (
-                    (str(sk), str(sid), int(seq))
-                    if (sk is not None and sid is not None and seq is not None)
+                    (str(sk), str(sid), parsed_seq)
+                    if (sk is not None and sid is not None and parsed_seq is not None)
                     else None
                 )
                 if rid and str(rid) in existing_rec_ids:
@@ -474,12 +487,7 @@ class ArchiveJournal:
                         )
                     seq = record.get("sequence")
                     if seq is not None:
-                        try:
-                            int(seq)
-                        except (ValueError, TypeError) as error:
-                            raise CollectorStateConflict(
-                                f"corrupted sequence in resolution record {res_path} at line {line_no}: {error}"
-                            ) from error
+                        _require_sequence(seq, f"sequence in {res_path} at line {line_no}")
                     records.append(record)
         except OSError as error:
             raise CollectorStateConflict(
@@ -518,7 +526,9 @@ class ArchiveJournal:
             try:
                 hcs = mdata.get("highest_committed_sequence")
                 if hcs is not None:
-                    parsed_hcs = int(hcs)
+                    parsed_hcs = _require_sequence(
+                        hcs, f"highest_committed_sequence in {self._manifest_path}"
+                    )
                     if self._highest_committed_sequence is None:
                         self._highest_committed_sequence = parsed_hcs
                     else:
@@ -527,7 +537,9 @@ class ArchiveJournal:
                         )
                 ms = mdata.get("materialized_sequence")
                 if ms is not None:
-                    parsed_ms = int(ms)
+                    parsed_ms = _require_sequence(
+                        ms, f"materialized_sequence in {self._manifest_path}"
+                    )
                     if self._materialized_sequence is None:
                         self._materialized_sequence = parsed_ms
                     else:
@@ -536,13 +548,17 @@ class ArchiveJournal:
                         )
                 acs = mdata.get("accepted_sequence")
                 if acs is not None:
-                    parsed_acs = int(acs)
+                    parsed_acs = _require_sequence(
+                        acs, f"accepted_sequence in {self._manifest_path}"
+                    )
                     if self._accepted_sequence is None:
                         self._accepted_sequence = parsed_acs
                     else:
                         self._accepted_sequence = max(
                             self._accepted_sequence, parsed_acs
                         )
+            except CollectorStateConflict:
+                raise
             except (ValueError, TypeError) as error:
                 raise CollectorStateConflict(
                     f"corrupted sequence values in manifest {self._manifest_path}: {error}"
@@ -559,7 +575,8 @@ class ArchiveJournal:
             sid = res.get("stream_id")
             seq = res.get("sequence")
             if sk is not None and sid is not None and seq is not None:
-                existing_res_keys.add((str(sk), str(sid), int(seq)))
+                parsed_seq = _require_sequence(seq, "resolution sequence")
+                existing_res_keys.add((str(sk), str(sid), parsed_seq))
 
         paths: list[Path] = []
         if self._pending_root.exists():
@@ -576,7 +593,11 @@ class ArchiveJournal:
             record = self._read_record(path)
             rec = record.receipt
             res_tuple = (
-                (rec.source_kind.value, str(rec.stream_id), int(rec.sequence))
+                (
+                    rec.source_kind.value,
+                    str(rec.stream_id),
+                    _require_sequence(rec.sequence, "receipt sequence"),
+                )
                 if (rec.source_kind and rec.stream_id is not None and rec.sequence is not None)
                 else None
             )

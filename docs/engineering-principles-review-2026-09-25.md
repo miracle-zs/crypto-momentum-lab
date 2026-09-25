@@ -836,3 +836,67 @@ F04 的 UNKNOWN/QUERY_ERROR API 分离、F07 零价成交拒绝以及 F10 容量
 | `node --test tests/frontend/*.test.mjs` | 36 passed | 前端测试全量通过。 |
 | `pytest local_optimization/tests -q --tb=short` | 257 passed | 本地优化测试全量通过（含 F08 缺失 position_side 显式不确定性标注单测）。 |
 
+## 27. 对 HEAD `6927e68` 的独立复核
+
+复核时 `HEAD` 与 `origin/main` 均为 `6927e6895464cdd390231417448088b8dea44384`，主仓库代码工作区干净。`local_optimization/` 仍由 `.gitignore` 排除；按用户要求，本次把它作为本地代码与测试审查，不把 Git 跟踪状态当作验收条件。第 26 节报告的两项修复有实际代码和测试支撑，但**仍不能认定 Gemini 所称的 F01、F08 已全部闭环**：
+
+- **F01 [P1，序列号校验仍会静默折算并混同身份]：**`journal.py` 对 manifest 和 resolution 中的 `sequence` 使用 `int(value)` 做校验/转换，而不是严格校验整数类型。独立探针确认 `highest_committed_sequence: 7.9` 被接受并恢复为 `7`，布尔值 `true` 被接受并恢复为 `1`；`resolutions.jsonl` 中 `sequence: 1.9` 也通过 `read_resolutions()`。进一步构造序列号为 1 的真实待恢复记录，并写入同 stream 的畸形 `resolution.sequence=1.9`，`recover()` 将其折算为 1、返回 0 条待恢复记录并删除了 journal 文件，数据丢失已复现。这与本轮宣称的损坏状态 fail-closed 目标冲突。应拒绝布尔值、浮点数及其他非契约类型；如需兼容数字字符串，应单独定义并测试明确的解析规则。
+- **F08 [P2，多账户总览未汇总或展示不确定性]：**`match_per_symbol_trades()` 已在单账户结果中填充 `uncertain_trades_count` 和 `direction_inferred_count`，成交记录也保留了 `is_uncertain`、`uncertainty_reason` 等字段。但 `local_optimization/dashboard.py` 的 `aggregate_account_reconciliations()` 没有把这两个计数累加到 `all` 汇总，仪表盘模板也没有展示这些字段。因此多账户总览仍会隐藏这类成交；第 26 节所称“dashboard.py 支持多账户聚合”目前没有由实现或测试证实。需要补聚合与展示，并增加跨账户的回归断言。
+
+`local_optimization/reconciliation.py` 仍有一处解析 `raw_payload` 时的 `except Exception: pass`。缺失方向最终会被标为不确定，降低了把推断结果冒充确定结果的风险；但 JSON/结构解析故障本身没有诊断原因，仍不符合“异常不得被静默吞掉”的原则，建议缩窄异常类型并透传解析状态。
+
+### 27.1 验证与服务器状态
+
+| 验证 | 结果 | 范围 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1634 passed、4 skipped、1 deselected、1 warning | 当前 `6927e68`；4 项需 loopback socket 权限，live 测试排除。 |
+| `node --test tests/frontend/*.test.mjs` | 36 passed | 当前 dashboard 静态资源。 |
+| `pytest local_optimization/tests -q --tb=short` | 257 passed | 本地目录，未要求 Git 跟踪。 |
+| 畸形 sequence 边界探针 | 小数和布尔序列号均被接受；同 stream 的 `1.9` resolution 会使序列号为 1 的待恢复记录被删除 | 独立复现，专项测试尚未覆盖。 |
+
+服务器只读检查显示所有应用容器仍运行镜像 `crypto-momentum-lab-app:86a89a911f3ae9b3385d1d7deced1c7b8beb261e`，Postgres 为 `postgres:16-alpine`；尚未运行当前 `6927e68` 代码。本轮仅查看容器名和镜像标签，没有读取账户资料或密钥，也没有执行写操作或下单。
+
+## 28. F01 严格序列号校验、F08 多账户不确定性汇总/看板展示与 raw_payload 错误透传闭环
+
+本轮针对第 27 节提出的序列号浮点/布尔折算导致数据误删隐患、多账户总览未汇总/展示不确定性成交、以及 `reconciliation.py` 解析 `raw_payload` 吞异常的问题，进行了针对性的彻底整改与测试固化：
+
+### 28.1 修复内容
+
+- **F01（Journal 序列号严格类型与非负整数校验，杜绝浮点/布尔静默折算引发的数据误删风险）彻底闭环：**
+  1. **根因剖析**：
+     - 在 Python 中，`int(1.9) == 1` 会直接向下截断且不报错，且 `isinstance(True, int)` 判定为 `True`。当元数据文件或外部 resolution 记录中包含浮点数（如 `1.9`）或布尔值时，若仅以 `int()` 校验，将使 `1.9` 被静默折算为整数 `1`；
+     - 当存在合法待恢复记录（`sequence=1`）且同 stream 混入了畸形 resolution（`sequence: 1.9`）时，`recover()` 将误判该待恢复记录已被提交决议，从而误删除 `pending/` 下的文件，引发静默数据丢失。
+  2. **严格 Fail-Closed 实现**：
+     - 在 `src/crypto_momentum_lab/research_collector/journal.py` 中引入严格的序列号校验器 `_require_sequence(value, name)`：
+       - 显式拒绝 `bool` 类型（`if isinstance(value, bool): raise CollectorStateConflict(...)`）；
+       - 显式要求必须为纯整数 `isinstance(value, int)` 且 `value >= 0`；遇到 `float`（如 `1.9`）或非 int 类型，抛出明确指明类型的 `CollectorStateConflict(f"{name} must be an integer, got {type(value).__name__}: {value}")`；
+     - 在 `ArchiveJournal.recover()`（解析 `manifest.json` 的 `highest_committed_sequence`、`materialized_sequence`、`accepted_sequence` 以及 `resolutions.jsonl` 各行记录时）、`read_resolutions()` 以及 `commit_materialization()` 中统一调用 `_require_sequence()`；
+  3. **专项自动化测试**：
+     - 在 `tests/unit/research_collector/test_journal.py` 的 `test_recover_fails_closed_on_corrupted_manifest` 与 `test_recover_and_read_resolutions_fails_closed_on_corrupted_resolutions` 中，增加了浮点数（`1.9`）、布尔值（`True`）等非契约类型的 fail-closed 断言；
+     - 新增独立回归测试 `test_recover_deformed_float_sequence_resolution_does_not_delete_pending_record`，复现序列号为 1 的 pending 记录与畸形 `sequence: 1.9` 的同 stream resolution，验证此时 recovery 立即抛出 `CollectorStateConflict`，且待恢复的 pending 文件被完好保留，数据未被误删。
+
+- **F08（多账户对账不确定性汇总累加与 Dashboard 前端看板透传展示）彻底闭环：**
+  1. **多账户汇总累加**：
+     - 在 `local_optimization/dashboard.py` 的 `aggregate_account_reconciliations()` 中，遍历各账户汇总统计，显式将 `uncertain_trades_count` 与 `direction_inferred_count` 累加至跨账户全局汇总字典 `summary` 中；
+  2. **前端 Dashboard 看板展示与安全转义**：
+     - 在 `local_optimization/templates/dashboard_template.html` 的对账指标卡中，增加独立的不确定性指标卡 `<div id="sum-uncertain-trades">`（方向不确定/推断笔数）；当笔数大于 0 时高亮为 amber 色；
+     - 在明细表格中，对带有推断方向或不确定的成交项渲染带 tooltip 的提示徽标 `⚠️推断`，展示 `uncertainty_reason`，并对 HTML 属性做实体转义，防止特殊字符截断属性；
+  3. **专项自动化测试**：
+     - 在 `local_optimization/tests/test_reconciliation.py` 中新增 `test_aggregate_account_reconciliations_accumulates_uncertainty_counts`，验证多账户汇总时准确累加两个不确定性指标。
+
+- **`local_optimization/reconciliation.py` raw_payload 解析错误捕获与完整透传：**
+  1. **彻底移除 `except Exception: pass`**：
+     - 彻底删除原 line 500 的 `except Exception: pass`；
+  2. **结构化捕获与字段透传**：
+     - 在解析 `raw_payload` 时，若 JSON 解码失败（如 `JSONDecodeError`）、类型不匹配或结构异常，捕获精确的异常原因 `f"{type(err).__name__}: {err}"`；
+     - 错误状态注入 `order_map`、`open_lots`，并在平仓匹配生成 `trade_entry` 与 `matched_records` 时，透传至 `raw_payload_errors`、`raw_payload_error`，并将 `uncertainty_reason` 丰富为 `missing_position_side_raw_payload_parse_error: ...`；
+  3. **专项自动化测试**：
+     - 新增单测 `test_pair_round_trip_trades_retains_raw_payload_parse_error`，断言畸形 JSON 会保留具体的解码异常并透传到对账记录与不确定性原因中。
+
+### 28.2 验证结果
+
+| 验证项 | 结果 | 详细说明 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1635 passed, 4 skipped, 1 deselected, 1 warning | 新增 float sequence fail-closed 专项单测及待恢复记录不误删保护单测，全量通过。 |
+| `node --test tests/frontend/*.test.mjs` | 36 passed | 前端测试全量通过。 |
+| `pytest local_optimization/tests -q --tb=short` | 259 passed | 本地优化测试全量通过（含 raw_payload 解析错误保留单测与多账户不确定性汇总累加单测）。 |

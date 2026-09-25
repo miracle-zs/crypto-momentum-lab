@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -292,9 +293,17 @@ def test_recover_fails_closed_on_corrupted_manifest(tmp_path: Path) -> None:
     with pytest.raises(CollectorStateConflict, match="corrupted collector manifest.*expected dict"):
         journal.recover()
 
-    # 3. Corrupted values (non-integer sequence)
+    # 3. Corrupted values (non-integer sequence, float, boolean)
     manifest_file.write_text('{"environment": "research", "highest_committed_sequence": "invalid"}', encoding="utf-8")
-    with pytest.raises(CollectorStateConflict, match="corrupted sequence values in manifest"):
+    with pytest.raises(CollectorStateConflict, match="must be an integer"):
+        journal.recover()
+
+    manifest_file.write_text('{"environment": "research", "highest_committed_sequence": 1.9}', encoding="utf-8")
+    with pytest.raises(CollectorStateConflict, match="must be an integer"):
+        journal.recover()
+
+    manifest_file.write_text('{"environment": "research", "highest_committed_sequence": true}', encoding="utf-8")
+    with pytest.raises(CollectorStateConflict, match="must be an integer"):
         journal.recover()
 
     # 4. Environment mismatch
@@ -324,8 +333,62 @@ def test_recover_and_read_resolutions_fails_closed_on_corrupted_resolutions(tmp_
     with pytest.raises(CollectorStateConflict, match="expected dict"):
         journal.recover()
 
-    # 3. Non-integer sequence on a line
+    # 3. Non-integer sequence on a line (string, float 1.9, boolean)
     res_file.write_text('{"record_id": "rec-1", "sequence": "not-an-int"}\n', encoding="utf-8")
-    with pytest.raises(CollectorStateConflict, match="corrupted sequence in resolution record"):
+    with pytest.raises(CollectorStateConflict, match="must be an integer"):
         journal.recover()
+
+    res_file.write_text('{"record_id": "rec-1", "sequence": 1.9}\n', encoding="utf-8")
+    with pytest.raises(CollectorStateConflict, match="must be an integer"):
+        journal.recover()
+
+    res_file.write_text('{"record_id": "rec-1", "sequence": true}\n', encoding="utf-8")
+    with pytest.raises(CollectorStateConflict, match="must be an integer"):
+        journal.recover()
+
+
+def test_recover_deformed_float_sequence_resolution_does_not_delete_pending_record(tmp_path: Path) -> None:
+    """Ensure deformed sequence=1.9 resolution does NOT get truncated to int(1) and delete sequence=1 record."""
+    journal_dir = tmp_path / "journal"
+    journal = ArchiveJournal(
+        journal_dir,
+        environment="research",
+        max_bytes=1024 * 1024,
+    )
+    state = fixture_state("BTCUSDT", 0)
+    batch = _batch(state, sequence=1)
+    selection = SelectionSnapshot(observed_at=state.bucket_start, symbols=())
+
+    # 1. Accept valid pending record sequence=1
+    receipt = journal.accept(batch, selection, (state,))
+    assert len(journal.pending_records()) == 1
+    pending_files = list((journal_dir / "pending").rglob("*.json"))
+    assert len(pending_files) == 1
+    pending_file = pending_files[0]
+    assert pending_file.exists()
+
+    # 2. Introduce deformed resolution with sequence=1.9 on same stream
+    res_file = journal_dir / "resolutions.jsonl"
+    res_file.write_text(
+        json.dumps({
+            "source_kind": "hub",
+            "stream_id": "test-stream",
+            "sequence": 1.9,
+            "status": "materialized",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    # 3. Recovery must FAIL CLOSED with CollectorStateConflict rather than truncating 1.9 -> 1
+    new_journal = ArchiveJournal(
+        journal_dir,
+        environment="research",
+        max_bytes=1024 * 1024,
+    )
+    with pytest.raises(CollectorStateConflict, match="must be an integer, got float"):
+        new_journal.recover()
+
+    # 4. Critical: The legitimate pending record for sequence=1 MUST NOT HAVE BEEN DELETED!
+    assert pending_file.exists()
+
 
