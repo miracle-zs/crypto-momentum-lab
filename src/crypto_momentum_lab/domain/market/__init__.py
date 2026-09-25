@@ -1,3 +1,18 @@
+from crypto_momentum_lab.domain.market.decision_trace_service import (
+    DecisionTraceService,
+    ReplayResult,
+)
+from crypto_momentum_lab.domain.market.market_book import (
+    DatasetCatalog,
+    InMemoryMarketBookRepository,
+    ManifestIntegrityError,
+    MarketBook,
+    MarketBookRepository,
+    RevisionConflictError,
+    RevisionNotFoundError,
+    UnreproducibleError,
+    compute_market_state_hash,
+)
 from crypto_momentum_lab.domain.market.models import (
     ArchiveManifest,
     CaptureRoute,
@@ -18,6 +33,13 @@ from crypto_momentum_lab.domain.market.ports import (
     CaptureRepository,
     RawArchive,
 )
+from crypto_momentum_lab.domain.market.revision_models import (
+    DatasetManifest,
+    DecisionTrace,
+    MarketEnvelope,
+    MarketRevisionRef,
+    MarketVisibilityMode,
+)
 
 __all__ = [
     "ArchiveAcknowledgementSink",
@@ -27,13 +49,29 @@ __all__ = [
     "CaptureRoute",
     "CaptureStream",
     "ConnectionLifecycleEvent",
+    "DatasetCatalog",
+    "DatasetManifest",
+    "DecisionTrace",
+    "DecisionTraceService",
     "DurableArchiveAcknowledgement",
+    "InMemoryMarketBookRepository",
     "JsonScalar",
     "JsonValue",
+    "ManifestIntegrityError",
+    "MarketBook",
+    "MarketBookRepository",
     "MarketDataState",
+    "MarketEnvelope",
+    "MarketRevisionRef",
+    "MarketVisibilityMode",
     "QualityCategory",
     "QualityEvent",
     "RawArchive",
     "RawEnvelope",
+    "ReplayResult",
+    "RevisionConflictError",
+    "RevisionNotFoundError",
+    "UnreproducibleError",
+    "compute_market_state_hash",
     "transition_market_data_state",
 ]

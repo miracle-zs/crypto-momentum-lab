@@ -38,7 +38,7 @@ class RetentionGatingEvaluation:
             raise ValueError("effective_cutoff must be timezone-aware")
         if self.effective_cutoff > self.requested_cutoff:
             raise ValueError(
-                f"effective_cutoff {self.effective_cutoff} must not be newer "
+                f"effective_cutoff {self.effective_cutoff} must never be newer "
                 f"than requested_cutoff {self.requested_cutoff}"
             )
 

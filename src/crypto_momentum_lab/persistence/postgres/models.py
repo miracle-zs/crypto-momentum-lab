@@ -1525,3 +1525,118 @@ class PrunePlanRow(Base):
     executed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class MarketRevisionRefRow(Base):
+    """Postgres table mapping for immutable MarketRevisionRef and envelope payloads."""
+
+    __tablename__ = "market_revision_refs"
+
+    revision_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    interval: Mapped[str] = mapped_column(String(16), nullable=False)
+    bucket_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    bucket_end: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    published_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    source_epoch: Mapped[str] = mapped_column(String(64), nullable=False)
+    visibility_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    is_canonical: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    lineage: Mapped[dict[str, object]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_market_revisions_bucket",
+            "scope",
+            "symbol",
+            "interval",
+            "bucket_start",
+        ),
+        Index(
+            "ix_market_revisions_canonical",
+            "scope",
+            "symbol",
+            "interval",
+            "bucket_start",
+            "is_canonical",
+        ),
+    )
+
+
+class DatasetManifestRow(Base):
+    """Postgres table mapping for reproducible DatasetManifests."""
+
+    __tablename__ = "dataset_manifests"
+
+    manifest_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbols: Mapped[str] = mapped_column(Text, nullable=False)
+    interval: Mapped[str] = mapped_column(String(16), nullable=False)
+    start_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    end_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    visibility_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    feature_algorithm_version: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="v1"
+    )
+    manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    coverage_ratio: Mapped[Decimal] = mapped_column(
+        Numeric(10, 4), nullable=False, default=Decimal("1.0")
+    )
+    revision_ids: Mapped[list[object]] = mapped_column(JSONB, nullable=False)
+    holes: Mapped[list[object]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+class DecisionTraceRow(Base):
+    """Postgres table mapping for DecisionTrace records."""
+
+    __tablename__ = "decision_traces"
+
+    decision_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    strategy_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    account_label: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    intent_produced: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    intent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    rejection_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    evaluated_revision_ids: Mapped[list[object]] = mapped_column(
+        JSONB, nullable=False
+    )
+    trace_payload: Mapped[dict[str, object]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_decision_traces_strategy_account_time",
+            "strategy_name",
+            "account_label",
+            "decision_time",
+        ),
+    )
