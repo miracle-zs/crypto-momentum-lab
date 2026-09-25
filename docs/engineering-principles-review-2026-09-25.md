@@ -367,3 +367,32 @@ Python测试有 Starlette/httpx 弃用警告，WebSocket E2E另有 ConnectionClo
 单元测试全量退出时另打印 `Task was destroyed but it is pending!`，指向 `ResearchStateCollector._materializer_worker()`。测试退出码为 0，但该异步清理诊断说明关闭路径仍应单独验证取消、等待和状态保存。
 
 本次没有修改应用代码、没有连接真实交易账户或下单。服务器没有在本次复核中重新读取；本文上一轮服务器采样记录的 SHA 仍为 `86a89a9...`，不能据此确认服务器已部署 `9d81b0c`。因此，代码修复和线上部署状态需分开确认。
+
+## 9. 最新提交复核（HEAD `a67c21a`）
+
+复核时 `HEAD` 与 `origin/main` 均为 `a67c21a`，应用代码没有未提交改动；本次把复核结果追加到本文后，工作区只剩本文的文档改动。此前 `24d305b` 把整个 `local_optimization/` 纳入版本控制；最新 `a67c21a` 又将该目录撤出并加入 `.gitignore`。所以主程序修复保留，但 F07/F08 相关研究对账修复没有进入可克隆版本。目录当前仍在本机，且 251 项本地测试通过；Git 不跟踪它们，普通 clone/checkout 不会得到这些文件。
+
+本次再次确认已修正的部分：F02 readiness 排除了 database 服务项并检查运行流状态；F03 对 readiness 查询故障返回降级结果；F05 API 增加 `X-Cache-Status: STALE`；F08 的本机对账函数按 `position_side` 分组；F09 两套数据库测试 fixture 均检查 URL；F12 模型索引与约束同步后，空库 `alembic check` 返回 `No new upgrade operations detected`；F13 对分区表和重复 `event_id` 的 downgrade 都增加了拒绝条件；F14 前端不再显示无依据的完整百分比。
+
+仍未闭环的事项：
+
+- **F01：**同优先级冲突版本被记为 `dropped_version_keys`，但 `WindowMaterializer` 把没有 accepted key 的 receipt 放入 `_empty_receipts`，flush 后仍提交并删除 journal。这样序列不再卡住，但没有持久的 `rejected/superseded` 结果，checkpoint 会前进而 Parquet 保留旧版本；审计端无法从持久状态区分该修订被拒绝还是已物化。
+- **F04：**`RiskExecutionQueries` 每次查询都用 `datetime.now(UTC)`、`source_status="LIVE"`、`data_age_seconds=0.0` 填充元数据，没有从订单、风控决策和 halt 记录计算实际来源时间；仪表盘的“数据年龄”因此可能把旧记录标成实时。
+- **F05：**`X-Cache-Status` 已区分 STALE，但静态 dashboard 代码没有读取或展示该响应头，操作人员页面仍看不到旧缓存状态。
+- **F06：**分页超预算状态现作为可用快照让事件流水继续运行；但其后 `_publish_heartbeat()` 调用 `publish_user_data_heartbeat()`，该函数无条件把持久状态写为 `READY_READONLY`。补采尚未完成时，心跳仍可能覆盖 `SYNCING`。
+- **F07：**本机忽略目录里的非法 Decimal 字符串现在会报错，但缺失金额/数量仍在调用处默认成零；Round-trip 结果随后转成 `float`，`match_per_symbol_trades()` 继续用浮点数计算滑点与 PnL 差值。且整个实现及测试不在 Git 中。
+- **F10：**容量统计现同时计入 journal 和 Parquet 写入；`scan()` 持锁重置增量计数，`record_written_bytes()` 不取同一把锁，扫描和写入并发时仍可能丢失一次增量，直至后续扫描校正。
+
+本机忽略目录里另外出现了性能改动：DuckDB/Polars 读取路径和依赖仍只存在于被忽略的 `local_optimization` 文件；其 fallback 用宽泛的 `except Exception: pass` 静默切换路径，也没有在这轮改动中提供目标负载、前后延迟或内存基准。应先界定可接受的 fallback 异常并记录性能证据，再考虑纳入版本。
+
+### 9.1 最新状态验证
+
+| 验证 | 结果 | 范围 |
+| --- | --- | --- |
+| `pytest tests/unit tests/smoke -m 'not live' -q --tb=short` | 1614 passed、4 skipped、1 deselected | 当前主项目 HEAD；4 项需要 loopback socket 权限，live 测试排除。 |
+| `node --test tests/frontend/*.test.mjs` | 34 passed | 当前主项目静态 dashboard 资源。 |
+| `pytest tests/integration -m 'not live' -q --tb=short` | 72 passed | 本地临时 PostgreSQL 库，执行后已删除。 |
+| 空库 `alembic upgrade head` + `alembic check` | 到 `20260925_0040`；`No new upgrade operations detected` | 迁移和模型在本次隔离空库上对齐；不替代生产大表迁移演练。 |
+| `pytest local_optimization/tests -q --tb=short` | 251 passed | 本机忽略目录，结果不属于当前 Git 提交的可复现验证。 |
+
+本次未检查服务器；上一轮报告的服务器 SHA 为 `86a89a9...`，不能据此宣称服务器已运行 `a67c21a`。

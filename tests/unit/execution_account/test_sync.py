@@ -899,4 +899,11 @@ async def test_sync_once_handles_incomplete_fills_catching_up() -> None:
     assert repository.process_states[-1].state is ExecutionAccountStatus.SYNCING
     assert repository.process_states[-1].reason == "fills_catching_up"
 
+    # Heartbeat during incomplete sync must preserve SYNCING and NOT overwrite with READY_READONLY
+    heartbeat_time = datetime(2026, 7, 4, 12, 1, tzinfo=UTC)
+    await service.publish_user_data_heartbeat(observed_at=heartbeat_time)
+    assert repository.process_states[-1].state is ExecutionAccountStatus.SYNCING
+    assert repository.process_states[-1].reason == "fills_catching_up"
+
+
 

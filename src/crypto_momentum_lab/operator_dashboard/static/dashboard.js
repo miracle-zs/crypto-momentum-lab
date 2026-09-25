@@ -234,13 +234,23 @@ const renderers = {
   performance: renderPerformance,
 };
 
-function setSectionStatus(id, status) {
+function setSectionStatus(id, status, cacheStatus = null) {
   const section = document.getElementById(id);
+  if (!section) return;
   const badge = section.querySelector(".section-state");
-  badge.className = `section-state ${statusClass(status)}`;
-  badge.textContent = status || "UNKNOWN";
+  const isStale = cacheStatus === "STALE";
+  const displayStatus = isStale ? "STALE" : (status || "UNKNOWN");
+  if (badge) {
+    badge.className = `section-state ${statusClass(displayStatus)}`;
+    badge.textContent = isStale ? `${status || "READY"} (STALE)` : (status || "UNKNOWN");
+    if (isStale) {
+      badge.setAttribute("title", "响应来源于过期的后台缓存 (X-Cache-Status: STALE)");
+    } else {
+      badge.removeAttribute("title");
+    }
+  }
   const dot = document.querySelector(`[data-nav-dot="${id}"]`);
-  if (dot) dot.className = `nav-dot ${statusClass(status)}`;
+  if (dot) dot.className = `nav-dot ${statusClass(displayStatus)}`;
 }
 
 function updateGlobalMode(data) {
@@ -362,7 +372,14 @@ async function refreshSection(id) {
       signal: fetchTimeoutSignal(SECTION_FETCH_TIMEOUT_MS),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const cacheHeader =
+      response.headers.get("x-cache-status") ||
+      response.headers.get("X-Cache-Status");
+    const cacheStatus = cacheHeader ? cacheHeader.toUpperCase() : null;
     const data = await response.json();
+    if (data && typeof data === "object") {
+      data._cache_status = cacheStatus;
+    }
     if (endpoint !== section.dataset.endpoint) return;
     const body = section.querySelector(".panel-body");
     const selectedMarketView = id === "universe"
@@ -376,11 +393,15 @@ async function refreshSection(id) {
         throw new Error(`未定义分区渲染器: ${id}`);
       }
       const [status, html] = renderer(data);
-      setSectionStatus(id, status);
+      setSectionStatus(id, status, cacheStatus);
       replaceChildrenFromHtml(body, html);
       sectionRenderKeys.set(id, renderKey);
       if (id === "universe") wireMarketViews(body, selectedMarketView);
       wireTableFilters(body);
+    } else {
+      const currentBadgeText = section?.querySelector(".section-state")?.textContent || "";
+      const baseStatus = currentBadgeText.replace(" (STALE)", "").trim();
+      setSectionStatus(id, baseStatus, cacheStatus);
     }
     body?.classList.remove("loading");
     body?.removeAttribute("aria-busy");

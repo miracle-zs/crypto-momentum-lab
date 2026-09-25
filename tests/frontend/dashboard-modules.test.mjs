@@ -108,6 +108,14 @@ test("global readiness uses database status for the overview section", () => {
     readinessStatusForSection("risk", { status: "HALTED" }),
     "HALTED",
   );
+  assert.equal(
+    readinessStatusForSection("overview", { database_status: "READY", _cache_status: "STALE" }),
+    "STALE",
+  );
+  assert.equal(
+    readinessStatusForSection("risk", { status: "READY", _cache_status: "STALE" }),
+    "STALE",
+  );
 });
 
 test("strategy equity models align paper and live B1 on common buckets", () => {

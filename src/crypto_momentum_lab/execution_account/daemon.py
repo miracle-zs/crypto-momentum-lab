@@ -176,6 +176,7 @@ class UserDataAccountSyncCycle(AccountSyncCycle, Protocol):
         self,
         *,
         observed_at: datetime,
+        state: ExecutionAccountStatus | None = None,
     ) -> None: ...
 
     async def persist_user_data_event(
@@ -306,6 +307,7 @@ class UserDataAccountSyncDaemon:
         self._expected_position_registry = expected_position_registry
         self._on_reconciled_fill = on_reconciled_fill
         self._state: AccountUserDataState | None = None
+        self._last_sync_result: ExecutionAccountSyncResult | None = None
         self._accept_events = False
         self._state_lock = asyncio.Lock()
         self._rest_sync_lock = asyncio.Lock()
@@ -959,10 +961,29 @@ class UserDataAccountSyncDaemon:
         self._check_stream_queue_health()
         async with self._state_lock:
             if self._accept_events and self._state is not None:
-                async with self._rest_sync_lock:
-                    await self._service.publish_user_data_heartbeat(
-                        observed_at=self._now(),
+                is_syncing = (
+                    self._last_sync_result is not None
+                    and (
+                        self._last_sync_result.fills_catching_up
+                        or self._last_sync_result.status
+                        == ExecutionAccountStatus.SYNCING
                     )
+                )
+                target_state = (
+                    ExecutionAccountStatus.SYNCING
+                    if is_syncing
+                    else ExecutionAccountStatus.READY_READONLY
+                )
+                async with self._rest_sync_lock:
+                    try:
+                        await self._service.publish_user_data_heartbeat(
+                            observed_at=self._now(),
+                            state=target_state,
+                        )
+                    except TypeError:
+                        await self._service.publish_user_data_heartbeat(
+                            observed_at=self._now(),
+                        )
                     self._notify_heartbeat()
 
     async def _reconcile(
@@ -1044,6 +1065,7 @@ class UserDataAccountSyncDaemon:
                         include_fills=include_fills,
                     )
             if _is_usable_result(result):
+                self._last_sync_result = result
                 snapshot = result.snapshot
                 assert snapshot is not None
                 if self._state is None:
@@ -1055,6 +1077,7 @@ class UserDataAccountSyncDaemon:
                     self._state.replace_snapshot(snapshot)
                 self._accept_events = False
             else:
+                self._last_sync_result = result
                 self._reconciliation_active = False
                 self._accept_events = False
                 if self._event_queue is not None:

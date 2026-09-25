@@ -9,7 +9,7 @@ seam so callers cannot accidentally treat an unknown state as safe.
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.execution import ExchangeOrderState
@@ -20,6 +20,7 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ExchangeOrderRow,
     RiskEvaluationRow,
     RiskHaltRow,
+    RuntimeMarketState15sRow,
 )
 
 _CONFIRMED_OPEN_ORDER_STATES = frozenset(
@@ -96,11 +97,68 @@ class RiskExecutionQueries:
                     .limit(_RECENT_ORDER_LIMIT)
                 )
             ).all()
+            latest_market_time = await session.scalar(
+                select(func.max(RuntimeMarketState15sRow.bucket_end))
+            )
         pending, ambiguous = split_exchange_orders(orders)
+
+        candidate_timestamps: list[datetime] = []
+        if latest_market_time is not None:
+            candidate_timestamps.append(
+                latest_market_time
+                if latest_market_time.tzinfo is not None
+                else latest_market_time.replace(tzinfo=UTC)
+            )
+        for h in halts:
+            if h.created_at is not None:
+                candidate_timestamps.append(
+                    h.created_at
+                    if h.created_at.tzinfo is not None
+                    else h.created_at.replace(tzinfo=UTC)
+                )
+        for d in decisions:
+            if d.evaluated_at is not None:
+                candidate_timestamps.append(
+                    d.evaluated_at
+                    if d.evaluated_at.tzinfo is not None
+                    else d.evaluated_at.replace(tzinfo=UTC)
+                )
+        for o in orders:
+            if o.updated_at is not None:
+                candidate_timestamps.append(
+                    o.updated_at
+                    if o.updated_at.tzinfo is not None
+                    else o.updated_at.replace(tzinfo=UTC)
+                )
+
+        now = datetime.now(UTC)
+        if not candidate_timestamps:
+            observed_at = None
+            data_age_seconds = None
+            source_status = "NO_DATA"
+            status = (
+                OperationalStatus.HALTED
+                if halts or ambiguous
+                else OperationalStatus.NO_DATA
+            )
+        else:
+            observed_at = max(candidate_timestamps)
+            data_age_seconds = round(
+                max(0.0, (now - observed_at).total_seconds()), 1
+            )
+            is_stale = data_age_seconds > 120.0
+            if halts or ambiguous:
+                status = OperationalStatus.HALTED
+                source_status = "HALTED"
+            elif is_stale:
+                status = OperationalStatus.STALE
+                source_status = "STALE"
+            else:
+                status = OperationalStatus.READY
+                source_status = "LIVE"
+
         return RiskExecutionResponse(
-            status=OperationalStatus.HALTED
-            if halts or ambiguous
-            else OperationalStatus.READY,
+            status=status,
             active_halts=[
                 {"reason": row.reason, "created_at": row.created_at.isoformat()}
                 for row in halts
@@ -117,9 +175,9 @@ class RiskExecutionQueries:
             exchange_orders=[exchange_order(row) for row in orders],
             pending_orders=[exchange_order(row) for row in pending],
             ambiguous_orders=[exchange_order(row) for row in ambiguous],
-            observed_at=datetime.now(UTC),
-            source_status="LIVE",
-            data_age_seconds=0.0,
+            observed_at=observed_at,
+            source_status=source_status,
+            data_age_seconds=data_age_seconds,
         )
 
 

@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable
+import os
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -274,10 +275,12 @@ class ArchiveJournal:
         *,
         last_bucket_start: datetime | None = None,
         last_symbol: str | None = None,
+        resolutions: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         """Acknowledge completed Parquet materialization.
 
-        Cleans up committed journal records and advances materialized_sequence.
+        Cleans up committed journal records, advances materialized_sequence,
+        and persists durable materialization/rejection resolution history.
         """
         committed_receipts = tuple(receipts)
         if not committed_receipts:
@@ -377,6 +380,49 @@ class ArchiveJournal:
                     )
                     or None
                 )
+
+        if resolutions:
+            res_path = self._root / "resolutions.jsonl"
+            with res_path.open("a", encoding="utf-8") as f:
+                for res in resolutions:
+                    f.write(json.dumps(dict(res), sort_keys=True) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            _fsync_directory(self._root)
+
+        manifest_data = {
+            "environment": self._environment,
+            "accepted_sequence": self._accepted_sequence,
+            "materialized_sequence": self._materialized_sequence,
+            "highest_committed_sequence": self._highest_committed_sequence,
+            "last_materialized_bucket": (
+                self._last_materialized_bucket.isoformat()
+                if self._last_materialized_bucket
+                else None
+            ),
+            "last_materialized_symbol": self._last_materialized_symbol,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        temp_manifest = self._root / "manifest.json.tmp"
+        with temp_manifest.open("w", encoding="utf-8") as f:
+            json.dump(manifest_data, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        temp_manifest.replace(self._manifest_path)
+        _fsync_directory(self._root)
+
+    def read_resolutions(self) -> list[dict[str, Any]]:
+        """Read all durable materialization resolutions from disk."""
+        res_path = self._root / "resolutions.jsonl"
+        if not res_path.exists():
+            return []
+        records = []
+        with res_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+        return records
 
     def recover(
         self,

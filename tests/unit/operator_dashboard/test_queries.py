@@ -1429,3 +1429,53 @@ def test_live_account_status_syncing_is_degraded() -> None:
     assert status == OperationalStatus.DEGRADED
 
 
+async def test_risk_execution_computes_data_age_and_freshness() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
+
+    now = datetime.now(UTC)
+    old_time = now - timedelta(seconds=200)
+
+    # 1. Test Stale case
+    scalars_mock = MagicMock()
+    scalars_mock.all.side_effect = [
+        [],  # halts
+        [],  # decisions
+        [],  # orders
+    ]
+    session_mock = AsyncMock()
+    session_mock.scalars.return_value = scalars_mock
+    session_mock.scalar.return_value = old_time  # latest_market_time is 200s old
+
+    factory_mock = MagicMock()
+    factory_mock.return_value.__aenter__.return_value = session_mock
+
+    queries = RiskExecutionQueries(session_factory=factory_mock)
+    resp = await queries.risk_execution()
+
+    assert resp.status == OperationalStatus.STALE
+    assert resp.source_status == "STALE"
+    assert resp.data_age_seconds is not None
+    assert resp.data_age_seconds >= 199.0
+    assert resp.observed_at == old_time
+
+    # 2. Test Empty / No Data case
+    scalars_mock2 = MagicMock()
+    scalars_mock2.all.side_effect = [[], [], []]
+    session_mock2 = AsyncMock()
+    session_mock2.scalars.return_value = scalars_mock2
+    session_mock2.scalar.return_value = None  # No records at all
+
+    factory_mock2 = MagicMock()
+    factory_mock2.return_value.__aenter__.return_value = session_mock2
+
+    queries2 = RiskExecutionQueries(session_factory=factory_mock2)
+    resp2 = await queries2.risk_execution()
+
+    assert resp2.status == OperationalStatus.NO_DATA
+    assert resp2.source_status == "NO_DATA"
+    assert resp2.observed_at is None
+    assert resp2.data_age_seconds is None
+
+
+

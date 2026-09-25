@@ -9,10 +9,11 @@ WindowMaterializer is the sole writer to Parquet window datasets:
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -44,6 +45,7 @@ class MaterializerFlushResult:
     last_bucket_start: datetime | None
     last_symbol: str | None
     sink_result: SinkFlushResult
+    resolutions: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def committed_sequences(self) -> frozenset[int]:
@@ -64,6 +66,7 @@ class WindowMaterializer:
         self._covered_keys: dict[Path, set[_VERSION_KEY]] = {}
         self._superseded_keys: set[_VERSION_KEY] = set()
         self._empty_receipts: list[DurableReceipt] = []
+        self._receipt_resolutions: dict[int | str, dict[str, Any]] = {}
         self._persisted_rows = 0
         self._duplicate_rows = 0
 
@@ -85,8 +88,20 @@ class WindowMaterializer:
 
     def stage_record(self, record: JournalRecord) -> SinkAppendResult | None:
         """Stage one journal record into the Parquet window sink."""
+        rec_id: int | str = record.receipt.record_id or record.receipt.sequence
         if record.receipt.is_empty:
             self._empty_receipts.append(record.receipt)
+            self._receipt_resolutions[rec_id] = {
+                "sequence": record.receipt.sequence,
+                "stream_id": record.receipt.stream_id,
+                "source_kind": record.receipt.source_kind.value,
+                "status": "empty",
+                "reason": "empty_batch",
+                "accepted_keys_count": 0,
+                "dropped_keys_count": 0,
+                "superseded_keys_count": 0,
+                "resolved_at": datetime.now(UTC).isoformat(),
+            }
             return None
 
         append_result = self._sink.append(
@@ -100,7 +115,50 @@ class WindowMaterializer:
 
         if not append_result.accepted_version_keys:
             self._empty_receipts.append(record.receipt)
+            status = "rejected" if append_result.dropped_version_keys else "empty"
+            reason = (
+                "conflict_dropped"
+                if append_result.dropped_version_keys
+                else "empty_selection"
+            )
+            self._receipt_resolutions[rec_id] = {
+                "sequence": record.receipt.sequence,
+                "stream_id": record.receipt.stream_id,
+                "source_kind": record.receipt.source_kind.value,
+                "status": status,
+                "reason": reason,
+                "accepted_keys_count": 0,
+                "dropped_keys_count": len(append_result.dropped_version_keys),
+                "superseded_keys_count": 0,
+                "dropped_version_keys": [
+                    f"{sym}:{bstart.isoformat()}:{digest}"
+                    for _, sym, bstart, digest in append_result.dropped_version_keys
+                ],
+                "resolved_at": datetime.now(UTC).isoformat(),
+            }
             return append_result
+
+        status = (
+            "partially_materialized"
+            if append_result.dropped_version_keys
+            else "materialized"
+        )
+        reason = "accepted_by_sink"
+        self._receipt_resolutions[rec_id] = {
+            "sequence": record.receipt.sequence,
+            "stream_id": record.receipt.stream_id,
+            "source_kind": record.receipt.source_kind.value,
+            "status": status,
+            "reason": reason,
+            "accepted_keys_count": len(append_result.accepted_version_keys),
+            "dropped_keys_count": len(append_result.dropped_version_keys),
+            "superseded_keys_count": len(append_result.superseded_version_keys),
+            "accepted_version_keys": [
+                f"{sym}:{bstart.isoformat()}:{digest}"
+                for _, sym, bstart, digest in append_result.accepted_version_keys
+            ],
+            "resolved_at": datetime.now(UTC).isoformat(),
+        }
 
         record_keys = set(append_result.accepted_version_keys)
         self._staged_records[record.path] = (record.receipt, record_keys)
@@ -181,11 +239,28 @@ class WindowMaterializer:
             ready_receipts.extend(ready_empty)
             self._empty_receipts = remaining_empty
 
+        ready_resolutions: list[dict[str, Any]] = []
+        for r in ready_receipts:
+            rec_id = r.record_id or r.sequence
+            res = self._receipt_resolutions.pop(rec_id, None)
+            if res is not None:
+                ready_resolutions.append(res)
+            else:
+                ready_resolutions.append({
+                    "sequence": r.sequence,
+                    "stream_id": r.stream_id,
+                    "source_kind": r.source_kind.value,
+                    "status": "materialized",
+                    "reason": "committed_on_flush",
+                    "resolved_at": datetime.now(UTC).isoformat(),
+                })
+
         if ready_receipts:
             self._journal.commit_materialization(
                 ready_receipts,
                 last_bucket_start=sink_result.last_bucket_start,
                 last_symbol=sink_result.last_symbol,
+                resolutions=ready_resolutions,
             )
 
         return MaterializerFlushResult(
@@ -196,4 +271,5 @@ class WindowMaterializer:
             last_bucket_start=sink_result.last_bucket_start,
             last_symbol=sink_result.last_symbol,
             sink_result=sink_result,
+            resolutions=tuple(ready_resolutions),
         )

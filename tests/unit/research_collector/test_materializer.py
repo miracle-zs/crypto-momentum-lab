@@ -142,6 +142,15 @@ def test_materializer_handles_conflicting_revision_without_hanging_pending(tmp_p
     assert journal.materialized_sequence == 2
     assert len(journal.pending_records()) == 0
 
+    # Durable resolutions on disk prove whether each revision was materialized or rejected
+    resolutions = journal.read_resolutions()
+    assert len(resolutions) == 2
+    res_map = {r["sequence"]: r for r in resolutions}
+    assert res_map[1]["status"] == "materialized"
+    assert res_map[2]["status"] == "rejected"
+    assert res_map[2]["reason"] == "conflict_dropped"
+    assert res_map[2]["dropped_keys_count"] == 1
+
     # The parquet file retains close=100
     parquet_files = list(tmp_path.joinpath("parquet").rglob("*.parquet"))
     assert len(parquet_files) == 1

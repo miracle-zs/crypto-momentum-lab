@@ -1175,11 +1175,32 @@ class ExecutionAccountSyncService:
         self,
         *,
         observed_at: datetime,
+        state: ExecutionAccountStatus | None = None,
     ) -> None:
         if observed_at.tzinfo is None or observed_at.utcoffset() is None:
             raise ValueError("observed_at must be timezone-aware")
+        target_state = state
+        if target_state is None:
+            if (
+                not self._has_completed_sync
+                or self._last_persisted_process_state
+                == ExecutionAccountStatus.SYNCING
+            ):
+                target_state = ExecutionAccountStatus.SYNCING
+            else:
+                target_state = ExecutionAccountStatus.READY_READONLY
+        reason = (
+            self._last_persisted_process_state_reason
+            if target_state == self._last_persisted_process_state
+            else (
+                "fills_catching_up"
+                if target_state == ExecutionAccountStatus.SYNCING
+                else None
+            )
+        )
         await self._save_state(
-            ExecutionAccountStatus.READY_READONLY,
+            target_state,
+            reason=reason,
             config=replace(self._config, observed_at=observed_at),
         )
 

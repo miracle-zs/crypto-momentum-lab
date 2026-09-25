@@ -78,7 +78,7 @@ class FakeService:
             snapshot=snapshot,
         )
 
-    async def publish_user_data_heartbeat(self, *, observed_at):
+    async def publish_user_data_heartbeat(self, *, observed_at, state=None):
         self.heartbeats.append(observed_at)
 
 

@@ -148,3 +148,36 @@ async def test_collector_ingest_does_not_scan_directory(tmp_path: Path) -> None:
     # scan() should NOT have been called during ingest (it was called once in initialize)
     assert scan_count == 0, f"Expected 0 scans during ingest, got {scan_count}"
     await collector.stop()
+
+
+def test_capacity_guard_concurrent_writes_during_scan_are_not_lost(tmp_path: Path) -> None:
+    import crypto_momentum_lab.research_collector.storage as storage_mod
+
+    guard = CapacityGuard(
+        root=tmp_path,
+        soft_limit_bytes=10000,
+        hard_limit_bytes=20000,
+        global_warning_free_bytes=500,
+        global_pause_free_bytes=100,
+        disk_usage_fn=lambda p: _DummyUsage(free=100000),
+    )
+    guard.scan()
+    guard.record_written_bytes(500)
+
+    orig_dir_size = storage_mod._directory_size
+
+    def slow_directory_size(path):
+        # A concurrent write happens while the directory scan is reading disk
+        guard.record_written_bytes(350)
+        return orig_dir_size(path)
+
+    storage_mod._directory_size = slow_directory_size
+    try:
+        guard.scan()
+    finally:
+        storage_mod._directory_size = orig_dir_size
+
+    current = guard.current_snapshot()
+    # The 350 bytes written during directory traversal must be preserved without loss
+    assert current.collector_bytes == 350
+
