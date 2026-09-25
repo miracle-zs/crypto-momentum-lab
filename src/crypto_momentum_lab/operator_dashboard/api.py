@@ -45,6 +45,8 @@ from crypto_momentum_lab.persistence.postgres.session import (
     create_dashboard_database_engine,
 )
 
+logger = logging.getLogger(__name__)
+
 STATIC_DIR = Path(__file__).with_name("static")
 _BASIC_AUTH = HTTPBasic(auto_error=False)
 _PAPER_CACHE_TTL_SECONDS = 5.0
@@ -502,6 +504,30 @@ def create_dashboard_app(
             raise HTTPException(
                 status_code=504,
                 detail="dashboard performance query timed out",
+            ) from exc
+
+    @dashboard.get(
+        "/api/performance/accounts/{account_label}",
+        dependencies=[Depends(require_dashboard_auth)],
+    )
+    async def account_performance(
+        account_label: str = "primary",
+        window_hours: int = 24,
+    ) -> dict[str, object]:
+        try:
+            return await response_cache.get(
+                f"account_performance:{account_label}:{window_hours}",
+                lambda: query_service().account_performance(
+                    account_label=account_label,
+                    window_hours=window_hours,
+                ),
+                ttl_seconds=_PERFORMANCE_CACHE_TTL_SECONDS,
+                stale_while_revalidate_seconds=default_stale_grace_seconds,
+            )
+        except (TimeoutError, SQLAlchemyTimeoutError) as exc:
+            raise HTTPException(
+                status_code=504,
+                detail="account performance query timed out",
             ) from exc
 
     @dashboard.get(

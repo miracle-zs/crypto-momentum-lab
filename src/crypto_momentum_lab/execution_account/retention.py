@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+from crypto_momentum_lab.domain.operational.retention_authority import (
+    RetentionAuthority,
+)
 from crypto_momentum_lab.domain.operational.retention_contract import (
     RetentionConsumerRequirement,
 )
@@ -62,19 +65,33 @@ async def prune_account_snapshots_once(
     config: AccountSnapshotRetentionConfig,
     now: datetime | None = None,
     consumer_requirements: tuple[RetentionConsumerRequirement, ...] = (),
+    authority: RetentionAuthority | None = None,
 ) -> dict[str, int]:
     observed_at = now or datetime.now(tz=UTC)
     if observed_at.tzinfo is None or observed_at.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
-    return await repository.prune_account_snapshots(
+    authority = authority or RetentionAuthority()
+    plan = authority.plan_prune(
+        dataset_name=f"account_snapshots_{account_label}",
+        requested_cutoff=observed_at - timedelta(days=config.retention_days),
+    )
+    effective_before = plan.effective_cutoff
+    deleted = await repository.prune_account_snapshots(
         environment=environment,
         account_label=account_label,
-        before=observed_at - timedelta(days=config.retention_days),
+        before=effective_before,
         equity_before=observed_at - timedelta(days=config.equity_retention_days),
         batch_size=config.batch_size,
         max_rows_per_table=config.max_rows_per_table,
         consumer_requirements=consumer_requirements,
     )
+    total_deleted = sum(deleted.values())
+    authority.execute_prune(
+        plan=plan,
+        expected_dependency_version=plan.expected_dependency_version,
+        executor_fn=lambda p: (total_deleted, 0),
+    )
+    return deleted
 
 
 async def run_account_snapshot_retention(

@@ -1,6 +1,7 @@
 import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -16,6 +17,7 @@ from crypto_momentum_lab.execution_account.orders.coordinator import (
     _KeyCommandScheduler,
 )
 from crypto_momentum_lab.execution_account.orders.state_machine import (
+    OrderExecutionResult,
     OrderPreSubmissionError,
 )
 
@@ -529,6 +531,118 @@ async def test_cancel_order_releases_reservation_after_backend_success() -> None
     saved = reservation_repo._reservations["res_test_123"]
     assert saved.released_quantity == Decimal("1.5")
     assert saved.active_quantity == Decimal("0")
+    await coordinator.aclose()
+
+
+async def test_cancel_order_does_not_release_reservation_if_state_not_canceled() -> None:
+    from decimal import Decimal
+
+    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+        InMemoryPositionReservationRepository,
+    )
+    from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+    from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
+
+    class FilledCancelBackend(BlockingBackend):
+        async def cancel_order(self, plan: OrderExecutionPlan) -> OrderExecutionResult:
+            return OrderExecutionResult(
+                client_order_id=plan.client_order_id,
+                state=ExchangeOrderState.FILLED,
+                exchange_order_id="ex-1",
+            )
+
+    backend = FilledCancelBackend()
+    reservation_repo = InMemoryPositionReservationRepository()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        reservation_repository=reservation_repo,
+    )
+    key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    res = PositionReservation(
+        reservation_id="res_test_filled",
+        command_id="order-exit-filled",
+        position_key=key,
+        batch_id="batch_1",
+        reserved_quantity=Decimal("1.5"),
+    )
+    reservation_repo.save_reservation(res)
+
+    plan = OrderExecutionPlan(
+        intent_id="intent-test-exit",
+        run_id="run-1",
+        client_order_id="order-exit-filled",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("1.5"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+    )
+
+    cancel_res = await coordinator.cancel_order(plan)
+    assert cancel_res.state is ExchangeOrderState.FILLED
+
+    # Reservation MUST NOT be released since state was FILLED, not CANCELED!
+    active = reservation_repo.load_active_reservations(key)
+    assert len(active) == 1
+    assert active[0].active_quantity == Decimal("1.5")
+
+    await coordinator.aclose()
+
+
+async def test_reservation_creation_failure_fails_closed() -> None:
+    from decimal import Decimal
+
+    backend = BlockingBackend()
+
+    class BrokenReservationRepo:
+        def load_active_reservations(self, key: Any) -> list[Any]:
+            return []
+
+        def save_reservation(self, res: Any) -> None:
+            raise RuntimeError("Database connection failure")
+
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        reservation_repository=BrokenReservationRepo(),
+    )
+    plan = OrderExecutionPlan(
+        intent_id="intent-test-fail-res",
+        run_id="run-1",
+        client_order_id="order-exit-fail-res",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("1.5"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+    )
+
+    with pytest.raises(
+        OrderPreSubmissionError, match="Failed to create position reservation"
+    ):
+        await coordinator.submit(plan)
+
+    with pytest.raises(
+        OrderPreSubmissionError, match="Failed to create position reservation"
+    ):
+        await coordinator.prepare_and_execute(
+            plan,
+            prepare_submission=lambda: asyncio.sleep(0, result=None),
+        )
 
     await coordinator.aclose()
 

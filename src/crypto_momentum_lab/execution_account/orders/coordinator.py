@@ -20,6 +20,7 @@ import structlog
 
 from crypto_momentum_lab.domain.execution import (
     ExchangeOrderSnapshot,
+    ExchangeOrderState,
     FuturesPositionSide,
     OrderExecutionPlan,
 )
@@ -342,6 +343,80 @@ class OrderExecutionCoordinator:
         """Wait until no entry operation can still reach the exchange."""
         await self._entry_submissions_idle.wait()
 
+    async def _ensure_reservation(self, plan: OrderExecutionPlan) -> None:
+        if not plan.reduce_only or self._reservation_repository is None:
+            return
+        try:
+            key = PositionKey(
+                environment="live",
+                account_label=self._account_label,
+                symbol=plan.symbol,
+                position_side=plan.position_side,
+            )
+            active_res = await _maybe_await(
+                self._reservation_repository.load_active_reservations(key)
+            )
+            existing = next(
+                (r for r in active_res if r.command_id == plan.client_order_id),
+                None,
+            )
+            if existing is None:
+                reservation = PositionReservation(
+                    reservation_id=f"res_{plan.client_order_id}",
+                    command_id=plan.client_order_id,
+                    position_key=key,
+                    batch_id=f"batch_{plan.symbol}_{plan.position_side.value}",
+                    reserved_quantity=Decimal(str(plan.quantity)),
+                )
+                await _maybe_await(
+                    self._reservation_repository.save_reservation(reservation)
+                )
+        except Exception as res_err:
+            log.error(
+                "order_reservation_creation_failed_refusing_submission",
+                client_order_id=plan.client_order_id,
+                error=str(res_err),
+            )
+            raise OrderPreSubmissionError(
+                f"Failed to create position reservation for "
+                f"{plan.client_order_id}: {res_err}"
+            ) from res_err
+
+    async def _consume_reservation_if_filled(
+        self,
+        plan: OrderExecutionPlan,
+        res: OrderExecutionResult,
+    ) -> None:
+        if (
+            not plan.reduce_only
+            or self._reservation_repository is None
+            or res.executed_quantity <= 0
+        ):
+            return
+        try:
+            key = PositionKey(
+                environment="live",
+                account_label=self._account_label,
+                symbol=plan.symbol,
+                position_side=plan.position_side,
+            )
+            active_res = await _maybe_await(
+                self._reservation_repository.load_active_reservations(key)
+            )
+            for r in active_res:
+                if r.command_id == plan.client_order_id:
+                    updated = r.consume(Decimal(str(res.executed_quantity)))
+                    await _maybe_await(
+                        self._reservation_repository.update_reservation(updated)
+                    )
+                    break
+        except Exception as consume_err:
+            log.warning(
+                "order_reservation_consume_failed",
+                client_order_id=plan.client_order_id,
+                error=str(consume_err),
+            )
+
     async def submit(
         self,
         plan: OrderExecutionPlan,
@@ -354,39 +429,7 @@ class OrderExecutionCoordinator:
 
         async def operation() -> OrderExecutionResult:
             async def submit() -> OrderExecutionResult:
-                if plan.reduce_only and self._reservation_repository is not None:
-                    try:
-                        key = PositionKey(
-                            environment="live",
-                            account_label=self._account_label,
-                            symbol=plan.symbol,
-                            position_side=plan.position_side,
-                        )
-                        active_res = await _maybe_await(
-                            self._reservation_repository.load_active_reservations(key)
-                        )
-                        existing = next(
-                            (r for r in active_res if r.command_id == plan.client_order_id),
-                            None,
-                        )
-                        if existing is None:
-                            reservation = PositionReservation(
-                                reservation_id=f"res_{plan.client_order_id}",
-                                command_id=plan.client_order_id,
-                                position_key=key,
-                                batch_id=f"batch_{plan.symbol}_{plan.position_side.value}",
-                                reserved_quantity=Decimal(str(plan.quantity)),
-                            )
-                            await _maybe_await(
-                                self._reservation_repository.save_reservation(reservation)
-                            )
-                    except Exception as res_err:
-                        log.warning(
-                            "order_reservation_creation_failed",
-                            client_order_id=plan.client_order_id,
-                            error=str(res_err),
-                        )
-
+                await self._ensure_reservation(plan)
                 res = (
                     await self._backend.execute_approved_intent(
                         plan,
@@ -395,36 +438,7 @@ class OrderExecutionCoordinator:
                     if prepared_submission is not None
                     else await self._backend.execute_approved_intent(plan)
                 )
-                if (
-                    plan.reduce_only
-                    and self._reservation_repository is not None
-                    and res.executed_quantity > 0
-                ):
-                    try:
-                        key = PositionKey(
-                            environment="live",
-                            account_label=self._account_label,
-                            symbol=plan.symbol,
-                            position_side=plan.position_side,
-                        )
-                        active_res = await _maybe_await(
-                            self._reservation_repository.load_active_reservations(key)
-                        )
-                        for r in active_res:
-                            if r.command_id == plan.client_order_id:
-                                updated = r.consume(Decimal(str(res.executed_quantity)))
-                                await _maybe_await(
-                                    self._reservation_repository.update_reservation(
-                                        updated
-                                    )
-                                )
-                                break
-                    except Exception as consume_err:
-                        log.warning(
-                            "order_reservation_consume_failed",
-                            client_order_id=plan.client_order_id,
-                            error=str(consume_err),
-                        )
+                await self._consume_reservation_if_filled(plan, res)
                 return res
 
             return cast(
@@ -460,13 +474,16 @@ class OrderExecutionCoordinator:
 
         async def operation() -> OrderExecutionResult | None:
             async def prepare_and_submit() -> OrderExecutionResult | None:
+                await self._ensure_reservation(plan)
                 prepared = await prepare_submission()
                 if prepared is None:
                     return None
-                return await self._backend.execute_approved_intent(
+                res = await self._backend.execute_approved_intent(
                     plan,
                     prepared_submission=prepared,
                 )
+                await self._consume_reservation_if_filled(plan, res)
+                return res
 
             return cast(
                 OrderExecutionResult | None,
@@ -497,7 +514,12 @@ class OrderExecutionCoordinator:
                 operation=lambda: self._backend.cancel_order(plan),
             ),
         )
-        if plan.reduce_only and self._reservation_repository is not None:
+        if (
+            plan.reduce_only
+            and self._reservation_repository is not None
+            and result.state
+            in (ExchangeOrderState.CANCELED, ExchangeOrderState.ABSENT_RECONCILED)
+        ):
             try:
                 key = PositionKey(
                     environment="live",

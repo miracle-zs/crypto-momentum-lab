@@ -284,6 +284,63 @@ class PostgresRuntimeMarketStateRepository:
                         )
                     )
                 )
+                await session.execute(
+                    update(MarketRevisionRefRow)
+                    .where(
+                        MarketRevisionRefRow.scope == gap.environment,
+                        MarketRevisionRefRow.symbol == gap.symbol,
+                        MarketRevisionRefRow.interval == "15s",
+                        MarketRevisionRefRow.bucket_start >= first_bucket,
+                        MarketRevisionRefRow.bucket_start <= last_bucket,
+                    )
+                    .values(is_canonical=False)
+                )
+                updated_rows = (
+                    await session.scalars(
+                        select(RuntimeMarketState15sRow)
+                        .where(
+                            RuntimeMarketState15sRow.environment == gap.environment,
+                            RuntimeMarketState15sRow.symbol == gap.symbol,
+                            RuntimeMarketState15sRow.bucket_start >= first_bucket,
+                            RuntimeMarketState15sRow.bucket_start <= last_bucket,
+                        )
+                    )
+                ).all()
+                revision_values = [
+                    {
+                        "revision_id": (
+                            f"{gap.environment}:{gap.symbol}:15s:"
+                            f"{int(row.bucket_start.timestamp())}:{compute_market_state_hash(market_state_from_row(row))[:10]}"
+                        ),
+                        "scope": gap.environment,
+                        "symbol": gap.symbol,
+                        "interval": "15s",
+                        "bucket_start": row.bucket_start,
+                        "bucket_end": row.bucket_end,
+                        "content_hash": compute_market_state_hash(
+                            market_state_from_row(row)
+                        ),
+                        "published_at": gap.current_event_at,
+                        "source_epoch": f"gap_{inserted}",
+                        "visibility_mode": "decision_visible",
+                        "is_canonical": False,
+                        "payload": market_state_to_payload(
+                            market_state_from_row(row)
+                        ),
+                        "lineage": {
+                            "gap_id": str(inserted),
+                            "gap_previous_event_at": gap.previous_event_at.isoformat(),
+                            "gap_current_event_at": gap.current_event_at.isoformat(),
+                        },
+                    }
+                    for row in updated_rows
+                ]
+                if revision_values:
+                    await session.execute(
+                        insert(MarketRevisionRefRow)
+                        .values(revision_values)
+                        .on_conflict_do_nothing()
+                    )
 
     async def load_after(
         self,

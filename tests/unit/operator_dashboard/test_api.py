@@ -47,6 +47,7 @@ def test_all_read_only_dashboard_routes_are_available() -> None:
             "/api/risk-execution",
             "/api/reports",
             "/api/performance",
+            "/api/performance/accounts/primary",
             "/api/readiness",
         ):
             assert client.get(route, auth=DASHBOARD_BASIC_AUTH).status_code == 200

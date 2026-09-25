@@ -28,6 +28,9 @@ from crypto_momentum_lab.domain.market.models import (
     CaptureStream,
     RawEnvelope,
 )
+from crypto_momentum_lab.domain.operational.retention_authority import (
+    RetentionAuthority,
+)
 from crypto_momentum_lab.domain.operational.retention_contract import (
     RetentionConsumerRequirement,
 )
@@ -861,6 +864,7 @@ async def prune_operational_database_once(
     runtime_state_batch_size: int = _RUNTIME_STATE_RETENTION_BATCH_SIZE,
     consumer_requirements: tuple[RetentionConsumerRequirement, ...] = (),
     now: datetime | None = None,
+    authority: RetentionAuthority | None = None,
 ) -> None:
     if contract_metadata_retention_hours <= 0:
         raise ValueError("contract_metadata_retention_hours must be positive")
@@ -873,20 +877,34 @@ async def prune_operational_database_once(
     observed_at = datetime.now(UTC) if now is None else now
     contract_cutoff = observed_at - timedelta(hours=contract_metadata_retention_hours)
     runtime_cutoff = observed_at - timedelta(hours=runtime_state_retention_hours)
+
+    authority = authority or RetentionAuthority()
+    plan = authority.plan_prune(
+        dataset_name="market_data",
+        requested_cutoff=runtime_cutoff,
+    )
+    effective_runtime_cutoff = plan.effective_cutoff
+    effective_contract_cutoff = min(contract_cutoff, plan.effective_cutoff)
+
     req_kwargs = (
         {"consumer_requirements": consumer_requirements}
         if consumer_requirements
         else {}
     )
     deleted_contracts = await repository.prune_contract_metadata(
-        before=contract_cutoff,
+        before=effective_contract_cutoff,
         batch_size=contract_metadata_batch_size,
         **req_kwargs,
     )
     deleted_states = await repository.prune_runtime_market_states(
-        before=runtime_cutoff,
+        before=effective_runtime_cutoff,
         batch_size=runtime_state_batch_size,
         **req_kwargs,
+    )
+    receipt = authority.execute_prune(
+        plan=plan,
+        expected_dependency_version=plan.expected_dependency_version,
+        executor_fn=lambda p: (deleted_states, deleted_contracts),
     )
     # Keep tomorrow's event partitions present so live-strategy writers never
     # miss a day boundary.  Deletion stays on the daily archive-and-trim job.
@@ -899,8 +917,9 @@ async def prune_operational_database_once(
             contract_metadata_deleted=deleted_contracts,
             runtime_market_states_deleted=deleted_states,
             event_partitions_ensured=event_partitions_ensured,
-            contract_metadata_cutoff=contract_cutoff.isoformat(),
-            runtime_state_cutoff=runtime_cutoff.isoformat(),
+            contract_metadata_cutoff=effective_contract_cutoff.isoformat(),
+            runtime_state_cutoff=effective_runtime_cutoff.isoformat(),
+            prune_receipt_id=receipt.receipt_id,
         )
 
 

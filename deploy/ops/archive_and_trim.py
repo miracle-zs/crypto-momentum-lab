@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import subprocess
 import sys
 from datetime import UTC, date, datetime, timedelta
@@ -203,7 +204,10 @@ class PsqlRetentionRepository:
                 continue
             parts = line.split("|")
             if len(parts) < 10:
-                continue
+                raise RuntimeError(
+                    f"Malformed consumer dependency record line: {line!r}. "
+                    "Refusing to prune operational data (failing closed)."
+                )
             (
                 cid,
                 dname,
@@ -220,8 +224,12 @@ class PsqlRetentionRepository:
                 wm_dt = datetime.fromisoformat(wmark).astimezone(UTC)
                 dl_dt = datetime.fromisoformat(dline).astimezone(UTC) if dline else None
                 up_dt = datetime.fromisoformat(up_at).astimezone(UTC)
-            except Exception:
-                continue
+            except Exception as parse_err:
+                raise RuntimeError(
+                    "Failed to parse consumer dependency timestamps from "
+                    f"line: {line!r}. Refusing to prune operational data "
+                    "(failing closed)."
+                ) from parse_err
             deps.append(
                 ConsumerDependency(
                     consumer_id=cid,
@@ -510,19 +518,10 @@ def main(argv: list[str] | None = None) -> int:
         if not manifest.exists():
             print(f"  no manifest at {manifest} -- refusing to delete", file=sys.stderr)
             return 1
-        recorded = int(
-            subprocess.run(  # noqa: S603
-                [
-                    sys.executable,
-                    "-c",
-                    f"import json;print(json.load(open({str(manifest)!r}))['rows'])",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            ).stdout.strip()
-            or "0"
-        )
+        manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+        recorded = int(manifest_data.get("rows", 0))
+        from_str = str(manifest_data.get("from", str(oldest)))
+        to_str = str(manifest_data.get("to", str(effective_cutoff)))
         if recorded != pending:
             print(
                 f"  archived {recorded} rows but {pending} are in range "
@@ -548,8 +547,11 @@ def main(argv: list[str] | None = None) -> int:
             col: str = column,
             rec: int = recorded,
             pend: int = pending,
+            from_dt: str = from_str,
+            to_dt: str = to_str,
         ) -> tuple[int, int]:
             if tbl == "strategy_runtime_events" and _table_is_partitioned(tbl, **db):
+                authority.verify_fence(p)
                 dropped = _drop_expired_partitions(tbl, p.effective_cutoff.date(), **db)
                 print(f"  dropped {dropped} expired partitions")
                 return (rec, 0)
@@ -561,7 +563,8 @@ def main(argv: list[str] | None = None) -> int:
                     _scalar(
                         "WITH d AS (DELETE FROM "
                         f"{tbl} WHERE ctid IN (SELECT ctid FROM {tbl} "
-                        f'WHERE "{col}" < \'{p.effective_cutoff.date()}+00\' '
+                        f'WHERE "{col}" >= \'{from_dt}+00\' '
+                        f'AND "{col}" < \'{to_dt}+00\' '
                         f"LIMIT {args.batch_rows}) "
                         "RETURNING 1) SELECT count(*) FROM d",
                         **db,
@@ -570,6 +573,11 @@ def main(argv: list[str] | None = None) -> int:
                 if removed == 0:
                     break
                 deleted += removed
+                if deleted > rec:
+                    raise RuntimeError(
+                        f"Deleted {deleted} rows exceeding archived manifest rows "
+                        f"({rec})! Aborting prune to prevent unarchived data loss."
+                    )
                 if deleted % (args.batch_rows * 20) == 0:
                     print(f"  deleted {deleted} / {pend}")
             print(f"  deleted {deleted} rows")

@@ -8,18 +8,28 @@ from pathlib import Path
 from typing import Protocol
 
 from crypto_momentum_lab.domain.decision import (
+    ClockEvent,
+    DecisionEngine,
+    DecisionInput,
+    EffectivePolicy,
     FillModel,
+    PolicyState,
     SimulationExecutionAdapter,
 )
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
-from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    PositionHealthStatus,
+    PositionKey,
+    PositionView,
+)
 from crypto_momentum_lab.domain.market.market_book import compute_market_state_hash
+from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import (
     MarketEnvelope,
     MarketRevisionRef,
+    MarketVisibilityMode,
 )
-from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.runtime.capability_evaluator import (
     CapabilityEvaluator,
     CapabilityEvidence,
@@ -190,6 +200,7 @@ def run_paper_trading(
     _sim_adapter = SimulationExecutionAdapter(
         default_fill_model=FillModel(fee_rate=config.execution.taker_fee_rate),
     )
+    _decision_engine = DecisionEngine()
     try:
         runtime_config = build_runtime_config(
             config.strategy_name,
@@ -278,6 +289,60 @@ def run_paper_trading(
         for position in position_updates:
             positions_by_id[position.position_id] = position
 
+        market_ref = MarketRevisionRef(
+            scope="paper",
+            symbol=state.symbol,
+            interval="15s",
+            bucket_start=state.bucket_start,
+            bucket_end=state.bucket_end,
+            revision_id=f"rev_{state.symbol}_{int(state.bucket_start.timestamp())}",
+            content_hash=compute_market_state_hash(state),
+            published_at=state.bucket_end,
+            source_epoch=f"ep_{config.run_id}",
+            visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
+        )
+        envelope = MarketEnvelope(ref=market_ref, state=state)
+        pos_key = PositionKey(
+            environment="paper",
+            account_label=config.run_id,
+            symbol=state.symbol,
+            position_side=FuturesPositionSide.BOTH,
+        )
+        journal = journals_by_symbol.setdefault(state.symbol, AccountJournal(pos_key))
+        pos_view = PositionView(
+            key=pos_key,
+            projection_version=f"pv_{input_state_count}",
+            input_revision=input_state_count,
+            event_cut=state.bucket_end,
+            policy_version="v1",
+            schema_version="v1",
+            coverage=None,
+            active_episode=None,
+            batches=(),
+            unallocated_quantity=Decimal("0"),
+            reconciliation_gap=Decimal("0"),
+            health_status=PositionHealthStatus.READY,
+        )
+        dec_input = DecisionInput(
+            symbol=state.symbol,
+            market_ref=market_ref,
+            market_envelope=envelope,
+            position_view=pos_view,
+            universe_version="univ_v1",
+            clock_event=ClockEvent(
+                timestamp=state.bucket_end, sequence=input_state_count
+            ),
+            cash_balance=Decimal("10000.00"),
+            risk_config_version="risk_v1",
+        )
+        policy = EffectivePolicy(
+            policy_id=f"policy_{config.strategy_name}",
+            strategy_name=config.strategy_name,
+            entry_threshold=Decimal("65000.00"),
+            target_notional=config.candidate_notional or Decimal("500.00"),
+        )
+        _decision_engine.evaluate(dec_input, PolicyState(), policy)
+
         decision = strategy.on_market_state(state)
         signals.extend(decision.signals)
         candidates.extend(decision.candidates)
@@ -302,29 +367,6 @@ def run_paper_trading(
                 )
                 if matching_cand is not None:
                     try:
-                        envelope = MarketEnvelope(
-                            ref=MarketRevisionRef(
-                                revision_id=f"rev_{state.symbol}_{state.bucket_start.isoformat()}",
-                                symbol=state.symbol,
-                                bucket_start=state.bucket_start,
-                                bucket_end=state.bucket_end,
-                                content_hash=compute_market_state_hash(state),
-                                data_complete=state.data_complete,
-                                created_at=state.bucket_end,
-                            ),
-                            state=state,
-                        )
-                        journal = journals_by_symbol.setdefault(
-                            state.symbol,
-                            AccountJournal(
-                                PositionKey(
-                                    environment="paper",
-                                    account_label=config.run_id,
-                                    symbol=state.symbol,
-                                    position_side=FuturesPositionSide.BOTH,
-                                )
-                            ),
-                        )
                         _sim_adapter.execute_entry(matching_cand, envelope, journal)
                     except Exception:
                         pass

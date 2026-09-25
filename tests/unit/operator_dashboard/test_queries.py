@@ -1037,8 +1037,8 @@ def test_live_common_equity_removes_configured_external_deposit() -> None:
 def test_live_cash_flow_parser_allows_explicit_empty_configuration() -> None:
     assert parse_live_cash_flow_adjustments("[]") == ()
     default = parse_live_cash_flow_adjustments("")
-    assert len(default) == 1
-    assert default[0].amount == Decimal("200")
+    assert len(default) == 0
+    assert default == ()
 
 
 def test_common_equity_start_is_fixed_to_august_21_anchor() -> None:

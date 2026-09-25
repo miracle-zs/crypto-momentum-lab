@@ -158,23 +158,7 @@ _live_strategy_signal = _account_queries._live_strategy_signal
 _order_intent_reason = _account_queries._order_intent_reason
 
 
-DEFAULT_LIVE_CASH_FLOW_ADJUSTMENTS = (
-    LiveCashFlowAdjustment(
-        account_label="primary",
-        effective_at=datetime(
-            2026,
-            8,
-            21,
-            9,
-            41,
-            19,
-            895915,
-            tzinfo=UTC,
-        ),
-        amount=Decimal("200"),
-        cash_flow_type="deposit",
-    ),
-)
+DEFAULT_LIVE_CASH_FLOW_ADJUSTMENTS: tuple[LiveCashFlowAdjustment, ...] = ()
 
 
 def _latest_checkpoint_at_statement() -> Select[tuple[datetime]]:
@@ -585,10 +569,22 @@ class DashboardQueries:
                 family=MetricFamily.TIME_WEIGHTED_RETURN,
                 unit="ratio",
             )
+            dietz_spec = MetricSpec(
+                name="modified_dietz",
+                family=MetricFamily.MODIFIED_DIETZ,
+                unit="ratio",
+            )
+            mwr_spec = MetricSpec(
+                name="mwr",
+                family=MetricFamily.MONEY_WEIGHTED_RETURN,
+                unit="ratio",
+            )
 
             pnl_metric = AccountPerformanceCalculator.calculate(pnl_spec, cut)
             delta_metric = AccountPerformanceCalculator.calculate(delta_spec, cut)
             twr_metric = AccountPerformanceCalculator.calculate(twr_spec, cut)
+            dietz_metric = AccountPerformanceCalculator.calculate(dietz_spec, cut)
+            mwr_metric = AccountPerformanceCalculator.calculate(mwr_spec, cut)
 
             return {
                 "account_label": account_label,
@@ -604,6 +600,12 @@ class DashboardQueries:
                 ),
                 "twr": (
                     str(twr_metric.value) if twr_metric.value is not None else None
+                ),
+                "modified_dietz": (
+                    str(dietz_metric.value) if dietz_metric.value is not None else None
+                ),
+                "mwr": (
+                    str(mwr_metric.value) if mwr_metric.value is not None else None
                 ),
                 "status": twr_metric.status.value,
                 "cash_flow_corrections_count": len(cf_rows),

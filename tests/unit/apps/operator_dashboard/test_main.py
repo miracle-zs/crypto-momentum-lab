@@ -284,3 +284,17 @@ class FakeQueries:
             ),
             host_resources=HostResourcesResponse(),
         )
+
+    async def account_performance(
+        self,
+        account_label: str = "primary",
+        window_hours: int = 24,
+    ) -> dict[str, object]:
+        return {
+            "account_label": account_label,
+            "window_hours": window_hours,
+            "status": "ready",
+            "twr": "0.05",
+            "modified_dietz": "0.048",
+            "mwr": "0.049",
+        }
