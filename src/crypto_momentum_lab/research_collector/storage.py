@@ -701,7 +701,12 @@ class CapacityGuard:
     def scan(self) -> CapacitySnapshot:
         """Perform a full directory walk and disk usage check (intended to run in a thread)."""
         with self._scan_lock:
+            with self._written_lock:
+                scan_start_writes = self._total_bytes_written
+                prior_base = self._base_collector_bytes
+
             collector_bytes = _directory_size(self._root)
+
             with self._written_lock:
                 scan_completed_at_written = self._total_bytes_written
                 usage = self._disk_usage_fn(self._root)
@@ -713,7 +718,18 @@ class CapacityGuard:
                 now_dt = datetime.now(UTC)
                 now_mono = time.monotonic()
 
-                self._base_collector_bytes = collector_bytes
+                writes_during_scan = max(
+                    0, scan_completed_at_written - scan_start_writes
+                )
+                if writes_during_scan > 0:
+                    effective_collector_bytes = max(
+                        collector_bytes,
+                        prior_base + writes_during_scan,
+                    )
+                else:
+                    effective_collector_bytes = collector_bytes
+
+                self._base_collector_bytes = effective_collector_bytes
                 self._baseline_written_total = scan_completed_at_written
                 self._base_disk_free_bytes = disk_free_bytes
                 self._last_scan_monotonic = now_mono

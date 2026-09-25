@@ -18,9 +18,11 @@ from crypto_momentum_lab.operator_dashboard.schemas import RiskExecutionResponse
 from crypto_momentum_lab.operator_dashboard.status import OperationalStatus
 from crypto_momentum_lab.persistence.postgres.models import (
     ExchangeOrderRow,
+    MonitoringMembershipRow,
     RiskEvaluationRow,
     RiskHaltRow,
     RuntimeMarketState15sRow,
+    UniverseSnapshotRow,
 )
 
 _CONFIRMED_OPEN_ORDER_STATES = frozenset(
@@ -73,9 +75,13 @@ class RiskExecutionQueries:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         environment: str = "live",
+        required_symbols: Sequence[str] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._environment = environment
+        self._required_symbols = (
+            tuple(required_symbols) if required_symbols is not None else None
+        )
 
     async def risk_execution(self) -> RiskExecutionResponse:
         async with self._session_factory() as session:
@@ -100,26 +106,82 @@ class RiskExecutionQueries:
                     .limit(_RECENT_ORDER_LIMIT)
                 )
             ).all()
-            latest_market_time = await session.scalar(
-                select(func.max(RuntimeMarketState15sRow.bucket_end)).where(
+
+            pending, ambiguous = split_exchange_orders(orders)
+
+            # Determine strategy-required symbols to evaluate coverage & freshness
+            if self._required_symbols is not None:
+                required_symbols = set(self._required_symbols)
+            else:
+                required_symbols = set()
+                # Include symbols from active open/ambiguous orders
+                for o in (*pending, *ambiguous):
+                    if o.symbol:
+                        required_symbols.add(o.symbol)
+                # Include monitored symbols from latest active universe snapshot
+                try:
+                    snapshot_id = await session.scalar(
+                        select(UniverseSnapshotRow.snapshot_id)
+                        .where(UniverseSnapshotRow.activated.is_(True))
+                        .order_by(UniverseSnapshotRow.observed_at.desc())
+                        .limit(1)
+                    )
+                    if snapshot_id is not None and isinstance(snapshot_id, (str, int)):
+                        monitored = (
+                            await session.scalars(
+                                select(MonitoringMembershipRow.symbol).where(
+                                    MonitoringMembershipRow.snapshot_id == snapshot_id
+                                )
+                            )
+                        ).all()
+                        required_symbols.update(monitored)
+                except Exception:
+                    pass
+
+            market_query = (
+                select(
+                    RuntimeMarketState15sRow.symbol,
+                    func.max(RuntimeMarketState15sRow.bucket_end),
+                )
+                .where(
                     RuntimeMarketState15sRow.environment == self._environment,
                     RuntimeMarketState15sRow.data_complete.is_(True),
                 )
+                .group_by(RuntimeMarketState15sRow.symbol)
             )
-        pending, ambiguous = split_exchange_orders(orders)
+            if required_symbols:
+                market_query = market_query.where(
+                    RuntimeMarketState15sRow.symbol.in_(required_symbols)
+                )
+
+            market_rows = (await session.execute(market_query)).all()
 
         now = datetime.now(UTC)
-        if latest_market_time is not None:
-            market_time = (
-                latest_market_time
-                if latest_market_time.tzinfo is not None
-                else latest_market_time.replace(tzinfo=UTC)
+        symbol_times: dict[str, datetime] = {
+            row[0]: (
+                row[1]
+                if row[1].tzinfo is not None
+                else row[1].replace(tzinfo=UTC)
             )
-            observed_at = market_time
+            for row in market_rows
+            if row[1] is not None
+        }
+
+        if required_symbols:
+            missing_symbols = required_symbols - set(symbol_times.keys())
+            coverage_complete = (len(missing_symbols) == 0)
+        else:
+            missing_symbols = set()
+            coverage_complete = bool(symbol_times)
+
+        if symbol_times:
+            # Multi-symbol worst-case freshness: determined by the oldest symbol
+            worst_market_time = min(symbol_times.values())
+            observed_at = worst_market_time
             data_age_seconds = round(
-                max(0.0, (now - market_time).total_seconds()), 1
+                max(0.0, (now - worst_market_time).total_seconds()), 1
             )
-            is_stale = data_age_seconds > 120.0
+            is_stale = (data_age_seconds > 120.0) or (not coverage_complete)
             if halts or ambiguous:
                 status = OperationalStatus.HALTED
                 source_status = "HALTED"

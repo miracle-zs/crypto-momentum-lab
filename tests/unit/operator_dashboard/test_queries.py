@@ -1445,7 +1445,10 @@ async def test_risk_execution_computes_data_age_and_freshness() -> None:
     ]
     session_mock = AsyncMock()
     session_mock.scalars.return_value = scalars_mock
-    session_mock.scalar.return_value = old_time  # latest_market_time is 200s old
+    session_mock.scalar.return_value = None  # universe snapshot
+    exec_mock = MagicMock()
+    exec_mock.all.return_value = [("BTCUSDT", old_time)]
+    session_mock.execute.return_value = exec_mock
 
     factory_mock = MagicMock()
     factory_mock.return_value.__aenter__.return_value = session_mock
@@ -1464,7 +1467,10 @@ async def test_risk_execution_computes_data_age_and_freshness() -> None:
     scalars_mock2.all.side_effect = [[], [], []]
     session_mock2 = AsyncMock()
     session_mock2.scalars.return_value = scalars_mock2
-    session_mock2.scalar.return_value = None  # No records at all
+    session_mock2.scalar.return_value = None  # universe snapshot
+    exec_mock2 = MagicMock()
+    exec_mock2.all.return_value = []
+    session_mock2.execute.return_value = exec_mock2
 
     factory_mock2 = MagicMock()
     factory_mock2.return_value.__aenter__.return_value = session_mock2
@@ -1509,7 +1515,10 @@ async def test_risk_execution_stale_market_not_masked_by_recent_orders() -> None
     ]
     session_mock = AsyncMock()
     session_mock.scalars.return_value = scalars_mock
-    session_mock.scalar.return_value = old_market_time  # market is 240s old
+    session_mock.scalar.return_value = None
+    exec_mock = MagicMock()
+    exec_mock.all.return_value = [("BTCUSDT", old_market_time)]
+    session_mock.execute.return_value = exec_mock
 
     factory_mock = MagicMock()
     factory_mock.return_value.__aenter__.return_value = session_mock
@@ -1534,6 +1543,9 @@ async def test_risk_execution_filters_by_environment_and_complete_data() -> None
     session_mock = AsyncMock()
     session_mock.scalars.return_value = scalars_mock
     session_mock.scalar.return_value = None
+    exec_mock = MagicMock()
+    exec_mock.all.return_value = []
+    session_mock.execute.return_value = exec_mock
 
     factory_mock = MagicMock()
     factory_mock.return_value.__aenter__.return_value = session_mock
@@ -1541,8 +1553,118 @@ async def test_risk_execution_filters_by_environment_and_complete_data() -> None
     queries = RiskExecutionQueries(session_factory=factory_mock, environment="paper_1")
     await queries.risk_execution()
 
-    assert session_mock.scalar.called
-    statement = session_mock.scalar.call_args[0][0]
+    assert session_mock.execute.called
+    statement = session_mock.execute.call_args[0][0]
     compiled = str(statement.compile(compile_kwargs={"literal_binds": True}))
     assert "runtime_market_states_15s.environment = 'paper_1'" in compiled
     assert "runtime_market_states_15s.data_complete IS true" in compiled
+    assert "GROUP BY runtime_market_states_15s.symbol" in compiled
+
+
+async def test_risk_execution_stale_if_any_required_symbol_stale() -> None:
+    """F04: A single fresh symbol cannot mask a stale symbol among required symbols."""
+    from unittest.mock import AsyncMock, MagicMock
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
+
+    now = datetime.now(UTC)
+    fresh_time = now - timedelta(seconds=5)
+    stale_time = now - timedelta(seconds=200)
+
+    scalars_mock = MagicMock()
+    scalars_mock.all.side_effect = [[], [], []]
+    session_mock = AsyncMock()
+    session_mock.scalars.return_value = scalars_mock
+    session_mock.scalar.return_value = None
+    exec_mock = MagicMock()
+    exec_mock.all.return_value = [
+        ("BTCUSDT", fresh_time),
+        ("ETHUSDT", stale_time),
+    ]
+    session_mock.execute.return_value = exec_mock
+
+    factory_mock = MagicMock()
+    factory_mock.return_value.__aenter__.return_value = session_mock
+
+    queries = RiskExecutionQueries(
+        session_factory=factory_mock,
+        required_symbols=["BTCUSDT", "ETHUSDT"],
+    )
+    resp = await queries.risk_execution()
+
+    assert resp.status == OperationalStatus.STALE
+    assert resp.source_status == "STALE"
+    assert resp.observed_at == stale_time
+    assert resp.data_age_seconds is not None
+    assert resp.data_age_seconds >= 199.0
+
+
+async def test_risk_execution_stale_if_required_symbol_missing_data() -> None:
+    """F04: Incomplete symbol coverage must cause STALE status, even if present symbol is fresh."""
+    from unittest.mock import AsyncMock, MagicMock
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
+
+    now = datetime.now(UTC)
+    fresh_time = now - timedelta(seconds=5)
+
+    scalars_mock = MagicMock()
+    scalars_mock.all.side_effect = [[], [], []]
+    session_mock = AsyncMock()
+    session_mock.scalars.return_value = scalars_mock
+    session_mock.scalar.return_value = None
+    # Only BTC has complete data, ETH is completely missing from complete buckets
+    exec_mock = MagicMock()
+    exec_mock.all.return_value = [
+        ("BTCUSDT", fresh_time),
+    ]
+    session_mock.execute.return_value = exec_mock
+
+    factory_mock = MagicMock()
+    factory_mock.return_value.__aenter__.return_value = session_mock
+
+    queries = RiskExecutionQueries(
+        session_factory=factory_mock,
+        required_symbols=["BTCUSDT", "ETHUSDT"],
+    )
+    resp = await queries.risk_execution()
+
+    # Missing ETH data means coverage is incomplete -> STALE
+    assert resp.status == OperationalStatus.STALE
+    assert resp.source_status == "STALE"
+    assert resp.observed_at == fresh_time
+
+
+async def test_risk_execution_ready_when_all_required_symbols_fresh() -> None:
+    """F04: When all required symbols have complete, fresh data, status is READY / LIVE."""
+    from unittest.mock import AsyncMock, MagicMock
+    from crypto_momentum_lab.operator_dashboard.risk_execution_queries import RiskExecutionQueries
+
+    now = datetime.now(UTC)
+    btc_time = now - timedelta(seconds=5)
+    eth_time = now - timedelta(seconds=10)
+
+    scalars_mock = MagicMock()
+    scalars_mock.all.side_effect = [[], [], []]
+    session_mock = AsyncMock()
+    session_mock.scalars.return_value = scalars_mock
+    session_mock.scalar.return_value = None
+    exec_mock = MagicMock()
+    exec_mock.all.return_value = [
+        ("BTCUSDT", btc_time),
+        ("ETHUSDT", eth_time),
+    ]
+    session_mock.execute.return_value = exec_mock
+
+    factory_mock = MagicMock()
+    factory_mock.return_value.__aenter__.return_value = session_mock
+
+    queries = RiskExecutionQueries(
+        session_factory=factory_mock,
+        required_symbols=["BTCUSDT", "ETHUSDT"],
+    )
+    resp = await queries.risk_execution()
+
+    assert resp.status == OperationalStatus.READY
+    assert resp.source_status == "LIVE"
+    assert resp.observed_at == eth_time
+    assert resp.data_age_seconds is not None
+    assert 9.0 <= resp.data_age_seconds <= 11.0
