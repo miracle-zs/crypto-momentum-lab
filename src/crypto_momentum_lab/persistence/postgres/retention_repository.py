@@ -33,18 +33,26 @@ _RETENTION_ADVISORY_LOCK_SQL = text(
 )
 
 
+def _retention_lock_key(dataset_name: str) -> str:
+    return f"retention_{dataset_name}"
+
+
+def _log_lock_failure(dataset_name: str, lock_err: Exception) -> None:
+    log.warning(
+        "retention_advisory_lock_failed",
+        dataset_name=dataset_name,
+        error=str(lock_err),
+    )
+
+
 def _acquire_advisory_lock(session: Session, dataset_name: str) -> None:
     try:
         session.execute(
             _RETENTION_ADVISORY_LOCK_SQL,
-            {"lock_key": f"retention_{dataset_name}"},
+            {"lock_key": _retention_lock_key(dataset_name)},
         )
     except Exception as lock_err:
-        log.warning(
-            "retention_advisory_lock_failed",
-            dataset_name=dataset_name,
-            error=str(lock_err),
-        )
+        _log_lock_failure(dataset_name, lock_err)
 
 
 async def _acquire_advisory_lock_async(
@@ -53,14 +61,10 @@ async def _acquire_advisory_lock_async(
     try:
         await session.execute(
             _RETENTION_ADVISORY_LOCK_SQL,
-            {"lock_key": f"retention_{dataset_name}"},
+            {"lock_key": _retention_lock_key(dataset_name)},
         )
     except Exception as lock_err:
-        log.warning(
-            "retention_advisory_lock_failed",
-            dataset_name=dataset_name,
-            error=str(lock_err),
-        )
+        _log_lock_failure(dataset_name, lock_err)
 
 
 def _row_to_dependency(row: ConsumerDependencyRow) -> ConsumerDependency:

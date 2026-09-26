@@ -318,7 +318,7 @@ class OrderExecutionCoordinator:
             for r in initial_reservations:
                 self._active_reservations[r.reservation_id] = r
                 if self._domain_coordinator is not None:
-                    self._domain_coordinator._reservations_by_id[r.reservation_id] = r
+                    self._domain_coordinator.register_reservation(r)
         self._schedulers: dict[OrderExecutionKey, _KeyCommandScheduler] = {}
         self._scheduler_lock = asyncio.Lock()
         self._closed = False
@@ -493,8 +493,8 @@ class OrderExecutionCoordinator:
                         pass
                     self._active_reservations.pop(saved.reservation_id, None)
                     if self._domain_coordinator is not None:
-                        self._domain_coordinator._reservations_by_id.pop(
-                            saved.reservation_id, None
+                        self._domain_coordinator.unregister_reservation(
+                            saved.reservation_id
                         )
                 raise save_err
         except Exception as res_err:
@@ -538,8 +538,8 @@ class OrderExecutionCoordinator:
                     )
                     self._active_reservations.pop(r.reservation_id, None)
                     if self._domain_coordinator is not None:
-                        self._domain_coordinator._reservations_by_id.pop(
-                            r.reservation_id, None
+                        self._domain_coordinator.unregister_reservation(
+                            r.reservation_id
                         )
         except Exception as rel_err:
             log.warning(
@@ -584,15 +584,13 @@ class OrderExecutionCoordinator:
                     if updated.active_quantity <= Decimal("0"):
                         self._active_reservations.pop(r.reservation_id, None)
                         if self._domain_coordinator is not None:
-                            self._domain_coordinator._reservations_by_id.pop(
-                                r.reservation_id, None
+                            self._domain_coordinator.unregister_reservation(
+                                r.reservation_id
                             )
                     else:
                         self._active_reservations[r.reservation_id] = updated
                         if self._domain_coordinator is not None:
-                            self._domain_coordinator._reservations_by_id[
-                                r.reservation_id
-                            ] = updated
+                            self._domain_coordinator.update_reservation(updated)
                     remaining_to_consume -= qty_to_consume
                     if remaining_to_consume <= Decimal("0"):
                         break
@@ -617,8 +615,8 @@ class OrderExecutionCoordinator:
                             )
                             self._active_reservations.pop(r.reservation_id, None)
                             if self._domain_coordinator is not None:
-                                self._domain_coordinator._reservations_by_id.pop(
-                                    r.reservation_id, None
+                                self._domain_coordinator.unregister_reservation(
+                                    r.reservation_id
                                 )
         except Exception as consume_err:
             log.warning(

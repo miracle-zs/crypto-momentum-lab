@@ -128,6 +128,23 @@ class ExecutionCoordinator:
         """
         self._reservations_by_id[reservation.reservation_id] = reservation
 
+    def update_reservation(
+        self, reservation: PositionReservation
+    ) -> None:
+        """Replaces the tracked reservation after consume/release."""
+        self._reservations_by_id[reservation.reservation_id] = reservation
+
+    def unregister_reservation(
+        self, reservation_id: str
+    ) -> PositionReservation | None:
+        """Drops a reservation from tracking; returns it when present."""
+        return self._reservations_by_id.pop(reservation_id, None)
+
+    def get_reservation(
+        self, reservation_id: str
+    ) -> PositionReservation | None:
+        return self._reservations_by_id.get(reservation_id)
+
     def get_active_reservations(
         self, key: PositionKey
     ) -> tuple[PositionReservation, ...]:
