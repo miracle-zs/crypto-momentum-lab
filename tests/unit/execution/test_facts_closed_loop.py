@@ -11,16 +11,11 @@ Validates:
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-import pytest
-
 from crypto_momentum_lab.domain.account import (
     AccountFillEvent,
     AccountPositionSnapshot,
 )
-from crypto_momentum_lab.domain.execution.account_journal import (
-    AccountFactEnvelope,
-    AccountJournal,
-)
+from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_book import PositionBook
 from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
@@ -30,11 +25,9 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageInterval,
     FactCoverageStatus,
     FreshnessRequirement,
-    PositionCheckpoint,
     PositionHealthStatus,
     PositionKey,
 )
-from crypto_momentum_lab.domain.strategy import StrategySide
 
 
 def _dt(hour: int, minute: int, second: int = 0) -> datetime:
@@ -151,6 +144,31 @@ def test_coverage_truncated_before_episode_opened_emits_incomplete() -> None:
     assert "does not cover" in proj.discrepancy.details
 
 
+def test_coverage_pending_status_downgrades_to_catching_up() -> None:
+    key = PositionKey("live", "account-3", "SANDUSDT", FuturesPositionSide.LONG)
+    t = _dt(10, 0)
+    f = _fill("t1", "100", "1.5", t)
+    s = _snapshot("100", "1.5", t)
+
+    coverage = FactCoverageInterval(
+        start_at=t - timedelta(minutes=5),
+        end_at=t,
+        has_known_gaps=False,
+        status=FactCoverageStatus.PENDING,
+    )
+    facts = AccountFacts(
+        position_key=key,
+        fills=(f,),
+        snapshots=(s,),
+        coverage=coverage,
+    )
+    ledger = PositionLedger(key)
+    proj = ledger.project(facts)
+
+    assert proj.health_status == PositionHealthStatus.CATCHING_UP
+    assert proj.is_comparable is False
+
+
 def test_synthetic_fills_downgraded_and_denied_authoritative_status() -> None:
     key = PositionKey("live", "account-3", "SANDUSDT", FuturesPositionSide.LONG)
     t = _dt(10, 0)
@@ -195,7 +213,6 @@ def test_account_journal_deduplication_and_conflict_detection() -> None:
     assert journal.has_conflicts
 
     # 4. Reading facts and replaying reveals conflict
-    facts = journal.read_cut()
     ledger = PositionLedger(key)
     # Add conflicting fill to facts to simulate persisted conflict
     conflicting_facts = AccountFacts(

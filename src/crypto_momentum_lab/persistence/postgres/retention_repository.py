@@ -8,6 +8,7 @@ Obeys Astra Architecture Blueprint 2026-09-25:
 
 from __future__ import annotations
 
+import structlog
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session, sessionmaker
@@ -24,6 +25,42 @@ from crypto_momentum_lab.persistence.postgres.models import (
     ConsumerDependencyRow,
     PrunePlanRow,
 )
+
+log = structlog.get_logger(__name__)
+
+_RETENTION_ADVISORY_LOCK_SQL = text(
+    "SELECT pg_advisory_xact_lock(hashtext(:lock_key))"
+)
+
+
+def _acquire_advisory_lock(session: Session, dataset_name: str) -> None:
+    try:
+        session.execute(
+            _RETENTION_ADVISORY_LOCK_SQL,
+            {"lock_key": f"retention_{dataset_name}"},
+        )
+    except Exception as lock_err:
+        log.warning(
+            "retention_advisory_lock_failed",
+            dataset_name=dataset_name,
+            error=str(lock_err),
+        )
+
+
+async def _acquire_advisory_lock_async(
+    session: AsyncSession, dataset_name: str
+) -> None:
+    try:
+        await session.execute(
+            _RETENTION_ADVISORY_LOCK_SQL,
+            {"lock_key": f"retention_{dataset_name}"},
+        )
+    except Exception as lock_err:
+        log.warning(
+            "retention_advisory_lock_failed",
+            dataset_name=dataset_name,
+            error=str(lock_err),
+        )
 
 
 def _row_to_dependency(row: ConsumerDependencyRow) -> ConsumerDependency:
@@ -53,13 +90,7 @@ class PostgresRetentionRepository:
     def save_dependency(self, dependency: ConsumerDependency) -> None:
         spec = dependency.recovery_spec
         with self._session_factory() as session:
-            try:
-                session.execute(
-                    text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-                    {"lock_key": f"retention_{dependency.dataset_name}"},
-                )
-            except Exception:
-                pass
+            _acquire_advisory_lock(session, dependency.dataset_name)
             row = ConsumerDependencyRow(
                 consumer_id=dependency.consumer_id,
                 dataset_name=dependency.dataset_name,
@@ -77,13 +108,7 @@ class PostgresRetentionRepository:
 
     def delete_dependency(self, consumer_id: str, dataset_name: str) -> None:
         with self._session_factory() as session:
-            try:
-                session.execute(
-                    text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-                    {"lock_key": f"retention_{dataset_name}"},
-                )
-            except Exception:
-                pass
+            _acquire_advisory_lock(session, dataset_name)
             session.execute(
                 delete(ConsumerDependencyRow).where(
                     ConsumerDependencyRow.consumer_id == consumer_id,
@@ -176,13 +201,7 @@ class AsyncPostgresRetentionRepository:
     async def save_dependency(self, dependency: ConsumerDependency) -> None:
         spec = dependency.recovery_spec
         async with self._session_factory() as session:
-            try:
-                await session.execute(
-                    text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-                    {"lock_key": f"retention_{dependency.dataset_name}"},
-                )
-            except Exception:
-                pass
+            await _acquire_advisory_lock_async(session, dependency.dataset_name)
             row = ConsumerDependencyRow(
                 consumer_id=dependency.consumer_id,
                 dataset_name=dependency.dataset_name,
@@ -200,13 +219,7 @@ class AsyncPostgresRetentionRepository:
 
     async def delete_dependency(self, consumer_id: str, dataset_name: str) -> None:
         async with self._session_factory() as session:
-            try:
-                await session.execute(
-                    text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-                    {"lock_key": f"retention_{dataset_name}"},
-                )
-            except Exception:
-                pass
+            await _acquire_advisory_lock_async(session, dataset_name)
             await session.execute(
                 delete(ConsumerDependencyRow).where(
                     ConsumerDependencyRow.consumer_id == consumer_id,

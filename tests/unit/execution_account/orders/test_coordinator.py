@@ -647,4 +647,141 @@ async def test_reservation_creation_failure_fails_closed() -> None:
     await coordinator.aclose()
 
 
+async def test_multi_batch_reservation_release_all_on_failure() -> None:
+    backend = BlockingBackend()
 
+    class InMemoryReservationRepo:
+        def __init__(self) -> None:
+            self.reservations: dict[str, Any] = {}
+
+        def load_active_reservations(self, key: Any) -> list[Any]:
+            return [
+                r for r in self.reservations.values()
+                if r.active_quantity > Decimal("0")
+            ]
+
+        def save_reservation(self, res: Any) -> None:
+            self.reservations[res.reservation_id] = res
+
+        def update_reservation(self, res: Any, release_reason: str = "") -> None:
+            self.reservations[res.reservation_id] = res
+
+    repo = InMemoryReservationRepo()
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        reservation_repository=repo,
+    )
+
+    class FailingBackend(BlockingBackend):
+        async def execute_approved_intent(
+            self, plan: OrderExecutionPlan, *, prepared_submission=None
+        ):
+            raise RuntimeError("Exchange API rejected order")
+
+    coordinator._backend = FailingBackend()
+
+    from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
+    allocs = (
+        ExitAllocation(batch_id="batch_1", allocated_quantity=Decimal("10.0")),
+        ExitAllocation(batch_id="batch_2", allocated_quantity=Decimal("20.0")),
+    )
+    plan = OrderExecutionPlan(
+        intent_id="intent-multi-fail",
+        run_id="run-1",
+        client_order_id="order-multi-fail",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("30.0"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+        allocations=allocs,
+    )
+
+    with pytest.raises(RuntimeError, match="Exchange API rejected order"):
+        await coordinator.submit(plan)
+
+    # Both batch_1 and batch_2 reservations must be released (active_quantity == 0)
+    assert len(repo.reservations) == 2
+    for r in repo.reservations.values():
+        assert r.active_quantity == Decimal("0")
+        assert r.released_quantity > Decimal("0")
+
+    await coordinator.aclose()
+
+
+async def test_multi_batch_reservation_consume_across_batches() -> None:
+    class InMemoryReservationRepo:
+        def __init__(self) -> None:
+            self.reservations: dict[str, Any] = {}
+
+        def load_active_reservations(self, key: Any) -> list[Any]:
+            return [
+                r for r in self.reservations.values()
+                if r.active_quantity > Decimal("0")
+            ]
+
+        def save_reservation(self, res: Any) -> None:
+            self.reservations[res.reservation_id] = res
+
+        def update_reservation(self, res: Any, release_reason: str = "") -> None:
+            self.reservations[res.reservation_id] = res
+
+    class FillBackend(BlockingBackend):
+        async def execute_approved_intent(
+            self, plan: OrderExecutionPlan, *, prepared_submission=None
+        ):
+            return OrderExecutionResult(
+                client_order_id=plan.client_order_id,
+                state=ExchangeOrderState.FILLED,
+                exchange_order_id="exchange-1",
+                executed_quantity=plan.quantity,
+                average_price=Decimal("100.0"),
+            )
+
+    repo = InMemoryReservationRepo()
+    coordinator = OrderExecutionCoordinator(
+        backend=FillBackend(),
+        account_label="primary",
+        reservation_repository=repo,
+    )
+
+    from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
+    allocs = (
+        ExitAllocation(batch_id="batch_1", allocated_quantity=Decimal("10.0")),
+        ExitAllocation(batch_id="batch_2", allocated_quantity=Decimal("15.0")),
+    )
+    plan = OrderExecutionPlan(
+        intent_id="intent-multi-consume",
+        run_id="run-1",
+        client_order_id="order-multi-consume",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("25.0"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+        allocations=allocs,
+    )
+
+    # Execute fill of 25 (covering both batches: 10 from batch_1, 15 from batch_2)
+    res = await coordinator.submit(plan)
+    assert res.executed_quantity == Decimal("25.0")
+
+    # Both reservations should be consumed to 0 active
+    assert len(repo.reservations) == 2
+    r0 = repo.reservations["res_order-multi-consume_0"]
+    r1 = repo.reservations["res_order-multi-consume_1"]
+    assert r0.consumed_quantity == Decimal("10.0")
+    assert r0.active_quantity == Decimal("0")
+    assert r1.consumed_quantity == Decimal("15.0")
+    assert r1.active_quantity == Decimal("0")
+
+    await coordinator.aclose()

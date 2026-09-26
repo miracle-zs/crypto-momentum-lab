@@ -7,8 +7,9 @@ source of truth for metric calculation and coverage semantics.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -69,6 +70,9 @@ _METRIC_SPECS = (
 )
 
 
+_HEX_64_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
 def _assess_coverage(
     cf_rows: Sequence[Any],
     start_time: datetime,
@@ -80,10 +84,11 @@ def _assess_coverage(
 
     A window is certified when:
     1. Cash-flow facts are present;
-    2. Every fact contains verified cryptographic evidence (valid 64-char
-       hex hash, non-zero/placeholder) and a non-empty approval reference.
-    If no facts exist or if any fact has unverified/dummy evidence, it remains
-    uncertified so operators can audit the data lineage.
+    2. Every fact contains verified cryptographic evidence (strictly valid 64-char
+       hex hash, non-zero/placeholder) and a non-empty approval reference;
+    3. Every fact's effective_at falls strictly within [start_time, end_time].
+    If no facts exist or if any fact has unverified/dummy evidence or falls outside
+    the evaluated interval, it remains uncertified.
     """
     if not cf_rows:
         return (
@@ -92,25 +97,58 @@ def _assess_coverage(
             "uncertified_zero_cash_flow_facts",
         )
 
-    all_audited = all(
-        getattr(r, "evidence_hash", None)
-        and len(str(r.evidence_hash)) == 64
-        and str(r.evidence_hash) != "0" * 64
-        and bool(getattr(r, "approval_ref", None))
-        for r in cf_rows
+    s_time = (
+        start_time if start_time.tzinfo is not None else start_time.replace(tzinfo=UTC)
+    )
+    e_time = (
+        end_time if end_time.tzinfo is not None else end_time.replace(tzinfo=UTC)
     )
 
-    if all_audited:
-        return (
-            True,
-            "confirmed",
-            f"audited_records_count_{len(cf_rows)}_with_verified_evidence",
-        )
+    for r in cf_rows:
+        ev_hash = getattr(r, "evidence_hash", None)
+        rec_id = getattr(r, "correction_id", "unknown")
+        if not ev_hash:
+            return (
+                False,
+                "uncertified",
+                f"uncertified_missing_evidence_hash_in_record_{rec_id}",
+            )
+        ev_hash_str = str(ev_hash).strip()
+        if not _HEX_64_PATTERN.fullmatch(ev_hash_str):
+            return (
+                False,
+                "uncertified",
+                f"uncertified_invalid_evidence_hash_format_in_record_{rec_id}",
+            )
+        if ev_hash_str.lower() == "0" * 64:
+            return (
+                False,
+                "uncertified",
+                f"uncertified_zero_placeholder_evidence_in_record_{rec_id}",
+            )
+        appr = getattr(r, "approval_ref", None)
+        if not appr or not str(appr).strip():
+            return (
+                False,
+                "uncertified",
+                f"uncertified_missing_approval_ref_in_record_{rec_id}",
+            )
+        eff_at = getattr(r, "effective_at", None)
+        if eff_at is not None:
+            eff_time = (
+                eff_at if eff_at.tzinfo is not None else eff_at.replace(tzinfo=UTC)
+            )
+            if eff_time < s_time or eff_time > e_time:
+                return (
+                    False,
+                    "uncertified",
+                    f"uncertified_cash_flow_out_of_interval_{rec_id}",
+                )
 
     return (
-        False,
-        "uncertified",
-        f"uncertified_has_{len(cf_rows)}_facts_but_evidence_incomplete",
+        True,
+        "confirmed",
+        f"audited_records_count_{len(cf_rows)}_with_verified_evidence",
     )
 
 

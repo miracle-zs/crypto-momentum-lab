@@ -550,45 +550,50 @@ def main(argv: list[str] | None = None) -> int:
             from_dt: str = from_str,
             to_dt: str = to_str,
         ) -> tuple[int, int]:
-            if tbl == "strategy_runtime_events" and _table_is_partitioned(tbl, **db):
+            lock_key = f"retention_{p.dataset_name}"
+            # Acquire session advisory lock before verifying fence to prevent TOCTOU race
+            _psql(f"SELECT pg_advisory_lock(hashtext('{lock_key}'));", **db)
+            try:
                 authority.verify_fence(p)
-                dropped = _drop_expired_partitions(tbl, p.effective_cutoff.date(), **db)
-                print(f"  dropped {dropped} expired partitions")
-                return (rec, 0)
+                if tbl == "strategy_runtime_events" and _table_is_partitioned(tbl, **db):
+                    dropped = _drop_expired_partitions(tbl, p.effective_cutoff.date(), **db)
+                    print(f"  dropped {dropped} expired partitions")
+                    return (rec, 0)
 
-            deleted = 0
-            while deleted < rec:
-                batch_limit = min(args.batch_rows, rec - deleted)
-                if batch_limit <= 0:
-                    break
-                authority.verify_fence(p)
-                removed = int(
-                    _scalar(
-                        "BEGIN;\n"
-                        f"SELECT pg_advisory_xact_lock(hashtext('retention_{p.dataset_name}'));\n"
-                        "WITH d AS (DELETE FROM "
-                        f"{tbl} WHERE ctid IN (SELECT ctid FROM {tbl} "
-                        f'WHERE "{col}" >= \'{from_dt}+00\' '
-                        f'AND "{col}" < \'{to_dt}+00\' '
-                        f"LIMIT {batch_limit}) "
-                        "RETURNING 1) SELECT count(*) FROM d;\n"
-                        "COMMIT;",
-                        **db,
+                deleted = 0
+                while deleted < rec:
+                    batch_limit = min(args.batch_rows, rec - deleted)
+                    if batch_limit <= 0:
+                        break
+                    authority.verify_fence(p)
+                    removed = int(
+                        _scalar(
+                            "BEGIN;\n"
+                            "WITH d AS (DELETE FROM "
+                            f"{tbl} WHERE ctid IN (SELECT ctid FROM {tbl} "
+                            f'WHERE "{col}" >= \'{from_dt}+00\' '
+                            f'AND "{col}" < \'{to_dt}+00\' '
+                            f"LIMIT {batch_limit}) "
+                            "RETURNING 1) SELECT count(*) FROM d;\n"
+                            "COMMIT;",
+                            **db,
+                        )
                     )
-                )
-                if removed == 0:
-                    break
-                deleted += removed
-                if deleted % (args.batch_rows * 20) == 0:
-                    print(f"  deleted {deleted} / {pend}")
+                    if removed == 0:
+                        break
+                    deleted += removed
+                    if deleted % (args.batch_rows * 20) == 0:
+                        print(f"  deleted {deleted} / {pend}")
 
-            if deleted != rec:
-                raise RuntimeError(
-                    f"Deleted {deleted} rows does not match archived manifest rows "
-                    f"({rec})! Aborting prune to prevent unarchived data loss."
-                )
-            print(f"  deleted {deleted} rows")
-            return (rec, deleted)
+                if deleted != rec:
+                    raise RuntimeError(
+                        f"Deleted {deleted} rows does not match archived manifest rows "
+                        f"({rec})! Aborting prune to prevent unarchived data loss."
+                    )
+                print(f"  deleted {deleted} rows")
+                return (rec, deleted)
+            finally:
+                _psql(f"SELECT pg_advisory_unlock(hashtext('{lock_key}'));", **db)
 
         receipt = authority.execute_prune(
             plan=plan,

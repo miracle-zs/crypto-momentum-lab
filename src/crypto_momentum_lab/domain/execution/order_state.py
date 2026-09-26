@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
 
 from crypto_momentum_lab.domain.market.models import JsonValue
 
@@ -43,6 +42,23 @@ class FuturesPositionSide(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class ExitAllocation:
+    """Explicit allocation of an exit order to a specific lot/batch."""
+
+    batch_id: str
+    allocated_quantity: Decimal
+    entry_price: Decimal = Decimal("0")
+
+    def __post_init__(self) -> None:
+        if not self.batch_id.strip():
+            raise ValueError("batch_id must not be empty")
+        if self.allocated_quantity <= 0:
+            raise ValueError("allocated_quantity must be positive")
+        if self.entry_price < 0:
+            raise ValueError("entry_price must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
 class OrderExecutionPlan:
     intent_id: str
     run_id: str
@@ -59,7 +75,7 @@ class OrderExecutionPlan:
     time_in_force: str | None = None
     expires_at: datetime | None = None
     batch_id: str | None = None
-    allocations: tuple[Any, ...] = ()
+    allocations: tuple[ExitAllocation, ...] = ()
 
     def __post_init__(self) -> None:
         for value, field_name in (

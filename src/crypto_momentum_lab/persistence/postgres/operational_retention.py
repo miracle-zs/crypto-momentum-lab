@@ -168,6 +168,7 @@ class PostgresOperationalRetentionRepository:
             statement,
             before=effective_before,
             batch_size=batch_size,
+            dataset_name="contract_metadata",
         )
 
     async def prune_runtime_market_states(
@@ -362,6 +363,7 @@ class PostgresOperationalRetentionRepository:
                 account_label=account_label,
                 before=before,
                 batch_size=current_batch_size,
+                dataset_name=table_name,
             )
             deleted += count
             if count < current_batch_size:
@@ -416,6 +418,10 @@ class PostgresOperationalRetentionRepository:
             current_batch_size = min(batch_size, max_rows - deleted)
             async with self._session_factory() as session:
                 async with session.begin():
+                    await session.execute(
+                        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                        {"lock_key": "retention_account_balance_snapshots"},
+                    )
                     result = cast(
                         CursorResult[Any],
                         await session.execute(
@@ -462,6 +468,7 @@ class PostgresOperationalRetentionRepository:
             statement,
             before=before,
             batch_size=batch_size,
+            dataset_name=table_name,
         )
 
     async def _execute_delete(
@@ -470,9 +477,15 @@ class PostgresOperationalRetentionRepository:
         *,
         before: datetime,
         batch_size: int,
+        dataset_name: str | None = None,
     ) -> int:
         async with self._session_factory() as session:
             async with session.begin():
+                if dataset_name:
+                    await session.execute(
+                        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                        {"lock_key": f"retention_{dataset_name}"},
+                    )
                 result = cast(
                     CursorResult[Any],
                     await session.execute(
@@ -490,9 +503,15 @@ class PostgresOperationalRetentionRepository:
         account_label: str,
         before: datetime,
         batch_size: int,
+        dataset_name: str | None = None,
     ) -> int:
         async with self._session_factory() as session:
             async with session.begin():
+                if dataset_name:
+                    await session.execute(
+                        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                        {"lock_key": f"retention_{dataset_name}"},
+                    )
                 result = cast(
                     CursorResult[Any],
                     await session.execute(

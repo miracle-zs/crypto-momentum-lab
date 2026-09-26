@@ -12,12 +12,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    PositionHealthStatus,
+    PositionKey,
     PositionView,
 )
 from crypto_momentum_lab.domain.execution.trade_command import (
@@ -28,13 +32,18 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommandType,
 )
 from crypto_momentum_lab.domain.market.market_book import compute_market_state_hash
+from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import (
     MarketEnvelope,
     MarketRevisionRef,
+    MarketVisibilityMode,
 )
 from crypto_momentum_lab.domain.strategy.models import (
     EntryType,
     OrderIntentCandidate,
+    RejectionReason,
+    StrategyDecision,
+    StrategyRejection,
     StrategySide,
 )
 from crypto_momentum_lab.strategy_runner.position_exit import (
@@ -395,3 +404,112 @@ class DecisionEngine:
     ) -> DecisionResult:
         """Evaluates pure strategy decision."""
         return decide(decision_input, state, policy)
+
+
+def create_authoritative_decision_filter(
+    strategy_name: str,
+    target_notional: Decimal | None = None,
+) -> Callable[[StrategyDecision, MarketState15s], StrategyDecision]:
+    """Authoritative decision filter wrapping DecisionEngine for runtime loops."""
+    engine = DecisionEngine()
+    notional = target_notional or Decimal("500.00")
+
+    def _filter(
+        decision: StrategyDecision, state: MarketState15s
+    ) -> StrategyDecision:
+        if not decision.candidates:
+            return decision
+
+        pos_key = PositionKey(
+            environment="live",
+            account_label="primary",
+            symbol=state.symbol,
+            position_side=FuturesPositionSide.BOTH,
+        )
+        pos_view = PositionView(
+            key=pos_key,
+            projection_version="pv_live",
+            input_revision=1,
+            event_cut=state.bucket_end,
+            policy_version="v1",
+            schema_version="v1",
+            coverage=None,
+            active_episode=None,
+            batches=(),
+            unallocated_quantity=Decimal("0"),
+            reconciliation_gap=Decimal("0"),
+            health_status=PositionHealthStatus.READY,
+        )
+        market_ref = MarketRevisionRef(
+            scope="decision",
+            symbol=state.symbol,
+            interval="15s",
+            bucket_start=state.bucket_start,
+            bucket_end=state.bucket_end,
+            revision_id=f"rev_{state.symbol}_{int(state.bucket_start.timestamp())}",
+            content_hash=compute_market_state_hash(state),
+            published_at=state.bucket_end,
+            source_epoch="ep_decision",
+            visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
+        )
+        envelope = MarketEnvelope(ref=market_ref, state=state)
+        dec_input = DecisionInput(
+            symbol=state.symbol,
+            market_ref=market_ref,
+            market_envelope=envelope,
+            position_view=pos_view,
+            universe_version="univ_v1",
+            clock_event=ClockEvent(timestamp=state.bucket_end, sequence=1),
+            cash_balance=Decimal("10000.00"),
+            risk_config_version="risk_v1",
+        )
+
+        filtered_candidates: list[OrderIntentCandidate] = []
+        new_rejections: list[StrategyRejection] = list(decision.rejections)
+
+        for cand in decision.candidates:
+            policy = EffectivePolicy(
+                policy_id=f"policy_{strategy_name}",
+                strategy_name=strategy_name,
+                target_notional=notional,
+                candidate_generator=lambda inp, st, _c=cand: _c,
+            )
+            dec_res = engine.evaluate(dec_input, PolicyState(), policy)
+            if dec_res.intent is not None:
+                filtered_candidates.append(cand)
+            else:
+                raw_reason = dec_res.rejection_reason or "decision_engine_filtered"
+                rej_reason = (
+                    RejectionReason.COOLDOWN_ACTIVE
+                    if raw_reason == "cooldown_active"
+                    else (
+                        RejectionReason.HOLDING_POSITION
+                        if raw_reason == "holding_position_no_exit"
+                        else (
+                            RejectionReason.BELOW_ENTRY_THRESHOLD
+                            if raw_reason == "below_entry_threshold"
+                            else RejectionReason.NO_SIGNAL
+                        )
+                    )
+                )
+                new_rejections.append(
+                    StrategyRejection(
+                        reason=rej_reason,
+                        symbol=state.symbol,
+                        bucket_start=state.bucket_start,
+                        details={
+                            "decision_id": dec_res.decision_id,
+                            "raw_reason": raw_reason,
+                            "candidate_id": cand.candidate_id,
+                        },
+                    )
+                )
+
+        return StrategyDecision(
+            signals=decision.signals,
+            candidates=tuple(filtered_candidates),
+            rejections=tuple(new_rejections),
+            checkpoint=decision.checkpoint,
+        )
+
+    return _filter

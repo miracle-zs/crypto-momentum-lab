@@ -670,6 +670,11 @@ class PositionLedger:
                         details=diag_msg,
                         event_cut=high_watermark,
                     )
+            elif facts.coverage.status == FactCoverageStatus.PENDING:
+                health_status = PositionHealthStatus.CATCHING_UP
+                is_comparable = False
+                diag_msg = "Fact coverage interval is unconfirmed/pending verification"
+                diagnostics.append(diag_msg)
             elif (
                 final_active_episode is not None
                 and facts.coverage.start_at > final_active_episode.opened_at

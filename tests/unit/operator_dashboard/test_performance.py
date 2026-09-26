@@ -184,3 +184,57 @@ async def test_performance_queries_uses_market_state_progress_delay() -> None:
     assert result.market_data.status == OperationalStatus.READY
     assert result.market_data.market_delay_ms == 550.0
     assert result.market_data.realtime_closure_delay_seconds == 0.55
+
+
+def test_assess_coverage_hardened_validation() -> None:
+    from dataclasses import dataclass
+
+    from crypto_momentum_lab.operator_dashboard.performance_builder import (
+        _assess_coverage,
+    )
+
+    @dataclass
+    class DummyCF:
+        correction_id: str
+        evidence_hash: str
+        approval_ref: str
+        effective_at: datetime
+
+    start = datetime(2026, 9, 20, 0, 0, tzinfo=UTC)
+    end = datetime(2026, 9, 21, 0, 0, tzinfo=UTC)
+    valid_eff = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+
+    # 1. Valid hex hash and interval
+    valid_cf = DummyCF("cf1", "a" * 64, "appr_1", valid_eff)
+    ok, status, proof = _assess_coverage([valid_cf], start, end)
+    assert ok is True
+    assert status == "confirmed"
+    assert "audited_records_count_1" in proof
+
+    # 2. Non-hex characters in 64-char string (e.g. 'z')
+    invalid_hex_cf = DummyCF("cf2", "z" * 64, "appr_1", valid_eff)
+    ok, status, proof = _assess_coverage([invalid_hex_cf], start, end)
+    assert ok is False
+    assert status == "uncertified"
+    assert "invalid_evidence_hash_format" in proof
+
+    # 3. All zeros dummy hash
+    zero_cf = DummyCF("cf3", "0" * 64, "appr_1", valid_eff)
+    ok, status, proof = _assess_coverage([zero_cf], start, end)
+    assert ok is False
+    assert status == "uncertified"
+    assert "zero_placeholder_evidence" in proof
+
+    # 4. Empty approval ref
+    no_appr_cf = DummyCF("cf4", "f" * 64, "   ", valid_eff)
+    ok, status, proof = _assess_coverage([no_appr_cf], start, end)
+    assert ok is False
+    assert status == "uncertified"
+    assert "missing_approval_ref" in proof
+
+    # 5. Out of bounds effective_at
+    out_of_bounds_cf = DummyCF("cf5", "b" * 64, "appr_1", end + timedelta(seconds=1))
+    ok, status, proof = _assess_coverage([out_of_bounds_cf], start, end)
+    assert ok is False
+    assert status == "uncertified"
+    assert "cash_flow_out_of_interval" in proof

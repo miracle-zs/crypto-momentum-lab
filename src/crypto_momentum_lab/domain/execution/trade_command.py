@@ -6,9 +6,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
+from typing import Any
 from uuid import uuid4
 
-from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
+from crypto_momentum_lab.domain.execution.order_state import (
+    ExitAllocation,
+    FuturesPositionSide,
+)
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionKey,
     PositionLedgerProjection,
@@ -31,23 +35,6 @@ class TradeCommandType(str, Enum):
     ENTRY = "entry"
     EXIT = "exit"
     EMERGENCY_FLATTEN = "emergency_flatten"
-
-
-@dataclass(frozen=True, slots=True)
-class ExitAllocation:
-    """Explicit allocation of an exit order to a specific lot/batch."""
-
-    batch_id: str
-    allocated_quantity: Decimal
-    entry_price: Decimal
-
-    def __post_init__(self) -> None:
-        if not self.batch_id.strip():
-            raise ValueError("batch_id must not be empty")
-        if self.allocated_quantity <= 0:
-            raise ValueError("allocated_quantity must be positive")
-        if self.entry_price < 0:
-            raise ValueError("entry_price must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)

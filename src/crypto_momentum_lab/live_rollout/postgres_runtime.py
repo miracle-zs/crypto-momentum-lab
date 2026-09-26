@@ -2328,13 +2328,22 @@ def _build_position_batches(
         matching_fills = tuple(
             fill for fill in account_fills if _fill_matches_position(fill)
         )
-        coverage = None
-        if since_time is not None:
+        coverage = getattr(position, "coverage", None)
+        if coverage is None and since_time is not None:
             obs_dt = getattr(position, "observed_at", None) or datetime.now(UTC)
+            has_cursor = bool(getattr(position, "source_cursor", None))
+            has_checkpoint = bool(getattr(position, "checkpoint_revision", None))
+            cov_status = (
+                FactCoverageStatus.CONFIRMED
+                if (has_cursor or has_checkpoint)
+                else FactCoverageStatus.PENDING
+            )
             coverage = FactCoverageInterval(
                 start_at=since_time,
                 end_at=obs_dt if obs_dt >= since_time else since_time,
-                status=FactCoverageStatus.CONFIRMED,
+                source_cursor=getattr(position, "source_cursor", None),
+                confirmed_revision=getattr(position, "checkpoint_revision", None),
+                status=cov_status,
             )
         facts = LegacyOrderIdentityAdapter.to_account_facts(
             position_key=position_key,
