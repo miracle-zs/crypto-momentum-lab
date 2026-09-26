@@ -120,12 +120,15 @@ def _row_content_hash_matches(row: Any, ev_hash_str: str) -> bool | None:
     }
     if any(v is None for v in fields.values()):
         return None
+    eff_at = fields["effective_at"]
+    if not isinstance(eff_at, datetime):
+        return None
     expected = compute_cash_flow_evidence_hash(
         correction_id=str(fields["correction_id"]),
         account_label=str(fields["account_label"]),
         amount=Decimal(str(fields["amount"])),
         cash_flow_type=str(fields["cash_flow_type"]),
-        effective_at=fields["effective_at"],
+        effective_at=eff_at,
         reason=str(fields["reason"]),
         approval_ref=str(fields["approval_ref"]),
     )

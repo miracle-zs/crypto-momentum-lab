@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert
@@ -29,6 +30,10 @@ from crypto_momentum_lab.persistence.postgres.models import (
     AccountPositionSnapshotRow,
     PositionReservationRow,
 )
+
+
+def _insert_rowcount(result: Any) -> int:
+    return int(getattr(result, "rowcount", 0) or 0)
 
 
 def _row_to_reservation(r: PositionReservationRow) -> PositionReservation:
@@ -374,7 +379,7 @@ class PostgresPositionReservationRepository:
                     .on_conflict_do_nothing()
                 )
                 result = session.execute(stmt)
-                if int(result.rowcount or 0) == 0:
+                if _insert_rowcount(result) == 0:
                     existing_row = session.get(
                         PositionReservationRow, reservation.reservation_id
                     )
@@ -483,7 +488,7 @@ class PostgresPositionReservationRepository:
                 )
             )
             result = session.execute(stmt)
-            return int(result.rowcount or 0)
+            return _insert_rowcount(result)
 
 
 class AsyncPostgresPositionReservationRepository:
@@ -637,7 +642,7 @@ class AsyncPostgresPositionReservationRepository:
                     .on_conflict_do_nothing()
                 )
                 result = await session.execute(stmt)
-                if int(result.rowcount or 0) == 0:
+                if _insert_rowcount(result) == 0:
                     existing_row = await session.get(
                         PositionReservationRow, reservation.reservation_id
                     )
