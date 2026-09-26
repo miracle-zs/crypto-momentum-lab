@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import (
     Select,
@@ -333,7 +334,11 @@ class DashboardQueries:
     async def health(self) -> dict[str, str]:
         return await self._overview_queries.health()
 
+    async def operational_health(self) -> dict[str, Any]:
+        return await self._overview_queries.operational_health()
+
     async def readiness(self) -> SystemReadinessResponse:
+
         return await self._overview_queries.readiness()
 
     async def decision_slo(

@@ -38,6 +38,18 @@ class MetricStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class CashFlowType(StrEnum):
+    """Authoritative cash flow classification categories (R6)."""
+
+    DEPOSIT = "deposit"
+    WITHDRAWAL = "withdrawal"
+    TRADING_FEE = "trading_fee"
+    FUNDING_FEE = "funding_fee"
+    REALIZED_PNL = "realized_pnl"
+    AUDIT_ADJUSTMENT = "audit_adjustment"
+    FEE_REBATE = "fee_rebate"
+
+
 @dataclass(frozen=True, slots=True)
 class LiveCashFlowAdjustment:
     account_label: str
@@ -49,11 +61,12 @@ class LiveCashFlowAdjustment:
         self,
         reason: str = "legacy_env_config",
         approval_ref: str = "legacy_operator",
+        asset: str = "USDT",
     ) -> CashFlowFact:
         import hashlib
 
         h = hashlib.sha256(
-            f"{self.account_label}:{self.effective_at.isoformat()}:{self.amount}".encode()
+            f"{self.account_label}:{self.effective_at.isoformat()}:{self.amount}:{asset}".encode()
         ).hexdigest()
         return CashFlowFact(
             correction_id=f"cf_leg_{h[:16]}",
@@ -64,21 +77,26 @@ class LiveCashFlowAdjustment:
             reason=reason,
             approval_ref=approval_ref,
             evidence_hash=h,
+            asset=asset,
+            source="legacy_env_config",
         )
 
 
 @dataclass(frozen=True, slots=True)
 class CashFlowFact:
-    """Authoritative immutable cash flow record with proof and approval lineage."""
+    """Authoritative immutable cash flow record with proof and approval lineage (R6)."""
 
     correction_id: str
     account_label: str
     amount: Decimal
-    cash_flow_type: str  # deposit, withdrawal, fee_rebate, audit_adjustment
+    cash_flow_type: str  # deposit, withdrawal, fee_rebate, audit_adjustment, etc.
     effective_at: datetime
     reason: str
     approval_ref: str
     evidence_hash: str
+    asset: str = "USDT"
+    external_identity: str | None = None
+    source: str = "manual_correction"
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
@@ -96,6 +114,10 @@ class CashFlowFact:
             raise ValueError("reason must not be empty")
         if not self.approval_ref.strip():
             raise ValueError("approval_ref must not be empty")
+        if not self.asset.strip():
+            raise ValueError("asset must not be empty")
+        if not self.source.strip():
+            raise ValueError("source must not be empty")
 
     def to_live_adjustment(self) -> LiveCashFlowAdjustment:
         return LiveCashFlowAdjustment(
@@ -129,12 +151,14 @@ class CoverageReceipt:
     interval_start: datetime
     interval_end: datetime
     source: str
-    cursor_boundary: str | None = None
+    cursor_boundary: datetime | str | None = None
+    end_condition: str = "cursor_exhausted"
+    gaps: tuple[tuple[datetime, datetime], ...] = ()
     is_gapless: bool = True
     is_empty_proven: bool = False
-    revision: str = "v1"
+    revision: str | int = "v1"
     as_of: datetime = field(default_factory=lambda: datetime.now(UTC))
-    details: str = ""
+    details: str | dict[str, Any] = ""
 
     def __post_init__(self) -> None:
         if not self.account_label.strip():
@@ -145,6 +169,11 @@ class CoverageReceipt:
             raise ValueError("interval bounds must be timezone-aware")
         if self.interval_end < self.interval_start:
             raise ValueError("interval_end cannot precede interval_start")
+        if self.gaps and self.is_gapless:
+            raise ValueError("is_gapless cannot be True when gaps are present")
+        if self.is_empty_proven:
+            if not self.is_gapless or self.gaps:
+                raise ValueError("cannot claim is_empty_proven when coverage has gaps")
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +195,7 @@ class AccountEquityCut:
     valuation_basis: str = "wallet"
     asset: str = "USDT"
     environment: str = "live"
+    currency_conversion_source: str | None = None
     coverage_receipt: CoverageReceipt | None = None
     source_refs: tuple[str, ...] = ()
     as_of: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -183,6 +213,27 @@ class AccountEquityCut:
             raise ValueError("end_time cannot precede start_time")
         if self.start_equity < Decimal("0") or self.end_equity < Decimal("0"):
             raise ValueError("equity values cannot be negative")
+        if self.coverage_receipt is not None:
+            if self.coverage_receipt.account_label != self.account_label:
+                raise ValueError("coverage_receipt account_label does not match cut")
+            if self.coverage_receipt.asset != self.asset:
+                raise ValueError("coverage_receipt asset does not match cut")
+            if self.coverage_receipt.interval_start > self.start_time:
+                raise ValueError(
+                    "coverage_receipt interval_start is after cut start_time"
+                )
+            if self.coverage_receipt.interval_end < self.end_time:
+                raise ValueError(
+                    "coverage_receipt interval_end is before cut end_time"
+                )
+        if any(
+            cf.asset != self.asset for cf in self.cash_flows
+        ) and not self.currency_conversion_source:
+            raise ValueError(
+                "multi-asset cash flows detected without explicit "
+                "currency_conversion_source"
+            )
+
 
 
 @dataclass(frozen=True, slots=True)

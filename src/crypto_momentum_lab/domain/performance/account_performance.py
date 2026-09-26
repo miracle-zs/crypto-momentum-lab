@@ -33,26 +33,39 @@ class AccountPerformanceCalculator:
     ) -> tuple[bool, str, str]:
         """Resolves certification and proof from coverage receipt or legacy facts."""
         if cut.coverage_receipt is not None:
-            if not cut.coverage_receipt.is_gapless:
+            if not cut.coverage_receipt.is_gapless or cut.coverage_receipt.gaps:
+                details = cut.coverage_receipt.details
+                details_str = (
+                    str(details) if details else "coverage_receipt_gap_detected"
+                )
                 return (
                     False,
                     "uncertified",
-                    cut.coverage_receipt.details or "coverage_receipt_gap_detected",
+                    details_str,
                 )
             if cut.coverage_receipt.is_empty_proven:
+                details = cut.coverage_receipt.details
+                details_str = (
+                    str(details) if details else "proven_zero_cash_flows"
+                )
                 return (
                     True,
                     "confirmed",
-                    cut.coverage_receipt.details or "proven_zero_cash_flows",
+                    details_str,
                 )
             if cut.has_unknown_cash_flows:
                 return False, "uncertified", "unknown_cash_flows_present"
             if cut.cash_flows:
+                details = cut.coverage_receipt.details
+                details_str = (
+                    str(details)
+                    if details
+                    else f"audited_records_count_{len(cut.cash_flows)}"
+                )
                 return (
                     True,
                     "confirmed",
-                    cut.coverage_receipt.details
-                    or f"audited_records_count_{len(cut.cash_flows)}",
+                    details_str,
                 )
             return False, "uncertified", "uncertified_zero_cash_flow_facts"
         if cut.has_unknown_cash_flows:
@@ -60,6 +73,7 @@ class AccountPerformanceCalculator:
         if cut.cash_flows:
             return True, "confirmed", f"audited_records_count_{len(cut.cash_flows)}"
         return False, "uncertified", "uncertified_zero_cash_flow_facts"
+
 
     @classmethod
     def calculate(

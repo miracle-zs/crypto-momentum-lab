@@ -7,6 +7,8 @@ from crypto_momentum_lab.domain.operational.operational_read_model import (
     HealthDimensionName,
     HealthDimensionStatus,
     OperationalView,
+    aggregate_operational_views,
+    evaluate_standard_health,
     read_health,
 )
 from crypto_momentum_lab.domain.operational.retention_authority import (
@@ -57,7 +59,10 @@ __all__ = [
     "RetentionRepository",
     "RetentionWatermarkEvaluator",
     "RuntimeMetadataSnapshot",
+    "aggregate_operational_views",
     "compute_content_hash",
     "compute_trading_rules_hash",
+    "evaluate_standard_health",
     "read_health",
 ]
+

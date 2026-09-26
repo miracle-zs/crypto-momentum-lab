@@ -206,14 +206,32 @@ class StrategyRejection:
         )
 
 
+CURRENT_STRATEGY_CHECKPOINT_SCHEMA_VERSION = 1
+
+
+class IncompatibleCheckpointError(ValueError):
+    """Raised when encountering a checkpoint from a newer schema version (R6)."""
+
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class StrategyCheckpoint:
     last_processed_at_by_symbol: dict[str, datetime]
     warmup_buckets_by_symbol: dict[str, int]
     cooldown_buckets_remaining_by_symbol: dict[str, int]
     payload: dict[str, JsonValue]
+    schema_version: int = 1
 
     def __post_init__(self) -> None:
+        if self.schema_version > CURRENT_STRATEGY_CHECKPOINT_SCHEMA_VERSION:
+            raise IncompatibleCheckpointError(
+                f"Incompatible strategy checkpoint schema version "
+                f"{self.schema_version}; current supported version is "
+                f"{CURRENT_STRATEGY_CHECKPOINT_SCHEMA_VERSION}. "
+                "Rollback writer rejected to prevent state corruption."
+            )
+
         for symbol, processed_at in self.last_processed_at_by_symbol.items():
             _require_non_empty(symbol, "symbol")
             if not _is_aware(processed_at):
@@ -234,6 +252,7 @@ class StrategyCheckpoint:
             _normalize_json_mapping(self.payload, "payload"),
         )
         _ensure_json_normalizable(asdict(self), "checkpoint")
+
 
 
 @dataclass(frozen=True, slots=True)

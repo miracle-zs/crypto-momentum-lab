@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
+
 
 from fastapi.testclient import TestClient
 
@@ -71,6 +72,18 @@ def test_dashboard_app_mounts_static_index() -> None:
 class FakeQueries:
     async def health(self) -> dict[str, str]:
         return {"app_status": "UP", "database_status": "UP"}
+
+    async def operational_health(self) -> dict[str, Any]:
+        return {
+            "scope": "system",
+            "overall_status": "healthy",
+            "is_execution_ready": True,
+            "source_as_of": NOW.isoformat(),
+            "evaluated_at": NOW.isoformat(),
+            "dimensions": [],
+            "details": {},
+        }
+
 
     async def readiness(self) -> SystemReadinessResponse:
         return SystemReadinessResponse(

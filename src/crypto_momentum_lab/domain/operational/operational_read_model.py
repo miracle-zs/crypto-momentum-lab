@@ -145,3 +145,194 @@ def read_health(
             ],
         },
     )
+
+
+def aggregate_operational_views(
+    views: tuple[OperationalView, ...],
+    composite_scope: str = "system",
+    evaluated_at: datetime | None = None,
+) -> OperationalView:
+    """Aggregates multiple operational views across scopes/accounts.
+
+    Invariants (Blueprint R6 / Section 12.3):
+    - 跨账户汇总必须同区间同口径；部分未知不能被其它账户绿色抵消；
+    - If any view is CRITICAL -> overall is CRITICAL;
+    - Else if any view is DEGRADED -> overall is DEGRADED;
+    - Else if any view is STALE -> overall is STALE;
+    - Else if any view is UNKNOWN -> overall is UNKNOWN;
+    - Only when ALL views are HEALTHY is the composite HEALTHY;
+    - source_as_of preserves the earliest timestamp (cache HIT or green peer
+      cannot extend stale evidence);
+    - is_execution_ready is True ONLY if all subviews are execution-ready.
+    """
+    if not views:
+        now = evaluated_at or datetime.now(UTC)
+        return OperationalView(
+            scope=composite_scope,
+            overall_status=HealthDimensionStatus.UNKNOWN,
+            dimensions=(),
+            source_as_of=now,
+            is_execution_ready=False,
+            evaluated_at=now,
+            details={"reason": "no_subviews_provided_for_aggregation"},
+        )
+
+    # Severity priority: CRITICAL > DEGRADED > STALE > UNKNOWN > HEALTHY
+    statuses = {v.overall_status for v in views}
+    if HealthDimensionStatus.CRITICAL in statuses:
+        overall = HealthDimensionStatus.CRITICAL
+    elif HealthDimensionStatus.DEGRADED in statuses:
+        overall = HealthDimensionStatus.DEGRADED
+    elif HealthDimensionStatus.STALE in statuses:
+        overall = HealthDimensionStatus.STALE
+    elif HealthDimensionStatus.UNKNOWN in statuses:
+        overall = HealthDimensionStatus.UNKNOWN
+    else:
+        overall = HealthDimensionStatus.HEALTHY
+
+    is_ready = all(v.is_execution_ready for v in views) and (
+        overall == HealthDimensionStatus.HEALTHY
+    )
+    source_as_of = min((v.source_as_of for v in views), default=datetime.now(UTC))
+    eval_time = evaluated_at or datetime.now(UTC)
+
+    # Flatten dimensions tagging origin scope
+    all_dims: list[HealthDimension] = []
+    for v in views:
+        for d in v.dimensions:
+            all_dims.append(
+                HealthDimension(
+                    name=d.name,
+                    status=d.status,
+                    details=f"[{v.scope}] {d.details}",
+                    observed_at=d.observed_at,
+                    metric_value=d.metric_value,
+                )
+            )
+
+    unhealthy_scopes = [
+        f"{v.scope}:{v.overall_status.value}"
+        for v in views
+        if v.overall_status != HealthDimensionStatus.HEALTHY
+    ]
+
+    return OperationalView(
+        scope=composite_scope,
+        overall_status=overall,
+        dimensions=tuple(all_dims),
+        source_as_of=source_as_of,
+        is_execution_ready=is_ready,
+        evaluated_at=eval_time,
+        details={
+            "subview_count": len(views),
+            "unhealthy_scopes": unhealthy_scopes,
+            "subview_statuses": {v.scope: v.overall_status.value for v in views},
+        },
+    )
+
+
+def evaluate_standard_health(
+    scope: str,
+    *,
+    liveness_ok: bool,
+    liveness_details: str = "daemon_active",
+    lag_seconds: float = 0.0,
+    max_lag_seconds: float = 5.0,
+    fact_gaps_count: int = 0,
+    capability_permitted: bool = True,
+    capability_reason: str = "normal",
+    reconciliation_matched: bool = True,
+    reconciliation_details: str = "ledger_matches_exchange",
+    observed_at: datetime | None = None,
+) -> OperationalView:
+    """Builds an OperationalView with the 5 authoritative R6 dimensions."""
+    now = observed_at or datetime.now(UTC)
+
+    # 1. Process Liveness
+    live_status = (
+        HealthDimensionStatus.HEALTHY
+        if liveness_ok
+        else HealthDimensionStatus.CRITICAL
+    )
+    details_msg = (
+        liveness_details
+        if liveness_ok
+        else f"liveness_failed: {liveness_details}"
+    )
+    dim_liveness = HealthDimension(
+        name=HealthDimensionName.PROCESS_LIVENESS,
+        status=live_status,
+        details=details_msg,
+        observed_at=now,
+    )
+
+
+    # 2. Consumption Lag
+    if lag_seconds <= max_lag_seconds:
+        lag_status = HealthDimensionStatus.HEALTHY
+    elif lag_seconds <= max_lag_seconds * 5:
+        lag_status = HealthDimensionStatus.DEGRADED
+    else:
+        lag_status = HealthDimensionStatus.CRITICAL
+    dim_lag = HealthDimension(
+        name=HealthDimensionName.CONSUMPTION_LAG,
+        status=lag_status,
+        details=f"lag_{lag_seconds:.1f}s",
+        observed_at=now,
+        metric_value=lag_seconds,
+    )
+
+    # 3. Fact Integrity
+    if fact_gaps_count == 0:
+        fact_status = HealthDimensionStatus.HEALTHY
+        fact_details = "zero_fact_gaps"
+    elif fact_gaps_count <= 2:
+        fact_status = HealthDimensionStatus.DEGRADED
+        fact_details = f"{fact_gaps_count}_fact_gaps_detected"
+    else:
+        fact_status = HealthDimensionStatus.CRITICAL
+        fact_details = f"{fact_gaps_count}_critical_fact_gaps"
+    dim_fact = HealthDimension(
+        name=HealthDimensionName.FACT_INTEGRITY,
+        status=fact_status,
+        details=fact_details,
+        observed_at=now,
+        metric_value=float(fact_gaps_count),
+    )
+
+    # 4. Executable Capability
+    cap_status = (
+        HealthDimensionStatus.HEALTHY
+        if capability_permitted
+        else HealthDimensionStatus.DEGRADED
+    )
+    dim_cap = HealthDimension(
+        name=HealthDimensionName.EXECUTABLE_CAPABILITY,
+        status=cap_status,
+        details=capability_reason,
+        observed_at=now,
+    )
+
+    # 5. Reconciliation Concordance
+    rec_status = (
+        HealthDimensionStatus.HEALTHY
+        if reconciliation_matched
+        else HealthDimensionStatus.CRITICAL
+    )
+    dim_rec = HealthDimension(
+        name=HealthDimensionName.RECONCILIATION_CONCORDANCE,
+        status=rec_status,
+        details=(
+            reconciliation_details
+            if reconciliation_matched
+            else f"reconciliation_mismatch: {reconciliation_details}"
+        ),
+        observed_at=now,
+    )
+
+    return read_health(
+        scope=scope,
+        dimensions=(dim_liveness, dim_lag, dim_fact, dim_cap, dim_rec),
+        evidence_cut=now,
+    )
+

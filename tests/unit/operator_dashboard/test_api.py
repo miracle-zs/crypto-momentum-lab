@@ -50,11 +50,26 @@ def test_all_read_only_dashboard_routes_are_available() -> None:
             "/api/performance",
             "/api/performance/accounts/primary",
             "/api/readiness",
+            "/api/health/operational",
         ):
             assert client.get(route, auth=DASHBOARD_BASIC_AUTH).status_code == 200
 
 
+def test_operational_health_endpoint() -> None:
+    with TestClient(
+        create_dashboard_app(queries=FakeQueries(), **DASHBOARD_AUTH_KWARGS)
+    ) as client:
+        response = client.get("/api/health/operational", auth=DASHBOARD_BASIC_AUTH)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["scope"] == "system"
+    assert data["overall_status"] == "healthy"
+    assert data["is_execution_ready"] is True
+
+
 def test_readiness_endpoint_returns_layered_state() -> None:
+
     with TestClient(
         create_dashboard_app(queries=FakeQueries(), **DASHBOARD_AUTH_KWARGS)
     ) as client:

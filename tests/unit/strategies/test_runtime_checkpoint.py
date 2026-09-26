@@ -93,3 +93,35 @@ def _state(
         data_complete=data_complete,
         missing_agg_trade_count=missing_agg_trade_count,
     )
+
+
+def test_strategy_checkpoint_incompatible_version_blocks_recovery() -> None:
+    import pytest
+
+    from crypto_momentum_lab.domain.strategy.models import (
+        IncompatibleCheckpointError,
+        StrategyCheckpoint,
+    )
+
+    t0 = datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
+
+    # Future checkpoint schema version 2 must be rejected by version 1 code
+    with pytest.raises(IncompatibleCheckpointError, match="Incompatible strategy checkpoint"):
+        StrategyCheckpoint(
+            last_processed_at_by_symbol={"BTCUSDT": t0},
+            warmup_buckets_by_symbol={"BTCUSDT": 10},
+            cooldown_buckets_remaining_by_symbol={"BTCUSDT": 0},
+            payload={"version": 2},
+            schema_version=2,
+        )
+
+    # Current schema version 1 must be accepted
+    cp_ok = StrategyCheckpoint(
+        last_processed_at_by_symbol={"BTCUSDT": t0},
+        warmup_buckets_by_symbol={"BTCUSDT": 10},
+        cooldown_buckets_remaining_by_symbol={"BTCUSDT": 0},
+        payload={"version": 1},
+        schema_version=1,
+    )
+    assert cp_ok.schema_version == 1
+

@@ -16,6 +16,11 @@ from sqlalchemy import Select, and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.domain.operational import (
+    OperationalView,
+    aggregate_operational_views,
+    evaluate_standard_health,
+)
 from crypto_momentum_lab.operator_dashboard.collector_status import (
     read_research_collector_status,
 )
@@ -206,6 +211,116 @@ class OverviewQueries:
             return {"app_status": "UP", "database_status": "UP"}
         except Exception:
             return {"app_status": "UP", "database_status": "DOWN"}
+
+    async def operational_health(self) -> dict[str, Any]:
+        """Evaluates authoritative operational read model (R6 / Section 12.3)."""
+        now = self._clock()
+        liveness = await self.health()
+        db_up = liveness.get("database_status") == "UP"
+
+        try:
+            accounts_resp = await self.live_accounts()
+        except Exception as exc:
+            view = evaluate_standard_health(
+                scope="system",
+                liveness_ok=db_up,
+                liveness_details=f"query_error: {exc}",
+                lag_seconds=999.0,
+                fact_gaps_count=1,
+                capability_permitted=False,
+                capability_reason=f"query_error: {exc}",
+                reconciliation_matched=False,
+                reconciliation_details=f"query_error: {exc}",
+                observed_at=now,
+            )
+            return {
+                "scope": view.scope,
+                "overall_status": view.overall_status.value,
+                "is_execution_ready": view.is_execution_ready,
+                "source_as_of": view.source_as_of.isoformat(),
+                "evaluated_at": view.evaluated_at.isoformat(),
+                "dimensions": [
+                    {
+                        "name": d.name.value,
+                        "status": d.status.value,
+                        "details": d.details,
+                        "observed_at": d.observed_at.isoformat(),
+                        "metric_value": d.metric_value,
+                    }
+                    for d in view.dimensions
+                ],
+                "details": view.details,
+            }
+
+        account_views: list[OperationalView] = []
+        for acc in accounts_resp.accounts:
+            observed = acc.observed_at or now
+            lag = max(0.0, (now - observed).total_seconds())
+            lease_active = (
+                acc.lease_expires_at is not None
+                and acc.lease_expires_at > now
+            )
+            strategy_active = acc.strategy_state in ("active", "running")
+            cap_ok = (
+                lease_active
+                and strategy_active
+                and acc.status == OperationalStatus.READY
+            )
+
+            acc_view = evaluate_standard_health(
+                scope=f"account:{acc.account_label}",
+                liveness_ok=db_up and acc.status != OperationalStatus.HALTED,
+                liveness_details=f"account_status_{acc.status.value}",
+                lag_seconds=lag,
+                max_lag_seconds=90.0,
+                fact_gaps_count=0 if acc.status == OperationalStatus.READY else 1,
+                capability_permitted=cap_ok,
+                capability_reason=(
+                    "ready" if cap_ok else "lease_expired_or_inactive"
+                ),
+                reconciliation_matched=acc.status != OperationalStatus.HALTED,
+                reconciliation_details="ledger_reconciled",
+                observed_at=observed,
+            )
+            account_views.append(acc_view)
+
+        if account_views:
+            composite_view = aggregate_operational_views(
+                tuple(account_views),
+                composite_scope="system",
+                evaluated_at=now,
+            )
+        else:
+            composite_view = evaluate_standard_health(
+                scope="system",
+                liveness_ok=db_up,
+                lag_seconds=0.0,
+                fact_gaps_count=0,
+                capability_permitted=False,
+                capability_reason="no_live_accounts_configured",
+                reconciliation_matched=True,
+                observed_at=now,
+            )
+
+        return {
+            "scope": composite_view.scope,
+            "overall_status": composite_view.overall_status.value,
+            "is_execution_ready": composite_view.is_execution_ready,
+            "source_as_of": composite_view.source_as_of.isoformat(),
+            "evaluated_at": composite_view.evaluated_at.isoformat(),
+            "dimensions": [
+                {
+                    "name": d.name.value,
+                    "status": d.status.value,
+                    "details": d.details,
+                    "observed_at": d.observed_at.isoformat(),
+                    "metric_value": d.metric_value,
+                }
+                for d in composite_view.dimensions
+            ],
+            "details": composite_view.details,
+        }
+
 
     async def readiness(self) -> SystemReadinessResponse:
         now = self._clock()

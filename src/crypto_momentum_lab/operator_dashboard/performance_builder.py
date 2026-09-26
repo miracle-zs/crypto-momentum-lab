@@ -142,6 +142,7 @@ def _assess_coverage(
     end_time: datetime,
     equity_rows: Sequence[Any] = (),
     max_equity_gap: timedelta | None = None,
+    is_empty_proven: bool = False,
 ) -> tuple[bool, str, str]:
     """Determine coverage status from cash-flow facts from first principles.
 
@@ -154,13 +155,6 @@ def _assess_coverage(
     4. Every fact's evidence_hash is non-placeholder hex and, when content
        fields are available, equals the canonical content hash.
     """
-    if not cf_rows:
-        return (
-            False,
-            "uncertified",
-            "uncertified_zero_cash_flow_facts",
-        )
-
     s_time = (
         start_time if start_time.tzinfo is not None else start_time.replace(tzinfo=UTC)
     )
@@ -220,6 +214,20 @@ def _assess_coverage(
                     "uncertified_equity_window_gap_detected",
                 )
             prev_utc = cur_utc
+
+    if not cf_rows:
+        if is_empty_proven:
+            return (
+                True,
+                "confirmed",
+                "proven_zero_cash_flows",
+            )
+        return (
+            False,
+            "uncertified",
+            "uncertified_zero_cash_flow_facts",
+        )
+
 
     for r in cf_rows:
         rec_id = getattr(r, "correction_id", "unknown")
@@ -293,6 +301,7 @@ def build_performance_summary(
     environment: str = "live",
     asset: str = "USDT",
     valuation_basis: str = "wallet",
+    is_empty_proven: bool = False,
 ) -> AccountPerformanceSummaryResponse | None:
     """Builds a fully-audited AccountPerformanceSummaryResponse.
 
@@ -321,6 +330,7 @@ def build_performance_summary(
         end_time,
         equity_rows=equity_rows,
         max_equity_gap=effective_max_gap,
+        is_empty_proven=is_empty_proven,
     )
 
     coverage_receipt = CoverageReceipt(
@@ -397,6 +407,7 @@ def build_performance_summary_dict(
     environment: str = "live",
     asset: str = "USDT",
     valuation_basis: str = "wallet",
+    is_empty_proven: bool = False,
 ) -> dict[str, object]:
     """Dict variant for the /api/account-performance endpoint."""
     summary = build_performance_summary(
@@ -409,7 +420,9 @@ def build_performance_summary_dict(
         environment=environment,
         asset=asset,
         valuation_basis=valuation_basis,
+        is_empty_proven=is_empty_proven,
     )
+
     if summary is None:
         return {"status": "no_data", "account_label": account_label}
 

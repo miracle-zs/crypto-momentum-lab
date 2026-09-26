@@ -331,3 +331,260 @@ def test_twr_with_subintervals_uses_linked_modified_dietz_method() -> None:
 
     assert res_twr.status == MetricStatus.CONFIRMED
     assert res_twr.method == "linked_modified_dietz"
+
+
+def test_proven_zero_cash_flows_full_suite() -> None:
+    t0 = datetime(2026, 9, 25, 0, 0, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(days=1)
+
+    receipt = CoverageReceipt(
+        account_label="primary",
+        asset="USDT",
+        interval_start=t0,
+        interval_end=t1,
+        source="exchange_fills_stream",
+        is_gapless=True,
+        is_empty_proven=True,
+        details="audited_zero_cash_flows",
+    )
+
+    cut = AccountEquityCut(
+        account_label="primary",
+        start_equity=Decimal("10000.00"),
+        end_equity=Decimal("11000.00"),
+        start_time=t0,
+        end_time=t1,
+        cash_flows=(),
+        coverage_receipt=receipt,
+    )
+
+    # 1. NET_EQUITY_DELTA: confirmed raw equity change
+    res_delta = AccountPerformanceCalculator.calculate(
+        MetricSpec("delta", MetricFamily.NET_EQUITY_DELTA), cut
+    )
+    assert res_delta.status == MetricStatus.CONFIRMED
+    assert res_delta.value == Decimal("1000.00")
+    assert res_delta.method == "raw_equity_delta"
+
+    # 2. CASH_FLOW_ADJUSTED_PNL: confirmed, identical to delta with zero cash flows
+    res_pnl = AccountPerformanceCalculator.calculate(
+        MetricSpec("pnl", MetricFamily.CASH_FLOW_ADJUSTED_PNL), cut
+    )
+    assert res_pnl.status == MetricStatus.CONFIRMED
+    assert res_pnl.value == Decimal("1000.00")
+    assert res_pnl.method == "cash_flow_adjusted_pnl"
+
+    # 3. EXACT_TWR: confirmed exact simple return
+    res_twr = AccountPerformanceCalculator.calculate(
+        MetricSpec("twr", MetricFamily.TIME_WEIGHTED_RETURN), cut
+    )
+    assert res_twr.status == MetricStatus.CONFIRMED
+    assert res_twr.value == Decimal("0.100000")
+    assert res_twr.method == "exact_twr_zero_cash_flows"
+
+    # 4. MODIFIED_DIETZ: confirmed
+    res_dietz = AccountPerformanceCalculator.calculate(
+        MetricSpec("dietz", MetricFamily.MODIFIED_DIETZ), cut
+    )
+    assert res_dietz.status == MetricStatus.CONFIRMED
+    assert res_dietz.value == Decimal("0.100000")
+
+    # 5. MWR: confirmed simple return
+    res_mwr = AccountPerformanceCalculator.calculate(
+        MetricSpec("mwr", MetricFamily.MONEY_WEIGHTED_RETURN), cut
+    )
+    assert res_mwr.status == MetricStatus.CONFIRMED
+    assert res_mwr.value == Decimal("0.100000")
+    assert res_mwr.method == "simple_return_no_cash_flows"
+
+
+def test_unproven_empty_cash_flows_remains_uncertified() -> None:
+    t0 = datetime(2026, 9, 25, 0, 0, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(days=1)
+
+    # Empty cash flows without coverage receipt is UNKNOWN, not confirmed
+    cut = AccountEquityCut(
+        account_label="primary",
+        start_equity=Decimal("10000.00"),
+        end_equity=Decimal("11000.00"),
+        start_time=t0,
+        end_time=t1,
+        cash_flows=(),
+        coverage_receipt=None,
+    )
+
+    res_delta = AccountPerformanceCalculator.calculate(
+        MetricSpec("delta", MetricFamily.NET_EQUITY_DELTA), cut
+    )
+    assert res_delta.status == MetricStatus.UNVERIFIED_ESTIMATE
+
+    res_pnl = AccountPerformanceCalculator.calculate(
+        MetricSpec("pnl", MetricFamily.CASH_FLOW_ADJUSTED_PNL), cut
+    )
+    assert res_pnl.status == MetricStatus.INSUFFICIENT_COVERAGE
+    assert res_pnl.value is None
+
+    res_twr = AccountPerformanceCalculator.calculate(
+        MetricSpec("twr", MetricFamily.TIME_WEIGHTED_RETURN), cut
+    )
+    assert res_twr.status == MetricStatus.INSUFFICIENT_COVERAGE
+    assert res_twr.value is None
+
+
+def test_receipt_with_gaps_is_uncertified() -> None:
+    t0 = datetime(2026, 9, 25, 0, 0, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(days=1)
+    gap_start = t0 + timedelta(hours=6)
+    gap_end = t0 + timedelta(hours=8)
+
+    receipt = CoverageReceipt(
+        account_label="primary",
+        asset="USDT",
+        interval_start=t0,
+        interval_end=t1,
+        source="exchange_fills_stream",
+        is_gapless=False,
+        gaps=((gap_start, gap_end),),
+        details="stream_disconnect_detected",
+    )
+
+    cut = AccountEquityCut(
+        account_label="primary",
+        start_equity=Decimal("10000.00"),
+        end_equity=Decimal("11000.00"),
+        start_time=t0,
+        end_time=t1,
+        coverage_receipt=receipt,
+    )
+
+    res_pnl = AccountPerformanceCalculator.calculate(
+        MetricSpec("pnl", MetricFamily.CASH_FLOW_ADJUSTED_PNL), cut
+    )
+    assert res_pnl.status == MetricStatus.INSUFFICIENT_COVERAGE
+    assert res_pnl.value is None
+
+    res_twr = AccountPerformanceCalculator.calculate(
+        MetricSpec("twr", MetricFamily.TIME_WEIGHTED_RETURN), cut
+    )
+    assert res_twr.status == MetricStatus.INSUFFICIENT_COVERAGE
+    assert res_twr.value is None
+
+
+def test_negative_or_zero_starting_equity_fails_closed() -> None:
+    t0 = datetime(2026, 9, 25, 0, 0, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(days=1)
+
+    receipt = CoverageReceipt(
+        account_label="primary",
+        asset="USDT",
+        interval_start=t0,
+        interval_end=t1,
+        source="audit",
+        is_gapless=True,
+        is_empty_proven=True,
+    )
+
+    cut_zero = AccountEquityCut(
+        account_label="primary",
+        start_equity=Decimal("0.00"),
+        end_equity=Decimal("100.00"),
+        start_time=t0,
+        end_time=t1,
+        coverage_receipt=receipt,
+    )
+
+    res_twr = AccountPerformanceCalculator.calculate(
+        MetricSpec("twr", MetricFamily.TIME_WEIGHTED_RETURN), cut_zero
+    )
+    assert res_twr.status == MetricStatus.UNKNOWN
+    assert res_twr.value is None
+    assert res_twr.details["error"] == "zero_or_negative_starting_equity"
+
+    res_dietz = AccountPerformanceCalculator.calculate(
+        MetricSpec("dietz", MetricFamily.MODIFIED_DIETZ), cut_zero
+    )
+    assert res_dietz.status == MetricStatus.UNKNOWN
+    assert res_dietz.value is None
+
+    res_mwr = AccountPerformanceCalculator.calculate(
+        MetricSpec("mwr", MetricFamily.MONEY_WEIGHTED_RETURN), cut_zero
+    )
+    assert res_mwr.status == MetricStatus.UNKNOWN
+    assert res_mwr.value is None
+
+
+def test_multi_asset_isolation_enforced() -> None:
+    import pytest
+
+    t0 = datetime(2026, 9, 25, 0, 0, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(days=1)
+
+    # Cash flow in BTC for a USDT cut without conversion source must fail
+    cf_btc = CashFlowFact(
+        correction_id="cf_btc_01",
+        account_label="primary",
+        amount=Decimal("0.5"),
+        cash_flow_type="deposit",
+        effective_at=t0 + timedelta(hours=6),
+        reason="btc_transfer",
+        approval_ref="admin_01",
+        evidence_hash="0123456789abcdef" * 4,
+        asset="BTC",
+    )
+
+    with pytest.raises(ValueError, match="multi-asset cash flows detected"):
+        AccountEquityCut(
+            account_label="primary",
+            start_equity=Decimal("10000.00"),
+            end_equity=Decimal("11000.00"),
+            start_time=t0,
+            end_time=t1,
+            asset="USDT",
+            cash_flows=(cf_btc,),
+            currency_conversion_source=None,
+        )
+
+    # Allowed with explicit currency_conversion_source
+    cut_converted = AccountEquityCut(
+        account_label="primary",
+        start_equity=Decimal("10000.00"),
+        end_equity=Decimal("11000.00"),
+        start_time=t0,
+        end_time=t1,
+        asset="USDT",
+        cash_flows=(cf_btc,),
+        currency_conversion_source="binance_spot_index_1m",
+    )
+    assert cut_converted.currency_conversion_source == "binance_spot_index_1m"
+
+
+def test_coverage_receipt_invariants() -> None:
+    import pytest
+
+    t0 = datetime(2026, 9, 25, 0, 0, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(days=1)
+
+    # Cannot claim empty proven when gapless is False
+    with pytest.raises(ValueError, match="cannot claim is_empty_proven"):
+        CoverageReceipt(
+            account_label="primary",
+            asset="USDT",
+            interval_start=t0,
+            interval_end=t1,
+            source="audit",
+            is_gapless=False,
+            is_empty_proven=True,
+        )
+
+    # Cannot claim is_gapless=True when gaps are present
+    with pytest.raises(ValueError, match="is_gapless cannot be True when gaps"):
+        CoverageReceipt(
+            account_label="primary",
+            asset="USDT",
+            interval_start=t0,
+            interval_end=t1,
+            source="audit",
+            is_gapless=True,
+            gaps=((t0, t1),),
+        )
+

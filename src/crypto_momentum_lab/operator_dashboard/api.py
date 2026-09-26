@@ -262,7 +262,10 @@ class _ResponseCache:
 class DashboardQueryProtocol(Protocol):
     async def health(self) -> dict[str, str]: ...
 
+    async def operational_health(self) -> dict[str, Any]: ...
+
     async def readiness(self) -> SystemReadinessResponse: ...
+
 
     async def decision_slo(
         self,
@@ -474,6 +477,19 @@ def create_dashboard_app(
             ) from exc
 
     @dashboard.get(
+        "/api/health/operational",
+        dependencies=[Depends(require_dashboard_auth)],
+    )
+    async def operational_health() -> dict[str, Any]:
+        return await response_cache.get(
+            "operational_health",
+            query_service().operational_health,
+            ttl_seconds=5.0,
+            stale_while_revalidate_seconds=0.0,
+        )
+
+    @dashboard.get(
+
         "/api/readiness",
         response_model=SystemReadinessResponse,
         dependencies=[Depends(require_dashboard_auth)],
