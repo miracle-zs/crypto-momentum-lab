@@ -24,6 +24,7 @@ from crypto_momentum_lab.domain.execution import (
     FuturesPositionSide,
     OrderExecutionPlan,
 )
+from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
     ReservationConflictError,
@@ -318,6 +319,7 @@ class OrderExecutionCoordinator:
         idle_timeout_seconds: float = 120.0,
         domain_coordinator: ExecutionCoordinator | None = None,
         reservation_repository: Any | None = None,
+        execution_book: ExecutionBook | None = None,
         initial_reservations: Iterable[PositionReservation] | None = None,
     ) -> None:
         if not account_label.strip():
@@ -336,6 +338,10 @@ class OrderExecutionCoordinator:
         self._idle_timeout_seconds = idle_timeout_seconds
         self._domain_coordinator = domain_coordinator
         self._reservation_repository = reservation_repository
+        self._execution_book = execution_book or ExecutionBook(
+            coordinator=self._domain_coordinator,
+            reservation_repository=self._reservation_repository,
+        )
         self._active_reservations: dict[str, PositionReservation] = {}
         if initial_reservations:
             for r in initial_reservations:
@@ -353,6 +359,10 @@ class OrderExecutionCoordinator:
     @property
     def domain_coordinator(self) -> ExecutionCoordinator | None:
         return self._domain_coordinator
+
+    @property
+    def execution_book(self) -> ExecutionBook:
+        return self._execution_book
 
     @property
     def reservation_repository(self) -> Any | None:
@@ -424,19 +434,20 @@ class OrderExecutionCoordinator:
                             reserved_quantity=alloc.allocated_quantity,
                         )
                     )
-            else:
-                batch_id = (
-                    getattr(plan, "batch_id", None)
-                    or f"batch_{plan.symbol}_{plan.position_side.value}"
-                )
+            elif getattr(plan, "batch_id", None):
                 target_reservations.append(
                     PositionReservation(
                         reservation_id=f"res_{plan.client_order_id}",
                         command_id=plan.client_order_id,
                         position_key=key,
-                        batch_id=batch_id,
+                        batch_id=str(plan.batch_id),
                         reserved_quantity=Decimal(str(plan.quantity)),
                     )
+                )
+            else:
+                raise OrderPreSubmissionError(
+                    f"Exit order {plan.client_order_id} has no allocated "
+                    "batches or batch_id; cannot invent synthetic batch"
                 )
 
             # Sync active existing reservations into memory cache and domain
@@ -612,8 +623,17 @@ class OrderExecutionCoordinator:
         if (
             not plan.reduce_only
             or self._reservation_repository is None
-            or res.executed_quantity <= 0
+            or res is None
         ):
+            return
+        is_terminal = res.state in {
+            ExchangeOrderState.FILLED,
+            ExchangeOrderState.CANCELED,
+            ExchangeOrderState.EXPIRED,
+            ExchangeOrderState.REJECTED,
+            ExchangeOrderState.ABSENT_RECONCILED,
+        }
+        if res.executed_quantity <= 0 and not is_terminal:
             return
         try:
             key = PositionKey(
@@ -626,6 +646,7 @@ class OrderExecutionCoordinator:
                 self._reservation_repository.load_active_reservations(key)
             )
             remaining_to_consume = Decimal(str(res.executed_quantity))
+            consumed_by_id: dict[str, PositionReservation] = {}
             for r in active_res:
                 if (
                     r.command_id == plan.client_order_id
@@ -637,6 +658,7 @@ class OrderExecutionCoordinator:
                     await _maybe_await(
                         self._reservation_repository.update_reservation(updated)
                     )
+                    consumed_by_id[r.reservation_id] = updated
                     if updated.active_quantity <= Decimal("0"):
                         self._active_reservations.pop(r.reservation_id, None)
                         if self._domain_coordinator is not None:
@@ -652,21 +674,19 @@ class OrderExecutionCoordinator:
                         break
 
             # On terminal state, release any residual unconsumed reservations
-            if res.state in {
-                ExchangeOrderState.FILLED,
-                ExchangeOrderState.CANCELED,
-                ExchangeOrderState.EXPIRED,
-                ExchangeOrderState.REJECTED,
-            }:
+            if is_terminal:
                 for r in active_res:
                     if r.command_id == plan.client_order_id:
-                        cached = self._active_reservations.get(r.reservation_id)
-                        if cached is not None and cached.active_quantity > Decimal("0"):
-                            released = cached.release(cached.active_quantity)
+                        latest = consumed_by_id.get(
+                            r.reservation_id,
+                            self._active_reservations.get(r.reservation_id, r),
+                        )
+                        if latest is not None and latest.active_quantity > Decimal("0"):
+                            released = latest.release(latest.active_quantity)
                             await _maybe_await(
                                 self._reservation_repository.update_reservation(
                                     released,
-                                    release_reason="order_finished_residual_release",
+                                    release_reason=f"order_finished_residual_release_{res.state.value}",
                                 )
                             )
                             self._active_reservations.pop(r.reservation_id, None)
@@ -800,14 +820,21 @@ class OrderExecutionCoordinator:
                     self._reservation_repository.load_active_reservations(key)
                 )
                 for r in active_res:
-                    if r.command_id == plan.client_order_id:
+                    if (
+                        r.command_id == plan.client_order_id
+                        and r.active_quantity > Decimal("0")
+                    ):
                         updated = r.release(r.active_quantity)
                         await _maybe_await(
                             self._reservation_repository.update_reservation(
                                 updated, release_reason="order_cancelled"
                             )
                         )
-                        break
+                        self._active_reservations.pop(r.reservation_id, None)
+                        if self._domain_coordinator is not None:
+                            self._domain_coordinator.unregister_reservation(
+                                r.reservation_id
+                            )
             except Exception as cancel_err:
                 log.warning(
                     "order_reservation_release_on_cancel_failed",
@@ -821,12 +848,17 @@ class OrderExecutionCoordinator:
         self,
         plan: OrderExecutionPlan,
     ) -> OrderExecutionResult:
+        async def operation() -> OrderExecutionResult:
+            res = await self._backend.reconcile_order(plan)
+            await self._consume_reservation_if_filled(plan, res)
+            return res
+
         return cast(
             OrderExecutionResult,
             await self._schedule(
                 plan,
                 priority=self._RECONCILE_PRIORITY,
-                operation=lambda: self._backend.reconcile_order(plan),
+                operation=operation,
             ),
         )
 
@@ -835,6 +867,11 @@ class OrderExecutionCoordinator:
         plan: OrderExecutionPlan,
         snapshot: ExchangeOrderSnapshot,
     ) -> OrderExecutionResult:
+        async def operation() -> OrderExecutionResult:
+            res = await self._backend.apply_observed_snapshot(plan, snapshot)
+            await self._consume_reservation_if_filled(plan, res)
+            return res
+
         return cast(
             OrderExecutionResult,
             await self._schedule(
@@ -844,10 +881,7 @@ class OrderExecutionCoordinator:
                     if plan.reduce_only
                     else self._RECONCILE_PRIORITY
                 ),
-                operation=lambda: self._backend.apply_observed_snapshot(
-                    plan,
-                    snapshot,
-                ),
+                operation=operation,
             ),
         )
 
@@ -857,21 +891,20 @@ class OrderExecutionCoordinator:
         *,
         details: dict[str, JsonValue],
     ) -> OrderExecutionResult:
+        async def operation() -> OrderExecutionResult:
+            res = await self._backend.mark_absent_reconciled(plan, details=details)
+            await self._consume_reservation_if_filled(plan, res)
+            return res
+
         return cast(
             OrderExecutionResult,
             await self._schedule(
                 plan,
-                priority=(
-                    self._EXIT_PRIORITY
-                    if plan.reduce_only
-                    else self._RECONCILE_PRIORITY
-                ),
-                operation=lambda: self._backend.mark_absent_reconciled(
-                    plan,
-                    details=details,
-                ),
+                priority=self._RECONCILE_PRIORITY,
+                operation=operation,
             ),
         )
+
 
     async def aclose(self) -> None:
         self.block_entry_submissions()

@@ -94,6 +94,7 @@ class ManagedLivePosition:
     batch_id: str | None = None
     recovery_exit_started_at: datetime | None = None
     batches: tuple[ManagedLivePositionBatch, ...] = ()
+    projection_version: str | None = None
 
     def __post_init__(self) -> None:
         if not self.symbol.strip():
@@ -831,7 +832,11 @@ class LiveExitManager:
                     "entry_price": str(position.entry_price),
                     "reference_price": str(reference_price),
                     "opened_at": position.opened_at.astimezone(UTC).isoformat(),
-                    "batch_id": position.batch_id,
+                    "batch_id": (
+                        position.batch_id
+                        or (position.batches[0].batch_id if position.batches else None)
+                    ),
+                    "projection_version": position.projection_version,
                     "trigger_at": trigger_at.astimezone(UTC).isoformat(),
                     "exit_order_type": entry_type.value,
                 },

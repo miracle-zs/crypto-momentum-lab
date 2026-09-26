@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 
 from crypto_momentum_lab.domain.execution import (
+    ExitAllocation,
     FuturesPositionSide,
     OrderExecutionPlan,
 )
@@ -54,6 +55,9 @@ def quantize_order_plan(
     resize_tolerance: Decimal,
     hedge_mode: bool = False,
     requested_quantity: Decimal | None = None,
+    allocations: tuple[ExitAllocation, ...] = (),
+    projection_version: str | None = None,
+    batch_id: str | None = None,
 ) -> OrderExecutionPlan | QuantizationRejection:
     if intent.symbol != rules.symbol:
         raise ValueError("intent symbol must match trading rules")
@@ -116,6 +120,26 @@ def quantize_order_plan(
                 tolerance=resize_tolerance,
             )
 
+    features = getattr(intent, "features", None) or {}
+    resolved_batch_id = batch_id or (
+        str(features["batch_id"]).strip()
+        if features.get("batch_id")
+        else None
+    )
+    resolved_projection_version = projection_version or (
+        str(features["projection_version"]).strip()
+        if features.get("projection_version")
+        else None
+    )
+    resolved_allocations = allocations
+    if not resolved_allocations and intent.reduce_only and resolved_batch_id:
+        resolved_allocations = (
+            ExitAllocation(
+                batch_id=resolved_batch_id,
+                allocated_quantity=quantity,
+            ),
+        )
+
     return OrderExecutionPlan(
         intent_id=intent.candidate_id,
         run_id=intent.run_id,
@@ -132,6 +156,9 @@ def quantize_order_plan(
         created_at=intent.created_at,
         position_side=_position_side(intent, hedge_mode=hedge_mode),
         quantized=True,
+        batch_id=resolved_batch_id,
+        allocations=resolved_allocations,
+        projection_version=resolved_projection_version,
     )
 
 

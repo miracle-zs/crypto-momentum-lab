@@ -1185,10 +1185,10 @@ if [[ "$live_update" == 1 && "$live_changed" == 1 ]]; then
   migration_revision_for_account() {
     local account="$1"
     case "$account" in
-      primary) env_value CML_LIVE_MIGRATION_REVISION 20260911_0036 ;;
-      account-2) env_value CML_LIVE_MIGRATION_REVISION_ACCOUNT_2 20260911_0036 ;;
-      account-3) env_value CML_LIVE_MIGRATION_REVISION_ACCOUNT_3 20260911_0036 ;;
-      account-4) env_value CML_LIVE_MIGRATION_REVISION_ACCOUNT_4 20260911_0036 ;;
+      primary) env_value CML_LIVE_MIGRATION_REVISION 20260925_0043 ;;
+      account-2) env_value CML_LIVE_MIGRATION_REVISION_ACCOUNT_2 20260925_0043 ;;
+      account-3) env_value CML_LIVE_MIGRATION_REVISION_ACCOUNT_3 20260925_0043 ;;
+      account-4) env_value CML_LIVE_MIGRATION_REVISION_ACCOUNT_4 20260925_0043 ;;
       *) echo "unknown account: $account" >&2; return 64 ;;
     esac
   }
@@ -1351,6 +1351,8 @@ if not isinstance(entry_reason, str):
 age = payload["latest_market_state_age_seconds"]
 if age is not None and (type(age) not in (int, float) or age < 0):
     raise SystemExit("readiness latest_market_state_age_seconds is invalid")
+if entry_enabled and (age is None or age > 120.0):
+    raise SystemExit(f"readiness entry_enabled is true but market state age is stale: {age}s")
 target_label = "unbounded" if target is None else str(target)
 
 print(

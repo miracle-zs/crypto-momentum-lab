@@ -278,6 +278,39 @@ class AccountFacts:
     checkpoint: PositionCheckpoint | None = None
     has_synthetic_fills: bool = False
 
+    def compute_facts_hash(self) -> str:
+        """Deterministic cryptographic hash representing fact cut."""
+        import hashlib
+
+        hasher = hashlib.sha256()
+        hasher.update(self.position_key.canonical_id.encode())
+        for f in sorted(self.fills, key=lambda x: (x.trade_at, x.trade_id)):
+            f_str = (
+                f"{f.trade_id}:{f.quantity}:{f.price}:"
+                f"{f.side}:{f.trade_at.isoformat()}"
+            )
+            hasher.update(f_str.encode())
+        for s in sorted(self.snapshots, key=lambda x: x.observed_at):
+            s_str = f"{s.observed_at.isoformat()}:{s.position_amt}:{s.entry_price}"
+            hasher.update(s_str.encode())
+        for b in sorted(
+            self.exit_boundaries, key=lambda x: (x.submitted_at, x.order_id)
+        ):
+            b_str = f"{b.order_id}:{b.submitted_at.isoformat()}"
+            hasher.update(b_str.encode())
+        if self.coverage is not None:
+            cov = self.coverage
+            c_str = (
+                f"{cov.start_at.isoformat()}:{cov.end_at.isoformat()}:"
+                f"{cov.status.value}"
+            )
+            hasher.update(c_str.encode())
+        if self.checkpoint is not None:
+            chk = self.checkpoint
+            chk_str = f"{chk.checkpoint_id}:{chk.event_cut.isoformat()}"
+            hasher.update(chk_str.encode())
+        return hasher.hexdigest()
+
 
 @dataclass(frozen=True, slots=True)
 class BatchReductionAttribution:

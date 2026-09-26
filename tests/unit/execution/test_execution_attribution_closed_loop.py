@@ -32,6 +32,8 @@ from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     AccountFacts,
     ExitOrderSubmissionFact,
+    FactCoverageInterval,
+    FactCoverageStatus,
     PositionHealthStatus,
     PositionKey,
     PositionLedgerBatch,
@@ -118,6 +120,13 @@ def _setup_two_batch_book() -> tuple[PositionBook, PositionKey]:
     journal.record_boundary(boundary)
     journal.append_fill(f2)
     journal.record_snapshot(snap)
+    journal.set_coverage(
+        FactCoverageInterval(
+            start_at=t1,
+            end_at=t2,
+            status=FactCoverageStatus.CONFIRMED,
+        )
+    )
 
     book = PositionBook(journal)
     return book, key
@@ -199,8 +208,48 @@ def test_cas_version_fencing_rejects_stale_command() -> None:
     )
     assert cmd is not None
 
-    # Construct a new view with newer projection version
-    newer_view = book.get_view()
+    # Construct a new view with newer projection version by appending a new fact
+    t_new = _dt(10, 45)
+    f3 = AccountFillEvent(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        trade_id="t3",
+        order_id="ord_3",
+        side="BUY",
+        price=Decimal("52000"),
+        quantity=Decimal("0.1"),
+        realized_pnl=Decimal("0"),
+        fee=Decimal("0.1"),
+        fee_asset="USDT",
+        trade_at=t_new,
+        raw_payload={"positionSide": "LONG", "is_system": True},
+    )
+    book._journal.append_fill(f3)
+    snap_new = AccountPositionSnapshot(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side="LONG",
+        position_amt=Decimal("3.1"),
+        entry_price=Decimal("50709.68"),
+        mark_price=Decimal("52000"),
+        unrealized_pnl=Decimal("0"),
+        notional=Decimal("161200"),
+        leverage=5,
+        margin_type="cross",
+        observed_at=t_new,
+        raw_payload={},
+    )
+    book._journal.record_snapshot(snap_new)
+    book._journal.set_coverage(
+        FactCoverageInterval(
+            start_at=_dt(10, 0),
+            end_at=t_new,
+            status=FactCoverageStatus.CONFIRMED,
+        )
+    )
+    newer_view = book.get_view(now=t_new)
     assert newer_view.projection_version != view.projection_version
 
     # Attempting to reserve with stale expected_projection_version fails

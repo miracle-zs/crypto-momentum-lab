@@ -147,6 +147,53 @@ def test_limit_price_rounds_outward_for_exchange_side() -> None:
     assert close_result.price == Decimal("100.1")
 
 
+def test_quantize_forwards_allocations_and_projection_version() -> None:
+    from crypto_momentum_lab.domain.execution import ExitAllocation
+
+    allocs = (
+        ExitAllocation(batch_id="b1", allocated_quantity=Decimal("0.001")),
+        ExitAllocation(batch_id="b2", allocated_quantity=Decimal("0.002")),
+    )
+    result = quantize_order_plan(
+        replace(_intent(Decimal("90")), reduce_only=True),
+        _rules(),
+        reference_price=Decimal("30000"),
+        resize_tolerance=Decimal("0.20"),
+        requested_quantity=Decimal("0.003"),
+        allocations=allocs,
+        projection_version="pv_abc",
+        batch_id="b_multi",
+    )
+    assert isinstance(result, OrderExecutionPlan)
+    assert result.allocations == allocs
+    assert result.projection_version == "pv_abc"
+    assert result.batch_id == "b_multi"
+
+
+def test_quantize_extracts_batch_id_and_projection_version_from_features() -> None:
+    intent = replace(
+        _intent(Decimal("90")),
+        reduce_only=True,
+        features={
+            "batch_id": "b_feat_1",
+            "projection_version": "pv_feat_999",
+        },
+    )
+    result = quantize_order_plan(
+        intent,
+        _rules(),
+        reference_price=Decimal("30000"),
+        resize_tolerance=Decimal("0.20"),
+        requested_quantity=Decimal("0.003"),
+    )
+    assert isinstance(result, OrderExecutionPlan)
+    assert result.batch_id == "b_feat_1"
+    assert result.projection_version == "pv_feat_999"
+    assert len(result.allocations) == 1
+    assert result.allocations[0].batch_id == "b_feat_1"
+    assert result.allocations[0].allocated_quantity == Decimal("0.003")
+
+
 def _rules() -> SymbolTradingRules:
     return SymbolTradingRules(
         symbol="BTCUSDT",

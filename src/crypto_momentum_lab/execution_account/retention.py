@@ -101,7 +101,7 @@ async def prune_account_snapshots_once(
             consumer_requirements=consumer_requirements,
         )
         total_deleted = sum(deleted_counts.values())
-        return (total_deleted, 0)
+        return (0, total_deleted)
 
     await authority.execute_prune_async(
         plan=plan,

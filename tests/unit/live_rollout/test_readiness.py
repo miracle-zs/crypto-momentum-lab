@@ -21,7 +21,7 @@ def _publisher(tmp_path):
         session_id="live-primary-v1",
         strategy="orderflow_impulse",
         code_commit="a" * 40,
-        migration_revision="20260911_0036",
+        migration_revision="20260925_0043",
         entry_universe_target_count=10,
         warmup_required_buckets=140,
     )
@@ -86,6 +86,21 @@ def test_readiness_refreshes_progress_and_market_age(tmp_path) -> None:
     assert payload["warmup_complete_symbols"] == 1
     assert payload["warmup_deferred_symbols"] == 1
     assert payload["latest_market_state_age_seconds"] >= 0
+    first_market_at = payload["latest_market_state_at"]
+
+    # Subsequent bucket with same warmup must still update market age and time
+    state2 = SimpleNamespace(
+        bucket_start=state.bucket_start + timedelta(seconds=15),
+        bucket_end=state.bucket_end + timedelta(seconds=15),
+    )
+    publisher.observe_market_state(
+        state2,
+        strategy=Strategy(),
+        entry_universe_count=2,
+    )
+    payload2 = json.loads(health.readiness_path.read_text())
+    assert payload2["latest_market_state_at"] != first_market_at
+    assert payload2["warmup_complete_symbols"] == 1
 
 
 def test_readiness_deduplicates_entry_gate_updates(tmp_path, monkeypatch) -> None:

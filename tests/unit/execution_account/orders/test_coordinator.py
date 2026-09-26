@@ -913,6 +913,7 @@ async def test_reservation_save_receives_projection_version() -> None:
         created_at=NOW,
         quantized=True,
         projection_version="pv_123",
+        batch_id="batch_1",
     )
     await coordinator.submit(plan)
     assert captured["kwargs"].get("expected_projection_version") == "pv_123"
@@ -971,7 +972,386 @@ async def test_reservation_conflict_mismatch_is_rejected() -> None:
         position_side=FuturesPositionSide.BOTH,
         created_at=NOW,
         quantized=True,
+        batch_id="batch_plan",
     )
     with pytest.raises(OrderPreSubmissionError, match="does not match|already exists"):
         await coordinator.submit(plan)
     await coordinator.aclose()
+
+
+async def test_unallocated_exit_order_fails_closed_without_inventing_batch() -> None:
+    class DummyRepo:
+        def load_active_reservations(self, key: Any) -> list[Any]:
+            return []
+
+    coordinator = OrderExecutionCoordinator(
+        backend=BlockingBackend(),
+        account_label="primary",
+        reservation_repository=DummyRepo(),
+    )
+    plan = OrderExecutionPlan(
+        intent_id="intent-unallocated",
+        run_id="run-1",
+        client_order_id="order-unallocated",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("1.0"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+    )
+    with pytest.raises(OrderPreSubmissionError, match="has no allocated batches or batch_id"):
+        await coordinator.submit(plan)
+    await coordinator.aclose()
+
+
+async def test_reconcile_order_consumes_filled_reservation() -> None:
+    from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+    from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
+
+    class InMemoryReservationRepo:
+        def __init__(self) -> None:
+            self.reservations: dict[str, PositionReservation] = {}
+
+        def load_active_reservations(self, key: Any) -> list[PositionReservation]:
+            return [
+                r for r in self.reservations.values()
+                if r.active_quantity > Decimal("0")
+            ]
+
+        def save_reservation(self, res: PositionReservation, **kwargs: Any) -> None:
+            self.reservations[res.reservation_id] = res
+
+        def update_reservation(self, res: PositionReservation, release_reason: str = "") -> None:
+            self.reservations[res.reservation_id] = res
+
+    class ReconcileFillBackend(BlockingBackend):
+        async def reconcile_order(self, plan: OrderExecutionPlan):
+            return OrderExecutionResult(
+                client_order_id=plan.client_order_id,
+                state=ExchangeOrderState.FILLED,
+                exchange_order_id="e-rec-1",
+                executed_quantity=plan.quantity,
+                average_price=Decimal("100.0"),
+            )
+
+    repo = InMemoryReservationRepo()
+    key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    res_id = "res_order-reconcile-fill_0"
+    repo.reservations[res_id] = PositionReservation(
+        reservation_id=res_id,
+        command_id="order-reconcile-fill",
+        position_key=key,
+        batch_id="batch_1",
+        reserved_quantity=Decimal("5.0"),
+    )
+
+    coordinator = OrderExecutionCoordinator(
+        backend=ReconcileFillBackend(),
+        account_label="primary",
+        reservation_repository=repo,
+    )
+    plan = OrderExecutionPlan(
+        intent_id="intent-rec",
+        run_id="run-1",
+        client_order_id="order-reconcile-fill",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("5.0"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+        batch_id="batch_1",
+    )
+
+    result = await coordinator.reconcile_order(plan)
+    assert result.state == ExchangeOrderState.FILLED
+    r = repo.reservations[res_id]
+    assert r.consumed_quantity == Decimal("5.0")
+    assert r.active_quantity == Decimal("0")
+    await coordinator.aclose()
+
+
+async def test_apply_observed_snapshot_consumes_filled_reservation() -> None:
+    from crypto_momentum_lab.domain.execution import ExchangeOrderSnapshot
+    from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+    from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
+
+    class InMemoryReservationRepo:
+        def __init__(self) -> None:
+            self.reservations: dict[str, PositionReservation] = {}
+
+        def load_active_reservations(self, key: Any) -> list[PositionReservation]:
+            return [
+                r for r in self.reservations.values()
+                if r.active_quantity > Decimal("0")
+            ]
+
+        def save_reservation(self, res: PositionReservation, **kwargs: Any) -> None:
+            self.reservations[res.reservation_id] = res
+
+        def update_reservation(self, res: PositionReservation, release_reason: str = "") -> None:
+            self.reservations[res.reservation_id] = res
+
+    class SnapshotBackend(BlockingBackend):
+        async def apply_observed_snapshot(
+            self, plan: OrderExecutionPlan, snapshot: ExchangeOrderSnapshot
+        ):
+            return OrderExecutionResult(
+                client_order_id=plan.client_order_id,
+                state=snapshot.state,
+                exchange_order_id=snapshot.exchange_order_id,
+                executed_quantity=snapshot.executed_quantity,
+                average_price=snapshot.average_price,
+            )
+
+    repo = InMemoryReservationRepo()
+    key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    res_id = "res_order-snap-fill_0"
+    repo.reservations[res_id] = PositionReservation(
+        reservation_id=res_id,
+        command_id="order-snap-fill",
+        position_key=key,
+        batch_id="batch_1",
+        reserved_quantity=Decimal("3.0"),
+    )
+
+    coordinator = OrderExecutionCoordinator(
+        backend=SnapshotBackend(),
+        account_label="primary",
+        reservation_repository=repo,
+    )
+    plan = OrderExecutionPlan(
+        intent_id="intent-snap",
+        run_id="run-1",
+        client_order_id="order-snap-fill",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("3.0"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+        batch_id="batch_1",
+    )
+    snapshot = ExchangeOrderSnapshot(
+        client_order_id="order-snap-fill",
+        exchange_order_id="e-snap-1",
+        state=ExchangeOrderState.FILLED,
+        executed_quantity=Decimal("3.0"),
+        average_price=Decimal("100.0"),
+        observed_at=NOW,
+    )
+
+    result = await coordinator.apply_observed_snapshot(plan, snapshot)
+    assert result.state == ExchangeOrderState.FILLED
+    r = repo.reservations[res_id]
+    assert r.consumed_quantity == Decimal("3.0")
+    assert r.active_quantity == Decimal("0")
+    await coordinator.aclose()
+
+
+async def test_cancel_order_releases_all_allocations_for_command() -> None:
+    from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
+    from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+    from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
+
+    class InMemoryReservationRepo:
+        def __init__(self) -> None:
+            self.reservations: dict[str, PositionReservation] = {}
+            self.release_reasons: dict[str, str] = {}
+
+        def load_active_reservations(self, key: Any) -> list[PositionReservation]:
+            return [
+                r for r in self.reservations.values()
+                if r.active_quantity > Decimal("0")
+            ]
+
+        def save_reservation(self, res: PositionReservation, **kwargs: Any) -> None:
+            self.reservations[res.reservation_id] = res
+
+        def update_reservation(self, res: PositionReservation, release_reason: str = "") -> None:
+            self.reservations[res.reservation_id] = res
+            if release_reason:
+                self.release_reasons[res.reservation_id] = release_reason
+
+    repo = InMemoryReservationRepo()
+    key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    r0 = PositionReservation(
+        reservation_id="res_multi_cancel_0",
+        command_id="order-multi-cancel",
+        position_key=key,
+        batch_id="batch_1",
+        reserved_quantity=Decimal("10.0"),
+    )
+    r1 = PositionReservation(
+        reservation_id="res_multi_cancel_1",
+        command_id="order-multi-cancel",
+        position_key=key,
+        batch_id="batch_2",
+        reserved_quantity=Decimal("15.0"),
+    )
+    repo.reservations[r0.reservation_id] = r0
+    repo.reservations[r1.reservation_id] = r1
+
+    class CancelBackend(BlockingBackend):
+        async def cancel_order(self, plan: OrderExecutionPlan):
+            return OrderExecutionResult(
+                client_order_id=plan.client_order_id,
+                state=ExchangeOrderState.CANCELED,
+                exchange_order_id="e-cancel-1",
+            )
+
+    coordinator = OrderExecutionCoordinator(
+        backend=CancelBackend(),
+        account_label="primary",
+        reservation_repository=repo,
+    )
+    allocs = (
+        ExitAllocation(batch_id="batch_1", allocated_quantity=Decimal("10.0")),
+        ExitAllocation(batch_id="batch_2", allocated_quantity=Decimal("15.0")),
+    )
+    plan = OrderExecutionPlan(
+        intent_id="intent-cancel",
+        run_id="run-1",
+        client_order_id="order-multi-cancel",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("25.0"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+        allocations=allocs,
+    )
+
+    result = await coordinator.cancel_order(plan)
+    assert result.state == ExchangeOrderState.CANCELED
+    assert repo.reservations[r0.reservation_id].active_quantity == Decimal("0")
+    assert repo.reservations[r0.reservation_id].released_quantity == Decimal("10.0")
+    assert repo.reservations[r1.reservation_id].active_quantity == Decimal("0")
+    assert repo.reservations[r1.reservation_id].released_quantity == Decimal("15.0")
+    await coordinator.aclose()
+
+
+async def test_terminal_order_with_zero_fill_releases_active_reservations() -> None:
+    from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
+    from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
+
+    class InMemoryReservationRepo:
+        def __init__(self) -> None:
+            self.reservations: dict[str, PositionReservation] = {}
+            self.release_reasons: dict[str, str] = {}
+
+        def load_active_reservations(self, key: Any) -> list[PositionReservation]:
+            return [
+                r for r in self.reservations.values()
+                if r.active_quantity > Decimal("0")
+            ]
+
+        def save_reservation(self, res: PositionReservation, **kwargs: Any) -> None:
+            self.reservations[res.reservation_id] = res
+
+        def update_reservation(self, res: PositionReservation, release_reason: str = "") -> None:
+            self.reservations[res.reservation_id] = res
+            if release_reason:
+                self.release_reasons[res.reservation_id] = release_reason
+
+    class RejectedBackend(BlockingBackend):
+        async def execute_approved_intent(
+            self, plan: OrderExecutionPlan, *, prepared_submission=None
+        ):
+            return OrderExecutionResult(
+                client_order_id=plan.client_order_id,
+                state=ExchangeOrderState.REJECTED,
+                exchange_order_id="e-rej-1",
+                executed_quantity=Decimal("0"),
+            )
+
+    repo = InMemoryReservationRepo()
+    coordinator = OrderExecutionCoordinator(
+        backend=RejectedBackend(),
+        account_label="primary",
+        reservation_repository=repo,
+    )
+    plan = OrderExecutionPlan(
+        intent_id="intent-reject",
+        run_id="run-1",
+        client_order_id="order-reject",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("5.0"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+        batch_id="batch_1",
+    )
+
+    result = await coordinator.submit(plan)
+    assert result.state == ExchangeOrderState.REJECTED
+    res = repo.reservations["res_order-reject"]
+    assert res.active_quantity == Decimal("0")
+    assert res.released_quantity == Decimal("5.0")
+    assert "order_finished_residual_release_rejected" in repo.release_reasons.get(res.reservation_id, "")
+    await coordinator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_execution_book_integration() -> None:
+    from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook, ExecutionScope
+    from crypto_momentum_lab.domain.execution.execution_coordinator import InMemoryPositionReservationRepository
+
+    backend = BlockingBackend()
+    repo = InMemoryPositionReservationRepository()
+    custom_book = ExecutionBook(reservation_repository=repo)
+
+    coordinator = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        reservation_repository=repo,
+        execution_book=custom_book,
+    )
+
+    assert coordinator.execution_book is custom_book
+
+    scope = ExecutionScope(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+
+    view = await coordinator.execution_book.read(scope)
+    assert view.projection_version.startswith("pv_BTCUSDT_")
+    assert view.unallocated_quantity == Decimal("0")
+
+    await coordinator.aclose()
+

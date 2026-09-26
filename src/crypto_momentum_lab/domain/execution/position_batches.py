@@ -28,6 +28,7 @@ class ManagedLivePositionBatch:
     legacy_attribution: bool = False
     entry_order_count: int = 1
     entry_client_order_ids: frozenset[str] = frozenset()
+    projection_version: str | None = None
 
     def __post_init__(self) -> None:
         if not self.batch_id.strip():

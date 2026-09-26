@@ -3,8 +3,11 @@
 Research and trading infrastructure for independent short-horizon momentum
 strategies on Binance USD-M perpetual futures.
 
-The approved architecture is documented in
-`docs/superpowers/specs/2026-06-14-project-architecture-design.md`.
+The current implementation is summarized in [docs/current-state.md](docs/current-state.md).
+The [system refactoring plan](docs/architecture/system-refactor-blueprint-20260925.md)
+records the latest architecture review, production evidence, and proposed migration.
+The original design remains available in
+`docs/superpowers/specs/2026-06-14-project-architecture-design.md` as historical context.
 
 ## Local Setup
 

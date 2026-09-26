@@ -929,7 +929,7 @@ async def prune_operational_database_once(
             batch_size=runtime_state_batch_size,
             **req_kwargs,
         )
-        return (deleted_states, deleted_contracts)
+        return (0, deleted_states + deleted_contracts)
 
     receipt = await authority.execute_prune_async(
         plan=plan,

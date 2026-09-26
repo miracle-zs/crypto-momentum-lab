@@ -37,7 +37,6 @@ class PositionBook:
         self._ledger = ledger or PositionLedger(self._position_key)
         self._policy_version = policy_version
         self._schema_version = schema_version
-        self._projection_counter = 0
 
     @property
     def position_key(self) -> PositionKey:
@@ -50,11 +49,12 @@ class PositionBook:
         now: datetime | None = None,
     ) -> PositionView:
         """Projects the authoritative PositionView at an explicit event cut."""
-        self._projection_counter += 1
-        version_id = f"pv_{self._position_key.symbol}_{self._projection_counter}"
-
         facts = self._journal.read_cut(cut)
         projection = self._ledger.project(facts)
+
+        facts_hash = facts.compute_facts_hash()
+        version_id = f"pv_{self._position_key.symbol}_{facts_hash[:12]}"
+        input_revision = getattr(self._journal, "revision", 0)
 
         health_status = projection.health_status
         is_comparable = projection.is_comparable
@@ -99,7 +99,7 @@ class PositionBook:
         return PositionView(
             key=self._position_key,
             projection_version=version_id,
-            input_revision=self._projection_counter,
+            input_revision=input_revision,
             event_cut=projection.event_cut,
             policy_version=self._policy_version,
             schema_version=self._schema_version,

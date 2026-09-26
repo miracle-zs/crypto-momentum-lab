@@ -51,6 +51,11 @@ class AccountJournal:
         self._checkpoint: PositionCheckpoint | None = None
         self._high_watermark_trade_at: datetime | None = None
         self._has_late_events: bool = False
+        self._revision: int = 0
+
+    @property
+    def revision(self) -> int:
+        return self._revision
 
     @property
     def position_key(self) -> PositionKey:
@@ -94,6 +99,7 @@ class AccountJournal:
             self._high_watermark_trade_at = fill.trade_at
 
         self._fills_by_id[fill.trade_id] = fill
+        self._revision += 1
         return True
 
     def record_snapshot(self, snapshot: AccountPositionSnapshot) -> None:
@@ -103,6 +109,7 @@ class AccountJournal:
                 f"journal {self._position_key.symbol}"
             )
         self._snapshots.append(snapshot)
+        self._revision += 1
 
     def record_boundary(self, boundary: ExitOrderSubmissionFact) -> None:
         if boundary.symbol != self._position_key.symbol:
@@ -111,9 +118,11 @@ class AccountJournal:
                 f"journal {self._position_key.symbol}"
             )
         self._boundaries.append(boundary)
+        self._revision += 1
 
     def set_coverage(self, coverage: FactCoverageInterval) -> None:
         self._coverage = coverage
+        self._revision += 1
 
     def set_checkpoint(self, checkpoint: PositionCheckpoint) -> None:
         if checkpoint.key.canonical_id != self._position_key.canonical_id:
@@ -122,6 +131,7 @@ class AccountJournal:
                 f"match {self._position_key.canonical_id}"
             )
         self._checkpoint = checkpoint
+        self._revision += 1
 
     def append(self, envelope: AccountFactEnvelope) -> None:
         """Convenience method to ingest any fact envelope."""
@@ -180,7 +190,7 @@ class AccountJournal:
                 start_at=min_time,
                 end_at=max_time,
                 has_known_gaps=False,
-                status=FactCoverageStatus.CONFIRMED,
+                status=FactCoverageStatus.PENDING,
             )
 
         return AccountFacts(

@@ -388,7 +388,7 @@ class LiveReadinessPublisher:
         strategy: ReadinessStrategy,
         *,
         expected_symbols: Collection[str] | None = None,
-    ) -> None:
+    ) -> bool:
         """Refresh symbol counts from the strategy's compact checkpoint."""
 
         try:
@@ -412,16 +412,18 @@ class LiveReadinessPublisher:
                 and self._warmup_expected_symbols == normalized_expected
                 and self._warmup_complete_symbols == complete
             ):
-                return
+                return False
             self._warmup_required_buckets = required_buckets
             self._warmup_expected_symbols = normalized_expected
             self._warmup_complete_symbols = complete
             self.publish()
+            return True
         except Exception as error:
             log.warning(
                 "live_readiness_warmup_progress_failed",
                 error_type=type(error).__name__,
             )
+            return False
 
     def update_entry_gate(
         self,
@@ -571,13 +573,14 @@ class LiveReadinessPublisher:
         ):
             return
         self._last_published_market_bucket = state.bucket_start
+        published = False
         if self._warmup_expected_symbols:
-            self.update_warmup_progress(
+            published = self.update_warmup_progress(
                 strategy,
                 expected_symbols=self._warmup_expected_symbols,
             )
-            return
-        self.publish()
+        if not published:
+            self.publish()
 
     def publish(self) -> None:
         """Best-effort atomic publication of the current JSON snapshot."""

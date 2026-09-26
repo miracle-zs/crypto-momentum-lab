@@ -250,6 +250,13 @@ def test_position_book_get_view_and_freshness_constraints() -> None:
 
     journal.append_fill(_fill("t1", "500", "0.045", t))
     journal.record_snapshot(_snapshot("500", "0.045", t))
+    journal.set_coverage(
+        FactCoverageInterval(
+            start_at=t,
+            end_at=t,
+            status=FactCoverageStatus.CONFIRMED,
+        )
+    )
 
     book = PositionBook(journal)
 
@@ -291,6 +298,13 @@ def test_ake_external_close_and_reopen_lifecycle_via_journal_and_book() -> None:
     )
     journal.record_snapshot(
         _snapshot("2618", "0.038197", t_sep25_buy, symbol="AKEUSDT")
+    )
+    journal.set_coverage(
+        FactCoverageInterval(
+            start_at=t_sep20_buy,
+            end_at=t_sep25_buy,
+            status=FactCoverageStatus.CONFIRMED,
+        )
     )
 
     # Verify zero crossing discovery

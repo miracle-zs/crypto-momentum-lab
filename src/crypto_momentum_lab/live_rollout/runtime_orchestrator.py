@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from crypto_momentum_lab.domain.decision.decision_engine import (
     create_authoritative_decision_filter,
 )
-from crypto_momentum_lab.domain.execution import OrderExecutionPlan
+from crypto_momentum_lab.domain.execution import ExecutionBook, OrderExecutionPlan
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
 )
@@ -646,11 +646,17 @@ async def run_live_daemon(
             for r in active_reservations:
                 domain_coordinator.register_reservation(r)
 
+        execution_book = ExecutionBook(
+            coordinator=domain_coordinator,
+            reservation_repository=reservation_repository,
+        )
+
         execution_coordinator = OrderExecutionCoordinator(
             backend=state_machine,
             account_label=account_label,
             reservation_repository=reservation_repository,
             domain_coordinator=domain_coordinator,
+            execution_book=execution_book,
             initial_reservations=active_reservations,
         )
         ownership_registry.register(

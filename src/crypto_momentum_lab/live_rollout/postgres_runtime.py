@@ -1877,7 +1877,11 @@ def _classify_live_positions_detailed(
                     if latest_recovery is None
                     else latest_recovery.recovery_order_remaining_quantity
                 ),
+                batch_id=(batches[0].batch_id if len(batches) == 1 else None),
                 batches=batches,
+                projection_version=(
+                    batches[0].projection_version if batches else None
+                ),
             )
         )
     return (
@@ -2582,6 +2586,7 @@ def _build_position_batches(
                                 else frozenset()
                             )
                         ),
+                        projection_version=shadow_projection.projection_version,
                     )
                     for idx, ab in enumerate(shadow_projection.active_batches)
                 )

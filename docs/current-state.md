@@ -1,6 +1,6 @@
 # 仓库实现现状
 
-核对日期：2026-09-25。范围：本地 checkout 中的源码、README 和 Compose 配置。本页是仓库可见现状摘要，不代表服务器当前正在运行的镜像或账户状态；涉及实盘的结论必须以部署元数据和线上观测复核。
+核对日期：2026-09-26。代码基线：`42d95a1dd15176501cec698de63655c86fe06685`。本页分别记录仓库可见能力和一次服务器只读快照；部署与账户状态会变化，不能把快照当作持续健康证明。
 
 ## 仓库能确认的系统轮廓
 
@@ -12,9 +12,17 @@
 - 实盘路径按账户拆分只读 `execution-account` 与交易 `live-strategy`。基础 Compose 配置定义 primary；[实盘账户 overlay](../compose.live.accounts.yaml) 增加 account-2、account-3、account-4。多账户操作方式见[多账户实盘手册](runbooks/multi-live-accounts.md)。这些文件证明仓库支持该拓扑，不证明所有账户已经启动。
 - 凭证解析和部署配置区分 `BINANCE_READ_API_KEY` 与 `BINANCE_TRADE_API_KEY`。代码仍保留需显式启用的 legacy fallback。此仓库无法证明线上实际使用了不同密钥，也无法验证 Binance 上配置的权限；见 [ADR-0001](adr/0001-live-trading-credential-boundary.md)。
 
-## 不应从仓库文档直接推断的线上事实
+## 2026-09-26 服务器只读快照
 
-- 生产服务器实际部署的 commit、镜像、Compose profile 和运行服务数。
+13:58—14:06（Asia/Shanghai）核对 `43.167.191.253`：服务器 checkout 与应用镜像均为上述基线。运行 4 个 Live、4 个账户同步、market-data、research-collector、dashboard 和 PostgreSQL，共 12 个容器；该时刻均为 healthy，没有运行 Paper 容器。PostgreSQL Alembic revision 为 `20260925_0043`；`cml-archive-trim.timer` 已停用。
+
+新的行情修订和持仓预留已经真实写入，但不能据此判定整条重构完成：41 条预留均缺投影版本且使用合成批次身份，8 条 ACTIVE 预留关联的订单已是 filled；新 DecisionTrace/DatasetManifest 表仍为空，代码追踪也未发现对应生产追踪闭环。这里记录的是持久状态脱节，不推断实际重复交易或资金损失。
+
+详细证据、已实现保护、尚未验证的部分和迁移方案见[全系统第一性原理重构方案](architecture/system-refactor-blueprint-20260925.md)。本次未修改服务器配置、重启服务、清理数据或执行交易操作。
+
+## 仍需按观测时刻确认的线上事实
+
+- 后续时刻实际部署的 commit、镜像、Compose profile 和运行服务数。
 - 实盘账户当前是否启用、正在使用的策略和参数、账户余额、持仓、挂单及健康状态。
 - 生产环境是否使用不同的读/交易密钥，以及密钥在 Binance 上的实际权限。
 - 日期化审查中记录的告警或缺陷现在是否仍存在。

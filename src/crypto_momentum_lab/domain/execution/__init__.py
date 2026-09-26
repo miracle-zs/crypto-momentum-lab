@@ -2,6 +2,23 @@ from crypto_momentum_lab.domain.execution.account_journal import (
     AccountFactEnvelope,
     AccountJournal,
 )
+from crypto_momentum_lab.domain.execution.execution_book import (
+    Accepted,
+    AlreadyAccepted,
+    Applied,
+    Blocked,
+    CommandConflict,
+    Duplicate,
+    EvidenceConflict,
+    ExecutionActResult,
+    ExecutionBook,
+    ExecutionEvidence,
+    ExecutionObserveResult,
+    ExecutionReceipt,
+    ExecutionRequest,
+    ExecutionScope,
+    StaleView,
+)
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
     ExecutionReadinessError,
@@ -122,6 +139,21 @@ __all__ = [
     "ProgressFreshnessSLA",
     "ReadinessAssessment",
     "ReadinessEvaluator",
+    "ExecutionScope",
+    "ExecutionRequest",
+    "ExecutionReceipt",
+    "Accepted",
+    "AlreadyAccepted",
+    "StaleView",
+    "Blocked",
+    "CommandConflict",
+    "ExecutionEvidence",
+    "Applied",
+    "Duplicate",
+    "EvidenceConflict",
+    "ExecutionActResult",
+    "ExecutionObserveResult",
+    "ExecutionBook",
 ]
 
 

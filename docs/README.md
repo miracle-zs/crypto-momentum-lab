@@ -4,7 +4,7 @@
 
 ## 从这里开始
 
-- [全系统重构蓝图（2026-09-25）](architecture/system-refactor-blueprint-20260925.md)：行情版本、恢复与清理、政策执行、运行配置及指标读模型的统一设计与迁移验收。
+- [全系统第一性原理重构方案（2026-09-26 修订）](architecture/system-refactor-blueprint-20260925.md)：以 `42d95a1` 和服务器只读核验为基线，说明已实现基础、尚未闭合的业务链、目标模块、事务/恢复协议、分阶段迁移与删除验收；保留原文件作为统一入口。
 
 - [仓库实现现状](current-state.md)：从当前代码与 Compose 配置能确认的系统轮廓，以及仅凭仓库无法确认的线上事实。
 - [项目 README](../README.md)：安装、数据采集、Replay、Paper 和服务器 Paper 部署入口。
