@@ -240,8 +240,9 @@ def test_unregister_dependency_requires_explicit_retired_by() -> None:
     assert v_after == "dep_v0_empty"
 
 
-def test_execute_prune_rejects_when_caller_passes_current_version_with_stale_plan() -> None:
-    """Regression test: Stale PrunePlan cannot bypass dependency fencing even if caller supplies latest version."""
+def test_execute_prune_rejects_when_caller_passes_current_version_with_stale_plan(
+) -> None:
+    """Regression test: Stale PrunePlan cannot bypass dependency fencing."""
     authority = RetentionAuthority()
     t_needed = datetime(2026, 9, 22, 0, 0, tzinfo=UTC)
     spec1 = RecoverySpec(
@@ -323,7 +324,99 @@ def test_bind_manifest_locks_effective_cutoff_and_rejects_version_change() -> No
     authority.register_dependency(consumer_id="c2", generation=1, recovery_spec=spec2)
 
     with pytest.raises(
-        DependencyVersionConflictError, match="Dependency epoch fence violation mid-prune"
+        DependencyVersionConflictError,
+        match="Dependency epoch fence violation mid-prune",
     ):
         authority.verify_fence(bound)
+
+
+def test_dataset_scope_canonical_id_and_locks() -> None:
+    from crypto_momentum_lab.domain.operational.retention_models import (
+        DatasetId,
+        DatasetScope,
+        resolve_dataset_scope,
+    )
+
+    scope1 = resolve_dataset_scope("account_snapshots_binance_prod")
+    assert isinstance(scope1, DatasetScope)
+    assert scope1.dataset_id == DatasetId.ACCOUNT_SNAPSHOTS
+    assert scope1.account_label == "binance_prod"
+    assert scope1.canonical_id == "account_snapshots_binance_prod"
+    # All physical tables covered and sorted
+    assert "retention_account_balance_snapshots" in scope1.advisory_lock_keys
+    assert "retention_account_position_snapshots" in scope1.advisory_lock_keys
+    assert list(scope1.advisory_lock_keys) == sorted(scope1.advisory_lock_keys)
+
+    scope2 = resolve_dataset_scope("account_position_snapshots")
+    assert scope2.dataset_id == DatasetId.ACCOUNT_POSITIONS
+    assert "retention_account_position_snapshots" in scope2.advisory_lock_keys
+
+    # Generic / test table fallback
+    scope3 = resolve_dataset_scope("custom_test_table")
+    assert scope3.dataset_id == DatasetId.GENERIC
+    assert scope3.canonical_id == "custom_test_table"
+    assert scope3.advisory_lock_keys == ("retention_custom_test_table",)
+
+
+def test_cross_dataset_dependency_resolution() -> None:
+    """Proves that a dependency on a child table (e.g. account_position_snapshots)
+    is observed and constrains a plan for account_snapshots_binance_prod.
+    """
+    authority = RetentionAuthority()
+    t_needed = datetime(2026, 9, 21, 10, 0, tzinfo=UTC)
+    spec = RecoverySpec(
+        source_dataset="account_position_snapshots",
+        earliest_needed_watermark=t_needed,
+        reason="Active positions need protection",
+    )
+    authority.register_dependency(
+        consumer_id="live_active_positions",
+        generation=1,
+        recovery_spec=spec,
+    )
+
+    requested = datetime(2026, 9, 24, 0, 0, tzinfo=UTC)
+    plan = authority.plan_prune(
+        dataset_name="account_snapshots_binance_prod",
+        requested_cutoff=requested,
+    )
+
+    # Must be constrained by the child table's dependency!
+    assert plan.is_constrained is True
+    assert plan.effective_cutoff == t_needed
+    assert plan.binding_consumer_id == "live_active_positions"
+
+
+def test_execute_prune_with_structured_prune_outcome() -> None:
+    from crypto_momentum_lab.domain.operational.retention_models import PruneOutcome
+
+    authority = RetentionAuthority()
+    plan = authority.plan_prune(
+        dataset_name="market_data",
+        requested_cutoff=datetime(2026, 9, 24, 0, 0, tzinfo=UTC),
+    )
+
+    outcome = PruneOutcome(
+        rows_archived=100,
+        rows_deleted=100,
+        partitions_dropped=2,
+        bytes_deleted=20480,
+        batches=4,
+        status=PruneReceiptStatus.SUCCESS,
+        details="Archived 100 rows, deleted 100 rows, dropped 2 partitions.",
+    )
+
+    receipt = authority.execute_prune(
+        plan=plan,
+        expected_dependency_version=plan.expected_dependency_version,
+        executor_fn=lambda p: outcome,
+    )
+
+    assert receipt.status == PruneReceiptStatus.SUCCESS
+    assert receipt.rows_archived == 100
+    assert receipt.rows_deleted == 100
+    assert receipt.partitions_dropped == 2
+    assert receipt.bytes_deleted == 20480
+    assert receipt.batches == 4
+    assert "dropped 2 partitions" in receipt.details
 

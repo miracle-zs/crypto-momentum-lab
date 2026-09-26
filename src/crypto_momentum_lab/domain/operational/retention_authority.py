@@ -12,20 +12,39 @@ from __future__ import annotations
 
 import hashlib
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import uuid4
 
 from crypto_momentum_lab.domain.operational.retention_models import (
     ConsumerDependency,
+    PruneOutcome,
     PrunePlan,
     PrunePlanStatus,
     PruneReceipt,
     PruneReceiptStatus,
     RecoverySpec,
     RestoreReceipt,
+    resolve_dataset_scope,
 )
+
+
+def _normalize_prune_outcome(res: Any) -> PruneOutcome:
+    """Normalize executor return value into a structured PruneOutcome."""
+    if isinstance(res, PruneOutcome):
+        return res
+    if isinstance(res, tuple) and len(res) == 2:
+        return PruneOutcome(
+            rows_archived=res[0],
+            rows_deleted=res[1],
+            batches=1 if res[1] > 0 else 0,
+            status=PruneReceiptStatus.SUCCESS,
+        )
+    raise TypeError(
+        f"executor_fn must return PruneOutcome or tuple[int, int], got {type(res)}"
+    )
 
 
 async def _maybe_await(val: Any) -> Any:
@@ -69,10 +88,12 @@ class InMemoryRetentionRepository:
         self.dependencies.pop(key, None)
 
     def get_dependencies(self, dataset_name: str) -> tuple[ConsumerDependency, ...]:
+        scope = resolve_dataset_scope(dataset_name)
+        related = set(scope.related_dataset_names())
         return tuple(
             dep
             for dep in self.dependencies.values()
-            if dep.dataset_name == dataset_name
+            if dep.dataset_name in related
         )
 
     def save_plan(self, plan: PrunePlan) -> None:
@@ -96,11 +117,9 @@ class DependencyViolationError(Exception):
 class RetentionAuthority:
     """Authority module governing data retention and safe pruning.
 
-    Uses per-dataset asyncio.Lock to serialise dependency registration
-    and prune execution within a single process, closing the TOCTOU gap
-    between verify_fence and the actual DELETE.  Cross-process callers
-    (e.g. archive_and_trim.py) must additionally use PostgreSQL advisory
-    locks or equivalent external coordination.
+    Uses canonical dataset scope and deterministic lock ordering to serialize
+    dependency registration and prune execution within a single process.
+    Cross-process callers additionally coordinate via PostgreSQL advisory locks.
     """
 
     def __init__(self, repository: RetentionRepository | None = None) -> None:
@@ -108,12 +127,44 @@ class RetentionAuthority:
         self._dataset_locks: dict[str, Any] = {}
 
     def _get_lock(self, dataset_name: str) -> Any:
-        """Returns (or creates) the asyncio.Lock for a dataset."""
+        """Returns (or creates) the asyncio.Lock for a dataset or lock key."""
         import asyncio
 
         if dataset_name not in self._dataset_locks:
             self._dataset_locks[dataset_name] = asyncio.Lock()
         return self._dataset_locks[dataset_name]
+
+    @asynccontextmanager
+    async def _lock_scope(self, dataset_name: str) -> AsyncIterator[None]:
+        """Acquires all relevant advisory locks for this scope in sorted order."""
+        scope = resolve_dataset_scope(dataset_name)
+        keys = scope.advisory_lock_keys
+        locks = [self._get_lock(k) for k in keys]
+        async with AsyncExitStack() as stack:
+            for lock in locks:
+                await stack.enter_async_context(lock)
+            yield
+
+    def _gather_dependencies(self, dataset_name: str) -> tuple[ConsumerDependency, ...]:
+        """Gather deduplicated dependencies covering all related dataset/table names."""
+        scope = resolve_dataset_scope(dataset_name)
+        all_deps: dict[tuple[str, str], ConsumerDependency] = {}
+        for name in scope.related_dataset_names():
+            for dep in self._repo.get_dependencies(name):
+                all_deps[(dep.consumer_id, dep.dataset_name)] = dep
+        return tuple(all_deps.values())
+
+    async def _gather_dependencies_async(
+        self, dataset_name: str
+    ) -> tuple[ConsumerDependency, ...]:
+        """Async variant of _gather_dependencies."""
+        scope = resolve_dataset_scope(dataset_name)
+        all_deps: dict[tuple[str, str], ConsumerDependency] = {}
+        for name in scope.related_dataset_names():
+            deps = await _maybe_await(self._repo.get_dependencies(name))
+            for dep in deps:
+                all_deps[(dep.consumer_id, dep.dataset_name)] = dep
+        return tuple(all_deps.values())
 
     @staticmethod
     def _compute_version_hash_pure(
@@ -127,6 +178,7 @@ class RetentionAuthority:
             deps,
             key=lambda d: (
                 d.consumer_id,
+                d.dataset_name,
                 d.recovery_spec.earliest_needed_watermark.isoformat(),
             ),
         )
@@ -136,6 +188,7 @@ class RetentionAuthority:
         hasher = hashlib.sha256()
         for d in sorted_deps:
             hasher.update(d.consumer_id.encode())
+            hasher.update(d.dataset_name.encode())
             hasher.update(str(d.generation).encode())
             hasher.update(
                 d.recovery_spec.earliest_needed_watermark.isoformat().encode()
@@ -146,7 +199,7 @@ class RetentionAuthority:
 
     def compute_dependency_version(self, dataset_name: str) -> str:
         """Computes a deterministic hash of active dependencies for dataset."""
-        deps = self._repo.get_dependencies(dataset_name)
+        deps = self._gather_dependencies(dataset_name)
         return self._compute_version_hash_pure(deps)
 
     @staticmethod
@@ -190,12 +243,12 @@ class RetentionAuthority:
         generation: int,
         recovery_spec: RecoverySpec,
     ) -> str:
-        """Async variant that acquires dataset lock before registering.
+        """Async variant that acquires dataset scope locks before registering.
 
         Prevents a concurrent execute_prune_async from deleting data
         that the newly-registered dependency's recovery window protects.
         """
-        async with self._get_lock(recovery_spec.source_dataset):
+        async with self._lock_scope(recovery_spec.source_dataset):
             dependency = self._create_consumer_dependency(
                 consumer_id=consumer_id,
                 generation=generation,
@@ -231,7 +284,7 @@ class RetentionAuthority:
         if requested_cutoff.tzinfo is None:
             raise ValueError("requested_cutoff must be timezone-aware")
 
-        deps = self._repo.get_dependencies(dataset_name)
+        deps = self._gather_dependencies(dataset_name)
         current_dep_version = self.compute_dependency_version(dataset_name)
 
         if not deps:
@@ -315,7 +368,7 @@ class RetentionAuthority:
 
     async def compute_dependency_version_async(self, dataset_name: str) -> str:
         """Async: compute current version hash of active dependencies."""
-        deps = await _maybe_await(self._repo.get_dependencies(dataset_name))
+        deps = await self._gather_dependencies_async(dataset_name)
         return self._compute_version_hash_pure(deps)
 
     async def plan_prune_async(
@@ -333,7 +386,7 @@ class RetentionAuthority:
         if requested_cutoff.tzinfo is None:
             raise ValueError("requested_cutoff must be timezone-aware")
 
-        deps = await _maybe_await(self._repo.get_dependencies(dataset_name))
+        deps = await self._gather_dependencies_async(dataset_name)
         current_dep_version = await self.compute_dependency_version_async(dataset_name)
 
         if not deps:
@@ -411,15 +464,15 @@ class RetentionAuthority:
         expected_dependency_version: str,
         executor_fn: Callable[
             [PrunePlan],
-            Awaitable[tuple[int, int]] | tuple[int, int],
+            Awaitable[PruneOutcome | tuple[int, int]] | PruneOutcome | tuple[int, int],
         ],
     ) -> PruneReceipt:
         """Asynchronously executes a PrunePlan with dependency epoch fencing.
 
-        Acquires per-dataset lock to serialise against concurrent
+        Acquires canonical dataset scope locks to serialise against concurrent
         register_dependency_async calls within the same process.
         """
-        async with self._get_lock(plan.dataset_name):
+        async with self._lock_scope(plan.dataset_name):
             return await self._execute_prune_async_inner(
                 plan=plan,
                 expected_dependency_version=expected_dependency_version,
@@ -433,7 +486,7 @@ class RetentionAuthority:
         expected_dependency_version: str,
         executor_fn: Callable[
             [PrunePlan],
-            Awaitable[tuple[int, int]] | tuple[int, int],
+            Awaitable[PruneOutcome | tuple[int, int]] | PruneOutcome | tuple[int, int],
         ],
     ) -> PruneReceipt:
         """Inner execution logic, called under dataset lock."""
@@ -484,23 +537,11 @@ class RetentionAuthority:
         try:
             res = executor_fn(plan)
             if inspect.isawaitable(res):
-                rows_archived, rows_deleted = await res
-            else:
-                rows_archived, rows_deleted = res
-            receipt = PruneReceipt(
-                plan_id=plan.plan_id,
-                dataset_name=plan.dataset_name,
-                effective_cutoff=plan.effective_cutoff,
-                rows_archived=rows_archived,
-                rows_deleted=rows_deleted,
-                manifest_hash=plan.manifest_hash,
+                res = await res
+            outcome = _normalize_prune_outcome(res)
+            receipt = outcome.to_receipt(
+                plan=plan,
                 dependency_version_verified=current_dep_version,
-                status=PruneReceiptStatus.SUCCESS,
-                details=(
-                    f"Archived {rows_archived} rows, deleted {rows_deleted} rows "
-                    f"bounded by {plan.effective_cutoff}."
-                ),
-                executed_at=datetime.now(UTC),
             )
             completed_plan = PrunePlan(
                 plan_id=plan.plan_id,
@@ -539,7 +580,7 @@ class RetentionAuthority:
         *,
         plan: PrunePlan,
         expected_dependency_version: str,
-        executor_fn: Callable[[PrunePlan], tuple[int, int]],
+        executor_fn: Callable[[PrunePlan], PruneOutcome | tuple[int, int]],
     ) -> PruneReceipt:
         """Executes a PrunePlan after validating dependency epoch fencing.
 
@@ -595,21 +636,11 @@ class RetentionAuthority:
 
         # 3. Execute bounded prune
         try:
-            rows_archived, rows_deleted = executor_fn(plan)
-            receipt = PruneReceipt(
-                plan_id=plan.plan_id,
-                dataset_name=plan.dataset_name,
-                effective_cutoff=plan.effective_cutoff,
-                rows_archived=rows_archived,
-                rows_deleted=rows_deleted,
-                manifest_hash=plan.manifest_hash,
+            res = executor_fn(plan)
+            outcome = _normalize_prune_outcome(res)
+            receipt = outcome.to_receipt(
+                plan=plan,
                 dependency_version_verified=current_dep_version,
-                status=PruneReceiptStatus.SUCCESS,
-                details=(
-                    f"Archived {rows_archived} rows, deleted {rows_deleted} rows "
-                    f"bounded by {plan.effective_cutoff}."
-                ),
-                executed_at=datetime.now(UTC),
             )
             # Update plan status to COMPLETED
             completed_plan = PrunePlan(

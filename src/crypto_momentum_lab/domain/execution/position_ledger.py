@@ -722,6 +722,9 @@ class PositionLedger:
                         event_cut=high_watermark,
                     )
 
+        facts_hash = facts.compute_facts_hash()
+        version_id = f"pv_{self._position_key.symbol}_{facts_hash[:12]}"
+
         return PositionLedgerProjection(
             position_key=self._position_key,
             active_episode=final_active_episode,
@@ -736,4 +739,5 @@ class PositionLedger:
             event_cut=high_watermark,
             discrepancy=discrepancy,
             is_comparable=is_comparable,
+            projection_version=version_id,
         )

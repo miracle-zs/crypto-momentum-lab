@@ -428,6 +428,7 @@ class PositionLedgerProjection:
     event_cut: datetime | None = None
     discrepancy: PositionDiscrepancy | None = None
     is_comparable: bool = True
+    projection_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

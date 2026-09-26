@@ -125,10 +125,25 @@ async def drop_expired_event_partitions(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     before: datetime,
+    authority: Any | None = None,
+    plan: Any | None = None,
 ) -> int:
-    """Drop complete partitions whose upper bound is outside retention."""
+    """Drop complete partitions whose upper bound is outside retention.
+
+    Acquires advisory lock retention_strategy_runtime_events and verifies
+    RetentionAuthority epoch fence before dropping each partition.
+    """
 
     cutoff = _as_utc(before)
+    if authority is not None:
+        if plan is None:
+            plan = await authority.plan_prune_async(
+                dataset_name=EVENT_TABLE,
+                requested_cutoff=cutoff,
+            )
+        if plan.effective_cutoff < cutoff:
+            cutoff = plan.effective_cutoff
+
     async with session_factory() as session:
         if not await _table_is_partitioned(session, EVENT_TABLE):
             return 0
@@ -157,10 +172,19 @@ async def drop_expired_event_partitions(
             expired.append(name)
 
     dropped = 0
+    lock_key = f"retention_{EVENT_TABLE}"
     for name in expired:
+        if authority is not None and plan is not None:
+            await authority.verify_fence_async(plan)
         async with session_factory() as drop_session:
             try:
                 async with drop_session.begin():
+                    # Acquire advisory lock to coordinate with prune and archive
+                    # operations
+                    await drop_session.execute(
+                        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                        {"lock_key": lock_key},
+                    )
                     await drop_session.execute(
                         text("SET LOCAL lock_timeout = '2s'")
                     )

@@ -13,7 +13,12 @@ from crypto_momentum_lab.domain.operational.retention_authority import (
 from crypto_momentum_lab.domain.operational.retention_contract import (
     RetentionConsumerRequirement,
 )
-from crypto_momentum_lab.domain.operational.retention_models import PrunePlan
+from crypto_momentum_lab.domain.operational.retention_models import (
+    PruneOutcome,
+    PrunePlan,
+    PruneReceiptStatus,
+    resolve_dataset_scope,
+)
 from crypto_momentum_lab.persistence.postgres.retention_repository import (
     AsyncPostgresRetentionRepository,
 )
@@ -82,14 +87,20 @@ async def prune_account_snapshots_once(
             async_repo_factory=AsyncPostgresRetentionRepository,
         )
 
+    scope = resolve_dataset_scope(
+        f"account_snapshots_{account_label}",
+        environment=environment,
+        account_label=account_label,
+    )
+
     plan = await authority.plan_prune_async(
-        dataset_name=f"account_snapshots_{account_label}",
+        dataset_name=scope.canonical_id,
         requested_cutoff=observed_at - timedelta(days=config.retention_days),
     )
 
     deleted_counts: dict[str, int] = {}
 
-    async def executor(p: PrunePlan) -> tuple[int, int]:
+    async def executor(p: PrunePlan) -> PruneOutcome:
         nonlocal deleted_counts
         deleted_counts = await repository.prune_account_snapshots(
             environment=environment,
@@ -101,7 +112,18 @@ async def prune_account_snapshots_once(
             consumer_requirements=consumer_requirements,
         )
         total_deleted = sum(deleted_counts.values())
-        return (0, total_deleted)
+        return PruneOutcome(
+            rows_archived=0,
+            rows_deleted=total_deleted,
+            partitions_dropped=0,
+            bytes_deleted=0,
+            batches=1 if total_deleted > 0 else 0,
+            status=PruneReceiptStatus.SUCCESS,
+            details=(
+                f"Pruned {total_deleted} rows across "
+                f"{len(deleted_counts)} account snapshot tables for {account_label}."
+            ),
+        )
 
     await authority.execute_prune_async(
         plan=plan,

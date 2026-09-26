@@ -20,6 +20,7 @@ from crypto_momentum_lab.domain.operational.retention_models import (
     PruneReceipt,
     PruneReceiptStatus,
     RecoverySpec,
+    resolve_dataset_scope,
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     ConsumerDependencyRow,
@@ -33,38 +34,38 @@ _RETENTION_ADVISORY_LOCK_SQL = text(
 )
 
 
-def _retention_lock_key(dataset_name: str) -> str:
-    return f"retention_{dataset_name}"
-
-
-def _log_lock_failure(dataset_name: str, lock_err: Exception) -> None:
+def _log_lock_failure(lock_key: str, lock_err: Exception) -> None:
     log.warning(
         "retention_advisory_lock_failed",
-        dataset_name=dataset_name,
+        lock_key=lock_key,
         error=str(lock_err),
     )
 
 
 def _acquire_advisory_lock(session: Session, dataset_name: str) -> None:
-    try:
-        session.execute(
-            _RETENTION_ADVISORY_LOCK_SQL,
-            {"lock_key": _retention_lock_key(dataset_name)},
-        )
-    except Exception as lock_err:
-        _log_lock_failure(dataset_name, lock_err)
+    scope = resolve_dataset_scope(dataset_name)
+    for lock_key in scope.advisory_lock_keys:
+        try:
+            session.execute(
+                _RETENTION_ADVISORY_LOCK_SQL,
+                {"lock_key": lock_key},
+            )
+        except Exception as lock_err:
+            _log_lock_failure(lock_key, lock_err)
 
 
 async def _acquire_advisory_lock_async(
     session: AsyncSession, dataset_name: str
 ) -> None:
-    try:
-        await session.execute(
-            _RETENTION_ADVISORY_LOCK_SQL,
-            {"lock_key": _retention_lock_key(dataset_name)},
-        )
-    except Exception as lock_err:
-        _log_lock_failure(dataset_name, lock_err)
+    scope = resolve_dataset_scope(dataset_name)
+    for lock_key in scope.advisory_lock_keys:
+        try:
+            await session.execute(
+                _RETENTION_ADVISORY_LOCK_SQL,
+                {"lock_key": lock_key},
+            )
+        except Exception as lock_err:
+            _log_lock_failure(lock_key, lock_err)
 
 
 def _row_to_dependency(row: ConsumerDependencyRow) -> ConsumerDependency:
@@ -122,10 +123,12 @@ class PostgresRetentionRepository:
             session.commit()
 
     def get_dependencies(self, dataset_name: str) -> tuple[ConsumerDependency, ...]:
+        scope = resolve_dataset_scope(dataset_name)
+        related = scope.related_dataset_names()
         with self._session_factory() as session:
             rows = session.scalars(
                 select(ConsumerDependencyRow).where(
-                    ConsumerDependencyRow.dataset_name == dataset_name
+                    ConsumerDependencyRow.dataset_name.in_(related)
                 )
             ).all()
             return tuple(_row_to_dependency(r) for r in rows)
@@ -235,11 +238,13 @@ class AsyncPostgresRetentionRepository:
     async def get_dependencies(
         self, dataset_name: str
     ) -> tuple[ConsumerDependency, ...]:
+        scope = resolve_dataset_scope(dataset_name)
+        related = scope.related_dataset_names()
         async with self._session_factory() as session:
             rows = (
                 await session.scalars(
                     select(ConsumerDependencyRow).where(
-                        ConsumerDependencyRow.dataset_name == dataset_name
+                        ConsumerDependencyRow.dataset_name.in_(related)
                     )
                 )
             ).all()

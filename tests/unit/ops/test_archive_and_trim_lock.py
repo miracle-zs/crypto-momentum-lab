@@ -212,3 +212,69 @@ def test_save_dependency_takes_advisory_xact_lock() -> None:
     assert "retention_demo_table" in sql
     assert sql.strip().startswith("BEGIN;")
     assert sql.strip().endswith("COMMIT;")
+
+
+def test_frozen_content_fingerprint_mismatch_aborts_without_delete() -> None:
+    mod = _load_module()
+    session = FakeSession({
+        "count(*) FROM prune_targets": "3",
+        "md5(string_agg(id::text": "3|targethash",
+        "md5(t::text)": "3|wronghash",
+    })
+    authority = FakeAuthority()
+    with pytest.raises(RuntimeError, match="Frozen prune targets content fingerprint"):
+        mod.run_locked_prune(
+            session=session,
+            authority=authority,
+            plan=_plan(mod),
+            table="demo_table",
+            column="occurred_at",
+            recorded=3,
+            pending=3,
+            from_dt="2026-07-25",
+            to_dt="2026-08-01",
+            batch_rows=10,
+            db={},
+            expected_fingerprint="3|expectedhash",
+        )
+    assert authority.fence_calls >= 1
+    assert any("pg_advisory_unlock" in s for s in session.sql)
+    assert not any("DELETE FROM demo_table" in s for s in session.sql)
+
+
+def test_frozen_content_fingerprint_match_proceeds() -> None:
+    mod = _load_module()
+
+    class DrainSession(FakeSession):
+        def run(self, sql: str) -> str:
+            self.sql.append(sql)
+            if "count(*) FROM prune_targets" in sql:
+                prior = sum(1 for s in self.sql if "count(*) FROM prune_targets" in s)
+                return "3" if prior == 1 else "0"
+            if "count(*) FROM del" in sql:
+                return "3"
+            if "md5(string_agg(id::text" in sql:
+                return "3|deadbeef"
+            if "md5(t::text)" in sql:
+                return "3|matching_content_hash"
+            return ""
+
+    session = DrainSession()
+    authority = FakeAuthority()
+    result = mod.run_locked_prune(
+        session=session,
+        authority=authority,
+        plan=_plan(mod),
+        table="demo_table",
+        column="occurred_at",
+        recorded=3,
+        pending=3,
+        from_dt="2026-07-25",
+        to_dt="2026-08-01",
+        batch_rows=10,
+        db={},
+        expected_fingerprint="3|matching_content_hash",
+    )
+    assert result == (3, 3)
+    assert authority.fence_calls >= 1
+    assert any("DELETE FROM demo_table" in s for s in session.sql)

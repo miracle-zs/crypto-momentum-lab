@@ -124,6 +124,32 @@ def count_rows(
     return int(result.stdout.decode().strip() or "0")
 
 
+def compute_range_fingerprint(
+    prefix: list[str],
+    *,
+    container: str,
+    user: str,
+    database: str,
+    table: str,
+    column: str,
+    start: str,
+    end: str,
+) -> str:
+    """Deterministic content fingerprint of rows in [start, end) range."""
+    sql = (
+        "SELECT count(*)::text || '|' || "
+        "coalesce(md5(string_agg(md5(t::text), '' ORDER BY md5(t::text))), '') "
+        f'FROM (SELECT * FROM "{table}" '
+        f"WHERE \"{column}\" >= '{start}+00' AND \"{column}\" < '{end}+00') t"
+    )
+    result = _run([*_psql(prefix, container, user, database), "-At", "-c", sql])
+    if result.returncode != 0:
+        raise SystemExit(
+            f"fingerprint failed: {result.stderr.decode(errors='replace').strip()}"
+        )
+    return result.stdout.decode().strip()
+
+
 def export_range(
     prefix: list[str],
     *,
@@ -255,12 +281,24 @@ def main(argv: list[str] | None = None) -> int:
         as_jsonl=as_jsonl,
     )
 
+    fingerprint = compute_range_fingerprint(
+        prefix,
+        container=args.container,
+        user=args.user,
+        database=args.database,
+        table=args.table,
+        column=args.time_column,
+        start=args.from_date,
+        end=args.to_date,
+    )
+
     manifest = {
         "table": args.table,
         "time_column": args.time_column,
         "from": args.from_date,
         "to": args.to_date,
         "rows": rows,
+        "content_fingerprint": fingerprint,
         "format": "jsonl" if as_jsonl else "csv",
         "compressed_bytes": destination.stat().st_size,
         "sha256": sha256_file(destination),
