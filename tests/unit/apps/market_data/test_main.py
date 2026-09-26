@@ -290,6 +290,74 @@ async def test_operational_retention_uses_bounded_batches() -> None:
     ]
 
 
+async def test_retention_emits_prune_outcome_with_partitions() -> None:
+    from crypto_momentum_lab.domain.operational.retention_authority import (
+        InMemoryRetentionRepository,
+        RetentionAuthority,
+    )
+    from crypto_momentum_lab.domain.operational.retention_models import (
+        PruneReceiptStatus,
+    )
+
+    class PartitionedRetention:
+        def __init__(self, partitioned: bool) -> None:
+            self._partitioned = partitioned
+
+        async def is_runtime_state_partitioned(self) -> bool:
+            return self._partitioned
+
+        async def prune_contract_metadata(
+            self,
+            *,
+            before: datetime,
+            batch_size: int,
+        ) -> int:
+            del before, batch_size
+            return 5
+
+        async def prune_runtime_market_states(
+            self,
+            *,
+            before: datetime,
+            batch_size: int,
+        ) -> int:
+            del before, batch_size
+            return 2
+
+        async def ensure_strategy_runtime_event_partitions(self) -> int:
+            return 0
+
+    # Case 1: Partitioned -> separates dropped partitions from deleted contract rows
+    mem_repo1 = InMemoryRetentionRepository()
+    authority1 = RetentionAuthority(mem_repo1)
+    repo_partitioned = PartitionedRetention(partitioned=True)
+    await main.prune_operational_database_once(
+        repo_partitioned,  # type: ignore[arg-type]
+        now=datetime(2026, 6, 14, 11, 1, tzinfo=UTC),
+        authority=authority1,
+    )
+    receipts1 = list(mem_repo1.receipts.values())
+    assert len(receipts1) == 1
+    assert receipts1[0].status == PruneReceiptStatus.SUCCESS
+    assert receipts1[0].rows_deleted == 5
+    assert receipts1[0].partitions_dropped == 2
+
+    # Case 2: Unpartitioned -> deleted states are row count, summed into rows_deleted
+    mem_repo2 = InMemoryRetentionRepository()
+    authority2 = RetentionAuthority(mem_repo2)
+    repo_unpartitioned = PartitionedRetention(partitioned=False)
+    await main.prune_operational_database_once(
+        repo_unpartitioned,  # type: ignore[arg-type]
+        now=datetime(2026, 6, 14, 11, 1, tzinfo=UTC),
+        authority=authority2,
+    )
+    receipts2 = list(mem_repo2.receipts.values())
+    assert len(receipts2) == 1
+    assert receipts2[0].status == PruneReceiptStatus.SUCCESS
+    assert receipts2[0].rows_deleted == 7
+    assert receipts2[0].partitions_dropped == 0
+
+
 def test_run_market_data_uses_combined_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

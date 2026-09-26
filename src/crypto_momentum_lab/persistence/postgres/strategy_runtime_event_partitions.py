@@ -19,6 +19,10 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from crypto_momentum_lab.domain.operational.retention_models import (
+    resolve_dataset_scope,
+)
+
 EVENT_TABLE: Final = "strategy_runtime_events"
 EVENT_SHADOW_TABLE: Final = "strategy_runtime_events_partitioned"
 EVENT_PARTITION_PREFIX: Final = "strategy_runtime_events_p_"
@@ -172,19 +176,20 @@ async def drop_expired_event_partitions(
             expired.append(name)
 
     dropped = 0
-    lock_key = f"retention_{EVENT_TABLE}"
+    scope = resolve_dataset_scope(EVENT_TABLE)
     for name in expired:
         if authority is not None and plan is not None:
             await authority.verify_fence_async(plan)
         async with session_factory() as drop_session:
             try:
                 async with drop_session.begin():
-                    # Acquire advisory lock to coordinate with prune and archive
-                    # operations
-                    await drop_session.execute(
-                        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-                        {"lock_key": lock_key},
-                    )
+                    # Acquire advisory locks in deterministic order to coordinate
+                    # with prune, retention, and archive operations
+                    for lock_key in scope.advisory_lock_keys:
+                        await drop_session.execute(
+                            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                            {"lock_key": lock_key},
+                        )
                     await drop_session.execute(
                         text("SET LOCAL lock_timeout = '2s'")
                     )

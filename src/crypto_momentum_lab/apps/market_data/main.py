@@ -35,7 +35,10 @@ from crypto_momentum_lab.domain.operational.retention_authority import (
 from crypto_momentum_lab.domain.operational.retention_contract import (
     RetentionConsumerRequirement,
 )
-from crypto_momentum_lab.domain.operational.retention_models import PrunePlan
+from crypto_momentum_lab.domain.operational.retention_models import (
+    PruneOutcome,
+    PrunePlan,
+)
 from crypto_momentum_lab.domain.universe.models import (
     MembershipStatus,
     UniverseSnapshot,
@@ -916,7 +919,7 @@ async def prune_operational_database_once(
     deleted_contracts = 0
     deleted_states = 0
 
-    async def executor(p: PrunePlan) -> tuple[int, int]:
+    async def executor(p: PrunePlan) -> PruneOutcome:
         nonlocal deleted_contracts, deleted_states
         eff_contract_cutoff = min(contract_cutoff, p.effective_cutoff)
         deleted_contracts = await repository.prune_contract_metadata(
@@ -924,12 +927,27 @@ async def prune_operational_database_once(
             batch_size=contract_metadata_batch_size,
             **req_kwargs,
         )
+        is_partitioned = False
+        if hasattr(repository, "is_runtime_state_partitioned"):
+            is_partitioned = await repository.is_runtime_state_partitioned()
         deleted_states = await repository.prune_runtime_market_states(
             before=p.effective_cutoff,
             batch_size=runtime_state_batch_size,
             **req_kwargs,
         )
-        return (0, deleted_states + deleted_contracts)
+        if is_partitioned:
+            return PruneOutcome(
+                rows_archived=0,
+                rows_deleted=deleted_contracts,
+                partitions_dropped=deleted_states,
+                batches=1 if (deleted_contracts > 0 or deleted_states > 0) else 0,
+            )
+        return PruneOutcome(
+            rows_archived=0,
+            rows_deleted=deleted_contracts + deleted_states,
+            partitions_dropped=0,
+            batches=1 if (deleted_contracts > 0 or deleted_states > 0) else 0,
+        )
 
     receipt = await authority.execute_prune_async(
         plan=plan,

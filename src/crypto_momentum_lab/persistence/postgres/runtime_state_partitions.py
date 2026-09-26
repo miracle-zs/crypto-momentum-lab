@@ -17,6 +17,10 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from crypto_momentum_lab.domain.operational.retention_models import (
+    resolve_dataset_scope,
+)
+
 RUNTIME_STATE_TABLE: Final = "runtime_market_states_15s"
 RUNTIME_STATE_SHADOW_TABLE: Final = "runtime_market_states_15s_partitioned"
 RUNTIME_STATE_PARTITION_PREFIX: Final = "runtime_market_states_15s_p_"
@@ -186,19 +190,20 @@ async def drop_expired_runtime_state_partitions(
             expired.append(name)
 
     dropped = 0
-    lock_key = f"retention_{RUNTIME_STATE_TABLE}"
+    scope = resolve_dataset_scope(RUNTIME_STATE_TABLE)
     for name in expired:
         if authority is not None and plan is not None:
             await authority.verify_fence_async(plan)
         async with session_factory() as drop_session:
             try:
                 async with drop_session.begin():
-                    # Acquire advisory lock to coordinate with prune and archive
-                    # operations
-                    await drop_session.execute(
-                        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-                        {"lock_key": lock_key},
-                    )
+                    # Acquire advisory locks in deterministic order to coordinate
+                    # with prune, retention, and archive operations
+                    for lock_key in scope.advisory_lock_keys:
+                        await drop_session.execute(
+                            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                            {"lock_key": lock_key},
+                        )
                     # A stuck reader must not turn retention into a database
                     # outage.  The next interval retries the partition.
                     await drop_session.execute(

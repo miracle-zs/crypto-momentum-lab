@@ -17,6 +17,9 @@ from crypto_momentum_lab.domain.operational.retention_contract import (
     RetentionConsumerRequirement,
     RetentionWatermarkEvaluator,
 )
+from crypto_momentum_lab.domain.operational.retention_models import (
+    resolve_dataset_scope,
+)
 from crypto_momentum_lab.persistence.postgres.runtime_state_partitions import (
     RUNTIME_STATE_PARTITION_LOOKAHEAD,
     drop_expired_runtime_state_partitions,
@@ -125,6 +128,10 @@ class PostgresOperationalRetentionRepository:
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         self._session_factory = session_factory
+
+    async def is_runtime_state_partitioned(self) -> bool:
+        """Check if runtime_market_states_15s table is partitioned."""
+        return await runtime_state_table_is_partitioned(self._session_factory)
 
     async def prune_contract_metadata(
         self,
@@ -418,10 +425,12 @@ class PostgresOperationalRetentionRepository:
             current_batch_size = min(batch_size, max_rows - deleted)
             async with self._session_factory() as session:
                 async with session.begin():
-                    await session.execute(
-                        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-                        {"lock_key": "retention_account_balance_snapshots"},
-                    )
+                    scope = resolve_dataset_scope("account_balance_snapshots")
+                    for lock_key in scope.advisory_lock_keys:
+                        await session.execute(
+                            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                            {"lock_key": lock_key},
+                        )
                     result = cast(
                         CursorResult[Any],
                         await session.execute(
@@ -482,10 +491,12 @@ class PostgresOperationalRetentionRepository:
         async with self._session_factory() as session:
             async with session.begin():
                 if dataset_name:
-                    await session.execute(
-                        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-                        {"lock_key": f"retention_{dataset_name}"},
-                    )
+                    scope = resolve_dataset_scope(dataset_name)
+                    for lock_key in scope.advisory_lock_keys:
+                        await session.execute(
+                            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                            {"lock_key": lock_key},
+                        )
                 result = cast(
                     CursorResult[Any],
                     await session.execute(
@@ -508,10 +519,12 @@ class PostgresOperationalRetentionRepository:
         async with self._session_factory() as session:
             async with session.begin():
                 if dataset_name:
-                    await session.execute(
-                        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-                        {"lock_key": f"retention_{dataset_name}"},
-                    )
+                    scope = resolve_dataset_scope(dataset_name)
+                    for lock_key in scope.advisory_lock_keys:
+                        await session.execute(
+                            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                            {"lock_key": lock_key},
+                        )
                 result = cast(
                     CursorResult[Any],
                     await session.execute(

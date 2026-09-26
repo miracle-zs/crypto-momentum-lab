@@ -35,6 +35,7 @@ class PruneReceiptStatus(StrEnum):
 class DatasetId(StrEnum):
     """Canonical dataset identifiers across storage and pruning."""
 
+    MARKET_DATA = "market_data"
     MARKET_STATES = "market_states"
     STRATEGY_EVENTS = "strategy_events"
     ACCOUNT_SNAPSHOTS = "account_snapshots"
@@ -52,6 +53,10 @@ class DatasetId(StrEnum):
 
 
 DATASET_PHYSICAL_TABLES: dict[DatasetId | str, tuple[str, ...]] = {
+    DatasetId.MARKET_DATA: (
+        "runtime_market_states_15s",
+        "contract_metadata",
+    ),
     DatasetId.MARKET_STATES: ("runtime_market_states_15s",),
     DatasetId.STRATEGY_EVENTS: ("strategy_runtime_events",),
     DatasetId.ACCOUNT_BALANCES: ("account_balance_snapshots",),
@@ -77,6 +82,7 @@ DATASET_PHYSICAL_TABLES: dict[DatasetId | str, tuple[str, ...]] = {
 }
 
 TABLE_TO_DATASET: dict[str, DatasetId] = {
+    "market_data": DatasetId.MARKET_DATA,
     "runtime_market_states_15s": DatasetId.MARKET_STATES,
     "strategy_runtime_events": DatasetId.STRATEGY_EVENTS,
     "account_balance_snapshots": DatasetId.ACCOUNT_BALANCES,
@@ -94,6 +100,8 @@ TABLE_TO_DATASET: dict[str, DatasetId] = {
 }
 
 DATASET_PARENT: dict[DatasetId | str, DatasetId] = {
+    DatasetId.MARKET_STATES: DatasetId.MARKET_DATA,
+    DatasetId.CONTRACT_METADATA: DatasetId.MARKET_DATA,
     DatasetId.ACCOUNT_BALANCES: DatasetId.ACCOUNT_SNAPSHOTS,
     DatasetId.ACCOUNT_POSITIONS: DatasetId.ACCOUNT_SNAPSHOTS,
     DatasetId.ACCOUNT_CONFIGS: DatasetId.ACCOUNT_SNAPSHOTS,
@@ -101,6 +109,10 @@ DATASET_PARENT: dict[DatasetId | str, DatasetId] = {
 }
 
 DATASET_CHILDREN: dict[DatasetId | str, tuple[DatasetId, ...]] = {
+    DatasetId.MARKET_DATA: (
+        DatasetId.MARKET_STATES,
+        DatasetId.CONTRACT_METADATA,
+    ),
     DatasetId.ACCOUNT_SNAPSHOTS: (
         DatasetId.ACCOUNT_BALANCES,
         DatasetId.ACCOUNT_POSITIONS,
@@ -147,6 +159,12 @@ class DatasetScope:
             keys.add(f"retention_{t}")
         if self.custom_name:
             keys.add(f"retention_{self.custom_name}")
+        if self.dataset_id in DATASET_PARENT:
+            parent = DATASET_PARENT[self.dataset_id]
+            keys.add(f"retention_{parent.value}")
+        if self.dataset_id in DATASET_CHILDREN:
+            for child in DATASET_CHILDREN[self.dataset_id]:
+                keys.add(f"retention_{child.value}")
         return tuple(sorted(keys))
 
     def related_dataset_names(self) -> tuple[str, ...]:
