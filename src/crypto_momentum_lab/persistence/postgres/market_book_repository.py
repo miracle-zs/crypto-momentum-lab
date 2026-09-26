@@ -442,10 +442,31 @@ class PostgresMarketBookRepository:
             if row is None:
                 return None
             rev_ids = row.evaluated_revision_ids or []
-            stmt = select(MarketRevisionRefRow).where(
-                MarketRevisionRefRow.revision_id.in_(rev_ids)
-            )
-            rev_rows = {r.revision_id: r for r in session.execute(stmt).scalars().all()}
+            rev_rows: dict[str, MarketRevisionRefRow] = {}
+            chunk_size = 5000
+            for i in range(0, len(rev_ids), chunk_size):
+                chunk = rev_ids[i : i + chunk_size]
+                stmt = (
+                    select(MarketRevisionRefRow)
+                    .options(
+                        load_only(
+                            MarketRevisionRefRow.revision_id,
+                            MarketRevisionRefRow.scope,
+                            MarketRevisionRefRow.symbol,
+                            MarketRevisionRefRow.interval,
+                            MarketRevisionRefRow.bucket_start,
+                            MarketRevisionRefRow.bucket_end,
+                            MarketRevisionRefRow.content_hash,
+                            MarketRevisionRefRow.published_at,
+                            MarketRevisionRefRow.source_epoch,
+                            MarketRevisionRefRow.visibility_mode,
+                            MarketRevisionRefRow.lineage,
+                        )
+                    )
+                    .where(MarketRevisionRefRow.revision_id.in_(chunk))
+                )
+                for r in session.execute(stmt).scalars().all():
+                    rev_rows[r.revision_id] = r
             refs = []
             for rid in rev_ids:
                 rrow = rev_rows.get(str(rid))
@@ -499,6 +520,21 @@ class PostgresMarketBookRepository:
         with self._session_factory() as session:
             stmt = (
                 select(MarketRevisionRefRow)
+                .options(
+                    load_only(
+                        MarketRevisionRefRow.revision_id,
+                        MarketRevisionRefRow.scope,
+                        MarketRevisionRefRow.symbol,
+                        MarketRevisionRefRow.interval,
+                        MarketRevisionRefRow.bucket_start,
+                        MarketRevisionRefRow.bucket_end,
+                        MarketRevisionRefRow.content_hash,
+                        MarketRevisionRefRow.published_at,
+                        MarketRevisionRefRow.source_epoch,
+                        MarketRevisionRefRow.visibility_mode,
+                        MarketRevisionRefRow.lineage,
+                    )
+                )
                 .where(
                     MarketRevisionRefRow.scope == scope,
                     MarketRevisionRefRow.symbol.in_(symbols),
@@ -573,7 +609,7 @@ class PostgresMarketBookRepository:
         with self._session_factory() as session:
             stmt = (
                 select(
-                    MarketRevisionRefRow.bucket_start,
+                    func.date(MarketRevisionRefRow.bucket_start).label("d"),
                     MarketRevisionRefRow.symbol,
                 )
                 .where(
@@ -581,12 +617,20 @@ class PostgresMarketBookRepository:
                     MarketRevisionRefRow.interval == interval,
                     MarketRevisionRefRow.is_canonical.is_(True),
                 )
-                .order_by(MarketRevisionRefRow.bucket_start.asc())
+                .distinct()
+                .order_by("d", MarketRevisionRefRow.symbol.asc())
             )
             rows = session.execute(stmt).all()
             date_to_symbols: dict[date, set[str]] = {}
-            for b_start, sym in rows:
-                d = b_start.date()
+            for d_val, sym in rows:
+                if isinstance(d_val, str):
+                    d = date.fromisoformat(d_val)
+                elif isinstance(d_val, datetime):
+                    d = d_val.date()
+                elif isinstance(d_val, date):
+                    d = d_val
+                else:
+                    d = date.fromisoformat(str(d_val))
                 date_to_symbols.setdefault(d, set()).add(sym)
             return [
                 (d, tuple(sorted(syms)))

@@ -64,19 +64,23 @@ def catalog_auto_daily(
     scope: str = "research",
     interval: str = "15s",
     save: bool = True,
+    overwrite: bool = False,
 ) -> list[dict[str, Any]]:
     """Scan distinct dates in revisions and catalog completed daily datasets."""
     date_symbols = repo.get_distinct_dates_and_symbols(
         scope=scope, interval=interval
     )
+    existing_manifests = {
+        m.manifest_id: m for m in catalog.list_manifests(scope=scope, limit=1000)
+    }
     results: list[dict[str, Any]] = []
     now_dt = datetime.now(UTC)
 
     for d, symbols in date_symbols:
         day_start = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=UTC)
         day_end = day_start + timedelta(days=1)
-        # If today, don't exceed current 15s aligned minute
-        if day_end > now_dt:
+        is_today = day_end > now_dt
+        if is_today:
             sec = (now_dt.second // 15) * 15
             day_end = now_dt.replace(second=sec, microsecond=0)
 
@@ -84,6 +88,24 @@ def catalog_auto_daily(
             continue
 
         manifest_id = f"ds_{scope}_{d.strftime('%Y%m%d')}_{interval}"
+        if not overwrite and not is_today and manifest_id in existing_manifests:
+            existing = existing_manifests[manifest_id]
+            results.append(
+                {
+                    "manifest_id": existing.manifest_id,
+                    "scope": existing.scope,
+                    "date": d.isoformat(),
+                    "symbols_count": len(existing.symbols),
+                    "revisions_count": len(existing.revision_refs),
+                    "coverage_ratio": str(existing.coverage_ratio),
+                    "holes_count": len(existing.holes),
+                    "manifest_hash": existing.manifest_hash,
+                    "saved": False,
+                    "skipped": True,
+                }
+            )
+            continue
+
         manifest = catalog.build_dataset(
             manifest_id=manifest_id,
             scope=scope,
@@ -155,6 +177,12 @@ def main() -> None:
         default=True,
         help="Persist built manifests into postgres dataset_manifests table",
     )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        default=False,
+        help="Force overwrite already cataloged manifests",
+    )
 
     args = parser.parse_args()
 
@@ -196,6 +224,7 @@ def main() -> None:
             scope=args.scope,
             interval=args.interval,
             save=args.save,
+            overwrite=args.overwrite,
         )
         print(json.dumps(results, indent=2))
         sys.exit(0)

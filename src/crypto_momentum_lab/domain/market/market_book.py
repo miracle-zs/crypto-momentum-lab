@@ -400,6 +400,7 @@ class DatasetCatalog:
                 scope, symbols, interval, start_time, end_time
             )
 
+        gap_per_sym: dict[str, datetime | None] = {s: None for s in symbols}
         current_time = start_time
         while current_time < end_time:
             b_start = current_time
@@ -417,9 +418,19 @@ class DatasetCatalog:
 
                 if ref is not None:
                     refs.append(ref)
+                    g_start = gap_per_sym[sym]
+                    if g_start is not None:
+                        holes.append((g_start, b_start))
+                        gap_per_sym[sym] = None
                 else:
-                    holes.append((b_start, b_end))
+                    if gap_per_sym[sym] is None:
+                        gap_per_sym[sym] = b_start
             current_time += step
+
+        for sym in sorted(symbols):
+            g_start = gap_per_sym[sym]
+            if g_start is not None:
+                holes.append((g_start, end_time))
 
         cov = (
             Decimal(len(refs)) / Decimal(total_expected)
