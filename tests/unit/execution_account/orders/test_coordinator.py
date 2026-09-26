@@ -1355,3 +1355,254 @@ async def test_coordinator_execution_book_integration() -> None:
 
     await coordinator.aclose()
 
+
+@pytest.mark.asyncio
+async def test_account_4_gray_cutover_activation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = BlockingBackend()
+    coord_primary = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+    )
+    coord_4 = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="account-4",
+    )
+    assert not coord_primary.is_execution_book_enabled
+    assert coord_4.is_execution_book_enabled
+
+    # Configurable via environment variable
+    monkeypatch.setenv("CML_EXECUTION_BOOK_GRAY_ACCOUNTS", "account-2,account-3")
+    coord_custom = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="account-2",
+    )
+    assert coord_custom.is_execution_book_enabled
+    assert not coord_4.is_execution_book_enabled
+
+    await coord_primary.aclose()
+    await coord_4.aclose()
+    await coord_custom.aclose()
+
+
+@pytest.mark.asyncio
+async def test_account_4_prohibits_synthetic_batches() -> None:
+    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+        InMemoryPositionReservationRepository,
+    )
+
+    backend = BlockingBackend()
+    repo = InMemoryPositionReservationRepository()
+    coord_4 = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="account-4",
+        reservation_repository=repo,
+    )
+    coord_primary = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="primary",
+        reservation_repository=repo,
+    )
+
+    synth_plan = OrderExecutionPlan(
+        intent_id="intent-synth",
+        run_id="run-1",
+        client_order_id="order-synth-1",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("1.0"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+        batch_id="batch_BTCUSDT_BOTH",
+    )
+
+    # account-4 must strictly prohibit synthetic batch IDs
+    with pytest.raises(
+        OrderPreSubmissionError,
+        match="prohibited",
+    ):
+        await coord_4.submit(synth_plan)
+
+    # Non-gray primary account must allow synthetic batch ID
+    res = await coord_primary.submit(synth_plan)
+    assert res.state == ExchangeOrderState.ACKNOWLEDGED
+
+    await coord_4.aclose()
+    await coord_primary.aclose()
+
+
+@pytest.mark.asyncio
+async def test_account_4_authoritative_reservation_and_outbox_lifecycle() -> None:
+    from crypto_momentum_lab.domain.execution import DispatchState
+    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+        InMemoryPositionReservationRepository,
+    )
+
+    backend = BlockingBackend()
+    repo = InMemoryPositionReservationRepository()
+    coord_4 = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="account-4",
+        reservation_repository=repo,
+    )
+
+    plan = OrderExecutionPlan(
+        intent_id="intent-auth-1",
+        run_id="run-1",
+        client_order_id="order-auth-1",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("2.5"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+        batch_id="lot_20260927_001",
+    )
+
+    res = await coord_4.submit(plan)
+    assert res.state == ExchangeOrderState.ACKNOWLEDGED
+
+    # Outbox tracking in ExecutionBook
+    book = coord_4.execution_book
+    outbox = book.get_outbox(plan.client_order_id)
+    assert outbox is not None
+    assert outbox.state == DispatchState.ACKNOWLEDGED
+    assert outbox.command.requested_quantity == Decimal("2.5")
+
+    # Authoritative reservation recorded
+    res = repo._reservations[f"res_{plan.client_order_id}"]
+    assert res.batch_id == "lot_20260927_001"
+    assert res.active_quantity == Decimal("2.5")
+
+    # Command reservations registered
+    assert book._command_reservations[plan.client_order_id] == [
+        f"res_{plan.client_order_id}"
+    ]
+
+    await coord_4.aclose()
+
+
+@pytest.mark.asyncio
+async def test_account_4_outbox_marks_rejected_on_submission_failure() -> None:
+    from crypto_momentum_lab.domain.execution import DispatchState
+    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+        InMemoryPositionReservationRepository,
+    )
+
+    class FailingBackend(BlockingBackend):
+        async def execute_approved_intent(
+            self, plan: OrderExecutionPlan, **kwargs: Any
+        ) -> Any:
+            raise RuntimeError("Exchange API timeout")
+
+    repo = InMemoryPositionReservationRepository()
+    coord_4 = OrderExecutionCoordinator(
+        backend=FailingBackend(),
+        account_label="account-4",
+        reservation_repository=repo,
+    )
+
+    plan = OrderExecutionPlan(
+        intent_id="intent-fail-1",
+        run_id="run-1",
+        client_order_id="order-fail-1",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("1.0"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+        batch_id="lot_20260927_002",
+    )
+
+    with pytest.raises(RuntimeError, match="Exchange API timeout"):
+        await coord_4.submit(plan)
+
+    book = coord_4.execution_book
+    outbox = book.get_outbox(plan.client_order_id)
+    assert outbox is not None
+    assert outbox.state == DispatchState.REJECTED
+    assert "Exchange API timeout" in (outbox.last_error or "")
+
+    # Active reservation released
+    res = repo._reservations[f"res_{plan.client_order_id}"]
+    assert res.active_quantity == Decimal("0")
+
+    await coord_4.aclose()
+
+
+@pytest.mark.asyncio
+async def test_multi_batch_allocations_preserve_batch_quantities() -> None:
+    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+        InMemoryPositionReservationRepository,
+    )
+    from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
+    from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
+
+    class SpyRepo(InMemoryPositionReservationRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.saved_batch_quantities: dict[str, Decimal] | None = None
+
+        def save_reservations(
+            self,
+            reservations: tuple[PositionReservation, ...],
+            expected_projection_version: str | None = None,
+            expires_at: datetime | None = None,
+            batch_quantities: dict[str, Decimal] | None = None,
+        ) -> None:
+            self.saved_batch_quantities = batch_quantities
+            super().save_reservations(
+                reservations,
+                expected_projection_version=expected_projection_version,
+                expires_at=expires_at,
+                batch_quantities=batch_quantities,
+            )
+
+    backend = BlockingBackend()
+    repo = SpyRepo()
+    coord = OrderExecutionCoordinator(
+        backend=backend,
+        account_label="account-4",
+        reservation_repository=repo,
+    )
+
+    plan = OrderExecutionPlan(
+        intent_id="intent-multi",
+        run_id="run-1",
+        client_order_id="order-multi-1",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("5.0"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+        allocations=(
+            ExitAllocation("lot_1", Decimal("2.0")),
+            ExitAllocation("lot_2", Decimal("3.0")),
+        ),
+    )
+
+    await coord.submit(plan)
+    assert repo.saved_batch_quantities == {
+        "lot_1": Decimal("2.0"),
+        "lot_2": Decimal("3.0"),
+    }
+    await coord.aclose()
+
+
+

@@ -10,19 +10,28 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Protocol, cast
 
 import structlog
 
 from crypto_momentum_lab.domain.execution import (
+    DispatchState,
+    ExchangeOrderEvent,
     ExchangeOrderSnapshot,
     ExchangeOrderState,
+    ExecutionEvidence,
+    ExecutionScope,
     FuturesPositionSide,
     OrderExecutionPlan,
+    OutboxEntry,
+    TradeCommand,
+    TradeCommandType,
 )
 from crypto_momentum_lab.domain.execution.execution_book import ExecutionBook
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
@@ -32,6 +41,7 @@ from crypto_momentum_lab.domain.execution.execution_coordinator import (
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
 from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 from crypto_momentum_lab.execution_account.orders.state_machine import (
     OrderExecutionResult,
     OrderPreSubmissionError,
@@ -368,6 +378,13 @@ class OrderExecutionCoordinator:
     def reservation_repository(self) -> Any | None:
         return self._reservation_repository
 
+    @property
+    def is_execution_book_enabled(self) -> bool:
+        gray_accounts = os.environ.get(
+            "CML_EXECUTION_BOOK_GRAY_ACCOUNTS", "account-4"
+        ).split(",")
+        return self._account_label in {a.strip() for a in gray_accounts if a.strip()}
+
     def get_active_reservations(
         self, key: PositionKey | None = None
     ) -> tuple[PositionReservation, ...]:
@@ -435,12 +452,21 @@ class OrderExecutionCoordinator:
                         )
                     )
             elif getattr(plan, "batch_id", None):
+                batch_str = str(plan.batch_id)
+                if self.is_execution_book_enabled and (
+                    batch_str.startswith(f"batch_{plan.symbol}_")
+                    or batch_str in ("batch_default", "batch_synthetic")
+                ):
+                    raise OrderPreSubmissionError(
+                        f"Account {self._account_label} in ExecutionBook gray "
+                        f"cutover: synthetic batch {batch_str} is prohibited"
+                    )
                 target_reservations.append(
                     PositionReservation(
                         reservation_id=f"res_{plan.client_order_id}",
                         command_id=plan.client_order_id,
                         position_key=key,
-                        batch_id=str(plan.batch_id),
+                        batch_id=batch_str,
                         reserved_quantity=Decimal(str(plan.quantity)),
                     )
                 )
@@ -489,6 +515,7 @@ class OrderExecutionCoordinator:
                         alloc.batch_id: alloc.allocated_quantity
                         for alloc in allocations
                     }
+                elif target_reservations:
                     first_res = target_reservations[0]
                     batch_quantities = {
                         first_res.batch_id: first_res.reserved_quantity
@@ -546,6 +573,55 @@ class OrderExecutionCoordinator:
                         self._active_reservations[res.reservation_id] = res
                         if self._domain_coordinator is not None:
                             self._domain_coordinator.register_reservation(res)
+
+                if self.is_execution_book_enabled:
+                    scope = ExecutionScope(
+                        environment="live",
+                        account_label=self._account_label,
+                        symbol=plan.symbol,
+                        position_side=plan.position_side,
+                    )
+                    cmd = TradeCommand(
+                        command_id=plan.client_order_id,
+                        position_key=key,
+                        command_type=(
+                            TradeCommandType.EXIT
+                            if plan.reduce_only
+                            else TradeCommandType.ENTRY
+                        ),
+                        side=(
+                            StrategySide.LONG
+                            if plan.side.upper() == "BUY"
+                            else StrategySide.SHORT
+                        ),
+                        order_type=(
+                            EntryType(plan.order_type.lower())
+                            if isinstance(plan.order_type, str)
+                            else plan.order_type
+                        ),
+                        requested_quantity=Decimal(str(plan.quantity)),
+                        limit_price=(
+                            Decimal(str(plan.price)) if plan.price is not None else None
+                        ),
+                        reduce_only=plan.reduce_only,
+                        expected_projection_version=proj_ver,
+                        created_at=plan.created_at,
+                    )
+                    self._execution_book._outbox_by_command_id[plan.client_order_id] = (
+                        OutboxEntry(
+                            command_id=plan.client_order_id,
+                            request_id=plan.client_order_id,
+                            scope=scope,
+                            command=cmd,
+                            state=DispatchState.PREPARED,
+                            created_at=plan.created_at,
+                            updated_at=plan.created_at,
+                        )
+                    )
+                    if target_reservations:
+                        self._execution_book._command_reservations[
+                            plan.client_order_id
+                        ] = [r.reservation_id for r in target_reservations]
             except Exception as save_err:
                 # Atomicity rollback: release any newly created reservations
                 for saved in saved_new:
@@ -701,6 +777,57 @@ class OrderExecutionCoordinator:
                 error=str(consume_err),
             )
 
+    async def _observe_order_result_in_execution_book(
+        self,
+        plan: OrderExecutionPlan,
+        res: OrderExecutionResult | None,
+    ) -> None:
+        if not self.is_execution_book_enabled or res is None:
+            return
+        try:
+            scope = ExecutionScope(
+                environment="live",
+                account_label=self._account_label,
+                symbol=plan.symbol,
+                position_side=plan.position_side,
+            )
+            now_dt = datetime.now(UTC)
+            order_ev = ExchangeOrderEvent(
+                event_id=f"ev_{res.client_order_id}_{res.state.value}",
+                client_order_id=res.client_order_id,
+                state=res.state,
+                occurred_at=now_dt,
+                exchange_order_id=res.exchange_order_id,
+                details={
+                    "account_label": self._account_label,
+                    "symbol": plan.symbol,
+                    "executed_quantity": str(res.executed_quantity),
+                    "cumulative_quote_quantity": "0",
+                    "average_price": (
+                        str(res.average_price)
+                        if res.average_price is not None
+                        else None
+                    ),
+                    "limit_price": str(plan.price) if plan.price is not None else None,
+                    "is_reduce_only": plan.reduce_only,
+                    "position_side": (
+                        plan.position_side.value
+                        if hasattr(plan.position_side, "value")
+                        else str(plan.position_side)
+                    ),
+                },
+            )
+            await self._execution_book.observe(
+                ExecutionEvidence(
+                    evidence_id=order_ev.event_id,
+                    scope=scope,
+                    observed_at=now_dt,
+                    order_event=order_ev,
+                )
+            )
+        except Exception as obs_err:
+            log.warning("execution_book_observe_order_event_failed", error=str(obs_err))
+
     async def submit(
         self,
         plan: OrderExecutionPlan,
@@ -712,6 +839,11 @@ class OrderExecutionCoordinator:
         async def operation() -> OrderExecutionResult:
             async def submit() -> OrderExecutionResult:
                 await self._ensure_reservation(plan)
+                if self.is_execution_book_enabled:
+                    try:
+                        self._execution_book.mark_dispatching(plan.client_order_id)
+                    except Exception:
+                        pass
                 try:
                     res = (
                         await self._backend.execute_approved_intent(
@@ -722,8 +854,16 @@ class OrderExecutionCoordinator:
                         else await self._backend.execute_approved_intent(plan)
                     )
                     await self._consume_reservation_if_filled(plan, res)
+                    await self._observe_order_result_in_execution_book(plan, res)
                     return res
-                except Exception:
+                except Exception as sub_err:
+                    if self.is_execution_book_enabled:
+                        try:
+                            self._execution_book.mark_rejected(
+                                plan.client_order_id, reason=str(sub_err)
+                            )
+                        except Exception:
+                            pass
                     await self._release_reservation_if_present(plan)
                     raise
 
@@ -757,9 +897,22 @@ class OrderExecutionCoordinator:
         async def operation() -> OrderExecutionResult | None:
             async def prepare_and_submit() -> OrderExecutionResult | None:
                 await self._ensure_reservation(plan)
+                if self.is_execution_book_enabled:
+                    try:
+                        self._execution_book.mark_dispatching(plan.client_order_id)
+                    except Exception:
+                        pass
                 try:
                     prepared = await prepare_submission()
                     if prepared is None:
+                        if self.is_execution_book_enabled:
+                            try:
+                                self._execution_book.mark_rejected(
+                                    plan.client_order_id,
+                                    reason="prepare_submission_returned_none",
+                                )
+                            except Exception:
+                                pass
                         await self._release_reservation_if_present(
                             plan, reason="prepare_submission_returned_none"
                         )
@@ -769,8 +922,16 @@ class OrderExecutionCoordinator:
                         prepared_submission=prepared,
                     )
                     await self._consume_reservation_if_filled(plan, res)
+                    await self._observe_order_result_in_execution_book(plan, res)
                     return res
-                except Exception:
+                except Exception as sub_err:
+                    if self.is_execution_book_enabled:
+                        try:
+                            self._execution_book.mark_rejected(
+                                plan.client_order_id, reason=str(sub_err)
+                            )
+                        except Exception:
+                            pass
                     await self._release_reservation_if_present(plan)
                     raise
 
@@ -842,6 +1003,7 @@ class OrderExecutionCoordinator:
                     error=str(cancel_err),
                 )
 
+        await self._observe_order_result_in_execution_book(plan, result)
         return result
 
     async def reconcile_order(
@@ -851,6 +1013,7 @@ class OrderExecutionCoordinator:
         async def operation() -> OrderExecutionResult:
             res = await self._backend.reconcile_order(plan)
             await self._consume_reservation_if_filled(plan, res)
+            await self._observe_order_result_in_execution_book(plan, res)
             return res
 
         return cast(
@@ -870,6 +1033,7 @@ class OrderExecutionCoordinator:
         async def operation() -> OrderExecutionResult:
             res = await self._backend.apply_observed_snapshot(plan, snapshot)
             await self._consume_reservation_if_filled(plan, res)
+            await self._observe_order_result_in_execution_book(plan, res)
             return res
 
         return cast(
@@ -894,6 +1058,7 @@ class OrderExecutionCoordinator:
         async def operation() -> OrderExecutionResult:
             res = await self._backend.mark_absent_reconciled(plan, details=details)
             await self._consume_reservation_if_filled(plan, res)
+            await self._observe_order_result_in_execution_book(plan, res)
             return res
 
         return cast(

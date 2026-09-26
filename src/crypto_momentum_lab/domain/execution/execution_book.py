@@ -1,3 +1,4 @@
+import inspect
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -39,6 +40,12 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     TradeCommandType,
 )
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
+
+
+async def _maybe_await(val: Any) -> Any:
+    if inspect.isawaitable(val):
+        return await val
+    return val
 
 
 class DispatchState(StrEnum):
@@ -363,11 +370,22 @@ class ExecutionBook:
                 )
 
             if self._reservation_repo is not None:
-                for res in reservations:
-                    self._reservation_repo.save_reservation(
-                        res,
-                        expected_projection_version=view.projection_version,
+                saver = getattr(self._reservation_repo, "save_reservations", None)
+                if callable(saver):
+                    await _maybe_await(
+                        saver(
+                            reservations,
+                            expected_projection_version=view.projection_version,
+                        )
                     )
+                else:
+                    for res in reservations:
+                        await _maybe_await(
+                            self._reservation_repo.save_reservation(
+                                res,
+                                expected_projection_version=view.projection_version,
+                            )
+                        )
         else:
             command = TradeCommand(
                 command_id=request.request_id,
@@ -628,9 +646,15 @@ class ExecutionBook:
                             break
                         consume_amt = min(remaining, res.active_quantity)
                         if consume_amt > Decimal("0"):
-                            self._coordinator.reconcile_fill(
+                            updated_res = self._coordinator.reconcile_fill(
                                 res.reservation_id, consume_amt
                             )
+                            if self._reservation_repo is not None:
+                                updater = getattr(
+                                    self._reservation_repo, "update_reservation", None
+                                )
+                                if callable(updater):
+                                    await _maybe_await(updater(updated_res))
                             consumed_qty += consume_amt
                             remaining -= consume_amt
 
@@ -672,9 +696,20 @@ class ExecutionBook:
                 active_res = self._find_active_reservations_for_command(cmd_id)
                 for res in active_res:
                     to_release = res.active_quantity
-                    self._coordinator.release_reservation(
+                    released_res = self._coordinator.release_reservation(
                         res.reservation_id, to_release
                     )
+                    if self._reservation_repo is not None:
+                        updater = getattr(
+                            self._reservation_repo, "update_reservation", None
+                        )
+                        if callable(updater):
+                            await _maybe_await(
+                                updater(
+                                    released_res,
+                                    release_reason=f"order_finished_residual_release_{ev_state.value}",
+                                )
+                            )
                     released_qty += to_release
 
                 if outbox is not None:
@@ -693,9 +728,20 @@ class ExecutionBook:
                 active_res = self._find_active_reservations_for_command(cmd_id)
                 for res in active_res:
                     to_release = res.active_quantity
-                    self._coordinator.release_reservation(
+                    released_res = self._coordinator.release_reservation(
                         res.reservation_id, to_release
                     )
+                    if self._reservation_repo is not None:
+                        updater = getattr(
+                            self._reservation_repo, "update_reservation", None
+                        )
+                        if callable(updater):
+                            await _maybe_await(
+                                updater(
+                                    released_res,
+                                    release_reason="order_finished_residual_release_filled",
+                                )
+                            )
                     released_qty += to_release
 
                 if outbox is not None:
