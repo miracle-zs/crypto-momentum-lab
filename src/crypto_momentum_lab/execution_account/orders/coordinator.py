@@ -26,6 +26,7 @@ from crypto_momentum_lab.domain.execution import (
 )
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
+    ReservationConflictError,
 )
 from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
 from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
@@ -376,6 +377,7 @@ class OrderExecutionCoordinator:
             symbol=plan.symbol,
             position_side=plan.position_side,
         )
+        proj_ver = getattr(plan, "projection_version", None)
         try:
             active_res = await _maybe_await(
                 self._reservation_repository.load_active_reservations(key)
@@ -414,8 +416,27 @@ class OrderExecutionCoordinator:
                     )
                 )
 
-            # Sync active existing reservations into memory cache and domain coordinator
+            # Sync active existing reservations into memory cache and domain
+            # coordinator. Reject retries whose identity drifted from the plan.
             for r in existing_by_id.values():
+                target = next(
+                    (
+                        t
+                        for t in target_reservations
+                        if t.reservation_id == r.reservation_id
+                    ),
+                    None,
+                )
+                if target is not None and (
+                    r.batch_id != target.batch_id
+                    or r.reserved_quantity != target.reserved_quantity
+                ):
+                    raise ReservationConflictError(
+                        f"active reservation {r.reservation_id} batch "
+                        f"{r.batch_id} qty {r.reserved_quantity} does not "
+                        f"match retry plan batch {target.batch_id} qty "
+                        f"{target.reserved_quantity}"
+                    )
                 self._active_reservations[r.reservation_id] = r
                 if self._domain_coordinator is not None:
                     self._domain_coordinator.register_reservation(r)
@@ -429,9 +450,30 @@ class OrderExecutionCoordinator:
             saved_new: list[PositionReservation] = []
             try:
                 for res in needed:
-                    await _maybe_await(
-                        self._reservation_repository.save_reservation(res)
-                    )
+                    try:
+                        await _maybe_await(
+                            self._reservation_repository.save_reservation(
+                                res,
+                                expected_projection_version=proj_ver,
+                            )
+                        )
+                    except ReservationConflictError:
+                        # Same ID already durable. Adopt only when identity
+                        # matches the plan; never treat a silent no-op as
+                        # insert.
+                        loaded = await _maybe_await(
+                            self._reservation_repository.load_reservation(
+                                res.reservation_id
+                            )
+                        )
+                        if loaded is None:
+                            raise
+                        if (
+                            loaded.batch_id != res.batch_id
+                            or loaded.reserved_quantity != res.reserved_quantity
+                        ):
+                            raise
+                        res = loaded
                     saved_new.append(res)
                     self._active_reservations[res.reservation_id] = res
                     if self._domain_coordinator is not None:
@@ -555,7 +597,7 @@ class OrderExecutionCoordinator:
                     if remaining_to_consume <= Decimal("0"):
                         break
 
-            # If the order is in a terminal state, release residual unconsumed reservations
+            # On terminal state, release any residual unconsumed reservations
             if res.state in {
                 ExchangeOrderState.FILLED,
                 ExchangeOrderState.CANCELED,

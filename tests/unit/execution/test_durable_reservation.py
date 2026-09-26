@@ -255,6 +255,8 @@ def test_reservation_release_on_cancellation_updates_repository() -> None:
 
 def test_postgres_position_reservation_repository_sync_contract_with_coordinator() -> None:
     """Regression test: PostgresPositionReservationRepository must match synchronous ExecutionCoordinator protocol."""
+    from unittest.mock import patch
+
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
@@ -295,18 +297,31 @@ def test_postgres_position_reservation_repository_sync_contract_with_coordinator
         ),
     )
 
-    reservations = coord1.reserve_exit(command, view)
-    assert len(reservations) == 1
-    res_id = reservations[0].reservation_id
+    # SQLite cannot host the JSONB snapshot table; capacity guard is
+    # covered separately. Here we only prove the repository protocol.
+    with (
+        patch(
+            "crypto_momentum_lab.persistence.postgres"
+            ".position_reservation_repository._require_capacity"
+        ),
+        patch(
+            "crypto_momentum_lab.persistence.postgres"
+            ".position_reservation_repository._load_position_amt_sync",
+            return_value=Decimal("2000.0"),
+        ),
+    ):
+        reservations = coord1.reserve_exit(command, view)
+        assert len(reservations) == 1
+        res_id = reservations[0].reservation_id
 
-    # Restart coordinator against the same Postgres repository
-    coord2 = ExecutionCoordinator(repository=pg_repo)
-    assert coord2.get_available_batch_quantity(view, "batch_sand_001") == Decimal(
-        "1200.0"
-    )
+        # Restart coordinator against the same Postgres repository
+        coord2 = ExecutionCoordinator(repository=pg_repo)
+        assert coord2.get_available_batch_quantity(
+            view, "batch_sand_001"
+        ) == Decimal("1200.0")
 
-    # Reconcile fill
-    coord2.reconcile_fill(res_id, Decimal("800.0"))
+        # Reconcile fill
+        coord2.reconcile_fill(res_id, Decimal("800.0"))
     loaded = pg_repo.load_reservation(res_id)
     assert loaded is not None
     assert loaded.consumed_quantity == Decimal("800.0")

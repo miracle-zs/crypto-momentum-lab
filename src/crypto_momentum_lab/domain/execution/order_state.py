@@ -76,6 +76,7 @@ class OrderExecutionPlan:
     expires_at: datetime | None = None
     batch_id: str | None = None
     allocations: tuple[ExitAllocation, ...] = ()
+    projection_version: str | None = None
 
     def __post_init__(self) -> None:
         for value, field_name in (

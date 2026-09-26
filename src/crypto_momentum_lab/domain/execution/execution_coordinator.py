@@ -39,7 +39,12 @@ class ExecutionReadinessError(Exception):
 class PositionReservationRepository:
     """Protocol for durable storage and crash-recovery of batch lot reservations."""
 
-    def save_reservation(self, reservation: PositionReservation) -> None: ...
+    def save_reservation(
+        self,
+        reservation: PositionReservation,
+        expected_projection_version: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> None: ...
     def update_reservation(
         self, reservation: PositionReservation, release_reason: str | None = None
     ) -> None: ...
@@ -55,7 +60,24 @@ class InMemoryPositionReservationRepository:
     def __init__(self) -> None:
         self._reservations: dict[str, PositionReservation] = {}
 
-    def save_reservation(self, reservation: PositionReservation) -> None:
+    def save_reservation(
+        self,
+        reservation: PositionReservation,
+        expected_projection_version: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> None:
+        existing = self._reservations.get(reservation.reservation_id)
+        if existing is not None:
+            if (
+                existing.batch_id != reservation.batch_id
+                or existing.reserved_quantity != reservation.reserved_quantity
+            ):
+                raise ReservationConflictError(
+                    f"reservation {reservation.reservation_id} already exists "
+                    f"with batch {existing.batch_id} qty "
+                    f"{existing.reserved_quantity}"
+                )
+            return
         self._reservations[reservation.reservation_id] = reservation
 
     def update_reservation(
@@ -66,12 +88,14 @@ class InMemoryPositionReservationRepository:
     def load_active_reservations(
         self, key: PositionKey | None = None
     ) -> tuple[PositionReservation, ...]:
-        return tuple(
+        active = [
             r
             for r in self._reservations.values()
             if r.active_quantity > Decimal("0")
             and (key is None or r.position_key.canonical_id == key.canonical_id)
-        )
+        ]
+        active.sort(key=lambda r: (r.created_at, r.reservation_id))
+        return tuple(active)
 
     def load_reservation(self, reservation_id: str) -> PositionReservation | None:
         return self._reservations.get(reservation_id)
@@ -213,7 +237,10 @@ class ExecutionCoordinator:
                 reserved_quantity=allocation.allocated_quantity,
                 created_at=datetime.now(UTC),
             )
-            self._repo.save_reservation(res)
+            self._repo.save_reservation(
+                res,
+                expected_projection_version=command.expected_projection_version,
+            )
             self._reservations_by_id[res_id] = res
             created_reservations.append(res)
 

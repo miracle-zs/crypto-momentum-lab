@@ -608,7 +608,7 @@ async def test_reservation_creation_failure_fails_closed() -> None:
         def load_active_reservations(self, key: Any) -> list[Any]:
             return []
 
-        def save_reservation(self, res: Any) -> None:
+        def save_reservation(self, res: Any, **kwargs: Any) -> None:
             raise RuntimeError("Database connection failure")
 
     coordinator = OrderExecutionCoordinator(
@@ -660,7 +660,7 @@ async def test_multi_batch_reservation_release_all_on_failure() -> None:
                 if r.active_quantity > Decimal("0")
             ]
 
-        def save_reservation(self, res: Any) -> None:
+        def save_reservation(self, res: Any, **kwargs: Any) -> None:
             self.reservations[res.reservation_id] = res
 
         def update_reservation(self, res: Any, release_reason: str = "") -> None:
@@ -725,7 +725,7 @@ async def test_multi_batch_reservation_consume_across_batches() -> None:
                 if r.active_quantity > Decimal("0")
             ]
 
-        def save_reservation(self, res: Any) -> None:
+        def save_reservation(self, res: Any, **kwargs: Any) -> None:
             self.reservations[res.reservation_id] = res
 
         def update_reservation(self, res: Any, release_reason: str = "") -> None:
@@ -784,4 +784,194 @@ async def test_multi_batch_reservation_consume_across_batches() -> None:
     assert r1.consumed_quantity == Decimal("15.0")
     assert r1.active_quantity == Decimal("0")
 
+    await coordinator.aclose()
+
+
+async def test_partial_fill_consumes_batches_in_stable_order() -> None:
+    """Partial fills must attribute quantity to batches in load order."""
+    from dataclasses import dataclass, field
+
+    @dataclass
+    class OrderedRepo:
+        reservations: dict[str, Any] = field(default_factory=dict)
+
+        def load_active_reservations(self, key: Any) -> list[Any]:
+            active = [
+                r for r in self.reservations.values()
+                if r.active_quantity > Decimal("0")
+            ]
+            # Simulate SQL ORDER BY created_at, reservation_id
+            active.sort(key=lambda r: (r.created_at, r.reservation_id))
+            return active
+
+        def save_reservation(self, res: Any, **kwargs: Any) -> None:
+            self.reservations[res.reservation_id] = res
+
+        def update_reservation(self, res: Any, release_reason: str = "") -> None:
+            self.reservations[res.reservation_id] = res
+
+        def load_reservation(self, reservation_id: str) -> Any:
+            return self.reservations.get(reservation_id)
+
+    class PartialFillBackend(BlockingBackend):
+        async def execute_approved_intent(
+            self, plan: OrderExecutionPlan, *, prepared_submission=None
+        ):
+            return OrderExecutionResult(
+                client_order_id=plan.client_order_id,
+                state=ExchangeOrderState.PARTIALLY_FILLED,
+                exchange_order_id="exchange-partial",
+                executed_quantity=Decimal("12.0"),
+                average_price=Decimal("100.0"),
+            )
+
+    repo = OrderedRepo()
+    coordinator = OrderExecutionCoordinator(
+        backend=PartialFillBackend(),
+        account_label="primary",
+        reservation_repository=repo,
+    )
+    from crypto_momentum_lab.domain.execution.order_state import ExitAllocation
+
+    allocs = (
+        ExitAllocation(batch_id="batch_1", allocated_quantity=Decimal("10.0")),
+        ExitAllocation(batch_id="batch_2", allocated_quantity=Decimal("20.0")),
+    )
+    plan = OrderExecutionPlan(
+        intent_id="intent-partial",
+        run_id="run-1",
+        client_order_id="order-partial",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("30.0"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+        allocations=allocs,
+    )
+    res = await coordinator.submit(plan)
+    assert res.executed_quantity == Decimal("12.0")
+
+    r0 = repo.reservations["res_order-partial_0"]
+    r1 = repo.reservations["res_order-partial_1"]
+    # First batch (created earlier / lower id) absorbs the fill first.
+    assert r0.consumed_quantity == Decimal("10.0")
+    assert r0.active_quantity == Decimal("0")
+    assert r1.consumed_quantity == Decimal("2.0")
+    assert r1.active_quantity == Decimal("18.0")
+    await coordinator.aclose()
+
+
+async def test_reservation_save_receives_projection_version() -> None:
+    captured: dict[str, Any] = {}
+
+    class CaptureRepo:
+        def load_active_reservations(self, key: Any) -> list[Any]:
+            return []
+
+        def save_reservation(self, res: Any, **kwargs: Any) -> None:
+            captured["res"] = res
+            captured["kwargs"] = kwargs
+
+        def update_reservation(self, res: Any, release_reason: str = "") -> None:
+            return None
+
+        def load_reservation(self, reservation_id: str) -> Any:
+            return captured.get("res")
+
+    class FillBackend(BlockingBackend):
+        async def execute_approved_intent(
+            self, plan: OrderExecutionPlan, *, prepared_submission=None
+        ):
+            return OrderExecutionResult(
+                client_order_id=plan.client_order_id,
+                state=ExchangeOrderState.FILLED,
+                exchange_order_id="e1",
+                executed_quantity=plan.quantity,
+                average_price=Decimal("1.0"),
+            )
+
+    coordinator = OrderExecutionCoordinator(
+        backend=FillBackend(),
+        account_label="primary",
+        reservation_repository=CaptureRepo(),
+    )
+    plan = OrderExecutionPlan(
+        intent_id="intent-pv",
+        run_id="run-1",
+        client_order_id="order-pv",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("1.0"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+        projection_version="pv_123",
+    )
+    await coordinator.submit(plan)
+    assert captured["kwargs"].get("expected_projection_version") == "pv_123"
+    await coordinator.aclose()
+
+
+async def test_reservation_conflict_mismatch_is_rejected() -> None:
+    from crypto_momentum_lab.domain.execution.execution_coordinator import (
+        ReservationConflictError,
+    )
+    from crypto_momentum_lab.domain.execution.position_ledger_models import PositionKey
+    from crypto_momentum_lab.domain.execution.trade_command import PositionReservation
+
+    class ConflictingRepo:
+        def __init__(self) -> None:
+            self.existing = PositionReservation(
+                reservation_id="res_order-conflict",
+                command_id="order-conflict",
+                position_key=PositionKey(
+                    environment="live",
+                    account_label="primary",
+                    symbol="BTCUSDT",
+                    position_side=FuturesPositionSide.BOTH,
+                ),
+                batch_id="batch_other",
+                reserved_quantity=Decimal("99.0"),
+            )
+
+        def load_active_reservations(self, key: Any) -> list[Any]:
+            return [self.existing]
+
+        def save_reservation(self, res: Any, **kwargs: Any) -> None:
+            raise ReservationConflictError("dup")
+
+        def update_reservation(self, res: Any, release_reason: str = "") -> None:
+            return None
+
+        def load_reservation(self, reservation_id: str) -> Any:
+            return self.existing
+
+    coordinator = OrderExecutionCoordinator(
+        backend=BlockingBackend(),
+        account_label="primary",
+        reservation_repository=ConflictingRepo(),
+    )
+    plan = OrderExecutionPlan(
+        intent_id="intent-conflict",
+        run_id="run-1",
+        client_order_id="order-conflict",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("1.0"),
+        price=None,
+        reduce_only=True,
+        position_side=FuturesPositionSide.BOTH,
+        created_at=NOW,
+        quantized=True,
+    )
+    with pytest.raises(OrderPreSubmissionError, match="does not match|already exists"):
+        await coordinator.submit(plan)
     await coordinator.aclose()
