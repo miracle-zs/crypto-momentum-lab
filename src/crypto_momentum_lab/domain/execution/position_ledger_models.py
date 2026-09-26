@@ -438,6 +438,10 @@ class PositionView:
 
     @property
     def is_ready_for_trade(self) -> bool:
+        has_confirmed_coverage = (
+            self.coverage is not None
+            and self.coverage.status == FactCoverageStatus.CONFIRMED
+        )
         return (
             self.health_status == PositionHealthStatus.READY
             and self.is_comparable
@@ -446,4 +450,8 @@ class PositionView:
                 or self.reconciliation_gap == Decimal("0")
             )
             and self.unallocated_quantity == Decimal("0")
+            and (
+                has_confirmed_coverage
+                or (self.coverage is None and self.key.environment != "live")
+            )
         )

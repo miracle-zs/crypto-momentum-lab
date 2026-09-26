@@ -199,6 +199,25 @@ def _adopt_or_reject_existing(
         )
 
 
+def _parse_version_rank(version: str) -> int | None:
+    parts = version.split("_")
+    for part in reversed(parts):
+        if part.isdigit():
+            return int(part)
+    return None
+
+
+def _is_stale_projection_version(incoming: str, recorded: str) -> bool:
+    """Return True if incoming version is strictly older than recorded version."""
+    if incoming == recorded:
+        return False
+    inc_rank = _parse_version_rank(incoming)
+    rec_rank = _parse_version_rank(recorded)
+    if inc_rank is not None and rec_rank is not None:
+        return inc_rank < rec_rank
+    return False
+
+
 def _require_batch_capacity(
     *,
     batch_id: str,
@@ -298,6 +317,34 @@ class PostgresPositionReservationRepository:
                             f"{expected_projection_version}, active "
                             f"{row.expected_projection_version}"
                         )
+                if not active_rows:
+                    latest_row = session.scalars(
+                        select(PositionReservationRow)
+                        .where(
+                            PositionReservationRow.environment
+                            == first.position_key.environment,
+                            PositionReservationRow.account_label
+                            == first.position_key.account_label,
+                            PositionReservationRow.symbol == first.position_key.symbol,
+                            PositionReservationRow.position_side
+                            == first.position_key.position_side.value,
+                        )
+                        .order_by(PositionReservationRow.created_at.desc())
+                        .limit(1)
+                    ).first()
+                    if (
+                        latest_row is not None
+                        and latest_row.expected_projection_version is not None
+                    ):
+                        if _is_stale_projection_version(
+                            expected_projection_version,
+                            latest_row.expected_projection_version,
+                        ):
+                            raise ReservationConflictError(
+                                f"stale projection version: expected "
+                                f"{expected_projection_version}, latest recorded "
+                                f"{latest_row.expected_projection_version}"
+                            )
             batch_active: dict[str, Decimal] = {}
             total_active = Decimal("0")
             for r in active_rows:
@@ -309,6 +356,7 @@ class PostgresPositionReservationRepository:
                 )
                 total_active += remaining
 
+            has_capacity_limits = bool(batch_quantities)
             pending_batch: dict[str, Decimal] = {}
             for reservation in reservations:
                 existing_row = session.get(
@@ -324,6 +372,11 @@ class PostgresPositionReservationRepository:
                         _row_to_reservation(existing_row), reservation
                     )
                     continue
+                if has_capacity_limits and reservation.batch_id not in batch_quantities:
+                    raise ReservationConflictError(
+                        f"batch {reservation.batch_id} capacity unknown or "
+                        "missing from batch_quantities"
+                    )
                 already = pending_batch.get(reservation.batch_id, Decimal("0"))
                 _require_batch_capacity(
                     batch_id=reservation.batch_id,
@@ -562,6 +615,35 @@ class AsyncPostgresPositionReservationRepository:
                             f"{expected_projection_version}, active "
                             f"{row.expected_projection_version}"
                         )
+                if not active_rows:
+                    latest_res = await session.execute(
+                        select(PositionReservationRow)
+                        .where(
+                            PositionReservationRow.environment
+                            == first.position_key.environment,
+                            PositionReservationRow.account_label
+                            == first.position_key.account_label,
+                            PositionReservationRow.symbol == first.position_key.symbol,
+                            PositionReservationRow.position_side
+                            == first.position_key.position_side.value,
+                        )
+                        .order_by(PositionReservationRow.created_at.desc())
+                        .limit(1)
+                    )
+                    latest_row = latest_res.scalars().first()
+                    if (
+                        latest_row is not None
+                        and latest_row.expected_projection_version is not None
+                    ):
+                        if _is_stale_projection_version(
+                            expected_projection_version,
+                            latest_row.expected_projection_version,
+                        ):
+                            raise ReservationConflictError(
+                                f"stale projection version: expected "
+                                f"{expected_projection_version}, latest recorded "
+                                f"{latest_row.expected_projection_version}"
+                            )
             batch_active: dict[str, Decimal] = {}
             total_active = Decimal("0")
             for r in active_rows:
@@ -573,6 +655,7 @@ class AsyncPostgresPositionReservationRepository:
                 )
                 total_active += remaining
 
+            has_capacity_limits = bool(batch_quantities)
             pending_batch: dict[str, Decimal] = {}
             for reservation in reservations:
                 existing_row = await session.get(
@@ -588,6 +671,11 @@ class AsyncPostgresPositionReservationRepository:
                         _row_to_reservation(existing_row), reservation
                     )
                     continue
+                if has_capacity_limits and reservation.batch_id not in batch_quantities:
+                    raise ReservationConflictError(
+                        f"batch {reservation.batch_id} capacity unknown or "
+                        "missing from batch_quantities"
+                    )
                 already = pending_batch.get(reservation.batch_id, Decimal("0"))
                 _require_batch_capacity(
                     batch_id=reservation.batch_id,

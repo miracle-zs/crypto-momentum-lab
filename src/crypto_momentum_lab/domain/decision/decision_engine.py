@@ -546,6 +546,12 @@ def create_authoritative_decision_filter(
                 state,
                 f"position_health_{pos_view.health_status.value.lower()}",
             )
+        if not pos_view.is_ready_for_trade:
+            return _reject_all(
+                decision,
+                state,
+                "position_not_ready_for_trade",
+            )
 
         dec_input = build_decision_input(
             state=state,

@@ -527,7 +527,9 @@ def run_locked_prune(
             # Dropping partitions must be accounted for; returning 0 hides
             # the fact that data was removed.
             print(f"  dropped {dropped} expired partitions")
-            return (recorded, dropped)
+            # Dropping expired partitions removes all recorded archived rows.
+            rows_deleted = recorded if dropped > 0 else 0
+            return (recorded, rows_deleted)
 
         session.run(
             build_freeze_targets_sql(table, column, from_dt, to_dt)
@@ -776,11 +778,43 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"  manifest verified: {recorded} rows")
 
-        manifest_hash = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        # Verify archive artifact existence and sha256 digest
+        archive_name = manifest_data.get("file")
+        if not archive_name:
+            print(
+                f"  manifest {manifest} missing 'file' field -- refusing to delete",
+                file=sys.stderr,
+            )
+            return 1
+        archive_file = manifest.parent / str(archive_name)
+        if not archive_file.exists():
+            print(
+                f"  archive file {archive_file} does not exist -- refusing to delete",
+                file=sys.stderr,
+            )
+            return 1
+
+        hasher = hashlib.sha256()
+        with archive_file.open("rb") as f:
+            while chunk := f.read(65536):
+                hasher.update(chunk)
+        actual_archive_hash = hasher.hexdigest().lower()
+        expected_archive_hash = str(manifest_data.get("sha256", "")).strip().lower()
+
+        if actual_archive_hash != expected_archive_hash:
+            print(
+                f"  archive file {archive_file} sha256 mismatch: "
+                f"expected {expected_archive_hash}, got {actual_archive_hash} "
+                "-- refusing to delete",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"  archive artifact verified: {archive_file.name} (sha256={actual_archive_hash[:16]}...)")
+
         try:
             plan = authority.bind_manifest(
                 plan,
-                manifest_hash=manifest_hash,
+                manifest_hash=actual_archive_hash,
             )
         except Exception as bind_err:
             print(f"  failed to bind manifest to plan: {bind_err}", file=sys.stderr)

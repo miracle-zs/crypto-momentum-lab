@@ -710,7 +710,9 @@ class PostgresLiveContextProvider(LiveContextReader):
             managed_positions,
             pending_symbols,
             unmanaged_symbols,
+            *rest,
         ) = unresolved_and_positions[1]
+        coverage_by_symbol: Mapping[str, CoverageEvidence] = rest[0] if rest else {}
         unresolved = unresolved_and_positions[0]
         rules = {state.symbol: symbol_rules}
         unresolved_states = tuple(item.state for item in unresolved)
@@ -757,6 +759,7 @@ class PostgresLiveContextProvider(LiveContextReader):
                 else None
             ),
             context_epoch=cache_epoch,
+            coverage_by_symbol=coverage_by_symbol,
         )
         if self._cache_epoch == cache_epoch and (
             self._cached_bucket_start is None
@@ -979,6 +982,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             tuple[ManagedLivePosition, ...],
             frozenset[str],
             frozenset[str],
+            Mapping[str, CoverageEvidence],
         ],
     ]:
         unresolved = await self._order_repository.load_unresolved_orders(self._run_id)
@@ -1000,6 +1004,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         tuple[ManagedLivePosition, ...],
         frozenset[str],
         frozenset[str],
+        Mapping[str, CoverageEvidence],
     ]:
         if account_snapshot is not None:
             return await self._account_position_view_from_snapshot(
@@ -1131,7 +1136,10 @@ class PostgresLiveContextProvider(LiveContextReader):
             self._sessions, orders
         )
         coverage_by_symbol: dict[str, CoverageEvidence] = {}
-        if active:
+        if active or (
+            reconciliation is not None
+            and getattr(reconciliation, "status", None) == "ready"
+        ):
             fill_cursors = (
                 await session.scalars(
                     select(AccountFillReconciliationCursorRow).where(
@@ -1169,6 +1177,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             managed,
             pending,
             unmanaged,
+            coverage_by_symbol,
         )
 
     async def _account_position_view_from_snapshot(
@@ -1183,6 +1192,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         tuple[ManagedLivePosition, ...],
         frozenset[str],
         frozenset[str],
+        Mapping[str, CoverageEvidence],
     ]:
         """Build the hot account view from the Hub's complete snapshot.
 
@@ -1269,8 +1279,44 @@ class PostgresLiveContextProvider(LiveContextReader):
         exit_batch_ids, legacy_exit_order_ids = await _load_exit_batch_bindings(
             self._sessions, orders
         )
-        # Hub snapshot path must not open account-state sessions; without
-        # durable cursor/checkpoint evidence coverage stays unconfirmed.
+        coverage_by_symbol: dict[str, CoverageEvidence] = {}
+        try:
+            async with self._sessions() as session:
+                reconciliation = await session.scalar(
+                    select(AccountReconciliationRunRow)
+                    .where(
+                        AccountReconciliationRunRow.environment == "live",
+                        AccountReconciliationRunRow.account_label
+                        == self._account_label,
+                        AccountReconciliationRunRow.status == "ready",
+                    )
+                    .order_by(AccountReconciliationRunRow.observed_at.desc())
+                    .limit(1)
+                )
+                if (
+                    reconciliation is not None
+                    and getattr(reconciliation, "status", None) == "ready"
+                ):
+                    fill_cursors = (
+                        await session.scalars(
+                            select(AccountFillReconciliationCursorRow).where(
+                                AccountFillReconciliationCursorRow.environment
+                                == "live",
+                                AccountFillReconciliationCursorRow.account_label
+                                == self._account_label,
+                            )
+                        )
+                    ).all()
+                    coverage_by_symbol = {
+                        cursor.symbol: _coverage_evidence_from_sources(
+                            fill_cursor=cursor,
+                            reconciliation=reconciliation,
+                        )
+                        for cursor in fill_cursors
+                    }
+        except (AssertionError, Exception):
+            pass
+
         managed, pending, unmanaged = _classify_live_positions_detailed(
             active,
             orders,
@@ -1282,7 +1328,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             order_identity_events=order_identity_events,
             account_fill_quantities=account_fill_quantities,
             account_fills=domain_account_fills,
-            coverage_by_symbol=None,
+            coverage_by_symbol=coverage_by_symbol,
         )
         return (
             snapshot.config.observed_at,
@@ -1292,6 +1338,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             managed,
             pending,
             unmanaged,
+            coverage_by_symbol,
         )
 
     async def _daily_realized_pnl(self, now: datetime) -> Decimal:

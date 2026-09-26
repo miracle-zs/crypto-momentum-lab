@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -50,6 +51,7 @@ class ExitAllocationPlan:
     reason: str = ""
     projection_version: str | None = None
     reservation_id: str | None = None
+    batch_quantities: Mapping[str, Decimal] | None = None
 
     def __post_init__(self) -> None:
         if self.total_allocated_quantity < 0:
@@ -260,6 +262,10 @@ class ExitAllocator:
         if pos_key is None:
             raise ValueError("projection must expose a position key")
 
+        batch_caps = {
+            b.batch_id: get_batch_available(b) for b in candidate_batches
+        }
+
         if not candidate_batches or total_active_quantity <= 0:
             return ExitAllocationPlan(
                 position_key=pos_key,
@@ -268,6 +274,7 @@ class ExitAllocator:
                 policy=policy,
                 reason=reason,
                 projection_version=proj_ver,
+                batch_quantities=batch_caps,
             )
 
         if policy == ExitPolicyMode.FULL_POSITION_CLOSE:
@@ -288,6 +295,7 @@ class ExitAllocator:
                 policy=policy,
                 reason=reason,
                 projection_version=proj_ver,
+                batch_quantities=batch_caps,
             )
 
         if policy == ExitPolicyMode.ABSORB_DUST_SINGLE_BATCH:
@@ -321,6 +329,7 @@ class ExitAllocator:
                             absorbed_dust=dust_remainder,
                             reason=f"{reason} (absorbed_dust={dust_remainder})".strip(),
                             projection_version=proj_ver,
+                            batch_quantities=batch_caps,
                         )
 
         # Standard FIFO allocation across candidate batches
@@ -342,6 +351,7 @@ class ExitAllocator:
                 policy=policy,
                 reason=reason,
                 projection_version=proj_ver,
+                batch_quantities=batch_caps,
             )
 
         remaining_to_allocate = requested_quantity
@@ -375,6 +385,7 @@ class ExitAllocator:
             unallocated_remainder=unallocated,
             reason=reason,
             projection_version=proj_ver,
+            batch_quantities=batch_caps,
         )
 
     @classmethod

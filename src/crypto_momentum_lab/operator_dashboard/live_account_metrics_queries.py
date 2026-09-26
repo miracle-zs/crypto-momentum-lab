@@ -411,6 +411,7 @@ class LiveAccountMetricsQueries:
                         cf_rows=cf_rows,
                         start_time=equity_window_start,
                         end_time=equity_window_end,
+                        max_equity_gap=timedelta(seconds=equity_bucket_seconds * 4),
                     )
 
                 metric_accounts.append(

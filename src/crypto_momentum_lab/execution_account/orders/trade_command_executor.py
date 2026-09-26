@@ -149,6 +149,12 @@ class TradeCommandExecutor:
             else (f"batch_multi_{len(allocations)}" if allocations else None)
         )
 
+        batch_quantities = (
+            command.allocation_plan.batch_quantities
+            if command.allocation_plan and command.allocation_plan.batch_quantities
+            else None
+        )
+
         plan = OrderExecutionPlan(
             intent_id=command.command_id,
             run_id=run_id,
@@ -165,6 +171,7 @@ class TradeCommandExecutor:
             batch_id=batch_id,
             allocations=allocations,
             projection_version=command.expected_projection_version,
+            batch_quantities=batch_quantities,
         )
 
         return TradeExecutionPlanResult(

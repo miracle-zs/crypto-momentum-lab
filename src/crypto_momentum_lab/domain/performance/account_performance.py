@@ -181,11 +181,49 @@ class AccountPerformanceCalculator:
                     details={"error": "valuation_subintervals_required_for_twr"},
                 )
 
-            # Compound subinterval returns
+            # Compound subinterval returns adjusting for cash flows
             compounded = Decimal("1.0")
-            prev_eq = cut.valuation_points[0].equity
+            prev_vp = cut.valuation_points[0]
+            last_vp = cut.valuation_points[-1]
+            first_vp = cut.valuation_points[0]
+
             for vp in cut.valuation_points[1:]:
-                if prev_eq <= Decimal("0"):
+                # Identify cash flows that occurred in this subinterval
+                is_first = prev_vp == first_vp
+                is_last = vp == last_vp
+                sub_cfs = [
+                    cf
+                    for cf in cut.cash_flows
+                    if (
+                        (cf.effective_at >= prev_vp.timestamp if not is_first else True)
+                        and (
+                            cf.effective_at <= vp.timestamp
+                            if is_last
+                            else cf.effective_at < vp.timestamp
+                        )
+                    )
+                ]
+
+                sub_duration = Decimal(
+                    str((vp.timestamp - prev_vp.timestamp).total_seconds())
+                )
+                cf_total = sum((cf.amount for cf in sub_cfs), start=Decimal("0.00"))
+
+                # Calculate weighted cash flows for the subinterval capital base
+                weighted_cf = Decimal("0.00")
+                if sub_duration > Decimal("0"):
+                    for cf in sub_cfs:
+                        elapsed = Decimal(
+                            str((cf.effective_at - prev_vp.timestamp).total_seconds())
+                        )
+                        remaining = max(Decimal("0.00"), sub_duration - elapsed)
+                        weight = remaining / sub_duration
+                        weighted_cf += cf.amount * weight
+                else:
+                    weighted_cf = cf_total
+
+                capital_base = prev_vp.equity + weighted_cf
+                if capital_base <= Decimal("0"):
                     return MetricValue(
                         metric_name=spec.name,
                         family=spec.family,
@@ -197,11 +235,16 @@ class AccountPerformanceCalculator:
                         as_of=as_of,
                         source_refs=source_refs,
                         status=MetricStatus.UNKNOWN,
-                        details={"error": "subinterval_equity_zero_or_negative"},
+                        details={
+                            "error": "subinterval_capital_base_zero_or_negative",
+                            "capital_base": str(capital_base),
+                        },
                     )
-                sub_ret = (vp.equity - prev_eq) / prev_eq
+
+                gain = (vp.equity - prev_vp.equity) - cf_total
+                sub_ret = gain / capital_base
                 compounded *= Decimal("1.0") + sub_ret
-                prev_eq = vp.equity
+                prev_vp = vp
 
             twr_ret = compounded - Decimal("1.0")
             return MetricValue(

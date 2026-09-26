@@ -107,12 +107,12 @@ def test_twr_requires_subinterval_valuation_with_cash_flows() -> None:
     val_points = (
         ValuationPoint(timestamp=t0, equity=Decimal("10000.00")),
         ValuationPoint(timestamp=t0 + timedelta(hours=12), equity=Decimal("11000.00")),
-        ValuationPoint(timestamp=t1, equity=Decimal("12100.00")),
+        ValuationPoint(timestamp=t1, equity=Decimal("14300.00")),
     )
     cut_with_sub = AccountEquityCut(
         account_label="primary",
         start_equity=Decimal("10000.00"),
-        end_equity=Decimal("12100.00"),
+        end_equity=Decimal("14300.00"),
         start_time=t0,
         end_time=t1,
         cash_flows=(deposit,),
@@ -121,6 +121,42 @@ def test_twr_requires_subinterval_valuation_with_cash_flows() -> None:
     res_with_sub = AccountPerformanceCalculator.calculate(spec_twr, cut_with_sub)
     assert res_with_sub.status == MetricStatus.CONFIRMED
     assert res_with_sub.value == Decimal("0.210000")
+
+
+def test_twr_deposit_does_not_create_artificial_return() -> None:
+    t0 = datetime(2026, 9, 25, 0, 0, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(hours=24)
+
+    # 100 USDT start equity, 100 USDT deposit, 200 USDT end equity with zero market trading
+    deposit = CashFlowFact(
+        correction_id="cf_dep_01",
+        account_label="primary",
+        amount=Decimal("100.00"),
+        cash_flow_type="deposit",
+        effective_at=t0 + timedelta(hours=12),
+        reason="deposit",
+        approval_ref="appr_01",
+        evidence_hash="hash_01",
+    )
+    val_points = (
+        ValuationPoint(timestamp=t0, equity=Decimal("100.00")),
+        ValuationPoint(timestamp=t0 + timedelta(hours=12), equity=Decimal("100.00")),
+        ValuationPoint(timestamp=t1, equity=Decimal("200.00")),
+    )
+    cut = AccountEquityCut(
+        account_label="primary",
+        start_equity=Decimal("100.00"),
+        end_equity=Decimal("200.00"),
+        start_time=t0,
+        end_time=t1,
+        cash_flows=(deposit,),
+        valuation_points=val_points,
+    )
+    spec_twr = MetricSpec(name="twr", family=MetricFamily.TIME_WEIGHTED_RETURN)
+    res = AccountPerformanceCalculator.calculate(spec_twr, cut)
+    assert res.status == MetricStatus.CONFIRMED
+    # Must be 0.000000 return, NOT 100% (1.000000)
+    assert res.value == Decimal("0.000000")
 
 
 def test_mwr_modified_dietz_weighting() -> None:

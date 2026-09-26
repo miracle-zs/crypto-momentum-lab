@@ -182,4 +182,5 @@ def test_save_reservations_is_all_or_nothing() -> None:
             ),
             batch_quantities={"batch_1": Decimal("10")},
         )
-    assert repo.load_reservation("r1") is not None
+    assert repo.load_reservation("r1") is None
+    assert repo.load_reservation("r2") is None

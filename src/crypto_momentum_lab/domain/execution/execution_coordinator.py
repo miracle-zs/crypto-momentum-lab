@@ -105,6 +105,7 @@ class InMemoryPositionReservationRepository:
     ) -> None:
         batch_quantities = batch_quantities or {}
         pending: dict[str, Decimal] = {}
+        to_commit: list[PositionReservation] = []
         for reservation in reservations:
             existing = self._reservations.get(reservation.reservation_id)
             if existing is not None:
@@ -143,7 +144,10 @@ class InMemoryPositionReservationRepository:
                     pending.get(reservation.batch_id, Decimal("0"))
                     + reservation.reserved_quantity
                 )
-            self._reservations[reservation.reservation_id] = reservation
+            to_commit.append(reservation)
+
+        for res in to_commit:
+            self._reservations[res.reservation_id] = res
 
     def update_reservation(
         self, reservation: PositionReservation, release_reason: str | None = None

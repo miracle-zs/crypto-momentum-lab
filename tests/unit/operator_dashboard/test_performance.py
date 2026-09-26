@@ -383,3 +383,16 @@ def test_assess_coverage_requires_equity_window_bracket() -> None:
     ok, status, _ = _assess_coverage([cf], start, end, equity_rows=brackets)
     assert ok is True
     assert status == "confirmed"
+
+    # Gap detection
+    gap_rows = [
+        Eq(start, Decimal("1")),
+        Eq(start + timedelta(hours=1), Decimal("1.1")),
+        Eq(end, Decimal("2")),  # 23-hour gap
+    ]
+    ok_gap, status_gap, proof_gap = _assess_coverage(
+        [cf], start, end, equity_rows=gap_rows, max_equity_gap=timedelta(hours=2)
+    )
+    assert ok_gap is False
+    assert status_gap == "uncertified"
+    assert "equity_window_gap_detected" in proof_gap

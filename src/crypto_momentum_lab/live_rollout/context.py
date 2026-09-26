@@ -8,8 +8,8 @@ state.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Collection
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Collection, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -19,6 +19,9 @@ import structlog
 
 from crypto_momentum_lab.domain.account import ExecutionAccountStatus
 from crypto_momentum_lab.domain.execution import ExchangeOrderState
+from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    CoverageEvidence,
+)
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import (
     RiskConfigSnapshot,
@@ -87,6 +90,7 @@ class LiveDaemonRuntimeContext:
     account_snapshot: AccountSnapshot | None = None
     account_snapshot_version: int | None = None
     context_epoch: int | None = None
+    coverage_by_symbol: Mapping[str, CoverageEvidence] = field(default_factory=dict)
 
 
 class ContextInvalidationReason(StrEnum):

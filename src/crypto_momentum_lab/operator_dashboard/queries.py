@@ -521,4 +521,5 @@ class DashboardQueries:
                 cf_rows=cf_rows,
                 start_time=start_time,
                 end_time=now,
+                max_equity_gap=None,
             )

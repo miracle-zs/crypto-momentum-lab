@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.account.models import AccountBalanceSnapshot
@@ -62,6 +62,7 @@ class _Ctx:
         self.risk_config = _Risk()
         self.context_epoch = kwargs.get("context_epoch", 1)
         self.account_snapshot_version = kwargs.get("account_snapshot_version", 7)
+        self.coverage_by_symbol = kwargs.get("coverage_by_symbol", {})
 
 
 def _snapshot(cash: str = "1000") -> AccountSnapshot:
@@ -124,3 +125,33 @@ def test_fact_source_requires_bound_context() -> None:
     assert src.build(_state()) is None
     src.bind_context(_Ctx(account_snapshot=_snapshot()))
     assert src.build(_state()) is not None
+
+
+def test_proven_coverage_yields_ready_position_health() -> None:
+    from crypto_momentum_lab.domain.execution.position_ledger_models import (
+        CoverageEvidence,
+        FactCoverageStatus,
+    )
+
+    state = _state()
+    evidence = CoverageEvidence(
+        fill_cursor_id="cursor_1",
+        fill_load_start=state.bucket_start - timedelta(hours=1),
+        fill_checked_through=state.bucket_end + timedelta(minutes=1),
+        checkpoint_id="chk_1",
+        checkpoint_event_cut=state.bucket_end + timedelta(minutes=1),
+    )
+    ctx = _Ctx(
+        account_snapshot=_snapshot("500"),
+        coverage_by_symbol={state.symbol: evidence},
+    )
+    out = frozen_decision_inputs_from_context(
+        ctx,
+        state,
+        account_label="primary",
+    )
+    assert out is not None
+    assert out.position_view.health_status == PositionHealthStatus.READY
+    assert out.position_view.coverage is not None
+    assert out.position_view.coverage.status == FactCoverageStatus.CONFIRMED
+    assert out.position_view.is_ready_for_trade is True

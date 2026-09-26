@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -140,6 +140,7 @@ def _assess_coverage(
     start_time: datetime,
     end_time: datetime,
     equity_rows: Sequence[Any] = (),
+    max_equity_gap: timedelta | None = None,
 ) -> tuple[bool, str, str]:
     """Determine coverage status from cash-flow facts from first principles.
 
@@ -167,6 +168,12 @@ def _assess_coverage(
     )
 
     if equity_rows:
+        if len(equity_rows) < 2:
+            return (
+                False,
+                "uncertified",
+                "uncertified_equity_window_incomplete",
+            )
         first_at = getattr(equity_rows[0], "observed_at", None)
         last_at = getattr(equity_rows[-1], "observed_at", None)
         if first_at is None or last_at is None:
@@ -175,12 +182,43 @@ def _assess_coverage(
                 "uncertified",
                 "uncertified_equity_window_incomplete",
             )
-        if first_at > s_time or last_at < e_time:
+        first_utc = (
+            first_at if first_at.tzinfo is not None else first_at.replace(tzinfo=UTC)
+        )
+        last_utc = (
+            last_at if last_at.tzinfo is not None else last_at.replace(tzinfo=UTC)
+        )
+        if first_utc > s_time or last_utc < e_time:
             return (
                 False,
                 "uncertified",
                 "uncertified_equity_window_incomplete",
             )
+        prev_utc = first_utc
+        for r in equity_rows[1:]:
+            cur_at = getattr(r, "observed_at", None)
+            if cur_at is None:
+                return (
+                    False,
+                    "uncertified",
+                    "uncertified_equity_window_incomplete",
+                )
+            cur_utc = (
+                cur_at if cur_at.tzinfo is not None else cur_at.replace(tzinfo=UTC)
+            )
+            if cur_utc < prev_utc:
+                return (
+                    False,
+                    "uncertified",
+                    "uncertified_equity_sequence_out_of_order",
+                )
+            if max_equity_gap is not None and (cur_utc - prev_utc) > max_equity_gap:
+                return (
+                    False,
+                    "uncertified",
+                    "uncertified_equity_window_gap_detected",
+                )
+            prev_utc = cur_utc
 
     for r in cf_rows:
         rec_id = getattr(r, "correction_id", "unknown")
@@ -250,6 +288,7 @@ def build_performance_summary(
     cf_rows: Sequence[Any],
     start_time: datetime,
     end_time: datetime,
+    max_equity_gap: timedelta | None = None,
 ) -> AccountPerformanceSummaryResponse | None:
     """Builds a fully-audited AccountPerformanceSummaryResponse.
 
@@ -257,6 +296,14 @@ def build_performance_summary(
     """
     if not equity_rows:
         return None
+
+    effective_max_gap = max_equity_gap
+    if effective_max_gap is None and len(equity_rows) >= 3:
+        first_at = getattr(equity_rows[0], "observed_at", None)
+        last_at = getattr(equity_rows[-1], "observed_at", None)
+        if first_at is not None and last_at is not None and last_at > first_at:
+            expected_step = (last_at - first_at) / (len(equity_rows) - 1)
+            effective_max_gap = max(timedelta(hours=2), expected_step * 4)
 
     start_eq: Decimal = equity_rows[0].wallet_balance
     end_eq: Decimal = equity_rows[-1].wallet_balance
@@ -281,7 +328,11 @@ def build_performance_summary(
     }
 
     is_certified, coverage_status, coverage_proof = _assess_coverage(
-        cf_rows, start_time, end_time, equity_rows=equity_rows,
+        cf_rows,
+        start_time,
+        end_time,
+        equity_rows=equity_rows,
+        max_equity_gap=effective_max_gap,
     )
 
     pnl = metrics["cash_flow_adjusted_pnl"]
@@ -319,6 +370,7 @@ def build_performance_summary_dict(
     cf_rows: Sequence[Any],
     start_time: datetime,
     end_time: datetime,
+    max_equity_gap: timedelta | None = None,
 ) -> dict[str, object]:
     """Dict variant for the /api/account-performance endpoint."""
     summary = build_performance_summary(
@@ -327,6 +379,7 @@ def build_performance_summary_dict(
         cf_rows=cf_rows,
         start_time=start_time,
         end_time=end_time,
+        max_equity_gap=max_equity_gap,
     )
     if summary is None:
         return {"status": "no_data", "account_label": account_label}

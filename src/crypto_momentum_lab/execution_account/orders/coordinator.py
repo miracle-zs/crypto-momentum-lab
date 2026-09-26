@@ -469,6 +469,20 @@ class OrderExecutionCoordinator:
                 r for r in target_reservations if r.reservation_id not in existing_by_id
             ]
 
+            # Determine batch quantities for capacity enforcement
+            batch_quantities = getattr(plan, "batch_quantities", None)
+            if batch_quantities is None:
+                allocations = getattr(plan, "allocations", ())
+                if allocations:
+                    batch_quantities = {
+                        alloc.batch_id: alloc.allocated_quantity
+                        for alloc in allocations
+                    }
+                    first_res = target_reservations[0]
+                    batch_quantities = {
+                        first_res.batch_id: first_res.reserved_quantity
+                    }
+
             saved_new: list[PositionReservation] = []
             try:
                 saver = getattr(self._reservation_repository, "save_reservations", None)
@@ -477,6 +491,7 @@ class OrderExecutionCoordinator:
                         saver(
                             tuple(needed),
                             expected_projection_version=proj_ver,
+                            batch_quantities=batch_quantities,
                         )
                     )
                     for res in needed:
@@ -487,10 +502,16 @@ class OrderExecutionCoordinator:
                 else:
                     for res in needed:
                         try:
+                            batch_limit = (
+                                batch_quantities.get(res.batch_id)
+                                if batch_quantities
+                                else None
+                            )
                             await _maybe_await(
                                 self._reservation_repository.save_reservation(
                                     res,
                                     expected_projection_version=proj_ver,
+                                    batch_quantity=batch_limit,
                                 )
                             )
                         except ReservationConflictError:

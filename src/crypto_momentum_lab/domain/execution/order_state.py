@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -77,6 +78,7 @@ class OrderExecutionPlan:
     batch_id: str | None = None
     allocations: tuple[ExitAllocation, ...] = ()
     projection_version: str | None = None
+    batch_quantities: Mapping[str, Decimal] | None = None
 
     def __post_init__(self) -> None:
         for value, field_name in (

@@ -559,8 +559,8 @@ class PositionLedger:
                     is_comparable = True
                     diagnostics.append(
                         f"Reconciliation gap at cut {snap_time.isoformat()}: "
-                        f"snapshot={obs_amt}, cut_qty={cut_qty},"
-                        "gap={reconciliation_gap}"
+                        f"snapshot={obs_amt}, cut_qty={cut_qty}, "
+                        f"gap={reconciliation_gap}"
                     )
             else:
                 # Snapshot is at or ahead of all fills

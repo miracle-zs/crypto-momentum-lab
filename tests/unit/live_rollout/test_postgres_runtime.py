@@ -1420,6 +1420,7 @@ async def test_position_view_uses_hub_snapshot_without_account_queries() -> None
         (),
         frozenset(),
         frozenset(),
+        {},
     )
 
 

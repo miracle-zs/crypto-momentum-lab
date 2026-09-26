@@ -14,10 +14,12 @@ from crypto_momentum_lab.domain.decision.decision_engine import (
 )
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    FactCoverageStatus,
     PositionHealthStatus,
     PositionKey,
     PositionLedgerBatch,
     PositionView,
+    compose_fact_coverage,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.risk import StrategyLiveState
@@ -101,12 +103,21 @@ def frozen_decision_inputs_from_context(
         getattr(context, "pending_position_symbols", frozenset())
         | getattr(context, "unmanaged_position_symbols", frozenset())
     )
-    coverage = None
+    evidence = getattr(context, "coverage_by_symbol", {}).get(state.symbol)
+    coverage = (
+        compose_fact_coverage(
+            evidence,
+            start=state.bucket_start,
+            end=state.bucket_end,
+        )
+        if evidence is not None
+        else None
+    )
     if context.strategy_state != StrategyLiveState.ACTIVE:
         health = PositionHealthStatus.CATCHING_UP
     elif context.active_halts or pending_or_unmanaged:
         health = PositionHealthStatus.INCOMPLETE
-    elif coverage is None or coverage.status.value != "CONFIRMED":
+    elif coverage is None or coverage.status != FactCoverageStatus.CONFIRMED:
         # Without proven coverage the position facts are not authoritative.
         health = PositionHealthStatus.CATCHING_UP
     else:

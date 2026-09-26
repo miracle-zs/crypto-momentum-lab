@@ -70,9 +70,8 @@ class PositionBook:
                 ):
                     health_status = PositionHealthStatus.CATCHING_UP
                     diagnostics.append(
-                        f"Event cut ({projection.event_cut}) is behind minimum required"
-                        "cut"
-                        f"({requirement.min_event_cut})"
+                        f"Event cut ({projection.event_cut}) is behind minimum "
+                        f"required cut ({requirement.min_event_cut})"
                     )
 
             if projection.event_cut is not None:
