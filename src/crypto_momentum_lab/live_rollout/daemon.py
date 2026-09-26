@@ -7,7 +7,7 @@ from collections.abc import (
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import Any, Protocol
 
 import structlog
 
@@ -174,6 +174,7 @@ class LiveDaemonConfig:
         ]
         | None
     ) = None
+    decision_fact_binder: Callable[[Any], None] | None = None
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -451,6 +452,7 @@ class LiveStrategyDaemon:
             entered_symbol_lookup=entered_symbol_lookup,
             unmanaged_halt_debounce_seconds=config.unmanaged_halt_debounce_seconds,
             decision_filter=config.decision_filter,
+            decision_fact_binder=config.decision_fact_binder,
         )
         self._lifecycle = LiveDaemonLifecycle(
             run_id=config.run_id,

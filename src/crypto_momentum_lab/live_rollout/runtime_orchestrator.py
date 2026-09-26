@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from crypto_momentum_lab.domain.decision.decision_engine import (
     create_authoritative_decision_filter,
 )
+from crypto_momentum_lab.live_rollout.decision_facts import LiveDecisionFactSource
 from crypto_momentum_lab.domain.execution import OrderExecutionPlan
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
     ExecutionCoordinator,
@@ -1003,6 +1004,7 @@ async def run_live_daemon(
         entry_universe_snapshot_provider = (
             entry_runtime.entry_universe_snapshot_provider
         )
+        fact_source = LiveDecisionFactSource(account_label)
         daemon = LiveStrategyDaemon(
             strategy=strategy,
             risk_gateway=RiskGateway(),
@@ -1043,7 +1045,11 @@ async def run_live_daemon(
                 entry_limit_ttl_seconds=entry_limit_ttl_seconds,
                 scheduled_risk_window=_resolve_scheduled_risk_window(),
                 max_concurrency_per_symbol=max_concurrency_per_symbol,
-                decision_filter=create_authoritative_decision_filter(strategy_name),
+                decision_filter=create_authoritative_decision_filter(
+                    strategy_name,
+                    fact_provider=fact_source.build,
+                ),
+                decision_fact_binder=fact_source.bind_context,
                 readiness_provider=lambda: (
                     daemon.evaluate_readiness()
                     if daemon is not None

@@ -156,6 +156,10 @@ class LiveMarketLoop:
             ]
             | None
         ) = None,
+        decision_fact_binder: Callable[
+            [LiveDaemonRuntimeContext | None], None
+        ]
+        | None = None,
     ) -> None:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
@@ -181,6 +185,7 @@ class LiveMarketLoop:
         self._commit_market_state_cursor = commit_market_state_cursor
         self._entered_symbol_lookup = entered_symbol_lookup
         self._decision_filter = decision_filter
+        self._decision_fact_binder = decision_fact_binder
         self._unmanaged_halt_debounce_seconds = float(
             os.environ.get(
                 "CML_UNMANAGED_HALT_DEBOUNCE_SECONDS",
@@ -599,6 +604,8 @@ class LiveMarketLoop:
                         final_state_at,
                     )
             decision = self._strategy.on_market_state(state)
+            if self._decision_fact_binder is not None:
+                self._decision_fact_binder(context)
             if self._decision_filter is not None:
                 filtered = self._decision_filter(decision, state)
                 if inspect.isawaitable(filtered):
