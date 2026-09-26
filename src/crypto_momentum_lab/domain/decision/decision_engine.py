@@ -424,16 +424,14 @@ def compute_decision_input_hash(
                 for k, v in sorted(state.cooldown_until_by_symbol.items())
             },
             "anchor_prices_by_symbol": {
-                k: str(v)
-                for k, v in sorted(state.anchor_prices_by_symbol.items())
+                k: str(v) for k, v in sorted(state.anchor_prices_by_symbol.items())
             },
             "active_intent_ids_by_symbol": dict(
                 sorted(state.active_intent_ids_by_symbol.items())
             ),
             "warmup_status": dict(sorted(state.warmup_status.items())),
             "grace_until_by_symbol": {
-                k: v.isoformat()
-                for k, v in sorted(state.grace_until_by_symbol.items())
+                k: v.isoformat() for k, v in sorted(state.grace_until_by_symbol.items())
             },
             "holding_deadline_by_symbol": {
                 k: v.isoformat()
@@ -558,9 +556,7 @@ def build_decision_input(
     labels differ. Do not reassemble DecisionInput ad hoc in runners.
     """
     effective_scope = scope or getattr(state, "environment", None) or "live"
-    effective_source_epoch = (
-        source_epoch or f"seq_{getattr(state, 'trade_count', 0)}"
-    )
+    effective_source_epoch = source_epoch or f"seq_{getattr(state, 'trade_count', 0)}"
 
     if market_ref is None:
         pub_time = state.last_received_at or state.bucket_end
@@ -635,6 +631,18 @@ def decision_trace_from_result(
             "warmup_status": dict(sorted(warmup_items)),
         },
     }
+    if (
+        hasattr(decision_input, "market_envelope")
+        and decision_input.market_envelope is not None
+    ):
+        try:
+            from crypto_momentum_lab.market_data.hub import market_state_to_payload
+
+            payload["market_state"] = market_state_to_payload(
+                decision_input.market_envelope.state
+            )
+        except Exception:
+            pass
     if result.intent is not None:
         notional = getattr(result.intent, "desired_notional", None)
         if notional is None:
@@ -653,9 +661,7 @@ def decision_trace_from_result(
             "command_id": cmd.command_id,
             "symbol": cmd.position_key.symbol,
             "quantity": str(cmd.requested_quantity),
-            "side": (
-                cmd.side.value if hasattr(cmd.side, "value") else str(cmd.side)
-            ),
+            "side": (cmd.side.value if hasattr(cmd.side, "value") else str(cmd.side)),
         }
     return DecisionTrace(
         decision_id=result.decision_id,
@@ -670,6 +676,9 @@ def decision_trace_from_result(
         frame_digest=result.frame_digest,
         trace_payload=payload,
     )
+
+
+build_decision_trace = decision_trace_from_result
 
 
 def map_decision_rejection_reason(raw_reason: str | None) -> str:
@@ -688,7 +697,8 @@ def create_authoritative_decision_filter(
     target_notional: Decimal | None = None,
     fact_provider: Callable[[MarketState15s], FrozenDecisionInputs | None]
     | None = None,
-    on_decision_result: Callable[[DecisionResult], None] | None = None,
+    on_decision_result: Callable[..., None] | None = None,
+    trace_recorder: Callable[[DecisionTrace], None] | None = None,
 ) -> Callable[[StrategyDecision, MarketState15s], StrategyDecision]:
     """Authoritative decision filter wrapping DecisionEngine for runtime loops.
 
@@ -749,8 +759,22 @@ def create_authoritative_decision_filter(
                         candidate_generator=lambda inp, st: None,
                     )
                     dec_res = engine.evaluate(dec_input, frozen.policy_state, policy)
+                    if trace_recorder is not None:
+                        try:
+                            trace = build_decision_trace(
+                                dec_res,
+                                dec_input,
+                                strategy_name=strategy_name,
+                                account_label=frozen.position_view.key.account_label,
+                            )
+                            trace_recorder(trace)
+                        except Exception:
+                            pass
                     if on_decision_result is not None:
-                        on_decision_result(dec_res)
+                        try:
+                            on_decision_result(dec_res, dec_input)
+                        except TypeError:
+                            on_decision_result(dec_res)
             return decision
 
         if fact_provider is None:
@@ -795,8 +819,22 @@ def create_authoritative_decision_filter(
             )
             # Shared starting PolicyState — never a fresh empty state.
             dec_res = engine.evaluate(dec_input, frozen.policy_state, policy)
+            if trace_recorder is not None:
+                try:
+                    trace = build_decision_trace(
+                        dec_res,
+                        dec_input,
+                        strategy_name=strategy_name,
+                        account_label=frozen.position_view.key.account_label,
+                    )
+                    trace_recorder(trace)
+                except Exception:
+                    pass
             if on_decision_result is not None:
-                on_decision_result(dec_res)
+                try:
+                    on_decision_result(dec_res, dec_input)
+                except TypeError:
+                    on_decision_result(dec_res)
             if dec_res.intent is not None:
                 filtered_candidates.append(cand)
             else:

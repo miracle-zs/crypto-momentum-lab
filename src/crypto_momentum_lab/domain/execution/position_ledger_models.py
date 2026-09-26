@@ -465,6 +465,7 @@ class PositionView:
     diagnostics: tuple[str, ...] = ()
     discrepancy: PositionDiscrepancy | None = None
     is_comparable: bool = True
+    zero_position_snapshot_confirmed: bool = False
 
     @property
     def total_quantity(self) -> Decimal:
@@ -487,5 +488,6 @@ class PositionView:
             and (
                 has_confirmed_coverage
                 or (self.coverage is None and self.key.environment != "live")
+                or self.zero_position_snapshot_confirmed
             )
         )

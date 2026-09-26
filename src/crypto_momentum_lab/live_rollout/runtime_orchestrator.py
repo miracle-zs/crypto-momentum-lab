@@ -215,6 +215,9 @@ from crypto_momentum_lab.market_data.quote_hub import (
     WebSocketMarketQuoteSource,
     WebSocketMarketQuoteVolumeSource,
 )
+from crypto_momentum_lab.persistence.postgres.decision_trace_repository import (
+    PostgresDecisionTraceRepository,
+)
 from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
     PostgresLiveRolloutRepository,
 )
@@ -497,6 +500,9 @@ async def run_live_daemon(
         ownership_registry.register("volume_cache", volume_cache.stop)
         await volume_cache.start()
         signal_repository = PostgresLiveSignalRepository(observability_factory)
+        decision_trace_repository = PostgresDecisionTraceRepository(
+            observability_factory
+        )
         signal_recorder = LiveStrategySignalRecorder(
             run_id=session_id,
             account_label=account_label,
@@ -551,6 +557,7 @@ async def run_live_daemon(
                 )
             except Exception as tel_err:
                 log.warning("runtime_metadata_telemetry_failed", error=str(tel_err))
+
         def _write_metadata_disk() -> None:
             meta_dir = Path(os.environ.get("CML_RUNTIME_METADATA_DIR", "/tmp"))
             if meta_dir.exists():
@@ -561,7 +568,6 @@ async def run_live_daemon(
             await asyncio.to_thread(_write_metadata_disk)
         except Exception as disk_err:
             log.debug("runtime_metadata_disk_write_failed", error=str(disk_err))
-
 
         client = BinanceUsdMTradeClient(
             api_key=api_key,
@@ -637,9 +643,7 @@ async def run_live_daemon(
                 strategy_name=strategy_name,
             )
         except Exception as res_err:
-            log.warning(
-                "position_reservations_recovery_failed", error=str(res_err)
-            )
+            log.warning("position_reservations_recovery_failed", error=str(res_err))
 
         domain_coordinator = ExecutionCoordinator()
         if active_reservations:
@@ -1010,7 +1014,11 @@ async def run_live_daemon(
         entry_universe_snapshot_provider = (
             entry_runtime.entry_universe_snapshot_provider
         )
-        fact_source = LiveDecisionFactSource(account_label)
+        fact_source = LiveDecisionFactSource(
+            account_label,
+            trace_repository=decision_trace_repository,
+            strategy_name=strategy_name,
+        )
         daemon = LiveStrategyDaemon(
             strategy=strategy,
             risk_gateway=RiskGateway(),
@@ -1055,6 +1063,7 @@ async def run_live_daemon(
                     strategy_name,
                     fact_provider=fact_source.build,
                     on_decision_result=fact_source.on_decision_result,
+                    trace_recorder=fact_source.record_trace,
                 ),
                 decision_fact_binder=fact_source.bind_context,
                 readiness_provider=lambda: (
