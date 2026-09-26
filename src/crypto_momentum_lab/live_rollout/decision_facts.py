@@ -97,10 +97,18 @@ def frozen_decision_inputs_from_context(
     )
     batches = _position_batches(context, state.symbol)
 
+    pending_or_unmanaged = state.symbol in (
+        getattr(context, "pending_position_symbols", frozenset())
+        | getattr(context, "unmanaged_position_symbols", frozenset())
+    )
+    coverage = None
     if context.strategy_state != StrategyLiveState.ACTIVE:
         health = PositionHealthStatus.CATCHING_UP
-    elif context.active_halts:
+    elif context.active_halts or pending_or_unmanaged:
         health = PositionHealthStatus.INCOMPLETE
+    elif coverage is None or coverage.status.value != "CONFIRMED":
+        # Without proven coverage the position facts are not authoritative.
+        health = PositionHealthStatus.CATCHING_UP
     else:
         health = PositionHealthStatus.READY
 
@@ -125,7 +133,7 @@ def frozen_decision_inputs_from_context(
         event_cut=state.bucket_end,
         policy_version="live",
         schema_version="v1",
-        coverage=None,
+        coverage=coverage,
         active_episode=None,
         batches=batches,
         unallocated_quantity=Decimal("0"),

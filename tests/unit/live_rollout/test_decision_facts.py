@@ -100,7 +100,8 @@ def test_real_cash_and_versions_are_used() -> None:
     )
     assert out is not None
     assert out.cash_balance == Decimal("250.5")
-    assert out.position_view.health_status == PositionHealthStatus.READY
+    # Without proven coverage the facts must not claim READY.
+    assert out.position_view.health_status == PositionHealthStatus.CATCHING_UP
     assert "primary" in out.position_view.projection_version
     assert out.position_view.projection_version.endswith("_7")
 
