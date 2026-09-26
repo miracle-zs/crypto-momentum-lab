@@ -29,6 +29,8 @@ from crypto_momentum_lab.domain.execution.position_ledger import PositionLedger
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageInterval,
     FactCoverageStatus,
+    CoverageEvidence,
+    compose_fact_coverage,
     PositionHealthStatus,
     PositionKey,
 )
@@ -66,6 +68,7 @@ from crypto_momentum_lab.persistence.postgres.live_rollout_repository import (
 )
 from crypto_momentum_lab.persistence.postgres.models import (
     AccountFillEventRow,
+    AccountFillReconciliationCursorRow,
     AccountPositionSnapshotRow,
     AccountReconciliationRunRow,
     ExchangeFillRow,
@@ -1129,6 +1132,19 @@ class PostgresLiveContextProvider(LiveContextReader):
         exit_batch_ids, legacy_exit_order_ids = await _load_exit_batch_bindings(
             self._sessions, orders
         )
+        fill_cursor = await session.scalar(
+            select(AccountFillReconciliationCursorRow)
+            .where(
+                AccountFillReconciliationCursorRow.environment == "live",
+                AccountFillReconciliationCursorRow.account_label
+                == self._account_label,
+            )
+            .limit(1)
+        )
+        coverage_evidence = _coverage_evidence_from_sources(
+            fill_cursor=fill_cursor,
+            reconciliation=reconciliation,
+        )
         managed, pending, unmanaged = _classify_live_positions_detailed(
             active,
             orders,
@@ -1140,6 +1156,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             order_identity_events=order_identity_events,
             account_fill_quantities=account_fill_quantities,
             account_fills=domain_account_fills,
+            coverage_evidence=coverage_evidence,
         )
         return (
             process_at,
@@ -1249,6 +1266,9 @@ class PostgresLiveContextProvider(LiveContextReader):
         exit_batch_ids, legacy_exit_order_ids = await _load_exit_batch_bindings(
             self._sessions, orders
         )
+        # Hub snapshot path must not open account-state sessions; without
+        # durable cursor/checkpoint evidence coverage stays unconfirmed.
+        coverage_evidence = None
         managed, pending, unmanaged = _classify_live_positions_detailed(
             active,
             orders,
@@ -1260,6 +1280,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             order_identity_events=order_identity_events,
             account_fill_quantities=account_fill_quantities,
             account_fills=domain_account_fills,
+            coverage_evidence=coverage_evidence,
         )
         return (
             snapshot.config.observed_at,
@@ -1501,6 +1522,7 @@ def _classify_live_positions(
     ]
     | None = None,
     account_fill_quantities: Mapping[str, Decimal] | None = None,
+    coverage_evidence: CoverageEvidence | None = None,
 ) -> tuple[tuple[ManagedLivePosition, ...], frozenset[str]]:
     """Keep the historical two-value classification API for callers/tests."""
     managed, _pending, unmanaged = _classify_live_positions_detailed(
@@ -1513,6 +1535,7 @@ def _classify_live_positions(
         legacy_exit_order_ids=legacy_exit_order_ids,
         order_identity_events=order_identity_events,
         account_fill_quantities=account_fill_quantities,
+        coverage_evidence=coverage_evidence,
     )
     return managed, unmanaged
 
@@ -1534,6 +1557,7 @@ def _classify_live_positions_detailed(
     account_fill_quantities: Mapping[str, Decimal] | None = None,
     account_fills: Sequence[AccountFillEvent] = (),
     since_time: datetime | None = None,
+    coverage_evidence: CoverageEvidence | None = None,
 ) -> tuple[
     tuple[ManagedLivePosition, ...],
     frozenset[str],
@@ -1724,6 +1748,7 @@ def _classify_live_positions_detailed(
             fill_prices=fill_prices,
             account_fills=account_fills,
             since_time=resolved_since,
+            coverage_evidence=coverage_evidence,
         )
         if not batches and not closing_filled:
             # The account snapshot can arrive before the new entry's order
@@ -2266,6 +2291,48 @@ def _position_order_from_plan(item: PersistedExchangeOrder) -> _PositionOrder:
     )
 
 
+def _ms_to_dt(value: int | None) -> datetime | None:
+    if value is None:
+        return None
+    return datetime.fromtimestamp(value / 1000.0, tz=UTC)
+
+
+def _coverage_evidence_from_sources(
+    *,
+    fill_cursor: AccountFillReconciliationCursorRow | None,
+    reconciliation: AccountReconciliationRunRow | None,
+) -> CoverageEvidence:
+    """Assemble durable coverage proof from fill cursor + reconciliation.
+
+    Neither source alone can confirm a window: the cursor proves continuous
+    fill ingestion, the ready reconciliation is the checkpoint cut.
+    """
+    cursor_id: str | None = None
+    load_start: datetime | None = None
+    checked_through: datetime | None = None
+    if fill_cursor is not None:
+        from_id = getattr(fill_cursor, "from_id", None)
+        start_time_ms = getattr(fill_cursor, "start_time_ms", None)
+        if from_id is not None:
+            cursor_id = f"fill_from_id:{from_id}"
+        elif start_time_ms is not None:
+            cursor_id = f"fill_start_ms:{start_time_ms}"
+        load_start = _ms_to_dt(start_time_ms)
+        checked_through = getattr(fill_cursor, "last_checked_at", None)
+    checkpoint_id: str | None = None
+    checkpoint_cut: datetime | None = None
+    if reconciliation is not None and getattr(reconciliation, "status", None) == "ready":
+        checkpoint_id = getattr(reconciliation, "reconciliation_id", None)
+        checkpoint_cut = getattr(reconciliation, "observed_at", None)
+    return CoverageEvidence(
+        fill_cursor_id=cursor_id,
+        fill_load_start=load_start,
+        fill_checked_through=checked_through,
+        checkpoint_id=checkpoint_id,
+        checkpoint_event_cut=checkpoint_cut,
+    )
+
+
 def _build_position_batches(
     *,
     position: AccountPositionSnapshot | AccountPositionSnapshotRow,
@@ -2276,6 +2343,7 @@ def _build_position_batches(
     fill_prices: Mapping[str, Decimal],
     account_fills: Sequence[AccountFillEvent] = (),
     since_time: datetime | None = None,
+    coverage_evidence: CoverageEvidence | None = None,
 ) -> tuple[ManagedLivePositionBatch, ...]:
     observation = PositionObservation(
         symbol=position.symbol,
@@ -2331,19 +2399,14 @@ def _build_position_batches(
         coverage = getattr(position, "coverage", None)
         if coverage is None and since_time is not None:
             obs_dt = getattr(position, "observed_at", None) or datetime.now(UTC)
-            has_cursor = bool(getattr(position, "source_cursor", None))
-            has_checkpoint = bool(getattr(position, "checkpoint_revision", None))
-            cov_status = (
-                FactCoverageStatus.CONFIRMED
-                if (has_cursor or has_checkpoint)
-                else FactCoverageStatus.PENDING
-            )
-            coverage = FactCoverageInterval(
-                start_at=since_time,
-                end_at=obs_dt if obs_dt >= since_time else since_time,
-                source_cursor=getattr(position, "source_cursor", None),
-                confirmed_revision=getattr(position, "checkpoint_revision", None),
-                status=cov_status,
+            if obs_dt < since_time:
+                obs_dt = since_time
+            # Only cursor+checkpoint evidence can confirm completeness.
+            # Non-empty attributes on the snapshot are not proof.
+            coverage = compose_fact_coverage(
+                coverage_evidence,
+                start=since_time,
+                end=obs_dt,
             )
         facts = LegacyOrderIdentityAdapter.to_account_facts(
             position_key=position_key,

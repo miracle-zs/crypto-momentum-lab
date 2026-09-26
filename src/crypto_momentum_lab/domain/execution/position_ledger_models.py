@@ -33,6 +33,76 @@ class FactCoverageStatus(StrEnum):
     PENDING = "PENDING"
 
 
+@dataclass(frozen=True, slots=True)
+class CoverageEvidence:
+    """Durable proof that account facts were loaded completely.
+
+    CONFIRMED coverage requires all of:
+    - a fill-load cursor proving continuous ingestion through the end of
+      the window (``fill_checked_through``);
+    - a checkpoint whose event cut reaches the end of the window;
+    - a load start that is not after the requested window start.
+    Missing any piece leaves the interval unconfirmed.
+    """
+
+    fill_cursor_id: str | None = None
+    fill_load_start: datetime | None = None
+    fill_checked_through: datetime | None = None
+    checkpoint_id: str | None = None
+    checkpoint_event_cut: datetime | None = None
+
+    def proves_complete(self, start: datetime, end: datetime) -> bool:
+        if self.fill_load_start is None or self.fill_checked_through is None:
+            return False
+        if self.checkpoint_id is None or self.checkpoint_event_cut is None:
+            return False
+        return (
+            self.fill_load_start <= start
+            and self.fill_checked_through >= end
+            and self.checkpoint_event_cut >= end
+        )
+
+
+def compose_fact_coverage(
+    evidence: CoverageEvidence | None,
+    *,
+    start: datetime,
+    end: datetime,
+) -> FactCoverageInterval:
+    """Build coverage only from proven evidence — never from empty attributes.
+
+    A non-empty cursor or checkpoint id is not enough: the window must be
+    bracketed by load start, fill check-through, and checkpoint event cut.
+    """
+    if start.tzinfo is None or end.tzinfo is None:
+        raise ValueError("coverage bounds must be timezone-aware")
+    if end < start:
+        raise ValueError("coverage end must not precede start")
+
+    if evidence is not None and evidence.proves_complete(start, end):
+        return FactCoverageInterval(
+            start_at=max(start, evidence.fill_load_start or start),
+            end_at=min(
+                end,
+                evidence.fill_checked_through,
+                evidence.checkpoint_event_cut,
+            ),
+            source_cursor=evidence.fill_cursor_id,
+            status=FactCoverageStatus.CONFIRMED,
+            confirmed_revision=None,
+        )
+
+    return FactCoverageInterval(
+        start_at=start,
+        end_at=end,
+        source_cursor=(
+            evidence.fill_cursor_id if evidence is not None else None
+        ),
+        status=FactCoverageStatus.PENDING,
+        confirmed_revision=None,
+    )
+
+
 class PositionHealthStatus(StrEnum):
     """Authoritative trading health status for a PositionKey per architecture RFC 2026-09-25."""
 
