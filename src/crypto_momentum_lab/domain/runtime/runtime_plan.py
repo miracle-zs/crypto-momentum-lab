@@ -18,7 +18,7 @@ from typing import Any
 
 from crypto_momentum_lab.domain.decision.decision_engine import EffectivePolicy
 from crypto_momentum_lab.domain.strategy.models import EntryType
-from crypto_momentum_lab.strategy_runner.position_exit import (
+from crypto_momentum_lab.domain.strategy.position_exit import (
     PositionExitMode,
     PositionExitPolicy,
 )

@@ -12,9 +12,9 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
 
 from crypto_momentum_lab.domain.market.models import JsonValue
+from crypto_momentum_lab.domain.performance.metric_models import LiveCashFlowAdjustment
 from crypto_momentum_lab.operator_dashboard.live_account_metrics_queries import (
     AccountEquityPoint,
 )
@@ -25,37 +25,6 @@ from crypto_momentum_lab.persistence.postgres.models import (
 
 _COMMON_EQUITY_BUCKET_SECONDS = 15 * 60
 _EQUITY_MAX_POINTS = 240
-
-
-@dataclass(frozen=True, slots=True)
-class LiveCashFlowAdjustment:
-    account_label: str
-    effective_at: datetime
-    amount: Decimal
-    cash_flow_type: str = "deposit"
-
-    def to_fact(
-        self,
-        reason: str = "legacy_env_config",
-        approval_ref: str = "legacy_operator",
-    ) -> Any:
-        import hashlib
-
-        from crypto_momentum_lab.domain.performance.metric_models import CashFlowFact
-
-        h = hashlib.sha256(
-            f"{self.account_label}:{self.effective_at.isoformat()}:{self.amount}".encode()
-        ).hexdigest()
-        return CashFlowFact(
-            correction_id=f"cf_leg_{h[:16]}",
-            account_label=self.account_label,
-            amount=self.amount,
-            cash_flow_type=self.cash_flow_type,
-            effective_at=self.effective_at,
-            reason=reason,
-            approval_ref=approval_ref,
-            evidence_hash=h,
-        )
 
 
 @dataclass(frozen=True, slots=True)

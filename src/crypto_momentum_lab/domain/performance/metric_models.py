@@ -39,6 +39,35 @@ class MetricStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class LiveCashFlowAdjustment:
+    account_label: str
+    effective_at: datetime
+    amount: Decimal
+    cash_flow_type: str = "deposit"
+
+    def to_fact(
+        self,
+        reason: str = "legacy_env_config",
+        approval_ref: str = "legacy_operator",
+    ) -> CashFlowFact:
+        import hashlib
+
+        h = hashlib.sha256(
+            f"{self.account_label}:{self.effective_at.isoformat()}:{self.amount}".encode()
+        ).hexdigest()
+        return CashFlowFact(
+            correction_id=f"cf_leg_{h[:16]}",
+            account_label=self.account_label,
+            amount=self.amount,
+            cash_flow_type=self.cash_flow_type,
+            effective_at=self.effective_at,
+            reason=reason,
+            approval_ref=approval_ref,
+            evidence_hash=h,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CashFlowFact:
     """Authoritative immutable cash flow record with proof and approval lineage."""
 
@@ -68,11 +97,7 @@ class CashFlowFact:
         if not self.approval_ref.strip():
             raise ValueError("approval_ref must not be empty")
 
-    def to_live_adjustment(self) -> Any:
-        from crypto_momentum_lab.operator_dashboard.common_equity import (
-            LiveCashFlowAdjustment,
-        )
-
+    def to_live_adjustment(self) -> LiveCashFlowAdjustment:
         return LiveCashFlowAdjustment(
             account_label=self.account_label,
             effective_at=self.effective_at,

@@ -22,17 +22,16 @@ from crypto_momentum_lab.domain.decision.decision_frame import (
     ClockEvent,
     DecisionFrame,
 )
+from crypto_momentum_lab.domain.decision.policy_transition import (
+    PolicyTransition,
+    StrategyPositionMode,
+    execute_policy_transition,
+)
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionHealthStatus,
     PositionView,
 )
-from crypto_momentum_lab.domain.execution.trade_command import (
-    ExitAllocation,
-    ExitAllocationPlan,
-    ExitPolicyMode,
-    TradeCommand,
-    TradeCommandType,
-)
+from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
 from crypto_momentum_lab.domain.market.market_book import compute_market_state_hash
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import (
@@ -46,13 +45,8 @@ from crypto_momentum_lab.domain.strategy.models import (
     RejectionReason,
     StrategyDecision,
     StrategyRejection,
-    StrategySide,
 )
-from crypto_momentum_lab.strategy_runner.position_exit import (
-    ClosedCandle15m,
-    PositionExitPolicy,
-    position_exit_reason,
-)
+from crypto_momentum_lab.domain.strategy.position_exit import PositionExitPolicy
 
 
 def _require_aware(dt: datetime, name: str) -> datetime:
@@ -120,6 +114,11 @@ class PolicyState:
     anchor_prices_by_symbol: dict[str, Decimal] = field(default_factory=dict)
     active_intent_ids_by_symbol: dict[str, str] = field(default_factory=dict)
     custom_state: dict[str, Any] = field(default_factory=dict)
+    signal_memory: dict[str, Any] = field(default_factory=dict)
+    warmup_status: dict[str, bool] = field(default_factory=dict)
+    grace_until_by_symbol: dict[str, datetime] = field(default_factory=dict)
+    holding_deadline_by_symbol: dict[str, datetime] = field(default_factory=dict)
+    sizing_state_by_symbol: dict[str, Any] = field(default_factory=dict)
 
     def is_in_cooldown(self, symbol: str, current_time: datetime) -> bool:
         until = self.cooldown_until_by_symbol.get(symbol)
@@ -134,6 +133,63 @@ class PolicyState:
             anchor_prices_by_symbol=dict(self.anchor_prices_by_symbol),
             active_intent_ids_by_symbol=dict(self.active_intent_ids_by_symbol),
             custom_state=dict(self.custom_state),
+            signal_memory=dict(self.signal_memory),
+            warmup_status=dict(self.warmup_status),
+            grace_until_by_symbol=dict(self.grace_until_by_symbol),
+            holding_deadline_by_symbol=dict(self.holding_deadline_by_symbol),
+            sizing_state_by_symbol=dict(self.sizing_state_by_symbol),
+        )
+
+    def with_anchor_and_intent(
+        self, symbol: str, anchor_price: Decimal, intent_id: str
+    ) -> PolicyState:
+        new_anchors = dict(self.anchor_prices_by_symbol)
+        new_anchors[symbol] = anchor_price
+        new_intents = dict(self.active_intent_ids_by_symbol)
+        new_intents[symbol] = intent_id
+        return PolicyState(
+            policy_version=self.policy_version + 1,
+            cooldown_until_by_symbol=dict(self.cooldown_until_by_symbol),
+            anchor_prices_by_symbol=new_anchors,
+            active_intent_ids_by_symbol=new_intents,
+            custom_state=dict(self.custom_state),
+            signal_memory=dict(self.signal_memory),
+            warmup_status=dict(self.warmup_status),
+            grace_until_by_symbol=dict(self.grace_until_by_symbol),
+            holding_deadline_by_symbol=dict(self.holding_deadline_by_symbol),
+            sizing_state_by_symbol=dict(self.sizing_state_by_symbol),
+        )
+
+    def with_holding_deadline(self, symbol: str, deadline: datetime) -> PolicyState:
+        new_deadline = dict(self.holding_deadline_by_symbol)
+        new_deadline[symbol] = deadline
+        return PolicyState(
+            policy_version=self.policy_version + 1,
+            cooldown_until_by_symbol=dict(self.cooldown_until_by_symbol),
+            anchor_prices_by_symbol=dict(self.anchor_prices_by_symbol),
+            active_intent_ids_by_symbol=dict(self.active_intent_ids_by_symbol),
+            custom_state=dict(self.custom_state),
+            signal_memory=dict(self.signal_memory),
+            warmup_status=dict(self.warmup_status),
+            grace_until_by_symbol=dict(self.grace_until_by_symbol),
+            holding_deadline_by_symbol=new_deadline,
+            sizing_state_by_symbol=dict(self.sizing_state_by_symbol),
+        )
+
+    def with_signal_memory(self, key: str, value: Any) -> PolicyState:
+        new_mem = dict(self.signal_memory)
+        new_mem[key] = value
+        return PolicyState(
+            policy_version=self.policy_version + 1,
+            cooldown_until_by_symbol=dict(self.cooldown_until_by_symbol),
+            anchor_prices_by_symbol=dict(self.anchor_prices_by_symbol),
+            active_intent_ids_by_symbol=dict(self.active_intent_ids_by_symbol),
+            custom_state=dict(self.custom_state),
+            signal_memory=new_mem,
+            warmup_status=dict(self.warmup_status),
+            grace_until_by_symbol=dict(self.grace_until_by_symbol),
+            holding_deadline_by_symbol=dict(self.holding_deadline_by_symbol),
+            sizing_state_by_symbol=dict(self.sizing_state_by_symbol),
         )
 
     def with_cleared_symbol(self, symbol: str) -> PolicyState:
@@ -143,12 +199,23 @@ class PolicyState:
         new_anchors.pop(symbol, None)
         new_intents = dict(self.active_intent_ids_by_symbol)
         new_intents.pop(symbol, None)
+        new_grace = dict(self.grace_until_by_symbol)
+        new_grace.pop(symbol, None)
+        new_deadline = dict(self.holding_deadline_by_symbol)
+        new_deadline.pop(symbol, None)
+        new_sizing = dict(self.sizing_state_by_symbol)
+        new_sizing.pop(symbol, None)
         return PolicyState(
             policy_version=self.policy_version + 1,
             cooldown_until_by_symbol=new_cd,
             anchor_prices_by_symbol=new_anchors,
             active_intent_ids_by_symbol=new_intents,
             custom_state=dict(self.custom_state),
+            signal_memory=dict(self.signal_memory),
+            warmup_status=dict(self.warmup_status),
+            grace_until_by_symbol=new_grace,
+            holding_deadline_by_symbol=new_deadline,
+            sizing_state_by_symbol=new_sizing,
         )
 
 
@@ -165,6 +232,8 @@ class EffectivePolicy:
     max_open_positions: int = 4
     exit_policy: PositionExitPolicy = field(default_factory=PositionExitPolicy)
     cooldown_duration: timedelta = timedelta(minutes=15)
+    position_mode: StrategyPositionMode = StrategyPositionMode.LONG_ONLY
+    grace_period: timedelta = timedelta(0)
     candidate_generator: Any | None = None
 
 
@@ -180,6 +249,7 @@ class DecisionResult:
     rejection_reason: str | None
     evaluated_at: datetime
     frame_digest: str = ""
+    transition: PolicyTransition | None = None
 
 
 def compute_decision_input_hash(
@@ -219,183 +289,46 @@ def decide(
     Guarantees:
     - Zero side effects: no I/O, no DB, no network, no datetime.now();
     - Fully reproducible from frozen DecisionInput;
-    - Returns updated PolicyState and deterministic decision ID.
+    - Returns updated PolicyState and deterministic decision ID;
+    - Executes authoritative state transition via execute_policy_transition.
     """
-    input_hash = compute_decision_input_hash(decision_input, policy, state)
-    decision_id = f"dec_{decision_input.symbol}_{input_hash[:16]}"
-    clock_time = decision_input.clock_event.timestamp
-    state_15s = decision_input.market_envelope.state
-    pos_view = decision_input.position_view
-    frame_digest = (
-        decision_input.frame.frame_digest if decision_input.frame else ""
+    frame = decision_input.frame
+    if frame is None:
+        clock_event = decision_input.clock_event
+        frame = DecisionFrame(
+            scope="decision",
+            symbol=decision_input.symbol,
+            market_refs=(decision_input.market_ref,),
+            position_view_token=decision_input.position_view.projection_version,
+            universe_version=decision_input.universe_version,
+            risk_config_version=decision_input.risk_config_version,
+            policy_code_digest=f"policy_{state.policy_version}",
+            policy_parameters_digest=f"param_{state.policy_version}",
+            policy_state_digest=f"state_{state.policy_version}",
+            risk_plan_digest=decision_input.risk_config_version,
+            clock_event=clock_event,
+            cash_balance=decision_input.cash_balance,
+        )
+
+    transition = execute_policy_transition(
+        frame=frame,
+        prior_state=state,
+        policy_artifact=policy,
+        market_envelope=decision_input.market_envelope,
+        position_view=decision_input.position_view,
+        decision_input=decision_input,
     )
 
-    # 1. Check Exit condition if position is currently open
-    if pos_view.total_quantity > Decimal("0"):
-        closed_candle = None
-        if state_15s.open_price is not None and state_15s.close_price is not None:
-            closed_candle = ClosedCandle15m(
-                symbol=decision_input.symbol,
-                candle_start=state_15s.bucket_start,
-                candle_end=state_15s.bucket_end,
-                open_price=state_15s.open_price,
-                close_price=state_15s.close_price,
-            )
-
-        earliest_open = min(
-            (b.opened_at for b in pos_view.batches),
-            default=clock_time,
-        )
-
-        exit_reason = position_exit_reason(
-            held_until=clock_time,
-            opened_at=earliest_open,
-            symbol=decision_input.symbol,
-            side=StrategySide.LONG,
-            policy=policy.exit_policy,
-            closed_candle=closed_candle,
-        )
-
-        if exit_reason is not None:
-            allocations = tuple(
-                ExitAllocation(
-                    batch_id=b.batch_id,
-                    allocated_quantity=b.quantity,
-                    entry_price=b.entry_price,
-                )
-                for b in pos_view.batches
-                if b.quantity > Decimal("0")
-            )
-            total_qty = sum(
-                (a.allocated_quantity for a in allocations), start=Decimal("0")
-            )
-            if total_qty > Decimal("0"):
-                alloc_plan = ExitAllocationPlan(
-                    position_key=pos_view.key,
-                    allocations=allocations,
-                    total_allocated_quantity=total_qty,
-                    policy=ExitPolicyMode.FULL_POSITION_CLOSE,
-                    reason=exit_reason,
-                    projection_version=pos_view.projection_version,
-                )
-                exit_cmd = TradeCommand(
-                    command_id=f"cmd_exit_{decision_id}",
-                    position_key=pos_view.key,
-                    command_type=TradeCommandType.EXIT,
-                    side=StrategySide.SHORT,
-                    order_type=EntryType.MARKET,
-                    requested_quantity=total_qty,
-                    reduce_only=True,
-                    allocation_plan=alloc_plan,
-                    reason=exit_reason,
-                    created_at=clock_time,
-                    expected_projection_version=pos_view.projection_version,
-                )
-                next_state = state.with_cooldown(
-                    decision_input.symbol, clock_time + policy.cooldown_duration
-                )
-                return DecisionResult(
-                    decision_id=decision_id,
-                    input_hash=input_hash,
-                    intent=None,
-                    exit_command=exit_cmd,
-                    next_policy_state=next_state,
-                    rejection_reason=None,
-                    evaluated_at=clock_time,
-                    frame_digest=frame_digest,
-                )
-
-    # 2. Check Cooldown
-    if state.is_in_cooldown(decision_input.symbol, clock_time):
-        return DecisionResult(
-            decision_id=decision_id,
-            input_hash=input_hash,
-            intent=None,
-            exit_command=None,
-            next_policy_state=state,
-            rejection_reason="cooldown_active",
-            evaluated_at=clock_time,
-            frame_digest=frame_digest,
-        )
-
-    # 3. Check Entry Eligibility (when position is flat)
-    if pos_view.total_quantity == Decimal("0"):
-        if policy.candidate_generator is not None:
-            cand = policy.candidate_generator(decision_input, state)
-            if cand is not None:
-                return DecisionResult(
-                    decision_id=decision_id,
-                    input_hash=input_hash,
-                    intent=cand,
-                    exit_command=None,
-                    next_policy_state=state,
-                    rejection_reason=None,
-                    evaluated_at=clock_time,
-                    frame_digest=frame_digest,
-                )
-            else:
-                return DecisionResult(
-                    decision_id=decision_id,
-                    input_hash=input_hash,
-                    intent=None,
-                    exit_command=None,
-                    next_policy_state=state,
-                    rejection_reason="no_candidate",
-                    evaluated_at=clock_time,
-                    frame_digest=frame_digest,
-                )
-
-        close = state_15s.close_price or Decimal("0")
-        if close > policy.entry_threshold:
-            intent = OrderIntentCandidate(
-                candidate_id=f"intent_{decision_id}",
-                signal_id=f"sig_{decision_id}",
-                run_id="run_deterministic",
-                strategy_name=policy.strategy_name,
-                strategy_version=f"v{policy.policy_version}",
-                config_hash=policy.policy_id,
-                symbol=decision_input.symbol,
-                side=StrategySide.LONG,
-                entry_type=policy.order_type,
-                limit_price=close if policy.order_type == EntryType.LIMIT else None,
-                desired_notional=policy.target_notional,
-                reduce_only=False,
-                expires_at=clock_time + timedelta(minutes=5),
-                created_at=clock_time,
-                reason="breakout_above_threshold",
-                features={"close_price": str(close)},
-            )
-            return DecisionResult(
-                decision_id=decision_id,
-                input_hash=input_hash,
-                intent=intent,
-                exit_command=None,
-                next_policy_state=state,
-                rejection_reason=None,
-                evaluated_at=clock_time,
-                frame_digest=frame_digest,
-            )
-        else:
-            return DecisionResult(
-                decision_id=decision_id,
-                input_hash=input_hash,
-                intent=None,
-                exit_command=None,
-                next_policy_state=state,
-                rejection_reason="below_entry_threshold",
-                evaluated_at=clock_time,
-                frame_digest=frame_digest,
-            )
-
     return DecisionResult(
-        decision_id=decision_id,
-        input_hash=input_hash,
-        intent=None,
-        exit_command=None,
-        next_policy_state=state,
-        rejection_reason="holding_position_no_exit",
-        evaluated_at=clock_time,
-        frame_digest=frame_digest,
+        decision_id=transition.decision_id,
+        input_hash=transition.input_hash,
+        intent=transition.entry_candidate,
+        exit_command=transition.exit_command,
+        next_policy_state=transition.next_state,
+        rejection_reason=transition.rejection_reason,
+        evaluated_at=transition.transition_time,
+        frame_digest=transition.frame_digest,
+        transition=transition,
     )
 
 
