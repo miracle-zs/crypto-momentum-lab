@@ -95,8 +95,9 @@ class DecisionInput:
             )
         if self.market_envelope.ref != self.market_ref:
             raise ValueError(
-                f"market_envelope.ref ({self.market_envelope.ref.revision_id}) must match "
-                f"market_ref ({self.market_ref.revision_id})"
+                f"market_envelope.ref ({self.market_envelope.ref.revision_id}) "
+                "must match market_ref "
+                f"({self.market_ref.revision_id})"
             )
         computed_hash = compute_market_state_hash(self.market_envelope.state)
         if computed_hash != self.market_ref.content_hash:
@@ -106,7 +107,8 @@ class DecisionInput:
             )
         if self.market_envelope.state.symbol != self.symbol:
             raise ValueError(
-                f"market_envelope state symbol {self.market_envelope.state.symbol} != {self.symbol}"
+                f"market_envelope state symbol "
+                f"{self.market_envelope.state.symbol} != {self.symbol}"
             )
         if self.position_view.key.symbol != self.symbol:
             raise ValueError(
@@ -427,6 +429,55 @@ class FrozenDecisionInputs:
             raise ValueError("risk_config_version must not be empty")
 
 
+def build_decision_input(
+    *,
+    state: MarketState15s,
+    frozen: FrozenDecisionInputs,
+    clock_sequence: int = 1,
+    scope: str = "decision",
+    source_epoch: str = "ep_decision",
+) -> DecisionInput:
+    """Shared DecisionInput assembly for live, paper, and research paths.
+
+    Every runner freezes the same kind of facts; only the epoch/scope
+    labels differ. Do not reassemble DecisionInput ad hoc in runners.
+    """
+    market_ref = MarketRevisionRef(
+        scope=scope,
+        symbol=state.symbol,
+        interval="15s",
+        bucket_start=state.bucket_start,
+        bucket_end=state.bucket_end,
+        revision_id=f"rev_{state.symbol}_{int(state.bucket_start.timestamp())}",
+        content_hash=compute_market_state_hash(state),
+        published_at=state.bucket_end,
+        source_epoch=source_epoch,
+        visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
+    )
+    envelope = MarketEnvelope(ref=market_ref, state=state)
+    return DecisionInput(
+        symbol=state.symbol,
+        market_ref=market_ref,
+        market_envelope=envelope,
+        position_view=frozen.position_view,
+        universe_version=frozen.universe_version,
+        clock_event=ClockEvent(timestamp=state.bucket_end, sequence=clock_sequence),
+        cash_balance=frozen.cash_balance,
+        risk_config_version=frozen.risk_config_version,
+    )
+
+
+def map_decision_rejection_reason(raw_reason: str | None) -> str:
+    """Canonical rejection reason label shared by live and paper runners."""
+    if raw_reason == "cooldown_active":
+        return "COOLDOWN_ACTIVE"
+    if raw_reason == "holding_position_no_exit":
+        return "HOLDING_POSITION"
+    if raw_reason == "below_entry_threshold":
+        return "BELOW_ENTRY_THRESHOLD"
+    return "NO_SIGNAL"
+
+
 def create_authoritative_decision_filter(
     strategy_name: str,
     target_notional: Decimal | None = None,
@@ -496,30 +547,12 @@ def create_authoritative_decision_filter(
                 f"position_health_{pos_view.health_status.value.lower()}",
             )
 
-        market_ref = MarketRevisionRef(
+        dec_input = build_decision_input(
+            state=state,
+            frozen=frozen,
+            clock_sequence=1,
             scope="decision",
-            symbol=state.symbol,
-            interval="15s",
-            bucket_start=state.bucket_start,
-            bucket_end=state.bucket_end,
-            revision_id=(
-                f"rev_{state.symbol}_{int(state.bucket_start.timestamp())}"
-            ),
-            content_hash=compute_market_state_hash(state),
-            published_at=state.bucket_end,
             source_epoch="ep_decision",
-            visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
-        )
-        envelope = MarketEnvelope(ref=market_ref, state=state)
-        dec_input = DecisionInput(
-            symbol=state.symbol,
-            market_ref=market_ref,
-            market_envelope=envelope,
-            position_view=pos_view,
-            universe_version=frozen.universe_version,
-            clock_event=ClockEvent(timestamp=state.bucket_end, sequence=1),
-            cash_balance=frozen.cash_balance,
-            risk_config_version=frozen.risk_config_version,
         )
 
         filtered_candidates: list[OrderIntentCandidate] = []

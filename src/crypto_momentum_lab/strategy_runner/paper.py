@@ -8,13 +8,14 @@ from pathlib import Path
 from typing import Protocol
 
 from crypto_momentum_lab.domain.decision import (
-    ClockEvent,
     DecisionEngine,
-    DecisionInput,
     EffectivePolicy,
     FillModel,
+    FrozenDecisionInputs,
     PolicyState,
     SimulationExecutionAdapter,
+    build_decision_input,
+    map_decision_rejection_reason,
 )
 from crypto_momentum_lab.domain.execution.account_journal import AccountJournal
 from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
@@ -117,6 +118,7 @@ class PaperRunnerConfig:
     candidate_notional: Decimal | None
     candidate_ttl_buckets: int
     signal_interval_seconds: int = 300
+    initial_cash_balance: Decimal = Decimal("10000.00")
     order_flow_impulse: OrderFlowImpulseConfig | None = None
     liquidation_cascade: LiquidationCascadeConfig | None = None
     execution: ReplayExecutionConfig = field(default_factory=ReplayExecutionConfig)
@@ -135,6 +137,8 @@ class PaperRunnerConfig:
             raise ValueError("generated_at must be timezone-aware")
         if self.candidate_notional is not None and self.candidate_notional <= 0:
             raise ValueError("candidate_notional must be positive")
+        if self.initial_cash_balance < Decimal("0"):
+            raise ValueError("initial_cash_balance must not be negative")
         if self.candidate_ttl_buckets <= 0:
             raise ValueError("candidate_ttl_buckets must be positive")
         if self.signal_interval_seconds <= 0:
@@ -342,17 +346,19 @@ def run_paper_trading(
             reconciliation_gap=Decimal("0"),
             health_status=PositionHealthStatus.READY,
         )
-        dec_input = DecisionInput(
-            symbol=state.symbol,
-            market_ref=market_ref,
-            market_envelope=envelope,
+        frozen = FrozenDecisionInputs(
             position_view=pos_view,
+            cash_balance=config.initial_cash_balance,
+            policy_state=policy_state,
             universe_version="univ_v1",
-            clock_event=ClockEvent(
-                timestamp=state.bucket_end, sequence=input_state_count
-            ),
-            cash_balance=Decimal("10000.00"),
             risk_config_version="risk_v1",
+        )
+        dec_input = build_decision_input(
+            state=state,
+            frozen=frozen,
+            clock_sequence=input_state_count,
+            scope="paper",
+            source_epoch=f"ep_{config.run_id}",
         )
         decision = strategy.on_market_state(state)
         signals.extend(decision.signals)
@@ -374,22 +380,12 @@ def run_paper_trading(
                 candidates.append(dec_res.intent)
                 pending_candidates.append(dec_res.intent)
             elif raw_cand is not None:
-                rej_reason = (
-                    RejectionReason.COOLDOWN_ACTIVE
-                    if dec_res.rejection_reason == "cooldown_active"
-                    else (
-                        RejectionReason.HOLDING_POSITION
-                        if dec_res.rejection_reason == "holding_position_no_exit"
-                        else (
-                            RejectionReason.BELOW_ENTRY_THRESHOLD
-                            if dec_res.rejection_reason == "below_entry_threshold"
-                            else RejectionReason.NO_SIGNAL
-                        )
-                    )
-                )
+                label = map_decision_rejection_reason(dec_res.rejection_reason)
                 rejections.append(
                     StrategyRejection(
-                        reason=rej_reason,
+                        reason=getattr(
+                            RejectionReason, label, RejectionReason.NO_SIGNAL
+                        ),
                         symbol=state.symbol,
                         bucket_start=state.bucket_start,
                         details={
