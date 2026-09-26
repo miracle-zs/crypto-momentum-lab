@@ -18,10 +18,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionHealthStatus,
-    PositionKey,
     PositionView,
 )
 from crypto_momentum_lab.domain.execution.trade_command import (
@@ -406,13 +404,70 @@ class DecisionEngine:
         return decide(decision_input, state, policy)
 
 
+@dataclass(frozen=True, slots=True)
+class FrozenDecisionInputs:
+    """Real, version-pinned facts a live decision must be evaluated against.
+
+    Callers supply these from the shared frozen input set (position
+    projection, cash, policy state). The filter never invents them.
+    """
+
+    position_view: PositionView
+    cash_balance: Decimal
+    policy_state: PolicyState
+    universe_version: str
+    risk_config_version: str
+
+    def __post_init__(self) -> None:
+        if self.cash_balance < Decimal("0"):
+            raise ValueError("cash_balance must not be negative")
+        if not self.universe_version.strip():
+            raise ValueError("universe_version must not be empty")
+        if not self.risk_config_version.strip():
+            raise ValueError("risk_config_version must not be empty")
+
+
 def create_authoritative_decision_filter(
     strategy_name: str,
     target_notional: Decimal | None = None,
+    fact_provider: Callable[[MarketState15s], FrozenDecisionInputs | None]
+    | None = None,
+    on_decision_result: Callable[[DecisionResult], None] | None = None,
 ) -> Callable[[StrategyDecision, MarketState15s], StrategyDecision]:
-    """Authoritative decision filter wrapping DecisionEngine for runtime loops."""
+    """Authoritative decision filter wrapping DecisionEngine for runtime loops.
+
+    Refuses to evaluate against synthetic facts. Without a fact provider, or
+    when the frozen position is not READY, candidates are rejected with an
+    explicit reason instead of being approved on an empty READY view.
+    """
     engine = DecisionEngine()
     notional = target_notional or Decimal("500.00")
+
+    def _reject_all(
+        decision: StrategyDecision,
+        state: MarketState15s,
+        reason: str,
+    ) -> StrategyDecision:
+        details = {
+            "raw_reason": reason,
+            "strategy_name": strategy_name,
+        }
+        new_rejections = list(decision.rejections)
+        for cand in decision.candidates:
+            new_rejections.append(
+                StrategyRejection(
+                    reason=RejectionReason.NO_SIGNAL,
+                    symbol=state.symbol,
+                    bucket_start=state.bucket_start,
+                    details={**details, "candidate_id": cand.candidate_id},
+                )
+            )
+        return StrategyDecision(
+            signals=decision.signals,
+            candidates=(),
+            rejections=tuple(new_rejections),
+            checkpoint=decision.checkpoint,
+        )
 
     def _filter(
         decision: StrategyDecision, state: MarketState15s
@@ -420,33 +475,36 @@ def create_authoritative_decision_filter(
         if not decision.candidates:
             return decision
 
-        pos_key = PositionKey(
-            environment="live",
-            account_label="primary",
-            symbol=state.symbol,
-            position_side=FuturesPositionSide.BOTH,
-        )
-        pos_view = PositionView(
-            key=pos_key,
-            projection_version="pv_live",
-            input_revision=1,
-            event_cut=state.bucket_end,
-            policy_version="v1",
-            schema_version="v1",
-            coverage=None,
-            active_episode=None,
-            batches=(),
-            unallocated_quantity=Decimal("0"),
-            reconciliation_gap=Decimal("0"),
-            health_status=PositionHealthStatus.READY,
-        )
+        if fact_provider is None:
+            return _reject_all(
+                decision, state, "missing_frozen_decision_inputs"
+            )
+        frozen = fact_provider(state)
+        if frozen is None:
+            return _reject_all(
+                decision, state, "frozen_decision_inputs_unavailable"
+            )
+        pos_view = frozen.position_view
+        if pos_view.key.symbol != state.symbol:
+            return _reject_all(
+                decision, state, "frozen_inputs_symbol_mismatch"
+            )
+        if pos_view.health_status != PositionHealthStatus.READY:
+            return _reject_all(
+                decision,
+                state,
+                f"position_health_{pos_view.health_status.value.lower()}",
+            )
+
         market_ref = MarketRevisionRef(
             scope="decision",
             symbol=state.symbol,
             interval="15s",
             bucket_start=state.bucket_start,
             bucket_end=state.bucket_end,
-            revision_id=f"rev_{state.symbol}_{int(state.bucket_start.timestamp())}",
+            revision_id=(
+                f"rev_{state.symbol}_{int(state.bucket_start.timestamp())}"
+            ),
             content_hash=compute_market_state_hash(state),
             published_at=state.bucket_end,
             source_epoch="ep_decision",
@@ -458,10 +516,10 @@ def create_authoritative_decision_filter(
             market_ref=market_ref,
             market_envelope=envelope,
             position_view=pos_view,
-            universe_version="univ_v1",
+            universe_version=frozen.universe_version,
             clock_event=ClockEvent(timestamp=state.bucket_end, sequence=1),
-            cash_balance=Decimal("10000.00"),
-            risk_config_version="risk_v1",
+            cash_balance=frozen.cash_balance,
+            risk_config_version=frozen.risk_config_version,
         )
 
         filtered_candidates: list[OrderIntentCandidate] = []
@@ -474,11 +532,18 @@ def create_authoritative_decision_filter(
                 target_notional=notional,
                 candidate_generator=lambda inp, st, _c=cand: _c,
             )
-            dec_res = engine.evaluate(dec_input, PolicyState(), policy)
+            # Shared starting PolicyState — never a fresh empty state.
+            dec_res = engine.evaluate(
+                dec_input, frozen.policy_state, policy
+            )
+            if on_decision_result is not None:
+                on_decision_result(dec_res)
             if dec_res.intent is not None:
                 filtered_candidates.append(cand)
             else:
-                raw_reason = dec_res.rejection_reason or "decision_engine_filtered"
+                raw_reason = dec_res.rejection_reason or (
+                    "decision_engine_filtered"
+                )
                 rej_reason = (
                     RejectionReason.COOLDOWN_ACTIVE
                     if raw_reason == "cooldown_active"
@@ -501,6 +566,9 @@ def create_authoritative_decision_filter(
                             "decision_id": dec_res.decision_id,
                             "raw_reason": raw_reason,
                             "candidate_id": cand.candidate_id,
+                            "policy_state_version": (
+                                frozen.policy_state.policy_version
+                            ),
                         },
                     )
                 )
