@@ -21,6 +21,8 @@ import hashlib
 import json
 import subprocess
 import sys
+import threading
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -105,6 +107,94 @@ def _psql(sql: str, *, container: str, database: str, user: str) -> str:
     return result.stdout.decode().strip()
 
 
+class PsqlSession:
+    """One long-lived psql session.
+
+    Session-level advisory locks taken via :meth:`run` stay held until the
+    session ends, which is what lets fence checks and deletes share a lock.
+    Each ``_psql`` call is a fresh process and cannot do that: the lock is
+    released the moment that process exits.
+    """
+
+    def __init__(self, *, container: str, database: str, user: str) -> None:
+        self._container = container
+        self._database = database
+        self._user = user
+        self._proc: subprocess.Popen[str] | None = None
+        self._stderr_lines: list[str] = []
+        self._seq = 0
+
+    def __enter__(self) -> PsqlSession:
+        self._proc = subprocess.Popen(  # noqa: S603 - argv built here
+            [
+                "docker",
+                "exec",
+                "-i",
+                self._container,
+                "psql",
+                "-U",
+                self._user,
+                "-d",
+                self._database,
+                "-At",
+                "-X",
+                "-q",
+                "-v",
+                "ON_ERROR_STOP=1",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        threading.Thread(target=self._drain_stderr, daemon=True).start()
+        return self
+
+    def _drain_stderr(self) -> None:
+        proc = self._proc
+        if proc is None or proc.stderr is None:
+            return
+        for line in proc.stderr:
+            self._stderr_lines.append(line)
+
+    def run(self, sql: str) -> str:
+        proc = self._proc
+        if proc is None or proc.stdin is None or proc.stdout is None:
+            raise RuntimeError("PsqlSession is not started")
+        if proc.poll() is not None:
+            raise RuntimeError(
+                "psql session already exited: " + "".join(self._stderr_lines)
+            )
+        self._seq += 1
+        marker = f"__cml_done_{self._seq}__"
+        proc.stdin.write(sql.rstrip() + "\n")
+        proc.stdin.write(f"SELECT '{marker}';\n")
+        proc.stdin.flush()
+        out: list[str] = []
+        for line in proc.stdout:
+            if line.rstrip("\n") == marker:
+                return "".join(out)
+            out.append(line)
+        raise RuntimeError(
+            "psql session ended before marker: " + "".join(self._stderr_lines)
+        )
+
+    def __exit__(self, *exc: object) -> None:
+        proc = self._proc
+        if proc is None:
+            return
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=30)
+        except Exception:
+            proc.kill()
+
+
 def _scalar(sql: str, **kw: str) -> str:
     lines = _psql(sql, **kw).splitlines()
     return lines[0].strip() if lines else ""
@@ -146,7 +236,10 @@ class PsqlRetentionRepository:
         cold_bool = "TRUE" if spec.cold_recovery_supported else "FALSE"
         reason_escaped = spec.reason.replace("'", "''")
         updated_str = dependency.updated_at.isoformat()
+        lock_key = f"retention_{dependency.dataset_name}"
         sql = (
+            "BEGIN;\n"
+            f"SELECT pg_advisory_xact_lock(hashtext('{lock_key}'));\n"
             "INSERT INTO consumer_dependencies (consumer_id, dataset_name, generation, "
             "recovery_watermark, earliest_checkpoint_id, recovery_deadline, "
             "cold_recovery_supported, dependency_version, reason, updated_at) "
@@ -161,7 +254,8 @@ class PsqlRetentionRepository:
             "cold_recovery_supported = EXCLUDED.cold_recovery_supported, "
             "dependency_version = EXCLUDED.dependency_version, "
             "reason = EXCLUDED.reason, "
-            "updated_at = EXCLUDED.updated_at"
+            "updated_at = EXCLUDED.updated_at;\n"
+            "COMMIT;"
         )
         _psql(sql, **self.db)
 
@@ -174,9 +268,13 @@ class PsqlRetentionRepository:
             raise RuntimeError(
                 "Table 'consumer_dependencies' does not exist; failing closed to prevent data loss"
             )
+        lock_key = f"retention_{dataset_name}"
         sql = (
+            "BEGIN;\n"
+            f"SELECT pg_advisory_xact_lock(hashtext('{lock_key}'));\n"
             f"DELETE FROM consumer_dependencies WHERE consumer_id = '{consumer_id}' "
-            f"AND dataset_name = '{dataset_name}'"
+            f"AND dataset_name = '{dataset_name}';\n"
+            "COMMIT;"
         )
         _psql(sql, **self.db)
 
@@ -350,20 +448,144 @@ def _resolve_consumer_watermark(table: str, **db: str) -> datetime | None:
     return None
 
 
-def _drop_expired_partitions(table: str, cutoff: date, **kw: str) -> int:
+def build_freeze_targets_sql(
+    table: str,
+    column: str,
+    from_dt: str,
+    to_dt: str,
+) -> str:
+    """SQL that freezes the exact rows a prune will delete.
+
+    The set is materialized once under the session lock; later batches
+    consume only this set instead of re-querying a mutable time range.
+    """
+    return (
+        "CREATE TEMP TABLE prune_targets AS\n"
+        f"SELECT ctid AS id FROM {table}\n"
+        f"WHERE \"{column}\" >= '{from_dt}+00'\n"
+        f"AND \"{column}\" < '{to_dt}+00';"
+    )
+
+
+def build_batch_delete_sql(table: str, batch_limit: int) -> str:
+    """SQL that deletes one batch of already-frozen target ctids."""
+    return (
+        "WITH picked AS (\n"
+        f"  SELECT id FROM prune_targets LIMIT {batch_limit}\n"
+        "), del AS (\n"
+        f"  DELETE FROM {table} WHERE ctid IN (\n"
+        "    SELECT id FROM picked\n"
+        "  ) RETURNING 1\n"
+        "), cleaned AS (\n"
+        "  DELETE FROM prune_targets WHERE id IN (\n"
+        "    SELECT id FROM picked\n"
+        "  )\n"
+        ")\n"
+        "SELECT count(*) FROM del;"
+    )
+
+
+def run_locked_prune(
+    *,
+    session: PsqlSession,
+    authority: RetentionAuthority,
+    plan: PrunePlan,
+    table: str,
+    column: str,
+    recorded: int,
+    pending: int,
+    from_dt: str,
+    to_dt: str,
+    batch_rows: int,
+    db: dict[str, str],
+    is_partitioned_table: bool = False,
+) -> tuple[int, int]:
+    """Holds one session lock across fence checks and every delete batch.
+
+    Deletion targets are frozen into ``prune_targets`` first; a count
+    mismatch with the archive manifest aborts before any row is removed.
+    """
+    lock_key = f"retention_{plan.dataset_name}"
+    session.run(f"SELECT pg_advisory_lock(hashtext('{lock_key}'));")
+    try:
+        authority.verify_fence(plan)
+        if is_partitioned_table:
+            dropped = _drop_expired_partitions(
+                table,
+                plan.effective_cutoff.date(),
+                run=session.run,
+            )
+            print(f"  dropped {dropped} expired partitions")
+            return (recorded, 0)
+
+        session.run(
+            build_freeze_targets_sql(table, column, from_dt, to_dt)
+        )
+        frozen = int(
+            session.run("SELECT count(*) FROM prune_targets;").strip() or "0"
+        )
+        if frozen != recorded:
+            raise RuntimeError(
+                f"Frozen prune targets ({frozen}) do not match archived "
+                f"manifest rows ({recorded}). Aborting so rows outside "
+                "the archive are never deleted."
+            )
+
+        deleted = 0
+        while deleted < recorded:
+            batch_limit = min(batch_rows, recorded - deleted)
+            if batch_limit <= 0:
+                break
+            authority.verify_fence(plan)
+            removed = int(
+                session.run(build_batch_delete_sql(table, batch_limit))
+                .strip()
+                or "0"
+            )
+            if removed == 0:
+                break
+            deleted += removed
+            if batch_rows and deleted % (batch_rows * 20) == 0:
+                print(f"  deleted {deleted} / {pending}")
+
+        if deleted != recorded:
+            raise RuntimeError(
+                f"Deleted {deleted} rows does not match archived "
+                f"manifest rows ({recorded})! Aborting prune to prevent "
+                "unarchived data loss."
+            )
+        print(f"  deleted {deleted} rows")
+        return (recorded, deleted)
+    finally:
+        session.run(f"SELECT pg_advisory_unlock(hashtext('{lock_key}'));")
+
+
+def _drop_expired_partitions(
+    table: str,
+    cutoff: date,
+    *,
+    run: Callable[[str], str] | None = None,
+    **kw: str,
+) -> int:
     """Drop day partitions whose upper bound is on or before ``cutoff``.
 
     Only the strategy-runtime-event table uses this path today.  Identifiers
     come from the fixed prefix plus a YYYYMMDD token parsed out of the catalog.
+    Pass ``run`` to execute every statement on an already-locked session so
+    the drop set stays under the same advisory lock as the prune.
     """
 
-    rows = _psql(
+    def _exec(sql: str) -> str:
+        if run is not None:
+            return run(sql)
+        return _psql(sql, **kw)
+
+    rows = _exec(
         "SELECT child.relname FROM pg_inherits i "
         "JOIN pg_class parent ON parent.oid = i.inhparent "
         "JOIN pg_class child ON child.oid = i.inhrelid "
         "WHERE parent.oid = to_regclass('" + table + "') "
-        "AND child.relispartition ORDER BY child.relname",
-        **kw,
+        "AND child.relispartition ORDER BY child.relname"
     )
     dropped = 0
     for name in rows.splitlines():
@@ -379,7 +601,7 @@ def _drop_expired_partitions(table: str, cutoff: date, **kw: str) -> int:
         # A partition covers [day, day+1); it is fully outside the window
         # once day+1 <= cutoff, i.e. day < cutoff.
         if partition_day < cutoff:
-            _psql(f'DROP TABLE IF EXISTS "{name}"', **kw)
+            _exec(f'DROP TABLE IF EXISTS "{name}"')
             print(f"  dropped partition {name}")
             dropped += 1
     return dropped
@@ -550,50 +772,25 @@ def main(argv: list[str] | None = None) -> int:
             from_dt: str = from_str,
             to_dt: str = to_str,
         ) -> tuple[int, int]:
-            lock_key = f"retention_{p.dataset_name}"
-            # Acquire session advisory lock before verifying fence to prevent TOCTOU race
-            _psql(f"SELECT pg_advisory_lock(hashtext('{lock_key}'));", **db)
-            try:
-                authority.verify_fence(p)
-                if tbl == "strategy_runtime_events" and _table_is_partitioned(tbl, **db):
-                    dropped = _drop_expired_partitions(tbl, p.effective_cutoff.date(), **db)
-                    print(f"  dropped {dropped} expired partitions")
-                    return (rec, 0)
-
-                deleted = 0
-                while deleted < rec:
-                    batch_limit = min(args.batch_rows, rec - deleted)
-                    if batch_limit <= 0:
-                        break
-                    authority.verify_fence(p)
-                    removed = int(
-                        _scalar(
-                            "BEGIN;\n"
-                            "WITH d AS (DELETE FROM "
-                            f"{tbl} WHERE ctid IN (SELECT ctid FROM {tbl} "
-                            f'WHERE "{col}" >= \'{from_dt}+00\' '
-                            f'AND "{col}" < \'{to_dt}+00\' '
-                            f"LIMIT {batch_limit}) "
-                            "RETURNING 1) SELECT count(*) FROM d;\n"
-                            "COMMIT;",
-                            **db,
-                        )
-                    )
-                    if removed == 0:
-                        break
-                    deleted += removed
-                    if deleted % (args.batch_rows * 20) == 0:
-                        print(f"  deleted {deleted} / {pend}")
-
-                if deleted != rec:
-                    raise RuntimeError(
-                        f"Deleted {deleted} rows does not match archived manifest rows "
-                        f"({rec})! Aborting prune to prevent unarchived data loss."
-                    )
-                print(f"  deleted {deleted} rows")
-                return (rec, deleted)
-            finally:
-                _psql(f"SELECT pg_advisory_unlock(hashtext('{lock_key}'));", **db)
+            is_part = (
+                tbl == "strategy_runtime_events"
+                and _table_is_partitioned(tbl, **db)
+            )
+            with PsqlSession(**db) as session:
+                return run_locked_prune(
+                    session=session,
+                    authority=authority,
+                    plan=p,
+                    table=tbl,
+                    column=col,
+                    recorded=rec,
+                    pending=pend,
+                    from_dt=from_dt,
+                    to_dt=to_dt,
+                    batch_rows=args.batch_rows,
+                    db=db,
+                    is_partitioned_table=is_part,
+                )
 
         receipt = authority.execute_prune(
             plan=plan,
