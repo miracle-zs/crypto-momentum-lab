@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -41,6 +41,13 @@ from crypto_momentum_lab.domain.strategy.position_exit import (
     ClosedCandle15m,
     PositionExitPolicy,
     position_exit_reason,
+)
+from crypto_momentum_lab.domain.strategy.sizing import (
+    SizingModel,
+    SizingPlan,
+    SizingRejection,
+    SymbolLotRules,
+    default_symbol_lot_rules,
 )
 
 
@@ -125,6 +132,57 @@ def compute_transition_input_hash(
     return hashlib.sha256(dumped.encode("utf-8")).hexdigest()
 
 
+def _evaluate_sizing(
+    cand: OrderIntentCandidate,
+    policy_artifact: Any,
+    symbol: str,
+    ref_price: Decimal,
+    cash_balance: Decimal,
+    as_of: datetime,
+) -> tuple[OrderIntentCandidate | None, SizingPlan | None, str | None]:
+    """Applies sizing model if present on policy_artifact.
+
+    Returns:
+        (updated_candidate, sizing_plan, rejection_reason)
+    """
+    sizing_model: SizingModel | None = getattr(policy_artifact, "sizing_model", None)
+    if sizing_model is None:
+        return cand, None, None
+
+    lot_rules: SymbolLotRules = getattr(
+        policy_artifact, "symbol_lot_rules", None
+    ) or default_symbol_lot_rules(symbol)
+
+    result = sizing_model.compute_plan(
+        symbol=symbol,
+        reference_price=ref_price,
+        cash_balance=cash_balance,
+        lot_rules=lot_rules,
+        as_of=as_of,
+        sizing_version=getattr(policy_artifact, "policy_version", 1),
+    )
+    if isinstance(result, SizingRejection):
+        return None, None, f"sizing_{result.reason}"
+
+    sizing_feat = {
+        "sizing_model": str(result.features.get("model", "custom")),
+        "quantized_quantity": str(result.quantized_quantity),
+        "lot_remainder": str(result.lot_remainder),
+        "target_notional": str(result.target_notional),
+        "actual_notional": str(result.actual_notional),
+        "step_size": str(result.step_size),
+        "margin_required": str(result.margin_required),
+    }
+    updated_features = dict(cand.features)
+    updated_features.update(sizing_feat)
+    updated_cand = replace(
+        cand,
+        desired_notional=result.actual_notional,
+        features=updated_features,
+    )
+    return updated_cand, result, None
+
+
 def execute_policy_transition(
     frame: DecisionFrame,
     prior_state: Any,
@@ -151,9 +209,7 @@ def execute_policy_transition(
             f"market_envelope symbol {market_envelope.state.symbol} != {symbol}"
         )
     if position_view.key.symbol != symbol:
-        raise ValueError(
-            f"position_view symbol {position_view.key.symbol} != {symbol}"
-        )
+        raise ValueError(f"position_view symbol {position_view.key.symbol} != {symbol}")
 
     input_hash = compute_transition_input_hash(
         frame=frame,
@@ -172,8 +228,7 @@ def execute_policy_transition(
             and state_15s.close_price is not None
             and state_15s.open_price > Decimal("0")
             and state_15s.close_price > Decimal("0")
-            and (state_15s.bucket_end - state_15s.bucket_start)
-            == timedelta(minutes=15)
+            and (state_15s.bucket_end - state_15s.bucket_start) == timedelta(minutes=15)
         ):
             closed_candle = ClosedCandle15m(
                 symbol=symbol,
@@ -300,15 +355,11 @@ def execute_policy_transition(
         )
 
     # 3. Check Position Mode and Entry Evaluation (when position is flat)
-    pos_mode = getattr(
-        policy_artifact, "position_mode", StrategyPositionMode.LONG_ONLY
-    )
+    pos_mode = getattr(policy_artifact, "position_mode", StrategyPositionMode.LONG_ONLY)
     if position_view.total_quantity == Decimal("0"):
         generator = getattr(policy_artifact, "candidate_generator", None)
         if generator is not None:
-            arg0 = (
-                decision_input if decision_input is not None else market_envelope
-            )
+            arg0 = decision_input if decision_input is not None else market_envelope
             cand = generator(arg0, prior_state)
             if cand is not None:
                 # Enforce position mode
@@ -339,6 +390,34 @@ def execute_policy_transition(
                         transition_time=clock_time,
                     )
 
+                # Evaluate sizing if model present
+                ref_price = cand.limit_price or state_15s.close_price or Decimal("0")
+                effective_cash = frame.cash_balance
+                if effective_cash <= Decimal("0") and decision_input is not None:
+                    effective_cash = getattr(
+                        decision_input, "cash_balance", effective_cash
+                    )
+                cand_sized, sizing_plan, rej_reason = _evaluate_sizing(
+                    cand=cand,
+                    policy_artifact=policy_artifact,
+                    symbol=symbol,
+                    ref_price=ref_price,
+                    cash_balance=effective_cash,
+                    as_of=clock_time,
+                )
+                if rej_reason is not None:
+                    return PolicyTransition(
+                        decision_id=decision_id,
+                        frame_digest=frame.frame_digest,
+                        input_hash=input_hash,
+                        prior_state_version=prior_state.policy_version,
+                        next_state=prior_state,
+                        rejection_reason=rej_reason,
+                        transition_time=clock_time,
+                    )
+                if cand_sized is not None:
+                    cand = cand_sized
+
                 if hasattr(prior_state, "with_anchor_and_intent"):
                     next_state = prior_state.with_anchor_and_intent(
                         symbol=symbol,
@@ -347,6 +426,11 @@ def execute_policy_transition(
                     )
                 else:
                     next_state = prior_state
+                if sizing_plan is not None and hasattr(next_state, "with_sizing_state"):
+                    next_state = next_state.with_sizing_state(
+                        symbol=symbol,
+                        sizing_state=asdict(sizing_plan),
+                    )
                 grace_timers: list[TimerRequest] = []
                 grace_period: timedelta = getattr(
                     policy_artifact, "grace_period", timedelta(0)
@@ -409,17 +493,13 @@ def execute_policy_transition(
                 candidate_id=f"intent_{decision_id}",
                 signal_id=f"sig_{decision_id}",
                 run_id="run_deterministic",
-                strategy_name=getattr(
-                    policy_artifact, "strategy_name", "breakout"
-                ),
+                strategy_name=getattr(policy_artifact, "strategy_name", "breakout"),
                 strategy_version=f"v{getattr(policy_artifact, 'policy_version', 1)}",
                 config_hash=policy_artifact.policy_id,
                 symbol=symbol,
                 side=StrategySide.LONG,
                 entry_type=order_type,
-                limit_price=(
-                    close_px if order_type == EntryType.LIMIT else None
-                ),
+                limit_price=(close_px if order_type == EntryType.LIMIT else None),
                 desired_notional=target_notional,
                 reduce_only=False,
                 expires_at=clock_time + timedelta(minutes=5),
@@ -427,6 +507,32 @@ def execute_policy_transition(
                 reason="breakout_above_threshold",
                 features={"close_price": str(close_px)},
             )
+            # Evaluate sizing if model present
+            ref_price = cand.limit_price or close_px
+            effective_cash = frame.cash_balance
+            if effective_cash <= Decimal("0") and decision_input is not None:
+                effective_cash = getattr(decision_input, "cash_balance", effective_cash)
+            cand_sized, sizing_plan, rej_reason = _evaluate_sizing(
+                cand=cand,
+                policy_artifact=policy_artifact,
+                symbol=symbol,
+                ref_price=ref_price,
+                cash_balance=effective_cash,
+                as_of=clock_time,
+            )
+            if rej_reason is not None:
+                return PolicyTransition(
+                    decision_id=decision_id,
+                    frame_digest=frame.frame_digest,
+                    input_hash=input_hash,
+                    prior_state_version=prior_state.policy_version,
+                    next_state=prior_state,
+                    rejection_reason=rej_reason,
+                    transition_time=clock_time,
+                )
+            if cand_sized is not None:
+                cand = cand_sized
+
             if hasattr(prior_state, "with_anchor_and_intent"):
                 next_state = prior_state.with_anchor_and_intent(
                     symbol=symbol,
@@ -435,6 +541,11 @@ def execute_policy_transition(
                 )
             else:
                 next_state = prior_state
+            if sizing_plan is not None and hasattr(next_state, "with_sizing_state"):
+                next_state = next_state.with_sizing_state(
+                    symbol=symbol,
+                    sizing_state=asdict(sizing_plan),
+                )
             return PolicyTransition(
                 decision_id=decision_id,
                 frame_digest=frame.frame_digest,

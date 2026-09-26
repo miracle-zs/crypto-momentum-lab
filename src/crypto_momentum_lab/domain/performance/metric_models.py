@@ -122,8 +122,7 @@ class ValuationPoint:
 
 @dataclass(frozen=True, slots=True)
 class AccountEquityCut:
-    """Bounded, immutable point-in-time equity cut consumed by performance evaluation.
-    """
+    """Bounded, immutable point-in-time equity cut consumed by evaluation."""
 
     account_label: str
     start_equity: Decimal

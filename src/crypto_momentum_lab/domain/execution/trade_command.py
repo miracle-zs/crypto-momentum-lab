@@ -262,9 +262,7 @@ class ExitAllocator:
         if pos_key is None:
             raise ValueError("projection must expose a position key")
 
-        batch_caps = {
-            b.batch_id: get_batch_available(b) for b in candidate_batches
-        }
+        batch_caps = {b.batch_id: get_batch_available(b) for b in candidate_batches}
 
         if not candidate_batches or total_active_quantity <= 0:
             return ExitAllocationPlan(
@@ -452,6 +450,50 @@ class ExitAllocator:
         )
 
 
+def validate_exit_allocation_plan(
+    plan: ExitAllocationPlan,
+    view: Any,
+    requested_quantity: Decimal | None = None,
+) -> None:
+    """Validates Astra Section 7 batch allocation and capacity invariants:
+
+    - sum(allocations) == plan.total_allocated_quantity;
+    - sum(allocations) <= requested_quantity (if requested_quantity provided);
+    - Each allocation references an existing active batch in the view;
+    - Each allocation does not exceed the batch's available remaining quantity;
+    - Raises ValueError if any invariant is violated.
+    """
+    sum_allocated = sum(
+        (a.allocated_quantity for a in plan.allocations), start=Decimal("0")
+    )
+    if sum_allocated != plan.total_allocated_quantity:
+        raise ValueError(
+            f"sum(allocations) {sum_allocated} != total_allocated_quantity "
+            f"{plan.total_allocated_quantity}"
+        )
+
+    if requested_quantity is not None:
+        if plan.total_allocated_quantity > requested_quantity:
+            raise ValueError(
+                f"total_allocated_quantity {plan.total_allocated_quantity} exceeds "
+                f"requested_quantity {requested_quantity}"
+            )
+
+    batches = getattr(view, "batches", view)
+    batches_by_id = {b.batch_id: b for b in batches}
+    for alloc in plan.allocations:
+        if alloc.batch_id not in batches_by_id:
+            raise ValueError(
+                f"allocation references non-existent batch {alloc.batch_id} in view"
+            )
+        batch = batches_by_id[alloc.batch_id]
+        if alloc.allocated_quantity > batch.quantity:
+            raise ValueError(
+                f"allocation quantity {alloc.allocated_quantity} exceeds batch "
+                f"{alloc.batch_id} capacity {batch.quantity}"
+            )
+
+
 __all__ = [
     "ExitAllocation",
     "ExitAllocationPlan",
@@ -460,4 +502,5 @@ __all__ = [
     "PositionReservation",
     "TradeCommand",
     "TradeCommandType",
+    "validate_exit_allocation_plan",
 ]

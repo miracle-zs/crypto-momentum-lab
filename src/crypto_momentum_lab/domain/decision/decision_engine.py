@@ -19,8 +19,10 @@ from decimal import Decimal
 from typing import Any
 
 from crypto_momentum_lab.domain.decision.decision_frame import (
-    ClockEvent,
-    DecisionFrame,
+    ClockEvent as ClockEvent,
+)
+from crypto_momentum_lab.domain.decision.decision_frame import (
+    DecisionFrame as DecisionFrame,
 )
 from crypto_momentum_lab.domain.decision.policy_transition import (
     PolicyTransition,
@@ -192,6 +194,22 @@ class PolicyState:
             sizing_state_by_symbol=dict(self.sizing_state_by_symbol),
         )
 
+    def with_sizing_state(self, symbol: str, sizing_state: Any) -> PolicyState:
+        new_sizing = dict(self.sizing_state_by_symbol)
+        new_sizing[symbol] = sizing_state
+        return PolicyState(
+            policy_version=self.policy_version + 1,
+            cooldown_until_by_symbol=dict(self.cooldown_until_by_symbol),
+            anchor_prices_by_symbol=dict(self.anchor_prices_by_symbol),
+            active_intent_ids_by_symbol=dict(self.active_intent_ids_by_symbol),
+            custom_state=dict(self.custom_state),
+            signal_memory=dict(self.signal_memory),
+            warmup_status=dict(self.warmup_status),
+            grace_until_by_symbol=dict(self.grace_until_by_symbol),
+            holding_deadline_by_symbol=dict(self.holding_deadline_by_symbol),
+            sizing_state_by_symbol=new_sizing,
+        )
+
     def with_cleared_symbol(self, symbol: str) -> PolicyState:
         new_cd = dict(self.cooldown_until_by_symbol)
         new_cd.pop(symbol, None)
@@ -234,6 +252,8 @@ class EffectivePolicy:
     cooldown_duration: timedelta = timedelta(minutes=15)
     position_mode: StrategyPositionMode = StrategyPositionMode.LONG_ONLY
     grace_period: timedelta = timedelta(0)
+    sizing_model: Any | None = None
+    symbol_lot_rules: Any | None = None
     candidate_generator: Any | None = None
 
 
@@ -488,26 +508,18 @@ def create_authoritative_decision_filter(
             checkpoint=decision.checkpoint,
         )
 
-    def _filter(
-        decision: StrategyDecision, state: MarketState15s
-    ) -> StrategyDecision:
+    def _filter(decision: StrategyDecision, state: MarketState15s) -> StrategyDecision:
         if not decision.candidates:
             return decision
 
         if fact_provider is None:
-            return _reject_all(
-                decision, state, "missing_frozen_decision_inputs"
-            )
+            return _reject_all(decision, state, "missing_frozen_decision_inputs")
         frozen = fact_provider(state)
         if frozen is None:
-            return _reject_all(
-                decision, state, "frozen_decision_inputs_unavailable"
-            )
+            return _reject_all(decision, state, "frozen_decision_inputs_unavailable")
         pos_view = frozen.position_view
         if pos_view.key.symbol != state.symbol:
-            return _reject_all(
-                decision, state, "frozen_inputs_symbol_mismatch"
-            )
+            return _reject_all(decision, state, "frozen_inputs_symbol_mismatch")
         if pos_view.health_status != PositionHealthStatus.READY:
             return _reject_all(
                 decision,
@@ -540,17 +552,13 @@ def create_authoritative_decision_filter(
                 candidate_generator=lambda inp, st, _c=cand: _c,
             )
             # Shared starting PolicyState — never a fresh empty state.
-            dec_res = engine.evaluate(
-                dec_input, frozen.policy_state, policy
-            )
+            dec_res = engine.evaluate(dec_input, frozen.policy_state, policy)
             if on_decision_result is not None:
                 on_decision_result(dec_res)
             if dec_res.intent is not None:
                 filtered_candidates.append(cand)
             else:
-                raw_reason = dec_res.rejection_reason or (
-                    "decision_engine_filtered"
-                )
+                raw_reason = dec_res.rejection_reason or ("decision_engine_filtered")
                 rej_reason = (
                     RejectionReason.COOLDOWN_ACTIVE
                     if raw_reason == "cooldown_active"

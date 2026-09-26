@@ -85,6 +85,7 @@ from crypto_momentum_lab.domain.execution.trade_command import (
     PositionReservation,
     TradeCommand,
     TradeCommandType,
+    validate_exit_allocation_plan,
 )
 
 __all__ = [
@@ -154,6 +155,5 @@ __all__ = [
     "ExecutionActResult",
     "ExecutionObserveResult",
     "ExecutionBook",
+    "validate_exit_allocation_plan",
 ]
-
-
