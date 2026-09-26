@@ -185,7 +185,7 @@ def test_read_missing_revision_raises() -> None:
 
 
 def test_decision_visible_ref_strict_isolation_and_no_leakage() -> None:
-    """Regression test: get_decision_visible_ref must never leak canonical or future revisions."""
+    """Regression test: decision_visible ref must never leak canonical or future."""
     repo = InMemoryMarketBookRepository()
     book = MarketBook(repo)
     t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
@@ -197,7 +197,7 @@ def test_decision_visible_ref_strict_isolation_and_no_leakage() -> None:
         visibility_mode=MarketVisibilityMode.CANONICAL,
         is_canonical=True,
     )
-    # Decision visible ref must be None at decision_time = t0 + 15s because only canonical exists
+    # Decision visible ref is None at t0 + 15s because only canonical exists
     assert (
         book.get_decision_visible_ref(
             "live", "BTCUSDT", "15s", t0, decision_time=t0 + timedelta(seconds=15)
@@ -214,7 +214,7 @@ def test_decision_visible_ref_strict_isolation_and_no_leakage() -> None:
         published_at=t0 + timedelta(seconds=16),
     )
 
-    # If decision_time is t0 + 15s, ref_dv was published in the future (> decision_time), so it must NOT be visible!
+    # If decision_time is t0 + 15s, ref_dv was published in future (> decision_time)
     assert (
         book.get_decision_visible_ref(
             "live", "BTCUSDT", "15s", t0, decision_time=t0 + timedelta(seconds=15)
@@ -232,7 +232,7 @@ def test_decision_visible_ref_strict_isolation_and_no_leakage() -> None:
 
 
 def test_postgres_market_book_repository_fails_closed_on_missing_revision() -> None:
-    """Regression test: PostgresMarketBookRepository must raise UnreproducibleError when revision is missing."""
+    """Regression test: repo must raise UnreproducibleError when revision missing."""
     from unittest.mock import MagicMock
 
     from crypto_momentum_lab.domain.market.market_book import UnreproducibleError
@@ -295,5 +295,48 @@ def test_postgres_market_book_repository_fails_closed_on_missing_revision() -> N
         UnreproducibleError, match="missing revision rev_missing_888"
     ):
         repo.load_manifest("mf_missing_rev_1")
+
+
+def test_market_state_hash_includes_1m_candle_and_received_timestamps() -> None:
+    """Verifies that 1m candle fields and timestamps alter hash (E2/R2)."""
+    from dataclasses import replace
+
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    base = _create_sample_state(
+        bucket_start=t0,
+        close_price=Decimal("65000.00"),
+    )
+    base_hash = compute_market_state_hash(base)
+
+    # 1. Alter 1m candle (complete 4 fields)
+    kline_1 = {
+        "closed_kline_1m_open_time": t0,
+        "closed_kline_1m_close_time": t0 + timedelta(minutes=1),
+        "closed_kline_1m_open_price": Decimal("64900.00"),
+        "closed_kline_1m_close_price": Decimal("65100.00"),
+    }
+    state_with_1m = replace(base, **kline_1)
+    hash_1m = compute_market_state_hash(state_with_1m)
+    assert hash_1m != base_hash
+
+    # 2. Reverse 1m candle direction (bullish -> bearish)
+    kline_reversed = {
+        "closed_kline_1m_open_time": t0,
+        "closed_kline_1m_close_time": t0 + timedelta(minutes=1),
+        "closed_kline_1m_open_price": Decimal("65100.00"),
+        "closed_kline_1m_close_price": Decimal("64900.00"),
+    }
+    state_reversed = replace(base, **kline_reversed)
+    hash_reversed = compute_market_state_hash(state_reversed)
+    assert hash_reversed != hash_1m
+    assert hash_reversed != base_hash
+
+    # 3. Alter first_received_at
+    state_diff_recv = replace(base, first_received_at=t0 + timedelta(seconds=1))
+    assert compute_market_state_hash(state_diff_recv) != base_hash
+
+    # 4. Alter is_backfill
+    state_diff_backfill = replace(base, is_backfill=True)
+    assert compute_market_state_hash(state_diff_backfill) != base_hash
 
 

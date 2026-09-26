@@ -1054,6 +1054,7 @@ async def run_live_daemon(
                 decision_filter=create_authoritative_decision_filter(
                     strategy_name,
                     fact_provider=fact_source.build,
+                    on_decision_result=fact_source.on_decision_result,
                 ),
                 decision_fact_binder=fact_source.bind_context,
                 readiness_provider=lambda: (

@@ -117,7 +117,7 @@ class DecisionTraceService:
         *,
         replay_mode: MarketVisibilityMode = MarketVisibilityMode.DECISION_VISIBLE,
         policy_evaluator: Callable[
-            [tuple[MarketEnvelope, ...]], tuple[bool, str | None]
+            [tuple[MarketEnvelope, ...]], Any
         ],
     ) -> ReplayResult:
         """Replays historic decision using visible or canonical revisions.
@@ -156,20 +156,83 @@ class DecisionTraceService:
                 envelopes.append(self._book.read(ref))
 
         # Evaluate strategy policy on the chosen envelopes
-        intent_produced, rejection = policy_evaluator(tuple(envelopes))
+        raw_result = policy_evaluator(tuple(envelopes))
 
+        intent_produced: bool
+        rejection: str | None
+        replayed_notional: str | None = None
+        replayed_input_hash: str | None = None
+        replayed_next_version: int | None = None
+
+        if hasattr(raw_result, "intent"):  # DecisionResult
+            intent_produced = raw_result.intent is not None
+            rejection = raw_result.rejection_reason
+            if raw_result.intent is not None:
+                n = getattr(raw_result.intent, "desired_notional", None)
+                if n is None:
+                    n = getattr(raw_result.intent, "target_notional", None)
+                replayed_notional = str(n) if n is not None else None
+            replayed_input_hash = getattr(raw_result, "input_hash", None)
+            if hasattr(raw_result, "next_policy_state"):
+                replayed_next_version = raw_result.next_policy_state.policy_version
+        elif isinstance(raw_result, tuple):
+            intent_produced, rejection = raw_result[:2]
+            if len(raw_result) > 2:
+                replayed_notional = str(raw_result[2])
+        else:
+            intent_produced = bool(raw_result)
+            rejection = None
+
+        divergence: str | None = None
         reproduced = (
             intent_produced == trace.intent_produced
             and rejection == trace.rejection_reason
         )
-
-        divergence = None
         if not reproduced:
             divergence = (
                 f"Divergence in {replay_mode.value} replay: original intent="
                 f"{trace.intent_produced} (reason={trace.rejection_reason}), "
                 f"replayed intent={intent_produced} (reason={rejection})"
             )
+        elif trace.trace_payload:
+            orig_intent = trace.trace_payload.get("output_intent")
+            if orig_intent is not None and replayed_notional is not None:
+                expected_notional = str(
+                    orig_intent.get("desired_notional")
+                    or orig_intent.get("target_notional")
+                )
+                if replayed_notional != expected_notional:
+                    reproduced = False
+                    divergence = (
+                        f"Divergence in {replay_mode.value} replay: "
+                        f"target notional mismatch "
+                        f"(original={expected_notional}, replayed={replayed_notional})"
+                    )
+            orig_state = trace.trace_payload.get("next_policy_state")
+            if (
+                reproduced
+                and orig_state is not None
+                and replayed_next_version is not None
+            ):
+                expected_v = orig_state.get("policy_version")
+                if expected_v is not None and replayed_next_version != expected_v:
+                    reproduced = False
+                    divergence = (
+                        f"Divergence in {replay_mode.value} replay: "
+                        f"next policy version mismatch "
+                        f"(original={expected_v}, replayed={replayed_next_version})"
+                    )
+            if (
+                reproduced
+                and trace.input_hash
+                and replayed_input_hash
+                and replayed_input_hash != trace.input_hash
+            ):
+                reproduced = False
+                divergence = (
+                    f"Divergence in {replay_mode.value} replay: input hash mismatch "
+                    f"(original={trace.input_hash}, replayed={replayed_input_hash})"
+                )
 
         return ReplayResult(
             decision_id=decision_id,

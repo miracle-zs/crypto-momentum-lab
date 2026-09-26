@@ -18,7 +18,9 @@ from crypto_momentum_lab.domain.decision.decision_engine import (
     DecisionInput,
     EffectivePolicy,
     PolicyState,
+    compute_decision_input_hash,
     decide,
+    decision_trace_from_result,
 )
 from crypto_momentum_lab.domain.decision.decision_frame import DecisionFrame
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
@@ -27,7 +29,14 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionLedgerBatch,
     PositionView,
 )
-from crypto_momentum_lab.domain.market.market_book import compute_market_state_hash
+from crypto_momentum_lab.domain.market.decision_trace_service import (
+    DecisionTraceService,
+)
+from crypto_momentum_lab.domain.market.market_book import (
+    InMemoryMarketBookRepository,
+    MarketBook,
+    compute_market_state_hash,
+)
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import (
     MarketEnvelope,
@@ -350,6 +359,154 @@ def test_decision_frame_clock_skew_validation() -> None:
             universe_version="univ_v1",
             max_clock_skew=timedelta(seconds=60),
         )
+
+
+def test_decision_input_hash_sensitivity() -> None:
+    """Verifies policy params, policy state, or position batches alter input_hash."""
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    mref, menv = _make_market_envelope("BTCUSDT", t0, Decimal("65500.00"))
+    pview = _make_flat_position_view("BTCUSDT")
+    clock = ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=1)
+    inp = DecisionInput(
+        symbol="BTCUSDT",
+        market_ref=mref,
+        market_envelope=menv,
+        position_view=pview,
+        universe_version="univ_v1",
+        clock_event=clock,
+        cash_balance=Decimal("10000.00"),
+        risk_config_version="risk_v1",
+    )
+    policy = EffectivePolicy(
+        policy_id="pol_base",
+        strategy_name="orderflow_impulse",
+        entry_threshold=Decimal("65000.00"),
+        cooldown_duration=timedelta(minutes=5),
+        target_notional=Decimal("500.00"),
+    )
+    state = PolicyState(policy_version=1)
+
+    base_hash = compute_decision_input_hash(inp, policy, state)
+    assert len(base_hash) == 64
+
+    # 1. Changing policy entry_threshold alters hash
+    pol_thresh = replace(policy, entry_threshold=Decimal("65100.00"))
+    assert compute_decision_input_hash(inp, pol_thresh, state) != base_hash
+
+    # 2. Changing policy cooldown_duration alters hash
+    pol_cd = replace(policy, cooldown_duration=timedelta(minutes=10))
+    assert compute_decision_input_hash(inp, pol_cd, state) != base_hash
+
+    # 3. Changing policy target_notional alters hash
+    pol_notional = replace(policy, target_notional=Decimal("1000.00"))
+    assert compute_decision_input_hash(inp, pol_notional, state) != base_hash
+
+    # 4. Changing state cooldown_until_by_symbol alters hash (without version bump)
+    st_cd = replace(
+        state,
+        cooldown_until_by_symbol={"BTCUSDT": t0 + timedelta(minutes=5)},
+    )
+    assert compute_decision_input_hash(inp, policy, st_cd) != base_hash
+
+    # 5. Changing state anchor_prices_by_symbol alters hash
+    st_anchor = replace(
+        state,
+        anchor_prices_by_symbol={"BTCUSDT": Decimal("64000.00")},
+    )
+    assert compute_decision_input_hash(inp, policy, st_anchor) != base_hash
+
+    # 6. Changing position batches alters hash
+    batch = PositionLedgerBatch(
+        batch_id="batch_01",
+        episode_id="ep_01",
+        quantity=Decimal("0.5"),
+        original_quantity=Decimal("1.0"),
+        entry_price=Decimal("65000.00"),
+        opened_at=t0,
+    )
+    pview_batches = replace(pview, batches=(batch,))
+    inp_batches = replace(inp, position_view=pview_batches)
+    assert compute_decision_input_hash(inp_batches, policy, state) != base_hash
+
+
+def test_decision_trace_from_result_and_replay() -> None:
+    """Verifies decision trace payload capture and semantic replay divergence checks."""
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    mref, menv = _make_market_envelope("BTCUSDT", t0, Decimal("65500.00"))
+    pview = _make_flat_position_view("BTCUSDT")
+    clock = ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=1)
+    inp = DecisionInput(
+        symbol="BTCUSDT",
+        market_ref=mref,
+        market_envelope=menv,
+        position_view=pview,
+        universe_version="univ_v1",
+        clock_event=clock,
+        cash_balance=Decimal("10000.00"),
+        risk_config_version="risk_v1",
+    )
+    policy = EffectivePolicy(
+        policy_id="pol_01",
+        strategy_name="orderflow_impulse",
+        entry_threshold=Decimal("65000.00"),
+        target_notional=Decimal("500.00"),
+    )
+    state = PolicyState(policy_version=1)
+
+    result = decide(inp, state, policy)
+    assert result.intent is not None
+    assert result.intent.desired_notional == Decimal("500.00")
+
+    trace = decision_trace_from_result(
+        result=result,
+        decision_input=inp,
+        strategy_name=policy.strategy_name,
+        account_label="primary",
+    )
+    assert trace.decision_id == result.decision_id
+    assert trace.input_hash == result.input_hash
+    assert trace.intent_produced is True
+    assert trace.trace_payload is not None
+    assert trace.trace_payload["output_intent"]["desired_notional"] == "500.00"
+
+    repo = InMemoryMarketBookRepository()
+    book = MarketBook(repo)
+    # Save the envelope so DecisionTraceService can read it
+    repo.save_envelope(menv)
+    trace_service = DecisionTraceService(book)
+    repo.save_decision_trace(trace)
+
+    # 1. Exact replay matches completely
+    replay_pass = trace_service.replay_decision(
+        trace.decision_id,
+        replay_mode=MarketVisibilityMode.DECISION_VISIBLE,
+        policy_evaluator=lambda envs: decide(inp, state, policy),
+    )
+    assert replay_pass.reproduced is True
+    assert replay_pass.divergence_explanation is None
+
+    # 2. Semantic divergence: policy target_notional changed
+    policy_changed = replace(policy, target_notional=Decimal("800.00"))
+    replay_fail_notional = trace_service.replay_decision(
+        trace.decision_id,
+        replay_mode=MarketVisibilityMode.DECISION_VISIBLE,
+        policy_evaluator=lambda envs: decide(inp, state, policy_changed),
+    )
+    assert replay_fail_notional.reproduced is False
+    assert replay_fail_notional.divergence_explanation is not None
+    assert "target notional mismatch" in replay_fail_notional.divergence_explanation
+
+    # 3. Next policy version mismatch
+    state_diff_v = replace(state, policy_version=99)
+    replay_fail_version = trace_service.replay_decision(
+        trace.decision_id,
+        replay_mode=MarketVisibilityMode.DECISION_VISIBLE,
+        policy_evaluator=lambda envs: decide(inp, state_diff_v, policy),
+    )
+    assert replay_fail_version.reproduced is False
+    assert replay_fail_version.divergence_explanation is not None
+    assert "next policy version mismatch" in replay_fail_version.divergence_explanation
+
 
 
 

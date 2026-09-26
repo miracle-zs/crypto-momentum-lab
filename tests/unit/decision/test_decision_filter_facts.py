@@ -182,3 +182,96 @@ def test_frozen_inputs_reject_negative_cash() -> None:
         assert "cash_balance" in str(exc)
     else:
         raise AssertionError("negative cash must be rejected")
+
+
+def test_filter_invokes_on_decision_result_callback() -> None:
+    from crypto_momentum_lab.domain.decision.decision_engine import DecisionResult
+    from crypto_momentum_lab.domain.strategy.models import (
+        EntryType,
+        OrderIntentCandidate,
+        StrategySide,
+    )
+
+    key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    view = PositionView(
+        key=key,
+        projection_version="pv1",
+        input_revision=1,
+        event_cut=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
+        policy_version="v1",
+        schema_version="v1",
+        coverage=FactCoverageInterval(
+            start_at=datetime(2026, 9, 25, 7, 0, tzinfo=UTC),
+            end_at=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
+            status=FactCoverageStatus.CONFIRMED,
+        ),
+        active_episode=None,
+        batches=(),
+        unallocated_quantity=Decimal("0"),
+        reconciliation_gap=Decimal("0"),
+        health_status=PositionHealthStatus.READY,
+    )
+    frozen = FrozenDecisionInputs(
+        position_view=view,
+        cash_balance=Decimal("1000"),
+        policy_state=PolicyState(policy_version=3),
+        universe_version="univ_v1",
+        risk_config_version="risk_v1",
+    )
+
+    results_captured: list[DecisionResult] = []
+    filt = create_authoritative_decision_filter(
+        "orderflow_impulse",
+        target_notional=Decimal("500"),
+        fact_provider=lambda state: frozen,
+        on_decision_result=results_captured.append,
+    )
+
+    from crypto_momentum_lab.domain.strategy.models import (
+        StrategySignal,
+    )
+
+    sig = StrategySignal(
+        signal_id="sig_1",
+        run_id="run_1",
+        strategy_name="orderflow_impulse",
+        strategy_version="v1",
+        config_hash="cfg_hash",
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        detected_at=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
+        source_state_at=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
+        reason="momentum_signal",
+        features={},
+        reference_prices={},
+    )
+    cand = OrderIntentCandidate(
+        candidate_id="cand_1",
+        signal_id="sig_1",
+        run_id="run_1",
+        strategy_name="orderflow_impulse",
+        strategy_version="v1",
+        config_hash="cfg_hash",
+        symbol="BTCUSDT",
+        side=StrategySide.LONG,
+        entry_type=EntryType.MARKET,
+        limit_price=Decimal("100"),
+        desired_notional=Decimal("500"),
+        reduce_only=False,
+        expires_at=datetime(2026, 9, 25, 8, 1, tzinfo=UTC),
+        created_at=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
+        reason="momentum_entry",
+        features={},
+    )
+    dec = StrategyDecision(signals=(sig,), candidates=(cand,), rejections=())
+    out = filt(dec, _state())
+
+    assert len(results_captured) == 1
+    assert results_captured[0].next_policy_state.policy_version > 3
+    assert len(out.candidates) == 1
+

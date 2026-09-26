@@ -37,6 +37,7 @@ from crypto_momentum_lab.domain.execution.trade_command import TradeCommand
 from crypto_momentum_lab.domain.market.market_book import compute_market_state_hash
 from crypto_momentum_lab.domain.market.models import MarketState15s
 from crypto_momentum_lab.domain.market.revision_models import (
+    DecisionTrace,
     MarketEnvelope,
     MarketRevisionRef,
     MarketVisibilityMode,
@@ -277,21 +278,95 @@ def compute_decision_input_hash(
     policy: EffectivePolicy,
     state: PolicyState,
 ) -> str:
-    """Calculates a deterministic cryptographic hash of all decision inputs."""
-    payload = {
+    """Calculates a deterministic cryptographic hash of all decision inputs.
+
+    Covers symbol, market revision identity and content, position scope, batches,
+    universe, clock, risk parameters, full policy parameters, and complete policy state.
+    """
+    pos_key = decision_input.position_view.key
+    batches_summary = [
+        (
+            b.batch_id,
+            str(b.original_quantity),
+            str(
+                getattr(b, "remaining_quantity", None)
+                or getattr(b, "quantity", None)
+                or "0"
+            ),
+            str(b.entry_price),
+            b.opened_at.isoformat(),
+        )
+        for b in decision_input.position_view.batches
+    ]
+    payload: dict[str, Any] = {
         "symbol": decision_input.symbol,
         "market_revision_id": decision_input.market_ref.revision_id,
         "market_content_hash": decision_input.market_ref.content_hash,
+        "position_scope": {
+            "environment": pos_key.environment,
+            "account_label": pos_key.account_label,
+            "position_side": (
+                pos_key.position_side.value
+                if hasattr(pos_key.position_side, "value")
+                else str(pos_key.position_side)
+            ),
+        },
         "position_version": decision_input.position_view.projection_version,
         "position_quantity": str(decision_input.position_view.total_quantity),
+        "position_health": (
+            decision_input.position_view.health_status.value
+            if hasattr(decision_input.position_view.health_status, "value")
+            else str(decision_input.position_view.health_status)
+        ),
+        "position_batches": sorted(batches_summary),
         "universe_version": decision_input.universe_version,
         "clock_time": decision_input.clock_event.timestamp.isoformat(),
         "clock_sequence": decision_input.clock_event.sequence,
         "cash_balance": str(decision_input.cash_balance),
         "risk_config_version": decision_input.risk_config_version,
-        "policy_id": policy.policy_id,
-        "policy_version": policy.policy_version,
-        "policy_state_version": state.policy_version,
+        "policy_parameters": {
+            "policy_id": policy.policy_id,
+            "strategy_name": policy.strategy_name,
+            "policy_version": policy.policy_version,
+            "entry_threshold": str(policy.entry_threshold),
+            "order_type": (
+                policy.order_type.value
+                if hasattr(policy.order_type, "value")
+                else str(policy.order_type)
+            ),
+            "target_notional": str(policy.target_notional),
+            "max_open_positions": policy.max_open_positions,
+            "cooldown_duration_seconds": int(policy.cooldown_duration.total_seconds()),
+            "position_mode": (
+                policy.position_mode.value
+                if hasattr(policy.position_mode, "value")
+                else str(policy.position_mode)
+            ),
+            "grace_period_seconds": int(policy.grace_period.total_seconds()),
+        },
+        "policy_state": {
+            "policy_version": state.policy_version,
+            "cooldown_until_by_symbol": {
+                k: v.isoformat()
+                for k, v in sorted(state.cooldown_until_by_symbol.items())
+            },
+            "anchor_prices_by_symbol": {
+                k: str(v)
+                for k, v in sorted(state.anchor_prices_by_symbol.items())
+            },
+            "active_intent_ids_by_symbol": dict(
+                sorted(state.active_intent_ids_by_symbol.items())
+            ),
+            "warmup_status": dict(sorted(state.warmup_status.items())),
+            "grace_until_by_symbol": {
+                k: v.isoformat()
+                for k, v in sorted(state.grace_until_by_symbol.items())
+            },
+            "holding_deadline_by_symbol": {
+                k: v.isoformat()
+                for k, v in sorted(state.holding_deadline_by_symbol.items())
+            },
+        },
     }
     if decision_input.frame is not None:
         payload["frame_digest"] = decision_input.frame.frame_digest
@@ -393,8 +468,8 @@ def build_decision_input(
     state: MarketState15s,
     frozen: FrozenDecisionInputs,
     clock_sequence: int = 1,
-    scope: str = "decision",
-    source_epoch: str = "ep_decision",
+    scope: str | None = None,
+    source_epoch: str | None = None,
     market_ref: MarketRevisionRef | None = None,
     market_envelope: MarketEnvelope | None = None,
     frame: DecisionFrame | None = None,
@@ -404,20 +479,25 @@ def build_decision_input(
     Every runner freezes the same kind of facts; only the epoch/scope
     labels differ. Do not reassemble DecisionInput ad hoc in runners.
     """
+    effective_scope = scope or getattr(state, "environment", None) or "live"
+    effective_source_epoch = (
+        source_epoch or f"seq_{getattr(state, 'trade_count', 0)}"
+    )
+
     if market_ref is None:
         pub_time = state.last_received_at or state.bucket_end
         content_hash = compute_market_state_hash(state)
         b_epoch = int(state.bucket_start.timestamp())
         market_ref = MarketRevisionRef(
-            scope=scope,
+            scope=effective_scope,
             symbol=state.symbol,
             interval="15s",
             bucket_start=state.bucket_start,
             bucket_end=state.bucket_end,
-            revision_id=f"{scope}:{state.symbol}:15s:{b_epoch}:{content_hash[:10]}",
+            revision_id=f"{effective_scope}:{state.symbol}:15s:{b_epoch}:{content_hash[:10]}",
             content_hash=content_hash,
             published_at=pub_time,
-            source_epoch=source_epoch,
+            source_epoch=effective_source_epoch,
             visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
             observed_at=state.first_received_at or pub_time,
         )
@@ -428,7 +508,7 @@ def build_decision_input(
     clock_event = ClockEvent(timestamp=state.bucket_end, sequence=clock_sequence)
     if frame is None:
         frame = DecisionFrame(
-            scope=scope,
+            scope=effective_scope,
             symbol=state.symbol,
             market_refs=(market_ref,),
             position_view_token=frozen.position_view.projection_version,
@@ -452,6 +532,65 @@ def build_decision_input(
         cash_balance=frozen.cash_balance,
         risk_config_version=frozen.risk_config_version,
         frame=frame,
+    )
+
+
+def decision_trace_from_result(
+    result: DecisionResult,
+    decision_input: DecisionInput,
+    strategy_name: str,
+    account_label: str,
+) -> DecisionTrace:
+    """Builds an immutable DecisionTrace with semantic outputs and next state."""
+    cd_items = result.next_policy_state.cooldown_until_by_symbol.items()
+    anchor_items = result.next_policy_state.anchor_prices_by_symbol.items()
+    intent_items = result.next_policy_state.active_intent_ids_by_symbol.items()
+    warmup_items = result.next_policy_state.warmup_status.items()
+    payload: dict[str, Any] = {
+        "input_hash": result.input_hash,
+        "frame_digest": result.frame_digest,
+        "next_policy_state": {
+            "policy_version": result.next_policy_state.policy_version,
+            "cooldown_until": {k: v.isoformat() for k, v in sorted(cd_items)},
+            "anchor_prices": {k: str(v) for k, v in sorted(anchor_items)},
+            "active_intent_ids": dict(sorted(intent_items)),
+            "warmup_status": dict(sorted(warmup_items)),
+        },
+    }
+    if result.intent is not None:
+        notional = getattr(result.intent, "desired_notional", None)
+        if notional is None:
+            notional = getattr(result.intent, "target_notional", None)
+        lim = result.intent.limit_price
+        payload["output_intent"] = {
+            "candidate_id": result.intent.candidate_id,
+            "symbol": result.intent.symbol,
+            "desired_notional": str(notional) if notional is not None else None,
+            "target_notional": str(notional) if notional is not None else None,
+            "limit_price": str(lim) if lim is not None else None,
+        }
+    if result.exit_command is not None:
+        cmd = result.exit_command
+        payload["output_exit_command"] = {
+            "command_id": cmd.command_id,
+            "symbol": cmd.position_key.symbol,
+            "quantity": str(cmd.requested_quantity),
+            "side": (
+                cmd.side.value if hasattr(cmd.side, "value") else str(cmd.side)
+            ),
+        }
+    return DecisionTrace(
+        decision_id=result.decision_id,
+        strategy_name=strategy_name,
+        account_label=account_label,
+        decision_time=result.evaluated_at,
+        evaluated_market_refs=(decision_input.market_ref,),
+        intent_produced=result.intent is not None,
+        intent_id=result.intent.candidate_id if result.intent is not None else None,
+        rejection_reason=result.rejection_reason,
+        input_hash=result.input_hash,
+        frame_digest=result.frame_digest,
+        trace_payload=payload,
     )
 
 
@@ -533,12 +672,13 @@ def create_authoritative_decision_filter(
                 "position_not_ready_for_trade",
             )
 
+        scope_to_use = getattr(state, "environment", None) or "live"
         dec_input = build_decision_input(
             state=state,
             frozen=frozen,
             clock_sequence=1,
-            scope="decision",
-            source_epoch="ep_decision",
+            scope=scope_to_use,
+            source_epoch=f"ep_{scope_to_use}",
         )
 
         filtered_candidates: list[OrderIntentCandidate] = []

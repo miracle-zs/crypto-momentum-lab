@@ -9,6 +9,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from crypto_momentum_lab.domain.decision.decision_engine import (
+    DecisionResult,
     FrozenDecisionInputs,
     PolicyState,
 )
@@ -173,6 +174,9 @@ class LiveDecisionFactSource:
 
     def set_policy_state(self, state: PolicyState) -> None:
         self._policy_state = state
+
+    def on_decision_result(self, result: DecisionResult) -> None:
+        self.set_policy_state(result.next_policy_state)
 
     def build(self, state: MarketState15s) -> FrozenDecisionInputs | None:
         if self._context is None:

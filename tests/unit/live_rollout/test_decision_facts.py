@@ -155,3 +155,27 @@ def test_proven_coverage_yields_ready_position_health() -> None:
     assert out.position_view.coverage is not None
     assert out.position_view.coverage.status == FactCoverageStatus.CONFIRMED
     assert out.position_view.is_ready_for_trade is True
+
+
+def test_fact_source_on_decision_result_updates_policy_state() -> None:
+    from crypto_momentum_lab.domain.decision.decision_engine import (
+        DecisionResult,
+        PolicyState,
+    )
+
+    src = LiveDecisionFactSource("primary")
+    assert src._policy_state.policy_version == 1
+
+    next_st = PolicyState(policy_version=7)
+    res = DecisionResult(
+        decision_id="dec_test",
+        input_hash="hash_test",
+        intent=None,
+        exit_command=None,
+        next_policy_state=next_st,
+        rejection_reason=None,
+        evaluated_at=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
+    )
+    src.on_decision_result(res)
+    assert src._policy_state.policy_version == 7
+

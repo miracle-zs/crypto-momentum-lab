@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import fields
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
@@ -45,40 +46,15 @@ class UnreproducibleError(Exception):
 
 def compute_market_state_hash(state: MarketState15s) -> str:
     """Calculates a deterministic SHA256 hash of a normalized MarketState15s payload."""
-    payload = {
-        "schema_version": state.schema_version,
-        "environment": state.environment,
-        "exchange": state.exchange,
-        "symbol": state.symbol,
-        "bucket_start": state.bucket_start.isoformat(),
-        "bucket_end": state.bucket_end.isoformat(),
-        "open_price": str(state.open_price) if state.open_price is not None else None,
-        "high_price": str(state.high_price) if state.high_price is not None else None,
-        "low_price": str(state.low_price) if state.low_price is not None else None,
-        "close_price": (
-            str(state.close_price) if state.close_price is not None else None
-        ),
-        "trade_count": state.trade_count,
-        "trade_notional": str(state.trade_notional),
-        "aggressive_buy_notional": str(state.aggressive_buy_notional),
-        "aggressive_sell_notional": str(state.aggressive_sell_notional),
-        "last_bid_price": (
-            str(state.last_bid_price) if state.last_bid_price is not None else None
-        ),
-        "last_ask_price": (
-            str(state.last_ask_price) if state.last_ask_price is not None else None
-        ),
-        "spread": str(state.spread) if state.spread is not None else None,
-        "midpoint": str(state.midpoint) if state.midpoint is not None else None,
-        "liquidation_count": state.liquidation_count,
-        "liquidation_notional": str(state.liquidation_notional),
-        "mark_price": str(state.mark_price) if state.mark_price is not None else None,
-        "closed_kline_count": state.closed_kline_count,
-        "source_event_count": state.source_event_count,
-        "data_complete": state.data_complete,
-        "missing_agg_trade_count": state.missing_agg_trade_count,
-        "is_backfill": state.is_backfill,
-    }
+    payload: dict[str, Any] = {}
+    for f in fields(MarketState15s):
+        val = getattr(state, f.name)
+        if isinstance(val, Decimal):
+            payload[f.name] = str(val)
+        elif isinstance(val, datetime):
+            payload[f.name] = val.isoformat()
+        else:
+            payload[f.name] = val
     dumped = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(dumped.encode("utf-8")).hexdigest()
 

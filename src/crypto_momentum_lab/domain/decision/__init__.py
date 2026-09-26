@@ -10,6 +10,7 @@ from crypto_momentum_lab.domain.decision.decision_engine import (
     build_decision_input,
     compute_decision_input_hash,
     decide,
+    decision_trace_from_result,
     map_decision_rejection_reason,
 )
 from crypto_momentum_lab.domain.decision.decision_frame import (
@@ -66,6 +67,7 @@ __all__ = [
     "compute_decision_input_hash",
     "compute_transition_input_hash",
     "decide",
+    "decision_trace_from_result",
     "default_symbol_lot_rules",
     "execute_policy_transition",
     "map_decision_rejection_reason",
