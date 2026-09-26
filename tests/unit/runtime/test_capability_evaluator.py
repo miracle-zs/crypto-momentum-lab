@@ -275,3 +275,14 @@ def test_plan_hash_and_fencing_epoch_mismatch_blocks_actions() -> None:
     dec_hash = evaluator.evaluate(SystemAction.ENTER, hash_mismatch_ev, plan)
     assert dec_hash.allowed is False
     assert dec_hash.reason == "plan_hash_mismatch"
+
+    # Mismatched runtime generation
+    gen_mismatch_ev = CapabilityEvidence(
+        evidence_version="ev_gen_bad",
+        market_freshness_seconds=2.0,
+        is_account_concordant=True,
+        runtime_generation="gen_outdated_v0",
+    )
+    dec_gen = evaluator.evaluate(SystemAction.ENTER, gen_mismatch_ev, plan)
+    assert dec_gen.allowed is False
+    assert dec_gen.reason == "runtime_generation_mismatch"

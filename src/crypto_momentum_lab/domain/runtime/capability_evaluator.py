@@ -141,6 +141,13 @@ class CapabilityEvaluator:
         ):
             return _decision(False, "plan_hash_mismatch")
 
+        # Check runtime generation alignment if supplied in evidence
+        if (
+            evidence.runtime_generation is not None
+            and evidence.runtime_generation != plan.runtime_generation
+        ):
+            return _decision(False, "runtime_generation_mismatch")
+
         # 2. CANCEL: Allowed as long as lease and identity are valid
         # Never blocked by stale market data, discordant batches, or collector lag!
         if action == SystemAction.CANCEL:
