@@ -1,6 +1,7 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any
 
 from crypto_momentum_lab.domain.account import (
@@ -18,6 +19,7 @@ from crypto_momentum_lab.domain.execution.execution_coordinator import (
 )
 from crypto_momentum_lab.domain.execution.order_state import (
     ExchangeOrderEvent,
+    ExchangeOrderState,
     FuturesPositionSide,
 )
 from crypto_momentum_lab.domain.execution.position_book import (
@@ -39,6 +41,17 @@ from crypto_momentum_lab.domain.execution.trade_command import (
 from crypto_momentum_lab.domain.strategy import EntryType, StrategySide
 
 
+class DispatchState(StrEnum):
+    """Authoritative lifecycle states for outbound trade commands."""
+
+    PREPARED = "prepared"
+    DISPATCHING = "dispatching"
+    ACKNOWLEDGED = "acknowledged"
+    REJECTED = "rejected"
+    UNKNOWN = "unknown"
+    TERMINAL = "terminal"
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionScope:
     environment: str
@@ -53,6 +66,22 @@ class ExecutionScope:
             symbol=self.symbol,
             position_side=self.position_side,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class OutboxEntry:
+    """Immutable dispatch record tracking external order submission attempt."""
+
+    command_id: str
+    request_id: str
+    scope: ExecutionScope
+    command: TradeCommand
+    state: DispatchState = DispatchState.PREPARED
+    attempt_count: int = 0
+    external_order_id: str | None = None
+    last_error: str | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +119,7 @@ class ExecutionReceipt:
     reservations: tuple[PositionReservation, ...]
     committed_at: datetime
     view_token: str
+    outbox_entry: OutboxEntry | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,11 +208,17 @@ class ExecutionBook:
     ) -> None:
         self._books: dict[str, PositionBook] = books_by_key or {}
         self._journals: dict[str, AccountJournal] = journals_by_key or {}
-        self._coordinator = coordinator or ExecutionCoordinator()
+        self._coordinator = coordinator or ExecutionCoordinator(
+            repository=reservation_repository
+        )
         self._reservation_repo = reservation_repository
         self._requests_by_id: dict[str, ExecutionRequest] = {}
         self._receipts_by_id: dict[str, ExecutionReceipt] = {}
         self._seen_evidence_ids: set[str] = set()
+        self._seen_trade_ids: set[str] = set()
+        self._outbox_by_command_id: dict[str, OutboxEntry] = {}
+        self._command_reservations: dict[str, list[str]] = {}
+        self._order_cumulative_fills: dict[str, Decimal] = {}
 
     def _ensure_book(self, key: PositionKey) -> PositionBook:
         canon = key.canonical_id
@@ -197,6 +233,17 @@ class ExecutionBook:
         if canon not in self._journals:
             self._journals[canon] = AccountJournal(key)
         return self._journals[canon]
+
+    def _find_active_reservations_for_command(
+        self, command_id: str
+    ) -> list[PositionReservation]:
+        res_ids = self._command_reservations.get(command_id, [])
+        active: list[PositionReservation] = []
+        for r_id in res_ids:
+            r = self._coordinator.get_reservation(r_id)
+            if r is not None and r.active_quantity > Decimal("0"):
+                active.append(r)
+        return active
 
     async def read(
         self,
@@ -213,7 +260,7 @@ class ExecutionBook:
         self,
         request: ExecutionRequest,
     ) -> ExecutionActResult:
-        """Accepts a trade request, enforcing CAS view token and capacity."""
+        """Accepts a trade request, enforcing CAS view token, capacity, and outbox."""
         key = request.scope.to_position_key()
         book = self._ensure_book(key)
         view = book.get_view()
@@ -335,17 +382,165 @@ class ExecutionBook:
                 created_at=request.created_at,
             )
 
+        committed_at = datetime.now(UTC)
+        outbox = OutboxEntry(
+            command_id=command.command_id,
+            request_id=request.request_id,
+            scope=request.scope,
+            command=command,
+            state=DispatchState.PREPARED,
+            created_at=committed_at,
+            updated_at=committed_at,
+        )
+        self._outbox_by_command_id[command.command_id] = outbox
+        if reservations:
+            self._command_reservations[command.command_id] = [
+                r.reservation_id for r in reservations
+            ]
+
         receipt = ExecutionReceipt(
             request_id=request.request_id,
             scope=request.scope,
             command=command,
             reservations=reservations,
-            committed_at=datetime.now(UTC),
+            committed_at=committed_at,
             view_token=view.projection_version,
+            outbox_entry=outbox,
         )
         self._requests_by_id[request.request_id] = request
         self._receipts_by_id[request.request_id] = receipt
         return Accepted(receipt)
+
+    def get_outbox(self, command_id: str) -> OutboxEntry | None:
+        """Returns the outbox record for command_id if found."""
+        return self._outbox_by_command_id.get(command_id)
+
+    def list_outbox(
+        self,
+        scope: ExecutionScope | None = None,
+        state: DispatchState | None = None,
+    ) -> tuple[OutboxEntry, ...]:
+        """Queries outbox records filtered by scope and dispatch state."""
+        entries: list[OutboxEntry] = list(self._outbox_by_command_id.values())
+        if scope is not None:
+            entries = [
+                e
+                for e in entries
+                if e.scope.to_position_key().canonical_id
+                == scope.to_position_key().canonical_id
+            ]
+        if state is not None:
+            entries = [e for e in entries if e.state == state]
+        return tuple(entries)
+
+    def mark_dispatching(
+        self, command_id: str, dispatched_at: datetime | None = None
+    ) -> OutboxEntry:
+        """Transitions outbox from PREPARED/UNKNOWN to DISPATCHING."""
+        entry = self._outbox_by_command_id.get(command_id)
+        if entry is None:
+            raise KeyError(f"Outbox entry {command_id} not found")
+        if entry.state not in (DispatchState.PREPARED, DispatchState.UNKNOWN):
+            raise ValueError(
+                f"Cannot dispatch outbox entry in state {entry.state.value}"
+            )
+        now = dispatched_at or datetime.now(UTC)
+        updated = replace(
+            entry,
+            state=DispatchState.DISPATCHING,
+            attempt_count=entry.attempt_count + 1,
+            updated_at=now,
+        )
+        self._outbox_by_command_id[command_id] = updated
+        return updated
+
+    def mark_acknowledged(
+        self,
+        command_id: str,
+        external_order_id: str,
+        acknowledged_at: datetime | None = None,
+    ) -> OutboxEntry:
+        """Transitions outbox to ACKNOWLEDGED with external exchange order ID."""
+        entry = self._outbox_by_command_id.get(command_id)
+        if entry is None:
+            raise KeyError(f"Outbox entry {command_id} not found")
+        now = acknowledged_at or datetime.now(UTC)
+        updated = replace(
+            entry,
+            state=DispatchState.ACKNOWLEDGED,
+            external_order_id=external_order_id,
+            updated_at=now,
+        )
+        self._outbox_by_command_id[command_id] = updated
+        return updated
+
+    def mark_unknown(
+        self,
+        command_id: str,
+        reason: str,
+        unknown_at: datetime | None = None,
+    ) -> OutboxEntry:
+        """Transitions outbox to UNKNOWN while preserving active reservations."""
+        entry = self._outbox_by_command_id.get(command_id)
+        if entry is None:
+            raise KeyError(f"Outbox entry {command_id} not found")
+        now = unknown_at or datetime.now(UTC)
+        updated = replace(
+            entry,
+            state=DispatchState.UNKNOWN,
+            last_error=reason,
+            updated_at=now,
+        )
+        self._outbox_by_command_id[command_id] = updated
+        return updated
+
+    def mark_rejected(
+        self,
+        command_id: str,
+        reason: str,
+        rejected_at: datetime | None = None,
+    ) -> OutboxEntry:
+        """Transitions outbox to REJECTED and releases all active reservations."""
+        entry = self._outbox_by_command_id.get(command_id)
+        if entry is None:
+            raise KeyError(f"Outbox entry {command_id} not found")
+        now = rejected_at or datetime.now(UTC)
+        active_res = self._find_active_reservations_for_command(command_id)
+        for res in active_res:
+            self._coordinator.release_reservation(res.reservation_id)
+
+        updated = replace(
+            entry,
+            state=DispatchState.REJECTED,
+            last_error=reason,
+            updated_at=now,
+        )
+        self._outbox_by_command_id[command_id] = updated
+        return updated
+
+    def mark_terminal(
+        self,
+        command_id: str,
+        reason: str = "",
+        terminal_at: datetime | None = None,
+    ) -> OutboxEntry:
+        """Transitions outbox to TERMINAL and releases remaining reservations."""
+        entry = self._outbox_by_command_id.get(command_id)
+        if entry is None:
+            raise KeyError(f"Outbox entry {command_id} not found")
+        now = terminal_at or datetime.now(UTC)
+        active_res = self._find_active_reservations_for_command(command_id)
+        for res in active_res:
+            self._coordinator.release_reservation(res.reservation_id)
+
+        updated = replace(
+            entry,
+            state=DispatchState.TERMINAL,
+            last_error=reason if reason else entry.last_error,
+            updated_at=now,
+        )
+        self._outbox_by_command_id[command_id] = updated
+        return updated
 
     async def observe(
         self,
@@ -367,27 +562,156 @@ class ExecutionBook:
         consumed_qty = Decimal("0")
         released_qty = Decimal("0")
 
+        # 1. Process Fill
         if evidence.fill is not None:
-            accepted = journal.append_fill(evidence.fill)
-            if not accepted and journal.has_conflicts:
-                return EvidenceConflict(
-                    evidence_id=evidence.evidence_id,
-                    reason=(
-                        f"Fill {evidence.fill.trade_id} conflicted with "
-                        "existing journal records"
-                    ),
-                )
-            if (
-                evidence.fill.side.upper() == "SELL"
-                and key.position_side == FuturesPositionSide.LONG
-            ):
-                consumed_qty = evidence.fill.quantity
+            trade_id = evidence.fill.trade_id
+            order_id = evidence.fill.order_id
+            is_new_trade = trade_id not in self._seen_trade_ids
 
+            if is_new_trade:
+                accepted = journal.append_fill(evidence.fill)
+                if not accepted and journal.has_conflicts:
+                    return EvidenceConflict(
+                        evidence_id=evidence.evidence_id,
+                        reason=(
+                            f"Fill {evidence.fill.trade_id} conflicted with "
+                            "existing journal records"
+                        ),
+                    )
+                self._seen_trade_ids.add(trade_id)
+
+                # Deduplicate cumulative vs incremental fill quantity
+                # Invariant: 3 -> 3 -> 5 only consumes 5 total
+                fill_qty = evidence.fill.quantity
+                if (
+                    isinstance(evidence.fill.raw_payload, dict)
+                    and (
+                        evidence.fill.raw_payload.get("is_cumulative")
+                        or "cum_qty" in evidence.fill.raw_payload
+                    )
+                ):
+                    cum_val = Decimal(
+                        str(evidence.fill.raw_payload.get("cum_qty", fill_qty))
+                    )
+                    prev_cum = self._order_cumulative_fills.get(
+                        order_id, Decimal("0")
+                    )
+                    delta_qty = max(Decimal("0"), cum_val - prev_cum)
+                    self._order_cumulative_fills[order_id] = cum_val
+                else:
+                    delta_qty = fill_qty
+
+                # Reconcile active reservations if this is an exit / reduction fill
+                is_exit_fill = (
+                    (
+                        evidence.fill.side.upper() == "SELL"
+                        and key.position_side == FuturesPositionSide.LONG
+                    )
+                    or (
+                        evidence.fill.side.upper() == "BUY"
+                        and key.position_side == FuturesPositionSide.SHORT
+                    )
+                )
+
+                if is_exit_fill and delta_qty > Decimal("0"):
+                    cand_res = self._find_active_reservations_for_command(
+                        order_id
+                    )
+                    if not cand_res:
+                        cand_res = list(
+                            self._coordinator.get_active_reservations(key)
+                        )
+
+                    remaining = delta_qty
+                    for res in cand_res:
+                        if remaining <= Decimal("0"):
+                            break
+                        consume_amt = min(remaining, res.active_quantity)
+                        if consume_amt > Decimal("0"):
+                            self._coordinator.reconcile_fill(
+                                res.reservation_id, consume_amt
+                            )
+                            consumed_qty += consume_amt
+                            remaining -= consume_amt
+
+        # 2. Process Snapshot
         if evidence.snapshot is not None:
             journal.record_snapshot(evidence.snapshot)
 
+        # 3. Process Boundary
         if evidence.boundary is not None:
             journal.record_boundary(evidence.boundary)
+
+        # 4. Process Order Event
+        if evidence.order_event is not None:
+            ev_state = evidence.order_event.state
+            cmd_id = evidence.order_event.client_order_id
+            outbox = self._outbox_by_command_id.get(cmd_id)
+
+            if ev_state in (
+                ExchangeOrderState.ACKNOWLEDGED,
+                ExchangeOrderState.SUBMITTED,
+            ):
+                if outbox is not None and outbox.state in (
+                    DispatchState.PREPARED,
+                    DispatchState.DISPATCHING,
+                    DispatchState.UNKNOWN,
+                ):
+                    self._outbox_by_command_id[cmd_id] = replace(
+                        outbox,
+                        state=DispatchState.ACKNOWLEDGED,
+                        updated_at=evidence.observed_at,
+                    )
+            elif ev_state in (
+                ExchangeOrderState.CANCELED,
+                ExchangeOrderState.EXPIRED,
+                ExchangeOrderState.REJECTED,
+                ExchangeOrderState.ABSENT_RECONCILED,
+            ):
+                # Terminal non-filled state: release remaining active reservations
+                active_res = self._find_active_reservations_for_command(cmd_id)
+                for res in active_res:
+                    to_release = res.active_quantity
+                    self._coordinator.release_reservation(
+                        res.reservation_id, to_release
+                    )
+                    released_qty += to_release
+
+                if outbox is not None:
+                    target_state = (
+                        DispatchState.REJECTED
+                        if ev_state == ExchangeOrderState.REJECTED
+                        else DispatchState.TERMINAL
+                    )
+                    self._outbox_by_command_id[cmd_id] = replace(
+                        outbox,
+                        state=target_state,
+                        last_error=f"Order {ev_state.value}",
+                        updated_at=evidence.observed_at,
+                    )
+            elif ev_state == ExchangeOrderState.FILLED:
+                active_res = self._find_active_reservations_for_command(cmd_id)
+                for res in active_res:
+                    to_release = res.active_quantity
+                    self._coordinator.release_reservation(
+                        res.reservation_id, to_release
+                    )
+                    released_qty += to_release
+
+                if outbox is not None:
+                    self._outbox_by_command_id[cmd_id] = replace(
+                        outbox,
+                        state=DispatchState.TERMINAL,
+                        updated_at=evidence.observed_at,
+                    )
+            elif ev_state == ExchangeOrderState.UNKNOWN_PENDING_RECONCILIATION:
+                if outbox is not None:
+                    self._outbox_by_command_id[cmd_id] = replace(
+                        outbox,
+                        state=DispatchState.UNKNOWN,
+                        last_error="Pending reconciliation",
+                        updated_at=evidence.observed_at,
+                    )
 
         self._seen_evidence_ids.add(evidence.evidence_id)
         updated_view = book.get_view(now=evidence.observed_at)
@@ -401,19 +725,20 @@ class ExecutionBook:
 
 
 __all__ = [
-    "ExecutionScope",
-    "ExecutionRequest",
-    "ExecutionReceipt",
     "Accepted",
     "AlreadyAccepted",
-    "StaleView",
     "Blocked",
     "CommandConflict",
-    "ExecutionActResult",
-    "ExecutionEvidence",
-    "Applied",
+    "DispatchState",
     "Duplicate",
     "EvidenceConflict",
-    "ExecutionObserveResult",
+    "ExecutionActResult",
     "ExecutionBook",
+    "ExecutionEvidence",
+    "ExecutionObserveResult",
+    "ExecutionReceipt",
+    "ExecutionRequest",
+    "ExecutionScope",
+    "OutboxEntry",
+    "StaleView",
 ]

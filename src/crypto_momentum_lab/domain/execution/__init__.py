@@ -8,6 +8,7 @@ from crypto_momentum_lab.domain.execution.execution_book import (
     Applied,
     Blocked,
     CommandConflict,
+    DispatchState,
     Duplicate,
     EvidenceConflict,
     ExecutionActResult,
@@ -17,6 +18,7 @@ from crypto_momentum_lab.domain.execution.execution_book import (
     ExecutionReceipt,
     ExecutionRequest,
     ExecutionScope,
+    OutboxEntry,
     StaleView,
 )
 from crypto_momentum_lab.domain.execution.execution_coordinator import (
@@ -155,5 +157,7 @@ __all__ = [
     "ExecutionActResult",
     "ExecutionObserveResult",
     "ExecutionBook",
+    "DispatchState",
+    "OutboxEntry",
     "validate_exit_allocation_plan",
 ]
