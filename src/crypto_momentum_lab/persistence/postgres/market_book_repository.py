@@ -216,11 +216,17 @@ class PostgresMarketBookRepository:
             if row is None:
                 return None
             rev_ids = row.revision_ids or []
-            # Batch load revision rows
-            stmt = select(MarketRevisionRefRow).where(
-                MarketRevisionRefRow.revision_id.in_(rev_ids)
-            )
-            rev_rows = {r.revision_id: r for r in session.execute(stmt).scalars().all()}
+            # Batch load revision rows in chunks to prevent exceeding
+            # PostgreSQL parameter limit (65535)
+            rev_rows: dict[str, MarketRevisionRefRow] = {}
+            chunk_size = 5000
+            for i in range(0, len(rev_ids), chunk_size):
+                chunk = rev_ids[i : i + chunk_size]
+                stmt = select(MarketRevisionRefRow).where(
+                    MarketRevisionRefRow.revision_id.in_(chunk)
+                )
+                for r in session.execute(stmt).scalars().all():
+                    rev_rows[r.revision_id] = r
 
             refs = []
             for rid in rev_ids:
