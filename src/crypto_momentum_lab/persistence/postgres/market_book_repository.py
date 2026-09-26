@@ -5,7 +5,7 @@ Implements MarketBookRepository protocol defined in domain/market/market_book.py
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
@@ -349,3 +349,108 @@ class PostgresMarketBookRepository:
                 frame_digest=frame_digest,
                 trace_payload=payload,
             )
+
+    def get_canonical_refs_in_range(
+        self,
+        scope: str,
+        symbols: tuple[str, ...],
+        interval: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> dict[tuple[str, datetime], MarketRevisionRef]:
+        with self._session_factory() as session:
+            stmt = (
+                select(MarketRevisionRefRow)
+                .where(
+                    MarketRevisionRefRow.scope == scope,
+                    MarketRevisionRefRow.symbol.in_(symbols),
+                    MarketRevisionRefRow.interval == interval,
+                    MarketRevisionRefRow.bucket_start >= start_time,
+                    MarketRevisionRefRow.bucket_start < end_time,
+                    MarketRevisionRefRow.is_canonical.is_(True),
+                )
+                .order_by(
+                    MarketRevisionRefRow.bucket_start.asc(),
+                    MarketRevisionRefRow.published_at.desc(),
+                )
+            )
+            rows = session.execute(stmt).scalars().all()
+            result: dict[tuple[str, datetime], MarketRevisionRef] = {}
+            for row in rows:
+                key = (row.symbol, row.bucket_start)
+                if key not in result:
+                    result[key] = MarketRevisionRef(
+                        scope=row.scope,
+                        symbol=row.symbol,
+                        interval=row.interval,
+                        bucket_start=row.bucket_start,
+                        bucket_end=row.bucket_end,
+                        revision_id=row.revision_id,
+                        content_hash=row.content_hash,
+                        published_at=row.published_at,
+                        observed_at=_observed_at_from_lineage(row.lineage),
+                        source_epoch=row.source_epoch,
+                        visibility_mode=MarketVisibilityMode(row.visibility_mode),
+                    )
+            return result
+
+    def list_manifests(
+        self, scope: str | None = None, limit: int = 100
+    ) -> list[DatasetManifest]:
+        with self._session_factory() as session:
+            stmt = select(DatasetManifestRow)
+            if scope is not None:
+                stmt = stmt.where(DatasetManifestRow.scope == scope)
+            stmt = stmt.order_by(DatasetManifestRow.start_time.desc()).limit(limit)
+            rows = session.execute(stmt).scalars().all()
+            return [
+                DatasetManifest(
+                    manifest_id=row.manifest_id,
+                    scope=row.scope,
+                    symbols=tuple(row.symbols.split(",")),
+                    interval=row.interval,
+                    start_time=row.start_time,
+                    end_time=row.end_time,
+                    visibility_mode=MarketVisibilityMode(row.visibility_mode),
+                    revision_refs=(),
+                    schema_version=row.schema_version,
+                    feature_algorithm_version=row.feature_algorithm_version,
+                    manifest_hash=row.manifest_hash,
+                    created_at=row.created_at,
+                    coverage_ratio=row.coverage_ratio,
+                    holes=tuple(
+                        (
+                            datetime.fromisoformat(str(h[0])),  # type: ignore[index]
+                            datetime.fromisoformat(str(h[1])),  # type: ignore[index]
+                        )
+                        for h in (row.holes or [])
+                    ),
+                )
+                for row in rows
+            ]
+
+    def get_distinct_dates_and_symbols(
+        self, scope: str, interval: str = "15s"
+    ) -> list[tuple[date, tuple[str, ...]]]:
+        with self._session_factory() as session:
+            stmt = (
+                select(
+                    MarketRevisionRefRow.bucket_start,
+                    MarketRevisionRefRow.symbol,
+                )
+                .where(
+                    MarketRevisionRefRow.scope == scope,
+                    MarketRevisionRefRow.interval == interval,
+                    MarketRevisionRefRow.is_canonical.is_(True),
+                )
+                .order_by(MarketRevisionRefRow.bucket_start.asc())
+            )
+            rows = session.execute(stmt).all()
+            date_to_symbols: dict[date, set[str]] = {}
+            for b_start, sym in rows:
+                d = b_start.date()
+                date_to_symbols.setdefault(d, set()).add(sym)
+            return [
+                (d, tuple(sorted(syms)))
+                for d, syms in sorted(date_to_symbols.items())
+            ]

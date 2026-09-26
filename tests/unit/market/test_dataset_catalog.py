@@ -197,3 +197,161 @@ def test_open_dataset_missing_revision_raises_unreproducible() -> None:
 
     with pytest.raises(UnreproducibleError, match="cannot be reproduced"):
         catalog.open_dataset("ds_missing_rev")
+
+
+def test_dataset_catalog_batch_range_fetch_and_verify() -> None:
+    repo = InMemoryMarketBookRepository()
+    book = MarketBook(repo)
+    catalog = DatasetCatalog(book, repo)
+
+    t0 = datetime(2026, 9, 25, 0, 0, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(seconds=15)
+    t2 = t1 + timedelta(seconds=15)
+
+    book.publish(
+        _make_state(symbol="BTCUSDT", bucket_start=t0),
+        is_canonical=True,
+    )
+    book.publish(
+        _make_state(symbol="ETHUSDT", bucket_start=t0),
+        is_canonical=True,
+    )
+    book.publish(
+        _make_state(symbol="BTCUSDT", bucket_start=t1),
+        is_canonical=True,
+    )
+    book.publish(
+        _make_state(symbol="ETHUSDT", bucket_start=t1),
+        is_canonical=True,
+    )
+
+    # Test get_canonical_refs_in_range
+    range_refs = repo.get_canonical_refs_in_range(
+        "live",
+        ("BTCUSDT", "ETHUSDT"),
+        "15s",
+        t0,
+        t2,
+    )
+    assert len(range_refs) == 4
+    assert ("BTCUSDT", t0) in range_refs
+    assert ("ETHUSDT", t1) in range_refs
+
+    # Test build_dataset with batch fetcher
+    manifest = catalog.build_dataset(
+        manifest_id="ds_batch_test",
+        scope="live",
+        symbols=("BTCUSDT", "ETHUSDT"),
+        interval="15s",
+        start_time=t0,
+        end_time=t2,
+        visibility_mode=MarketVisibilityMode.CANONICAL,
+    )
+    assert manifest.manifest_id == "ds_batch_test"
+    assert len(manifest.revision_refs) == 4
+    assert len(manifest.holes) == 0
+    assert manifest.coverage_ratio == Decimal("1.0")
+
+    # Test verify_manifest
+    verified = catalog.verify_manifest("ds_batch_test")
+    assert verified["status"] == "VERIFIED_REPRODUCIBLE"
+    assert verified["verified"] is True
+    assert verified["revisions_count"] == 4
+    assert Decimal(verified["coverage_ratio"]) == Decimal("1.0")
+
+
+def test_dataset_catalog_verify_manifest_integrity_violation() -> None:
+    repo = InMemoryMarketBookRepository()
+    book = MarketBook(repo)
+    catalog = DatasetCatalog(book, repo)
+
+    t0 = datetime(2026, 9, 25, 0, 0, 0, tzinfo=UTC)
+    book.publish(
+        _make_state(symbol="BTCUSDT", bucket_start=t0),
+        is_canonical=True,
+    )
+
+    manifest = catalog.build_dataset(
+        manifest_id="ds_tampered_verify",
+        scope="live",
+        symbols=("BTCUSDT",),
+        interval="15s",
+        start_time=t0,
+        end_time=t0 + timedelta(seconds=15),
+    )
+
+    # Tamper with stored hash
+    tampered = DatasetManifest(
+        manifest_id=manifest.manifest_id,
+        scope=manifest.scope,
+        symbols=manifest.symbols,
+        interval=manifest.interval,
+        start_time=manifest.start_time,
+        end_time=manifest.end_time,
+        visibility_mode=manifest.visibility_mode,
+        revision_refs=manifest.revision_refs,
+        schema_version=manifest.schema_version,
+        feature_algorithm_version=manifest.feature_algorithm_version,
+        manifest_hash="tampered_hash_123",
+        created_at=manifest.created_at,
+        coverage_ratio=manifest.coverage_ratio,
+        holes=manifest.holes,
+    )
+    repo.save_manifest(tampered)
+
+    res = catalog.verify_manifest("ds_tampered_verify")
+    assert res["status"] == "INTEGRITY_VIOLATION"
+    assert res["verified"] is False
+
+    # Non-existent manifest
+    missing = catalog.verify_manifest("ds_nonexistent")
+    assert missing["status"] == "NOT_FOUND"
+    assert missing["verified"] is False
+
+
+def test_dataset_catalog_list_and_distinct_dates() -> None:
+    from crypto_momentum_lab.tools.catalog_dataset import catalog_auto_daily
+
+    repo = InMemoryMarketBookRepository()
+    book = MarketBook(repo)
+    catalog = DatasetCatalog(book, repo)
+
+    d1 = datetime(2026, 9, 24, 10, 0, 0, tzinfo=UTC)
+    d2 = datetime(2026, 9, 25, 11, 0, 0, tzinfo=UTC)
+
+    book.publish(
+        _make_state(symbol="BTCUSDT", bucket_start=d1),
+        is_canonical=True,
+    )
+    book.publish(
+        _make_state(symbol="ETHUSDT", bucket_start=d1),
+        is_canonical=True,
+    )
+    book.publish(
+        _make_state(symbol="SOLUSDT", bucket_start=d2),
+        is_canonical=True,
+    )
+
+    dates_syms = repo.get_distinct_dates_and_symbols("live", "15s")
+    assert len(dates_syms) == 2
+    assert dates_syms[0][0] == d1.date()
+    assert dates_syms[0][1] == ("BTCUSDT", "ETHUSDT")
+    assert dates_syms[1][0] == d2.date()
+    assert dates_syms[1][1] == ("SOLUSDT",)
+
+    # Test auto_daily tool logic
+    results = catalog_auto_daily(
+        catalog,
+        repo,  # type: ignore[arg-type]
+        scope="live",
+        interval="15s",
+        save=True,
+    )
+    assert len(results) == 2
+    assert results[0]["symbols_count"] == 2
+    assert results[1]["symbols_count"] == 1
+
+    # Test list_manifests
+    listed = catalog.list_manifests(scope="live")
+    assert len(listed) == 2
+

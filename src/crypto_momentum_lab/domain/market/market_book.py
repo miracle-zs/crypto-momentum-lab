@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import fields
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -82,6 +82,20 @@ class MarketBookRepository(Protocol):
     def load_manifest(self, manifest_id: str) -> DatasetManifest | None: ...
     def save_decision_trace(self, trace: DecisionTrace) -> None: ...
     def load_decision_trace(self, decision_id: str) -> DecisionTrace | None: ...
+    def get_canonical_refs_in_range(
+        self,
+        scope: str,
+        symbols: tuple[str, ...],
+        interval: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> dict[tuple[str, datetime], MarketRevisionRef]: ...
+    def list_manifests(
+        self, scope: str | None = None, limit: int = 100
+    ) -> list[DatasetManifest]: ...
+    def get_distinct_dates_and_symbols(
+        self, scope: str, interval: str = "15s"
+    ) -> list[tuple[date, tuple[str, ...]]]: ...
 
 
 class InMemoryMarketBookRepository:
@@ -135,11 +149,52 @@ class InMemoryMarketBookRepository:
             self.bucket_revisions.get((scope, symbol, interval, bucket_start), [])
         )
 
+    def get_canonical_refs_in_range(
+        self,
+        scope: str,
+        symbols: tuple[str, ...],
+        interval: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> dict[tuple[str, datetime], MarketRevisionRef]:
+        sym_set = set(symbols)
+        result: dict[tuple[str, datetime], MarketRevisionRef] = {}
+        for (s, sym, inv, b_start), ref in self.canonical_pointers.items():
+            if (
+                s == scope
+                and sym in sym_set
+                and inv == interval
+                and start_time <= b_start < end_time
+            ):
+                result[(sym, b_start)] = ref
+        return result
+
     def save_manifest(self, manifest: DatasetManifest) -> None:
         self.manifests[manifest.manifest_id] = manifest
 
     def load_manifest(self, manifest_id: str) -> DatasetManifest | None:
         return self.manifests.get(manifest_id)
+
+    def list_manifests(
+        self, scope: str | None = None, limit: int = 100
+    ) -> list[DatasetManifest]:
+        items = list(self.manifests.values())
+        if scope is not None:
+            items = [m for m in items if m.scope == scope]
+        items.sort(key=lambda m: m.start_time, reverse=True)
+        return items[:limit]
+
+    def get_distinct_dates_and_symbols(
+        self, scope: str, interval: str = "15s"
+    ) -> list[tuple[date, tuple[str, ...]]]:
+        date_to_symbols: dict[date, set[str]] = {}
+        for s, sym, inv, b_start in self.canonical_pointers.keys():
+            if s == scope and inv == interval:
+                d = b_start.date()
+                date_to_symbols.setdefault(d, set()).add(sym)
+        return [
+            (d, tuple(sorted(syms))) for d, syms in sorted(date_to_symbols.items())
+        ]
 
     def save_decision_trace(self, trace: DecisionTrace) -> None:
         self.decision_traces[trace.decision_id] = trace
@@ -335,13 +390,25 @@ class DatasetCatalog:
         holes: list[tuple[datetime, datetime]] = []
 
         total_expected = 0
+        batch_fetcher = getattr(self._repo, "get_canonical_refs_in_range", None)
+        canonical_map: dict[tuple[str, datetime], MarketRevisionRef] | None = None
+        if (
+            callable(batch_fetcher)
+            and visibility_mode == MarketVisibilityMode.CANONICAL
+        ):
+            canonical_map = batch_fetcher(
+                scope, symbols, interval, start_time, end_time
+            )
+
         current_time = start_time
         while current_time < end_time:
             b_start = current_time
             b_end = current_time + step
             for sym in sorted(symbols):
                 total_expected += 1
-                if visibility_mode == MarketVisibilityMode.CANONICAL:
+                if canonical_map is not None:
+                    ref = canonical_map.get((sym, b_start))
+                elif visibility_mode == MarketVisibilityMode.CANONICAL:
                     ref = self._book.get_canonical_ref(scope, sym, interval, b_start)
                 else:
                     ref = self._book.get_decision_visible_ref(
@@ -432,3 +499,64 @@ class DatasetCatalog:
         # Return strictly ordered stream by bucket_start then symbol
         envelopes.sort(key=lambda e: (e.ref.bucket_start, e.ref.symbol))
         return tuple(envelopes)
+
+    def verify_manifest(self, manifest_id: str) -> dict[str, Any]:
+        """Cryptographically verifies a DatasetManifest and its referenced revisions."""
+        manifest = self._repo.load_manifest(manifest_id)
+        if manifest is None:
+            return {
+                "manifest_id": manifest_id,
+                "status": "NOT_FOUND",
+                "error": f"Manifest '{manifest_id}' not found in catalog",
+                "verified": False,
+            }
+
+        # Check hash
+        hasher = hashlib.sha256()
+        hasher.update(manifest.scope.encode())
+        hasher.update(",".join(sorted(manifest.symbols)).encode())
+        hasher.update(manifest.interval.encode())
+        hasher.update(manifest.start_time.isoformat().encode())
+        hasher.update(manifest.end_time.isoformat().encode())
+        hasher.update(manifest.visibility_mode.value.encode())
+        hasher.update(manifest.feature_algorithm_version.encode())
+        for r in manifest.revision_refs:
+            hasher.update(r.content_hash.encode())
+        computed_hash = hasher.hexdigest()
+
+        if computed_hash != manifest.manifest_hash:
+            return {
+                "manifest_id": manifest_id,
+                "status": "INTEGRITY_VIOLATION",
+                "error": (
+                    f"Computed hash {computed_hash} != stored "
+                    f"{manifest.manifest_hash}"
+                ),
+                "verified": False,
+            }
+
+        return {
+            "manifest_id": manifest.manifest_id,
+            "status": "VERIFIED_REPRODUCIBLE",
+            "verified": True,
+            "scope": manifest.scope,
+            "symbols_count": len(manifest.symbols),
+            "interval": manifest.interval,
+            "start_time": manifest.start_time.isoformat(),
+            "end_time": manifest.end_time.isoformat(),
+            "visibility_mode": manifest.visibility_mode.value,
+            "manifest_hash": manifest.manifest_hash,
+            "coverage_ratio": str(manifest.coverage_ratio),
+            "revisions_count": len(manifest.revision_refs),
+            "holes_count": len(manifest.holes),
+        }
+
+    def list_manifests(
+        self, scope: str | None = None, limit: int = 100
+    ) -> list[DatasetManifest]:
+        lister = getattr(self._repo, "list_manifests", None)
+        if callable(lister):
+            result = lister(scope=scope, limit=limit)
+            if isinstance(result, list):
+                return result
+        return []
