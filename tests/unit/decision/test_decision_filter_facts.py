@@ -16,6 +16,7 @@ from crypto_momentum_lab.domain.execution.position_ledger_models import (
     FactCoverageStatus,
     PositionHealthStatus,
     PositionKey,
+    PositionLedgerBatch,
     PositionView,
 )
 from crypto_momentum_lab.domain.market.models import MarketState15s
@@ -274,4 +275,72 @@ def test_filter_invokes_on_decision_result_callback() -> None:
     assert len(results_captured) == 1
     assert results_captured[0].next_policy_state.policy_version > 3
     assert len(out.candidates) == 1
+
+
+def test_filter_evaluates_open_position_exit_when_candidates_empty() -> None:
+    """Empty candidates with an open position must trigger holding evaluation
+    and on_decision_result.
+    """
+    key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    opened_at = datetime(2026, 9, 25, 6, 0, tzinfo=UTC)
+    batch = PositionLedgerBatch(
+        batch_id="b_01",
+        episode_id="ep_01",
+        quantity=Decimal("1.0"),
+        original_quantity=Decimal("1.0"),
+        entry_price=Decimal("100.00"),
+        opened_at=opened_at,
+    )
+    view = PositionView(
+        key=key,
+        projection_version="pv1",
+        input_revision=1,
+        event_cut=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
+        policy_version="v1",
+        schema_version="v1",
+        coverage=FactCoverageInterval(
+            start_at=datetime(2026, 9, 25, 6, 0, tzinfo=UTC),
+            end_at=datetime(2026, 9, 25, 8, 0, tzinfo=UTC),
+            status=FactCoverageStatus.CONFIRMED,
+        ),
+        active_episode=None,
+        batches=(batch,),
+        unallocated_quantity=Decimal("0"),
+        reconciliation_gap=Decimal("0"),
+        health_status=PositionHealthStatus.READY,
+    )
+    frozen = FrozenDecisionInputs(
+        position_view=view,
+        cash_balance=Decimal("1000"),
+        policy_state=PolicyState(policy_version=1),
+        universe_version="univ_v1",
+        risk_config_version="risk_v1",
+    )
+
+    results_captured = []
+    filt = create_authoritative_decision_filter(
+        "orderflow_impulse",
+        target_notional=Decimal("500"),
+        fact_provider=lambda state: frozen,
+        on_decision_result=results_captured.append,
+    )
+
+    # Empty candidates decision (clock tick only)
+    dec = StrategyDecision(signals=(), candidates=(), rejections=())
+    out = filt(dec, _state())
+
+    assert out.candidates == ()
+    # Holding evaluation must have executed and recorded result
+    assert len(results_captured) == 1
+    res = results_captured[0]
+    assert res.transition.exit_command is not None
+    assert res.next_policy_state.is_in_cooldown(
+        "BTCUSDT", datetime(2026, 9, 25, 8, 0, tzinfo=UTC)
+    )
+
 

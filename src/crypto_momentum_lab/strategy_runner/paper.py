@@ -1,4 +1,5 @@
 import json
+import logging
 from collections import Counter, deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -51,6 +52,10 @@ from crypto_momentum_lab.domain.strategy import (
     StrategySignal,
     deterministic_config_hash,
 )
+from crypto_momentum_lab.domain.strategy.position_exit import (
+    PositionExitMode,
+    PositionExitPolicy,
+)
 from crypto_momentum_lab.strategies.compression_breakout import (
     CompressionBreakoutConfig,
 )
@@ -84,6 +89,8 @@ from crypto_momentum_lab.strategy_runner.registry import (
     build_runtime_strategy,
 )
 from crypto_momentum_lab.strategy_runner.serialization import jsonable
+
+logger = logging.getLogger(__name__)
 
 
 class PaperRunnerError(RuntimeError):
@@ -247,6 +254,18 @@ def run_paper_trading(
     max_gap_seconds = strategy.required_data().max_gap_seconds
     input_state_count = 0
     policy_state = PolicyState()
+    runner_exit_policy = PositionExitPolicy(
+        max_holding_seconds=(
+            config.portfolio.max_holding_buckets
+            * config.portfolio.state_interval_seconds
+        ),
+        mode=PositionExitMode(config.portfolio.exit_mode.value),
+        minimum_holding_seconds=(
+            config.portfolio.candle_minimum_holding_buckets
+            * config.portfolio.state_interval_seconds
+        ),
+        candle_confirmation_count=config.portfolio.candle_confirmation_count,
+    )
 
     for state in source:
         if config.max_states is not None and input_state_count >= config.max_states:
@@ -380,6 +399,7 @@ def run_paper_trading(
                 candidate_generator=(
                     lambda inp, st, _c=raw_cand: _c
                 ),
+                exit_policy=runner_exit_policy,
             )
             dec_res = _decision_engine.evaluate(dec_input, policy_state, policy)
             policy_state = dec_res.next_policy_state
@@ -427,8 +447,12 @@ def run_paper_trading(
                 if matching_cand is not None:
                     try:
                         _sim_adapter.execute_entry(matching_cand, envelope, journal)
-                    except Exception:
-                        pass
+                    except Exception as err:
+                        logger.warning(
+                            "Failed to execute paper entry for candidate %s: %s",
+                            matching_cand.candidate_id,
+                            err,
+                        )
         last_processed_at_by_symbol[state.symbol] = state.bucket_start
 
     if input_state_count == 0:

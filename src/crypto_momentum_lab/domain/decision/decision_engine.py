@@ -144,12 +144,19 @@ class PolicyState:
         )
 
     def with_anchor_and_intent(
-        self, symbol: str, anchor_price: Decimal, intent_id: str
+        self,
+        symbol: str,
+        anchor_price: Decimal,
+        intent_id: str,
+        grace_until: datetime | None = None,
     ) -> PolicyState:
         new_anchors = dict(self.anchor_prices_by_symbol)
         new_anchors[symbol] = anchor_price
         new_intents = dict(self.active_intent_ids_by_symbol)
         new_intents[symbol] = intent_id
+        new_grace = dict(self.grace_until_by_symbol)
+        if grace_until is not None:
+            new_grace[symbol] = grace_until
         return PolicyState(
             policy_version=self.policy_version + 1,
             cooldown_until_by_symbol=dict(self.cooldown_until_by_symbol),
@@ -158,9 +165,69 @@ class PolicyState:
             custom_state=dict(self.custom_state),
             signal_memory=dict(self.signal_memory),
             warmup_status=dict(self.warmup_status),
-            grace_until_by_symbol=dict(self.grace_until_by_symbol),
+            grace_until_by_symbol=new_grace,
             holding_deadline_by_symbol=dict(self.holding_deadline_by_symbol),
             sizing_state_by_symbol=dict(self.sizing_state_by_symbol),
+        )
+
+    def with_grace_until(self, symbol: str, until: datetime) -> PolicyState:
+        new_grace = dict(self.grace_until_by_symbol)
+        new_grace[symbol] = until
+        return PolicyState(
+            policy_version=self.policy_version + 1,
+            cooldown_until_by_symbol=dict(self.cooldown_until_by_symbol),
+            anchor_prices_by_symbol=dict(self.anchor_prices_by_symbol),
+            active_intent_ids_by_symbol=dict(self.active_intent_ids_by_symbol),
+            custom_state=dict(self.custom_state),
+            signal_memory=dict(self.signal_memory),
+            warmup_status=dict(self.warmup_status),
+            grace_until_by_symbol=new_grace,
+            holding_deadline_by_symbol=dict(self.holding_deadline_by_symbol),
+            sizing_state_by_symbol=dict(self.sizing_state_by_symbol),
+        )
+
+    def with_exit(self, symbol: str, cooldown_until: datetime) -> PolicyState:
+        """Atomically set cooldown and clear symbol-scoped position state."""
+        new_cd = dict(self.cooldown_until_by_symbol)
+        new_cd[symbol] = cooldown_until
+        new_anchors = dict(self.anchor_prices_by_symbol)
+        new_anchors.pop(symbol, None)
+        new_intents = dict(self.active_intent_ids_by_symbol)
+        new_intents.pop(symbol, None)
+        new_grace = dict(self.grace_until_by_symbol)
+        new_grace.pop(symbol, None)
+        new_deadlines = dict(self.holding_deadline_by_symbol)
+        new_deadlines.pop(symbol, None)
+        new_sizing = dict(self.sizing_state_by_symbol)
+        new_sizing.pop(symbol, None)
+        return PolicyState(
+            policy_version=self.policy_version + 1,
+            cooldown_until_by_symbol=new_cd,
+            anchor_prices_by_symbol=new_anchors,
+            active_intent_ids_by_symbol=new_intents,
+            custom_state=dict(self.custom_state),
+            signal_memory=dict(self.signal_memory),
+            warmup_status=dict(self.warmup_status),
+            grace_until_by_symbol=new_grace,
+            holding_deadline_by_symbol=new_deadlines,
+            sizing_state_by_symbol=new_sizing,
+        )
+
+    def reset_for_split(self, carry_sizing: bool = False) -> PolicyState:
+        """Clean slate reset across walk-forward train/eval split boundaries."""
+        return PolicyState(
+            policy_version=self.policy_version + 1,
+            cooldown_until_by_symbol={},
+            anchor_prices_by_symbol={},
+            active_intent_ids_by_symbol={},
+            custom_state={},
+            signal_memory={},
+            warmup_status={},
+            grace_until_by_symbol={},
+            holding_deadline_by_symbol={},
+            sizing_state_by_symbol=(
+                dict(self.sizing_state_by_symbol) if carry_sizing else {}
+            ),
         )
 
     def with_holding_deadline(self, symbol: str, deadline: datetime) -> PolicyState:
@@ -246,6 +313,7 @@ class EffectivePolicy:
     strategy_name: str
     policy_version: int = 1
     entry_threshold: Decimal = Decimal("65000.00")
+    short_entry_threshold: Decimal | None = None
     order_type: EntryType = EntryType.MARKET
     target_notional: Decimal = Decimal("500.00")
     max_open_positions: int = 4
@@ -329,6 +397,11 @@ def compute_decision_input_hash(
             "strategy_name": policy.strategy_name,
             "policy_version": policy.policy_version,
             "entry_threshold": str(policy.entry_threshold),
+            "short_entry_threshold": (
+                str(policy.short_entry_threshold)
+                if policy.short_entry_threshold is not None
+                else None
+            ),
             "order_type": (
                 policy.order_type.value
                 if hasattr(policy.order_type, "value")
@@ -390,8 +463,13 @@ def decide(
     frame = decision_input.frame
     if frame is None:
         clock_event = decision_input.clock_event
+        scope_to_use = (
+            getattr(decision_input.market_ref, "scope", None)
+            or getattr(decision_input.position_view.key, "environment", None)
+            or "live"
+        )
         frame = DecisionFrame(
-            scope="decision",
+            scope=scope_to_use,
             symbol=decision_input.symbol,
             market_refs=(decision_input.market_ref,),
             position_view_token=decision_input.position_view.projection_version,
@@ -649,6 +727,30 @@ def create_authoritative_decision_filter(
 
     def _filter(decision: StrategyDecision, state: MarketState15s) -> StrategyDecision:
         if not decision.candidates:
+            if fact_provider is not None:
+                frozen = fact_provider(state)
+                if (
+                    frozen is not None
+                    and frozen.position_view.key.symbol == state.symbol
+                    and frozen.position_view.total_quantity > Decimal("0")
+                ):
+                    scope_to_use = getattr(state, "environment", None) or "live"
+                    dec_input = build_decision_input(
+                        state=state,
+                        frozen=frozen,
+                        clock_sequence=1,
+                        scope=scope_to_use,
+                        source_epoch=f"ep_{scope_to_use}",
+                    )
+                    policy = EffectivePolicy(
+                        policy_id=f"policy_{strategy_name}",
+                        strategy_name=strategy_name,
+                        target_notional=notional,
+                        candidate_generator=lambda inp, st: None,
+                    )
+                    dec_res = engine.evaluate(dec_input, frozen.policy_state, policy)
+                    if on_decision_result is not None:
+                        on_decision_result(dec_res)
             return decision
 
         if fact_provider is None:

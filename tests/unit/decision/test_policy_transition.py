@@ -24,7 +24,9 @@ from crypto_momentum_lab.domain.decision import (
     TimerRequest,
     execute_policy_transition,
 )
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    PositionEpisode,
     PositionHealthStatus,
     PositionKey,
     PositionLedgerBatch,
@@ -105,13 +107,21 @@ def _make_position_view(
     symbol: str,
     quantity: Decimal = Decimal("0"),
     opened_at: datetime | None = None,
+    side: StrategySide = StrategySide.LONG,
 ) -> PositionView:
+    pos_side = (
+        FuturesPositionSide.SHORT
+        if side == StrategySide.SHORT
+        else FuturesPositionSide.LONG
+    )
     pos_key = PositionKey(
         environment="live",
         account_label="test_acc",
         symbol=symbol,
+        position_side=pos_side,
     )
     batches: tuple[PositionLedgerBatch, ...] = ()
+    active_episode: PositionEpisode | None = None
     if quantity > Decimal("0"):
         batch = PositionLedgerBatch(
             batch_id=f"batch_{symbol}_01",
@@ -122,6 +132,13 @@ def _make_position_view(
             opened_at=opened_at or datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC),
         )
         batches = (batch,)
+        active_episode = PositionEpisode(
+            episode_id="ep_01",
+            position_key=pos_key,
+            side=side,
+            opened_at=opened_at or datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC),
+            batches=batches,
+        )
     return PositionView(
         key=pos_key,
         projection_version="pv_test_01",
@@ -130,7 +147,7 @@ def _make_position_view(
         policy_version="v1",
         schema_version="v1",
         coverage=None,
-        active_episode=None,
+        active_episode=active_episode,
         batches=batches,
         unallocated_quantity=Decimal("0"),
         reconciliation_gap=Decimal("0"),
@@ -549,3 +566,272 @@ def test_policy_state_immutability_and_versioning() -> None:
     assert "BTCUSDT" not in s5.holding_deadline_by_symbol
     # Global signal memory preserved
     assert s5.signal_memory["ema_fast"] == Decimal("65100.00")
+
+
+def test_short_position_holding_exit_and_reversal_command() -> None:
+    """Short position candle exit generates LONG reduce-only command
+    and with_exit state.
+    """
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    mref, menv = _make_15s_state("BTCUSDT", t0, Decimal("64500.00"))
+
+    # Short position opened 30 minutes ago
+    opened_at = t0 - timedelta(minutes=30)
+    pview = _make_position_view(
+        "BTCUSDT",
+        quantity=Decimal("1.5"),
+        opened_at=opened_at,
+        side=StrategySide.SHORT,
+    )
+
+    # Bullish candle (close > open) closing for BTCUSDT
+    candle_start = t0 - timedelta(minutes=15)
+    closed_candle = ClosedCandle15m(
+        symbol="BTCUSDT",
+        candle_start=candle_start,
+        candle_end=t0,
+        open_price=Decimal("64000.00"),
+        close_price=Decimal("64500.00"),
+    )
+
+    clock = ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=5)
+    frame = DecisionFrame(
+        scope="test",
+        symbol="BTCUSDT",
+        clock_event=clock,
+        market_refs=(mref,),
+        position_view_token=pview.projection_version,
+        universe_version="univ_v1",
+    )
+    # State with active anchor and deadline
+    state = (
+        PolicyState()
+        .with_anchor_and_intent("BTCUSDT", Decimal("65000.00"), "cand_prev")
+        .with_holding_deadline("BTCUSDT", opened_at + timedelta(hours=2))
+    )
+    policy = EffectivePolicy(
+        policy_id="short_exit_policy",
+        strategy_name="breakout",
+        cooldown_duration=timedelta(minutes=15),
+        exit_policy=PositionExitPolicy(max_holding_seconds=7200),
+    )
+
+    t = execute_policy_transition(
+        frame=frame,
+        prior_state=state,
+        policy_artifact=policy,
+        market_envelope=menv,
+        position_view=pview,
+        closed_candles=(closed_candle,),
+    )
+
+    assert t.exit_command is not None
+    assert t.exit_command.command_type == TradeCommandType.EXIT
+    # Closing a short position requires a LONG order
+    assert t.exit_command.side == StrategySide.LONG
+    assert t.exit_command.reduce_only is True
+    assert t.exit_command.requested_quantity == Decimal("1.5")
+    assert t.exit_command.reason == "candle_15m_bullish"
+
+    # with_exit: Cooldown active and symbol anchor/deadline cleared
+    assert t.next_state.is_in_cooldown("BTCUSDT", clock.timestamp)
+    assert "BTCUSDT" not in t.next_state.anchor_prices_by_symbol
+    assert "BTCUSDT" not in t.next_state.holding_deadline_by_symbol
+
+    # Cooldown timer request emitted
+    assert len(t.timer_requests) == 1
+    assert t.timer_requests[0].timer_type == "cooldown_expiry"
+    assert t.timer_requests[0].symbol == "BTCUSDT"
+
+
+def test_short_position_max_holding_exit() -> None:
+    """Short position held past max_holding_seconds produces LONG exit command."""
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    mref, menv = _make_15s_state("BTCUSDT", t0, Decimal("64000.00"))
+
+    # Opened 2 hours ago (> 1 hour max holding)
+    opened_at = t0 - timedelta(hours=2)
+    pview = _make_position_view(
+        "BTCUSDT",
+        quantity=Decimal("2.0"),
+        opened_at=opened_at,
+        side=StrategySide.SHORT,
+    )
+
+    clock = ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=6)
+    frame = DecisionFrame(
+        scope="test",
+        symbol="BTCUSDT",
+        clock_event=clock,
+        market_refs=(mref,),
+        position_view_token=pview.projection_version,
+        universe_version="univ_v1",
+    )
+    state = PolicyState()
+    policy = EffectivePolicy(
+        policy_id="short_max_hold_policy",
+        strategy_name="breakout",
+        exit_policy=PositionExitPolicy(max_holding_seconds=3600),
+    )
+
+    t = execute_policy_transition(
+        frame=frame,
+        prior_state=state,
+        policy_artifact=policy,
+        market_envelope=menv,
+        position_view=pview,
+    )
+
+    assert t.exit_command is not None
+    assert t.exit_command.side == StrategySide.LONG
+    assert t.exit_command.requested_quantity == Decimal("2.0")
+    assert t.exit_command.reason == "max_holding_period"
+    assert t.next_state.is_in_cooldown("BTCUSDT", clock.timestamp)
+
+
+def test_short_breakout_entry_generation() -> None:
+    """Breakout below short_entry_threshold produces SHORT candidate
+    when mode allows.
+    """
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    # Price drops to 62500, below short_entry_threshold 63000
+    mref, menv = _make_15s_state("BTCUSDT", t0, Decimal("62500.00"))
+    pview = _make_position_view("BTCUSDT", Decimal("0"))
+    clock = ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=7)
+    frame = DecisionFrame(
+        scope="test",
+        symbol="BTCUSDT",
+        clock_event=clock,
+        market_refs=(mref,),
+        position_view_token=pview.projection_version,
+        universe_version="univ_v1",
+    )
+    state = PolicyState()
+
+    # 1. Mode BOTH: Short candidate generated
+    policy_both = EffectivePolicy(
+        policy_id="both_breakout_policy",
+        strategy_name="breakout",
+        entry_threshold=Decimal("65000.00"),
+        short_entry_threshold=Decimal("63000.00"),
+        position_mode=StrategyPositionMode.BOTH,
+        grace_period=timedelta(seconds=30),
+    )
+    t_both = execute_policy_transition(
+        frame=frame,
+        prior_state=state,
+        policy_artifact=policy_both,
+        market_envelope=menv,
+        position_view=pview,
+    )
+    assert t_both.entry_candidate is not None
+    assert t_both.entry_candidate.side == StrategySide.SHORT
+    assert t_both.entry_candidate.reason == "breakout_below_short_threshold"
+    assert t_both.next_state.anchor_prices_by_symbol["BTCUSDT"] == Decimal("62500.00")
+    assert "BTCUSDT" in t_both.next_state.grace_until_by_symbol
+    assert len(t_both.timer_requests) == 1
+    assert t_both.timer_requests[0].timer_type == "grace_period_expiry"
+
+    # 2. Mode LONG_ONLY: Short candidate rejected
+    policy_long_only = EffectivePolicy(
+        policy_id="long_only_policy",
+        strategy_name="breakout",
+        entry_threshold=Decimal("65000.00"),
+        short_entry_threshold=Decimal("63000.00"),
+        position_mode=StrategyPositionMode.LONG_ONLY,
+    )
+    t_long = execute_policy_transition(
+        frame=frame,
+        prior_state=state,
+        policy_artifact=policy_long_only,
+        market_envelope=menv,
+        position_view=pview,
+    )
+    assert t_long.entry_candidate is None
+    assert t_long.rejection_reason == "direction_not_permitted_by_position_mode"
+
+    # 3. Mode SHORT_ONLY: Short candidate accepted
+    policy_short_only = EffectivePolicy(
+        policy_id="short_only_policy",
+        strategy_name="breakout",
+        entry_threshold=Decimal("65000.00"),
+        short_entry_threshold=Decimal("63000.00"),
+        position_mode=StrategyPositionMode.SHORT_ONLY,
+    )
+    t_short = execute_policy_transition(
+        frame=frame,
+        prior_state=state,
+        policy_artifact=policy_short_only,
+        market_envelope=menv,
+        position_view=pview,
+    )
+    assert t_short.entry_candidate is not None
+    assert t_short.entry_candidate.side == StrategySide.SHORT
+
+
+def test_walk_forward_split_state_reset_and_carry() -> None:
+    """PolicyState.reset_for_split cleans symbol state and optionally carries sizing."""
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    s0 = (
+        PolicyState(policy_version=10)
+        .with_cooldown("BTCUSDT", t0 + timedelta(minutes=15))
+        .with_anchor_and_intent("BTCUSDT", Decimal("65000.00"), "cand_01")
+        .with_grace_until("BTCUSDT", t0 + timedelta(minutes=5))
+        .with_holding_deadline("BTCUSDT", t0 + timedelta(hours=1))
+        .with_sizing_state("BTCUSDT", {"target_quantity": "0.1"})
+        .with_signal_memory("ema_diff", Decimal("12.5"))
+    )
+
+    # 1. Clean slate split (carry_sizing=False)
+    s_clean = s0.reset_for_split(carry_sizing=False)
+    assert s_clean.policy_version == s0.policy_version + 1
+    assert s_clean.cooldown_until_by_symbol == {}
+    assert s_clean.anchor_prices_by_symbol == {}
+    assert s_clean.active_intent_ids_by_symbol == {}
+    assert s_clean.grace_until_by_symbol == {}
+    assert s_clean.holding_deadline_by_symbol == {}
+    assert s_clean.sizing_state_by_symbol == {}
+    assert s_clean.signal_memory == {}
+
+    # 2. Split with sizing carry (carry_sizing=True)
+    s_carry = s0.reset_for_split(carry_sizing=True)
+    assert s_carry.policy_version == s0.policy_version + 1
+    assert s_carry.cooldown_until_by_symbol == {}
+    assert s_carry.anchor_prices_by_symbol == {}
+    assert s_carry.active_intent_ids_by_symbol == {}
+    assert s_carry.grace_until_by_symbol == {}
+    assert s_carry.holding_deadline_by_symbol == {}
+    assert s_carry.sizing_state_by_symbol == {"BTCUSDT": {"target_quantity": "0.1"}}
+    assert s_carry.signal_memory == {}
+
+
+def test_policy_state_with_exit_atomic_purge() -> None:
+    """with_exit atomically sets cooldown and purges symbol state
+    while preserving other symbols.
+    """
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    cd_due = t0 + timedelta(minutes=15)
+    s0 = (
+        PolicyState(policy_version=1)
+        .with_anchor_and_intent("BTCUSDT", Decimal("65000.00"), "cand_btc")
+        .with_grace_until("BTCUSDT", t0 + timedelta(minutes=5))
+        .with_holding_deadline("BTCUSDT", t0 + timedelta(hours=1))
+        .with_sizing_state("BTCUSDT", {"qty": "1.0"})
+        .with_anchor_and_intent("ETHUSDT", Decimal("3500.00"), "cand_eth")
+        .with_signal_memory("ema_trend", Decimal("1.0"))
+    )
+
+    s1 = s0.with_exit("BTCUSDT", cd_due)
+    assert s1.policy_version == s0.policy_version + 1
+    assert s1.cooldown_until_by_symbol["BTCUSDT"] == cd_due
+    assert "BTCUSDT" not in s1.anchor_prices_by_symbol
+    assert "BTCUSDT" not in s1.active_intent_ids_by_symbol
+    assert "BTCUSDT" not in s1.grace_until_by_symbol
+    assert "BTCUSDT" not in s1.holding_deadline_by_symbol
+    assert "BTCUSDT" not in s1.sizing_state_by_symbol
+
+    # ETHUSDT and global signal memory must be completely untouched
+    assert s1.anchor_prices_by_symbol["ETHUSDT"] == Decimal("3500.00")
+    assert s1.active_intent_ids_by_symbol["ETHUSDT"] == "cand_eth"
+    assert s1.signal_memory["ema_trend"] == Decimal("1.0")
+

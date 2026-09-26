@@ -21,6 +21,7 @@ from typing import Any, Protocol
 from crypto_momentum_lab.domain.decision.decision_frame import (
     DecisionFrame,
 )
+from crypto_momentum_lab.domain.execution.order_state import FuturesPositionSide
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionView,
 )
@@ -222,9 +223,12 @@ def execute_policy_transition(
 
     # 1. Evaluate Position Holding & Exit (even when no entry signal exists)
     if position_view.total_quantity > Decimal("0"):
-        closed_candle: ClosedCandle15m | None = None
+        closed_candle: ClosedCandle15m | None = (
+            closed_candles[-1] if closed_candles else None
+        )
         if (
-            state_15s.open_price is not None
+            closed_candle is None
+            and state_15s.open_price is not None
             and state_15s.close_price is not None
             and state_15s.open_price > Decimal("0")
             and state_15s.close_price > Decimal("0")
@@ -243,6 +247,14 @@ def execute_policy_transition(
             default=clock_time,
         )
 
+        pos_side = StrategySide.LONG
+        if position_view.active_episode is not None:
+            pos_side = position_view.active_episode.side
+        elif position_view.key.position_side == FuturesPositionSide.SHORT:
+            pos_side = StrategySide.SHORT
+        elif position_view.key.position_side == FuturesPositionSide.LONG:
+            pos_side = StrategySide.LONG
+
         exit_policy: PositionExitPolicy = getattr(
             policy_artifact, "exit_policy", PositionExitPolicy()
         )
@@ -250,7 +262,7 @@ def execute_policy_transition(
             held_until=clock_time,
             opened_at=earliest_open,
             symbol=symbol,
-            side=StrategySide.LONG,
+            side=pos_side,
             policy=exit_policy,
             closed_candle=closed_candle,
             closed_candles=closed_candles,
@@ -278,11 +290,16 @@ def execute_policy_transition(
                     reason=exit_reason,
                     projection_version=position_view.projection_version,
                 )
+                exit_side = (
+                    StrategySide.SHORT
+                    if pos_side == StrategySide.LONG
+                    else StrategySide.LONG
+                )
                 exit_cmd = TradeCommand(
                     command_id=f"cmd_exit_{decision_id}",
                     position_key=position_view.key,
                     command_type=TradeCommandType.EXIT,
-                    side=StrategySide.SHORT,
+                    side=exit_side,
                     order_type=EntryType.MARKET,
                     requested_quantity=total_qty,
                     reduce_only=True,
@@ -295,7 +312,9 @@ def execute_policy_transition(
                     policy_artifact, "cooldown_duration", timedelta(minutes=15)
                 )
                 cd_due = clock_time + cooldown_dur
-                if hasattr(prior_state, "with_cooldown"):
+                if hasattr(prior_state, "with_exit"):
+                    next_state = prior_state.with_exit(symbol, cd_due)
+                elif hasattr(prior_state, "with_cooldown"):
                     next_state = prior_state.with_cooldown(symbol, cd_due)
                 else:
                     next_state = prior_state
@@ -320,6 +339,7 @@ def execute_policy_transition(
             # Position is held and not exiting; schedule max holding expiration timer
             max_holding = exit_policy.max_holding_seconds
             holding_timers: list[TimerRequest] = []
+            next_state = prior_state
             if max_holding is not None and max_holding > 0:
                 holding_deadline = earliest_open + timedelta(seconds=max_holding)
                 holding_timers.append(
@@ -331,12 +351,20 @@ def execute_policy_transition(
                         details={"opened_at": earliest_open.isoformat()},
                     )
                 )
+                if hasattr(prior_state, "with_holding_deadline"):
+                    current_dl = getattr(
+                        prior_state, "holding_deadline_by_symbol", {}
+                    ).get(symbol)
+                    if current_dl != holding_deadline:
+                        next_state = prior_state.with_holding_deadline(
+                            symbol, holding_deadline
+                        )
             return PolicyTransition(
                 decision_id=decision_id,
                 frame_digest=frame.frame_digest,
                 input_hash=input_hash,
                 prior_state_version=prior_state.policy_version,
-                next_state=prior_state,
+                next_state=next_state,
                 timer_requests=tuple(holding_timers),
                 rejection_reason="holding_position_no_exit",
                 transition_time=clock_time,
@@ -418,23 +446,11 @@ def execute_policy_transition(
                 if cand_sized is not None:
                     cand = cand_sized
 
-                if hasattr(prior_state, "with_anchor_and_intent"):
-                    next_state = prior_state.with_anchor_and_intent(
-                        symbol=symbol,
-                        anchor_price=state_15s.close_price or Decimal("0"),
-                        intent_id=cand.candidate_id,
-                    )
-                else:
-                    next_state = prior_state
-                if sizing_plan is not None and hasattr(next_state, "with_sizing_state"):
-                    next_state = next_state.with_sizing_state(
-                        symbol=symbol,
-                        sizing_state=asdict(sizing_plan),
-                    )
                 grace_timers: list[TimerRequest] = []
                 grace_period: timedelta = getattr(
                     policy_artifact, "grace_period", timedelta(0)
                 )
+                grace_due: datetime | None = None
                 if grace_period > timedelta(0):
                     grace_due = clock_time + grace_period
                     grace_timers.append(
@@ -445,6 +461,21 @@ def execute_policy_transition(
                             due_at=grace_due,
                             details={"candidate_id": cand.candidate_id},
                         )
+                    )
+
+                if hasattr(prior_state, "with_anchor_and_intent"):
+                    next_state = prior_state.with_anchor_and_intent(
+                        symbol=symbol,
+                        anchor_price=state_15s.close_price or Decimal("0"),
+                        intent_id=cand.candidate_id,
+                        grace_until=grace_due,
+                    )
+                else:
+                    next_state = prior_state
+                if sizing_plan is not None and hasattr(next_state, "with_sizing_state"):
+                    next_state = next_state.with_sizing_state(
+                        symbol=symbol,
+                        sizing_state=asdict(sizing_plan),
                     )
                 return PolicyTransition(
                     decision_id=decision_id,
@@ -471,7 +502,11 @@ def execute_policy_transition(
         entry_thresh: Decimal = getattr(
             policy_artifact, "entry_threshold", Decimal("65000.00")
         )
+        short_entry_thresh: Decimal | None = getattr(
+            policy_artifact, "short_entry_threshold", None
+        )
         close_px = state_15s.close_price or Decimal("0")
+        cand = None
         if close_px > entry_thresh:
             if pos_mode == StrategyPositionMode.SHORT_ONLY:
                 return PolicyTransition(
@@ -507,53 +542,40 @@ def execute_policy_transition(
                 reason="breakout_above_threshold",
                 features={"close_price": str(close_px)},
             )
-            # Evaluate sizing if model present
-            ref_price = cand.limit_price or close_px
-            effective_cash = frame.cash_balance
-            if effective_cash <= Decimal("0") and decision_input is not None:
-                effective_cash = getattr(decision_input, "cash_balance", effective_cash)
-            cand_sized, sizing_plan, rej_reason = _evaluate_sizing(
-                cand=cand,
-                policy_artifact=policy_artifact,
-                symbol=symbol,
-                ref_price=ref_price,
-                cash_balance=effective_cash,
-                as_of=clock_time,
-            )
-            if rej_reason is not None:
+        elif short_entry_thresh is not None and close_px < short_entry_thresh:
+            if pos_mode == StrategyPositionMode.LONG_ONLY:
                 return PolicyTransition(
                     decision_id=decision_id,
                     frame_digest=frame.frame_digest,
                     input_hash=input_hash,
                     prior_state_version=prior_state.policy_version,
                     next_state=prior_state,
-                    rejection_reason=rej_reason,
+                    rejection_reason="direction_not_permitted_by_position_mode",
                     transition_time=clock_time,
                 )
-            if cand_sized is not None:
-                cand = cand_sized
-
-            if hasattr(prior_state, "with_anchor_and_intent"):
-                next_state = prior_state.with_anchor_and_intent(
-                    symbol=symbol,
-                    anchor_price=close_px,
-                    intent_id=cand.candidate_id,
-                )
-            else:
-                next_state = prior_state
-            if sizing_plan is not None and hasattr(next_state, "with_sizing_state"):
-                next_state = next_state.with_sizing_state(
-                    symbol=symbol,
-                    sizing_state=asdict(sizing_plan),
-                )
-            return PolicyTransition(
-                decision_id=decision_id,
-                frame_digest=frame.frame_digest,
-                input_hash=input_hash,
-                prior_state_version=prior_state.policy_version,
-                next_state=next_state,
-                entry_candidate=cand,
-                transition_time=clock_time,
+            target_notional = getattr(
+                policy_artifact, "target_notional", Decimal("500.00")
+            )
+            order_type = getattr(
+                policy_artifact, "order_type", EntryType.MARKET
+            )
+            cand = OrderIntentCandidate(
+                candidate_id=f"intent_{decision_id}",
+                signal_id=f"sig_{decision_id}",
+                run_id="run_deterministic",
+                strategy_name=getattr(policy_artifact, "strategy_name", "breakout"),
+                strategy_version=f"v{getattr(policy_artifact, 'policy_version', 1)}",
+                config_hash=policy_artifact.policy_id,
+                symbol=symbol,
+                side=StrategySide.SHORT,
+                entry_type=order_type,
+                limit_price=(close_px if order_type == EntryType.LIMIT else None),
+                desired_notional=target_notional,
+                reduce_only=False,
+                expires_at=clock_time + timedelta(minutes=5),
+                created_at=clock_time,
+                reason="breakout_below_short_threshold",
+                features={"close_price": str(close_px)},
             )
         else:
             return PolicyTransition(
@@ -565,6 +587,74 @@ def execute_policy_transition(
                 rejection_reason="below_entry_threshold",
                 transition_time=clock_time,
             )
+
+        # Evaluate sizing if model present
+        ref_price = cand.limit_price or close_px
+        effective_cash = frame.cash_balance
+        if effective_cash <= Decimal("0") and decision_input is not None:
+            effective_cash = getattr(decision_input, "cash_balance", effective_cash)
+        cand_sized, sizing_plan, rej_reason = _evaluate_sizing(
+            cand=cand,
+            policy_artifact=policy_artifact,
+            symbol=symbol,
+            ref_price=ref_price,
+            cash_balance=effective_cash,
+            as_of=clock_time,
+        )
+        if rej_reason is not None:
+            return PolicyTransition(
+                decision_id=decision_id,
+                frame_digest=frame.frame_digest,
+                input_hash=input_hash,
+                prior_state_version=prior_state.policy_version,
+                next_state=prior_state,
+                rejection_reason=rej_reason,
+                transition_time=clock_time,
+            )
+        if cand_sized is not None:
+            cand = cand_sized
+
+        grace_timers = []
+        grace_period = getattr(
+            policy_artifact, "grace_period", timedelta(0)
+        )
+        grace_due = None
+        if grace_period > timedelta(0):
+            grace_due = clock_time + grace_period
+            grace_timers.append(
+                TimerRequest(
+                    timer_id=f"tm_grace_{decision_id}",
+                    timer_type="grace_period_expiry",
+                    symbol=symbol,
+                    due_at=grace_due,
+                    details={"candidate_id": cand.candidate_id},
+                )
+            )
+
+        if hasattr(prior_state, "with_anchor_and_intent"):
+            next_state = prior_state.with_anchor_and_intent(
+                symbol=symbol,
+                anchor_price=close_px,
+                intent_id=cand.candidate_id,
+                grace_until=grace_due,
+            )
+        else:
+            next_state = prior_state
+        if sizing_plan is not None and hasattr(next_state, "with_sizing_state"):
+            next_state = next_state.with_sizing_state(
+                symbol=symbol,
+                sizing_state=asdict(sizing_plan),
+            )
+        return PolicyTransition(
+            decision_id=decision_id,
+            frame_digest=frame.frame_digest,
+            input_hash=input_hash,
+            prior_state_version=prior_state.policy_version,
+            next_state=next_state,
+            entry_candidate=cand,
+            timer_requests=tuple(grace_timers),
+            transition_time=clock_time,
+        )
 
     return PolicyTransition(
         decision_id=decision_id,
