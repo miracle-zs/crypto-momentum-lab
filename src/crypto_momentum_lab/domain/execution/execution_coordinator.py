@@ -65,20 +65,66 @@ class InMemoryPositionReservationRepository:
         reservation: PositionReservation,
         expected_projection_version: str | None = None,
         expires_at: datetime | None = None,
+        batch_quantity: Decimal | None = None,
     ) -> None:
-        existing = self._reservations.get(reservation.reservation_id)
-        if existing is not None:
-            if (
-                existing.batch_id != reservation.batch_id
-                or existing.reserved_quantity != reservation.reserved_quantity
-            ):
-                raise ReservationConflictError(
-                    f"reservation {reservation.reservation_id} already exists "
-                    f"with batch {existing.batch_id} qty "
-                    f"{existing.reserved_quantity}"
+        self.save_reservations(
+            (reservation,),
+            expected_projection_version=expected_projection_version,
+            batch_quantities=(
+                {reservation.batch_id: batch_quantity}
+                if batch_quantity is not None
+                else None
+            ),
+        )
+
+    def save_reservations(
+        self,
+        reservations: tuple[PositionReservation, ...],
+        expected_projection_version: str | None = None,
+        expires_at: datetime | None = None,
+        batch_quantities: dict[str, Decimal] | None = None,
+    ) -> None:
+        batch_quantities = batch_quantities or {}
+        pending: dict[str, Decimal] = {}
+        for reservation in reservations:
+            existing = self._reservations.get(reservation.reservation_id)
+            if existing is not None:
+                if existing.active_quantity <= Decimal("0"):
+                    raise ReservationConflictError(
+                        f"reservation {reservation.reservation_id} already "
+                        "exists in a terminal state"
+                    )
+                if (
+                    existing.position_key.canonical_id
+                    != reservation.position_key.canonical_id
+                    or existing.command_id != reservation.command_id
+                    or existing.batch_id != reservation.batch_id
+                    or existing.reserved_quantity != reservation.reserved_quantity
+                ):
+                    raise ReservationConflictError(
+                        f"reservation {reservation.reservation_id} already "
+                        f"exists with batch {existing.batch_id} qty "
+                        f"{existing.reserved_quantity}"
+                    )
+                continue
+            limit = batch_quantities.get(reservation.batch_id)
+            if limit is not None:
+                already = pending.get(reservation.batch_id, Decimal("0"))
+                for other in self._reservations.values():
+                    if (
+                        other.batch_id == reservation.batch_id
+                        and other.active_quantity > Decimal("0")
+                    ):
+                        already += other.active_quantity
+                if already + reservation.reserved_quantity > limit:
+                    raise ReservationConflictError(
+                        f"batch {reservation.batch_id} over-reserved"
+                    )
+                pending[reservation.batch_id] = (
+                    pending.get(reservation.batch_id, Decimal("0"))
+                    + reservation.reserved_quantity
                 )
-            return
-        self._reservations[reservation.reservation_id] = reservation
+            self._reservations[reservation.reservation_id] = reservation
 
     def update_reservation(
         self, reservation: PositionReservation, release_reason: str | None = None

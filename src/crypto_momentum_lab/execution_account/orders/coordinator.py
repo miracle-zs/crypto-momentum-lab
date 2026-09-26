@@ -449,35 +449,54 @@ class OrderExecutionCoordinator:
 
             saved_new: list[PositionReservation] = []
             try:
-                for res in needed:
-                    try:
-                        await _maybe_await(
-                            self._reservation_repository.save_reservation(
-                                res,
-                                expected_projection_version=proj_ver,
-                            )
+                saver = getattr(
+                    self._reservation_repository, "save_reservations", None
+                )
+                if callable(saver) and needed:
+                    await _maybe_await(
+                        saver(
+                            tuple(needed),
+                            expected_projection_version=proj_ver,
                         )
-                    except ReservationConflictError:
-                        # Same ID already durable. Adopt only when identity
-                        # matches the plan; never treat a silent no-op as
-                        # insert.
-                        loaded = await _maybe_await(
-                            self._reservation_repository.load_reservation(
-                                res.reservation_id
+                    )
+                    for res in needed:
+                        saved_new.append(res)
+                        self._active_reservations[res.reservation_id] = res
+                        if self._domain_coordinator is not None:
+                            self._domain_coordinator.register_reservation(res)
+                else:
+                    for res in needed:
+                        try:
+                            await _maybe_await(
+                                self._reservation_repository.save_reservation(
+                                    res,
+                                    expected_projection_version=proj_ver,
+                                )
                             )
-                        )
-                        if loaded is None:
-                            raise
-                        if (
-                            loaded.batch_id != res.batch_id
-                            or loaded.reserved_quantity != res.reserved_quantity
-                        ):
-                            raise
-                        res = loaded
-                    saved_new.append(res)
-                    self._active_reservations[res.reservation_id] = res
-                    if self._domain_coordinator is not None:
-                        self._domain_coordinator.register_reservation(res)
+                        except ReservationConflictError:
+                            loaded = await _maybe_await(
+                                self._reservation_repository.load_reservation(
+                                    res.reservation_id
+                                )
+                            )
+                            if loaded is None or loaded.active_quantity <= Decimal(
+                                "0"
+                            ):
+                                raise
+                            if (
+                                loaded.position_key.canonical_id
+                                != res.position_key.canonical_id
+                                or loaded.command_id != res.command_id
+                                or loaded.batch_id != res.batch_id
+                                or loaded.reserved_quantity
+                                != res.reserved_quantity
+                            ):
+                                raise
+                            res = loaded
+                        saved_new.append(res)
+                        self._active_reservations[res.reservation_id] = res
+                        if self._domain_coordinator is not None:
+                            self._domain_coordinator.register_reservation(res)
             except Exception as save_err:
                 # Atomicity rollback: release any newly created reservations
                 for saved in saved_new:

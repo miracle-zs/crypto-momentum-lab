@@ -161,6 +161,7 @@ class TradeCommandExecutor:
             quantized=True,
             batch_id=batch_id,
             allocations=allocations,
+            projection_version=command.expected_projection_version,
         )
 
         return TradeExecutionPlanResult(

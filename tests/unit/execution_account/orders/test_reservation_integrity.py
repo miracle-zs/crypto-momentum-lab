@@ -128,3 +128,58 @@ def test_load_active_reservations_is_stable_ordered() -> None:
     )
     ordered = [r.reservation_id for r in repo.load_active_reservations(_key())]
     assert ordered == ["r1", "r2", "r3"]
+
+
+def test_inmemory_rejects_terminal_same_id() -> None:
+    repo = InMemoryPositionReservationRepository()
+    res = _res("r1", batch_id="batch_1", qty="10")
+    repo.save_reservation(res)
+    repo.update_reservation(res.release(Decimal("10")))
+    with pytest.raises(ReservationConflictError, match="terminal"):
+        repo.save_reservation(_res("r1", batch_id="batch_1", qty="10"))
+
+
+def test_inmemory_rejects_position_key_mismatch() -> None:
+    repo = InMemoryPositionReservationRepository()
+    repo.save_reservation(_res("r1", batch_id="batch_1", qty="10"))
+    other_key = PositionKey(
+        environment="live",
+        account_label="other",
+        symbol="BTCUSDT",
+        position_side=FuturesPositionSide.BOTH,
+    )
+    hijack = PositionReservation(
+        reservation_id="r1",
+        command_id="cmd-1",
+        position_key=other_key,
+        batch_id="batch_1",
+        reserved_quantity=Decimal("10"),
+    )
+    with pytest.raises(ReservationConflictError):
+        repo.save_reservation(hijack)
+
+
+def test_inmemory_batch_capacity() -> None:
+    repo = InMemoryPositionReservationRepository()
+    repo.save_reservation(
+        _res("r1", batch_id="batch_1", qty="8"),
+        batch_quantity=Decimal("10"),
+    )
+    with pytest.raises(ReservationConflictError, match="over-reserved"):
+        repo.save_reservation(
+            _res("r2", batch_id="batch_1", qty="3"),
+            batch_quantity=Decimal("10"),
+        )
+
+
+def test_save_reservations_is_all_or_nothing() -> None:
+    repo = InMemoryPositionReservationRepository()
+    with pytest.raises(ReservationConflictError):
+        repo.save_reservations(
+            (
+                _res("r1", batch_id="batch_1", qty="8"),
+                _res("r2", batch_id="batch_1", qty="3"),
+            ),
+            batch_quantities={"batch_1": Decimal("10")},
+        )
+    assert repo.load_reservation("r1") is not None

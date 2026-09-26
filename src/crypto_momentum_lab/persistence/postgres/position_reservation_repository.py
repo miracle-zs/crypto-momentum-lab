@@ -10,6 +10,7 @@ Obeys Astra Architecture Blueprint 2026-09-25 (P2):
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -164,6 +165,23 @@ def _adopt_or_reject_existing(
     existing: PositionReservation,
     requested: PositionReservation,
 ) -> None:
+    """Same ID may be adopted only when identity fully matches the plan.
+
+    Terminal rows must never be treated as a live reservation. Position key
+    and command identity must match so a retry cannot hijack another lot.
+    """
+    if existing.position_key.canonical_id != requested.position_key.canonical_id:
+        raise ReservationConflictError(
+            f"reservation {requested.reservation_id} already exists for "
+            f"{existing.position_key.canonical_id}, retry targeted "
+            f"{requested.position_key.canonical_id}"
+        )
+    if existing.command_id != requested.command_id:
+        raise ReservationConflictError(
+            f"reservation {requested.reservation_id} already exists for "
+            f"command {existing.command_id}, retry used "
+            f"{requested.command_id}"
+        )
     if (
         existing.batch_id != requested.batch_id
         or existing.reserved_quantity != requested.reserved_quantity
@@ -173,6 +191,28 @@ def _adopt_or_reject_existing(
             f"batch {existing.batch_id} qty {existing.reserved_quantity}, "
             f"retry planned batch {requested.batch_id} qty "
             f"{requested.reserved_quantity}"
+        )
+
+
+def _require_batch_capacity(
+    *,
+    batch_id: str,
+    reserved_quantity: Decimal,
+    total_active_for_batch: Decimal,
+    batch_quantity: Decimal | None,
+) -> None:
+    """Fail closed when a single batch would be over-reserved."""
+    if batch_quantity is None:
+        return
+    if batch_quantity <= Decimal("0"):
+        raise ReservationConflictError(
+            f"batch {batch_id} quantity must be positive"
+        )
+    if total_active_for_batch + reserved_quantity > batch_quantity:
+        raise ReservationConflictError(
+            f"batch {batch_id} over-reserved: requested {reserved_quantity}, "
+            f"already reserved {total_active_for_batch}, "
+            f"batch quantity {batch_quantity}"
         )
 
 
@@ -192,39 +232,52 @@ class PostgresPositionReservationRepository:
         reservation: PositionReservation,
         expected_projection_version: str | None = None,
         expires_at: datetime | None = None,
+        batch_quantity: Decimal | None = None,
     ) -> None:
         """Persists a new PositionReservation into PostgreSQL.
 
         Fails closed on lock failure, unproven capacity, or ID conflict with
-        a different batch/quantity. Same-ID retries that match the plan are
-        adopted, never double-inserted.
+        a different batch/quantity. Same-ID ACTIVE retries that match the
+        plan are adopted, never double-inserted. Terminal rows are rejected.
         """
+        self.save_reservations(
+            (reservation,),
+            expected_projection_version=expected_projection_version,
+            expires_at=expires_at,
+            batch_quantities=(
+                {reservation.batch_id: batch_quantity}
+                if batch_quantity is not None
+                else None
+            ),
+        )
+
+    def save_reservations(
+        self,
+        reservations: Sequence[PositionReservation],
+        expected_projection_version: str | None = None,
+        expires_at: datetime | None = None,
+        batch_quantities: Mapping[str, Decimal] | None = None,
+    ) -> None:
+        """Insert a set of reservations in one transaction, or not at all."""
+        if not reservations:
+            return
         now = datetime.now(UTC)
-        strat = getattr(reservation.position_key, "strategy_name", self._strategy_name)
+        first = reservations[0]
+        strat = getattr(first.position_key, "strategy_name", self._strategy_name)
+        batch_quantities = batch_quantities or {}
         with self._session_factory() as session, session.begin():
             _acquire_reservation_lock(
-                session, f"res_{reservation.position_key.canonical_id}"
+                session, f"res_{first.position_key.canonical_id}"
             )
-
-            existing_row = session.get(
-                PositionReservationRow, reservation.reservation_id
-            )
-            if existing_row is not None:
-                _adopt_or_reject_existing(
-                    _row_to_reservation(existing_row), reservation
-                )
-                return
-
             active_rows = session.scalars(
                 select(PositionReservationRow).where(
                     PositionReservationRow.environment
-                    == reservation.position_key.environment,
+                    == first.position_key.environment,
                     PositionReservationRow.account_label
-                    == reservation.position_key.account_label,
-                    PositionReservationRow.symbol
-                    == reservation.position_key.symbol,
+                    == first.position_key.account_label,
+                    PositionReservationRow.symbol == first.position_key.symbol,
                     PositionReservationRow.position_side
-                    == reservation.position_key.position_side.value,
+                    == first.position_key.position_side.value,
                     PositionReservationRow.status == "ACTIVE",
                 )
             ).all()
@@ -240,64 +293,100 @@ class PostgresPositionReservationRepository:
                             f"{expected_projection_version}, active "
                             f"{row.expected_projection_version}"
                         )
-            total_active = sum(
-                (
-                    r.reserved_quantity
-                    - r.consumed_quantity
-                    - r.released_quantity
-                    for r in active_rows
-                ),
-                start=Decimal("0"),
-            )
-            try:
-                pos_amt = _load_position_amt_sync(session, reservation)
-            except Exception as snap_err:
-                raise ReservationConflictError(
-                    f"position snapshot capacity check failed: {snap_err}"
-                ) from snap_err
-            _require_capacity(
-                reserved_quantity=reservation.reserved_quantity,
-                total_active=total_active,
-                pos_amt=pos_amt,
-            )
-
-            stmt = (
-                insert(PositionReservationRow)
-                .values(
-                    reservation_id=reservation.reservation_id,
-                    environment=reservation.position_key.environment,
-                    account_label=reservation.position_key.account_label,
-                    strategy_name=strat,
-                    symbol=reservation.position_key.symbol,
-                    position_side=reservation.position_key.position_side.value,
-                    batch_id=reservation.batch_id,
-                    command_id=reservation.command_id,
-                    client_order_id=None,
-                    reserved_quantity=reservation.reserved_quantity,
-                    consumed_quantity=reservation.consumed_quantity,
-                    released_quantity=reservation.released_quantity,
-                    expected_projection_version=expected_projection_version,
-                    status="ACTIVE",
-                    created_at=reservation.created_at,
-                    updated_at=now,
-                    expires_at=expires_at,
+            batch_active: dict[str, Decimal] = {}
+            total_active = Decimal("0")
+            for r in active_rows:
+                remaining = (
+                    r.reserved_quantity - r.consumed_quantity - r.released_quantity
                 )
-                .on_conflict_do_nothing()
-            )
-            result = session.execute(stmt)
-            if int(result.rowcount or 0) == 0:
+                batch_active[r.batch_id] = (
+                    batch_active.get(r.batch_id, Decimal("0")) + remaining
+                )
+                total_active += remaining
+
+            pending_batch: dict[str, Decimal] = {}
+            for reservation in reservations:
                 existing_row = session.get(
                     PositionReservationRow, reservation.reservation_id
                 )
                 if existing_row is not None:
+                    if existing_row.status != "ACTIVE":
+                        raise ReservationConflictError(
+                            f"reservation {reservation.reservation_id} already "
+                            f"exists in terminal status {existing_row.status}"
+                        )
                     _adopt_or_reject_existing(
                         _row_to_reservation(existing_row), reservation
                     )
-                    return
-                raise ReservationConflictError(
-                    f"reservation {reservation.reservation_id} insert "
-                    "conflicted but no row was found"
+                    continue
+                already = pending_batch.get(reservation.batch_id, Decimal("0"))
+                _require_batch_capacity(
+                    batch_id=reservation.batch_id,
+                    reserved_quantity=reservation.reserved_quantity,
+                    total_active_for_batch=batch_active.get(
+                        reservation.batch_id, Decimal("0")
+                    )
+                    + already,
+                    batch_quantity=batch_quantities.get(reservation.batch_id),
                 )
+                pending_batch[reservation.batch_id] = (
+                    already + reservation.reserved_quantity
+                )
+                total_active += reservation.reserved_quantity
+
+                try:
+                    pos_amt = _load_position_amt_sync(session, reservation)
+                except Exception as snap_err:
+                    raise ReservationConflictError(
+                        f"position snapshot capacity check failed: {snap_err}"
+                    ) from snap_err
+                _require_capacity(
+                    reserved_quantity=reservation.reserved_quantity,
+                    total_active=total_active
+                    - reservation.reserved_quantity,
+                    pos_amt=pos_amt,
+                )
+                stmt = (
+                    insert(PositionReservationRow)
+                    .values(
+                        reservation_id=reservation.reservation_id,
+                        environment=reservation.position_key.environment,
+                        account_label=reservation.position_key.account_label,
+                        strategy_name=strat,
+                        symbol=reservation.position_key.symbol,
+                        position_side=(
+                            reservation.position_key.position_side.value
+                        ),
+                        batch_id=reservation.batch_id,
+                        command_id=reservation.command_id,
+                        client_order_id=None,
+                        reserved_quantity=reservation.reserved_quantity,
+                        consumed_quantity=reservation.consumed_quantity,
+                        released_quantity=reservation.released_quantity,
+                        expected_projection_version=(
+                            expected_projection_version
+                        ),
+                        status="ACTIVE",
+                        created_at=reservation.created_at,
+                        updated_at=now,
+                        expires_at=expires_at,
+                    )
+                    .on_conflict_do_nothing()
+                )
+                result = session.execute(stmt)
+                if int(result.rowcount or 0) == 0:
+                    existing_row = session.get(
+                        PositionReservationRow, reservation.reservation_id
+                    )
+                    if existing_row is not None and existing_row.status == "ACTIVE":
+                        _adopt_or_reject_existing(
+                            _row_to_reservation(existing_row), reservation
+                        )
+                        continue
+                    raise ReservationConflictError(
+                        f"reservation {reservation.reservation_id} insert "
+                        "conflicted but no active row was found"
+                    )
 
     def update_reservation(
         self,
@@ -413,32 +502,45 @@ class AsyncPostgresPositionReservationRepository:
         reservation: PositionReservation,
         expected_projection_version: str | None = None,
         expires_at: datetime | None = None,
+        batch_quantity: Decimal | None = None,
     ) -> None:
+        await self.save_reservations(
+            (reservation,),
+            expected_projection_version=expected_projection_version,
+            expires_at=expires_at,
+            batch_quantities=(
+                {reservation.batch_id: batch_quantity}
+                if batch_quantity is not None
+                else None
+            ),
+        )
+
+    async def save_reservations(
+        self,
+        reservations: Sequence[PositionReservation],
+        expected_projection_version: str | None = None,
+        expires_at: datetime | None = None,
+        batch_quantities: Mapping[str, Decimal] | None = None,
+    ) -> None:
+        if not reservations:
+            return
         now = datetime.now(UTC)
-        strat = getattr(reservation.position_key, "strategy_name", self._strategy_name)
+        first = reservations[0]
+        strat = getattr(first.position_key, "strategy_name", self._strategy_name)
+        batch_quantities = batch_quantities or {}
         async with self._session_maker() as session, session.begin():
             await _acquire_reservation_lock_async(
-                session, f"res_{reservation.position_key.canonical_id}"
+                session, f"res_{first.position_key.canonical_id}"
             )
-
-            existing_row = await session.get(
-                PositionReservationRow, reservation.reservation_id
-            )
-            if existing_row is not None:
-                _adopt_or_reject_existing(
-                    _row_to_reservation(existing_row), reservation
-                )
-                return
-
             active_res = await session.execute(
                 select(PositionReservationRow).where(
                     PositionReservationRow.environment
-                    == reservation.position_key.environment,
+                    == first.position_key.environment,
                     PositionReservationRow.account_label
-                    == reservation.position_key.account_label,
-                    PositionReservationRow.symbol == reservation.position_key.symbol,
+                    == first.position_key.account_label,
+                    PositionReservationRow.symbol == first.position_key.symbol,
                     PositionReservationRow.position_side
-                    == reservation.position_key.position_side.value,
+                    == first.position_key.position_side.value,
                     PositionReservationRow.status == "ACTIVE",
                 )
             )
@@ -455,64 +557,99 @@ class AsyncPostgresPositionReservationRepository:
                             f"{expected_projection_version}, active "
                             f"{row.expected_projection_version}"
                         )
-            total_active = sum(
-                (
-                    r.reserved_quantity
-                    - r.consumed_quantity
-                    - r.released_quantity
-                    for r in active_rows
-                ),
-                start=Decimal("0"),
-            )
-            try:
-                pos_amt = await _load_position_amt_async(session, reservation)
-            except Exception as snap_err:
-                raise ReservationConflictError(
-                    f"position snapshot capacity check failed: {snap_err}"
-                ) from snap_err
-            _require_capacity(
-                reserved_quantity=reservation.reserved_quantity,
-                total_active=total_active,
-                pos_amt=pos_amt,
-            )
-
-            stmt = (
-                insert(PositionReservationRow)
-                .values(
-                    reservation_id=reservation.reservation_id,
-                    environment=reservation.position_key.environment,
-                    account_label=reservation.position_key.account_label,
-                    strategy_name=strat,
-                    symbol=reservation.position_key.symbol,
-                    position_side=reservation.position_key.position_side.value,
-                    batch_id=reservation.batch_id,
-                    command_id=reservation.command_id,
-                    client_order_id=None,
-                    reserved_quantity=reservation.reserved_quantity,
-                    consumed_quantity=reservation.consumed_quantity,
-                    released_quantity=reservation.released_quantity,
-                    expected_projection_version=expected_projection_version,
-                    status="ACTIVE",
-                    created_at=reservation.created_at,
-                    updated_at=now,
-                    expires_at=expires_at,
+            batch_active: dict[str, Decimal] = {}
+            total_active = Decimal("0")
+            for r in active_rows:
+                remaining = (
+                    r.reserved_quantity - r.consumed_quantity - r.released_quantity
                 )
-                .on_conflict_do_nothing()
-            )
-            result = await session.execute(stmt)
-            if int(result.rowcount or 0) == 0:
+                batch_active[r.batch_id] = (
+                    batch_active.get(r.batch_id, Decimal("0")) + remaining
+                )
+                total_active += remaining
+
+            pending_batch: dict[str, Decimal] = {}
+            for reservation in reservations:
                 existing_row = await session.get(
                     PositionReservationRow, reservation.reservation_id
                 )
                 if existing_row is not None:
+                    if existing_row.status != "ACTIVE":
+                        raise ReservationConflictError(
+                            f"reservation {reservation.reservation_id} already "
+                            f"exists in terminal status {existing_row.status}"
+                        )
                     _adopt_or_reject_existing(
                         _row_to_reservation(existing_row), reservation
                     )
-                    return
-                raise ReservationConflictError(
-                    f"reservation {reservation.reservation_id} insert "
-                    "conflicted but no row was found"
+                    continue
+                already = pending_batch.get(reservation.batch_id, Decimal("0"))
+                _require_batch_capacity(
+                    batch_id=reservation.batch_id,
+                    reserved_quantity=reservation.reserved_quantity,
+                    total_active_for_batch=batch_active.get(
+                        reservation.batch_id, Decimal("0")
+                    )
+                    + already,
+                    batch_quantity=batch_quantities.get(reservation.batch_id),
                 )
+                pending_batch[reservation.batch_id] = (
+                    already + reservation.reserved_quantity
+                )
+                try:
+                    pos_amt = await _load_position_amt_async(session, reservation)
+                except Exception as snap_err:
+                    raise ReservationConflictError(
+                        f"position snapshot capacity check failed: {snap_err}"
+                    ) from snap_err
+                _require_capacity(
+                    reserved_quantity=reservation.reserved_quantity,
+                    total_active=total_active,
+                    pos_amt=pos_amt,
+                )
+                total_active += reservation.reserved_quantity
+
+                stmt = (
+                    insert(PositionReservationRow)
+                    .values(
+                        reservation_id=reservation.reservation_id,
+                        environment=reservation.position_key.environment,
+                        account_label=reservation.position_key.account_label,
+                        strategy_name=strat,
+                        symbol=reservation.position_key.symbol,
+                        position_side=(
+                            reservation.position_key.position_side.value
+                        ),
+                        batch_id=reservation.batch_id,
+                        command_id=reservation.command_id,
+                        client_order_id=None,
+                        reserved_quantity=reservation.reserved_quantity,
+                        consumed_quantity=reservation.consumed_quantity,
+                        released_quantity=reservation.released_quantity,
+                        expected_projection_version=(
+                            expected_projection_version
+                        ),
+                        status="ACTIVE",
+                        created_at=reservation.created_at,
+                        updated_at=now,
+                        expires_at=expires_at,
+                    )
+                    .on_conflict_do_nothing()
+                )
+                result = await session.execute(stmt)
+                if int(result.rowcount or 0) == 0:
+                    existing_row = await session.get(
+                        PositionReservationRow, reservation.reservation_id
+                    )
+                    if existing_row is not None and existing_row.status == "ACTIVE":
+                        _adopt_or_reject_existing(
+                            _row_to_reservation(existing_row), reservation
+                        )
+                        continue
+                    raise ReservationConflictError(
+                        f"reservation {reservation.reservation_id} insert "
+                        "conflicted but no active row was found"
+                    )
 
     async def update_reservation(
         self,
