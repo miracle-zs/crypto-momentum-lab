@@ -84,9 +84,21 @@ def test_batch_delete_consumes_frozen_set_only() -> None:
 
 def test_lock_held_across_fence_and_delete() -> None:
     mod = _load_module()
-    session = FakeSession(
-        {"count(*) FROM prune_targets": "3", "count(*) FROM del": "3"}
-    )
+
+    class DrainSession(FakeSession):
+        def run(self, sql: str) -> str:
+            self.sql.append(sql)
+            if "count(*) FROM prune_targets" in sql:
+                # Freeze count then leftover after drain.
+                prior = sum(1 for s in self.sql if "count(*) FROM prune_targets" in s)
+                return "3" if prior == 1 else "0"
+            if "count(*) FROM del" in sql:
+                return "3"
+            if "md5(string_agg" in sql:
+                return "3|deadbeef"
+            return ""
+
+    session = DrainSession()
     authority = FakeAuthority()
     result = mod.run_locked_prune(
         session=session,

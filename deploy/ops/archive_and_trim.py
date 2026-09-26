@@ -467,6 +467,15 @@ def build_freeze_targets_sql(
     )
 
 
+def build_freeze_fingerprint_sql() -> str:
+    """Content fingerprint of the frozen delete set (ctid identity)."""
+    return (
+        "SELECT count(*)::text || '|' || "
+        "coalesce(md5(string_agg(id::text, ',' ORDER BY id)), '') "
+        "FROM prune_targets;"
+    )
+
+
 def build_batch_delete_sql(table: str, batch_limit: int) -> str:
     """SQL that deletes one batch of already-frozen target ctids."""
     return (
@@ -515,8 +524,10 @@ def run_locked_prune(
                 plan.effective_cutoff.date(),
                 run=session.run,
             )
+            # Dropping partitions must be accounted for; returning 0 hides
+            # the fact that data was removed.
             print(f"  dropped {dropped} expired partitions")
-            return (recorded, 0)
+            return (recorded, dropped)
 
         session.run(
             build_freeze_targets_sql(table, column, from_dt, to_dt)
@@ -530,6 +541,8 @@ def run_locked_prune(
                 f"manifest rows ({recorded}). Aborting so rows outside "
                 "the archive are never deleted."
             )
+        fingerprint = session.run(build_freeze_fingerprint_sql()).strip()
+        print(f"  frozen fingerprint {fingerprint}")
 
         deleted = 0
         while deleted < recorded:
@@ -554,7 +567,17 @@ def run_locked_prune(
                 f"manifest rows ({recorded})! Aborting prune to prevent "
                 "unarchived data loss."
             )
-        print(f"  deleted {deleted} rows")
+        leftover = int(
+            session.run(
+                "SELECT count(*) FROM prune_targets;"
+            ).strip()
+            or "0"
+        )
+        if leftover != 0:
+            raise RuntimeError(
+                f"{leftover} frozen targets remain undeleted; aborting."
+            )
+        print(f"  deleted {deleted} rows (fingerprint {fingerprint})")
         return (recorded, deleted)
     finally:
         session.run(f"SELECT pg_advisory_unlock(hashtext('{lock_key}'));")
