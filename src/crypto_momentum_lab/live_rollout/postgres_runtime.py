@@ -1132,19 +1132,24 @@ class PostgresLiveContextProvider(LiveContextReader):
         exit_batch_ids, legacy_exit_order_ids = await _load_exit_batch_bindings(
             self._sessions, orders
         )
-        fill_cursor = await session.scalar(
-            select(AccountFillReconciliationCursorRow)
-            .where(
-                AccountFillReconciliationCursorRow.environment == "live",
-                AccountFillReconciliationCursorRow.account_label
-                == self._account_label,
-            )
-            .limit(1)
-        )
-        coverage_evidence = _coverage_evidence_from_sources(
-            fill_cursor=fill_cursor,
-            reconciliation=reconciliation,
-        )
+        coverage_by_symbol: dict[str, CoverageEvidence] = {}
+        if active:
+            fill_cursors = (
+                await session.scalars(
+                    select(AccountFillReconciliationCursorRow).where(
+                        AccountFillReconciliationCursorRow.environment == "live",
+                        AccountFillReconciliationCursorRow.account_label
+                        == self._account_label,
+                    )
+                )
+            ).all()
+            coverage_by_symbol = {
+                cursor.symbol: _coverage_evidence_from_sources(
+                    fill_cursor=cursor,
+                    reconciliation=reconciliation,
+                )
+                for cursor in fill_cursors
+            }
         managed, pending, unmanaged = _classify_live_positions_detailed(
             active,
             orders,
@@ -1156,7 +1161,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             order_identity_events=order_identity_events,
             account_fill_quantities=account_fill_quantities,
             account_fills=domain_account_fills,
-            coverage_evidence=coverage_evidence,
+            coverage_by_symbol=coverage_by_symbol,
         )
         return (
             process_at,
@@ -1268,7 +1273,6 @@ class PostgresLiveContextProvider(LiveContextReader):
         )
         # Hub snapshot path must not open account-state sessions; without
         # durable cursor/checkpoint evidence coverage stays unconfirmed.
-        coverage_evidence = None
         managed, pending, unmanaged = _classify_live_positions_detailed(
             active,
             orders,
@@ -1280,7 +1284,7 @@ class PostgresLiveContextProvider(LiveContextReader):
             order_identity_events=order_identity_events,
             account_fill_quantities=account_fill_quantities,
             account_fills=domain_account_fills,
-            coverage_evidence=coverage_evidence,
+            coverage_by_symbol=None,
         )
         return (
             snapshot.config.observed_at,
@@ -1522,7 +1526,7 @@ def _classify_live_positions(
     ]
     | None = None,
     account_fill_quantities: Mapping[str, Decimal] | None = None,
-    coverage_evidence: CoverageEvidence | None = None,
+    coverage_by_symbol: Mapping[str, CoverageEvidence] | None = None,
 ) -> tuple[tuple[ManagedLivePosition, ...], frozenset[str]]:
     """Keep the historical two-value classification API for callers/tests."""
     managed, _pending, unmanaged = _classify_live_positions_detailed(
@@ -1535,7 +1539,7 @@ def _classify_live_positions(
         legacy_exit_order_ids=legacy_exit_order_ids,
         order_identity_events=order_identity_events,
         account_fill_quantities=account_fill_quantities,
-        coverage_evidence=coverage_evidence,
+        coverage_by_symbol=coverage_by_symbol,
     )
     return managed, unmanaged
 
@@ -1557,7 +1561,7 @@ def _classify_live_positions_detailed(
     account_fill_quantities: Mapping[str, Decimal] | None = None,
     account_fills: Sequence[AccountFillEvent] = (),
     since_time: datetime | None = None,
-    coverage_evidence: CoverageEvidence | None = None,
+    coverage_by_symbol: Mapping[str, CoverageEvidence] | None = None,
 ) -> tuple[
     tuple[ManagedLivePosition, ...],
     frozenset[str],
@@ -1748,7 +1752,9 @@ def _classify_live_positions_detailed(
             fill_prices=fill_prices,
             account_fills=account_fills,
             since_time=resolved_since,
-            coverage_evidence=coverage_evidence,
+            coverage_evidence=(
+                (coverage_by_symbol or {}).get(position.symbol)
+            ),
         )
         if not batches and not closing_filled:
             # The account snapshot can arrive before the new entry's order
