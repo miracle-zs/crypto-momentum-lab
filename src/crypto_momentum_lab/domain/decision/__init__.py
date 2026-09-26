@@ -1,7 +1,6 @@
 """DecisionEngine and SimulationExecution contracts (R3)."""
 
 from crypto_momentum_lab.domain.decision.decision_engine import (
-    ClockEvent,
     DecisionEngine,
     DecisionInput,
     DecisionResult,
@@ -13,6 +12,10 @@ from crypto_momentum_lab.domain.decision.decision_engine import (
     decide,
     map_decision_rejection_reason,
 )
+from crypto_momentum_lab.domain.decision.decision_frame import (
+    ClockEvent,
+    DecisionFrame,
+)
 from crypto_momentum_lab.domain.decision.simulation_execution import (
     FillModel,
     SimulatedFillResult,
@@ -22,6 +25,7 @@ from crypto_momentum_lab.domain.decision.simulation_execution import (
 __all__ = [
     "ClockEvent",
     "DecisionEngine",
+    "DecisionFrame",
     "DecisionInput",
     "DecisionResult",
     "EffectivePolicy",

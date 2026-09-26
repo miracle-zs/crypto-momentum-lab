@@ -18,6 +18,10 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from crypto_momentum_lab.domain.decision.decision_frame import (
+    ClockEvent,
+    DecisionFrame,
+)
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionHealthStatus,
     PositionView,
@@ -58,22 +62,6 @@ def _require_aware(dt: datetime, name: str) -> datetime:
 
 
 @dataclass(frozen=True, slots=True)
-class ClockEvent:
-    """Explicit external clock tick driving deterministic strategy evaluation."""
-
-    timestamp: datetime
-    sequence: int
-    event_type: str = "bucket_close"
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "timestamp", _require_aware(self.timestamp, "timestamp")
-        )
-        if self.sequence < 0:
-            raise ValueError("sequence must be non-negative")
-
-
-@dataclass(frozen=True, slots=True)
 class DecisionInput:
     """Immutable input contract for a single strategy evaluation tick."""
 
@@ -85,6 +73,7 @@ class DecisionInput:
     clock_event: ClockEvent
     cash_balance: Decimal
     risk_config_version: str
+    frame: DecisionFrame | None = None
 
     def __post_init__(self) -> None:
         if not self.symbol.strip():
@@ -116,6 +105,10 @@ class DecisionInput:
             )
         if self.cash_balance < Decimal("0"):
             raise ValueError("cash_balance must not be negative")
+
+    @property
+    def frame_digest(self) -> str:
+        return self.frame.frame_digest if self.frame is not None else ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +179,7 @@ class DecisionResult:
     next_policy_state: PolicyState
     rejection_reason: str | None
     evaluated_at: datetime
+    frame_digest: str = ""
 
 
 def compute_decision_input_hash(
@@ -209,6 +203,8 @@ def compute_decision_input_hash(
         "policy_version": policy.policy_version,
         "policy_state_version": state.policy_version,
     }
+    if decision_input.frame is not None:
+        payload["frame_digest"] = decision_input.frame.frame_digest
     dumped = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(dumped.encode("utf-8")).hexdigest()
 
@@ -230,6 +226,9 @@ def decide(
     clock_time = decision_input.clock_event.timestamp
     state_15s = decision_input.market_envelope.state
     pos_view = decision_input.position_view
+    frame_digest = (
+        decision_input.frame.frame_digest if decision_input.frame else ""
+    )
 
     # 1. Check Exit condition if position is currently open
     if pos_view.total_quantity > Decimal("0"):
@@ -303,6 +302,7 @@ def decide(
                     next_policy_state=next_state,
                     rejection_reason=None,
                     evaluated_at=clock_time,
+                    frame_digest=frame_digest,
                 )
 
     # 2. Check Cooldown
@@ -315,6 +315,7 @@ def decide(
             next_policy_state=state,
             rejection_reason="cooldown_active",
             evaluated_at=clock_time,
+            frame_digest=frame_digest,
         )
 
     # 3. Check Entry Eligibility (when position is flat)
@@ -330,6 +331,7 @@ def decide(
                     next_policy_state=state,
                     rejection_reason=None,
                     evaluated_at=clock_time,
+                    frame_digest=frame_digest,
                 )
             else:
                 return DecisionResult(
@@ -340,6 +342,7 @@ def decide(
                     next_policy_state=state,
                     rejection_reason="no_candidate",
                     evaluated_at=clock_time,
+                    frame_digest=frame_digest,
                 )
 
         close = state_15s.close_price or Decimal("0")
@@ -370,6 +373,7 @@ def decide(
                 next_policy_state=state,
                 rejection_reason=None,
                 evaluated_at=clock_time,
+                frame_digest=frame_digest,
             )
         else:
             return DecisionResult(
@@ -380,6 +384,7 @@ def decide(
                 next_policy_state=state,
                 rejection_reason="below_entry_threshold",
                 evaluated_at=clock_time,
+                frame_digest=frame_digest,
             )
 
     return DecisionResult(
@@ -390,6 +395,7 @@ def decide(
         next_policy_state=state,
         rejection_reason="holding_position_no_exit",
         evaluated_at=clock_time,
+        frame_digest=frame_digest,
     )
 
 
@@ -436,34 +442,63 @@ def build_decision_input(
     clock_sequence: int = 1,
     scope: str = "decision",
     source_epoch: str = "ep_decision",
+    market_ref: MarketRevisionRef | None = None,
+    market_envelope: MarketEnvelope | None = None,
+    frame: DecisionFrame | None = None,
 ) -> DecisionInput:
     """Shared DecisionInput assembly for live, paper, and research paths.
 
     Every runner freezes the same kind of facts; only the epoch/scope
     labels differ. Do not reassemble DecisionInput ad hoc in runners.
     """
-    market_ref = MarketRevisionRef(
-        scope=scope,
-        symbol=state.symbol,
-        interval="15s",
-        bucket_start=state.bucket_start,
-        bucket_end=state.bucket_end,
-        revision_id=f"rev_{state.symbol}_{int(state.bucket_start.timestamp())}",
-        content_hash=compute_market_state_hash(state),
-        published_at=state.bucket_end,
-        source_epoch=source_epoch,
-        visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
-    )
-    envelope = MarketEnvelope(ref=market_ref, state=state)
+    if market_ref is None:
+        pub_time = state.last_received_at or state.bucket_end
+        content_hash = compute_market_state_hash(state)
+        b_epoch = int(state.bucket_start.timestamp())
+        market_ref = MarketRevisionRef(
+            scope=scope,
+            symbol=state.symbol,
+            interval="15s",
+            bucket_start=state.bucket_start,
+            bucket_end=state.bucket_end,
+            revision_id=f"{scope}:{state.symbol}:15s:{b_epoch}:{content_hash[:10]}",
+            content_hash=content_hash,
+            published_at=pub_time,
+            source_epoch=source_epoch,
+            visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
+            observed_at=state.first_received_at or pub_time,
+        )
+
+    if market_envelope is None:
+        market_envelope = MarketEnvelope(ref=market_ref, state=state)
+
+    clock_event = ClockEvent(timestamp=state.bucket_end, sequence=clock_sequence)
+    if frame is None:
+        frame = DecisionFrame(
+            scope=scope,
+            symbol=state.symbol,
+            market_refs=(market_ref,),
+            position_view_token=frozen.position_view.projection_version,
+            universe_version=frozen.universe_version,
+            risk_config_version=frozen.risk_config_version,
+            policy_code_digest=f"policy_{frozen.policy_state.policy_version}",
+            policy_parameters_digest=f"param_{frozen.policy_state.policy_version}",
+            policy_state_digest=f"state_{frozen.policy_state.policy_version}",
+            risk_plan_digest=frozen.risk_config_version,
+            clock_event=clock_event,
+            cash_balance=frozen.cash_balance,
+        )
+
     return DecisionInput(
         symbol=state.symbol,
         market_ref=market_ref,
-        market_envelope=envelope,
+        market_envelope=market_envelope,
         position_view=frozen.position_view,
         universe_version=frozen.universe_version,
-        clock_event=ClockEvent(timestamp=state.bucket_end, sequence=clock_sequence),
+        clock_event=clock_event,
         cash_balance=frozen.cash_balance,
         risk_config_version=frozen.risk_config_version,
+        frame=frame,
     )
 
 

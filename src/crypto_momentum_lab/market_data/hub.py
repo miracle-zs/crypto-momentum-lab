@@ -16,8 +16,11 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, fields
 from datetime import datetime
 from decimal import Decimal
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from crypto_momentum_lab.domain.market.revision_models import MarketRevisionRef
 
 import structlog
 from websockets.asyncio.client import ClientConnection, connect
@@ -91,6 +94,46 @@ class MarketStateBatch:
     # symbol has no prior bucket, so consumers must treat its first bucket as a
     # new baseline rather than as a gap.  Optional: an older publisher omits it.
     entered_symbols: frozenset[str] = frozenset()
+    revisions: tuple[MarketRevisionRef, ...] = ()
+
+    @property
+    def revision_refs(self) -> tuple[MarketRevisionRef, ...]:
+        if self.revisions:
+            return self.revisions
+        from crypto_momentum_lab.domain.market.market_book import (
+            compute_market_state_hash,
+        )
+        from crypto_momentum_lab.domain.market.revision_models import (
+            MarketRevisionRef,
+            MarketVisibilityMode,
+        )
+
+        return tuple(
+            MarketRevisionRef(
+                scope=self.environment,
+                symbol=s.symbol,
+                interval="15s",
+                bucket_start=s.bucket_start,
+                bucket_end=s.bucket_end,
+                revision_id=(
+                    f"{self.environment}:{s.symbol}:15s:"
+                    f"{int(s.bucket_start.timestamp())}:"
+                    f"{compute_market_state_hash(s)[:10]}"
+                ),
+                content_hash=compute_market_state_hash(s),
+                published_at=self.published_at,
+                source_epoch=self.stream_id or f"ep_{self.sequence}",
+                visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
+                observed_at=s.first_received_at or self.published_at,
+            )
+            for s in self.states
+        )
+
+    def get_revision(self, symbol: str) -> MarketRevisionRef | None:
+        for r in self.revision_refs:
+            if getattr(r, "symbol", None) == symbol:
+                return r
+        return None
 
 
 @dataclass(frozen=True, slots=True)

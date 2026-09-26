@@ -7,8 +7,11 @@ Tests:
 4. State transition and cooldown enforcement via versioned PolicyState.
 """
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+
+import pytest
 
 from crypto_momentum_lab.domain.decision.decision_engine import (
     ClockEvent,
@@ -17,6 +20,7 @@ from crypto_momentum_lab.domain.decision.decision_engine import (
     PolicyState,
     decide,
 )
+from crypto_momentum_lab.domain.decision.decision_frame import DecisionFrame
 from crypto_momentum_lab.domain.execution.position_ledger_models import (
     PositionHealthStatus,
     PositionKey,
@@ -260,10 +264,7 @@ def test_decision_input_rejects_mismatched_market_envelope_ref() -> None:
 
 
 def test_decision_input_rejects_tampered_content_hash() -> None:
-    """Regression test: DecisionInput must verify compute_market_state_hash(state) == ref.content_hash."""
-    import pytest
-    from dataclasses import replace
-
+    """Regression test: DecisionInput verifies compute_market_state_hash matches ref."""
     t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
     mref, menv = _make_market_envelope("BTCUSDT", t0, Decimal("65500.00"))
     pview = _make_flat_position_view("BTCUSDT")
@@ -285,5 +286,70 @@ def test_decision_input_rejects_tampered_content_hash() -> None:
             cash_balance=Decimal("10000.00"),
             risk_config_version="risk_v1",
         )
+
+
+def test_decision_input_with_decision_frame() -> None:
+    """DecisionFrame binds market_refs, clocks, and digests into frame_digest."""
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    mref, menv = _make_market_envelope("BTCUSDT", t0, Decimal("65500.00"))
+    pview = _make_flat_position_view("BTCUSDT")
+
+    clock = ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=1)
+    frame = DecisionFrame(
+        scope="live",
+        symbol="BTCUSDT",
+        clock_event=clock,
+        market_refs=(mref,),
+        position_view_token=pview.projection_version,
+        universe_version="univ_v1",
+        policy_code_digest="code_sha",
+        policy_parameters_digest="params_sha",
+        policy_state_digest="state_sha",
+    )
+    assert len(frame.frame_digest) == 64
+
+    inp = DecisionInput(
+        symbol="BTCUSDT",
+        market_ref=mref,
+        market_envelope=menv,
+        position_view=pview,
+        universe_version="univ_v1",
+        clock_event=clock,
+        cash_balance=Decimal("10000.00"),
+        risk_config_version="risk_v1",
+        frame=frame,
+    )
+    assert inp.frame_digest == frame.frame_digest
+
+    policy = EffectivePolicy(
+        policy_id="pol_test_01",
+        strategy_name="orderflow_impulse",
+        entry_threshold=Decimal("65000.00"),
+    )
+    state = PolicyState()
+    result = decide(inp, state, policy)
+    assert result.frame_digest == frame.frame_digest
+    assert len(result.input_hash) == 64
+
+
+def test_decision_frame_clock_skew_validation() -> None:
+    """DecisionFrame rejects clock skew exceeding max_clock_skew."""
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+    mref, _ = _make_market_envelope("BTCUSDT", t0, Decimal("65500.00"))
+
+    # Clock is 10 minutes ahead of bucket_end (600s > 60s max_clock_skew)
+    future_clock = ClockEvent(timestamp=t0 + timedelta(minutes=10), sequence=1)
+
+    with pytest.raises(ValueError, match="Clock skew .* exceeds max allowed"):
+        DecisionFrame(
+            scope="live",
+            symbol="BTCUSDT",
+            clock_event=future_clock,
+            market_refs=(mref,),
+            position_view_token="tok",
+            universe_version="univ_v1",
+            max_clock_skew=timedelta(seconds=60),
+        )
+
 
 

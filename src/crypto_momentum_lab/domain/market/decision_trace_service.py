@@ -69,9 +69,16 @@ class DecisionTraceService:
         intent_produced: bool,
         intent_id: str | None = None,
         rejection_reason: str | None = None,
+        input_hash: str = "",
+        frame_digest: str = "",
         trace_payload: dict[str, Any] | None = None,
     ) -> DecisionTrace:
         """Records an immutable DecisionTrace and registers retention dependencies."""
+        payload = dict(trace_payload or {})
+        if frame_digest:
+            payload["frame_digest"] = frame_digest
+        if input_hash:
+            payload["input_hash"] = input_hash
         trace = DecisionTrace(
             decision_id=decision_id,
             strategy_name=strategy_name,
@@ -81,7 +88,9 @@ class DecisionTraceService:
             intent_produced=intent_produced,
             intent_id=intent_id,
             rejection_reason=rejection_reason,
-            trace_payload=trace_payload or {},
+            input_hash=input_hash,
+            frame_digest=frame_digest,
+            trace_payload=payload,
         )
         self._book._repo.save_decision_trace(trace)
 

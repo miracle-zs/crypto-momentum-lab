@@ -29,6 +29,14 @@ from crypto_momentum_lab.persistence.postgres.models import (
 )
 
 
+def _observed_at_from_lineage(lineage: dict[str, object] | None) -> datetime | None:
+    if lineage and "observed_at" in lineage:
+        val = lineage["observed_at"]
+        if isinstance(val, str):
+            return datetime.fromisoformat(val)
+    return None
+
+
 class PostgresMarketBookRepository:
     """Postgres-backed storage for market revisions, pointers, and manifests."""
 
@@ -38,6 +46,9 @@ class PostgresMarketBookRepository:
     def save_envelope(self, envelope: MarketEnvelope) -> None:
         with self._session_factory() as session:
             payload = market_state_to_payload(envelope.state)
+            lineage = dict(envelope.lineage)
+            if envelope.ref.observed_at is not None:
+                lineage["observed_at"] = envelope.ref.observed_at.isoformat()
             row = MarketRevisionRefRow(
                 revision_id=envelope.ref.revision_id,
                 scope=envelope.ref.scope,
@@ -53,7 +64,7 @@ class PostgresMarketBookRepository:
                     envelope.ref.visibility_mode == MarketVisibilityMode.CANONICAL
                 ),
                 payload=payload,
-                lineage=envelope.lineage,
+                lineage=lineage,
             )
             session.merge(row)
             session.commit()
@@ -73,6 +84,7 @@ class PostgresMarketBookRepository:
                 revision_id=row.revision_id,
                 content_hash=row.content_hash,
                 published_at=row.published_at,
+                observed_at=_observed_at_from_lineage(row.lineage),
                 source_epoch=row.source_epoch,
                 visibility_mode=MarketVisibilityMode(row.visibility_mode),
             )
@@ -112,6 +124,7 @@ class PostgresMarketBookRepository:
                 revision_id=row.revision_id,
                 content_hash=row.content_hash,
                 published_at=row.published_at,
+                observed_at=_observed_at_from_lineage(row.lineage),
                 source_epoch=row.source_epoch,
                 visibility_mode=MarketVisibilityMode(row.visibility_mode),
             )
@@ -169,6 +182,7 @@ class PostgresMarketBookRepository:
                     revision_id=row.revision_id,
                     content_hash=row.content_hash,
                     published_at=row.published_at,
+                    observed_at=_observed_at_from_lineage(row.lineage),
                     source_epoch=row.source_epoch,
                     visibility_mode=MarketVisibilityMode(row.visibility_mode),
                 )
@@ -226,6 +240,7 @@ class PostgresMarketBookRepository:
                         revision_id=rrow.revision_id,
                         content_hash=rrow.content_hash,
                         published_at=rrow.published_at,
+                        observed_at=_observed_at_from_lineage(rrow.lineage),
                         source_epoch=rrow.source_epoch,
                         visibility_mode=MarketVisibilityMode(rrow.visibility_mode),
                     )
@@ -260,6 +275,11 @@ class PostgresMarketBookRepository:
             )
 
     def save_decision_trace(self, trace: DecisionTrace) -> None:
+        payload = dict(trace.trace_payload)
+        if trace.frame_digest and "frame_digest" not in payload:
+            payload["frame_digest"] = trace.frame_digest
+        if trace.input_hash and "input_hash" not in payload:
+            payload["input_hash"] = trace.input_hash
         with self._session_factory() as session:
             row = DecisionTraceRow(
                 decision_id=trace.decision_id,
@@ -272,7 +292,7 @@ class PostgresMarketBookRepository:
                 evaluated_revision_ids=[
                     r.revision_id for r in trace.evaluated_market_refs
                 ],
-                trace_payload=trace.trace_payload,
+                trace_payload=payload,
                 created_at=datetime.now(UTC),
             )
             session.merge(row)
@@ -306,10 +326,15 @@ class PostgresMarketBookRepository:
                         revision_id=rrow.revision_id,
                         content_hash=rrow.content_hash,
                         published_at=rrow.published_at,
+                        observed_at=_observed_at_from_lineage(rrow.lineage),
                         source_epoch=rrow.source_epoch,
                         visibility_mode=MarketVisibilityMode(rrow.visibility_mode),
                     )
                 )
+
+            payload = row.trace_payload or {}
+            input_hash = str(payload.get("input_hash", ""))
+            frame_digest = str(payload.get("frame_digest", ""))
 
             return DecisionTrace(
                 decision_id=row.decision_id,
@@ -320,5 +345,7 @@ class PostgresMarketBookRepository:
                 intent_produced=row.intent_produced,
                 intent_id=row.intent_id,
                 rejection_reason=row.rejection_reason,
-                trace_payload=row.trace_payload,
+                input_hash=input_hash,
+                frame_digest=frame_digest,
+                trace_payload=payload,
             )

@@ -12,6 +12,23 @@ from decimal import Decimal
 
 import pytest
 
+from crypto_momentum_lab.domain.decision import (
+    ClockEvent,
+    DecisionFrame,
+    DecisionInput,
+    EffectivePolicy,
+    PolicyState,
+    decide,
+)
+from crypto_momentum_lab.domain.execution.position_ledger_models import (
+    PositionHealthStatus,
+    PositionKey,
+    PositionView,
+)
+from crypto_momentum_lab.domain.market import (
+    DatasetManifest,
+    RunManifest,
+)
 from crypto_momentum_lab.domain.market.decision_trace_service import (
     DecisionTraceService,
 )
@@ -29,6 +46,7 @@ from crypto_momentum_lab.domain.operational.retention_authority import (
     InMemoryRetentionRepository,
     RetentionAuthority,
 )
+from crypto_momentum_lab.market_data.hub import MarketStateBatch
 
 
 def _make_state(
@@ -223,3 +241,238 @@ def test_decision_trace_registers_retention_dependency() -> None:
     )
     assert plan.is_constrained is True
     assert plan.effective_cutoff == t0
+
+
+def _make_flat_position_view(symbol: str) -> PositionView:
+    pos_key = PositionKey(
+        environment="live",
+        account_label="primary",
+        symbol=symbol,
+    )
+    return PositionView(
+        key=pos_key,
+        projection_version="pv_flat_0",
+        input_revision=1,
+        event_cut=None,
+        policy_version="v1",
+        schema_version="v1",
+        coverage=None,
+        active_episode=None,
+        batches=(),
+        unallocated_quantity=Decimal("0"),
+        reconciliation_gap=Decimal("0"),
+        health_status=PositionHealthStatus.READY,
+    )
+
+
+def test_vertical_slice_publisher_runner_trace_and_replay() -> None:
+    """Astra Blueprint Phase 2 Vertical Slice Acceptance Test:
+
+    1. Real publisher generates authentic MarketRevisionRef with timestamps.
+    2. Runner executes DecisionEngine with DecisionFrame binding multi-window refs.
+    3. Immutable DecisionTrace records decision with frame_digest and input_hash.
+    4. Replay in DECISION_VISIBLE mode reproduces exact live decision.
+    5. Canonical repair update does NOT perturb DECISION_VISIBLE replay.
+    6. Pruned/missing original revision fails closed with UnreproducibleError.
+    7. Authoritative DatasetManifest and RunManifest compute deterministic hashes.
+    """
+    repo = InMemoryMarketBookRepository()
+    book = MarketBook(repo)
+    trace_service = DecisionTraceService(book)
+
+    t0 = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+
+    # --- 1. Real publisher publishes batch with authentic MarketRevisionRef ---
+    s1 = _make_state(
+        symbol="BTCUSDT",
+        bucket_start=t0,
+        close_price=Decimal("65500.00"),
+        missing_count=2,
+        data_complete=False,
+    )
+    batch = MarketStateBatch(
+        sequence=1,
+        published_at=t0 + timedelta(seconds=15),
+        environment="live",
+        states=(s1,),
+        stream_id="epoch-20260925",
+    )
+    assert len(batch.revision_refs) == 1
+    pub_ref = batch.get_revision("BTCUSDT")
+    assert pub_ref is not None
+    assert pub_ref.scope == "live"
+    assert pub_ref.symbol == "BTCUSDT"
+    assert pub_ref.interval == "15s"
+    assert pub_ref.source_epoch == "epoch-20260925"
+
+    env1 = MarketEnvelope(
+        ref=pub_ref,
+        state=s1,
+        lineage={"publisher": "market_state_hub", "batch_epoch": "epoch-20260925"},
+    )
+    repo.save_envelope(env1)
+    repo.set_canonical_ref("live", "BTCUSDT", "15s", t0, pub_ref)
+
+    # --- 2. Runner executes pure DecisionEngine with DecisionFrame ---
+    pview = _make_flat_position_view("BTCUSDT")
+    clock = ClockEvent(timestamp=t0 + timedelta(seconds=15), sequence=1)
+
+    frame = DecisionFrame(
+        scope="live",
+        symbol="BTCUSDT",
+        market_refs=(pub_ref,),
+        position_view_token=pview.projection_version,
+        universe_version="univ_20260925",
+        risk_config_version="risk_v1",
+        policy_code_digest="sha256_code_v1",
+        policy_parameters_digest="sha256_params_v1",
+        policy_state_digest="sha256_state_v1",
+        clock_event=clock,
+        cash_balance=Decimal("10000.00"),
+    )
+    assert len(frame.frame_digest) == 64
+
+    d_input = DecisionInput(
+        symbol="BTCUSDT",
+        market_ref=pub_ref,
+        market_envelope=env1,
+        position_view=pview,
+        universe_version="univ_20260925",
+        clock_event=clock,
+        cash_balance=Decimal("10000.00"),
+        risk_config_version="risk_v1",
+        frame=frame,
+    )
+    assert d_input.frame_digest == frame.frame_digest
+
+    policy = EffectivePolicy(
+        policy_id="breakout_live_v1",
+        strategy_name="orderflow_impulse",
+        entry_threshold=Decimal("65000.00"),
+    )
+    policy_state = PolicyState()
+    result = decide(d_input, policy_state, policy)
+    assert result.intent is not None
+    assert result.rejection_reason is None
+    assert result.frame_digest == frame.frame_digest
+    assert len(result.input_hash) == 64
+
+    # --- 3. Trace Service records DecisionTrace ---
+    trace = trace_service.record_decision(
+        decision_id="dec_slice_001",
+        strategy_name="orderflow_impulse",
+        account_label="primary",
+        decision_time=t0 + timedelta(seconds=15, milliseconds=20),
+        evaluated_market_refs=(pub_ref,),
+        intent_produced=True,
+        intent_id=result.intent.candidate_id,
+        rejection_reason=None,
+        input_hash=result.input_hash,
+        frame_digest=result.frame_digest,
+    )
+    assert trace.frame_digest == frame.frame_digest
+    assert trace.input_hash == result.input_hash
+
+    # Verify loaded trace round-trip
+    loaded_trace = repo.load_decision_trace("dec_slice_001")
+    assert loaded_trace is not None
+    assert loaded_trace.frame_digest == frame.frame_digest
+    assert loaded_trace.input_hash == result.input_hash
+
+    # --- 4. DECISION_VISIBLE mode reproduces exact decision ---
+    def replay_evaluator(
+        envelopes: tuple[MarketEnvelope, ...],
+    ) -> tuple[bool, str | None]:
+        env = envelopes[0]
+        inp = DecisionInput(
+            symbol="BTCUSDT",
+            market_ref=env.ref,
+            market_envelope=env,
+            position_view=pview,
+            universe_version="univ_20260925",
+            clock_event=clock,
+            cash_balance=Decimal("10000.00"),
+            risk_config_version="risk_v1",
+        )
+        res = decide(inp, policy_state, policy)
+        return res.intent is not None, res.rejection_reason
+
+    replay_vis = trace_service.replay_decision(
+        "dec_slice_001",
+        replay_mode=MarketVisibilityMode.DECISION_VISIBLE,
+        policy_evaluator=replay_evaluator,
+    )
+    assert replay_vis.reproduced is True
+    assert replay_vis.replayed_intent_produced is True
+    assert replay_vis.replayed_rejection_reason is None
+    assert replay_vis.divergence_explanation is None
+
+    # --- 5. Canonical repair update: repaired close=64000 (no entry) ---
+    s2 = _make_state(
+        symbol="BTCUSDT",
+        bucket_start=t0,
+        close_price=Decimal("64000.00"),
+        missing_count=0,
+        data_complete=True,
+    )
+    ref2 = book.publish(
+        s2,
+        visibility_mode=MarketVisibilityMode.CANONICAL,
+        is_canonical=True,
+    )
+    assert ref2.revision_id != pub_ref.revision_id
+
+    # Canonical repair does NOT affect DECISION_VISIBLE replay
+    replay_vis2 = trace_service.replay_decision(
+        "dec_slice_001",
+        replay_mode=MarketVisibilityMode.DECISION_VISIBLE,
+        policy_evaluator=replay_evaluator,
+    )
+    assert replay_vis2.reproduced is True
+    assert replay_vis2.replayed_intent_produced is True
+
+    # CANONICAL replay reflects late repairs and flags divergence
+    replay_canon = trace_service.replay_decision(
+        "dec_slice_001",
+        replay_mode=MarketVisibilityMode.CANONICAL,
+        policy_evaluator=replay_evaluator,
+    )
+    assert replay_canon.reproduced is False
+    assert replay_canon.replayed_intent_produced is False
+    assert "Divergence in canonical replay" in (
+        replay_canon.divergence_explanation or ""
+    )
+
+    # --- 6. Deleting original revision fails closed with UnreproducibleError ---
+    repo.envelopes.pop(pub_ref.revision_id)
+    with pytest.raises(UnreproducibleError, match="Cannot reproduce decision"):
+        trace_service.replay_decision(
+            "dec_slice_001",
+            replay_mode=MarketVisibilityMode.DECISION_VISIBLE,
+            policy_evaluator=replay_evaluator,
+        )
+
+    # --- 7. DatasetManifest & RunManifest deterministic hashing ---
+    d_manifest = DatasetManifest(
+        manifest_id="manifest_slice_01",
+        scope="live",
+        symbols=("BTCUSDT",),
+        interval="15s",
+        start_time=t0,
+        end_time=t0 + timedelta(minutes=15),
+        visibility_mode=MarketVisibilityMode.CANONICAL,
+        revision_refs=(ref2,),
+    )
+    assert len(d_manifest.manifest_hash) == 64
+
+    r_manifest = RunManifest(
+        run_id="run_slice_01",
+        strategy_name="orderflow_impulse",
+        strategy_policy_version="breakout_live_v1",
+        dataset_manifest_id=d_manifest.manifest_id,
+        policy_code_digest="sha256_code_v1",
+        policy_parameters_digest="sha256_params_v1",
+        risk_plan_digest="sha256_risk_v1",
+    )
+    assert len(r_manifest.run_manifest_hash) == 64
+

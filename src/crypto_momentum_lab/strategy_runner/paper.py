@@ -296,18 +296,26 @@ def run_paper_trading(
         for position in position_updates:
             positions_by_id[position.position_id] = position
 
-        market_ref = MarketRevisionRef(
-            scope="paper",
-            symbol=state.symbol,
-            interval="15s",
-            bucket_start=state.bucket_start,
-            bucket_end=state.bucket_end,
-            revision_id=f"rev_{state.symbol}_{int(state.bucket_start.timestamp())}",
-            content_hash=compute_market_state_hash(state),
-            published_at=state.bucket_end,
-            source_epoch=f"ep_{config.run_id}",
-            visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
-        )
+        existing_ref = getattr(state, "market_ref", None)
+        if existing_ref is not None:
+            market_ref = existing_ref
+        else:
+            state_hash = compute_market_state_hash(state)
+            b_epoch = int(state.bucket_start.timestamp())
+            pub_time = state.last_received_at or state.bucket_end
+            market_ref = MarketRevisionRef(
+                scope="paper",
+                symbol=state.symbol,
+                interval="15s",
+                bucket_start=state.bucket_start,
+                bucket_end=state.bucket_end,
+                revision_id=f"paper:{state.symbol}:15s:{b_epoch}:{state_hash[:10]}",
+                content_hash=state_hash,
+                published_at=pub_time,
+                source_epoch=f"ep_{config.run_id}",
+                visibility_mode=MarketVisibilityMode.DECISION_VISIBLE,
+                observed_at=state.first_received_at or pub_time,
+            )
         envelope = MarketEnvelope(ref=market_ref, state=state)
         pos_key = PositionKey(
             environment="paper",

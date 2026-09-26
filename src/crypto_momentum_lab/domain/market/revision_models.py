@@ -9,6 +9,8 @@ Obeys Astra Architecture Blueprint 2026-09-25:
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -45,6 +47,7 @@ class MarketRevisionRef:
     published_at: datetime
     source_epoch: str
     visibility_mode: MarketVisibilityMode
+    observed_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not self.scope.strip():
@@ -62,6 +65,10 @@ class MarketRevisionRef:
         object.__setattr__(
             self, "published_at", _require_aware(self.published_at, "published_at")
         )
+        if self.observed_at is not None:
+            object.__setattr__(
+                self, "observed_at", _require_aware(self.observed_at, "observed_at")
+            )
         if self.bucket_end <= self.bucket_start:
             raise ValueError("bucket_end must be strictly greater than bucket_start")
         if not self.revision_id.strip():
@@ -142,6 +149,76 @@ class DatasetManifest:
             raise ValueError("end_time must be greater than start_time")
         if self.coverage_ratio < Decimal("0") or self.coverage_ratio > Decimal("1"):
             raise ValueError("coverage_ratio must be between 0 and 1")
+        if not self.manifest_hash:
+            object.__setattr__(self, "manifest_hash", self.compute_manifest_hash())
+
+    def compute_manifest_hash(self) -> str:
+        payload = {
+            "manifest_id": self.manifest_id,
+            "scope": self.scope,
+            "symbols": sorted(self.symbols),
+            "interval": self.interval,
+            "start_time": self.start_time.isoformat(),
+            "end_time": self.end_time.isoformat(),
+            "visibility_mode": self.visibility_mode.value,
+            "schema_version": self.schema_version,
+            "feature_algorithm_version": self.feature_algorithm_version,
+            "coverage_ratio": str(self.coverage_ratio),
+            "revision_ids": [r.revision_id for r in self.revision_refs],
+            "holes": [
+                [h[0].isoformat(), h[1].isoformat()] for h in self.holes
+            ],
+        }
+        dumped = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(dumped.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class RunManifest:
+    """Immutable manifest establishing an authoritative strategy run or backtest."""
+
+    run_id: str
+    strategy_name: str
+    strategy_policy_version: str
+    dataset_manifest_id: str | None = None
+    policy_code_digest: str = ""
+    policy_parameters_digest: str = ""
+    risk_plan_digest: str = ""
+    initial_equity: Decimal = Decimal("0")
+    simulation_model: str = "live"
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    run_manifest_hash: str = ""
+    tags: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError("run_id must not be empty")
+        if not self.strategy_name.strip():
+            raise ValueError("strategy_name must not be empty")
+        if not self.strategy_policy_version.strip():
+            raise ValueError("strategy_policy_version must not be empty")
+        object.__setattr__(
+            self, "created_at", _require_aware(self.created_at, "created_at")
+        )
+        if not self.run_manifest_hash:
+            object.__setattr__(self, "run_manifest_hash", self.compute_manifest_hash())
+
+    def compute_manifest_hash(self) -> str:
+        payload = {
+            "run_id": self.run_id,
+            "strategy_name": self.strategy_name,
+            "strategy_policy_version": self.strategy_policy_version,
+            "dataset_manifest_id": self.dataset_manifest_id,
+            "policy_code_digest": self.policy_code_digest,
+            "policy_parameters_digest": self.policy_parameters_digest,
+            "risk_plan_digest": self.risk_plan_digest,
+            "initial_equity": str(self.initial_equity),
+            "simulation_model": self.simulation_model,
+            "created_at": self.created_at.isoformat(),
+            "tags": dict(sorted(self.tags.items())),
+        }
+        dumped = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(dumped.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +234,7 @@ class DecisionTrace:
     intent_id: str | None = None
     rejection_reason: str | None = None
     input_hash: str = ""
+    frame_digest: str = ""
     trace_payload: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
