@@ -219,7 +219,7 @@ class LiveStrategySignalRecorder:
             return {}
         metrics_fn = getattr(provider, "metrics_snapshot", None)
         if callable(metrics_fn):
-            return metrics_fn()
+            return dict(metrics_fn())
         return {}
 
     @property

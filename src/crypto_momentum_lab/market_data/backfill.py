@@ -54,6 +54,19 @@ class SymbolBackfillReport:
     failure: str | None = None
 
 
+
+def _as_dt(value: object) -> datetime:
+    return value if isinstance(value, datetime) else datetime.now(UTC)
+
+
+def _dec(value: object) -> Decimal:
+    return Decimal(str(value))
+
+
+def _int(value: object) -> int:
+    return int(str(value))
+
+
 def _bucket_start(event_at: datetime) -> datetime:
     normalized = event_at.astimezone(UTC)
     return normalized.replace(
@@ -94,21 +107,21 @@ def synthesize_states_from_trades(
             },
         )
         notional = trade.price * trade.quantity
-        acc["trade_count"] = int(acc["trade_count"]) + 1
-        acc["trade_notional"] = Decimal(acc["trade_notional"]) + notional
+        acc["trade_count"] = _int(acc["trade_count"]) + 1
+        acc["trade_notional"] = _dec(acc["trade_notional"]) + notional
         if trade.buyer_is_maker:
             acc["aggressive_sell_notional"] = (
-                Decimal(acc["aggressive_sell_notional"]) + notional
+                _dec(acc["aggressive_sell_notional"]) + notional
             )
         else:
             acc["aggressive_buy_notional"] = (
-                Decimal(acc["aggressive_buy_notional"]) + notional
+                _dec(acc["aggressive_buy_notional"]) + notional
             )
-        acc["high_price"] = max(Decimal(acc["high_price"]), trade.price)
-        acc["low_price"] = min(Decimal(acc["low_price"]), trade.price)
+        acc["high_price"] = max(_dec(acc["high_price"]), trade.price)
+        acc["low_price"] = min(_dec(acc["low_price"]), trade.price)
         acc["close_price"] = trade.price
         acc["last_received_at"] = max(
-            trade.event_at, acc["last_received_at"]  # type: ignore[arg-type]
+            trade.event_at, _as_dt(acc["last_received_at"])
         )
 
     states: list[MarketState15s] = []

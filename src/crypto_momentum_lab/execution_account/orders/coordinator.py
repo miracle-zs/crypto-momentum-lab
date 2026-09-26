@@ -107,7 +107,7 @@ class _KeyCommandScheduler:
         self._max_queue_wait_seconds = max_queue_wait_seconds
         self._idle_timeout_seconds = idle_timeout_seconds
         self._on_idle = on_idle
-        self._queue: asyncio.PriorityQueue[tuple[int, int, Any, Any, float]] = (
+        self._queue: asyncio.PriorityQueue[tuple[int, int, Any, Any, float, Any]] = (
             asyncio.PriorityQueue(maxsize=max_queue_depth)
         )
         self._state_lock = asyncio.Lock()
@@ -195,7 +195,14 @@ class _KeyCommandScheduler:
                         self._queue.task_done()
                     except asyncio.QueueEmpty:
                         break
-                    _priority, _sequence, _operation, future, _enqueued_at, *rest = item
+                    (
+                        _priority,
+                        _sequence,
+                        _operation,
+                        future,
+                        _enqueued_at,
+                        _started,
+                    ) = item
                     if future is not None and not future.done():
                         future.set_exception(
                             RuntimeError("order command scheduler is closed")

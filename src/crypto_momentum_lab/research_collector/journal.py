@@ -19,6 +19,7 @@ import os
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -392,8 +393,10 @@ class ArchiveJournal:
                 sid = item.get("stream_id")
                 seq = item.get("sequence")
                 if sk is not None and sid is not None and seq is not None:
-                    parsed_seq = _require_sequence(seq, "existing resolution sequence")
-                    existing_keys.add((str(sk), str(sid), parsed_seq))
+                    existing_seq = _require_sequence(
+                        seq, "existing resolution sequence"
+                    )
+                    existing_keys.add((str(sk), str(sid), existing_seq))
 
             to_append: list[dict[str, Any]] = []
             for res in resolutions:
@@ -450,7 +453,12 @@ class ArchiveJournal:
 
         # 3. ONLY AFTER audit trail and manifest are safely fsynced, remove committed journal files
         for path in paths_to_remove:
-            record = self._pending_records.pop(path, None)
+            dropped: Any = (
+                self._pending_records.pop(path)
+                if path in self._pending_records
+                else None
+            )
+            record = dropped
             if record is not None:
                 try:
                     size = path.stat().st_size

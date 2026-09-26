@@ -731,7 +731,7 @@ class CapacityGuard:
 
                 self._base_collector_bytes = effective_collector_bytes
                 self._baseline_written_total = scan_completed_at_written
-                self._base_disk_free_bytes = disk_free_bytes
+                self._base_disk_free_bytes = int(str(disk_free_bytes))
                 self._last_scan_monotonic = now_mono
                 self._last_scan_observed_at = now_dt
                 written_since = max(

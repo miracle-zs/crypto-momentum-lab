@@ -231,12 +231,16 @@ class PostgresMarketBookRepository:
                     )
                 )
 
+            hole_pairs: list[tuple[str, str]] = [
+                (str(hole[0]), str(hole[1]))  # type: ignore[index]
+                for hole in (row.holes or [])
+            ]
             holes = tuple(
                 (
-                    datetime.fromisoformat(h[0]),
-                    datetime.fromisoformat(h[1]),
+                    datetime.fromisoformat(a),
+                    datetime.fromisoformat(b),
                 )
-                for h in (row.holes or [])
+                for a, b in hole_pairs
             )
             return DatasetManifest(
                 manifest_id=row.manifest_id,

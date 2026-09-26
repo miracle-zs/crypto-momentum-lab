@@ -292,7 +292,7 @@ class LiveStrategyDaemon:
         )
         self._context_runtime = LiveContextRuntime(
             run_id=config.run_id,
-            context_reader=self._context_provider,
+            context_reader=self._context_provider,  # type: ignore[arg-type]
             set_pending_position_symbols=(
                 self._entry_control.set_pending_position_symbols
             ),

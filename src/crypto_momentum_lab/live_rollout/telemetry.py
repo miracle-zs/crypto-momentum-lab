@@ -171,16 +171,6 @@ _EMPTY_HEARTBEAT_DETAIL_KEYS: tuple[str, ...] = (
     "input_missing_agg_trade_count",
 )
 
-_DECISION_SLO_LATENCY_KEY = "decision_slo_latency_ms"
-_DECISION_SLO_TRANSITIONS: dict[str, tuple[tuple[str, str], ...]] = {
-    CANDIDATE_ACCEPTED: (
-        (MARKET_STATE_RECEIVED, CONTEXT_READY),
-        (CONTEXT_READY, CANDIDATE_ACCEPTED),
-    ),
-    INTENT_SAVED: ((CANDIDATE_ACCEPTED, INTENT_SAVED),),
-    EXCHANGE_REQUEST_STARTED: ((INTENT_SAVED, EXCHANGE_REQUEST_STARTED),),
-}
-
 
 class LiveTelemetrySink(Protocol):
     def consumer_health(

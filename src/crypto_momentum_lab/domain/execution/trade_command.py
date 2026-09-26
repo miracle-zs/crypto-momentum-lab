@@ -205,10 +205,16 @@ class ExitAllocator:
         """Plan exit allocations respecting explicit policies, active reservations, and lot boundaries."""
         if hasattr(projection, "batches"):
             open_batches = projection.batches
-            total_active_quantity = projection.total_quantity
+            total_active_quantity = getattr(
+                projection, "total_quantity", Decimal("0")
+            )
         else:
-            open_batches = projection.active_batches
-            total_active_quantity = projection.total_active_quantity
+            open_batches = getattr(projection, "active_batches", ())
+            total_active_quantity = getattr(
+                projection, "total_active_quantity", Decimal("0")
+            )
+        if not isinstance(total_active_quantity, Decimal):
+            total_active_quantity = Decimal(str(total_active_quantity))
         proj_ver = getattr(projection, "projection_version", None)
 
         def get_batch_available(batch: Any) -> Decimal:
@@ -216,7 +222,8 @@ class ExitAllocator:
                 (r.active_quantity for r in active_reservations if r.batch_id == batch.batch_id),
                 start=Decimal("0"),
             )
-            return max(Decimal("0"), batch.quantity - reserved)
+            batch_qty = getattr(batch, "quantity", Decimal("0"))
+            return max(Decimal("0"), batch_qty - reserved)
 
         if target_batch_ids is not None:
             target_set = set(target_batch_ids)
@@ -226,9 +233,17 @@ class ExitAllocator:
         else:
             candidate_batches = open_batches
 
+        pos_key = getattr(
+            projection,
+            "position_key",
+            getattr(projection, "key", None),
+        )
+        if pos_key is None:
+            raise ValueError("projection must expose a position key")
+
         if not candidate_batches or total_active_quantity <= 0:
             return ExitAllocationPlan(
-                position_key=projection.position_key if hasattr(projection, "position_key") else projection.key,
+                position_key=pos_key,
                 allocations=(),
                 total_allocated_quantity=Decimal("0"),
                 policy=policy,
@@ -236,7 +251,6 @@ class ExitAllocator:
                 projection_version=proj_ver,
             )
 
-        pos_key = projection.position_key if hasattr(projection, "position_key") else projection.key
         if policy == ExitPolicyMode.FULL_POSITION_CLOSE:
             allocations = tuple(
                 ExitAllocation(
@@ -376,9 +390,16 @@ class ExitAllocator:
         if plan.total_allocated_quantity <= 0:
             return None
 
-        pos_key = projection.position_key if hasattr(projection, "position_key") else projection.key
-        if getattr(projection, "active_episode", None) is not None:
-            side = projection.active_episode.side
+        pos_key = getattr(
+            projection,
+            "position_key",
+            getattr(projection, "key", None),
+        )
+        if pos_key is None:
+            raise ValueError("projection must expose a position key")
+        episode = getattr(projection, "active_episode", None)
+        if episode is not None and getattr(episode, "side", None) is not None:
+            side = episode.side
         elif pos_key.position_side == FuturesPositionSide.SHORT:
             side = StrategySide.SHORT
         else:

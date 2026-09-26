@@ -40,6 +40,18 @@ _CHECKPOINT_PERSISTED_EVENT = "strategy_checkpoint_persisted"
 _MAX_CHECKPOINT_SAMPLES = 100
 
 
+def _as_float(value: object) -> float | None:
+    if value is None:
+        return None
+    return float(str(value))
+
+
+def _as_int(value: object) -> int | None:
+    if value is None:
+        return None
+    return int(str(value))
+
+
 def _account_label_and_phase(run_id: str) -> tuple[str, float]:
     """Map live run identifiers to user-facing account labels and expected phase."""
     if "primary" in run_id or "b1-long" in run_id:
@@ -192,17 +204,17 @@ class PerformanceQueries:
             details = row.details if isinstance(row.details, Mapping) else {}
             label, phase = _account_label_and_phase(row.run_id)
             total_ms = (
-                float(details["total_ms"])
+                _as_float(details.get("total_ms"))
                 if details.get("total_ms") is not None
                 else None
             )
             pre_commit_ms = (
-                float(details["pre_commit_ms"])
+                _as_float(details.get("pre_commit_ms"))
                 if details.get("pre_commit_ms") is not None
                 else total_ms
             )
             commit_ms = (
-                float(details["commit_ms"])
+                _as_float(details.get("commit_ms"))
                 if details.get("commit_ms") is not None
                 else None
             )
@@ -211,17 +223,17 @@ class PerformanceQueries:
                 account_label=label,
                 occurred_at=row.occurred_at,
                 prepare_ms=(
-                    float(details["prepare_ms"])
+                    _as_float(details.get("prepare_ms"))
                     if details.get("prepare_ms") is not None
                     else None
                 ),
                 event_loop_lag_ms=(
-                    float(details["event_loop_lag_ms"])
+                    _as_float(details.get("event_loop_lag_ms"))
                     if details.get("event_loop_lag_ms") is not None
                     else None
                 ),
                 pool_acquire_ms=(
-                    float(details["pool_acquire_ms"])
+                    _as_float(details.get("pool_acquire_ms"))
                     if details.get("pool_acquire_ms") is not None
                     else None
                 ),
@@ -231,17 +243,17 @@ class PerformanceQueries:
                     else None
                 ),
                 pool_checked_in=(
-                    int(details["pool_checked_in"])
+                    _as_int(details.get("pool_checked_in"))
                     if details.get("pool_checked_in") is not None
                     else None
                 ),
                 pool_checked_out=(
-                    int(details["pool_checked_out"])
+                    _as_int(details.get("pool_checked_out"))
                     if details.get("pool_checked_out") is not None
                     else None
                 ),
                 sql_execute_ms=(
-                    float(details["sql_execute_ms"])
+                    _as_float(details.get("sql_execute_ms"))
                     if details.get("sql_execute_ms") is not None
                     else None
                 ),
@@ -297,7 +309,7 @@ class PerformanceQueries:
             and latest_market_progress.details.get("market_delay_ms") is not None
         ):
             market_delay_ms = round(
-                float(latest_market_progress.details["market_delay_ms"]), 1
+                _as_float(latest_market_progress.details.get("market_delay_ms")) or 0.0, 1
             )
         elif (
             latest_market_state is not None

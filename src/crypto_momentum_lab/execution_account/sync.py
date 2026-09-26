@@ -731,8 +731,8 @@ class ExecutionAccountSyncService:
                 if include_fills and tracked_fill_symbols
                 else ()
             )
-            incomplete_fill_symbols = getattr(
-                self._client, "incomplete_fill_symbols", frozenset()
+            incomplete_fill_symbols: set[str] = set(
+                getattr(self._client, "incomplete_fill_symbols", frozenset())
             )
             fills_catching_up = bool(incomplete_fill_symbols)
             fill_keys = _fill_keys(fills)

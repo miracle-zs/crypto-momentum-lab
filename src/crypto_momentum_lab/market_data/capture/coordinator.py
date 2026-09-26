@@ -169,7 +169,7 @@ class CaptureCoordinator:
                 try:
                     recovery = await self._envelope_recovery.expand(
                         batch,
-                        bypass_network=bypass,
+                        **{"bypass_network": bypass},
                     )
                 except TypeError:
                     recovery = await self._envelope_recovery.expand(batch)

@@ -34,6 +34,13 @@ async def _maybe_await(val: Any) -> Any:
     return val
 
 
+async def _await_void_call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+    """Invoke a possibly-async void repository method without using its result."""
+    result = fn(*args, **kwargs)
+    if inspect.isawaitable(result):
+        await result
+
+
 
 class RetentionRepository(Protocol):
     """Protocol for storage of consumer dependencies, prune plans, and receipts."""
@@ -197,9 +204,7 @@ class RetentionAuthority:
                 generation=generation,
                 recovery_spec=recovery_spec,
             )
-            await _maybe_await(
-                self._repo.save_dependency(dependency)
-            )
+            await _await_void_call(self._repo.save_dependency, dependency)
             return await self.compute_dependency_version_async(
                 recovery_spec.source_dataset
             )
@@ -349,7 +354,7 @@ class RetentionAuthority:
                 status=PrunePlanStatus.CREATED,
                 created_at=datetime.now(UTC),
             )
-            await _maybe_await(self._repo.save_plan(plan))
+            await _await_void_call(self._repo.save_plan, plan)
             return plan
 
         binding_dep = min(
@@ -379,7 +384,7 @@ class RetentionAuthority:
             status=PrunePlanStatus.CREATED,
             created_at=datetime.now(UTC),
         )
-        await _maybe_await(self._repo.save_plan(plan))
+        await _await_void_call(self._repo.save_plan, plan)
         return plan
 
     def verify_fence(self, plan: PrunePlan) -> None:
@@ -463,7 +468,7 @@ class RetentionAuthority:
                 ),
                 executed_at=datetime.now(UTC),
             )
-            await _maybe_await(self._repo.save_receipt(receipt))
+            await _await_void_call(self._repo.save_receipt, receipt)
             return receipt
 
         if plan.status == PrunePlanStatus.ABORTED:
@@ -479,7 +484,7 @@ class RetentionAuthority:
                 details="Prune plan was previously aborted.",
                 executed_at=datetime.now(UTC),
             )
-            await _maybe_await(self._repo.save_receipt(receipt))
+            await _await_void_call(self._repo.save_receipt, receipt)
             return receipt
 
         try:
@@ -516,8 +521,8 @@ class RetentionAuthority:
                 status=PrunePlanStatus.COMPLETED,
                 created_at=plan.created_at,
             )
-            await _maybe_await(self._repo.update_plan(completed_plan))
-            await _maybe_await(self._repo.save_receipt(receipt))
+            await _await_void_call(self._repo.update_plan, completed_plan)
+            await _await_void_call(self._repo.save_receipt, receipt)
             return receipt
         except Exception as ex:
             receipt = PruneReceipt(
@@ -532,7 +537,7 @@ class RetentionAuthority:
                 details=f"Prune execution failed with exception: {ex}",
                 executed_at=datetime.now(UTC),
             )
-            await _maybe_await(self._repo.save_receipt(receipt))
+            await _await_void_call(self._repo.save_receipt, receipt)
             return receipt
 
     def execute_prune(

@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import structlog
 import typer
@@ -251,6 +251,16 @@ def parse_live_position_account_labels(
     if singular_value is not None:
         labels.add(singular_value)
     return frozenset(labels)
+
+
+
+def _ignore_backfill_result(
+    fn: Callable[[Any], Awaitable[Any]],
+) -> Callable[[Any], Awaitable[None]]:
+    async def _run(symbols: Any) -> None:
+        await fn(symbols)
+
+    return _run
 
 
 async def _load_protected_symbols(
@@ -1395,7 +1405,9 @@ async def build_market_data_runtime(
         must_warm_max_gainer_rank=runtime.universe.top_count,
         protected_symbol_loader=load_protected_symbols,
         on_symbols_changed=runtime_state_publisher.set_expected_symbols,
-        on_trade_symbols_promoted=promotion_backfiller.backfill_symbols,
+        on_trade_symbols_promoted=_ignore_backfill_result(
+            promotion_backfiller.backfill_symbols
+        ),
     )
     universe = UniverseRefreshService(
         market_data=rest_client,

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
-import asyncpg  # type: ignore[import-untyped]
+import asyncpg
 import structlog
 
 from crypto_momentum_lab.domain.market.models import MarketState15s

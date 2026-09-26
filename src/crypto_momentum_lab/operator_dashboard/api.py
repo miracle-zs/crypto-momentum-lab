@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Literal, Protocol, TypeVar, cast
+from typing import Annotated, Any, Literal, Protocol, TypeVar, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
@@ -236,8 +236,12 @@ class _ResponseCache:
             current = asyncio.current_task()
             if self._refresh_tasks.get(key) is current:
                 self._refresh_tasks.pop(key, None)
-            lock = self._locks.get(key)
-            if lock is not None and not lock.locked() and key not in self._entries:
+            cached_lock = self._locks.get(key)
+            if (
+                cached_lock is not None
+                and not cached_lock.locked()
+                and key not in self._entries
+            ):
                 self._locks.pop(key, None)
 
     async def aclose(self) -> None:
@@ -365,12 +369,14 @@ def create_dashboard_app(
     class _CachedStaticFiles(StaticFiles):
         def file_response(
             self,
-            full_path: Path | str,
+            full_path: str | os.PathLike[str],
             stat_result: os.stat_result,
             scope: Scope,
             status_code: int = 200,
         ) -> Response:
-            response = super().file_response(full_path, stat_result, scope, status_code)
+            response = super().file_response(
+                full_path, stat_result, scope, status_code
+            )
             path_str = str(full_path)
             if "vendor" in path_str:
                 response.headers["Cache-Control"] = (
@@ -389,7 +395,9 @@ def create_dashboard_app(
     dashboard.add_middleware(GZipMiddleware, minimum_size=1024)
 
     @dashboard.middleware("http")
-    async def add_cache_status_header(request: Request, call_next):
+    async def add_cache_status_header(
+        request: Request, call_next: Any
+    ) -> Response:
         state = {"status": ""}
         token = _cache_status_context.set(state)
         try:
@@ -397,7 +405,7 @@ def create_dashboard_app(
             status = state.get("status")
             if status:
                 response.headers["X-Cache-Status"] = status
-            return response
+            return cast(Response, response)
         finally:
             _cache_status_context.reset(token)
 

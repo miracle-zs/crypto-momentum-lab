@@ -300,7 +300,7 @@ class ResearchStateCollector:
             raise RuntimeError(
                 f"Materializer worker failed: {self._materializer_error}"
             ) from self._materializer_error
-        if self._queue._unfinished_tasks == 0:
+        if getattr(self._queue, "_unfinished_tasks", 0) == 0:
             return
         self._ensure_materializer_task()
         if timeout_seconds is not None:
@@ -591,7 +591,7 @@ class ResearchStateCollector:
 
     async def health(self) -> CollectorHealth:
         await self.initialize()
-        if self._queue._unfinished_tasks > 0:
+        if getattr(self._queue, "_unfinished_tasks", 0) > 0:
             try:
                 await self.drain_queue(timeout_seconds=2.0)
             except (TimeoutError, RuntimeError):
@@ -754,7 +754,7 @@ class ResearchStateCollector:
     async def _flush_all_buffers(self) -> MaterializerFlushResult:
         self._ensure_capacity()
         if self._materializer_task is not None and not self._materializer_task.done():
-            if self._queue._unfinished_tasks > 0:
+            if getattr(self._queue, "_unfinished_tasks", 0) > 0:
                 await self.drain_queue(timeout_seconds=10.0)
         result = await asyncio.to_thread(self._materializer.flush_all)
         await self._apply_flush_result(result)
@@ -910,7 +910,7 @@ class ResearchStateCollector:
             return
         if stream_id == self._active_stream_id:
             return
-        if self._queue._unfinished_tasks > 0:
+        if getattr(self._queue, "_unfinished_tasks", 0) > 0:
             await self.drain_queue(timeout_seconds=10.0)
         await self._flush_all_buffers()
         self._active_stream_id = stream_id

@@ -97,7 +97,7 @@ class PositionLedger:
         # Sort exit boundaries chronologically
         sorted_boundaries = sorted(
             facts.exit_boundaries,
-            key=lambda b: (b.submitted_at, b.order_id),
+            key=lambda fact: (fact.submitted_at, fact.order_id),
         )
         boundary_idx = 0
 
@@ -253,27 +253,27 @@ class PositionLedger:
 
                     # FIFO reduction across active batches
                     new_batches: list[PositionLedgerBatch] = []
-                    for b in current_batches:
-                        if b.quantity > 0 and to_reduce > 0:
-                            deduct = min(b.quantity, to_reduce)
-                            remaining_b_qty = b.quantity - deduct
+                    for lot in current_batches:
+                        if lot.quantity > 0 and to_reduce > 0:
+                            deduct = min(lot.quantity, to_reduce)
+                            remaining_b_qty = lot.quantity - deduct
                             to_reduce -= deduct
                             attributions.append(
                                 BatchReductionAttribution(
-                                    batch_id=b.batch_id,
+                                    batch_id=lot.batch_id,
                                     quantity=deduct,
                                 )
                             )
-                            exit_sub_at = b.exit_order_submitted_at
+                            exit_sub_at = lot.exit_order_submitted_at
                             new_batches.append(
                                 replace(
-                                    b,
+                                    lot,
                                     quantity=remaining_b_qty,
                                     exit_order_submitted_at=exit_sub_at,
                                 )
                             )
                         else:
-                            new_batches.append(b)
+                            new_batches.append(lot)
 
                     current_batches = new_batches
                     cum_sold += fill.quantity
@@ -392,27 +392,27 @@ class PositionLedger:
                     to_reduce = fill.quantity
                     attributions = []
                     new_batches = []
-                    for b in current_batches:
-                        if b.quantity > 0 and to_reduce > 0:
-                            deduct = min(b.quantity, to_reduce)
-                            remaining_b_qty = b.quantity - deduct
+                    for lot in current_batches:
+                        if lot.quantity > 0 and to_reduce > 0:
+                            deduct = min(lot.quantity, to_reduce)
+                            remaining_b_qty = lot.quantity - deduct
                             to_reduce -= deduct
                             attributions.append(
                                 BatchReductionAttribution(
-                                    batch_id=b.batch_id,
+                                    batch_id=lot.batch_id,
                                     quantity=deduct,
                                 )
                             )
-                            exit_sub_at = b.exit_order_submitted_at
+                            exit_sub_at = lot.exit_order_submitted_at
                             new_batches.append(
                                 replace(
-                                    b,
+                                    lot,
                                     quantity=remaining_b_qty,
                                     exit_order_submitted_at=exit_sub_at,
                                 )
                             )
                         else:
-                            new_batches.append(b)
+                            new_batches.append(lot)
 
                     current_batches = new_batches
                     cum_bought += fill.quantity

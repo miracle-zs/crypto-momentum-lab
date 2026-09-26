@@ -44,14 +44,33 @@ class PositionReservationRepository:
         reservation: PositionReservation,
         expected_projection_version: str | None = None,
         expires_at: datetime | None = None,
-    ) -> None: ...
+        batch_quantity: Decimal | None = None,
+    ) -> None:
+        raise NotImplementedError
+
+    def save_reservations(
+        self,
+        reservations: tuple[PositionReservation, ...],
+        expected_projection_version: str | None = None,
+        expires_at: datetime | None = None,
+        batch_quantities: dict[str, Decimal] | None = None,
+    ) -> None:
+        raise NotImplementedError
+
     def update_reservation(
         self, reservation: PositionReservation, release_reason: str | None = None
-    ) -> None: ...
+    ) -> None:
+        raise NotImplementedError
+
     def load_active_reservations(
         self, key: PositionKey | None = None
-    ) -> tuple[PositionReservation, ...]: ...
-    def load_reservation(self, reservation_id: str) -> PositionReservation | None: ...
+    ) -> tuple[PositionReservation, ...]:
+        raise NotImplementedError
+
+    def load_reservation(
+        self, reservation_id: str
+    ) -> PositionReservation | None:
+        raise NotImplementedError
 
 
 class InMemoryPositionReservationRepository:

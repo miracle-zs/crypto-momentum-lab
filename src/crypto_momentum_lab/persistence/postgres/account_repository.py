@@ -558,7 +558,7 @@ class PostgresAccountRepository:
                     open_order_count=row.open_order_count,
                     fill_count=row.fill_count,
                     mismatch_count=row.mismatch_count,
-                    details=row.details,
+                    details=dict(row.details or {}),  # type: ignore[arg-type]
                     projection_schema_version=row.projection_schema_version,
                     projected_at=row.projected_at,
                 )

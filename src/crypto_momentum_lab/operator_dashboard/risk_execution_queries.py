@@ -64,7 +64,7 @@ def _extract_sqlstate(exc: Exception) -> str | None:
             continue
         code = getattr(target, "pgcode", None) or getattr(target, "sqlstate", None)
         if code and isinstance(code, str):
-            return code
+            return str(code)
     return None
 
 

@@ -53,10 +53,10 @@ from crypto_momentum_lab.live_rollout.context import (
     LiveContextReader,
     LiveDaemonRuntimeContext,
 )
-from crypto_momentum_lab.live_rollout.exits import (
-    ManagedLivePosition,
+from crypto_momentum_lab.domain.execution.position_batches import (
     ManagedLivePositionBatch,
 )
+from crypto_momentum_lab.live_rollout.exits import ManagedLivePosition
 from crypto_momentum_lab.live_rollout.gates import LiveGateContext
 from crypto_momentum_lab.live_rollout.position_ledger_shadow import (
     LegacyOrderIdentityAdapter,
@@ -178,7 +178,7 @@ _TERMINAL_ORDER_STATES = frozenset(
 
 
 def _lookup_zero_at(
-    zero_crossing_times: Mapping[object, datetime] | None,
+    zero_crossing_times: Mapping[Any, datetime] | None,
     symbol: str,
     position_side: str | None = None,
 ) -> datetime | None:
@@ -204,9 +204,9 @@ def _is_pre_zero_order(
     is_terminal = state in _TERMINAL_ORDER_STATES
     created_at = getattr(row, "created_at", None)
     updated_at = getattr(row, "updated_at", created_at) or created_at
-    if created_at is None:
+    if created_at is None or updated_at is None:
         return False
-    return created_at < zero_at and updated_at < zero_at and is_terminal
+    return bool(created_at < zero_at and updated_at < zero_at and is_terminal)
 
 
 async def _load_order_anchor_events(
@@ -215,7 +215,7 @@ async def _load_order_anchor_events(
     run_id: str,
     active_symbols: Sequence[str],
     lookback_start: datetime,
-    zero_crossing_times: Mapping[object, datetime] | None = None,
+    zero_crossing_times: Mapping[Any, datetime] | None = None,
 ) -> tuple[tuple[_OrderAnchorEvent, ...], Mapping[str, datetime]]:
     rows = (
         await session.scalars(
@@ -793,7 +793,7 @@ class PostgresLiveContextProvider(LiveContextReader):
         realtime_seq = getattr(self, "_realtime_account_sequence", 0)
         snapshot_version = getattr(context, "account_snapshot_version", None)
         if snapshot_version is not None:
-            return snapshot_version == realtime_seq
+            return bool(snapshot_version == realtime_seq)
         if getattr(context, "account_snapshot", None) is not None:
             return getattr(context.account_snapshot, "sequence", 0) == realtime_seq
         if realtime_seq > 0:
@@ -1345,17 +1345,27 @@ def _resolve_symbol_fill_horizon(
     are recorded (e.g. unmanaged external positions), fall back to 7 days before
     the snapshot observation time.
     """
-    order_times = [
+    order_times: list[datetime] = [
         order.created_at for order in orders if getattr(order, "created_at", None)
     ]
     if order_times:
         return min(order_times) - timedelta(hours=24)
-    active_times = [
+    active_times: list[datetime] = [
         row.observed_at for row in active if getattr(row, "observed_at", None)
     ]
     if active_times:
         return min(active_times) - timedelta(days=7)
     return None
+
+
+def _fill_raw_payload(
+    raw: object, *, is_system: bool
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if isinstance(raw, dict):
+        payload.update(raw)
+    payload["is_system"] = is_system
+    return payload
 
 
 async def _load_order_identity_metadata(
@@ -1468,10 +1478,10 @@ async def _load_order_identity_metadata(
             fee=Decimal(str(row.fee)),
             fee_asset=row.fee_asset,
             trade_at=row.trade_at,
-            raw_payload={
-                **(row.raw_payload if isinstance(row.raw_payload, dict) else {}),
-                "is_system": str(row.order_id) in system_order_id_set,
-            },
+            raw_payload=_fill_raw_payload(
+                row.raw_payload,
+                is_system=str(row.order_id) in system_order_id_set,
+            ),
         )
         for row in account_fills
     )

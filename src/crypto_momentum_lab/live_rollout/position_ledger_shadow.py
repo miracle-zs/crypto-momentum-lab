@@ -194,7 +194,7 @@ class LegacyOrderIdentityAdapter:
                     notional=observation.position_amt * observation.entry_price,
                     leverage=None,
                     margin_type=None,
-                    observed_at=obs_time,
+                    observed_at=obs_time or datetime.now(UTC),
                     raw_payload={},
                 )
             )
